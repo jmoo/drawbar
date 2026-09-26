@@ -1,76 +1,75 @@
 //! Writing a piano library: recordings coded into blocks, and a container laid out
 //! around them.
 //!
-//! [`build`] takes a **template** library and a set of [`Recording`]s — one per root
-//! note, [`Bank`] and velocity layer, frames at [`codec::RATE`] — and returns a
-//! [`Library`] the parent module's writer turns into a file. [`rebuild`] re-codes a
-//! library's own strokes from the frames they decode to: a file this crate did not
-//! write comes back block for block, and one it did write comes back byte for byte.
+//! [`build`] takes a [`Donor`] and a set of [`Recording`]s (one per root note, [`Bank`]
+//! and velocity layer, with frames at [`codec::RATE`]) and returns a [`Library`] that
+//! the parent module's writer turns into a file. [`rebuild`] codes a library's own
+//! strokes again from the frames they decode to. A file this crate wrote comes back
+//! byte for byte; for any other file, [`Recoded`] reports how each stroke's blocks
+//! compare.
 //!
-//! # The coding laws
+//! # Coding
 //!
-//! A block's width fixes its frame count, `F(w) = ⌊8·(1022·C − 2)/(w·C)⌋`, so a wider
-//! block is a shorter one and the width and the segmentation are one choice. Per
-//! block: for each order up to [`codec::MAX_ORDER`], take the narrowest width whose
-//! order-`w` residuals all fit `w` signed bits and whose frames still fit what the
-//! stroke has left; then take the order that reaches the narrowest width, ties to the
-//! lowest order. Width 1 occurs and there is no floor above it.
+//! A block's width fixes its frame count, `F(w) = ⌊8·(1022·C − 2)/(w·C)⌋`, so wider
+//! fields mean shorter blocks, and choosing widths also segments the stroke. For each
+//! block and each order up to [`codec::MAX_ORDER`], the coder takes the narrowest width
+//! `w` whose residuals at that order all fit `w` signed bits and whose frames still fit
+//! what the stroke has left. It then takes the order that reaches the narrowest width,
+//! breaking ties toward the lowest order. Width 1 occurs, so there is no floor above it.
 //!
 //! Every block but the first opens by restating the previous block's last
 //! [`codec::OVERLAP`] frames against the running history, so a block owns
 //! `F(w) − OVERLAP` frames and the stroke owns their sum. The last block is an
-//! ordinary full block whose own trailing overlap sits past the stroke's end, which
-//! is why coding a stroke again needs [`codec::Audio::tail`].
+//! ordinary full block whose trailing overlap sits past the stroke's end, which is why
+//! coding a stroke again needs [`codec::Audio::tail`].
 //!
-//! A stroke therefore states whole blocks, and it states every frame it was given.
-//! Where the capped search lands on the frame count exactly, that count is what the
-//! stroke states. Where it cannot — the remainder shorter than any width's block —
-//! the blocks would have to stop short of the audio, so the stroke is laid out again
-//! with nothing capping any block and ends at the first block to reach the count, the
-//! source read as silent past its end. Such a stroke ends in silence, up to one block
-//! of it, and no frame is dropped for falling between block lengths.
+//! A stroke therefore holds whole blocks, and it holds every frame it was given. When
+//! the capped search lands exactly on the frame count, the stroke states that count.
+//! When the remainder is shorter than any width's block, the capped blocks would stop
+//! short of the audio. The stroke is then laid out again with no cap, reading the
+//! source as silent past its end, and ends at the first block to reach the count. Such
+//! a stroke ends in up to one block of silence, and no frame is dropped.
 //!
-//! Both layouts code again unchanged. The cap is what the stroke has left to own, so
-//! a stroke whose blocks land on its frame count gives the same search the same room
-//! the second time and reaches the same widths. A stroke laid out with no cap states
-//! the sum of those blocks, and a capped search over that sum admits every one of
-//! them — each is no longer than what is left when it starts, and the cap only ever
-//! removes candidates — so it lays out the same blocks and this time lands exactly.
+//! Both layouts code again unchanged. The cap is what the stroke has left to own, so a
+//! stroke whose blocks land on its frame count gives the search the same room the
+//! second time, and the search reaches the same widths. A stroke laid out with no cap
+//! states the sum of its blocks. A capped search over that sum admits every one of
+//! those blocks, since each is no longer than what is left when it starts and the cap
+//! only removes candidates. So it lays out the same blocks and this time lands exactly.
 //!
-//! What this codes plays. Confirmed on hardware. Libraries built here load and
-//! sound — mono and stereo, every key of a full-keyboard library including its lowest
-//! and highest root, each of three attack layers, the release stroke at note-off, a
-//! long stroke to its end, and the keys between roots transposed — and a vendor
-//! library coded again from its own audio plays indistinguishably from the original,
-//! in level and in spectrum.
+//! Libraries built here load and play on the instrument: mono and stereo, every key of
+//! a full-keyboard library including its lowest and highest root, each of three attack
+//! layers, the release stroke at note-off, a long stroke to its end, and the keys
+//! between roots transposed. A vendor library coded again from its own audio is
+//! indistinguishable from the original in level and spectrum. Confirmed on hardware.
 //!
-//! Given a block's width, order and attenuation, this reproduces its bytes, and the
-//! width and order it derives are the ones the file declares — except where a library's
-//! headers were decided on a signal the file does not store. The attenuation is the same
-//! kind of thing one step smaller: it is a statistic the vendor's encoder recorded
-//! rather than a function of the frames it went on to store, so a block coded again from
-//! its own audio can declare a neighbouring value. Nothing in [`codec`] reads it.
-//! Inferred from specimens; not confirmed on hardware.
+//! Given a block's width, order and attenuation, this coder reproduces the block's
+//! bytes. The width and order it derives match the file's, except where a library's
+//! headers were chosen from a signal the file does not store. The attenuation is
+//! similar: the vendor's encoder recorded it as a statistic, not as a function of the
+//! stored frames, so a block coded again from its own audio can declare a neighboring
+//! value. [`codec`] never reads it. Inferred from specimens; not confirmed on hardware.
 //!
 //! # What the audio does not say
 //!
 //! A stroke record carries fields no audio predicts: four length marks, fifteen
 //! one-pole decay coefficients, a velocity window, a per-stroke identifier, and two
-//! bytes the later streams use. Nor does the prefix's bank of per-note tables and
-//! playback parameters. [`Donor`] is where [`build`] gets them.
+//! bytes the later streams use. The audio does not predict the prefix's per-note
+//! tables and playback parameters either. [`build`] gets them from a [`Donor`].
 //!
-//! [`Donor::Template`] copies them from a library — for each recording, the template
-//! stroke of the same bank and nearest root, with the marks rescaled to the new
-//! stroke's length. They go in as the template donated them: the instrument accepts
-//! them, and what it makes of them beyond accepting is not known. What comes with them
-//! is the vendor's tuning of an instrument these recordings are not.
+//! [`Donor::Template`] copies them from a library: for each recording, from the
+//! template stroke of the same bank and nearest root, with the marks rescaled to the
+//! new stroke's length. Otherwise they go in unchanged. The instrument accepts them,
+//! but what it does with them is not known, and they carry the vendor's tuning of a
+//! different instrument.
 //!
 //! [`Donor::Rules`] states them instead, so a library can be written from recordings
-//! alone. Every one is then a neutral playback parameter: no decay applied over the
-//! recordings, each stroke trimmed by its own layer value, and the damper reaching the
-//! keys the kind of instrument dampens. Confirmed on hardware. A library written this
-//! way plays like the same audio built against a template, within about a decibel at
-//! every velocity and key, and sustains longer because nothing is applied over it.
+//! alone. Every field is then a neutral playback parameter: no decay applied over the
+//! recordings, each stroke trimmed according to its layer value, and the damper
+//! covering the keys that kind of instrument damps. A library written this way plays
+//! like the same audio built against a template, within about a decibel at every
+//! velocity and key, and sustains longer because no extra decay is applied. Confirmed
+//! on hardware.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
@@ -93,14 +92,14 @@ const FULL_SCALE: f64 = 8192.0;
 /// Widest field a header can declare, as an index bound.
 const WIDTHS: usize = MAX_WIDTH as usize + 1;
 
-/// What a library states about itself besides its strokes. Everything else — the
-/// stream version, the per-note tables, the word at body `0x06` — comes from the
-/// [`Donor`] [`build`] is given.
+/// What a library states about itself besides its strokes. Everything else, such as
+/// the stream version, the per-note tables and the word at body `0x06`, comes from the
+/// [`Donor`] given to [`build`].
 #[derive(Debug, Clone)]
 pub struct Options {
     /// The half of the `Name#Variant` field before the separator.
     pub name: String,
-    /// The half after it, where the vendor records the voicing and the library's size.
+    /// The half after it, where vendor libraries record the voicing and the size.
     pub variant: String,
 }
 
@@ -118,22 +117,21 @@ impl Options {
     }
 }
 
-/// Where [`build`] takes the fields no audio predicts from.
+/// Where [`build`] gets the fields no audio predicts.
 #[derive(Debug, Clone)]
 pub enum Donor<'a> {
     /// A library to copy them from: its prefix whole, and per stroke the length marks
     /// and decay ladder of its nearest stroke of the same bank.
     Template(&'a Library<'a>),
-    /// The rules that state them instead, which is what a library built from nothing
-    /// but recordings carries.
+    /// Rules that state them, for a library built from recordings alone.
     Rules(Rules),
 }
 
 /// The kind of instrument a library states it holds, at body `0x18`.
 ///
 /// The instrument files the library under it. Which code names which kind: Inferred
-/// from specimens; not confirmed on hardware. The byte changes nothing a library
-/// sounds like. Confirmed on hardware.
+/// from specimens; not confirmed on hardware. The byte does not change how the library
+/// sounds. Confirmed on hardware.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     ElectricGrand,
@@ -197,9 +195,9 @@ impl Kind {
         }
     }
 
-    /// The [`Rules::damper_top`] this kind of instrument has: the acoustic pianos damp
-    /// to a key well below the top of the keyboard and let the rest ring, the reed
-    /// pianos to a higher one, and everything else damps every key.
+    /// The [`Rules::damper_top`] this kind of instrument has. The acoustic pianos damp up
+    /// to a key well below the top of the keyboard and let the rest ring, the reed pianos
+    /// damp up to a higher key, and everything else damps every key.
     pub fn damper_top(self) -> u8 {
         match self {
             Kind::Grand | Kind::Upright => 90,
@@ -219,8 +217,8 @@ pub const DEFAULT_GAIN: i8 = 50;
 /// What a library states about its playback where no template donates it.
 ///
 /// These are the parameters a recording cannot carry, at their neutral settings: the
-/// library is heard at [`Rules::gain`], each stroke is trimmed by its own layer value,
-/// nothing is applied over the recordings' own decay, and the damper reaches
+/// library is heard at [`Rules::gain`], each stroke is trimmed according to its layer
+/// value, nothing is applied over the recordings' own decay, and the damper reaches
 /// [`Rules::damper_top`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
@@ -256,17 +254,17 @@ pub struct Recording {
     /// The note it was recorded at.
     pub root: u8,
     pub bank: Bank,
-    /// The layer value the stroke record states, 0 being the loudest recording of the
-    /// root and bank. Selection reads this value, not a rank among the layers present
+    /// The layer value the stroke record states, where 0 is the loudest recording of
+    /// the root and bank. Selection reads this value, not a rank among the layers present
     /// ([`Stroke::layer`]); [`layer_value`] spreads a root's layers across the
     /// velocity range the way a vendor library does.
     pub layer: u8,
     /// One vector per channel at [`codec::RATE`], all the same length. Every
     /// recording of one library states the same channel count, 1 or 2.
     ///
-    /// The stroke holds whole blocks and holds all of these frames, so it states them
-    /// and whatever silence fills out the block they end in — the recording is read as
-    /// silent past its end rather than cut back to a block boundary.
+    /// The stroke holds whole blocks and all of these frames, so it also states the
+    /// silence that fills out the last block. The recording is never cut back to a
+    /// block boundary.
     pub channels: Vec<Vec<i16>>,
 }
 
@@ -277,19 +275,19 @@ pub const SOFTEST_LAYER: u8 = 27;
 /// The largest layer value any velocity sounds: `(127 − 1)·31/127`, the selection
 /// bound at velocity 1, the softest note-on a key can send.
 ///
-/// A key sounds the largest value its root holds that is at most
-/// `(127 − velocity)·31/127` ([`Stroke::layer`]), and that bound only falls as the
-/// velocity rises, so a stroke stating more than this is one no playing reaches.
-/// [`build`] refuses one rather than write a library with a silent stroke in it.
+/// A key plays the largest value its root holds that is at most
+/// `(127 − velocity)·31/127` ([`Stroke::layer`]). That bound falls as velocity rises,
+/// so no velocity reaches a stroke stating more than this, and [`build`] refuses one.
 pub const HIGHEST_PLAYED_LAYER: u8 = ((127 - 1) * 31 / 127) as u8;
 
 /// The value the `index`-th loudest of a root's `layers` takes when the caller states
-/// none: `round(index·27/(layers − 1))`, and 0 for a root holding one.
+/// none: `round(index·27/(layers − 1))`, and 0 for a root with one layer.
 ///
-/// A key sounds the largest layer value its root holds that is at most
-/// `(127 − velocity)·31/127` ([`Stroke::layer`]), so the spread is what puts a layer
-/// change under each part of the velocity range; values packed at the loud end leave
-/// the softest layer playing almost everywhere. An `index` past the last is that one.
+/// A key plays the largest layer value its root holds that is at most
+/// `(127 − velocity)·31/127` ([`Stroke::layer`]). Spreading the values puts a layer
+/// change under each part of the velocity range; values packed at the loud end would
+/// leave the softest layer playing almost everywhere. An `index` past the last layer
+/// is treated as the last.
 pub fn layer_value(index: usize, layers: usize) -> u8 {
     let last = layers.saturating_sub(1);
     if last == 0 {
@@ -303,27 +301,26 @@ pub fn layer_value(index: usize, layers: usize) -> u8 {
 /// What a WAV's name says about the velocity layer its stroke sits at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LayerTag {
-    /// `l02`: the third-loudest layer of its root and bank, taking whatever value the
-    /// spread over that root's layers gives it.
+    /// `l02`: the third-loudest layer of its root and bank, valued by the spread over
+    /// that root and bank's layers.
     Index(u8),
-    /// `v12`: the layer value itself, written to the record as it stands.
+    /// `v12`: the layer value itself, written to the record unchanged.
     Value(u8),
 }
 
-/// Whether a stroke name may carry a stem of the caller's own in front of the stroke
-/// it states.
+/// Whether a stroke name may start with a stem of the caller's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stem {
-    /// `060-b0-l00`, and nothing else.
+    /// `060-b0-l00` only.
     None,
-    /// `Grand-060-b0-l00` as well: the trailing group is the whole claim.
+    /// `Grand-060-b0-l00` as well; only the trailing fields are read.
     Any,
 }
 
-/// The stroke a name states — `<root>-b<bank>-l<layer>`, or `<root>-b<bank>-v<value>`
-/// naming the layer value itself — read off a file name without its extension.
+/// The stroke a file name, without its extension, states: `<root>-b<bank>-l<layer>`, or
+/// `<root>-b<bank>-v<value>` to name the layer value itself.
 ///
-/// A root past [`NOTES`] is no note a library can hold.
+/// A root of [`NOTES`] or above is not a note a library can hold, and gives `None`.
 pub fn parse_stroke_name(name: &str, stem: Stem) -> Option<(u8, Bank, LayerTag)> {
     let mut parts = name.rsplit('-');
     let third = parts.next()?;
@@ -340,7 +337,7 @@ pub fn parse_stroke_name(name: &str, stem: Stem) -> Option<(u8, Bank, LayerTag)>
     (usize::from(root) < NOTES).then_some((root, bank, layer))
 }
 
-/// Why one root and bank's names state no layer values.
+/// Why the names for one root and bank give no layer values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayerClash {
     pub root: u8,
@@ -348,12 +345,11 @@ pub struct LayerClash {
     pub how: Clash,
 }
 
-/// The two ways one root and bank's names fail to state a layer each.
+/// How the names for one root and bank fail to give each stroke a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Clash {
-    /// Some layers named by index and some by value. The two forms mean different
-    /// things about how many layers a spread is over, so one root's bank names its
-    /// layers one way.
+    /// Some layers are named by index and some by value. The two forms disagree about
+    /// how many layers the spread covers, so one root's bank must use one form.
     BothForms,
     /// One layer named twice, which the spread would hand two different values.
     Twice,
@@ -427,10 +423,10 @@ impl Recoded {
 /// Build a library from recordings, taking from `donor` every field the audio does
 /// not decide.
 ///
-/// The recordings may arrive in any order; the directory sorts them by root, then
-/// bank, then layer, which is the ascending root order the per-root counts index by.
-/// The key map routes every key up to one semitone above the highest root, and the
-/// per-key fine tune starts at zero rather than carrying a template's.
+/// The recordings may arrive in any order. The directory sorts them by root, then bank,
+/// then layer, the ascending root order the per-root counts require. The key map routes
+/// every key up to one semitone above the highest root. The per-key fine tune starts at
+/// zero, even with a template.
 pub fn build(
     donor: &Donor<'_>,
     options: &Options,
@@ -497,18 +493,17 @@ pub fn build(
     Ok(library)
 }
 
-/// The content version the container states where no template donates one: a library's
-/// own version times a hundred, as the instrument reports it. The hardware evidence
-/// reaches no further than this: a library stating it loads and plays. Confirmed on
-/// hardware.
+/// The content version the container states when no template donates one: a library's
+/// own version times a hundred, as the instrument reports it. A library stating it
+/// loads and plays. Confirmed on hardware.
 const CONTENT_VERSION: u32 = 540;
 
 /// The stream version a rule-written prefix states, at [`VERSION_AT`],
 /// [`VERSION_REPEAT_AT`] and [`VERSION_ECHO_AT`].
 const RULES_VERSION: u16 = 0x450;
 
-/// u32 the vendor makes distinct per library. The instrument does not read it, so a
-/// rule-written prefix states one. Confirmed on hardware.
+/// u32 that vendor libraries make distinct per library. The instrument does not read
+/// it, so a rule-written prefix states a fixed value. Confirmed on hardware.
 const FILE_ID_AT: usize = 0x06;
 const FILE_ID: u32 = 1;
 
@@ -516,14 +511,12 @@ const FILE_ID: u32 = 1;
 const VERSION_REPEAT_AT: usize = 0x16;
 
 /// The three bytes after [`KIND_AT`]: a model id within the kind and the library's
-/// version digit — neither of which a rule-written prefix claims — then a format
-/// constant.
+/// version digit, both left at zero in a rule-written prefix, then a format constant.
 const KIND_TRAILER: [u8; 3] = [0, 0, 2];
 
-/// The per-note tables, [`NOTES`] bytes each, at the value that states nothing about
-/// the note: no retune at [`FINE_TUNE_AT`], and for the rest the value a library that
-/// has been played holds, sweeping any of them having moved nothing measurable.
-/// Confirmed on hardware.
+/// The per-note tables, [`NOTES`] bytes each, at neutral values: no retune at
+/// [`FINE_TUNE_AT`], and for the rest the value a library that has been played holds.
+/// Sweeping any of them moved nothing measurable. Confirmed on hardware.
 const PER_NOTE_TABLES: [(usize, u8); 6] = [
     (0x10c, 0),
     (FINE_TUNE_AT, 0),
@@ -535,24 +528,23 @@ const PER_NOTE_TABLES: [(usize, u8); 6] = [
 
 /// The playback parameters, zero but for the fields [`rules_prefix`] writes into them.
 const PARAMETERS: std::ops::Range<usize> = 0x40c..0x60f;
-/// The three bytes after the damper limit, whose meaning is open; every library holds
-/// these.
+/// The three bytes after the damper limit. Their meaning is unknown, and every library
+/// holds these values.
 const PARAMETER_TAIL_AT: usize = 0x40e;
 const PARAMETER_TAIL: [u8; 3] = [10, 108, 1];
-/// Nineteen bytes ahead of the damper cut whose meaning is open; every library holds
-/// these.
+/// Nineteen bytes before the damper cut. Their meaning is unknown, and every library
+/// holds these values.
 const BEFORE_DAMPER_CUT_AT: usize = 0x489;
 const BEFORE_DAMPER_CUT: [u8; 19] = [128; 19];
 /// The damper cut per note, [`NOTES`] bytes of [`damper_cut`].
 const DAMPER_CUT_AT: usize = 0x49d;
 const _: () = assert!(DAMPER_CUT_AT + NOTES <= PARAMETERS.end);
 
-/// The prefix a library states where no template donates one: the stream's own
-/// constants, the parameters `rules` carries, and zero wherever the vendor writes
-/// something only a recording session knows.
+/// The prefix a library states when no template donates one: the stream's constants,
+/// the parameters `rules` carries, and zero wherever vendor libraries hold something
+/// only a recording session knows.
 ///
-/// The name, the key map and the counts are laid over this by [`build`] and the
-/// container's writer.
+/// [`build`] and the container's writer add the name, the key map and the counts.
 fn rules_prefix(rules: &Rules) -> Vec<u8> {
     let mut prefix = vec![0u8; DIRECTORY_AT];
     prefix[..CNSP_MAGIC.len()].copy_from_slice(CNSP_MAGIC);
@@ -580,9 +572,9 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
 /// The damper cut's entry for `note`, at [`DAMPER_CUT_AT`] `+ note`.
 ///
 /// A plateau over the lowest notes, a straight fall to the highest key an instrument
-/// plays, and a fixed value past it. Confirmed on hardware. A curve of this shape takes
-/// a held key down within tens of milliseconds, where a flat table of any level takes
-/// about half a second. What axis the instrument reads the table on is open.
+/// plays, and a fixed value past it. A curve of this shape damps a held key within tens
+/// of milliseconds, where a flat table of any level takes about half a second.
+/// Confirmed on hardware. Which axis the instrument reads the table on is unknown.
 fn damper_cut(note: usize) -> u8 {
     /// The last note of the plateau, where the fall begins; it ends on `TOP`.
     const FLAT_TO: usize = 24;
@@ -601,12 +593,11 @@ fn damper_cut(note: usize) -> u8 {
     }
 }
 
-/// The record a stroke states where no template donates one: no length marks, a decay
-/// ladder that applies nothing, the trim its layer implies, and its own place in the
+/// The record a stroke states when no template donates one: no length marks, a decay
+/// ladder that applies nothing, the trim its layer implies, and its place in the
 /// directory as the identifier.
 ///
-/// [`record`] lays the audio's own fields over this, and reads the absent marks as the
-/// zeros they are.
+/// [`record`] writes the audio's fields over this and leaves the marks at zero.
 fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     let mut out = [0u8; RECORD];
     let (window, trim) = velocity_window(recording.bank, recording.layer);
@@ -629,10 +620,10 @@ const WIDEST_TRIM: u16 = 31;
 
 /// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states.
 ///
-/// An attack or resonance stroke is trimmed three decibels past its layer value, so
-/// that the softer layers of a root play softer than the loud ones by the amount their
-/// values already say they are; a release stroke takes a fixed trim instead, its layer
-/// value being no part of how it is selected.
+/// An attack or resonance stroke is trimmed three decibels more than its layer value,
+/// so a root's softer layers play softer than its loud ones by the amount their values
+/// state. A release stroke takes a fixed trim, since its layer value plays no part in
+/// selecting it.
 fn velocity_window(bank: Bank, layer: u8) -> (u16, u16) {
     match bank {
         Bank::Release => (0, RELEASE_TRIM),
@@ -646,10 +637,9 @@ fn velocity_window(bank: Bank, layer: u8) -> (u16, u16) {
 /// Code every stroke of `library` again from the frames it decodes to, each keeping
 /// its own record and its own place in the directory.
 ///
-/// A stroke whose decode saturates is refused rather than coded: the frames it would
-/// be given are the clamped ones, so what came back would be a stroke holding audio
-/// the file does not, and a stream that saturates this predictor is one the codec
-/// does not describe.
+/// A stroke whose decode saturates is refused. Its frames would be the clamped ones,
+/// so the rebuilt stroke would hold audio the file does not, and a stream that
+/// saturates this predictor is one the codec does not describe.
 pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
     let block = library.block_bytes();
     let mut strokes = Vec::new();
@@ -699,23 +689,24 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
 pub struct Resampled {
     /// One vector per channel at [`codec::RATE`].
     pub channels: Vec<Vec<i16>>,
-    /// Samples a sum put outside `i16`, which saturate.
+    /// Samples the filter put outside `i16`, saturated to fit.
     pub clipped: usize,
 }
 
-/// 16-bit PCM at `rate`, interleaved by channel, resampled onto the stroke lattice.
+/// Resample 16-bit PCM at `rate`, interleaved by channel, onto the stroke lattice.
 ///
 /// The tap bank is [`nsmp`](crate::formats::nsmp::kernel)'s and the lattice is
-/// `t(f) = rate·f / RATE`. Audio already at [`codec::RATE`] passes through untouched:
-/// the bank interpolates rather than reproduces, so running it at a ratio of one
-/// would filter the source for nothing.
+/// `t(f) = rate·f / RATE`. Audio already at [`codec::RATE`] passes through untouched,
+/// because the bank interpolates and would filter the source for nothing at a ratio of
+/// one.
 ///
 /// The kernel's cutoff follows the rates: a source faster than [`codec::RATE`] is
-/// band-limited to the lattice's own Nyquist before it lands on it, and a slower one
-/// keeps its whole band.
+/// band-limited to the lattice's Nyquist frequency, and a slower one keeps its whole
+/// band.
 ///
-/// The lattice count follows the rate the source declares, so a source that would
-/// stretch past the frame count a stroke states is refused rather than allocated.
+/// The lattice length follows the rate the source declares. A source that would
+/// stretch past the frame count a stroke can state is refused before anything is
+/// allocated.
 pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled, Error> {
     if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
         return Err(ParseError::OutOfBounds {
@@ -857,9 +848,9 @@ fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
 /// The template stroke a recording inherits the fields no audio predicts from: the
 /// same bank and nearest root, then the nearest layer.
 ///
-/// A release stroke zeroes the marks and the decay coefficient at `+0x2e` it would
-/// inherit, so any stroke can donate to one; anything else needs a donor that declares
-/// marks of its own.
+/// A release stroke zeroes the marks and the `+0x2e` decay coefficient it would
+/// inherit, so any stroke can donate to one. Any other stroke needs a non-release
+/// donor, which carries marks.
 fn donor_record<'a>(
     template: &'a Library<'_>,
     recording: &Recording,
@@ -914,15 +905,14 @@ struct Placed {
     width: u8,
 }
 
-/// Code whole blocks over `target` frames of `source` — one vector per channel — and
-/// report the frames they own between them, which is never fewer than `target`.
+/// Code whole blocks over `target` frames of `source` (one vector per channel) and
+/// report the frames they own, which is never fewer than `target`.
 ///
-/// Each block is capped at what `target` has left to own, and when the blocks land on
-/// `target` exactly that is the stroke. When instead they would stop short — the
-/// remainder shorter than [`shortest_block`], so that no width's block fits it — the
-/// stroke is laid out again with no cap on any block and ends at the first one to
-/// reach `target`, the source read as silent past its end. What it then owns past
-/// `target` is silence the stroke states rather than audio it drops.
+/// Each block is capped at what `target` has left to own, and when the blocks land
+/// exactly on `target` that is the stroke. When the remainder is shorter than
+/// [`shortest_block`], no width's block fits it, so the stroke is laid out again with
+/// no cap, reading the source as silent past its end, and ends at the first block to
+/// reach `target`. Anything it owns past `target` is silence.
 fn code(source: &[Vec<i16>], seeds: &[[i16; SEEDS]; 2], target: usize) -> Result<Coded, Error> {
     let channels = source.len();
     let block = block_bytes(channels as u16);
@@ -973,8 +963,7 @@ fn owned_by(placed: &[Placed], counts: &[usize; WIDTHS]) -> usize {
 
 /// Blocks over the frames from zero, each capped at what `target` has left to own.
 ///
-/// They land on `target` exactly or stop short of it by less than
-/// [`shortest_block`], which is the length no width's block fits.
+/// They land exactly on `target` or stop short of it by less than [`shortest_block`].
 fn lay_capped(
     planes: &[Vec<i32>],
     channels: usize,
@@ -995,10 +984,9 @@ fn lay_capped(
 /// Blocks over the frames from zero with nothing capping their length, up to and
 /// including the first one whose frames reach `target`.
 ///
-/// A capped search over the frames these own admits every one of them — each is no
-/// longer than what is left when it starts — so it lays out the same blocks and lands
-/// on that count exactly, which is what makes the stroke this writes one that codes
-/// again unchanged.
+/// A capped search over the frames these own admits every one of them, since each is
+/// no longer than what is left when it starts. It therefore lays out the same blocks
+/// and lands exactly on that count, so the stroke codes again unchanged.
 fn lay_uncapped(
     planes: &[Vec<i32>],
     channels: usize,
@@ -1030,8 +1018,8 @@ fn place(
     Placed { at, order, width }
 }
 
-/// Frames the shortest block a header can declare owns: the widest field, and so the
-/// fewest frames. It is the grain the stroke's own frame count comes in.
+/// Frames owned by the shortest block a header can declare, the one with the widest
+/// field. It is the smallest remainder a capped search can still fill.
 fn shortest_block(counts: &[usize; WIDTHS]) -> usize {
     counts[usize::from(MAX_WIDTH)] - OVERLAP
 }
@@ -1093,10 +1081,10 @@ fn residuals(len: usize) -> Result<Vec<i32>, Error> {
 /// The `(order, width)` a block starting at frame `at` declares.
 ///
 /// `owned_left` caps a block's owned frames at what the stroke has left to own. The
-/// narrowest width is the longest block, so the cap rules out an opening range of
-/// widths; at [`shortest_block`] it leaves only the widest, which order zero always
-/// reaches, so a cap that large or larger always names a block. `None` lifts the cap,
-/// which is what a last block reaching past the source is chosen without.
+/// narrowest width gives the longest block, so the cap rules out the narrowest widths
+/// first. A cap of [`shortest_block`] leaves only the widest, which order zero always
+/// reaches, so a cap at least that large always names a block. `None` lifts the cap,
+/// for a last block that reaches past the source.
 fn choose(
     planes: &[Vec<i32>],
     at: usize,
@@ -1110,8 +1098,8 @@ fn choose(
         let mut hi = 0i32;
         let mut scanned = at;
         let mut narrowest = None;
-        // A wider block is a shorter one, so walking widths down grows the window a
-        // step at a time and the span the residuals need never narrows again.
+        // Wider fields mean shorter blocks, so walking widths down grows the window a
+        // step at a time, and the range the residuals need only grows.
         for width in (MIN_WIDTH..=MAX_WIDTH).rev() {
             let frames = counts[usize::from(width)];
             for &value in &plane[scanned * channels..(at + frames) * channels] {
@@ -1163,7 +1151,7 @@ fn pack(out: &mut Vec<u8>, order: u8, width: u8, stat: u8, residuals: &[i32], bl
 /// The header's high byte: how far a block's loudest frame sits below [`FULL_SCALE`],
 /// in dB, rounded to a whole one and clamped to `0..=100`.
 ///
-/// A silent block declares 100 where one count declares 78. Inferred from specimens;
+/// A silent block declares 100, where a peak of one declares 78. Inferred from specimens;
 /// not confirmed on hardware.
 fn attenuation(peak: i64) -> u8 {
     if peak == 0 {
@@ -1177,8 +1165,9 @@ fn attenuation(peak: i64) -> u8 {
 /// own first three frames.
 ///
 /// Vendor strokes carry the four frames before the recording, the oldest of them zero.
-/// A recording that starts in silence has no such frames to carry and this states zeros,
-/// which is the same thing. Inferred from specimens; not confirmed on hardware.
+/// A new recording has no frames before it. For one that starts in silence, these
+/// seeds are zeros, as the vendor's would be. Inferred from specimens; not confirmed on
+/// hardware.
 fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
     let mut out = [[0i16; SEEDS]; 2];
     for (channel, group) in source.iter().zip(out.iter_mut()) {
@@ -1191,11 +1180,10 @@ fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
 
 /// A donor record with everything the audio decides written over it.
 ///
-/// The length marks scale with the stroke's length so that they stay inside it. A
-/// release stroke declares no marks and zeroes the decay coefficient at `+0x2e`,
-/// keeping the fourteen-entry ladder at `+0x36` exactly as the donor carries it, as a
-/// stroke of any other bank does. The block index at `+0x2c` is derived: it is the
-/// block holding the first mark.
+/// The length marks scale with the stroke's length so they stay inside it. A release
+/// stroke declares no marks and zeroes the decay coefficient at `+0x2e`, but like a
+/// stroke of any bank it keeps the donor's fourteen-entry ladder at `+0x36`. The block
+/// index at `+0x2c` is the block holding the first mark.
 fn record(
     donor: &[u8; RECORD],
     coded: &Coded,
@@ -1284,9 +1272,8 @@ mod tests {
     use super::*;
     use crate::formats::npno::{be16, Piano, DECAYS};
 
-    /// A one-stroke library the encoder can donate from: a real prefix and one real
-    /// record, holding marks and a full ladder of decay coefficients a new stroke
-    /// inherits, over a block of silence a decode reads back.
+    /// A one-stroke library to donate from: a prefix and one record holding marks and a
+    /// full decay ladder for a new stroke to inherit, over a decodable block of silence.
     fn template(channels: u16) -> Piano {
         let mut build = Build::new();
         build.channels = channels;
@@ -1325,8 +1312,7 @@ mod tests {
         }
     }
 
-    /// Build, write, read back, and decode: what the caller put in is what the
-    /// instrument would be handed.
+    /// Build a library from `recordings`, write it, and read it back.
     fn round_trip(channels: u16, recordings: &[Recording]) -> Piano {
         let donor = template(channels);
         let built = build(
@@ -1379,11 +1365,9 @@ mod tests {
         }
     }
 
-    /// Nothing a recording holds is dropped for falling between block lengths: the
-    /// coder states the silence that fills out the last block rather than fewer frames
-    /// than it was given, including where the whole signal sits in the frames a
-    /// truncating coder would leave off. The stroke it writes is one a rebuild leaves
-    /// alone.
+    /// A recording that ends between block lengths keeps every frame, even when all its
+    /// signal is in the frames a truncating coder would drop. The coder pads the last
+    /// block with silence, and a rebuild leaves the stroke alone.
     #[test]
     fn a_recording_that_does_not_fill_its_last_block_keeps_every_frame() {
         let mut late = vec![vec![0i16; 892]; 2];
@@ -1403,7 +1387,7 @@ mod tests {
         for (what, source) in cases {
             let frames = source[0].len();
             let signal: i64 = source[0].iter().map(|&s| i64::from(s).abs()).sum();
-            assert!(signal > 0, "{what}: the case states no signal");
+            assert!(signal > 0, "{what}: the case has no signal");
             let piano = round_trip(2, &[one(60, Bank::Attack, 0, source.clone())]);
             let library = piano.library().unwrap();
             let audio = codec::decode(&library.strokes()[0], 2).unwrap();
@@ -1440,9 +1424,8 @@ mod tests {
         }
     }
 
-    /// The two claims above hold wherever a recording ends against the block grid, not
-    /// only at the lengths a case picks: the stroke holds every frame, and coding it
-    /// again reaches the same file.
+    /// Wherever a recording ends against the block grid, the stroke holds every frame and
+    /// coding it again gives the same file.
     #[test]
     fn a_recording_of_any_length_codes_to_a_stroke_that_holds_it() {
         for frames in [
@@ -1475,9 +1458,8 @@ mod tests {
         }
     }
 
-    /// A stroke that saturates the decoder is refused rather than coded again: what a
-    /// recode would write is the clamped reconstruction, which is audio the file it
-    /// came from does not hold.
+    /// A recode would write the clamped reconstruction, which is audio the source file
+    /// does not hold.
     #[test]
     fn a_stroke_whose_decode_saturates_is_not_coded_again() {
         let donor = template(1);
@@ -1500,7 +1482,7 @@ mod tests {
         assert!(error.contains("left int16"), "{error}");
         assert!(
             error.contains("coding a stroke this codec does not describe"),
-            "the refusal does not read as the sentence it states: {error}"
+            "the refusal does not give its reason: {error}"
         );
     }
 
@@ -1544,8 +1526,8 @@ mod tests {
         );
     }
 
-    /// The default spread is what decides which velocities reach which layer, so the
-    /// values it produces are the contract, not an implementation detail.
+    /// The default spread decides which velocities reach which layer, so its values are
+    /// the contract.
     #[test]
     fn the_default_layer_values_spread_a_root_over_the_selection_range() {
         let spread = |layers| {
@@ -1561,8 +1543,8 @@ mod tests {
         assert_eq!(layer_value(0, 0), 0);
     }
 
-    /// A layer value is a field of the record, not a position in the directory: a
-    /// library that states its own keeps them when its audio is coded again.
+    /// A layer value is a field of the record, not a position in the directory, so a
+    /// rebuild keeps each stroke's value.
     #[test]
     fn a_rebuild_keeps_the_layer_value_every_stroke_states() {
         let short = tone(6_000, 300.0, 1);
@@ -1580,8 +1562,8 @@ mod tests {
         assert_eq!(values, [0, 6, 12]);
     }
 
-    /// Only the coefficient at `+0x2e` answers to the bank: a release stroke built
-    /// from a donor that carries all fifteen zeroes that one and keeps the donor's
+    /// Only the coefficient at `+0x2e` depends on the bank. A release stroke built from a
+    /// donor with all fifteen coefficients zeroes that one and keeps the donor's
     /// fourteen-entry ladder, as a stroke of any other bank does.
     #[test]
     fn a_release_stroke_declares_no_marks_and_zeroes_one_decay_coefficient() {
@@ -1634,11 +1616,10 @@ mod tests {
         assert_eq!(named, Kind::ALL, "a code names a kind ALL does not list");
     }
 
-    /// Building without a template needs no library to donate anything, and what comes
-    /// out reads back: the kind, the gain and the damper limit the rules state, a
-    /// stroke trimmed by its own layer value with no decay applied over it, and
-    /// identifiers counting the directory. A library that has been played holds these
-    /// bytes; the corpus suite is where that comparison is made.
+    /// A library built from rules reads back the kind, gain and damper limit the rules
+    /// state, strokes trimmed according to their layer values with no decay applied
+    /// over them, and identifiers counting the directory. The corpus suite compares
+    /// these bytes with a library that has been played.
     #[test]
     fn a_library_built_from_rules_states_them_and_needs_no_template() {
         let short = tone(6_000, 300.0, 1);
@@ -1731,7 +1712,7 @@ mod tests {
             &Options::new("Synth"),
             &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short)],
         )
-        .expect("the bound itself is a value a key sounds");
+        .expect("a key plays the bound itself");
     }
 
     #[test]
@@ -1767,9 +1748,8 @@ mod tests {
         }
     }
 
-    /// A name carrying something of its own in front of the stroke it states still
-    /// states it, where the caller asks for that form: the trailing group is the whole
-    /// claim.
+    /// With [`Stem::Any`], a name with its own prefix before the stroke fields still
+    /// names the stroke.
     #[test]
     fn a_stem_before_the_stroke_is_taken_only_where_the_caller_takes_one() {
         assert_eq!(
@@ -1800,7 +1780,7 @@ mod tests {
         assert_eq!(
             layer_values(&named).unwrap(),
             [27, 0, 14, 0, 0, 27],
-            "the order given is kept; the rank is the layer's own"
+            "values come back in the order given, ranked within each root and bank"
         );
     }
 
@@ -1814,9 +1794,8 @@ mod tests {
         assert_eq!(layer_values(&named).unwrap(), [0, 6, 12]);
     }
 
-    /// A spread over indices and a stated value mean different things about how many
-    /// layers a root has, and two names claiming one layer would be spread to two
-    /// different values — neither of which is what either name said.
+    /// Indices and stated values disagree about how many layers a root has, and two
+    /// names claiming one layer would be spread to two different values.
     #[test]
     fn one_roots_bank_names_its_layers_one_way_and_each_of_them_once() {
         let mixed = [
@@ -1850,7 +1829,7 @@ mod tests {
         assert_eq!(
             layer_values(&apart).unwrap(),
             [0, 12],
-            "a bank of its own names its layers its own way"
+            "each bank may use its own form"
         );
     }
 
@@ -1948,8 +1927,8 @@ mod tests {
         assert_eq!(stripped.to_body().unwrap(), whole.to_body().unwrap());
     }
 
-    /// A built library states the name and the variant the caller gives, so the name is
-    /// measured against that variant rather than against the one the template carries.
+    /// A built library states the caller's name and variant, so the name is checked
+    /// against that variant, not the template's.
     #[test]
     fn a_name_that_fits_beside_the_variant_it_is_given_is_built() {
         let name = "Studio Nine";
@@ -1959,7 +1938,7 @@ mod tests {
         library.set_variant(donated).unwrap();
         assert!(
             library.clone().set_name(name).is_err(),
-            "the name fits beside the template's variant, so the case states nothing"
+            "the name fits beside the template's variant, so this case tests nothing"
         );
 
         let built = build(
@@ -2000,14 +1979,12 @@ mod tests {
         source
     }
 
-    /// A library this module writes is one [`rebuild`] leaves alone: every block comes
-    /// back byte for byte and so does the container around it. A stroke states the
-    /// frames its blocks own and nothing past them, which is what leaves the width
-    /// search the same room the second time.
+    /// [`rebuild`] leaves a library this module wrote unchanged, every block and the
+    /// container around them. A stroke states only the frames its blocks own, so the
+    /// width search gets the same room the second time.
     ///
-    /// The lengths put the recording's end in each place it falls against the block
-    /// grid: inside a single block, part-way down a decay, and after the recording has
-    /// already reached digital silence.
+    /// The cases end the recording inside a single block, partway down a decay, and
+    /// after it has reached digital silence.
     #[test]
     fn rebuilding_a_library_this_module_wrote_reproduces_every_block() {
         let cases: [(&str, u16, Vec<Recording>); 4] = [
@@ -2068,9 +2045,9 @@ mod tests {
         assert!(resample(&[1, 2], 1, 0).is_err());
     }
 
-    /// The lattice count is the source's length scaled by the rate the source itself
+    /// The lattice length is the source's length scaled by the rate the source
     /// declares. A rate far below the lattice's stretches a modest source past every
-    /// frame count a stroke can state, which is a refusal rather than an allocation.
+    /// frame count a stroke can state, and that is refused before allocating.
     #[test]
     fn a_rate_that_stretches_a_source_past_a_strokes_frame_count_is_refused() {
         let frames = u32::MAX as usize / codec::RATE as usize + 1;
@@ -2082,10 +2059,9 @@ mod tests {
         assert!(error.contains("u32 frame count"), "{error}");
     }
 
-    /// A source faster than the lattice is band-limited to the lattice's own Nyquist
-    /// on the way down: a tone above it comes through as near silence rather than
-    /// folded back into the band as a tone the recording never held, and one well
-    /// inside the band comes through at its level.
+    /// A source faster than the lattice is band-limited to the lattice's Nyquist
+    /// frequency. A tone above it comes through as near silence instead of aliasing
+    /// back into the band, and a tone well inside the band keeps its level.
     #[test]
     fn resampling_a_faster_source_drops_what_the_lattice_cannot_hold() {
         let rate = 96_000;

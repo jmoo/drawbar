@@ -1,10 +1,9 @@
 //! The Stage 3 synth preset body (`.ns3y`): 58 bytes.
 //!
-//! The program's synth block under its own tag. ⚠️ The community docs call it a
-//! subset at program `0x0080..0x00AC`; the corpus puts it at program **body**
-//! `0x4f`, found by locating preset content inside programs and confirmed by the
-//! selector check. Panel B's copy sits 263 bytes further on, which is how the
-//! program's two panels were found.
+//! The program's synth block under its own tag. ⚠️ The community docs place it at
+//! program `0x0080..0x00AC`, but specimens put it at program body offset `0x4f`,
+//! found by locating preset content inside programs and confirmed by the selector
+//! check. Panel B's copy sits 263 bytes later.
 //!
 //! Field names match [`super::panel::Panel`]'s, so the same parameter reads the
 //! same either side of the tag.
@@ -22,7 +21,7 @@ use crate::error::Error;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns3y";
-/// Stored ×100; every corpus specimen holds 3.00.
+/// Stored ×100. Specimens hold 3.00.
 pub const KNOWN_VERSIONS: &[u32] = &[300];
 pub const BODY_LEN: usize = 58;
 
@@ -30,8 +29,8 @@ pub const BODY_LEN: usize = 58;
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
-/// re-encode verbatim. Placement located in the corpus (see the [module
-/// docs](self)). Inferred from specimens; not confirmed on hardware.
+/// re-encode. The placement was located in specimens; see the [module docs](self).
+/// Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(58)]
 pub struct SynthPreset {
     #[bits(40..=40)]

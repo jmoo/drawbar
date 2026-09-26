@@ -1,31 +1,28 @@
 //! The Electro 5 global settings format (`.ne5s`).
 //!
-//! Reads top-down: the format's constants, the read that pairs a header with
-//! [`Settings`], then the body itself — the 34 bytes after the header, one flat
-//! `#[bitbody]`. A file is a `Cbin<Settings>`, which derefs to the body.
+//! A file is a `Cbin<Settings>`, which derefs to the body: the 34 bytes after the
+//! header, declared as one flat `#[bitbody]`.
 //!
-//! The body holds the instrument's System, MIDI and Sound menus. Fields run from bit 38
-//! to bit 141 in no particular menu order — the MIDI channels sit between two System
-//! settings — so the declaration below is grouped the way the instrument's menus are and
-//! the placements do the reordering.
+//! The body holds the instrument's System, MIDI and Sound menus in bits 38..=141, in no
+//! menu order: the MIDI channels sit between two System settings. The declaration below
+//! groups the fields by menu, and each field's bit range places it.
 //!
-//! Every placement: Confirmed on hardware. A capture that changed one setting on the
-//! panel moves exactly the bits that setting's field claims, and nothing else. Where a
-//! field's *range* runs past the values the captures reach, the field says so.
+//! Every placement: Confirmed on hardware. Changing one setting on the panel moves only
+//! the bits its field claims. Where a field's range runs past the values the captures
+//! reach, the field says so.
 //!
-//! Bits 0..=15 are the schema version echoed into the body, which every `ne5` format
-//! carries at `0x2c` because the container header is not transmitted over USB — see
-//! [`crate::formats::ne5::song`]. `ne5s` is version 0, so they read zero.
+//! Bits 0..=15 echo the schema version. Every `ne5` format carries this echo at `0x2c`
+//! because the container header is not transmitted over USB (see
+//! [`crate::formats::ne5::song`]). `ne5s` is version 0, so these bits read zero.
 //!
-//! Bits 16..=37 are the `startup_*` settings below — the selections the instrument
-//! restores at power-up. **Bit 18 is the only bit below the menu settings that no
-//! field claims.** It is clear in every specimen. Whatever it is, it survives a re-encode
-//! untouched, as does everything past the last setting.
+//! Bits 16..=37 are the `startup_*` settings below, which the instrument restores at
+//! power-up. Bit 18 is the only bit below the menu settings that no field claims. It is
+//! clear in every specimen. It survives a re-encode untouched, as does everything past
+//! the last setting.
 //!
-//! **Two cataloged settings are not stored here.** Toggling *memory protect* and *local
-//! control* on the panel — the change verified on the display — and re-reading the object
-//! moves no bit of the body. Confirmed on hardware. Both live outside this object, so
-//! neither is decoded.
+//! Two menu settings are not stored here. Toggling memory protect or local control on
+//! the panel, with the change verified on the display, moves no bit of the body.
+//! Confirmed on hardware. Neither is decoded.
 
 use crate::cbin::{self, Cbin, Header};
 use crate::components::sparse_enum;
@@ -38,17 +35,14 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ne5s";
-/// Schema versions validated against the corpus. Every corpus settings file reports 0.
+/// Schema versions validated against specimens.
 pub const KNOWN_VERSIONS: &[u32] = &[0];
 /// Length of the settings body block, `0x2c..=0x4d`.
 pub const BODY_LEN: usize = 0x4e - 0x2c;
 /// Type-1 file length: 44-byte CBIN header + 34-byte body.
 pub const FILE_LEN: usize = 0x2c + BODY_LEN;
 
-/// A default settings file.
-///
-/// There is no slot to speak of: the instrument holds exactly one of these, and every
-/// specimen addresses it to bank 0 slot 0.
+/// A default settings file, addressed to bank 0 slot 0.
 pub fn new() -> Cbin<Settings> {
     Cbin {
         header: Header::new(FORMAT, (0, 0), 0),
@@ -60,8 +54,8 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Settings>, Erro
     let file: Cbin<Settings> = cbin::read(reader, FORMAT)?;
     program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
     program::unset_aux(FORMAT, &file.header)?;
-    // The instrument holds exactly one settings file, so the location field has
-    // nothing to address; every specimen holds bank 0 slot 0.
+    // The instrument holds one settings file, and every specimen addresses it to bank 0
+    // slot 0.
     let (bank, slot) = file.header.slot();
     if (bank, slot) != (0, 0) {
         return Err(ParseError::AssertFail(format!(
@@ -109,9 +103,9 @@ pub struct Settings {
     pub output_routing: OutputRouting,
     #[bits(68..=71)]
     pub global_transpose: GlobalTranspose,
-    /// At `-50`, `0` and `+5`, written over USB, each moves the instrument's pitch by
-    /// its own value in cents. Confirmed on hardware. The values between: Inferred from
-    /// specimens; not confirmed on hardware.
+    /// Writing `-50`, `0` or `+5` over USB moves the instrument's pitch by that many
+    /// cents. Confirmed on hardware. Other values: Inferred from specimens; not
+    /// confirmed on hardware.
     #[bits(55..=61)]
     pub fine_tune: FineTune,
 
@@ -153,8 +147,8 @@ pub struct Settings {
     pub b3_perc_volume_normal: PercVolume,
     #[bits(106..=108)]
     pub b3_perc_volume_soft: PercVolume,
-    /// The panel dials through more entries than the two the corpus names, so an
-    /// unrecognized value here is expected rather than a decode failure.
+    /// The panel offers more entries than the two named here, so an unrecognized value
+    /// is expected and decodes as unknown.
     #[bits(79..=81)]
     pub rotary_speaker_type: RotarySpeakerType,
     #[bits(94..=96)]
@@ -168,10 +162,10 @@ pub struct Settings {
     #[bits(91..=93)]
     pub rotary_rotor_acceleration: RotaryRate,
 
-    // Restored at boot; each field retains the last selection of its own mode.
+    // Restored at power-up; each field keeps the last selection made in its own mode.
     // Locations use the song map's zero-based `bank * 50 + slot` packing.
-    /// Inferred from specimens; not confirmed on hardware. A set-list-mode capture sets
-    /// it, while a backup changes `startup_song` independently.
+    /// Inferred from specimens; not confirmed on hardware. A capture in set list mode
+    /// sets it, and a backup changes `startup_song` independently.
     #[bits(16..=16)]
     pub startup_set_list_mode: bool,
     #[bits(17..=17)]
@@ -216,13 +210,11 @@ impl Menu {
 pub struct Setting {
     /// The field's name in [`Settings`].
     pub name: &'static str,
-    /// The value spelled the way the instrument spells it — `yamaha fc-7`, not the
-    /// variant name the bits decode to.
+    /// The value as the instrument's display spells it, such as `yamaha fc-7`.
     pub value: String,
 }
 
-/// Every field decodes from zeroed bytes — program `1:1`, Live and set list mode
-/// off — so this is the decode rather than a second statement of each default.
+/// The decode of zeroed bytes: program `1:1`, with Live and set list mode off.
 impl Default for Settings {
     fn default() -> Self {
         Settings::try_from([0; BODY_LEN]).expect("every settings field decodes totally")
@@ -235,13 +227,11 @@ fn on_off(on: bool) -> String {
 }
 
 impl Settings {
-    /// The panel's fields grouped by the menu the instrument shows them under, in menu
-    /// order — which is neither declaration order nor the order they sit in the file.
+    /// The fields grouped by the menu the instrument shows them under, in the
+    /// instrument's menu order.
     ///
-    /// ⚠️ These renderings are for reading, not for feeding back: `Display` is the panel's
-    /// wording, while [`Settings::set_field`] parses a field's `Debug`. A test holds the
-    /// list to the panel's own field names, so a field added to [`Settings`] and not
-    /// placed in a menu fails there.
+    /// ⚠️ The values are display text and cannot be fed back: they use the panel's
+    /// wording, while [`Settings::set_field`] parses a field's `Debug`.
     pub fn by_menu(&self) -> Vec<(Menu, Vec<Setting>)> {
         let at = |name, value: String| Setting { name, value };
         vec![
@@ -464,11 +454,10 @@ sparse_enum!(
     }
 );
 
-/// A channel number as the panel numbers them, `1..=16`.
+/// A MIDI channel number as the panel shows it, `1..=16`.
 ///
-/// The invariant is the type's, not the caller's: the slot stores the number one lower,
-/// so a 0 or a 17 here would be written as some other channel.
-/// [`MidiChannel::channel`] is the only way to build one.
+/// The slot stores the number one lower, so a 0 or a 17 would be written as a different
+/// channel. [`MidiChannel::channel`] is the only constructor, and it enforces the range.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct ChannelNumber(u8);
 
@@ -481,11 +470,11 @@ impl ChannelNumber {
 
 /// A MIDI channel slot: `1..=16`, or off.
 ///
-/// Stored zero-based, with 16 for off. A pattern above that has no meaning and is kept
-/// as [`MidiChannel::Unknown`] rather than folded into a channel.
+/// Stored zero-based, with 16 for off. A higher pattern has no known meaning and is kept
+/// as [`MidiChannel::Unknown`].
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum MidiChannel {
-    /// Channel `1..=16`, as the panel numbers them — see [`MidiChannel::channel`].
+    /// Channel `1..=16`, as the panel numbers them. See [`MidiChannel::channel`].
     Channel(ChannelNumber),
     Off,
     /// A stored pattern with no known meaning, bounded by the five bits it came from.
@@ -532,7 +521,7 @@ impl crate::bits::Packed for MidiChannel {
 
     fn to_bits(&self) -> u64 {
         match self {
-            // `1..=16` by the payload's own invariant, so the stored value is in range.
+            // `ChannelNumber` holds `1..=16`, so the subtraction cannot underflow.
             MidiChannel::Channel(n) => u64::from(n.get() - 1),
             MidiChannel::Off => 16,
             MidiChannel::Unknown(raw) => u64::from(raw.as_u8()),
@@ -541,7 +530,7 @@ impl crate::bits::Packed for MidiChannel {
 }
 
 impl Debug for MidiChannel {
-    /// The channel number alone, so `1` is spelled `1` and not `Channel(1)`.
+    /// The bare channel number: `1`, not `Channel(1)`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             MidiChannel::Channel(n) => write!(f, "{}", n.get()),
@@ -656,8 +645,6 @@ mod tests {
         assert_eq!(bytes, again);
     }
 
-    /// There is one settings file per instrument, so a file claiming a slot is not
-    /// one of them.
     #[test]
     fn a_settings_file_addressed_to_a_slot_is_refused() {
         let mut settings = new();
@@ -689,9 +676,8 @@ mod tests {
         assert_eq!(listed.display, "-3");
     }
 
-    /// Every declared menu field belongs to exactly one menu, and every menu names
-    /// only declared fields. The `startup_*` settings are in no menu — the
-    /// instrument shows them nowhere — so they are excluded rather than missing.
+    /// Every menu names only declared fields. The `startup_*` settings appear in no
+    /// instrument menu, so they are excluded.
     #[test]
     fn every_field_is_listed_under_one_menu() {
         let declared: BTreeSet<String> = Settings::field_specs()
@@ -720,10 +706,6 @@ mod tests {
         assert!(missing.is_empty(), "fields with no menu: {missing:?}");
     }
 
-    /// A menu renders what the instrument's display says, not what the bits decode to.
-    ///
-    /// ⚠️ These spellings are read-only. `set_field` parses a field's `Debug`, so
-    /// `yamaha fc-7` is not a value anything accepts back.
     #[test]
     fn a_menu_renders_the_panels_own_wording() {
         // The sweep's reference capture, rebuilt from the bytes it holds at 0x2c..=0x3d.
@@ -774,7 +756,6 @@ mod tests {
         }
     }
 
-    /// An unnamed value says so rather than being rendered as a neighbor.
     #[test]
     fn a_menu_names_an_unrecognized_value_as_unknown() {
         // 0b111 is not a rotary speaker type; bits 79..=81 straddle 0x35 and 0x36.
@@ -789,8 +770,6 @@ mod tests {
         assert_eq!(shown, "unknown (7)");
     }
 
-    /// The two signed fields are stored biased, so their endpoints are the cases worth
-    /// pinning: the bias is what an off-by-one shows up in.
     #[test]
     fn global_transpose_stores_minus_six_as_zero() {
         // Bits 68..=71 are the low nibble of 0x34.
@@ -826,7 +805,7 @@ mod tests {
                 "{cents} did not write back"
             );
         }
-        // A value past +50 is not a fine tune, so the panel refuses to decode at all.
+        // A stored value past +50 fails the whole decode.
         let mut raw = [0u8; BODY_LEN];
         raw[body(0x32)] = 0x01;
         raw[body(0x33)] = 0xfc;
@@ -836,8 +815,6 @@ mod tests {
         );
     }
 
-    /// Channels are stored zero-based with 16 for off, so the two ends and the off value
-    /// establish the encoding.
     #[test]
     fn a_midi_channel_is_stored_zero_based_with_sixteen_for_off() {
         let unknown = |raw: u8| MidiChannel::Unknown(raw.try_into().unwrap());
@@ -856,8 +833,6 @@ mod tests {
         assert_eq!(format!("{:?}", MidiChannel::Off), "off");
     }
 
-    /// The channel a caller can build is the channel the panel numbers: every other
-    /// number is refused rather than stored as a neighbour.
     #[test]
     fn only_the_panels_sixteen_channels_can_be_built() {
         for number in 1..=MidiChannel::CHANNELS {
@@ -867,11 +842,10 @@ mod tests {
         }
         assert!(MidiChannel::channel(0).is_err());
         assert!(MidiChannel::channel(17).is_err());
-        // The unknown payload is the slot's own five bits.
+        // The unknown payload is bounded by the slot's five bits.
         assert!(RangedU8::<31>::new(32).is_err());
     }
 
-    /// Gain is one-based on the panel and zero-based in the file.
     #[test]
     fn ctrl_pedal_gain_is_stored_one_less_than_the_panel_reads() {
         for gain in CtrlPedalGain::MIN..=CtrlPedalGain::MAX {
@@ -881,7 +855,7 @@ mod tests {
         }
         assert!(CtrlPedalGain::new(0).is_err());
         assert!(CtrlPedalGain::new(11).is_err());
-        // Ten is the widest the four-bit slot may hold, so 10..=15 do not decode.
+        // Stored 10..=15 would be gains past 10, so they do not decode.
         assert!(CtrlPedalGain::from_bits(10).is_err());
     }
 
@@ -896,7 +870,6 @@ mod tests {
         assert_eq!(p.global_channel, MidiChannel::channel(1).unwrap());
     }
 
-    /// Setting a field lands in its own bits and disturbs no other byte.
     #[test]
     fn setting_a_field_moves_only_its_own_bytes() {
         let mut p = panel(&[]);
@@ -909,7 +882,6 @@ mod tests {
         assert_eq!(raw[body(0x39)], 0x03);
     }
 
-    /// Decoding never invents a value: an unnamed pattern comes back as it went in.
     #[test]
     fn an_unrecognized_pattern_round_trips() {
         // 0b111 is not a rotary speaker type; bits 79..=81 straddle 0x35 and 0x36.

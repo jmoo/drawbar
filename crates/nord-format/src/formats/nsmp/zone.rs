@@ -3,8 +3,8 @@
 use super::Chain;
 use crate::error::ParseError;
 
-/// Offset of the zone count within the `map` payload. Everything before it is identical
-/// across every corpus specimen, whatever the zone layout.
+/// Offset of the zone count within the `map` payload. The keyboard map fills everything
+/// before it, whatever the zone layout.
 pub const COUNT_AT: usize = 785;
 
 /// First zone record.
@@ -13,7 +13,7 @@ pub const RECORDS_AT: usize = COUNT_AT + 1;
 /// Bytes per zone record on the chain the encoder writes.
 pub const RECORD_LEN: usize = Chain::Library2.zone_record_len();
 
-/// Stroke global ID, not a positional index.
+/// Within a record: the low byte of the stroke's global id, not its position in the file.
 const STROKE_ID: usize = 2;
 
 /// Within a record: the zone's gain, u24 big-endian with [`GAIN_BITS`] fractional bits.
@@ -34,25 +34,25 @@ const REL_STRENGTH: usize = 10;
 /// The relative strength the editor writes for a zone holding one sample.
 pub const REL_STRENGTH_DEFAULT: u16 = 1;
 
-/// A high-to-low keyboard zone storing only its upper bound.
-/// Confirmed on hardware. A note above a zone's top is silent, not clamped to the
-/// nearest zone.
+/// A narrow-chain keyboard zone, stored high to low with only its upper bound.
+///
+/// A note above the highest zone's top is silent, not clamped to that zone.
+/// Confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     /// Highest MIDI note this zone answers to.
     pub top_note: u8,
-    /// The stroke that plays this zone, by global id — see `STROKE_ID`.
+    /// The stroke that plays this zone, by the low byte of its global id.
     pub stroke_id: u8,
-    /// Linear playback gain, [`GAIN_BITS`] fractional bits — [`GAIN_UNITY`] is 1.0. The
-    /// audio is stored unscaled; the same factor scales the stroke's statistic A.
+    /// Linear playback gain with [`GAIN_BITS`] fractional bits; [`GAIN_UNITY`] is 1.0.
+    /// The audio is stored unscaled, and the same factor scales the stroke's statistic A.
     pub gain: u32,
     /// Where the playing stroke sits on the editor's 0..32767 strength axis.
     /// [`REL_STRENGTH_DEFAULT`] on a zone holding a single sample.
     ///
-    /// ⚠️ A zone plays exactly one stroke, so this is a position and not a
-    /// count: an editor project may hold several samples per zone, but only
-    /// one of them is enabled and only that one is written. Reading it as a
-    /// layer count is wrong on every file the format has ever carried.
+    /// ⚠️ A zone plays exactly one stroke, so this is a position, not a layer
+    /// count. An editor project may hold several samples per zone, but only the
+    /// enabled one is written.
     pub rel_strength: u16,
 }
 
@@ -79,7 +79,7 @@ fn records_held(chain: Chain, map: &[u8]) -> Result<usize, ParseError> {
 }
 
 /// Every field this reads sits at the same offset in both narrow chains; `chain`
-/// supplies the record stride and nothing else.
+/// supplies only the record stride.
 pub fn read(chain: Chain, map: &[u8]) -> Result<Vec<Zone>, ParseError> {
     let width = chain.zone_record_len();
     let n = records_held(chain, map)?;
@@ -96,7 +96,7 @@ pub fn read(chain: Chain, map: &[u8]) -> Result<Vec<Zone>, ParseError> {
         .collect())
 }
 
-/// Set one zone's isolated top-note byte without re-encoding audio.
+/// Set one zone's top-note byte. The audio is untouched.
 pub fn set_top_note(
     chain: Chain,
     map: &mut [u8],
@@ -113,11 +113,12 @@ pub fn set_top_note(
     Ok(())
 }
 
-/// Wide-generation zone paired to a stroke GID and duplicated root key.
+/// A wide-chain zone, paired to its stroke by global id and by the root key it
+/// duplicates.
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneV3 {
-    /// The referenced stroke's global id — the u32 its `stk` payload leads with.
+    /// The referenced stroke's global id: the u32 its `stk` payload leads with.
     pub stroke_gid: u32,
     /// The stroke's root key, duplicated into the record.
     pub root_key: u8,
@@ -132,19 +133,19 @@ pub struct ZoneV3 {
     /// Where the playing stroke sits on the editor's 0..32767 strength axis,
     /// where the layout stores it (`map` v14/v21). `None` on v12.
     ///
-    /// The same field [`Zone::rel_strength`] holds one generation earlier, four
-    /// bytes further into a wider record, and — like it — a position rather
-    /// than a count: a zone plays exactly one stroke.
+    /// The same field as the narrow chain's [`Zone::rel_strength`], two bytes
+    /// further into the record, and likewise a position, not a count: a zone
+    /// plays exactly one stroke.
     pub rel_strength: Option<u16>,
 }
 
 /// The velocities a zone answers to, inclusive at both ends.
 ///
-/// The format has carried this since `map` v14 and no shipped instrument uses
+/// The format has carried this since `map` v14, and no shipped instrument uses
 /// it: every zone of every vendor instrument reads [`VelocityWindow::FULL`].
-/// It is nonetheless a live field — a project naming a narrower window renders
-/// one into a v4 record — and a zone is silent outside its band, so a reader
-/// must honour what is stored rather than assume the full range.
+/// The field is live, though. A project naming a narrower window renders one
+/// into a v4 record, and a zone is silent outside its window, so a reader must
+/// honor what is stored.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,20 +195,19 @@ pub enum Field {
     Low,
 }
 
-/// A wide `map`'s zone-record layout, selected by the section's own version
-/// rather than by the file's content version.
+/// A wide `map`'s zone-record layout, selected by the section's own version, not
+/// the file's content version.
 ///
-/// Every record opens `[root][top]`; what the version decides is the record
-/// width, where the stroke's global id sits inside it, and whether a low note
-/// follows the top.
+/// Every record opens `[root][top]`; the version decides the record width, where
+/// the stroke's global id sits, and whether a low note follows the top.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wide {
     /// 11-byte records; zones tile, so no low note is stored.
     V12,
-    /// 16-byte records with a low note. ⚠️ Both record orders occur here — a
-    /// record states its own notes, so nothing may be read off the order.
+    /// 16-byte records with a low note. ⚠️ Both record orders occur here. A
+    /// record states its own notes; infer nothing from the order.
     V14,
     /// [`Wide::V14`]'s records, behind a per-key table naming the zones
     /// around each note.
@@ -281,10 +281,10 @@ impl Wide {
 
     /// Offset of the zone count within the `map` payload, where the layout fixes it.
     ///
-    /// ⚠️ **Count forward, never back from the end of the section.** The run behind
-    /// the last record is not a fixed width — a v21 `map` carries either two trailing
-    /// bytes or six — so a table placed by subtracting the records from the section
-    /// length lands four bytes out and still decodes into plausible small integers.
+    /// ⚠️ Count forward, never back from the end of the section. The run behind the
+    /// last record varies in width (a v21 `map` carries two trailing bytes or six), so
+    /// a table placed by subtracting the records from the section length can land four
+    /// bytes out and still decode into plausible small integers.
     ///
     /// Inferred from specimens; not confirmed on hardware.
     pub const fn count_at(self) -> Option<usize> {
@@ -300,20 +300,20 @@ impl Wide {
 /// records, and a six-byte unit of the same shape at offset 0 holding the
 /// instrument's own gain.
 ///
-/// ⚠️ **The level comes first.** A record is
+/// ⚠️ The level comes first. A record is
 ///
 /// ```text
 /// 6 + 10 × key:  [gain u24 BE][detune ×3][a][b][a][key]
 /// ```
 ///
-/// Framing it the other way round — quad first, level behind — puts key k+1's
-/// level in key k's record, and lands the vendor level curve's slope changes
-/// and its stop a key below the zone span they sit on.
+/// Framing it the other way round, quad first and level behind, puts key k+1's
+/// level in key k's record and lands the vendor level curve's slope changes and
+/// its end a key below the zone span they belong to.
 ///
-/// The gain is linear with `0x100000` for unity; it is an authored per-key
-/// curve that no zone layout predicts, and the three bytes behind it are where
-/// a per-note detune lands. Both are carried across an edit untouched. Only the
-/// quad follows from the zones, by [`partners`].
+/// The gain is linear with `0x100000` for unity. It is an authored per-key curve
+/// that no zone layout predicts, and the three bytes behind it hold a per-note
+/// detune. An edit carries both over untouched; only the quad follows from the
+/// zones, by [`partners`].
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const KEY_TABLE_AT: usize = 6;
@@ -321,9 +321,9 @@ const KEY_STRIDE: usize = 10;
 const KEY_QUAD_AT: usize = 6;
 const KEYS: usize = 128;
 
-/// The lowest key the per-key table ever describes, and the floor the editor's
-/// project file counts its note list from. The editor writes it into the bottom
-/// zone's `low`; the vendor library writes 0 there and means this.
+/// The lowest key the per-key table describes, and the note the editor's project
+/// file counts its note list from. The editor writes it into the bottom zone's
+/// `low`; the vendor library writes 0 there with the same meaning.
 pub(super) const KEY_FLOOR: u8 = 17;
 
 /// How far a partner root below a zone's own may be pitched up to cover it: a
@@ -336,8 +336,8 @@ pub enum KeyMap {
     /// This layout carries no per-key table.
     Absent,
     /// Every record names its own key. The sample editor writes this whatever
-    /// the zone layout, and it is also what [`partners`] gives an instrument no
-    /// zone of which has an eligible partner.
+    /// the zone layout, and [`partners`] yields it for an instrument where no
+    /// zone has an eligible partner.
     Neutral,
     /// Partner roots, filled in from the zone layout by the vendor's builder.
     Populated,
@@ -361,8 +361,8 @@ fn ladder(zones: &[ZoneV3]) -> Result<Vec<(u8, u8, u8)>, ParseError> {
     Ok(out)
 }
 
-/// The keys a layout covers: from [`KEY_FLOOR`] — or the bottom zone's own low,
-/// whichever is higher — up to the highest zone's top.
+/// The keys a layout covers: from [`KEY_FLOOR`] or the bottom zone's own low,
+/// whichever is higher, up to the highest zone's top.
 fn span(ladder: &[(u8, u8, u8)]) -> Option<(u8, u8)> {
     Some((ladder.first()?.1.max(KEY_FLOOR), ladder.last()?.2))
 }
@@ -373,7 +373,7 @@ fn span(ladder: &[(u8, u8, u8)]) -> Option<(u8, u8)> {
 /// roots below `R` within [`PARTNER_UP`] semitones and every root above it.
 /// `a` is the nearest of those to `R`, ties going to the lower root. `b` is the
 /// nearest of the rest when `a` is below `R`; when `a` is above, `b` reaches
-/// back *across* `R` for the highest eligible root below it, and only when
+/// back across `R` for the highest eligible root below it, and only when
 /// nothing is below does it take the next root above `a`.
 ///
 /// Outside the span the record is the identity, `a = b = key`. Inferred from
@@ -427,7 +427,7 @@ fn partners(ladder: &[(u8, u8, u8)], key: u8) -> (u8, u8) {
     (a, b)
 }
 
-/// Maximum unmodelled suffix searched after a wide zone table.
+/// Maximum unmodeled suffix searched after a wide zone table.
 const MAX_TAIL: usize = 8;
 
 /// A located wide zone table: its layout, where its records start in the `map`
@@ -445,11 +445,11 @@ pub struct Table {
 impl Table {
     /// Find the table and check every record against the strokes it names.
     ///
-    /// Where [`Wide::count_at`] fixes the count's offset the table is read from
-    /// there. The one layout that fixes none has its table found at the end of the
-    /// payload behind its count byte, with an unmodelled suffix of up to
-    /// [`MAX_TAIL`] bytes; the fit is decided by that count and by every record
-    /// naming a stroke that holds its root key.
+    /// Where [`Wide::count_at`] fixes the count's offset, the table is read from
+    /// there. Otherwise the table is found at the end of the payload, behind its
+    /// count byte, with an unmodeled suffix of up to [`MAX_TAIL`] bytes. A placement
+    /// fits when the count matches and every record names a stroke holding its root
+    /// key.
     pub fn locate(
         map_version: u32,
         map: &[u8],
@@ -483,8 +483,8 @@ impl Table {
             };
             match attempt {
                 Ok(table) => return Ok(table),
-                // The complaint worth reporting is the one from the tightest fit;
-                // the later placements only say the table is not there either.
+                // Report the error from the tightest fit; later placements only
+                // show the table is not there either.
                 Err(e) => first.get_or_insert(e),
             };
         }
@@ -555,9 +555,8 @@ impl Table {
 
     /// Write one field of one record, checked against the located table.
     ///
-    /// ⚠️ A root key is stored twice — here and in the stroke — and the table
-    /// stops reading if the two disagree, so a caller writing this one owes the
-    /// other.
+    /// ⚠️ A root key is stored twice, here and in the stroke, and the table stops
+    /// reading if the two disagree. A caller writing this one must write the other.
     pub fn set(
         &self,
         map: &mut [u8],
@@ -602,18 +601,17 @@ impl Table {
 
     /// The per-key quads `zones` calls for, as `(offset, bytes)` writes.
     ///
-    /// Empty unless the table is [`KeyMap::Populated`]: the sample editor leaves
-    /// it neutral whatever the layout, so a neutral table stays neutral and only
-    /// the vendor builder's is recomputed.
+    /// Empty unless the table is [`KeyMap::Populated`]. The sample editor leaves the
+    /// table neutral whatever the layout, so a neutral table stays neutral and only a
+    /// vendor builder's is recomputed.
     ///
-    /// Every key is planned from the layout alone, so the result does not depend
-    /// on what the table held — except outside the zones' span, where the law is
-    /// the identity and two vendor builders write `[0][0][0][key]` instead. That
-    /// is a wider idea of the playable keyboard which nothing in the layout
-    /// distinguishes, so a record already carrying it is left as it came.
+    /// Every key is planned from the layout alone, except outside the zones' span.
+    /// There the law gives the identity, but two vendor builders write
+    /// `[0][0][0][key]`. Nothing in the layout tells the two apart, so a record
+    /// already holding `[0][0][0][key]` is left alone.
     ///
-    /// Nothing is written here: a layout the law cannot read refuses before the
-    /// caller moves a byte.
+    /// Nothing is written here, so a layout the law cannot express is refused before
+    /// the caller moves a byte.
     pub fn plan_key_map(
         &self,
         map: &[u8],
@@ -659,7 +657,7 @@ impl Table {
     }
 }
 
-/// Find and validate a wide zone table against `(stroke GID, root key)` pairs.
+/// Find and validate a wide zone table against `(stroke global id, root key)` pairs.
 pub fn read_v3(
     map_version: u32,
     map: &[u8],
@@ -772,8 +770,8 @@ mod tests {
         assert!(read(Chain::Library2, &m).is_err());
     }
 
-    /// The pre-2.0 record is the same fields in twelve bytes, so the same table
-    /// read at the wrong stride walks off the records it is counting.
+    /// The pre-2.0 record holds the same fields in twelve bytes; read at the 15-byte
+    /// stride, the table runs past its records.
     #[test]
     fn the_pre_library_2_record_reads_the_same_fields_three_bytes_narrower() {
         let tops = [108, 90, 77, 66];
@@ -808,7 +806,7 @@ mod tests {
     }
 
     /// A wide `map`: a preamble of per-key records, the count byte, the zone
-    /// records, and an unmodelled tail — the shape every wide specimen has.
+    /// records, and an unmodeled tail, the shape every wide specimen has.
     fn wide_map(version: u32, zones: &[(u32, u8, u8, u8)], tail: usize) -> Vec<u8> {
         let wide = Wide::from_version(version).unwrap();
         let preamble = wide.count_at().unwrap_or(6 + 128 * 6);
@@ -838,9 +836,8 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_table_reads_behind_an_unmodelled_tail() {
-        // The tails every generation was seen with: v12 none, v14 one byte,
-        // v21 two or six.
+    fn a_wide_table_reads_behind_an_unmodeled_tail() {
+        // The tails seen in specimens: v12 none, v14 one byte, v21 two or six.
         for (version, tail) in [(12, 0), (14, 1), (21, 2), (21, 6)] {
             let zones = [(9u32, 60u8, 84u8, 48u8), (22, 72, 108, 85)];
             let map = wide_map(version, &zones, tail);
@@ -890,8 +887,6 @@ mod tests {
         }
     }
 
-    /// The trailer behind the records is not a fixed width, so the count's offset is
-    /// the layout's and never the section length less the records.
     #[test]
     fn a_wide_table_is_found_from_the_front() {
         let zones = [(9u32, 60u8, 84u8, 48u8)];
@@ -980,9 +975,9 @@ mod tests {
         assert!(table.validate_key_map(&map, &read).is_err());
     }
 
-    /// The Kalimba's sixteen roots, whose four- and five-semitone spacing is what
-    /// pins the minor-third ceiling: nothing is ever eligible below, so every one
-    /// of its zones names the two roots above it.
+    /// The Kalimba's sixteen roots, three, four and five semitones apart. That
+    /// spacing pins the ceiling at a minor third: a root three below is eligible and
+    /// one four below is not.
     fn kalimba() -> Vec<(u8, u8, u8)> {
         vec![
             (47, 0, 49),
@@ -1010,16 +1005,15 @@ mod tests {
     fn the_partner_law_matches_a_populated_table() {
         let zs = kalimba();
         for (key, want) in [
-            // Below the bottom zone's own low but inside the span, which starts
-            // at the floor: the bottom zone claims it.
+            // The bottom zone claims every key from the floor up to its top.
             (17, (51, 55)),
             (49, (51, 55)),
             // Four semitones up puts nothing within a minor third below, so both
             // partners come from above.
             (50, (55, 59)),
             (58, (62, 66)),
-            // Three semitones below 62 is eligible, so `a` drops below the root
-            // and `b` takes the next nearest — which is above it.
+            // 59 is three semitones below 62 and eligible, so `a` is 59 and `b`
+            // takes the next nearest, 66.
             (61, (59, 66)),
             (64, (59, 66)),
             // At the top there is nothing above, so both partners come from below.
@@ -1038,7 +1032,7 @@ mod tests {
     fn the_second_partner_straddles_the_root() {
         let zs = vec![(61, 17, 62), (64, 63, 65), (66, 66, 68), (71, 69, 73)];
         // 66 is two semitones up and 61 is three down: `a` takes the nearer 66,
-        // and `b` then takes 61 rather than 71.
+        // and `b` then takes 61, not 71.
         assert_eq!(partners(&zs, 64), (66, 61));
     }
 

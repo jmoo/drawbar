@@ -1,4 +1,4 @@
-//! Nord Lead A1 (`.nlas`, `.nlap`, `.nlat`) — container-verified, bodies unmapped.
+//! Nord Lead A1 (`.nlas`, `.nlap`, `.nlat`): container-verified, bodies unmapped.
 //!
 //! Same tag inversion as the Lead 4: `.nlas` is a program, `.nlap` a performance.
 //! Several schema versions occur in the factory banks; the differences between

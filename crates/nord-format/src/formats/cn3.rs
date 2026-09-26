@@ -1,17 +1,17 @@
-//! Electro 2 sample libraries (`.cn3`) — magic `CNE3`, not CBIN.
+//! Electro 2 sample libraries (`.cn3`), with magic `CNE3` instead of CBIN.
 //!
-//! Every specimen opens `CNE3` (never `CNE2`); why the 3 is unexplained.
-//! It is not a version field — the four bytes after it read `2c 01`, i.e. 300,
-//! which is where a version *would* sit. Nothing about the CBIN core generalises
-//! here, so the whole file is kept verbatim.
+//! Every specimen opens `CNE3`, never `CNE2`, and why the 3 is unexplained. It is not
+//! a version field: the four bytes after it read `2c 01`, which is 300, where a
+//! version would sit. Nothing about the CBIN core carries over, so the whole file is
+//! kept verbatim.
 
 use crate::error::{Error, ParseError};
 use std::io::{Read, Write};
 
 pub const MAGIC: &[u8; 4] = b"CNE3";
 
-/// One `.cn3` library, verbatim. ⚠️ Real libraries run to megabytes and this
-/// allocates them whole.
+/// One `.cn3` library, verbatim. ⚠️ Real libraries run to megabytes, and this
+/// allocates the whole file.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Cne3 {
     pub data: Vec<u8>,

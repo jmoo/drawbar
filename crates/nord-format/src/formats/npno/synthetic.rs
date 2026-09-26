@@ -1,14 +1,17 @@
 //! A piano library laid out from a description, for tests with no library to start
 //! from.
 //!
-//! The body follows the law [`Library::parse_body`](super::Library) checks: the
-//! prefix, the stroke directory, the zero alignment gap, then one audio span per
-//! stroke in directory order. Each span is filled with a byte naming its stroke, so a
-//! re-lay is visible in the bytes themselves.
+//! The body follows the layout that parsing a [`Library`] checks: the prefix, the
+//! stroke directory, the zero alignment gap, then one audio span per stroke in
+//! directory order. Each span is filled with a byte naming its stroke, so a re-lay is
+//! visible in the bytes themselves.
 //!
-//! ⚠️ That filler is not encoded blocks, so [`codec::decode`](super::codec) refuses it.
-//! What this builds is a container to transform, not a sound to play — [`Take::silent`]
-//! is the take whose span a decode reads back.
+//! ⚠️ That filler is not encoded audio, so [`codec::decode`] refuses it. Use
+//! [`Take::silent`] for a span that decodes.
+//!
+//! [`Library`]: crate::formats::npno::Library
+//! [`codec::decode`]: crate::formats::npno::codec::decode
+//! [`Take::silent`]: crate::formats::npno::synthetic::Take::silent
 
 use super::*;
 
@@ -17,7 +20,7 @@ use super::*;
 pub struct Take {
     pub root: u8,
     pub bank: Bank,
-    /// The softness value the record states — see [`Stroke::layer`].
+    /// The softness value the record states; see [`Stroke::layer`].
     pub layer: u8,
     /// Blocks of audio the stroke owns, each [`Library::block_bytes`] long.
     pub blocks: u16,
@@ -27,10 +30,10 @@ pub struct Take {
     pub decay: u32,
     /// The decay ladder at `+0x36`.
     pub ladder: [u32; DECAYS],
-    /// The identifier at `+0x6e`, or the stroke's place in the directory where the
-    /// caller names none — which is what keeps a build's identifiers distinct.
+    /// The identifier at `+0x6e`. When the caller names none, the stroke's place in the
+    /// directory keeps a build's identifiers distinct.
     pub id: Option<u32>,
-    /// Whether the span holds blocks a decode reads back rather than filler.
+    /// Whether the span holds decodable silent blocks instead of filler.
     pub silent: bool,
 }
 
@@ -69,8 +72,8 @@ impl Take {
         self
     }
 
-    /// Lay the span out as silence a decode reads back — every block order zero over
-    /// the widest field — and state the frames those blocks own.
+    /// Lay the span out as decodable silence, every block at order zero over the widest
+    /// field, and state the frames those blocks own.
     pub fn silent(mut self) -> Take {
         self.silent = true;
         self
@@ -80,22 +83,22 @@ impl Take {
 /// A library to lay out: the stream version, the channel count, the takes and the key
 /// map's routes.
 ///
-/// The takes must be in ascending root order, which is the order the per-root counts
-/// index the directory by; [`Library::to_body`] refuses any other.
+/// The takes must be in ascending root order, which the per-root counts require;
+/// [`Library::to_body`] refuses any other order.
 #[derive(Clone, Debug)]
 pub struct Build {
     pub version: u16,
     pub channels: u16,
     pub takes: Vec<Take>,
-    /// `(key, root)` routes. Every key named by none reads [`UNCOVERED`].
+    /// `(key, root)` routes. A key with no route reads [`UNCOVERED`].
     pub map: Vec<(u8, u8)>,
 }
 
 /// The name every synthetic library carries in the field at [`TextField::COMBINED`].
 const NAME: &[u8] = b"Test Piano#Variant";
 
-/// The header a block of silence carries: the widest field at order zero, under the
-/// attenuation a block with no signal in it states.
+/// The header a block of silence carries: the widest field at order zero, with the
+/// attenuation a block with no signal states.
 const SILENT_HEADER: u16 = (100 << 8) | codec::MAX_WIDTH as u16;
 
 impl Build {
@@ -198,7 +201,7 @@ impl Build {
         }
     }
 
-    /// The file's bytes, as a reader would be handed them.
+    /// The whole file's bytes.
     pub fn bytes(&self) -> Result<Vec<u8>, Error> {
         crate::to_bytes(&crate::Entity::Piano(self.piano()))
     }

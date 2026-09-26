@@ -2,11 +2,10 @@
 //! instrument's own gain and detune, then one gain-and-detune record per MIDI
 //! note.
 //!
-//! Nothing here touches the audio — a record is a playback-side level and
-//! pitch offset for one key, and the instrument's record scales the whole map.
-//! The sample editor writes the per-key records from its note list; its macro
-//! spin controls have no storage of their own and write through to the same
-//! table.
+//! Nothing here touches the audio: a record is a playback level and pitch offset
+//! for one key, and the instrument's record scales the whole map. The sample
+//! editor writes the per-key records from its note list; its macro spin controls
+//! have no storage of their own and write to the same table.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
@@ -16,13 +15,12 @@ use crate::error::ParseError;
 /// Schema version of a `map` section on the Sample Library 2.0 narrow chain.
 pub(super) const VERSION: u8 = 10;
 
-/// Schema version of a `map` section on the chain before it. The zone table behind
-/// this keyboard map is narrower there; the keyboard map itself is byte for byte the
-/// same layout, filler included.
+/// Schema version of a `map` section on the earlier narrow chain. Its zone table is
+/// narrower; its keyboard map has the same layout, filler included.
 pub(super) const VERSION_EARLY: u8 = 9;
 
-/// `1.0` in every gain field of the map, a u24 linear ratio — the same unit and the
-/// same value the zone record's own gain field uses.
+/// `1.0` in every gain field of the map, a u24 linear ratio. The zone record's own
+/// gain field uses the same unit.
 pub const GAIN_UNITY: u32 = zone::GAIN_UNITY;
 
 /// Largest value a gain field holds.
@@ -49,13 +47,13 @@ pub const KEY_TABLE_AT: usize = 15;
 
 const _: () = assert!(KEY_TABLE_AT + KEYS * RECORD_LEN + 2 == zone::COUNT_AT);
 
-/// A gain and a pitch offset — the six-byte record the map is built from.
+/// A gain and a pitch offset: the six-byte record the map is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Level {
     /// Linear gain, [`GAIN_UNITY`] for 1.0; never more than [`GAIN_MAX`].
     ///
     /// The editor keeps a key's gain within ±9 dB and the instrument's below
-    /// +9 dB, clamping as it encodes without repairing its project. What the
+    /// +9 dB, clamping as it encodes but leaving the project unchanged. What the
     /// instrument does with a value outside that band is unmeasured.
     gain: u32,
     /// Pitch offset in 1/256 semitone, positive upward, within an s24.
@@ -66,7 +64,7 @@ pub struct Level {
 }
 
 impl Level {
-    /// Unity gain, no detune — what every record holds until it is set.
+    /// Unity gain and no detune, which every record holds until it is set.
     pub const NEUTRAL: Level = Level {
         gain: GAIN_UNITY,
         detune: 0,
@@ -149,7 +147,7 @@ pub struct KeyTable {
 }
 
 impl KeyTable {
-    /// Every record neutral — what the editor writes for an untouched map.
+    /// Every record neutral, as the editor writes an untouched map.
     pub const NEUTRAL: KeyTable = KeyTable {
         instrument: Level::NEUTRAL,
         keys: [Level::NEUTRAL; KEYS],

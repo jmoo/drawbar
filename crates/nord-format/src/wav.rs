@@ -289,8 +289,7 @@ mod tests {
         assert!(read_pcm16(&stereo_half_frame).is_err());
     }
 
-    /// Chunk order is the file's business: the reader collects both chunks wherever
-    /// they sit, so a data chunk ahead of the fmt chunk reads the same.
+    /// The reader collects both chunks wherever they sit.
     #[test]
     fn a_data_chunk_before_the_fmt_chunk_still_reads() {
         let wav = mono_pcm16(&[7i16, -8], 44_100).unwrap();
@@ -301,8 +300,6 @@ mod tests {
         assert_eq!(read_pcm16(&swapped).unwrap().samples, vec![7, -8]);
     }
 
-    /// Bytes after the last chunk are not a chunk, and reading past them would be
-    /// reading whatever they are as audio.
     #[test]
     fn trailing_bytes_that_form_no_chunk_are_refused() {
         let mut trailing = mono_pcm16(&[1i16], 44_100).unwrap();

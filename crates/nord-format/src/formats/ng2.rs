@@ -1,4 +1,4 @@
-//! Nord Grand (`.ng2p`, `.ng2l`, `.ng2t`) — container-verified, bodies unmapped.
+//! Nord Grand (`.ng2p`, `.ng2l`, `.ng2t`): container-verified, bodies unmapped.
 
 use super::raw::raw_format;
 
@@ -9,7 +9,7 @@ raw_format!(
     185
 );
 raw_format!(
-    /// Live slots (`.ng2l`) — same length as a program.
+    /// Live slots (`.ng2l`), the same length as a program.
     live,
     "ng2l",
     185

@@ -1,6 +1,6 @@
 //! MIDI note names, the spelling the formats' key ranges are read and written in.
 //!
-//! Middle C (60) is spelled C4, the sample editor's own labelling.
+//! Middle C (60) is spelled C4, as the sample editor labels it.
 //! Inferred from specimens; not confirmed on hardware.
 
 const NAMES: [&str; 12] = [
@@ -82,7 +82,7 @@ mod tests {
     }
 
     /// ⚠️ The octave reaches the note number through a multiplication, so an
-    /// unbounded one wraps in a release build: `C357913941` came back as note 8.
+    /// unbounded one would wrap in a release build.
     #[test]
     fn an_octave_outside_the_keyboard_is_refused_rather_than_wrapped() {
         for bad in ["C357913941", "C2147483647", "C10", "Cb-1"] {

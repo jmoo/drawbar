@@ -1,23 +1,23 @@
 //! Building a sample instrument from PCM.
 //!
-//! The inverse of [`codec`](super::codec). What this emits is what Nord Sample Editor
-//! writes for the same input, byte for byte, apart from one residue: the resampling
-//! [`kernel`](super::kernel) is the instrument's to within a few `1e-8` per tap, and a
-//! handful of taps the editor evaluates a ulp off the closed form leave the occasional
-//! field one count from the editor's. No structural field moves with it, and neither
-//! does the pitch, the length, or anything else about what the instrument plays.
+//! The inverse of [`codec`]. This emits what Nord Sample Editor writes
+//! for the same input, byte for byte, with one exception: the resampling
+//! [`kernel`] matches the instrument's to within a few `1e-8` per tap,
+//! and a handful of taps the editor evaluates a ulp off the closed form leave the
+//! occasional field one count from the editor's. No structural field, pitch or length
+//! differs because of it.
 //!
-//! The record coding the editor picks, [`Predictor::Minimising`], is the default here.
-//! [`Predictor::Plain`] opts out and states every content field outright: the same
-//! audio in a file several times larger on smooth material, and not the editor's bytes.
+//! [`Predictor::Minimising`], the editor's record coding, is the default.
+//! [`Predictor::Plain`] stores every content field outright: the same audio in a file
+//! several times larger on smooth material, and not the editor's bytes.
 //!
-//! Under either predictor a file from here **round-trips through this crate's own
-//! decoder exactly** and obeys every structural law the format is known to have.
+//! Under either predictor, a file from here decodes exactly through this crate's
+//! decoder and obeys every known structural law of the format.
 //!
 //! For [`Layout::V2`], the Electro 5 loads and plays one under either predictor, at
 //! the pitch the decoder renders. Confirmed on hardware. The wide generations
-//! reproduce the editor's own renders, but the Electro 5 plays only v2, so their
-//! playback: Inferred from specimens; not confirmed on hardware.
+//! reproduce the editor's renders, but the Electro 5 plays only v2. Their playback:
+//! Inferred from specimens; not confirmed on hardware.
 //!
 //! ```no_run
 //! # use nord_format::formats::nsmp::encode;
@@ -27,38 +27,36 @@
 //! std::fs::write("test.nsmp", instrument.to_bytes().unwrap()).unwrap();
 //! ```
 //!
-//! **All three generations write from the one plan.** [`Options::layout`] picks the
-//! generation; what moves with it is the container — the narrow `NWS` chain against
-//! the wide `NSMP` one, and the section schemas inside — and the stream's units, which
-//! [`Units`] holds. The lattice, the kernel, the quantiser, the count laws and the
-//! record grammar's bit layout are the same object in all three.
+//! All three generations are written from one plan. [`Options::layout`] picks the
+//! generation, which decides the container (the narrow `NWS` chain or the wide `NSMP`
+//! one, and the section schemas inside) and the stream's units, held in [`Units`].
+//! The lattice, the kernel, the quantizer, the count laws and the record grammar's bit
+//! layout are shared by all three.
 //!
 //! [`multi_zone`] is the same builder across a keyboard: one `stk` per zone, highest
 //! zone first, each zone's record naming its stroke by the global id the caller gives
-//! it. Zone counts move where a stroke's audio may start, so the allocation each stroke
-//! is packed into comes from [`stroke::header_len`](super::stroke::header_len) rather
-//! than from a constant.
+//! it. Zone counts move where a stroke's audio may start, so each stroke's allocation
+//! comes from [`stroke::header_len`](super::stroke::header_len).
 //!
-//! **Stereo is the mono plan run once per channel and interleaved.** A stereo stroke
+//! Stereo is the mono plan run once per channel and interleaved. A stereo stroke
 //! carries both channels under one header at the doubled cell, and every count-law
-//! landmark — the field total, the resync position, both 1:1 runs — is exactly its mono
-//! value doubled. So the whole of stereo, on the plan side, is a channel count: cells
-//! and 1:1 records double, the terminator states the doubled cell, and the predictor
-//! keeps a history per channel. Where the two channels' *bits* go does move with the
-//! generation: v2 and v3 alternate fields in one bitstream, v4 packs each channel's
-//! half into its own words and alternates those.
+//! landmark (the field total, the resync position, both 1:1 runs) is its mono value
+//! doubled. On the plan side, stereo is only a channel count: cells and 1:1 records
+//! double, the terminator states the doubled cell, and the predictor keeps a history
+//! per channel. Where the two channels' bits go depends on the generation: v2 and v3
+//! alternate fields in one bitstream, and v4 packs each channel's half into its own
+//! words and alternates those.
 //!
 //! For [`Layout::V2`], a stereo encode plays with its channels in order and
 //! independent. Confirmed on hardware. The wide generations: Inferred from specimens;
 //! not confirmed on hardware.
 //!
-//! A [`Loop`] truncates the stroke at its end and opens a marked record at its start,
-//! which is the whole of what the container stores about looping: the crossfade is
-//! baked into the audio here, while loop detune, the decay switch and the short loop's
-//! pitch-tracking flag reach nowhere. Wide headers carry the decay amount. The fade's
-//! frame count is the caller's to work out — a project states the long loop's in frames
-//! and the short loop's as a percentage of its length — and it arrives here already in
-//! frames, fraction and all.
+//! A [`Loop`] truncates the stroke at its end and opens a marked record at its start.
+//! That is all the container stores about looping: the crossfade is baked into the
+//! audio here, and loop detune, the decay switch and the short loop's pitch-tracking
+//! flag are not stored. Wide headers carry the decay amount. The caller works out the
+//! fade's frame count (a project states the long loop's in frames and the short
+//! loop's as a percentage of its length) and passes it in frames, fraction included.
 //!
 //! For [`Layout::V2`], the Electro 5 sustains a looped encode to note-off, and the
 //! seam is clean. Confirmed on hardware. The wide generations: Inferred from
@@ -88,20 +86,19 @@ const fn version(layout: Layout) -> u32 {
 const AUX: u32 = 0x000f_0000;
 
 /// Largest field count a record header can state, from its 14-bit count field.
-/// ⚠️ A record covers whole cells, so how many *cells* that is halves on a stereo
-/// stroke — the count is a field count, and a stereo cell holds two channels' worth.
+/// ⚠️ The count is in fields, and a stereo cell holds two channels' worth, so a stereo
+/// record holds half as many cells.
 const MAX_COUNT: usize = (1 << 14) - 1;
 
-/// Widest field a stroke's peak may take: quantisation shifts until it fits. On a
-/// stereo stroke this is the whole of the shift rule.
+/// Widest field a stroke's peak may take: quantization shifts until it fits. On a
+/// stereo stroke this is the entire shift rule.
 const PEAK_WIDTH: u8 = 14;
 
 /// The stream units one stroke is written in: the generation's word and cell sizes,
 /// scaled by how many channels share the stroke.
 ///
-/// Everything else about the encoder is generation-independent — the lattice, the
-/// kernel, the quantiser and the record grammar's bit layout do not move — so this is
-/// the whole of what a generation changes about a stream.
+/// The lattice, the kernel, the quantizer and the record grammar's bit layout are the
+/// same in every generation, so this is all a generation changes about a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Units {
     layout: Layout,
@@ -129,7 +126,7 @@ impl Units {
     }
 
     /// Whether a record's two channels occupy alternating, independently padded
-    /// words rather than alternating fields in one bitstream.
+    /// words. Otherwise they alternate fields in one bitstream.
     const fn splits(self) -> bool {
         self.channels == 2 && self.layout.splits_wide_openings()
     }
@@ -158,9 +155,9 @@ impl Units {
 
     /// Words of slack the allocation keeps ahead of the chain's first record.
     ///
-    /// The chain is right-aligned in whole packets either way; the wide chain buys a
-    /// further packet rather than let the lead fall below this, so its strokes carry
-    /// 7 to 38 words of slack where a narrow one carries 0 to 126.
+    /// The chain is right-aligned in whole packets in both chains. The wide chain adds
+    /// a packet when the lead would fall below this, so its strokes carry 7 to 38
+    /// words of slack where a narrow one carries 0 to 126.
     ///
     /// Inferred from specimens; not confirmed on hardware.
     const fn min_lead(self) -> usize {
@@ -176,13 +173,13 @@ impl Units {
     }
 }
 
-/// Last-record field counts, per channel, that do not carry the extra quantiser bit —
+/// Last-record field counts, per channel, that never carry the extra quantizer bit;
 /// `None` for a generation whose mono strokes never spend it.
 ///
-/// A run's records are RMAX-sized until a remainder, so the range a last record can
-/// take is the generation's: 24..=32 fields at v2 and 32..=48 at v3. Every width in
-/// both ranges has been read off a render, and these are the ones that never buy the
-/// bit. There is no arithmetic behind either set and no correspondence between them.
+/// A run's records are RMAX-sized except the remainder, so a last record takes 24..=32
+/// fields at v2 and 32..=48 at v3. Every count in both ranges was read from a render,
+/// and these are the ones that never spend the bit. Neither set follows from any
+/// arithmetic, and the two sets do not correspond.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
@@ -193,22 +190,22 @@ const fn dead_last_record(layout: Layout) -> Option<&'static [usize]> {
     }
 }
 
-/// Whether a stroke spends one more quantiser bit than its peak needs, narrowing its
+/// Whether a stroke spends one more quantizer bit than its peak needs, narrowing its
 /// widest field a bit under [`PEAK_WIDTH`] and shrinking the stream.
 ///
 /// `values` are the stroke's fields before any shift. Read them at the smallest shift
-/// that fits the peak in [`PEAK_WIDTH`] bits: the bit is spent when a field still
-/// outside the signed 13-bit range there falls inside the **last record of one of the
-/// stroke's 1:1 runs** and that record's field count is not one [`dead_last_record`]
-/// names. A field in an earlier record of a run, or out in the content cells, never
-/// buys it, and no run's length is otherwise consulted.
+/// that fits the peak in [`PEAK_WIDTH`] bits. The bit is spent when a field still
+/// outside the signed 13-bit range there falls inside the last record of one of the
+/// stroke's 1:1 runs, and that record's field count is not one [`dead_last_record`]
+/// names. A field in an earlier record of a run, or in the content cells, never
+/// spends it, and no run's length is otherwise consulted.
 ///
-/// ⚠️ Every 1:1 run counts, the loop's included — a marked record opens a run of its
-/// own past the resync, and a field landing in its last record buys the bit exactly
-/// as one in the opening or resync run does.
+/// ⚠️ Every 1:1 run counts, the loop's included. A marked record opens a run of its
+/// own past the resync, and a field in its last record spends the bit just as one in
+/// the opening or resync run does.
 ///
 /// A stereo stroke never spends the bit, in any generation, and neither does a v4 mono
-/// one: both quantise at the peak term alone.
+/// one: both quantize at the peak term alone.
 ///
 /// Inferred from specimens; not confirmed on hardware. The Electro 5 plays v2 only.
 fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
@@ -258,8 +255,8 @@ const MAX_STORED_WIDTH: u8 = 16;
 /// promotes anything, and a width-1 flag-1 record is the terminator.
 const MIN_WIDTH: u8 = 2;
 
-/// Channels one stroke may carry. The terminator states the cell size, and one bit of
-/// doubling is all it can say.
+/// Channels one stroke may carry. The terminator states the cell size, which can only
+/// be single or doubled.
 const MAX_CHANNELS: usize = 2;
 
 /// Zones one instrument may hold, from the `map` section's single count byte.
@@ -278,23 +275,22 @@ const RING_OUT: usize = 127;
 /// Inferred from specimens; not confirmed on hardware.
 const RAMP_IN: usize = 35;
 
-/// Shortest input the editor encodes: below it, it clamps a project's own extent
-/// rather than laying a shorter stream out. The opening, the count laws and the
-/// resync are the same object all the way down to it.
+/// Shortest input the editor encodes: it extends a shorter project's extent to this
+/// length. The opening, the count laws and the resync hold unchanged down to it.
 pub const MIN_FRAMES: usize = 92;
 
 /// Fields per channel a looped stroke carries past its loop end, repeating the loop's
-/// own opening so that playback is unchanged. The mark clears the loop start by the
-/// same amount, which is why the loop's length survives it.
+/// own opening so that playback is unchanged. The mark sits the same amount past the
+/// loop start, so the loop's length is preserved.
 const LOOP_LEAD: usize = 5;
 
-/// Fields per channel a loop's marked record clears the **resync point** by, at least.
-/// A loop whose ordinary [`LOOP_LEAD`] would land the mark nearer than this is pushed
-/// back by repeating more of itself, which moves the whole stream's length with it.
+/// Minimum fields per channel between the resync point and a loop's marked record. A
+/// loop whose usual [`LOOP_LEAD`] would put the mark nearer is pushed back by
+/// repeating more of itself, which lengthens the whole stream.
 ///
-/// The floor is on the gap from the resync point, not on the mark's own position and
-/// not on the room left between the mark and the run in front of it: a resync run may
-/// reach the mark record with nothing between them.
+/// The minimum applies to the gap from the resync point only, not to the mark's own
+/// position or to the room between the mark and the run in front of it: a resync run
+/// may reach the mark record with nothing between them.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const fn min_resync_gap(layout: Layout) -> usize {
@@ -304,7 +300,8 @@ const fn min_resync_gap(layout: Layout) -> usize {
     }
 }
 
-/// Longest input the stroke header's 16-bit word directory can address unambiguously.
+/// Most stream words the stroke header's 16-bit word directory can address
+/// unambiguously.
 const MAX_STREAM_WORDS: usize = WRAP;
 
 /// Backward-difference coefficients for predictor orders 0 to 4.
@@ -321,8 +318,8 @@ const DIFFERENCE: [&[i32]; 5] = [
 pub enum Predictor {
     /// Store every content field outright at order zero.
     Plain,
-    /// Choose the narrowest predictor per cell, the lowest order among equals — the
-    /// editor's own choice. Smaller than plain records and exact through this crate's
+    /// Choose the narrowest predictor per cell, the lowest order among equals, as the
+    /// editor does. Smaller than plain records, and exact through this crate's
     /// decoder.
     #[default]
     Minimising,
@@ -330,10 +327,11 @@ pub enum Predictor {
 
 /// A sustain loop, in source frames.
 ///
-/// The container stores a loop as two things and nothing else: the stroke stops at
+/// The container stores two things about a loop: the stroke stops at
 /// [`end`](Loop::end), and the record the loop starts at carries the mark bit. Loop
-/// detune, loop decay, and whether the editor called this a short loop or a long one
-/// are not stored anywhere, so a caller that needs them cannot have them.
+/// detune, the decay switch, and whether the editor called this a short or a long loop
+/// are not stored. The wide header's decay amount is set per zone, by
+/// [`NewZone::loop_decay`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Loop {
     /// First frame of the loop.
@@ -341,9 +339,9 @@ pub struct Loop {
     /// One past its last frame. Audio after it is not encoded.
     pub end: usize,
     /// Frames of the loop's tail that fade into the frames before [`start`](Loop::start).
-    /// The fade is applied to the samples here, because that is where the instrument
-    /// reads it from. Fractional, because a project can state it as a percentage of the
-    /// loop rather than a frame count, and dropping the fraction moves the fade a field.
+    /// The fade is baked into the samples, because the instrument reads it from there.
+    /// It is fractional because a project can state it as a percentage of the loop,
+    /// and dropping the fraction moves the fade a field.
     /// Inferred from specimens; not confirmed on hardware.
     pub crossfade: f64,
 }
@@ -396,30 +394,29 @@ impl Options {
     }
 
     /// Which generation to write: `.nsmp`, `.nsmp3` or `.nsmp4`. The audio is the same
-    /// object in all three — what moves is the container and the stream's units.
+    /// in all three; the container and the stream's units differ.
     pub fn layout(mut self, layout: Layout) -> Options {
         self.layout = layout;
         self
     }
 
-    /// Resynchronise the stream at `frames` source frames from the first one — a
-    /// project's `m_startSecondary`, measured from its `m_start`. Unset, the stream
-    /// resynchronises where a fresh project would put it: [`default_secondary_start`].
+    /// Resynchronize the stream at `frames` source frames from the first: a project's
+    /// `m_startSecondary`, measured from its `m_start`. When unset, the stream
+    /// resynchronizes where a new project would put it, at [`default_secondary_start`].
     pub fn secondary_start(mut self, frames: f64) -> Options {
         self.secondary_start = Some(frames);
         self
     }
 
-    /// How many channels the PCM interleaves — 1 or 2. Anything else is refused when
+    /// How many channels the PCM interleaves: 1 or 2. Anything else is refused when
     /// the instrument is built.
     pub fn channels(mut self, channels: u16) -> Options {
         self.channels = channels;
         self
     }
 
-    /// Quantise at `bits` of shift instead of what the shift rule picks. Experimental: a
-    /// lever for laying the same stroke out at neighbouring shifts, not a setting the
-    /// editor exposes.
+    /// Quantize at `bits` of shift, overriding the shift rule. Experimental: it lays
+    /// the same stroke out at neighboring shifts, and the editor has no such setting.
     pub fn shift(mut self, bits: u8) -> Options {
         self.shift = Some(bits);
         self
@@ -461,8 +458,8 @@ impl Options {
 pub struct Looped {
     /// Field the marked record opens at.
     pub at: usize,
-    /// Fields repeated past the loop end, which is also how far `at` clears the loop
-    /// start: [`LOOP_LEAD`] per channel, or more when the mark is pushed off the
+    /// Fields repeated past the loop end, which is also how far `at` sits past the
+    /// loop start: [`LOOP_LEAD`] per channel, or more when the mark is pushed off the
     /// resync point by [`min_resync_gap`].
     pub lead: usize,
     /// Fields of the loop's tail the crossfade rewrites.
@@ -475,16 +472,17 @@ pub struct Looped {
 
 /// Stroke landmarks derived from the source frame count.
 ///
-/// Every field count here is a **stream** count: on a stereo stroke the two channels
-/// interleave, so each is twice the per-channel number the mono laws state. [`cell`] and
-/// [`chunk`] scale with it, which is the whole of what stereo changes about the plan.
+/// Every field count here is a stream count: on a stereo stroke the two channels
+/// interleave, so each is twice the per-channel number the mono laws state.
+/// [`Plan::cell`] and the 1:1 chunk scale with it, and that is all stereo changes about
+/// the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
     /// Which generation's units the stream is written in.
     pub layout: Layout,
     /// Channels interleaved into the stream: 1 or 2.
     pub channels: usize,
-    /// Fields in the stream — the source plus a ring-out past its end, or, when the
+    /// Fields in the stream: the source plus a ring-out past its end, or, when the
     /// stroke loops, the source up to the loop end plus the repeated lead.
     pub fields: usize,
     /// Field the resync record starts at.
@@ -509,12 +507,12 @@ impl Plan {
         }
     }
 
-    /// Fields one content cell covers — the generation's cell per channel.
+    /// Fields one content cell covers: the generation's cell per channel.
     pub const fn cell(&self) -> usize {
         self.units().cell()
     }
 
-    /// Fields one 1:1 record covers at most — the generation's RMAX per channel.
+    /// Fields one 1:1 record covers at most: the generation's RMAX per channel.
     const fn chunk(&self) -> usize {
         self.units().chunk()
     }
@@ -528,9 +526,9 @@ fn fields_of(frames: usize) -> Option<usize> {
         .and_then(|n| round_ratio(n, u64::from(PITCH_NUM)))
 }
 
-/// The same lattice, for a landmark that falls between two frames — a fade a project
-/// states as a percentage of its loop rather than as a frame count. Rounding such a
-/// value to a whole frame before it reaches the lattice opens the ramp a field early.
+/// The same lattice, for a landmark that falls between two frames, such as a fade a
+/// project states as a percentage of its loop. Rounding such a value to a whole frame
+/// first opens the ramp a field early.
 fn fields_at(frames: f64) -> Option<usize> {
     let fields = frames * f64::from(PITCH_DEN) / f64::from(PITCH_NUM);
     (fields.is_finite() && (0.0..=f64::from(u32::MAX)).contains(&fields))
@@ -539,11 +537,11 @@ fn fields_at(frames: f64) -> Option<usize> {
 
 impl Plan {
     /// The layout for `frames` source frames of `channels`-channel audio, no loop,
-    /// resynchronising at `secondary_start` source frames from the first — the
+    /// resynchronizing at `secondary_start` source frames from the first: the
     /// project's `m_startSecondary` measured from its `m_start`, or
     /// [`default_secondary_start`] for audio no project describes.
     ///
-    /// Refuses a secondary start the stream cannot resynchronise at: off the lattice,
+    /// Refuses a secondary start the stream cannot resynchronize at: off the lattice,
     /// or too close to either end for the 1:1 runs around it.
     pub fn new(
         layout: Layout,
@@ -551,7 +549,7 @@ impl Plan {
         channels: usize,
         secondary_start: f64,
     ) -> Result<Plan, Error> {
-        Plan::modelled(frames, channels)?;
+        Plan::modeled(frames, channels)?;
         let fields = fields_of(frames)
             .and_then(|f| f.checked_add(RING_OUT))
             .and_then(|f| f.checked_mul(channels))
@@ -561,17 +559,17 @@ impl Plan {
     }
 
     /// The layout for a stroke that loops: `frames` source samples truncated at
-    /// [`Loop::end`], with the loop's own opening repeated past it, resynchronising at
+    /// [`Loop::end`], with the loop's own opening repeated past it, resynchronizing at
     /// `secondary_start` as [`new`](Plan::new) does.
     ///
     /// The marked record sits [`LOOP_LEAD`] fields per channel past the loop start, or
-    /// [`min_resync_gap`] past the resync point when that is further: a loop starting
-    /// near the resync is pushed back, and the stream grows by what it is pushed.
+    /// [`min_resync_gap`] past the resync point when that is later: a loop starting
+    /// near the resync is pushed back, and the stream grows by the same amount.
     ///
-    /// Refuses a loop the format cannot state — one outside the audio, one shorter than
-    /// the run it has to open with, or a crossfade with no material in front of the loop
-    /// to fade from — and a secondary start past the loop start, which a project's own
-    /// is repaired to never be.
+    /// Refuses a loop the format cannot state (one outside the audio, one shorter than
+    /// the run it must open with, or a crossfade with no material in front of the loop
+    /// to fade from) and a secondary start past the loop start. A project's own
+    /// secondary start is repaired so it never lies past the loop start.
     pub fn looped(
         layout: Layout,
         frames: usize,
@@ -579,7 +577,7 @@ impl Plan {
         points: Loop,
         secondary_start: f64,
     ) -> Result<Plan, Error> {
-        Plan::modelled(points.end, channels)?;
+        Plan::modeled(points.end, channels)?;
         if points.start >= points.end || points.end > frames {
             return Err(ParseError::OutOfBounds {
                 value: format!("a loop over frames {}..{}", points.start, points.end),
@@ -587,13 +585,13 @@ impl Plan {
             }
             .into());
         }
-        // Everything below is laid out per channel and scaled at the end, because that
-        // is what the encoder does: one plan, interleaved.
+        // Every landmark is placed per channel and scaled by the channel count, as the
+        // encoder runs one plan interleaved.
         let lattice = |n: usize| fields_of(n).and_then(|f| f.checked_mul(channels));
         let lattice_at = |n: f64| fields_at(n).and_then(|f| f.checked_mul(channels));
         let start = lattice(points.start).ok_or_else(|| size_error(points.start))?;
-        // The loop's length is what has to survive, so it is put on the lattice as a
-        // length. Rounding its two ends separately can cost it a field.
+        // The loop's length must be preserved, so it goes onto the lattice as a
+        // length. Rounding its two ends separately can cost a field.
         let span = points.end - points.start;
         let length = lattice(span).ok_or_else(|| size_error(points.end))?;
         let end = start
@@ -606,14 +604,14 @@ impl Plan {
             return Err(ParseError::OutOfBounds {
                 value: format!("a secondary start at field {resync_at}"),
                 bound: format!(
-                    "field {start}, where the loop starts, or earlier — the marked \
-                     record clears the resync point, so the loop cannot open ahead of it"
+                    "field {start}, where the loop starts, or earlier; the marked \
+                     record follows the resync point, so the loop cannot open ahead of it"
                 ),
             }
             .into());
         }
-        // The mark clears the resync point by the generation's floor, so a loop that
-        // starts too near it is pushed back by repeating more of itself.
+        // The mark keeps the generation's minimum gap from the resync point, so a loop
+        // that starts too near it is pushed back by repeating more of itself.
         let at = start
             .checked_add(LOOP_LEAD * channels)
             .zip(resync_at.checked_add(min_resync_gap(layout) * channels))
@@ -638,7 +636,7 @@ impl Plan {
             return Err(ParseError::OutOfBounds {
                 value: format!("a {} frame crossfade", points.crossfade),
                 bound: format!(
-                    "the {} frames before the loop starts — the fade compares \
+                    "the {} frames before the loop starts, since the fade compares \
                      each frame with the material one loop length behind it",
                     points.start,
                 ),
@@ -662,7 +660,7 @@ impl Plan {
             return Err(ParseError::OutOfBounds {
                 value: format!("a {} frame crossfade", points.crossfade),
                 bound: format!(
-                    "the {} frames before the loop starts — the field lattice \
+                    "the {} frames before the loop starts, since the field lattice \
                      leaves no earlier material to compare",
                     points.start,
                 ),
@@ -685,7 +683,7 @@ impl Plan {
         )
     }
 
-    /// The secondary start on the lattice — a per-channel position, doubled like every
+    /// The secondary start on the lattice: a per-channel position, doubled like every
     /// other landmark when the two channels interleave.
     fn resync_at(secondary_start: f64, channels: usize) -> Result<usize, Error> {
         fields_at(secondary_start)
@@ -699,13 +697,13 @@ impl Plan {
             })
     }
 
-    fn modelled(frames: usize, channels: usize) -> Result<(), Error> {
+    fn modeled(frames: usize, channels: usize) -> Result<(), Error> {
         if !(1..=MAX_CHANNELS).contains(&channels) {
             return Err(ParseError::OutOfBounds {
                 value: format!("{channels} channels"),
                 bound: format!(
-                    "1 or {MAX_CHANNELS} — the terminator states one cell size, and all \
-                     it can say is whether the cell is doubled"
+                    "1 or {MAX_CHANNELS}, since the terminator states one cell size and \
+                     can only say whether it is doubled"
                 ),
             }
             .into());
@@ -716,15 +714,15 @@ impl Plan {
         Err(ParseError::OutOfBounds {
             value: format!("{frames} frames"),
             bound: format!(
-                "the modelled range: at least {MIN_FRAMES} frames, below which the \
-                 stream opens a way this crate has not modelled"
+                "the modeled range: at least {MIN_FRAMES} frames; below that the \
+                 stream opens in a way this crate has not modeled"
             ),
         }
         .into())
     }
 
     /// Place the warmup, the resync and the cells between them across everything ahead
-    /// of the loop — or across the whole stream when there is none.
+    /// of the loop, or across the whole stream when there is none.
     fn lay_out(
         layout: Layout,
         frames: usize,
@@ -812,12 +810,11 @@ fn size_error(frames: usize) -> ParseError {
     }
 }
 
-/// The 1:1 run that preserves a landmark's cell phase — constructive, and the same
-/// statement at either channel count.
+/// The 1:1 run length that preserves a landmark's cell phase, at either channel count.
 ///
 /// A run of `j` records covers between `j*cell` and `j*rmax` fields, so the reachable
-/// lengths come in windows with gaps between them: 24..=32, 48..=64, 72..=96 at the mono
-/// pair, and everything doubled at the stereo one. `band(r)` is the smallest reachable
+/// lengths come in windows with gaps between them: 24..=32, 48..=64, 72..=96 for v2
+/// mono, and doubled for stereo. `band(r)` is the smallest reachable
 /// length at or above `cell` that is congruent to `r`, which at `r ≡ 0` is `cell` itself.
 fn band(r: usize, cell: usize, rmax: usize) -> usize {
     let residue = if r.is_multiple_of(cell) {
@@ -841,8 +838,8 @@ fn band(r: usize, cell: usize, rmax: usize) -> usize {
     length
 }
 
-/// Split a 1:1 run into records of at most `chunk` fields. [`band`] is what guarantees
-/// the remainder is a legal record rather than a stub.
+/// Split a 1:1 run into records of at most `chunk` fields. [`band`] guarantees the
+/// remainder is a legal record.
 fn chunks(mut n: usize, chunk: usize) -> Vec<usize> {
     let mut out = Vec::new();
     while n > chunk {
@@ -853,13 +850,13 @@ fn chunks(mut n: usize, chunk: usize) -> Vec<usize> {
     out
 }
 
-/// The source on the lattice, quantised — the stream's field values and the two
-/// header statistics that describe them.
+/// The source on the lattice, quantized: the stream's field values and the two header
+/// statistics that describe them.
 #[derive(Debug, Clone)]
-struct Quantised {
+struct Quantized {
     /// One stored value per field, sign-extended and within the stream's maximum width.
     values: Vec<i32>,
-    /// Bits the values were shifted right by. Dequantising shifts back.
+    /// Bits the values were shifted right by. Dequantizing shifts back.
     shift: i32,
     /// Statistic B: the content field of largest magnitude, taken at a fixed shift of 2.
     /// Carries the extreme's sign where the generation stores one; a magnitude at v2.
@@ -871,7 +868,7 @@ struct Quantised {
 const MAX_PEAK: i64 = (1 << 23) - 1;
 
 /// The opening ramp: the first [`RAMP_IN`] fields of a channel rise as the cube of
-/// their position, toward zero like everything else the encoder quantises.
+/// their position, toward zero like everything else the encoder quantizes.
 fn ramp_in(fields: &mut [i64]) {
     let cube = |n: usize| (n * n * n) as i64;
     for (f, value) in fields.iter_mut().enumerate().take(RAMP_IN) {
@@ -884,8 +881,8 @@ fn ramp_in(fields: &mut [i64]) {
 ///
 /// One channel at a time, so every count here is a per-channel one.
 ///
-/// The ramp is linear across the crossfade, which is what the editor's own crossfade
-/// ladder measures out.
+/// The ramp is linear across the crossfade, matching what the editor's crossfade
+/// ladder measures.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
@@ -900,7 +897,7 @@ fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
         raw[f] = near + (2 * step + span * step.signum()) / (2 * span);
     }
     // The repeated fields are the loop's own opening, so the loop plays the same region
-    // however far the mark clears its start.
+    // however far past its start the mark sits.
     for k in 0..lead {
         raw[end + k] = raw[at - lead + k];
     }
@@ -913,7 +910,7 @@ fn bake_loop(raw: &mut [i64], at: usize, lead: usize, crossfade: usize) {
 /// Each channel is resampled on its own lattice and the results interleaved, because
 /// that is what the stream carries; the shift and statistic B are one pair for the
 /// stroke, taken across both.
-fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
+fn quantize(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantized {
     let channels = plan.channels;
     let per = plan.fields / channels;
     let mut raw = vec![0i64; plan.fields];
@@ -955,10 +952,9 @@ fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
         shift = i32::from(bits);
     }
 
-    // Statistic B is the content field of largest magnitude at a fixed shift of two —
-    // a negative extreme therefore rounds away from zero — and a later field takes the
-    // extreme only by exceeding it. Content only, which is why a value the 1:1 regime
-    // carries never sets it.
+    // Statistic B is the content field of largest magnitude at a fixed shift of two, so
+    // a negative extreme rounds away from zero, and a later field takes the extreme
+    // only by exceeding it. Values in the 1:1 regime never set it.
     let opening = plan.looped.map(|l| l.at..l.at + l.warmup);
     let content = |f: usize| {
         ((f >= plan.warmup && f < plan.resync_at) || f >= plan.resync_at + plan.resync)
@@ -978,7 +974,7 @@ fn quantise(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantised {
         false => signed.abs(),
     };
 
-    Quantised {
+    Quantized {
         values: raw.iter().map(|&v| (v >> shift) as i32).collect(),
         shift,
         peak,
@@ -1016,8 +1012,8 @@ impl Spec {
 
 /// The Nth backward difference at `at`, across record boundaries.
 ///
-/// ⚠️ **`stride` is the channel count**: the predictor runs per channel, so a stereo
-/// field differences against the field two slots back, not the other channel's.
+/// ⚠️ `stride` is the channel count: the predictor runs per channel, so a stereo field
+/// differences against the field two slots back, not the other channel's.
 fn residual(values: &[i32], at: usize, order: u8, stride: usize) -> i64 {
     DIFFERENCE[usize::from(order)]
         .iter()
@@ -1029,8 +1025,8 @@ fn residual(values: &[i32], at: usize, order: u8, stride: usize) -> i64 {
         .sum()
 }
 
-/// The width one cell needs at `order`, and the sum of the residuals it would store.
-/// One cell is `stride` channels' worth, and a record declares one width for both.
+/// The width one cell needs at `order`. One cell is `stride` channels' worth, and a
+/// record declares one width for both.
 fn width_at(values: &[i32], first: usize, order: u8, cell: usize, stride: usize) -> u8 {
     let mut low = 0i64;
     let mut high = 0i64;
@@ -1042,7 +1038,7 @@ fn width_at(values: &[i32], first: usize, order: u8, cell: usize, stride: usize)
     width_of(low, high)
 }
 
-/// The width each predictor order codes one cell at, indexed by order — order 0 alone
+/// The width each predictor order codes one cell at, indexed by order; order 0 alone
 /// under [`Predictor::Plain`].
 fn widths_at(
     values: &[i32],
@@ -1077,10 +1073,10 @@ fn choose_order(widths: &[u8], extending: Option<(u8, u8)>) -> (u8, u8) {
 }
 
 /// Partition 1:1 values and like-coded content cells into records, with the index of
-/// the record the resync run opens at — what the header's second pointer names.
+/// the record the resync run opens at, which the header's second pointer names.
 ///
-/// A loop appends a third regime — its own 1:1 run, marked, and the content after it —
-/// grown to a whole number of packets by [`pad_to_packet`].
+/// A loop appends a third regime (its own marked 1:1 run and the content after it),
+/// padded to a whole number of packets by [`pad_to_packet`].
 fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spec>, usize), Error> {
     let mut out = Vec::new();
     let mut at = 0usize;
@@ -1162,13 +1158,13 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spe
 }
 
 /// Pad the loop region out to whole packets: sweep its content records front to back,
-/// halving each one that covers more than one cell — the smaller half first — and
-/// carrying on into the second half, pass after pass, until the words fit.
+/// halving each one that covers more than one cell (the smaller half first) and
+/// continuing into the second half, pass after pass, until the words fit.
 ///
 /// A region with nothing left to split is widened instead, front to back, spending
 /// each content record up to [`widen_cap`] before moving on, so the last one widened
-/// takes only the words still owed. A 1:1 record is walked past by either sweep,
-/// whatever room it has, the marked one the region opens at included.
+/// takes only the words still owed. Both sweeps skip 1:1 records, whatever room they
+/// have, including the marked one the region opens at.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<(), Error> {
@@ -1218,8 +1214,8 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
         return Err(ParseError::OutOfBounds {
             value: format!("a loop of {} record(s)", specs.len() - opening),
             bound: format!(
-                "a loop with {pad} more word(s) of room in it — the encoded loop has to \
-                 be whole packets long, and no record of this one may be widened past \
+                "a loop with {pad} more word(s) of room in it; the encoded loop must be \
+                 whole packets long, and no record of this one may be widened past \
                  {cap}"
             ),
         }
@@ -1228,13 +1224,11 @@ fn pad_to_packet(specs: &mut Vec<Spec>, opening: usize, units: Units) -> Result<
     Ok(())
 }
 
-/// Widest the padding sweep writes a content record at, per generation. It is the
-/// generation's own constant and not a property of the region: a record already one
-/// width under the cap is still widened past itself, up to the cap, and a record
-/// holding room under the cap is never left unspent.
+/// Widest the padding sweep writes a content record at, per generation. The cap is
+/// fixed per generation, not derived from the region: a record one width under the cap
+/// is still widened up to it, and room under the cap is always spent.
 ///
-/// v4 stops one width above the narrow chain and v3, so this is a table rather than a
-/// constant. Nothing derives one entry from another.
+/// v4 stops one width above v2 and v3. Neither entry derives from the other.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const fn widen_cap(layout: Layout) -> u8 {
@@ -1258,8 +1252,8 @@ struct Stream {
 /// `preamble` bytes of payload, then whole packets until the chain fits.
 ///
 /// `preamble` is [`stroke::header_len`](super::stroke::header_len), which a zone table
-/// can drive below the stroke header — the first packet then starts inside what would
-/// otherwise be header, and the loop repays the difference.
+/// can drive below the stroke header. The first packet then starts inside what would
+/// otherwise be header, and whole packets make up the difference.
 fn pack(
     specs: &[Spec],
     values: &[i32],
@@ -1315,8 +1309,8 @@ fn pack(
         write_record(&mut words, at, spec, values, units);
         at += spec.span(units);
     }
-    // The terminator states the cell size, which is what says how many channels the
-    // stroke carries: twice the layout's cell and a reader de-interleaves.
+    // The terminator states the cell size, and with it the channel count: at twice the
+    // layout's cell, a reader de-interleaves.
     if at.checked_add(1) != Some(total) {
         return Err(ParseError::AssertFail(format!(
             "the record chain ended at word {at} of {total}"
@@ -1338,10 +1332,10 @@ fn pack(
 /// Writes one record: its header word, then its fields, which start at the first bit
 /// after it. Any alignment tail is left zero at the end of the segment.
 ///
-/// v2 and v3 store a stereo stroke's channels as **alternating fields**, which is the
-/// order `values` is already in, so the fields go down in stream order; v4 gives each
-/// channel its own word stream and alternates the words, so its halves are packed
-/// apart and then interleaved. Only the residual's reach moves with the channel count.
+/// v2 and v3 store a stereo stroke's channels as alternating fields, the order `values`
+/// is already in, so the fields are written in stream order. v4 gives each channel its
+/// own word stream and alternates the words, so its halves are packed apart and then
+/// interleaved. Only the residual's stride depends on the channel count.
 fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units: Units) {
     let (word, bits) = (units.word(), units.word_bits());
     let head = (u32::from(spec.one_to_one) << 23)
@@ -1396,21 +1390,21 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units:
 }
 
 /// Encode `A = gain · 2^(41+s)/peak` as `(mantissa, exponent)`: the exponent carries the
-/// quantiser shift, the mantissa is `1/peak` to 20 bits scaled by the zone's gain
+/// quantizer shift, and the mantissa is `1/peak` to 20 bits scaled by the zone's gain
 /// ([`zone::GAIN_UNITY`](super::zone::GAIN_UNITY) is 1.0). The reciprocal is held as a
-/// 24-bit fraction in `[½, 1)` — three bits finer than the mantissa — before the gain
-/// multiplies it, and one floor follows; the mantissa leaves its normalised range
-/// freely in either direction, and the exponent never moves with it.
+/// 24-bit fraction in `[½, 1)`, three bits finer than the mantissa, before the gain
+/// multiplies it, and one floor follows. The mantissa may leave its normalized range in
+/// either direction; the exponent does not follow it.
 ///
-/// ⚠️ **`gain` is the decibel field's round trip, not the project's own float.** The
-/// two agree below `2^24` and part above it, where the mantissa wraps into its field
+/// ⚠️ `gain` is the decibel field's round trip, not the project's own float. The two
+/// agree below `2^24` and differ above it, where the mantissa wraps within its field
 /// and the file states a level far quieter than the project asked for. That is what
-/// the instrument plays; a caller that means to warn about it owns the warning.
+/// the instrument plays; a caller that wants to warn about it must do so itself.
 ///
-/// ⚠️ **`peak` is the file's, not the stroke's.** Every stroke of a multi-zone
-/// instrument reciprocates the largest statistic B in the file; only the shift and the
-/// zone's own gain are the stroke's. Reciprocating each stroke's own peak instead
-/// leaves every zone but the loudest playing at the wrong level.
+/// ⚠️ `peak` is the file's, not the stroke's. Every stroke of a multi-zone instrument
+/// takes the reciprocal of the largest statistic B in the file; only the shift and the
+/// zone's own gain belong to the stroke. Using each stroke's own peak leaves every zone
+/// but the loudest playing at the wrong level.
 fn statistic_a(peak: u32, shift: i32, gain: u64) -> (u32, u8) {
     let peak = u64::from(peak.max(1));
     let bits = 64 - peak.leading_zeros() as i32;
@@ -1437,8 +1431,8 @@ fn stroke_header(
     head[super::stroke::ROOT_KEY] = zone.root_key;
     // Unexplained: real programs hold this, and the panel cannot produce it.
     head[6..8].copy_from_slice(&[0x88, 0xba]);
-    // The channel count, stated a second time — the terminator's cell size says it too,
-    // and a reader takes the terminator because that is what the record sizes follow.
+    // The channel count. The terminator's cell size states it too, and a reader uses
+    // the terminator because the record sizes follow it.
     head[8] = zone.channels as u8;
 
     let (mantissa, exponent) =
@@ -1478,13 +1472,12 @@ fn stroke_header(
 /// The loop decay amount a project carries until something sets one.
 pub const DEFAULT_LOOP_DECAY: f32 = 20.0;
 
-/// One zone's stream, and the quantiser statistics describing it.
+/// One zone's stream, and the quantizer statistics describing it.
 ///
-/// A stroke header cannot be written until every zone is here: statistic A
-/// reciprocates the file's peak, so the last zone's audio decides the first zone's
-/// header.
+/// A stroke header cannot be written until every zone is encoded: statistic A divides
+/// by the file's peak, so the last zone's audio decides the first zone's header.
 struct Encoded {
-    q: Quantised,
+    q: Quantized,
     stream: Stream,
 }
 
@@ -1504,19 +1497,19 @@ fn encode_stroke(
     if let Some(bits) = zone.shift {
         if i32::from(bits) > codec::SHIFT_LIMIT {
             return Err(ParseError::OutOfBounds {
-                value: format!("a quantiser shift of {bits} bits"),
+                value: format!("a quantizer shift of {bits} bits"),
                 bound: format!("0 through {} bits", codec::SHIFT_LIMIT),
             }
             .into());
         }
     }
-    let q = quantise(zone.source, &plan, zone.shift);
+    let q = quantize(zone.source, &plan, zone.shift);
     let low = q.values.iter().copied().min().unwrap_or(0);
     let high = q.values.iter().copied().max().unwrap_or(0);
     if width_of(i64::from(low), i64::from(high)) > MAX_STORED_WIDTH {
         return Err(ParseError::OutOfBounds {
             value: format!(
-                "a quantiser shift of {} bits for fields spanning {low}..={high}",
+                "a quantizer shift of {} bits for fields spanning {low}..={high}",
                 q.shift
             ),
             bound: format!("values that fit the stream's {MAX_STORED_WIDTH}-bit fields"),
@@ -1528,7 +1521,8 @@ fn encode_stroke(
     Ok(Encoded { q, stream })
 }
 
-/// Every zone's stream in order, and the peak each of their headers reciprocates.
+/// Every zone's stream in order, and the file peak every header's statistic A divides
+/// by.
 fn encode_strokes(
     layout: Layout,
     zones: &[NewZone<'_>],
@@ -1578,8 +1572,8 @@ fn stroke_payload(
     Ok(payload)
 }
 
-/// Section schema versions the narrow chain writes. They track the section's own
-/// schema rather than the content version.
+/// Section schema versions the narrow chain writes. They track each section's own
+/// schema, not the content version.
 const HDR_VERSION: u8 = 9;
 const CAT_VERSION: u8 = 5;
 const STK_VERSION: u8 = 9;
@@ -1610,8 +1604,8 @@ fn cat() -> Section {
         payload.push(label.len() as u8);
         payload.extend_from_slice(label);
     }
-    // Every section payload is a whole number of 24-bit words; the labels are
-    // padded out to one.
+    // Every section payload is a whole number of 24-bit words, so the labels are
+    // padded to a word boundary.
     while !payload.len().is_multiple_of(3) {
         payload.push(0);
     }
@@ -1622,8 +1616,8 @@ fn cat() -> Section {
     }
 }
 
-/// Build a neutral keyboard map — unity gain and no detune at every key —
-/// and the zone table behind it.
+/// Build a neutral keyboard map, unity gain and no detune at every key, and the zone
+/// table behind it.
 ///
 /// `zones` is one record per zone, already high to low.
 fn map(map_gain: u32, zones: &[ZoneRecord]) -> Result<Section, Error> {
@@ -1797,8 +1791,8 @@ fn cat4() -> Section4 {
 /// zone records behind their count.
 ///
 /// The wider schema's per-key record carries a partner quad as well as the level.
-/// The editor writes the identity there whatever the zone layout — only the vendor's
-/// own builder fills it in — so every quad names its own key.
+/// The editor writes the identity there whatever the zone layout (only the vendor's
+/// builder fills it in), so every quad names its own key.
 fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section4 {
     let mut payload = Vec::with_capacity(
         super::keymap::RECORD_LEN
@@ -1862,29 +1856,29 @@ fn meta4(chain_len: usize) -> Section4 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NewZone<'a> {
     /// PCM at [`codec::SOURCE_RATE`], already trimmed to what the zone plays and
-    /// **interleaved** when it has more than one channel.
+    /// interleaved when it has more than one channel.
     pub source: &'a [i16],
     /// Channels [`source`](NewZone::source) interleaves: 1 or 2.
     pub channels: u16,
     /// The note this sample plays untransposed at.
     pub root_key: u8,
-    /// Highest note this zone answers to. Stored as given — the file keeps top notes,
-    /// it does not derive them from the root keys.
+    /// Highest note this zone answers to. Stored as given; the file keeps top notes and
+    /// does not derive them from the root keys.
     pub top_note: u8,
     /// The stroke's global id, 1 through [`MAX_STROKE_ID`]. Zones name their strokes
-    /// by it rather than by position, so it need not run parallel to the sections.
+    /// by it, not by position, so it need not follow section order.
     pub global_id: u32,
     /// The zone's sustain loop, which truncates its audio at [`Loop::end`].
     pub loops: Option<Loop>,
-    /// Where the stream resynchronises: the project's `m_startSecondary` in source
+    /// Where the stream resynchronizes: the project's `m_startSecondary` in source
     /// frames from the first frame of [`source`](NewZone::source), after the repair
     /// the editor applies on load ([`nsmpproj::Stroke::encoded_secondary_start`]).
     pub secondary_start: f64,
-    /// Quantiser shift to lay the stroke out at instead of the rule's choice, or `None`
-    /// for the rule. Experimental — see [`Options::shift`].
+    /// Quantizer shift that overrides the shift rule, or `None` for the rule.
+    /// Experimental; see [`Options::shift`].
     pub shift: Option<u8>,
-    /// The stroke's loop decay amount — a project's `m_loopDecay` — in the project's
-    /// own units, [`DEFAULT_LOOP_DECAY`] until something sets one.
+    /// The stroke's loop decay amount (a project's `m_loopDecay`) in the project's own
+    /// units, [`DEFAULT_LOOP_DECAY`] until something sets one.
     ///
     /// ⚠️ A wide stroke header carries it whether or not the stroke loops and whether
     /// or not the decay is switched on; nothing in the file says which. The narrow
@@ -1893,7 +1887,7 @@ pub struct NewZone<'a> {
     /// Playback gain as a linear ratio, 1.0 for unity, below [`MAX_ZONE_GAIN`]. Not
     /// applied to the audio: the instrument applies it when it plays.
     ///
-    /// Where it is stored moves with the generation, and the stroke's statistic A
+    /// Where it is stored depends on the generation, and the stroke's statistic A
     /// carries it in every one. The narrow zone record holds it linearly to 20
     /// fractional bits; a wide stroke header holds `20·log10(gain)` as a float32 and
     /// no byte of a wide zone record moves with it.
@@ -1902,7 +1896,7 @@ pub struct NewZone<'a> {
 
 /// Build a one-zone instrument from PCM at [`codec::SOURCE_RATE`], mono or stereo
 /// interleaved per [`Options::channels`], in the generation [`Options::layout`] names.
-/// Refuses unmodelled lengths, invalid metadata, and streams past the directory limit.
+/// Refuses unmodeled lengths, invalid metadata, and streams past the directory limit.
 pub fn instrument(source: &[i16], options: &Options) -> Result<crate::Sample, Error> {
     midi_note("root key", options.root_key)?;
     let frames = frames_of(source, usize::from(options.channels))?;
@@ -1938,8 +1932,8 @@ pub struct Instrument<'a> {
     /// The name the `hdr` section carries.
     pub name: &'a str,
     /// The instrument's own playing gain, a linear ratio on top of every zone's. It
-    /// opens the `map` section in all three generations, and it is the one gain field
-    /// that clamps: [`MAX_MAP_GAIN_DB`] and no higher, whatever the caller asks for.
+    /// opens the `map` section in all three generations, and it is the only gain field
+    /// that clamps, at [`MAX_MAP_GAIN_DB`].
     pub map_gain: f64,
     /// How content records code their fields.
     pub predictor: Predictor,
@@ -2208,17 +2202,17 @@ fn zone_table(zones: &[NewZone<'_>]) -> Result<Vec<ZoneRecord>, Error> {
 /// renders at this and is not repaired.
 pub const MAX_MAP_GAIN_DB: f64 = 9.0;
 
-/// Largest zone gain whose stores this reproduces. Past it the u24s' wrap count is
-/// unmeasured; below it the wrap is the format's, not a mistake.
+/// Largest zone gain whose stored values this reproduces. Past it the u24s' wrap count
+/// is unmeasured; below it the wrap is the format's behavior, not a mistake.
 pub const MAX_ZONE_GAIN: f64 = 1000.0;
 
-/// The zone's playing gain in decibels — the number a wide stroke header stores, and
-/// the number every other gain field is derived through.
+/// The zone's playing gain in decibels: the value a wide stroke header stores, and the
+/// value every other gain field is derived from.
 ///
 /// The logarithm is evaluated wider than the field and rounded once; computing it in
-/// float32 throughout moves the last byte on the powers of two. Neither clamped nor
-/// gridded: silence is `-inf` and a negative gain is the default quiet NaN, which is
-/// what the map gain's ceiling comparison then fails against.
+/// float32 throughout changes the last byte at powers of two. It is neither clamped nor
+/// rounded to a grid: silence is `-inf`, and a negative gain gives the default quiet
+/// NaN, which then fails the map gain's ceiling comparison.
 fn gain_decibels(gain: f64) -> f32 {
     let decibels = 20.0 * gain.log10();
     match decibels.is_nan() {
@@ -2231,21 +2225,21 @@ fn gain_decibels(gain: f64) -> f32 {
 /// [`zone::GAIN_BITS`](super::zone::GAIN_BITS) fractional bits, exponentiated wider
 /// than the decibel and rounded once.
 ///
-/// ⚠️ **Not the identity on the linear gain it came from.** Below `2^24` the decibel's
-/// own precision is worth less than half a step and the two agree; above it they part
-/// by tens of steps, and it is this value — not the project's — that statistic A is
-/// built from.
+/// ⚠️ This does not return the linear gain the decibel came from. Below `2^24` the
+/// decibel's precision costs less than half a step and the two agree; above it they
+/// differ by tens of steps, and statistic A is built from this value, not the
+/// project's.
 fn gain_units(decibels: f32) -> u64 {
     let units = 10f64.powf(f64::from(decibels) / 20.0) * f64::from(super::zone::GAIN_UNITY);
     units.round() as u64
 }
 
-/// The `map`'s own gain as the section's opening u24. The one gain field that clamps.
+/// The `map`'s own gain as the section's opening u24. The only gain field that clamps.
 fn map_gain_units(gain: f64) -> u32 {
     let ceiling = MAX_MAP_GAIN_DB as f32;
     let decibels = gain_decibels(gain);
-    // The comparison, not the value, is what the ceiling is: a NaN decibel — which is
-    // what a negative gain gives — fails it and takes the ceiling rather than the floor.
+    // The ceiling is a comparison, not a min: a NaN decibel, from a negative gain,
+    // fails it and takes the ceiling, not the floor.
     let clamped = if decibels < ceiling {
         decibels
     } else {
@@ -2255,11 +2249,11 @@ fn map_gain_units(gain: f64) -> u32 {
 }
 
 /// A zone gain as the narrow zone record stores it: the project's own float, wrapping
-/// mod `2^24`, with a negative converting to zero rather than masking.
+/// mod `2^24`, with a negative gain converting to zero, not masked.
 ///
-/// ⚠️ The record and statistic A part company here. The record takes the project's
-/// float and the mantissa takes the decibel round trip, so past a gain of 16 the two
-/// u24s in one file disagree and the record's reads back as a plausible quieter gain.
+/// ⚠️ The record and statistic A diverge here. The record takes the project's float and
+/// the mantissa takes the decibel round trip, so past a gain of 16 the two u24s in one
+/// file disagree, and the record's reads back as a plausible quieter gain.
 fn zone_record_gain(gain: f64) -> u32 {
     let units = (gain * f64::from(super::zone::GAIN_UNITY)).round() as u64;
     (units % (1 << 24)) as u32
@@ -2403,8 +2397,8 @@ mod tests {
         }
     }
 
-    // Landmarks read off Nord Sample Editor renders of self-generated audio whose
-    // projects state the fresh default, `m_startSecondary = m_stop / 8`, from
+    // Landmarks read from Nord Sample Editor renders of self-generated audio whose
+    // projects state the new-project default, `m_startSecondary = m_stop / 8`, from
     // `m_start = 1`: a 44 100-frame mono sine and a 30 870-frame stereo pair.
     #[test]
     fn the_resync_lands_where_the_projects_secondary_start_says() {
@@ -2441,10 +2435,10 @@ mod tests {
         assert!(looped(4_096.0).is_ok());
     }
 
-    /// The mark's two anchors, on a loop that clears the resync point and on ones that
-    /// do not, at both channel counts.
+    /// The mark's two anchors, on a loop far enough past the resync point and on ones
+    /// that are not, at both channel counts.
     #[test]
-    fn a_loop_mark_clears_the_resync_point_by_the_generations_floor() {
+    fn a_loop_mark_keeps_the_generations_minimum_gap_from_the_resync_point() {
         // Loop start and secondary start in frames, then the field the mark lands on
         // at V2, V3 and V4.
         for (start, secondary, channels, marks) in [
@@ -2517,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn short_input_is_refused_rather_than_guessed_at() {
+    fn short_input_is_refused() {
         assert!(plan(MIN_FRAMES - 1, 1).is_err());
         assert!(plan(MIN_FRAMES, 1).is_ok());
         assert!(plan(usize::MAX, 1).is_err());
@@ -2586,7 +2580,7 @@ mod tests {
                 let file = encoded(&source, predictor);
                 let (at, stroke) = file.stroke_streams()[0];
                 let plan = plan(source.len(), 1).unwrap();
-                let q = quantise(&source, &plan, None);
+                let q = quantize(&source, &plan, None);
 
                 let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
                 assert_eq!(audio.samples.len(), plan.fields);
@@ -2601,7 +2595,7 @@ mod tests {
                 }
             }
         }
-        assert!(differenced > 0, "minimising never chose a predictor");
+        assert!(differenced > 0, "minimizing never chose a predictor");
     }
 
     #[test]
@@ -2698,13 +2692,13 @@ mod tests {
     }
 
     #[test]
-    fn the_header_states_the_shift_it_quantised_at() {
+    fn the_header_states_the_shift_it_quantized_at() {
         for amplitude in [40.0, 900.0, 8000.0, 32_000.0] {
             let source = sine(440.0, amplitude, 20_000);
             let plan = plan(source.len(), 1).unwrap();
             let file = encoded(&source, Predictor::Plain);
             let (_, stroke) = file.stroke_streams()[0];
-            let q = quantise(&source, &plan, None);
+            let q = quantize(&source, &plan, None);
             assert_eq!(
                 codec::shift(stroke, codec::Layout::V2),
                 Some(q.shift),
@@ -2718,10 +2712,10 @@ mod tests {
     #[test]
     fn the_shift_tracks_how_loud_the_content_is() {
         let quiet = plan(20_000, 1)
-            .map(|p| quantise(&sine(440.0, 500.0, 20_000), &p, None).shift)
+            .map(|p| quantize(&sine(440.0, 500.0, 20_000), &p, None).shift)
             .unwrap();
         let loud = plan(20_000, 1)
-            .map(|p| quantise(&sine(440.0, 32_000.0, 20_000), &p, None).shift)
+            .map(|p| quantize(&sine(440.0, 32_000.0, 20_000), &p, None).shift)
             .unwrap();
         assert_eq!(quiet, 0);
         assert!(loud > quiet, "loud {loud} vs quiet {quiet}");
@@ -2737,8 +2731,8 @@ mod tests {
             .zip(&right)
             .flat_map(|(&l, &r)| [l, r])
             .collect();
-        let mono = quantise(&left, &plan(frames, 1).unwrap(), None);
-        let stereo = quantise(&both, &plan(frames, 2).unwrap(), None);
+        let mono = quantize(&left, &plan(frames, 1).unwrap(), None);
+        let stereo = quantize(&both, &plan(frames, 2).unwrap(), None);
         assert_eq!(stereo.shift, 1);
         let widest = stereo
             .values
@@ -2751,7 +2745,7 @@ mod tests {
         assert!((stereo.shift..=stereo.shift + 1).contains(&mono.shift));
     }
 
-    /// A stroke whose only loud field sits at `field`, resynchronising at `resync`.
+    /// A stroke whose only loud field sits at `field`, resynchronizing at `resync`.
     fn probe(layout: Layout, resync: usize, field: usize) -> (Plan, Vec<i64>) {
         let frames = 100_000;
         let secondary = resync as f64 * f64::from(PITCH_NUM) / f64::from(PITCH_DEN);
@@ -2763,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_run_s_last_record_buys_the_extra_bit() {
+    fn only_a_run_s_last_record_spends_the_extra_bit() {
         // The resync run at 5464 is 89 fields: [0, 32), [32, 64), [64, 89).
         let (plan, values) = probe(Layout::V2, 5464, 5464 + 76);
         assert!(spends_extra_bit(&values, &plan));
@@ -2795,8 +2789,8 @@ mod tests {
     }
 
     #[test]
-    fn each_last_record_width_obeys_the_measured_rule() {
-        for (last, buys) in [
+    fn each_last_record_count_obeys_the_measured_rule() {
+        for (last, spends) in [
             (24, false),
             (25, true),
             (26, true),
@@ -2808,45 +2802,49 @@ mod tests {
             (32, false),
         ] {
             let (plan, values) = opening_run(Layout::V2, last, 1 << (PEAK_WIDTH - 2));
-            assert_eq!(spends_extra_bit(&values, &plan), buys, "width {last}");
-        }
-    }
-
-    #[test]
-    fn the_extra_bit_uses_signed_thirteen_bit_bounds() {
-        for (value, buys) in [(-4097, true), (-4096, false), (4095, false), (4096, true)] {
-            let (plan, values) = opening_run(Layout::V2, 25, value);
-            assert_eq!(spends_extra_bit(&values, &plan), buys, "value {value}");
-        }
-    }
-
-    /// The last record of a v3 run is 32..=48 fields, and these eleven of the
-    /// seventeen buy the bit.
-    const V3_LIVE: [usize; 11] = [33, 34, 35, 36, 37, 38, 39, 40, 42, 44, 46];
-
-    #[test]
-    fn six_of_the_seventeen_v3_last_record_widths_never_buy_it() {
-        for last in 32..=48 {
-            let (plan, values) = opening_run(Layout::V3, last, 1 << (PEAK_WIDTH - 2));
             assert_eq!(
                 spends_extra_bit(&values, &plan),
-                V3_LIVE.contains(&last),
-                "width {last}"
+                spends,
+                "last record {last}"
             );
         }
     }
 
     #[test]
-    fn a_v4_mono_stroke_never_buys_the_extra_bit() {
+    fn the_extra_bit_uses_signed_thirteen_bit_bounds() {
+        for (value, spends) in [(-4097, true), (-4096, false), (4095, false), (4096, true)] {
+            let (plan, values) = opening_run(Layout::V2, 25, value);
+            assert_eq!(spends_extra_bit(&values, &plan), spends, "value {value}");
+        }
+    }
+
+    /// The last record of a v3 run is 32..=48 fields, and these eleven of the
+    /// seventeen spend the bit.
+    const V3_LIVE: [usize; 11] = [33, 34, 35, 36, 37, 38, 39, 40, 42, 44, 46];
+
+    #[test]
+    fn six_of_the_seventeen_v3_last_record_counts_never_spend_it() {
+        for last in 32..=48 {
+            let (plan, values) = opening_run(Layout::V3, last, 1 << (PEAK_WIDTH - 2));
+            assert_eq!(
+                spends_extra_bit(&values, &plan),
+                V3_LIVE.contains(&last),
+                "last record {last}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_v4_mono_stroke_never_spends_the_extra_bit() {
         for last in 32..=48 {
             let (plan, values) = opening_run(Layout::V4, last, 1 << (PEAK_WIDTH - 2));
-            assert!(!spends_extra_bit(&values, &plan), "width {last}");
+            assert!(!spends_extra_bit(&values, &plan), "last record {last}");
         }
     }
 
     /// A looped mono stroke whose only loud field sits in the last record of the run
-    /// the mark opens. The opening run is a full RMAX record, a width both generations
-    /// call dead, so nothing but the loop's run can buy the bit.
+    /// the mark opens. The opening run is a full RMAX record, a count both generations
+    /// list as dead, so only the loop's run can spend the bit.
     fn loop_run(layout: Layout, last: usize) -> (Plan, Vec<i64>) {
         let at = layout.rmax();
         let fields = at + last;
@@ -2873,7 +2871,7 @@ mod tests {
     }
 
     #[test]
-    fn the_run_a_loop_mark_opens_buys_the_extra_bit() {
+    fn the_run_a_loop_mark_opens_spends_the_extra_bit() {
         for (layout, live, dead) in [(Layout::V2, 25, 29), (Layout::V3, 33, 41)] {
             let (plan, values) = loop_run(layout, live);
             assert!(spends_extra_bit(&values, &plan), "{layout:?} live");
@@ -2911,12 +2909,12 @@ mod tests {
         let mut up = vec![0i16; frames];
         up[10_000] = 13;
         let down: Vec<i16> = up.iter().map(|v| -v).collect();
-        let positive = quantise(&up, &plan(frames, 1).unwrap(), None).peak;
-        let negative = quantise(&down, &plan(frames, 1).unwrap(), None).peak;
+        let positive = quantize(&up, &plan(frames, 1).unwrap(), None).peak;
+        let negative = quantize(&down, &plan(frames, 1).unwrap(), None).peak;
         assert_eq!(positive, 2);
         assert_eq!(negative, 3);
         let opposed: Vec<i16> = up.iter().zip(&down).flat_map(|(&l, &r)| [l, r]).collect();
-        let stereo = quantise(&opposed, &plan(frames, 2).unwrap(), None).peak;
+        let stereo = quantize(&opposed, &plan(frames, 2).unwrap(), None).peak;
         assert_eq!(stereo, positive);
     }
 
@@ -2925,7 +2923,7 @@ mod tests {
         for predictor in [Predictor::Plain, Predictor::Minimising] {
             let source = sine(440.0, 32_000.0, 30_000);
             let plan = plan(source.len(), 1).unwrap();
-            let q = quantise(&source, &plan, None);
+            let q = quantize(&source, &plan, None);
             let (specs, _) = records(&q.values, &plan, predictor).unwrap();
             for spec in specs {
                 let limit = 1i64 << (spec.width - 1);
@@ -2942,7 +2940,7 @@ mod tests {
     fn records_tile_the_lattice_the_way_the_laws_say() {
         let source = sine(440.0, 20_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
-        let q = quantise(&source, &plan, None);
+        let q = quantize(&source, &plan, None);
         let (specs, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
 
         let mut at = 0;
@@ -2960,23 +2958,23 @@ mod tests {
     }
 
     #[test]
-    fn the_minimising_predictor_narrows_smooth_material() {
+    fn the_minimizing_predictor_narrows_smooth_material() {
         let source = sine(60.0, 30_000.0, 60_000);
         let plan = plan(source.len(), 1).unwrap();
-        let q = quantise(&source, &plan, None);
+        let q = quantize(&source, &plan, None);
         let (plain, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
-        let (minimised, _) = records(&q.values, &plan, Predictor::Minimising).unwrap();
+        let (minimized, _) = records(&q.values, &plan, Predictor::Minimising).unwrap();
 
         let bits = |specs: &[Spec]| -> usize { specs.iter().map(|s| s.span(MONO)).sum() };
         assert!(
-            bits(&minimised) < bits(&plain),
+            bits(&minimized) < bits(&plain),
             "{} words vs {}",
-            bits(&minimised),
+            bits(&minimized),
             bits(&plain)
         );
-        assert!(minimised.iter().any(|s| s.order > 0));
+        assert!(minimized.iter().any(|s| s.order > 0));
         // The 1:1 regime never predicts.
-        assert!(minimised.iter().all(|s| !s.one_to_one || s.order == 0));
+        assert!(minimized.iter().all(|s| !s.one_to_one || s.order == 0));
     }
 
     #[test]
@@ -3068,8 +3066,6 @@ mod tests {
         assert_eq!(statistic_a(1225, 0, 5_557_453), (4_645_576, 11));
     }
 
-    /// Every zone of an instrument reciprocates the same peak — the file's — so a
-    /// quiet zone plays quietly rather than being normalised up to the loud one.
     #[test]
     fn statistic_a_reciprocates_the_loudest_zone_in_the_file() {
         let loud = sine(440.0, 12_000.0, 20_000);
@@ -3089,7 +3085,7 @@ mod tests {
         assert_eq!(
             mantissa(second),
             statistic_a(peak(first), 0, u64::from(GAIN_UNITY)).0,
-            "the quiet zone reciprocates the loud zone's peak"
+            "the quiet zone uses the loud zone's peak"
         );
         assert_ne!(
             mantissa(second),
@@ -3162,7 +3158,7 @@ mod tests {
             let (at, stream) = read.zone_stream(index).unwrap();
             let audio = codec::decode(stream, at, codec::Layout::V2).unwrap();
             let plan = plan(source.len(), 1).unwrap();
-            let q = quantise(source, &plan, None);
+            let q = quantize(source, &plan, None);
             let gain = 1i32 << q.shift;
             assert_eq!(audio.samples.len(), plan.fields, "zone {index}");
             for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
@@ -3363,7 +3359,7 @@ mod tests {
         let source = sine(200.0, 20_000.0, 88_200);
         let plan = looped(source.len(), 1, Loop::new(16_384, 32_768)).unwrap();
         let points = plan.looped.unwrap();
-        let values = quantise(&source, &plan, None).values;
+        let values = quantize(&source, &plan, None).values;
         assert_eq!(
             values[plan.fields - points.lead..],
             values[points.at - points.lead..points.at]
@@ -3416,8 +3412,8 @@ mod tests {
         let plan = looped(source.len(), 1, points).unwrap();
         let faded = looped(source.len(), 1, points.crossfade(4_096.0)).unwrap();
         let (plain, mixed) = (
-            quantise(&source, &plan, None).values,
-            quantise(&source, &faded, None).values,
+            quantize(&source, &plan, None).values,
+            quantize(&source, &faded, None).values,
         );
         assert_eq!(plain.len(), mixed.len());
 
@@ -3494,7 +3490,7 @@ mod tests {
                 .unwrap();
                 let (at, stroke) = file.stroke_streams()[0];
                 let plan = looped(source.len(), 1, points).unwrap();
-                let q = quantise(&source, &plan, None);
+                let q = quantize(&source, &plan, None);
                 let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
                 assert_eq!(audio.samples.len(), plan.fields);
                 let gain = 1i32 << q.shift;
@@ -3505,19 +3501,13 @@ mod tests {
         }
     }
 
-    // Full-scale broadband material can exhaust the three spare bits per field before
-    // a short loop reaches the next packet boundary.
-    /// A loop region with nothing left to split is widened forward, each content record
-    /// spent up to the cap before the next is touched, so the last one widened takes
-    /// only the words still owed. Widening from the back instead finishes in fewer,
-    /// wider records, which is not what the editor writes.
+    /// Widening from the back would finish in fewer, wider records, which the editor
+    /// does not write. The region's 1:1 run here spans two records, the marked one and
+    /// a second.
     ///
-    /// The alignment run the region opens with is walked past however much room it has,
-    /// and however many records it takes — the marked one here is followed by a second.
-    ///
-    /// The two wide generations lay the same mono region out in the same words, so the
-    /// widths they finish on differ only by the cap: v3 stops one width below v4 and
-    /// the deficit runs on into the next record.
+    /// v3 and v4 lay the same mono region out in the same words, so their widths differ
+    /// only by the cap: v3 stops one width below v4, and the remainder runs on into the
+    /// next record.
     #[test]
     fn the_widen_fallback_walks_past_the_regions_alignment_records() {
         for (layout, widths) in [
@@ -3562,11 +3552,9 @@ mod tests {
         }
     }
 
-    /// The cap is the generation's own constant, so a content record sitting one width
-    /// under it is widened past itself before the next record is reached — and only as
-    /// far as the cap, whatever room the record still has. Each region here opens with
-    /// its alignment run and is two words short of a whole packet: the narrow chain and
-    /// v3 spend those two words one to a record, v4 spends both on the first.
+    /// Each region here opens with its alignment run and is two words short of a whole
+    /// packet. v2 and v3 spend those two words one per record; v4 spends both on the
+    /// first.
     #[test]
     fn the_widen_cap_is_the_generations_constant() {
         for (layout, alignment, content, spent) in [
@@ -3653,6 +3641,8 @@ mod tests {
             source.push((tone + noise).clamp(-32_768, 32_767) as i16);
         }
 
+        // Full-scale broadband material can exhaust the three spare bits per field
+        // before a short loop reaches the next packet boundary.
         let mut placed = 0usize;
         let mut refused = 0usize;
         for start in (4_096..48_000).step_by(7_919) {
@@ -3731,7 +3721,7 @@ mod tests {
             assert_eq!(&stroke[stroke.len() - 3..], &[0x80, 0, 48]);
 
             let plan = plan(30_000, 2).unwrap();
-            let q = quantise(&source, &plan, None);
+            let q = quantize(&source, &plan, None);
             let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
             assert_eq!(audio.channels, 2);
             assert_eq!(audio.samples.len(), plan.fields);
@@ -3763,7 +3753,7 @@ mod tests {
         assert!(audio.differenced > 0, "nothing chose a predictor");
 
         let plan = plan(frames, 2).unwrap();
-        let q = quantise(&source, &plan, None);
+        let q = quantize(&source, &plan, None);
         let gain = 1i32 << q.shift;
         for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
             assert_eq!(i32::from(got), want * gain, "field {f}");
@@ -3802,7 +3792,7 @@ mod tests {
         );
 
         let plan = looped(60_000, 2, points).unwrap();
-        let q = quantise(&source, &plan, None);
+        let q = quantize(&source, &plan, None);
         let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
         let gain = 1i32 << q.shift;
         for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
@@ -3827,9 +3817,8 @@ mod tests {
         assert!(instrument(&short, &Options::new("x").channels(2)).is_err());
     }
 
-    /// Every generation, mono and stereo, through this crate's own decoder. v4 stereo
-    /// is the one that packs each channel's half into its own words, so it is the one
-    /// this would catch.
+    /// Every generation, mono and stereo. v4 stereo is the case that packs each
+    /// channel's half into its own words.
     #[test]
     fn every_generation_round_trips_through_the_decoder_exactly() {
         for layout in [Layout::V2, Layout::V3, Layout::V4] {
@@ -3855,7 +3844,7 @@ mod tests {
                     default_secondary_start(frames, None),
                 )
                 .unwrap();
-                let q = quantise(&source, &plan, None);
+                let q = quantize(&source, &plan, None);
                 let audio = codec::decode(stroke, at, layout)
                     .unwrap_or_else(|e| panic!("{layout:?} {channels}ch: {e}"));
                 assert_eq!(audio.channels, channels, "{layout:?} {channels}ch");
@@ -3933,10 +3922,8 @@ mod tests {
         }
     }
 
-    /// Decibel words read off editor renders of one project at sixteen stroke gains,
-    /// four of them predicted before the render and landing on it. The logarithm is
-    /// evaluated wider than the field and rounded once: computing it in float32
-    /// throughout moves the last byte on the powers of two.
+    /// Decibel words read from editor renders of one project at sixteen stroke gains,
+    /// four of them predicted before the render and matched by it.
     #[test]
     fn a_zone_gain_in_decibels_is_the_word_the_editor_writes() {
         for (gain, word) in [
@@ -3961,9 +3948,8 @@ mod tests {
         }
     }
 
-    /// Statistic A's mantissa is built from the decibel and not from the project's
-    /// float. The two part company only past `2^24`, and these deltas are what the
-    /// editor writes there.
+    /// Statistic A's mantissa is built from the decibel, not the project's float. The
+    /// two differ only past `2^24`, and these deltas are what the editor writes there.
     #[test]
     fn the_gain_statistic_a_uses_is_the_decibels_round_trip() {
         for (gain, delta) in [
@@ -3986,10 +3972,10 @@ mod tests {
         }
     }
 
-    /// Fixed-point words read off editor renders of one project at eleven map gains.
-    /// The ceiling is a clamp on the decibel: the knee sits on a round +9.000 dB
-    /// rather than on a round linear number, and a negative gain — whose decibel is a
-    /// NaN — fails the comparison and takes the ceiling rather than the floor.
+    /// Fixed-point words read from editor renders of one project at a range of map
+    /// gains. The ceiling is a clamp on the decibel: the knee sits at +9.000 dB, not at
+    /// a round linear number, and a negative gain, whose decibel is NaN, fails the
+    /// comparison and takes the ceiling, not the floor.
     #[test]
     fn a_map_gain_is_the_word_the_editor_writes_and_clamps_at_the_ceiling() {
         for (gain, units) in [
@@ -4012,7 +3998,7 @@ mod tests {
 
     /// A zone gain past 16 overflows both u24 stores, by different rules: the record
     /// takes the project's float and wraps, and the mantissa takes the decibel's round
-    /// trip and truncates into its field. Words read off editor renders.
+    /// trip and truncates into its field. Words read from editor renders.
     #[test]
     fn a_zone_gain_past_sixteen_wraps_in_both_stores() {
         for (gain, record) in [
@@ -4042,8 +4028,8 @@ mod tests {
         }
     }
 
-    /// The map gain opens the `map` section and reaches nothing else — not the zone
-    /// records, not statistic A, not a stream byte.
+    /// The map gain opens the `map` section and reaches nothing else: not the zone
+    /// records, statistic A, or any stream byte.
     #[test]
     fn a_map_gain_moves_the_map_section_alone() {
         let source = sine(440.0, 12_000.0, 20_000);
@@ -4060,7 +4046,7 @@ mod tests {
             let moved: Vec<_> = (0..before.len())
                 .filter(|&i| before[i] != after[i])
                 .collect();
-            // The gain's own top byte — 0x10 against 0x08 — and the container checksum.
+            // The gain's own top byte (0x10 against 0x08) and the container checksum.
             assert!(moved.len() <= 1 + 4, "{layout:?}: {moved:?}");
         }
     }
@@ -4125,8 +4111,8 @@ mod tests {
                 Some(gain_decibels(0.5)),
                 "{layout:?}"
             );
-            // Statistic A's mantissa, the decibel word and the container checksum are
-            // the whole of what a zone gain moves; the zone record does not.
+            // A zone gain moves only statistic A's mantissa, the decibel word and the
+            // container checksum; the zone record does not change.
             let (before, after) = (unity.to_bytes().unwrap(), halved.to_bytes().unwrap());
             let differing = before.iter().zip(&after).filter(|(x, y)| x != y).count();
             assert_eq!(before.len(), after.len(), "{layout:?}");
@@ -4134,8 +4120,6 @@ mod tests {
         }
     }
 
-    /// The loop decay amount is the wide header's second float32, verbatim in the
-    /// project's own units, and the narrow header is too short to hold it at all.
     #[test]
     fn a_loop_decay_lands_in_the_wide_header_and_nowhere_narrow() {
         let source = sine(440.0, 12_000.0, 20_000);
@@ -4198,7 +4182,7 @@ mod tests {
     }
 
     /// The wide terminator states 32 fields per channel where the narrow one states 24,
-    /// and a 1:1 run reaches 48 fields per channel rather than 32.
+    /// and a 1:1 record reaches 48 fields per channel, not 32.
     #[test]
     fn the_wide_plan_tiles_the_lattice_in_its_own_units() {
         for frames in [4096, 10_000, 44_100, 100_000] {
@@ -4224,8 +4208,8 @@ mod tests {
         }
     }
 
-    /// A silent wide stroke stores statistic B as a signed extreme, so it reads back
-    /// through the codec's own sign rule rather than as a 24-bit magnitude.
+    /// A wide stroke stores statistic B as a signed extreme, so it reads back through
+    /// the codec's sign rule, not as a 24-bit magnitude.
     #[test]
     fn a_wide_statistic_b_carries_the_extremes_sign() {
         let frames = 20_000;

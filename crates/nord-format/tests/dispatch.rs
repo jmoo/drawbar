@@ -1,6 +1,6 @@
-//! Every registered CBIN tag dispatches to its entity and round-trips, both
-//! header generations — no corpus needed: the files are synthesized through the
-//! same container writer the library uses.
+//! Every CBIN tag in the format table dispatches to its entity and round-trips in
+//! both header generations. No corpus is needed: the files are synthesized
+//! through the container writer the library uses.
 
 use nord_format::cbin::{Cbin, Generation, Header, RawBody};
 use nord_format::formats::{ns3, ns4};
@@ -53,8 +53,8 @@ fn nul_padded_tags_are_matched_in_full() {
     );
 }
 
-/// An unknown version on a globals-decoded format refuses rather than misreads;
-/// the same version on a stub is preserved, because a raw body cannot misread.
+/// An unknown version on a decoded format is refused. The same version on a stub
+/// is kept, because a raw body cannot be misread.
 #[test]
 fn version_gates_cover_the_decoded_formats_only() {
     let bytes = synthesize(

@@ -1,5 +1,5 @@
 #![cfg(feature = "corpus")]
-//! Behavioral checks against files produced by the instrument and sample editor.
+//! Behavior checks against files written by the instruments and the Sample Editor.
 
 use nord_format::formats::{npno, nsmp, nsmpproj};
 use nord_format::{Entity, Live, Program, Sample};
@@ -83,7 +83,7 @@ fn cbin_body_lengths_match_format_constants() {
             checked += 1;
         }
     }
-    assert!(checked > 0, "no stub-format specimen");
+    assert!(checked > 0, "no specimen of a format in the table");
 }
 
 #[test]
@@ -159,12 +159,13 @@ fn ns4_octave_shifts_stay_in_panel_range() {
     }
     assert_eq!(
         seen,
-        BTreeSet::from(["organ preset", "piano preset", "program", "synth preset"])
+        BTreeSet::from(["organ preset", "piano preset", "program", "synth preset"]),
+        "Stage 4 entity kinds checked"
     );
 }
 
-/// Every selection the Stage 4 panel offers, and the highest stored value it reaches.
-/// A specimen past one holds a selection the panel cannot make.
+/// Asserts that a Stage 4 selector holds a value the panel can select. `top` is the
+/// highest stored value the panel reaches.
 fn in_panel_range(specimen: &Specimen, field: &str, value: u8, top: u8) {
     assert!(
         value <= top,
@@ -275,7 +276,8 @@ fn ns4_selectors_stay_in_panel_range() {
     }
     assert_eq!(
         seen,
-        BTreeSet::from(["organ preset", "piano preset", "program", "synth preset"])
+        BTreeSet::from(["organ preset", "piano preset", "program", "synth preset"]),
+        "Stage 4 entity kinds checked"
     );
 }
 
@@ -287,11 +289,19 @@ fn drum_banks_have_the_expected_member_count() {
         match &specimen.entity {
             Entity::Bundle(Bundle::Drum2Bank(bank)) => {
                 assert_eq!(bank.programs.len(), 50, "{}", specimen.path.display());
-                assert!(bank.programs.iter().all(|(name, _)| !name.is_empty()));
+                assert!(
+                    bank.programs.iter().all(|(name, _)| !name.is_empty()),
+                    "{}: unnamed member",
+                    specimen.path.display()
+                );
             }
             Entity::Bundle(Bundle::Drum3KitBank(bank)) => {
                 assert_eq!(bank.kits.len(), 50, "{}", specimen.path.display());
-                assert!(bank.kits.iter().all(|(name, _)| !name.is_empty()));
+                assert!(
+                    bank.kits.iter().all(|(name, _)| !name.is_empty()),
+                    "{}: unnamed member",
+                    specimen.path.display()
+                );
             }
             _ => continue,
         }
@@ -331,8 +341,8 @@ fn v3_samples_decode_names_and_strokes() {
     assert!(paired > 0, "no v3 zone map paired with its strokes");
 }
 
-/// A `map` v14 zone stores the velocity window its project asked for, so the field
-/// has to be read rather than assumed full.
+/// A `map` v14 zone stores the velocity window its project set, so a reader must read
+/// the field and not assume the full range.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[test]
@@ -355,7 +365,7 @@ fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
             .iter()
             .filter_map(|zone| zone.velocity)
             .find(|held| *held != nsmp::zone::VelocityWindow::FULL)
-            .unwrap_or_else(|| panic!("{file}: every zone still spans the full velocity range"));
+            .unwrap_or_else(|| panic!("{file}: every zone spans the full velocity range"));
         assert_eq!((narrowed.low, narrowed.high), *window, "{file}");
     }
 
@@ -392,8 +402,8 @@ fn a_wide_zone_answers_to_the_velocities_its_project_asked_for() {
     assert!(without > 0, "no v12 zone record, whose layout stores none");
 }
 
-/// The wide zone record carries the same relative strength the v2 record does, four
-/// bytes later, and it is wider than a byte: `LY-21rs300` holds 300.
+/// The wide zone record holds the same relative strength field as the v2 record, two
+/// bytes later, and the field is wider than a byte: `LY-21rs300` holds 300.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[test]
@@ -413,10 +423,10 @@ fn a_wide_zone_records_its_strokes_relative_strength() {
     }
 }
 
-/// `sty`'s v4 dynamics group is the one part of the preset a wide project
-/// reaches, and the enable alone carries all of it: `SP-dynen1` leaves the
-/// project's own curve field at its default and still moves the curve byte off
-/// its sentinel, while `SP-dyn1` sets that field and renders the base.
+/// The v4 `sty` dynamics group is the only part of the preset a wide project can
+/// set, and the enable controls all of it: `SP-dynen1` leaves the project's curve
+/// field at its default and still moves the curve byte off its sentinel, while
+/// `SP-dyn1` sets that field and renders the base values.
 #[test]
 fn the_v4_preset_holds_the_dynamics_a_project_asked_for() {
     for (file, enabled, curve, response) in [
@@ -438,9 +448,9 @@ fn the_v4_preset_holds_the_dynamics_a_project_asked_for() {
     }
 }
 
-/// v3 keeps the same dynamics group at its own offsets and on its own scale:
-/// the enable is a level on the block's 0..127 grid rather than a flag, and the
-/// response is stored once instead of once per layer.
+/// v3 stores the same dynamics group at its own offsets and on its own scale: the
+/// enable is a level on the block's 0..127 grid, not a flag, and the response is
+/// stored once, not once per layer.
 #[test]
 fn the_v3_preset_holds_the_same_dynamics_group() {
     for (file, enabled, curve, response) in [
@@ -461,9 +471,9 @@ fn the_v3_preset_holds_the_same_dynamics_group() {
 }
 
 /// The editor's loader replaces `samplib_attrs` with a preset chosen by the
-/// instrument's category, and the v2 encoder writes the two velocity depths of
-/// that preset through. Pairing each written-back project with the file it
-/// produced is what names the bytes: no project can set the depths itself.
+/// instrument's category, and the v2 encoder copies that preset's two velocity
+/// depths into the file. No project can set the depths directly, so pairing each
+/// written-back project with the file it produced identifies the bytes.
 #[test]
 fn a_v2_preset_carries_the_velocity_depths_the_category_installed() {
     let mut seen = 0;
@@ -491,9 +501,9 @@ fn a_v2_preset_carries_the_velocity_depths_the_category_installed() {
     assert!(seen > 0, "no SP specimen");
 }
 
-/// The instrument EQ is baked into the audio, not stored: every rung that turns
-/// a band on renders a different stroke and leaves all three `sty` records
-/// zero, so nothing this project can render fills them in.
+/// The instrument EQ is applied to the audio and not stored: every specimen that
+/// turns a band on renders a different stroke and leaves all three `sty` EQ
+/// records zero.
 #[test]
 fn the_instrument_eq_never_reaches_the_wide_preset() {
     let Entity::Sample(Sample::V3(base)) = &named("SP-00base.nsmp4").entity else {
@@ -549,7 +559,7 @@ fn the_instrument_eq_never_reaches_the_wide_preset() {
     assert!(seen > 0, "no SP EQ specimen");
 }
 
-/// A `sty` dynamics-response triple holds 127 exactly while no curve is selected.
+/// A v4 `sty` dynamics-response triple is all 127 exactly when no curve is selected.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[test]
@@ -575,8 +585,8 @@ fn a_v4_dynamics_response_is_pinned_while_no_curve_is_selected() {
     assert!(seen > 0, "no v4 preset");
 }
 
-/// Every wide body states its own length in `meta`, and it is the one field a
-/// writer that resized a section would have to restate.
+/// Every wide body's `meta` states the length of the chain before it. A writer that
+/// resizes a section must update this field.
 #[test]
 fn a_wide_body_states_the_length_of_the_chain_ahead_of_its_meta() {
     let mut seen = 0;
@@ -598,8 +608,8 @@ fn a_wide_body_states_the_length_of_the_chain_ahead_of_its_meta() {
     assert!(seen > 0, "no wide sample");
 }
 
-/// `sty` is a preset block whose v4 payload comes in two widths under one
-/// section version, so every specimen has to parse from its length.
+/// The v4 `sty` payload comes in two widths under one section version, so each
+/// specimen's schema is chosen by its length.
 #[test]
 fn every_sample_preset_parses_under_its_own_schema() {
     let mut v2 = 0;
@@ -607,7 +617,7 @@ fn every_sample_preset_parses_under_its_own_schema() {
     for (specimen, sample) in v2_samples() {
         let where_ = specimen.path.display();
         let sty = sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}"));
-        assert_eq!(sty.raw.len(), nsmp::sty::V2_LEN);
+        assert_eq!(sty.raw.len(), nsmp::sty::V2_LEN, "{where_}");
         v2 += 1;
     }
     for specimen in corpus() {
@@ -618,13 +628,15 @@ fn every_sample_preset_parses_under_its_own_schema() {
         match sample.sty().unwrap_or_else(|e| panic!("{where_}: {e}")) {
             nsmp::Sty::V2(_) => panic!("{where_}: a wide chain read a v2 preset"),
             nsmp::Sty::V3(block) => {
-                assert_eq!(block.raw.len(), nsmp::sty::V3_LEN);
+                assert_eq!(block.raw.len(), nsmp::sty::V3_LEN, "{where_}");
                 v3 += 1;
             }
             nsmp::Sty::V4(block) => {
                 assert!(
                     block.raw.len() == nsmp::sty::V4_LEN
-                        || block.raw.len() == nsmp::sty::V4_LEN_LONG
+                        || block.raw.len() == nsmp::sty::V4_LEN_LONG,
+                    "{where_}: v4 sty of {} bytes",
+                    block.raw.len()
                 );
                 for band in block.eq() {
                     assert!(
@@ -637,7 +649,10 @@ fn every_sample_preset_parses_under_its_own_schema() {
             }
         }
     }
-    assert!(v2 > 0 && v3 > 0 && v4 > 0, "a generation went unseen");
+    assert!(
+        v2 > 0 && v3 > 0 && v4 > 0,
+        "a sty generation has no specimen: v2 {v2}, v3 {v3}, v4 {v4}"
+    );
 }
 
 /// A live slot and a stored program use the same body. Confirmed on hardware.
@@ -667,7 +682,12 @@ fn ne5_live_body_decodes_as_a_program() {
                 .map(|field| (field.path, field.display))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(fields(live.fields()), fields(program.fields()));
+        assert_eq!(
+            fields(live.fields()),
+            fields(program.fields()),
+            "{}",
+            specimen.path.display()
+        );
         seen += 1;
     }
     assert!(seen > 0, "no Electro 5 live slot in the corpus");
@@ -684,10 +704,15 @@ fn ne5_live_slots_occupy_one_three_slot_bank() {
             location.inner()
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(slots, BTreeSet::from([(0, 0), (0, 1), (0, 2)]));
+    assert_eq!(
+        slots,
+        BTreeSet::from([(0, 0), (0, 1), (0, 2)]),
+        "Electro 5 live slots"
+    );
 }
 
-/// The drawbar accessors must be read/write inverses without disturbing other bits.
+/// Setting each organ model's drawbars to the values just read leaves every byte
+/// unchanged.
 #[test]
 fn ne5_drawbars_survive_a_rewrite() {
     use nord_format::formats::ne5::OrganModel::{Farfisa, Pipe, Vox, B3};
@@ -720,7 +745,6 @@ fn ne5_drawbars_survive_a_rewrite() {
     assert!(seen > 0, "no Electro 5 program in the corpus");
 }
 
-/// Each readable zone table must account for every encoded stroke.
 #[test]
 fn nsmp_strokes_match_zones() {
     let mut seen = 0;
@@ -737,10 +761,10 @@ fn nsmp_strokes_match_zones() {
     assert!(seen > 0, "no readable v2 strokes in the corpus");
 }
 
-/// The libraries before Sample Library 2.0 write a narrower chain under a `map`
-/// version of their own: no `cat`, an 18-byte `hdr` with no name field, and a zone
-/// record three bytes shorter. The content version does not separate the two chains,
-/// so this sweeps by [`nsmp::Chain`] and asserts what each side of it holds.
+/// Libraries before Sample Library 2.0 write a narrower chain with its own `map`
+/// version: no `cat`, an 18-byte `hdr` with no name field, and a zone record three
+/// bytes shorter. The content version does not distinguish the two chains, so this
+/// sweeps by [`nsmp::Chain`].
 #[test]
 fn pre_library_2_instruments_decode_their_narrower_zone_table() {
     let mut early = 0;
@@ -762,7 +786,7 @@ fn pre_library_2_instruments_decode_their_narrower_zone_table() {
         let mut copy = nsmp::from_bytes(&specimen.bytes).unwrap();
         assert!(
             copy.set_name("Renamed").is_err(),
-            "{where_}: renamed an instrument with nowhere to put a name"
+            "{where_}: renamed an instrument whose chain has no name field"
         );
         assert!(
             sample.categories().is_empty(),
@@ -775,7 +799,7 @@ fn pre_library_2_instruments_decode_their_narrower_zone_table() {
         assert_eq!(
             zones.len() * chain.zone_record_len() + nsmp::zone::RECORDS_AT,
             v2_map_payload(sample).len(),
-            "{where_}: the map is not the zone table's own length"
+            "{where_}: the map payload length does not match its zone count"
         );
         for pair in zones.windows(2) {
             assert!(
@@ -806,9 +830,9 @@ fn pre_library_2_instruments_decode_their_narrower_zone_table() {
     );
 }
 
-/// A zone record names its stroke in one byte and a stroke's own id is a u32, so
-/// library instruments exist whose ids alias. Pairing on the whole u32 loses those
-/// zones, and does it silently on everything with fewer than 256 strokes.
+/// A zone record names its stroke in one byte, but a stroke's id is a u32, and some
+/// library instruments have stroke ids past 255. Pairing on the whole u32 would lose
+/// those zones, and no instrument with smaller ids would show it.
 #[test]
 fn zones_pair_with_strokes_whose_ids_run_past_a_byte() {
     let mut aliased = 0;
@@ -835,13 +859,17 @@ fn zones_pair_with_strokes_whose_ids_run_past_a_byte() {
     assert!(aliased > 0, "no instrument with a stroke id past 255");
 }
 
-/// Rename and remap reproduce the file written by the sample editor.
+/// A rename and a zone remap reproduce the file the Sample Editor wrote.
 #[test]
 fn nsmp_edits_reproduce_editor_output() {
     let mut sample = v2_named("D4-3zones.nsmp");
     sample.set_name("D7-upperkey").unwrap();
     sample.set_zone_top_note(1, 60).unwrap();
-    assert_eq!(sample.to_bytes().unwrap(), named("D7-upperkey.nsmp").bytes);
+    assert_eq!(
+        sample.to_bytes().unwrap(),
+        named("D7-upperkey.nsmp").bytes,
+        "D4-3zones.nsmp edited into D7-upperkey.nsmp"
+    );
 }
 
 /// Retuning changes the root-key byte and the container checksum only.
@@ -850,7 +878,10 @@ fn nsmp_retune_is_surgical() {
     let before = &named("D1-one-zone.nsmp").bytes;
     let mut sample = v2_named("D1-one-zone.nsmp");
     let was = sample.strokes().unwrap()[0].root_key;
-    assert_ne!(was, 48, "the retune has to move the byte to say anything");
+    assert_ne!(
+        was, 48,
+        "the specimen already holds root key 48, so the retune would change nothing"
+    );
     sample.set_root_key(0, 48).unwrap();
     let after = sample.to_bytes().unwrap();
 
@@ -860,7 +891,7 @@ fn nsmp_retune_is_surgical() {
     assert_eq!(changed.len(), 5, "changed bytes: {changed:?}");
     assert!(
         changed[..4].iter().eq([0x18, 0x19, 0x1a, 0x1b].iter()),
-        "the container's body crc32 is not the first four: {changed:?}"
+        "the first four changed bytes are not the container's body CRC-32: {changed:?}"
     );
 
     let (stroke_at, stroke) = sample.stroke_streams()[0];
@@ -872,27 +903,41 @@ fn nsmp_retune_is_surgical() {
     );
     assert_eq!(before[changed[4]], was, "the root key the specimen held");
     assert_eq!(after[changed[4]], 48, "the root key the edit asked for");
-    assert_eq!(sample.strokes().unwrap()[0].root_key, 48);
+    assert_eq!(
+        sample.strokes().unwrap()[0].root_key,
+        48,
+        "root key read back"
+    );
 }
 
 #[test]
 fn nsmp_overlong_name_is_refused_without_mutation() {
     let mut sample = v2_named("D1-one-zone.nsmp");
     let over = "M".repeat(nsmp::MAX_NAME_LEN + 1);
-    assert!(sample.set_name(&over).is_err());
-    assert_eq!(sample.name().unwrap(), "TEST");
+    assert!(
+        sample.set_name(&over).is_err(),
+        "an overlong name was accepted"
+    );
+    assert_eq!(
+        sample.name().unwrap(),
+        "TEST",
+        "the refused rename changed the name"
+    );
 }
 
 #[test]
 fn nsmp_bad_checksum_is_refused() {
     let mut bytes = named("D1-one-zone.nsmp").bytes.clone();
     *bytes.last_mut().unwrap() ^= 0xff;
-    assert!(nord_format::from_stream(&mut Cursor::new(&bytes)).is_err());
+    assert!(
+        nord_format::from_stream(&mut Cursor::new(&bytes)).is_err(),
+        "a corrupted checksum was accepted"
+    );
 }
 
-/// A device read whose leading body bytes arrived as foreign buffer content, so the
-/// `NWS` container and the sections after it are gone. Named `.skip.`, which keeps the
-/// sweep off it, so it is reached through [`scan::named_skipped`] rather than [`named`].
+/// A device read whose leading body bytes are foreign buffer content, so the `NWS`
+/// container and the sections after it are missing. Its `.skip.` name keeps it out of
+/// the sweep, so it is found through [`scan::named_skipped`].
 #[test]
 fn nsmp_body_without_its_container_section_says_which_tag_was_expected() {
     let path = scan::named_skipped("stereo77.skip.nsmp");
@@ -933,15 +978,15 @@ fn edited(name: &str, edit: impl FnOnce(&mut Sample)) -> (&'static [u8], Vec<u8>
         after.len(),
         "{name}: the edit resized the file"
     );
-    // Reading the result back is what proves the container checksum was
-    // recomputed: a stale one is refused.
+    // Reading the result back proves the container checksum was recomputed,
+    // because a stale one is refused.
     nord_format::from_stream(&mut Cursor::new(&after))
         .unwrap_or_else(|e| panic!("{name} does not read back after the edit: {e}"));
     (before, after)
 }
 
-/// Which bytes an edit moved, less the container checksum's own word — that
-/// moves whenever anything else does and says nothing about scope.
+/// The offsets of the bytes an edit changed, excluding the container checksum,
+/// which changes whenever anything else does.
 fn moved(before: &[u8], after: &[u8]) -> Vec<usize> {
     const CHECKSUM: std::ops::Range<usize> = 0x18..0x1c;
     (0..before.len())
@@ -949,7 +994,7 @@ fn moved(before: &[u8], after: &[u8]) -> Vec<usize> {
         .collect()
 }
 
-/// Every zone's decoded audio, which no edit here is allowed to disturb.
+/// Every zone's decoded audio, which no edit here may change.
 fn audio(bytes: &[u8]) -> Vec<Vec<i16>> {
     let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
     let Entity::Sample(sample) = &entity else {
@@ -995,8 +1040,8 @@ fn nsmp_wide_rename_touches_only_the_name_field() {
         let old = name_of(&named(name).bytes);
         let (before, after) = edited(name, |s| s.set_name("Retitled").unwrap());
         let moved = moved(before, after.as_slice());
-        // Writing one name over another moves at most the longer of the two —
-        // the shorter one's tail is NUL-filled — and never leaves the field.
+        // Writing one name over another changes at most as many bytes as the longer
+        // name (the shorter one's tail is NUL-filled), all within the field.
         assert!(!moved.is_empty(), "{name}: rename moved nothing");
         assert!(
             moved.len() <= old.len().max("Retitled".len()),
@@ -1024,14 +1069,21 @@ fn nsmp_wide_rename_stops_at_the_sub_name() {
     let Entity::Sample(Sample::V3(sample)) = &reread else {
         panic!("not a wide sample")
     };
-    assert_eq!(sample.name().unwrap(), long);
-    assert_eq!(sample.sub_name().unwrap(), "KG  mono");
+    assert_eq!(sample.name().unwrap(), long, "{V3_MAP_14}: name");
+    assert_eq!(
+        sample.sub_name().unwrap(),
+        "KG  mono",
+        "{V3_MAP_14}: sub-name"
+    );
 
     let mut entity = nord_format::from_stream(&mut Cursor::new(&named(V3_MAP_14).bytes)).unwrap();
     let Entity::Sample(sample) = &mut entity else {
         unreachable!()
     };
-    assert!(sample.set_name(&format!("{long}x")).is_err());
+    assert!(
+        sample.set_name(&format!("{long}x")).is_err(),
+        "{V3_MAP_14}: a name past MAX_NAME_V3_LEN was accepted"
+    );
 }
 
 #[test]
@@ -1067,8 +1119,8 @@ fn nsmp_wide_remap_moves_one_boundary_byte() {
         assert_eq!(audio(before), audio(&after), "{name}: remap moved audio");
 
         let Some(low) = low else {
-            // This layout stores no low note, and says so rather than writing a
-            // byte that means something else.
+            // This layout stores no low note, so the setter refuses instead of
+            // writing a byte that means something else.
             let (_, unchanged) = edited(name, |s| assert!(s.set_zone_low_note(0, 40).is_err()));
             assert_eq!(before, unchanged.as_slice(), "{name}");
             continue;
@@ -1101,11 +1153,11 @@ fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
         match table.key_map(&map.payload).unwrap() {
             nsmp::zone::KeyMap::Absent => continue,
             nsmp::zone::KeyMap::Neutral => {
-                // The sample editor writes the neutral table whatever the zone
-                // layout, so nothing may start populating one.
+                // The Sample Editor writes the neutral table for any zone layout,
+                // so the planner must leave it neutral.
                 assert!(
                     table.plan_key_map(&map.payload, &zones).unwrap().is_empty(),
-                    "{name}: a neutral table was planned over"
+                    "{name}: the planner wrote into a neutral table"
                 );
                 neutral += 1;
             }
@@ -1114,7 +1166,10 @@ fn nsmp_v4_partner_law_reproduces_the_vendor_key_maps() {
                 for (at, quad) in table.plan_key_map(&map.payload, &zones).unwrap() {
                     after[at..at + quad.len()].copy_from_slice(&quad);
                 }
-                assert_eq!(after, map.payload, "{name}: the law did not reproduce it");
+                assert_eq!(
+                    after, map.payload,
+                    "{name}: the planned key map differs from the stored one"
+                );
                 populated += 1;
             }
         }
@@ -1143,8 +1198,8 @@ fn nsmp_v4_populated_key_map_survives_a_round_trip() {
         let Entity::Sample(edited) = &mut entity else {
             unreachable!()
         };
-        // Move every root away and back. The table is recomputed each time, so
-        // a byte-identical result is the law reproducing what the builder wrote.
+        // Move every root away and back. The table is recomputed on each edit, so
+        // a byte-identical result shows the planner reproduces what the builder wrote.
         for (i, root) in roots.iter().enumerate() {
             edited.set_root_key(i, root.saturating_sub(1)).unwrap();
         }
@@ -1165,11 +1220,11 @@ fn nsmp_v4_retune_carries_the_key_map_with_it() {
     let (root, _, _) = zones[0];
 
     let (_, after) = edited(V4_KEY_MAP, |s| s.set_root_key(0, root - 1).unwrap());
-    assert_eq!(zones_of(&after)[0].0, root - 1);
+    assert_eq!(zones_of(&after)[0].0, root - 1, "root key after the retune");
     assert_eq!(audio(before), audio(&after), "retune moved audio");
 
-    // The gains and the three bytes behind them are an authored curve that no
-    // layout predicts, so every one of them has to survive the recompute.
+    // The gains and the three bytes after them are an authored curve that no
+    // layout predicts, so the recompute must keep all of them.
     let levels = |bytes: &[u8]| -> Vec<Vec<u8>> {
         let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
         let Entity::Sample(Sample::V3(sample)) = &entity else {
@@ -1226,8 +1281,8 @@ fn nsmpproj_stroke_fields_move_alone() {
     for (specimen, project) in projects() {
         let at = specimen.path.display();
         let before = project.render();
-        // A probe has to differ from what the stroke holds, or nothing moves —
-        // and the LY ladder's projects hold windows other than the default.
+        // A probe must differ from what the stroke holds, or nothing changes, and
+        // the LY projects hold velocity windows other than the default.
         let windows: BTreeMap<u32, (u8, u8)> = project
             .zones()
             .unwrap()
@@ -1300,7 +1355,12 @@ fn nsmpproj_velocity_defaults_move_alone() {
             timbre: 0,
         };
         edited.set_velocity_defaults(defaults).unwrap();
-        assert_eq!(edited.velocity_defaults().unwrap(), defaults);
+        assert_eq!(
+            edited.velocity_defaults().unwrap(),
+            defaults,
+            "{}: velocity defaults read back",
+            specimen.path.display()
+        );
         let after = edited.render();
         let changed = before
             .lines()
@@ -1330,9 +1390,9 @@ fn project_named(name: &str) -> &'static nsmpproj::Project {
 
 /// A project's zones, each with audio of the length the project gives it.
 ///
-/// The editor's own WAVs are not corpus material, so the audio is generated. Only the
-/// frame count reaches anything asserted below: a stroke's field count comes from its
-/// length, and every other field compared is metadata.
+/// The editor's WAVs are not corpus material, so the audio is generated. Only the frame
+/// count affects anything asserted below: a stroke's field count comes from its length,
+/// and every other field compared is metadata.
 fn built_zones(project: &nsmpproj::Project) -> Vec<BuiltZone> {
     let strokes = project.strokes().unwrap();
     project
@@ -1358,8 +1418,8 @@ fn built_zones(project: &nsmpproj::Project) -> Vec<BuiltZone> {
         .collect()
 }
 
-/// A narrow instrument from the zones a project resolves to, under the editor's own
-/// predictor choice.
+/// A narrow instrument built from a project's zones, with the editor's predictor
+/// choice.
 fn built_v2(
     zones: &[nsmp::encode::NewZone<'_>],
     name: &str,
@@ -1406,7 +1466,7 @@ impl BuiltZone {
 
 #[test]
 fn nsmp_building_a_project_reproduces_its_editor_twin() {
-    // Expected bytes come from paired Sample Editor project/instrument fixtures.
+    // Expected bytes come from paired Sample Editor project and instrument specimens.
     for name in ["D3-2zones", "D4-3zones", "D8-2zones-hi", "D7-upperkey"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let zones = built_zones(project);
@@ -1471,7 +1531,7 @@ fn nsmp_building_a_project_reproduces_its_editor_twin() {
 
 #[test]
 fn nsmp_a_built_zone_is_as_long_as_the_editors() {
-    // Expected lengths come from the Sample Editor instrument fixtures.
+    // Expected lengths come from the Sample Editor instrument specimens.
     for name in ["D1-one-zone", "D3-2zones", "D4-3zones", "D8-2zones-hi"] {
         let project = project_named(&format!("{name}.nsmpproj"));
         let twin = v2_named(&format!("{name}.nsmp"));
@@ -1495,15 +1555,15 @@ fn nsmp_a_built_zone_is_as_long_as_the_editors() {
     }
 }
 
-/// A decibel back to a linear gain with [`nsmp::zone::GAIN_BITS`] fractional bits,
-/// exponentiated wider than the field and rounded once, as the writer does it. Silence
-/// and a negative gain — `-inf` and a NaN — both come back zero.
+/// Converts decibels to a linear gain with [`nsmp::zone::GAIN_BITS`] fractional bits,
+/// computed at higher precision than the field and rounded once, as the writer does.
+/// Silence (`-inf`) and a negative gain (NaN) both convert to zero.
 fn gain_units(decibels: f32) -> u64 {
     (10f64.powf(f64::from(decibels) / 20.0) * f64::from(nsmp::zone::GAIN_UNITY)).round() as u64
 }
 
 /// The wide render of the same instrument, where the corpus holds one. Both wide
-/// generations state the gain the same way, so either serves.
+/// generations state the gain the same way, so either one works.
 fn wide_twin(path: &std::path::Path) -> Option<&'static nord_format::cbin::Cbin<nsmp::SampleV3>> {
     let stem = path.file_stem()?.to_string_lossy();
     ["nsmp3", "nsmp4"].iter().find_map(|extension| {
@@ -1515,7 +1575,7 @@ fn wide_twin(path: &std::path::Path) -> Option<&'static nord_format::cbin::Cbin<
     })
 }
 
-/// The gain the stroke `id` names was built from, read off a wide render's decibel.
+/// The gain stroke `id` was built with, read from a wide render's decibel field.
 fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
     let layout = nsmp::codec::Layout::from_version(wide.header.version)?;
     let (_, stroke) = wide
@@ -1525,9 +1585,9 @@ fn wide_stroke_gain(wide: &'static nord_format::cbin::Cbin<nsmp::SampleV3>, id: 
     Some(gain_units(nsmp::codec::zone_gain_db(stroke, layout)?))
 }
 
-/// A wide stroke's statistic A is the reciprocal of the file peak scaled by the gain
-/// the stroke's own decibel field round-trips to, not by the project's float. The two
-/// agree below `2^24` and part above it, where the file follows the decibel.
+/// A wide stroke's statistic A is the reciprocal of the file peak, scaled by the gain
+/// the stroke's decibel field converts back to. The project's float gain agrees below
+/// `2^24` and differs above it, where the file follows the decibel field.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[test]
@@ -1574,14 +1634,15 @@ fn nsmp_wide_statistic_a_is_built_from_the_decibel_the_header_stores() {
     assert!(seen > 0, "no self-generated wide stroke");
 }
 
-/// The narrow half of that law, over every self-generated v2 specimen whatever its
-/// gain. Library instruments are left out: their strokes keep the mantissa of whatever
-/// file first encoded them.
+/// The same rule for narrow strokes, over every self-generated v2 specimen at any gain.
+/// Library instruments are left out: their strokes keep the mantissa of whatever file
+/// first encoded them.
 ///
-/// A narrow header has no decibel field and the zone record states the gain mod `2^24`,
-/// so past a gain of 16 the record reads back quieter than the mantissa was built from.
-/// Where the corpus holds a wide render of the same instrument, its decibel is the gain
-/// this asserts against; the record is only trusted where there is no twin.
+/// A narrow header has no decibel field, and the zone record stores the gain mod
+/// `2^24`, so above a gain of 16 the record reads back quieter than the gain the
+/// mantissa was built from. Where the corpus holds a wide render of the same
+/// instrument, the test uses that render's decibel field; otherwise it uses the zone
+/// record.
 #[test]
 fn nsmp_statistic_a_is_the_file_peaks_reciprocal_scaled_by_the_zones_gain() {
     let layout = nsmp::codec::Layout::V2;
@@ -1688,7 +1749,7 @@ fn nsmp_a_built_instrument_walks_and_agrees_with_its_directory() {
                 walk.records
                     .iter()
                     .any(|r| r.at == resolve(directory.resync)),
-                "{name} stroke {index}: resync names no record"
+                "{name} stroke {index}: resync points at no record"
             );
         }
     }
@@ -1768,12 +1829,21 @@ fn setting_the_keyboard_map_touches_only_the_keyboard_map() {
     edited.set_key_table(&table).unwrap();
     assert_eq!(
         v2_map_payload(&edited),
-        v2_map_payload(&v2_named("MN-00base.nsmp"))
+        v2_map_payload(&v2_named("MN-00base.nsmp")),
+        "map payload with key 60 reset, against MN-00base.nsmp"
     );
-    assert_eq!(edited.stroke_streams().len(), strokes_before);
+    assert_eq!(
+        edited.stroke_streams().len(),
+        strokes_before,
+        "stroke count"
+    );
     let bytes = edited.to_bytes().unwrap();
     let reread = nsmp::from_bytes(&bytes).unwrap();
-    assert_eq!(reread.key_table().unwrap(), nsmp::KeyTable::NEUTRAL);
+    assert_eq!(
+        reread.key_table().unwrap(),
+        nsmp::KeyTable::NEUTRAL,
+        "key table read back"
+    );
 }
 
 #[test]
@@ -1833,14 +1903,16 @@ fn nsmp_the_kernel_matches_the_corpus_f32_tap_table() {
     }
     assert_eq!(
         points.len(),
-        nsmp::kernel::PHASES * (nsmp::kernel::TAPS + 2)
+        nsmp::kernel::PHASES * (nsmp::kernel::TAPS + 2),
+        "{}: phase and tap points",
+        path.display()
     );
 }
 
-/// Renaming an instrument to the name it already holds moves no byte, in any
-/// generation: the read stops at the terminator inside the generation's own span, and
-/// the write covers exactly that span. Shipped libraries carry names longer than the
-/// narrowest field, so a writer sized to that field fails here.
+/// Renaming an instrument to its current name changes no byte, in any generation: the
+/// read stops at the terminator within the generation's name span, and the write covers
+/// that span. Shipped libraries have names longer than the narrowest field, so a writer
+/// sized to that field fails here.
 #[test]
 fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
     let mut seen = 0;
@@ -1856,7 +1928,7 @@ fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
             unreachable!("re-read as a different entity");
         };
         let name = sample.name().unwrap_or_else(|e| panic!("{where_}: {e}"));
-        // The oldest narrow `hdr` is 18 bytes and holds no name field at all.
+        // The oldest narrow `hdr` is 18 bytes and has no name field.
         if name.is_empty() {
             continue;
         }
@@ -1866,7 +1938,7 @@ fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
         let back = nord_format::to_bytes(&entity).unwrap_or_else(|e| panic!("{where_}: {e}"));
         assert!(
             back == specimen.bytes,
-            "{where_}: renaming to {name:?} moved a byte"
+            "{where_}: renaming to {name:?} changed a byte"
         );
         if name.len() > longest.len() {
             longest = name;
@@ -1874,12 +1946,12 @@ fn renaming_a_sample_to_the_name_it_holds_moves_no_byte() {
         seen += 1;
     }
     assert!(seen > 0, "no named sample instrument");
-    /// What the editor's own name box accepts. Shipped libraries hold longer names,
-    /// and without one of those in reach the assertion above proves nothing.
+    /// The longest name the editor's name box accepts. Without a longer name from a
+    /// shipped library, the assertion above proves nothing.
     const EDITOR_BOX: usize = 14;
     assert!(
         longest.len() > EDITOR_BOX,
-        "no name past the editor's own box to test a short writer against: {longest:?}"
+        "no name longer than the editor's box to test a short writer against: {longest:?}"
     );
 }
 
@@ -1890,10 +1962,9 @@ fn pianos() -> impl Iterator<Item = (&'static Specimen, &'static npno::Piano)> {
     })
 }
 
-/// The model is complete only if the writer can put the file back together from it:
-/// the per-root counts, every audio offset, the alignment gap and the container's
-/// checksum are all recomputed rather than carried, so a byte-exact rebuild says the
-/// derived fields are derived correctly and nothing outside them was lost.
+/// The writer recomputes the per-root counts, every audio offset, the alignment gap,
+/// and the container checksum from the model. A byte-exact rebuild shows those are
+/// derived correctly and nothing else was lost.
 #[test]
 fn a_piano_rebuilds_from_its_model_byte_for_byte() {
     let mut seen = 0;
@@ -1923,10 +1994,10 @@ fn a_piano_rebuilds_from_its_model_byte_for_byte() {
     assert!(seen > 0, "no piano library");
 }
 
-/// Every stroke decodes: each block repeats the previous block's last frames
-/// bit-exactly, and the frames the blocks own come to the count the record states.
-/// Both are properties of the codec against the file, not of the file against
-/// itself, so a decoder that drifts fails here rather than producing noise.
+/// Every stroke decodes: each block repeats the previous block's last frames bit for
+/// bit, and the blocks' own frames add up to the count the record states. Both check
+/// the decoder against the file, so a decoder that drifts fails here instead of
+/// producing noise.
 #[test]
 fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
     let mut strokes = 0;
@@ -1942,7 +2013,10 @@ fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
                 stroke.frames() as usize,
                 "{where_}: {stroke:?}"
             );
-            assert_eq!(audio.clipped, 0, "{where_}: {stroke:?} left int16");
+            assert_eq!(
+                audio.clipped, 0,
+                "{where_}: {stroke:?} decoded outside the int16 range"
+            );
             overlap += audio.overlap_checked;
             strokes += 1;
         }
@@ -1951,14 +2025,14 @@ fn every_piano_stroke_decodes_with_its_overlap_and_frame_count_intact() {
     assert!(overlap > 0, "no stroke long enough to repeat a block");
 }
 
-/// The coder is the decoder's inverse: give each stroke back the frames it decodes to
-/// and it lays out the same blocks — the same segmentation, the same width and order,
-/// the same residuals to the bit, and the same clear bits after the last field. Every
-/// stroke of every library is held to it, the ones this crate wrote included.
+/// The coder inverts the decoder: given the frames a stroke decodes to, it lays out the
+/// same blocks, with the same segmentation, width, order, residuals, and clear bits
+/// after the last field. This holds for every stroke of every library, including the
+/// ones this crate wrote.
 ///
-/// A block's attenuation byte is the one value that can come back different. It is a
-/// statistic the vendor's encoder recorded, not a function of the frames it went on
-/// to store, and nothing in the decode reads it.
+/// A block's attenuation byte is the only value that can differ. The vendor's encoder
+/// recorded it as a statistic that does not depend on the stored frames, and the
+/// decoder does not read it.
 #[test]
 fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
     let mut strokes = 0;
@@ -1977,7 +2051,7 @@ fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
                 recoded.recoded(),
                 0,
                 "{where_}: {stroke:?}: {} of {} block(s) came back with different residuals, \
-                 a different width or a different order",
+                 a different width, or a different order",
                 recoded.recoded(),
                 recoded.blocks
             );
@@ -1987,10 +2061,10 @@ fn every_piano_stroke_codes_back_to_the_blocks_it_came_from() {
     assert!(strokes > 0, "no piano stroke");
 }
 
-/// A library coded again from its own audio is the library it came from: the same
-/// size, the same prefix, the same directory records, and the same blocks in the same
-/// places. Only the attenuation the blocks declare can move, so the file this writes
-/// plays what the file it read plays.
+/// Recoding a library from its own audio reproduces the library: the same size, prefix,
+/// and directory records, and the same blocks in the same places. Only the blocks'
+/// declared attenuation can change, so the written file plays the same audio as the
+/// file that was read.
 #[test]
 fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
     let mut seen = 0;
@@ -2015,7 +2089,7 @@ fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
         let head = before.len() - audio;
         assert!(
             after[..head] == before[..head],
-            "{where_}: the recode moved a byte outside the audio"
+            "{where_}: the recode changed a byte outside the audio"
         );
         for (stroke, recoded) in again.library.strokes().iter().zip(&again.strokes) {
             assert_eq!(
@@ -2029,11 +2103,10 @@ fn recoding_a_piano_from_its_own_audio_leaves_the_container_alone() {
     assert!(seen > 0, "no piano library");
 }
 
-/// Coding reaches a fixed point in one pass, whatever it is handed: what a recode
-/// writes is what a recode of that writes, byte for byte, blocks and container. A
-/// stroke states the frames its blocks own, so the search is given the same room the
-/// second time and lands on the same widths — which is what makes a library this
-/// crate writes one that survives a rebuild untouched.
+/// Coding reaches a fixed point in one pass: recoding a recode writes the same bytes,
+/// blocks and container alike. A stroke states the frames its blocks own, so the second
+/// search has the same room and chooses the same widths. That is why a library this
+/// crate writes survives a rebuild unchanged.
 #[test]
 fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
     let mut seen = 0;
@@ -2052,7 +2125,7 @@ fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
             .unwrap_or_else(|| "the length".to_string());
         assert!(
             before == after,
-            "{where_}: coding the recode again moved {at} (in {} bytes, out {})",
+            "{where_}: coding the recode again differs at {at} (in {} bytes, out {})",
             before.len(),
             after.len()
         );
@@ -2061,10 +2134,10 @@ fn coding_a_piano_again_from_the_recode_reaches_the_same_file() {
     assert!(seen > 0, "no piano library");
 }
 
-/// A library built from recordings alone, with no template donating a byte, reproduces
-/// `from-scratch.npno`. The recordings are `full.npno`'s own strokes decoded; the
-/// expected bytes were written by a script outside this crate, so they are an oracle
-/// for the rules rather than a snapshot of this code.
+/// A library built from recordings alone, with no template bytes, reproduces
+/// `from-scratch.npno`. The recordings are `full.npno`'s decoded strokes. A script
+/// outside this crate wrote the expected bytes, so they are an independent oracle for
+/// the rules.
 ///
 /// Confirmed on hardware.
 #[test]
@@ -2121,13 +2194,13 @@ fn a_piano_written_from_rules_alone_is_the_library_that_was_played() {
     assert_eq!(
         again.library.to_body().unwrap(),
         built.to_body().unwrap(),
-        "a rule-written library is not a fixed point of a recode"
+        "recoding the rule-written library changed it"
     );
 }
 
-/// The libraries in reach this crate's own coder produced, named because nothing in a
-/// file says who wrote it: a stereo build, a mono one, a synthetic one, a vendor
-/// library coded again from its own audio, and one written with no template at all.
+/// The corpus libraries this crate's coder wrote, listed by name because nothing in a
+/// file says who wrote it: a stereo build, a mono build, a synthetic library, a vendor
+/// library recoded from its own audio, and one written with no template.
 const OUR_LIBRARIES: [&str; 5] = [
     "full.npno",
     "mono.npno",
@@ -2136,10 +2209,10 @@ const OUR_LIBRARIES: [&str; 5] = [
     "from-scratch.npno",
 ];
 
-/// A library this crate wrote comes back from a recode byte for byte — every block
-/// identical, the attenuation it declares included, and the container closed up the
-/// same way. The one value a recode may move is a statistic another encoder measured,
-/// and these hold none: what the coder writes, the coder writes again.
+/// Recoding a library this crate wrote reproduces it byte for byte: every block is
+/// identical, including its declared attenuation, and the container is laid out the
+/// same way. The only value a recode may change is a statistic another encoder
+/// measured, and these libraries hold none.
 #[test]
 fn a_library_this_crate_wrote_recodes_byte_for_byte() {
     for name in OUR_LIBRARIES {
@@ -2179,10 +2252,10 @@ fn a_library_this_crate_wrote_recodes_byte_for_byte() {
     }
 }
 
-/// Every transform leaves a library the reader takes back: spans tiling the body to
-/// its end, counts summing to the directory, and every covered key naming a root
-/// that still has strokes. The strokes that survive keep their audio byte for byte —
-/// a transform re-lays spans and never re-encodes one.
+/// Every transform leaves a library the reader accepts: spans that tile the body to its
+/// end, counts that sum to the directory, and every covered key naming a root that
+/// still has strokes. The remaining strokes keep their audio byte for byte, because a
+/// transform moves spans and never re-encodes one.
 #[test]
 fn piano_surgery_leaves_a_library_the_reader_accepts() {
     let mut seen = 0;
@@ -2230,7 +2303,7 @@ fn piano_surgery_leaves_a_library_the_reader_accepts() {
                 assert_eq!(before.id(), after.id(), "{where_}: {label}");
                 assert!(
                     before.audio() == after.audio(),
-                    "{where_}: {label}: {before:?} was re-encoded rather than moved"
+                    "{where_}: {label}: {before:?} audio was re-encoded"
                 );
             }
             for (key, &root) in back.key_map().iter().enumerate() {
@@ -2245,9 +2318,9 @@ fn piano_surgery_leaves_a_library_the_reader_accepts() {
     assert!(seen > 0, "no piano library");
 }
 
-/// Dropping the resonance bank is how a large library becomes a small one, so the
-/// strokes that stay must be exactly the ones that were not resonance — and nothing
-/// about them may move except where their audio sits.
+/// Dropping the resonance bank turns a large library into a small one. The remaining
+/// strokes must be exactly the non-resonance strokes, and only their audio offsets may
+/// change.
 #[test]
 fn dropping_a_pianos_resonance_bank_keeps_every_other_stroke_verbatim() {
     let mut seen = 0;
@@ -2267,7 +2340,7 @@ fn dropping_a_pianos_resonance_bank_keeps_every_other_stroke_verbatim() {
             "{where_}"
         );
         for (before, after) in expected.iter().zip(cut.strokes()) {
-            // `+0x00` is the audio offset, which is a placement rather than content.
+            // The record's first four bytes are the audio offset, which may change.
             assert_eq!(&before.record()[4..], &after.record()[4..], "{where_}");
         }
         seen += 1;

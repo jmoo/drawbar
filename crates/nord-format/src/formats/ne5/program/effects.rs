@@ -1,4 +1,4 @@
-//! The effects panel — the four effect slots, the reverb, the rotary and the EQ.
+//! The effects panel: the four effect slots, the reverb, the rotary and the EQ.
 
 use crate::bits::Packed;
 use crate::components::sparse_enum;
@@ -9,7 +9,7 @@ use nord_bits_derive::bitbody;
 
 use std::fmt::{self, Display, Formatter};
 
-// 0x93..=0xa4 — the effects panel.
+// File offsets 0x93..=0xa4.
 
 /// The effects panel: the four effect slots, the reverb, the rotary and the
 /// EQ.
@@ -20,8 +20,8 @@ pub struct EffectsPanel {
     pub fx1: Routing,
     #[bits(2..=5)]
     pub fx1_type: Fx1Type,
-    /// The effect's rate, in hertz. ⚠️ Not a [`Level`]: the panel does not read this on
-    /// its 0..10 scale, which is why it is a [`Rate`].
+    /// The effect's rate, in hertz. ⚠️ Not a [`Level`]: the panel does not show it on the
+    /// 0..10 scale.
     #[bits(6..=12)]
     pub fx1_rate: Rate,
     #[bits(13..=14)]
@@ -34,8 +34,8 @@ pub struct EffectsPanel {
     pub fx4: Routing,
     #[bits(28..=29)]
     pub fx4_feedback: RangedU8<3>,
-    /// Delay time. ⚠️ Runs **backwards**: the panel reads 750 ms at 0 and 20 ms at 127,
-    /// so this is not on the 0..10 scale and not monotonic with it either.
+    /// Delay time. ⚠️ Runs backward: the panel reads 750 ms at 0 and 20 ms at 127, so it
+    /// is not on the 0..10 scale.
     #[bits(30..=36)]
     pub fx4_tempo: Time,
     /// Delay wet/dry.
@@ -46,8 +46,8 @@ pub struct EffectsPanel {
     /// EQ engaged.
     #[bits(45..=45)]
     pub equalizer_on: bool,
-    /// Which part the equalizer applies to. Whether it is engaged at all is the separate
-    /// bit above.
+    /// Which part the equalizer applies to. [`equalizer_on`](Self::equalizer_on) says
+    /// whether it is engaged.
     #[bits(117..=118)]
     pub equalizer_part: EqualizerPart,
     /// The sweepable mid frequency, in hertz.
@@ -55,8 +55,8 @@ pub struct EffectsPanel {
     pub equalizer_freq: Frequency,
     #[bits(54..=60)]
     pub equalizer_treble: EqBand,
-    /// The mid band's boost/cut. ⚠️ Bipolar — its musical zero is the centre of the
-    /// slot, so the 0..10 reading a [`Level`] prints would show a cut as a small boost.
+    /// The mid band's boost or cut. ⚠️ Bipolar: zero is the center of the range, so a
+    /// [`Level`]'s 0..10 reading would show a cut as a small boost.
     #[bits(61..=67)]
     pub equalizer_freq_gain: EqBand,
     #[bits(68..=74)]
@@ -87,8 +87,7 @@ pub struct EffectsPanel {
 
 /// Which part an effect is routed to.
 ///
-/// The stored encoding is not the panel's numbering: off agrees at `0`, but the two
-/// engaged positions are `2` and `3`.
+/// Off is stored as `0`, and the two engaged positions as `2` and `3`.
 ///
 /// | stored | 0 | 1 | 2 | 3 |
 /// |---|---|---|---|---|
@@ -99,11 +98,12 @@ pub struct EffectsPanel {
 pub enum Routing {
     #[default]
     Off = 0,
-    /// Off, as older firmware spelled it. Confirmed on hardware. It presents as off
-    /// (no light, no effect), and a front-panel store preserves it byte-for-byte
-    /// while the current panel's own off-writes are `0`. That it was the pre-2.04
-    /// encoding: Inferred from specimens; not confirmed on hardware. Every carrier
-    /// is a factory program or predates the instrument's 2.04 update.
+    /// Off, as older firmware wrote it.
+    ///
+    /// It behaves as off (no light, no effect), and a front-panel store preserves it,
+    /// while the panel itself writes off as `0`. Confirmed on hardware. That it is the
+    /// encoding before firmware 2.04: Inferred from specimens; not confirmed on hardware.
+    /// Every program holding it is a factory program or predates the 2.04 update.
     Unknown = 1,
     Lower = 2,
     Upper = 3,
@@ -119,8 +119,7 @@ impl Routing {
         }
     }
 
-    /// Whether this is the value with no known meaning. Unlike the sparse enumerations,
-    /// this one does occur in practice.
+    /// Whether this is the value with no known meaning. It occurs in real programs.
     pub fn is_unknown(&self) -> bool {
         matches!(self, Routing::Unknown)
     }
@@ -160,9 +159,9 @@ impl Display for Routing {
 sparse_enum!(
     /// Effect 1's modulation type.
     ///
-    /// Values are the ones **as stored**, which is rotated relative to the panel's own
-    /// ordering — stored 0 is trem 1, not pan 1. Inferred from specimens; not confirmed
-    /// on hardware. Each specimen is named for the panel setting it was stored from.
+    /// Values are as stored, which is rotated from the panel's order: stored 0 is trem 1,
+    /// not pan 1. Inferred from specimens; not confirmed on hardware. Each specimen is
+    /// named for the panel setting it was stored from.
     Fx1Type, 4, {
         0 => Trem1, "trem 1";
         1 => Trem2, "trem 2";
@@ -188,7 +187,7 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// The speaker / amp simulation.
+    /// The speaker or amp simulation.
     Fx3Type, 3, {
         0 => None_, "none";
         1 => Small, "small";
@@ -224,7 +223,6 @@ sparse_enum!(
 mod tests {
     use super::*;
 
-    /// A value with no known meaning reads, writes back the same bits, and says so.
     #[test]
     fn an_unrecognized_value_survives_and_announces_itself() {
         let unknown = Fx1Type::from_bits(9).unwrap();
@@ -235,7 +233,6 @@ mod tests {
         assert_eq!(unknown.to_bits(), 9, "an unknown value must round-trip");
     }
 
-    /// Every named value round-trips, and none of them is reported as unknown.
     #[test]
     fn recovered_values_round_trip() {
         for bits in 0..8u64 {

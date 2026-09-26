@@ -47,10 +47,18 @@ fn fresh_ne5_writers_match_reviewed_minimal_fixtures() {
     )
     .unwrap();
 
-    assert_eq!(written(&program), fixture("ne5/default.ne5p"));
-    assert_eq!(written(&live), fixture("ne5/default.ne5l"));
-    assert_eq!(written(&settings), fixture("ne5/default.ne5s"));
-    assert_eq!(written(&song), fixture("ne5/song.ne5t"));
+    assert_eq!(
+        written(&program),
+        fixture("ne5/default.ne5p"),
+        "default.ne5p"
+    );
+    assert_eq!(written(&live), fixture("ne5/default.ne5l"), "default.ne5l");
+    assert_eq!(
+        written(&settings),
+        fixture("ne5/default.ne5s"),
+        "default.ne5s"
+    );
+    assert_eq!(written(&song), fixture("ne5/song.ne5t"), "song.ne5t");
 }
 
 #[test]
@@ -75,7 +83,7 @@ fn a_minimal_sample_project_matches_the_reviewed_fixture() {
 }
 
 #[test]
-fn every_registered_cbin_writer_matches_both_reviewed_container_generations() {
+fn the_container_writer_matches_every_committed_cbin_fixture() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cbin");
     let mut expected = BTreeSet::new();
     for (tag, body_len, version) in format_table::formats() {
@@ -95,5 +103,8 @@ fn every_registered_cbin_writer_matches_both_reviewed_container_generations() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<BTreeSet<_>>();
-    assert_eq!(committed, expected);
+    assert_eq!(
+        committed, expected,
+        "cbin fixtures on disk against the format table"
+    );
 }

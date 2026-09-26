@@ -3,7 +3,7 @@
 //! A [`Field`] names an inclusive bit range and owns both directions of the conversion,
 //! so a field's position is written once.
 //!
-//! Bits are numbered **MSB-first from byte 0 of the panel**: bit `i` is `byte i / 8`,
+//! Bits are numbered MSB-first from byte 0 of the panel: bit `i` is `byte i / 8`,
 //! mask `1 << (7 - i % 8)`. Bits no field names are left untouched.
 
 use std::convert::Infallible;
@@ -29,9 +29,9 @@ pub trait Packed: Sized {
     /// Which panel control this value is, for a caller building an interface over the
     /// field registry.
     ///
-    /// Defaults to [`ControlKind::Number`] — an integer nothing has been claimed about.
-    /// A type that knows better says so, and a field gets the answer by choosing that
-    /// type rather than by being annotated at its placement.
+    /// Defaults to [`ControlKind::Number`], a plain integer. A type that knows more
+    /// overrides it, and a field takes its control kind from its type, with no
+    /// annotation where the field is placed.
     const CONTROL: ControlKind = ControlKind::Number;
 
     /// Why a bit pattern is not a valid value. [`Infallible`] when every pattern is.
@@ -108,8 +108,10 @@ fn splice(raw: &mut [u8], lo: u32, hi: u32, bits: u64) {
 
 /// One value packed into bits `LO..=HI` of a panel, inclusive, MSB-first from byte 0.
 ///
-/// Never instantiated — it names a position plus a conversion, used as
+/// Never instantiated: it names a position and a conversion, used as
 /// `MyField::get(&raw)` / `MyField::set(&mut raw, v)`.
+///
+/// A field wider than its type cannot be read:
 ///
 /// ```compile_fail
 /// use nord_format::bits::Field;
@@ -253,8 +255,7 @@ mod tests {
         assert_eq!(raw, [0b1010_1010]);
     }
 
-    /// A range crossing a byte boundary is an ordinary field: MSB-first indexing has no
-    /// boundary in it to cross.
+    /// MSB-first indexing makes a range that crosses a byte boundary an ordinary field.
     #[test]
     fn a_field_may_span_bytes() {
         // `equalizer_freq_gain`'s shape: the low three bits of one byte and the high

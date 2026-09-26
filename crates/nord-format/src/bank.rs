@@ -17,8 +17,8 @@ pub trait Location:
 
 /// An item that knows which slot it occupies.
 ///
-/// The slot lives in the container header and nowhere else, so an implementation
-/// reads it back out rather than shadowing it in a field of its own.
+/// The slot lives only in the container header, so an implementation reads it from
+/// there and keeps no copy in a field of its own.
 pub trait Item<T>: Debug
 where
     T: Location,
@@ -28,9 +28,8 @@ where
 
 /// One slot's occupant.
 ///
-/// The name is the bank's, not the item's: no file on disk stores a name — it lives
-/// on the instrument and arrives alongside the bytes — so it is paired with the item
-/// here rather than smuggled into the entity.
+/// The name belongs to the bank, not the item. No file stores a name: it lives on the
+/// instrument and arrives alongside the bytes, so the bank pairs it with the item.
 #[derive(Debug)]
 pub struct Entry<T> {
     pub name: Option<String>,
@@ -62,8 +61,8 @@ where
 
     /// Put `item` in the slot it claims, under `name`, returning whatever it displaced.
     ///
-    /// A bank holds one item per slot, so a caller walking several files has to decide
-    /// what a displacement means; returning the loser is what lets it.
+    /// A bank holds one item per slot. Returning the displaced entry lets a caller that
+    /// walks several files decide what a displacement means.
     pub fn replace(&mut self, name: Option<String>, item: T) -> Option<Entry<T>> {
         self.items
             .insert(item.location().as_u16(), Entry { name, item })
@@ -160,7 +159,6 @@ mod tests {
 
         if let Some(result) = bank.get((4, 1).try_into()?) {
             assert_eq!(result.item.value, 69);
-            // The name came from the bank, not from the item.
             assert_eq!(result.name.as_deref(), Some("foo"));
         } else {
             panic!("Expected to find item at (4,1) but found nothing");

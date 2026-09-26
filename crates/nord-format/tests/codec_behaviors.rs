@@ -173,7 +173,7 @@ fn every_stroke_decodes_with_the_terminators_channel_count() {
 }
 
 #[test]
-fn same_source_generations_decode_within_one_quantiser_step() {
+fn same_source_generations_decode_within_one_quantizer_step() {
     let decode = |specimen: &'static Specimen, layout| {
         let (stroke_at, stroke) = match &specimen.entity {
             Entity::Sample(Sample::V2(sample)) => sample.stroke_streams()[0],
@@ -217,10 +217,10 @@ fn same_source_generations_decode_within_one_quantiser_step() {
             ("v2/v3", &wide, step(shift2, shift3)),
             ("v2/v4", &widest, step(shift2, shift4)),
         ] {
-            // A loop mark clears the resync point by a floor of the generation's own,
-            // so a loop that starts near the resync repeats more of itself at v2 than
-            // it does wide. Only that repeat differs: the shorter stream is the longer
-            // one cut short.
+            // Each generation keeps a loop mark at least its own minimum distance past
+            // the resync point, so a loop that starts near the resync repeats more of
+            // itself at v2 than in the wide generations. Only that repeat differs: the
+            // shorter stream is a prefix of the longer one.
             assert!(
                 marked || narrow.samples.len() == other.samples.len(),
                 "{stem}: {side} lengths {} and {}, and nothing is marked",
@@ -320,11 +320,10 @@ fn non_overridden_zones_match_the_editors_default_layout() {
     assert!(checked > 0, "no sidecar-backed zone layout checked");
 }
 
-/// The file bytes our render of `T-sil.nsmp`'s project does not reproduce, each with
-/// what holds it. The editor's silent render is not digitally silent: its opening
-/// warmup record carries a handful of ±1 fields, which is also what lifts its
-/// statistic B off zero. Everything downstream of that is one of these three bytes
-/// or the checksum over them.
+/// The bytes of `T-sil.nsmp` that our render of its project does not reproduce, each
+/// with what it holds. The editor's silent render is not digitally silent: its opening
+/// warmup record holds a few ±1 fields, which also make its statistic B nonzero. Every
+/// other difference is one of these three bytes or the checksum over them.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const SILENT_DIFFERENCES: &[(usize, &str)] = &[
@@ -371,12 +370,12 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     .unwrap()
     .to_bytes()
     .unwrap();
-    assert_eq!(actual.len(), expected.len());
+    assert_eq!(actual.len(), expected.len(), "T-sil.nsmp length");
 
     for (at, what) in SILENT_DIFFERENCES {
         assert_ne!(
             actual[*at], expected[*at],
-            "{at:#x} no longer differs: {what}"
+            "{at:#x} matches the specimen, so its row is stale: {what}"
         );
     }
     let unreviewed = (0..expected.len())
@@ -386,7 +385,7 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
         .collect::<Vec<_>>();
     assert!(
         unreviewed.is_empty(),
-        "bytes no reviewed row names: {unreviewed:?}"
+        "bytes that differ outside SILENT_DIFFERENCES: {unreviewed:?}"
     );
 
     let loud_fields = |bytes: &[u8]| {
@@ -405,18 +404,18 @@ fn silent_encode_differs_from_the_editors_specimen_only_at_reviewed_bytes() {
     assert_eq!(loud_fields(&actual), 0, "our render of a silent source");
     assert!(
         loud_fields(expected) > 0,
-        "the editor's render of a silent source, which the three body bytes record"
+        "the editor's render of a silent source decodes as digital silence"
     );
 }
 
 /// `A-silence-C4`'s project: `m_start` 1, `m_stop` 4410, `m_startSecondary` 552.128186,
-/// over a WAV of digital silence, under the editor's own default top note.
+/// over a WAV of digital silence, with the editor's default top note.
 const SILENT_FRAMES: usize = 4409;
 const SILENT_SECONDARY_START: f64 = 552.128186 - 1.0;
 
-/// The same project rendered to `.nsmp3` and `.nsmp4`. Both come out byte-identical,
-/// checksum included, so the wide container, section schemas, stroke header and
-/// stream units are all pinned here at once.
+/// The same project rendered to `.nsmp3` and `.nsmp4`. Both match byte for byte,
+/// checksum included, so this pins the wide container, section schemas, stroke header,
+/// and stream units together.
 #[test]
 fn a_wide_silence_reproduces_the_editors_renders_exactly() {
     for (layout, name) in [
@@ -442,8 +441,8 @@ fn a_wide_silence_reproduces_the_editors_renders_exactly() {
     }
 }
 
-/// A wide build states its own chain length, and the section chain is the one the
-/// editor writes down to the schema versions.
+/// A wide build's meta section states the length of the chain before it, and the
+/// section chain matches the editor's down to the schema versions.
 #[test]
 fn a_wide_build_states_the_chain_length_its_meta_section_promises() {
     for (layout, name) in [
@@ -586,8 +585,8 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
     };
 
     let (channels, cell, mono) = walk_named("C-44k-16-mono.nsmp");
-    assert_eq!(channels, 1);
-    assert_eq!(cell, Some(24));
+    assert_eq!(channels, 1, "C-44k-16-mono.nsmp");
+    assert_eq!(cell, Some(24), "C-44k-16-mono.nsmp");
     for name in ["C-44k-16-stL.nsmp", "C-44k-16-stLR.nsmp"] {
         let (channels, cell, stereo) = walk_named(name);
         assert_eq!(channels, 2, "{name}");
@@ -605,9 +604,13 @@ fn a_stereo_stroke_carries_its_mono_twins_landmarks_doubled() {
         nsmp::encode::Plan::new(nsmp::codec::Layout::V2, 4_409, 1, MONO_SECONDARY_START).unwrap();
     let both =
         nsmp::encode::Plan::new(nsmp::codec::Layout::V2, 4_409, 2, MONO_SECONDARY_START).unwrap();
-    assert_eq!(both.fields, 2 * mono.fields);
-    assert_eq!(both.fields, walk_named("C-44k-16-stL.nsmp").2[0]);
-    assert_eq!(both.resync_at, 2 * mono.resync_at);
+    assert_eq!(both.fields, 2 * mono.fields, "planned fields");
+    assert_eq!(
+        both.fields,
+        walk_named("C-44k-16-stL.nsmp").2[0],
+        "planned fields against C-44k-16-stL.nsmp"
+    );
+    assert_eq!(both.resync_at, 2 * mono.resync_at, "planned resync field");
 }
 
 #[test]

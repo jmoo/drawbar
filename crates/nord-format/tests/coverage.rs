@@ -1,5 +1,7 @@
 #![cfg(feature = "corpus")]
-//! Check that instrument-written bits have answers, and keep known blind debt small.
+//! Bit coverage of every registry body. Flipping a bit that instrument specimens vary
+//! must change a decoded field, and flipping a claimed bit must change the field that
+//! claims it and no other. `KNOWN_BLIND` and `KNOWN_REJECTIONS` list reviewed exceptions.
 
 #[path = "support/registry.rs"]
 mod registry;
@@ -94,7 +96,8 @@ fn claims(fields: &'static [LayoutField], base: u32, prefix: &str, out: &mut [Bi
     }
 }
 
-/// Rejection is tracked separately: it is not an answer from the claimed field.
+/// Flips each body bit in turn and records which fields change. A flip the reader
+/// refuses is recorded as a rejection, which is not an answer.
 fn answers(bytes: &[u8], entity: &Entity, facts: &mut [Bit]) {
     let baseline = registry::field_values(entity)
         .expect("a body with a registry")
@@ -170,7 +173,7 @@ fn measure() -> BTreeMap<String, Body> {
         assert_eq!(
             entry.facts.len(),
             body.len() * 8,
-            "one body type, two lengths"
+            "specimens of one body type differ in length"
         );
         if pick.instrument {
             for (at, byte) in body.iter().enumerate() {
@@ -192,9 +195,9 @@ fn measure() -> BTreeMap<String, Body> {
     bodies
 }
 
-// Body-relative bit ranges that some specimen varies, no reader claims, and no
-// sampled flip moves. Each is reviewed debt: a bit the corpus proves is live and
-// this crate cannot yet name.
+// Body-relative bit ranges that instrument specimens vary and whose sampled flips
+// change no decoded field. Each is reviewed debt: the corpus shows the bit is used,
+// and this crate cannot name it yet.
 const KNOWN_BLIND: &[(&str, &[(usize, usize)])] = &[
     (
         "ne5-Program",
@@ -341,7 +344,8 @@ const KNOWN_BLIND: &[(&str, &[(usize, usize)])] = &[
     ),
 ];
 
-// Sparse values can make a one-bit trial invalid; these are explicit debt, not answers.
+// Bits the reader refuses on every one-bit flip, because their field's legal values are
+// sparse. Reviewed debt, like `KNOWN_BLIND`.
 const KNOWN_REJECTIONS: &[(&str, &[usize])] = &[("ne5-Program", &[16, 19, 22, 26])];
 
 fn known_blind(key: &str) -> Option<&'static [(usize, usize)]> {
@@ -391,13 +395,11 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
     for (key, body) in &bodies {
         if body.weighed == 0 {
             failures.push(format!(
-                "{key}: no instrument specimen supplied variation evidence"
+                "{key}: no instrument specimen to measure variation on"
             ));
         }
         if body.flipped == 0 {
-            failures.push(format!(
-                "{key}: no sampled specimen supplied mutation answers"
-            ));
+            failures.push(format!("{key}: no sampled specimen to flip bits in"));
         }
         let blind = body
             .facts
@@ -407,20 +409,20 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
             .map(|(bit, _)| bit)
             .collect::<BTreeSet<_>>();
         match known_blind(key) {
-            None => failures.push(format!("{key}: no reviewed blind-bit contract")),
+            None => failures.push(format!("{key}: missing from KNOWN_BLIND")),
             Some(reviewed) => {
                 let reviewed = expand(reviewed);
                 let new = runs(blind.difference(&reviewed).copied());
                 if !new.is_empty() {
                     failures.push(format!(
-                        "{key}: bits vary that no reader claims and no flip moves: [{}]",
+                        "{key}: bits vary across specimens and no flip changes a field: [{}]",
                         show(&new)
                     ));
                 }
                 let answered = runs(reviewed.difference(&blind).copied());
                 if !answered.is_empty() {
                     failures.push(format!(
-                        "{key}: blind-bit debt is paid and its entries are stale: [{}]",
+                        "{key}: KNOWN_BLIND lists bits that are not blind: [{}]",
                         show(&answered)
                     ));
                 }
@@ -439,7 +441,7 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
             .collect::<Vec<_>>();
         if !new.is_empty() {
             failures.push(format!(
-                "{key}: flipping these bits only ever makes the file unreadable: {new:?}"
+                "{key}: every flip of these bits makes the file unreadable: {new:?}"
             ));
         }
         let answered = reviewed_refusals
@@ -447,7 +449,7 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
             .collect::<Vec<_>>();
         if !answered.is_empty() {
             failures.push(format!(
-                "{key}: refusal-only debt is paid and its entries are stale: {answered:?}"
+                "{key}: KNOWN_REJECTIONS lists bits the reader does not always refuse: {answered:?}"
             ));
         }
         let missing = body
@@ -459,7 +461,7 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
             .collect::<Vec<_>>();
         if !missing.is_empty() {
             failures.push(format!(
-                "{key}: claimed bits without readers: {}",
+                "{key}: claimed bits whose field is not in the registry: {}",
                 missing.join(", ")
             ));
         }
@@ -486,14 +488,14 @@ fn blind_and_claimed_bits_match_the_reviewed_contracts() {
             .collect::<Vec<_>>();
         if !unanswered.is_empty() {
             failures.push(format!(
-                "{key}: claimed bits without their owner's answer: {}",
+                "{key}: claimed bits whose flip does not change their own field alone: {}",
                 unanswered.join(", ")
             ));
         }
     }
     for (key, _) in KNOWN_BLIND {
         if !bodies.contains_key(*key) {
-            failures.push(format!("{key}: blind-bit contract has no measured body"));
+            failures.push(format!("{key}: KNOWN_BLIND entry has no measured body"));
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));

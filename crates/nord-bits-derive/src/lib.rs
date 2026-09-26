@@ -1,4 +1,4 @@
-//! `#[bitbody]` — a bit-mapped structure declared once, composable recursively.
+//! `#[bitbody]`: a bit-mapped structure, declared once and composable by nesting.
 //!
 //! > This is an unofficial, community project: **not affiliated with, endorsed
 //! > by, or supported by Clavia DMI AB**. "Nord" is Clavia's trademark, used
@@ -24,18 +24,17 @@
 //!
 //! Two placements, one bit space:
 //!
-//! - `#[bits(LO..=HI)]` — a leaf value at an inclusive bit range, MSB-first from
+//! - `#[bits(LO..=HI)]`: a leaf value at an inclusive bit range, MSB-first from
 //!   byte 0, as `nord-format`'s `bits` module describes. The type carries its own
 //!   range (`Packed`), so a value wider than its slot fails to compile. A
 //!   multi-byte integer leaf is big-endian by construction.
-//! - `#[at(LO..HI)]` — a nested `#[bitbody]` at a half-open byte range, placed
-//!   via the `TryFrom<[u8; N]>` / `From<&T> -> [u8; N]` pair every bitbody
-//!   generates. Nesting is how a large format keeps its real logical layout —
-//!   the Electro 5 program *is* five panels — without a second macro for the
-//!   inner level.
+//! - `#[at(LO..HI)]`: a nested `#[bitbody]` at a half-open byte range, placed
+//!   through the `TryFrom<[u8; N]>` / `From<&T> -> [u8; N]` pair every bitbody
+//!   generates. Nesting lets a large format keep its logical layout (the Electro 5
+//!   program is five panels) without a second macro for the inner level.
 //!
-//! Bits no field claims are preserved verbatim through a re-encode and reported
-//! in the generated doc; ranges may not overlap, whichever kind claimed them.
+//! Bits no field claims are preserved through a re-encode and reported in the
+//! generated doc. Ranges may not overlap, whichever kind of placement claims them.
 //!
 //! The struct's doc carries a bit/byte map: one markdown row per field and per
 //! unclaimed run, in offset order, so the rows tile the body. A nested body is
@@ -43,19 +42,19 @@
 //!
 //! Generates: the `[u8; LEN]` conversions both ways, the `cbin::Body` impl, a
 //! `Debug` over the decoded fields, a `layout::BodyLayout` impl publishing every
-//! placement as data (nested bodies chain to their own layouts), and — for `pub`
-//! fields — the registry: `fields()`, `set_field()`, `field_values()`,
+//! placement as data (nested bodies chain to their own layouts), and, for `pub`
+//! fields, the registry: `fields()`, `set_field()`, `field_values()`,
 //! `field_specs()`. Private fields decode and encode but stay unregistered.
 //!
 //! **Paths.** A nested field registers its children under its own name:
 //! `center_panel.transpose`. A leaf registers under its own name alone.
 //!
-//! **Names carry two relations the type cannot.** A registered leaf named `x_wheel`,
-//! `x_aftertouch` or `x_ctrl_pedal` beside a registered `x` is that parameter's morph
-//! slot, and one named `…_N` is drawbar N of a register. Both are applied to the field's
-//! `ControlKind`, which honours whichever it has a use for and ignores the other — so a
-//! field named like one of these but typed as something else is unaffected, and a morph
-//! slot with no parameter beside it binds to nothing rather than to a guess.
+//! **Names.** A name carries two relations the type cannot. A registered leaf named
+//! `x_wheel`, `x_aftertouch` or `x_ctrl_pedal` beside a registered `x` is that
+//! parameter's morph slot, and one named `…_N` is drawbar N of a register. Both are
+//! applied to the field's `ControlKind`, which honors whichever it has a use for and
+//! ignores the other. A field named like one of these but typed as something else is
+//! unaffected, and a morph slot with no parameter beside it binds to nothing.
 //!
 //! Where a name says the wrong thing, the declaration says the right one:
 //! `#[morphs(x)]` binds a slot to the registered leaf `x` whatever the slot is called,
@@ -148,7 +147,7 @@ fn literal(expr: Option<&Expr>, at: &ExprRange, what: &str) -> syn::Result<u32> 
     }
 }
 
-/// Every byte the range touches, as `(byte, first_bit, last_bit)` — the bit
+/// Every byte the range touches, as `(byte, first_bit, last_bit)`, with bit
 /// numbers MSB-first within that byte, so they count down.
 fn bytes_touched(lo: u32, hi: u32) -> Vec<(u32, u32, u32)> {
     let mut parts = Vec::new();
@@ -162,7 +161,7 @@ fn bytes_touched(lo: u32, hi: u32) -> Vec<(u32, u32, u32)> {
     parts
 }
 
-/// `Bits 24..=27 (byte 0x03, bits 7..4).` — the range as a hex dump reads it.
+/// The range as a hex dump reads it: `Bits 24..=27 (byte 0x03, bits 7..4).`
 fn breakdown(lo: u32, hi: u32) -> String {
     let parts: Vec<String> = bytes_touched(lo, hi)
         .into_iter()
@@ -250,7 +249,7 @@ const MORPH_SUFFIXES: [&str; 3] = ["_wheel", "_aftertouch", "_ctrl_pedal"];
 
 /// The parameter a slot named `x_wheel` morphs, when the body registers an `x`.
 ///
-/// A slot whose parameter is not beside it binds to nothing rather than to a guess.
+/// A slot whose parameter is not beside it binds to nothing.
 fn morphed_parent<'a>(field: &str, registered: &[&'a str]) -> Option<&'a str> {
     let stem = MORPH_SUFFIXES
         .iter()
@@ -258,10 +257,10 @@ fn morphed_parent<'a>(field: &str, registered: &[&'a str]) -> Option<&'a str> {
     registered.iter().copied().find(|&name| name == stem)
 }
 
-/// The drawbar position a name ending in `_N` declares — 1 is the leftmost bar.
+/// The drawbar position a name ending in `_N` declares; 1 is the leftmost bar.
 ///
-/// Applied to every leaf and honoured only by a drawbar, so a field that ends in a digit
-/// for some other reason keeps whatever its type said.
+/// Applied to every leaf and honored only by a drawbar, so a field that ends in a digit
+/// for some other reason keeps its type's kind.
 fn trailing_ordinal(field: &str) -> Option<u8> {
     let stem = field.trim_end_matches(|c: char| c.is_ascii_digit());
     if !stem.ends_with('_') {
@@ -350,8 +349,8 @@ struct Placement {
 const ONE_PLACEMENT: &str =
     "one placement per field: `#[bits]` for a leaf or `#[at]` for a nested body";
 
-/// The one `#[name]` attribute on `field`; a second is refused rather than dropped
-/// unread, since the expansion reads the first alone.
+/// The `#[name]` attribute on `field`, if any. A second is refused, since the expansion
+/// would read only the first.
 fn sole_attr<'a>(field: &'a syn::Field, name: &str) -> syn::Result<Option<&'a syn::Attribute>> {
     let mut found = field.attrs.iter().filter(|attr| attr.path().is_ident(name));
     let first = found.next();
@@ -582,9 +581,8 @@ fn leaf_field(
             value: ::std::format!("{:?}", &self.#ident),
         });
     });
-    // What the type cannot know, taken from the declaration or else the field's own
-    // name, and applied to the kinds that have a use for it — every other kind ignores
-    // the refinement.
+    // What the type cannot know, taken from the declaration or else the field's name.
+    // Kinds with no use for a refinement ignore it.
     let mut control = quote! { <#ty as crate::bits::Packed>::CONTROL };
     let parent = refinement
         .morphs
@@ -620,10 +618,9 @@ fn generate_fields(
     span_bits: u32,
     bytes: usize,
 ) -> syn::Result<GeneratedFields> {
-    // Every registered leaf's name, for the one relation a field's own declaration cannot
-    // state: which parameter a morph slot belongs to. A private field is not in the
-    // registry for a caller to resolve, and a nested body registers a path prefix rather
-    // than a value, so neither is a parameter anything can morph.
+    // Every registered leaf's name, to resolve which parameter a morph slot belongs to.
+    // A private field is not in the registry, and a nested body registers a path prefix
+    // instead of a value, so neither is a parameter anything can morph.
     let registered: Vec<String> = named
         .named
         .iter()
@@ -677,7 +674,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let len: LitInt = syn::parse2(attr.clone()).map_err(|_| {
         syn::Error::new(
             attr.span(),
-            "expected the body's length in bytes — e.g. `#[bitbody(121)]`",
+            "expected the body's length in bytes, e.g. `#[bitbody(121)]`",
         )
     })?;
     let bytes: usize = len.base10_parse()?;
@@ -807,7 +804,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
 
         impl #name {
             /// Every registered field's current value, under its full path, in
-            /// declaration order — nested bodies inline where their field sits.
+            /// declaration order, with nested bodies inline where their field sits.
             /// Describes the same fields as [`Self::field_specs`], so callers may
             /// zip the two positionally.
             pub fn field_values(&self) -> ::std::vec::Vec<crate::fields::FieldValue> {
@@ -916,7 +913,7 @@ mod tests {
         );
     }
 
-    /// The binding is by name, and only to a parameter the body actually registers.
+    /// The binding is by name, and only to a parameter the body registers.
     #[test]
     fn a_morph_slot_binds_to_the_parameter_beside_it() {
         let registered = ["organ_a_volume", "drawbar_1", "delay_tempo"];
@@ -952,8 +949,8 @@ mod tests {
         syn::Field::parse_named.parse2(tokens).unwrap()
     }
 
-    /// A declared refinement is checked against the body it is in, and a mistake is a
-    /// compile error rather than a binding that never resolves.
+    /// A declared refinement is checked against its body, so a mistake is a compile
+    /// error instead of a binding that never resolves.
     #[test]
     fn a_declared_refinement_names_a_registered_leaf() {
         let registered = ["cc_value", "cc_number"];
@@ -1043,8 +1040,6 @@ mod tests {
         assert!(refused(quote!(2), nested).contains("bit 23 is past the end of a 2-byte body"));
     }
 
-    /// A second placement is refused rather than silently dropped: the field would
-    /// otherwise be decoded from the first range alone.
     #[test]
     fn a_field_takes_exactly_one_placement() {
         let both = quote! {

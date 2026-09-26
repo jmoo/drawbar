@@ -1,9 +1,9 @@
 //! The section chains that make up a sample instrument's body.
 //!
-//! Two framings, one shape. The v2 body is an `NWS` chain of 9-byte-header
-//! [`Section`]s; the v3/v4 body is an `NSMP` chain of 12-byte-header
-//! [`Section4`]s. Both are flat tag/version/length runs that must land exactly
-//! on the end of the body.
+//! The v2 body is an `NWS` chain of [`Section`]s with 9-byte headers; the v3/v4 body
+//! is an `NSMP` chain of [`Section4`]s with 12-byte headers. Both are flat runs of
+//! tagged, versioned, length-prefixed sections that must end exactly at the end of
+//! the body.
 
 use crate::error::{try_vec, ParseError};
 
@@ -21,11 +21,10 @@ pub const STY: &[u8; 3] = b"sty";
 
 /// One section of a sample instrument body.
 ///
-/// ⚠️ `len` on the wire is **big-endian**, inside a CBIN header that is little-endian
-/// throughout. Reading it the same way as the header's `u32`s yields a nonsense length
-/// in the hundreds of millions.
+/// ⚠️ The length on the wire is big-endian, inside a CBIN file whose header is
+/// little-endian. Read little-endian, it becomes a length in the hundreds of millions.
 ///
-/// The length counts the payload only — the 9 header bytes are not included.
+/// The length counts the payload only, not the 9 header bytes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Section {
     pub tag: [u8; 3],
@@ -60,9 +59,9 @@ impl Section {
     }
 }
 
-/// A chain whose first section is not the container that opens it — the leading
-/// sections are missing, or the bytes are not a chain at all. Raised before the first
-/// declared length is trusted; on a corrupt opener that length is arbitrary.
+/// A chain whose first section is not its container: the leading sections are missing,
+/// or the bytes are not a chain. Raised before the first declared length is trusted,
+/// since a corrupt opener's length is arbitrary.
 fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
     ParseError::AssertFail(format!(
         "the body does not open with the {} container section; found {}",
@@ -73,7 +72,7 @@ fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
 
 /// A header whose tag is not NUL-padded. [`Section`] models no field there and
 /// [`Section::write_to`] writes 0, so decoding one would drop the byte and
-/// write the section back different. Raised with [`wrong_opener`], before the
+/// write the section back changed. Raised with [`wrong_opener`], before the
 /// declared length is trusted.
 fn unpadded_tag(tag: &[u8], at: u64, found: u8) -> ParseError {
     ParseError::AssertFail(format!(
@@ -91,10 +90,9 @@ fn missing_opener(expected: &[u8]) -> ParseError {
 
 /// Walks the chain from the reader's position to its end, `remaining` bytes away.
 ///
-/// The chain must open with [`CONTAINER`] and land exactly on the end of the body. Both
-/// are strong integrity checks — a wrong length anywhere puts every later section at the
-/// wrong offset — so a short or overrunning walk is an error rather than a truncated
-/// result.
+/// The chain must open with [`CONTAINER`] and end exactly at the end of the body. A
+/// wrong length anywhere shifts every later section, so a short or overrunning walk is
+/// an error.
 pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Section>, ParseError> {
     let mut sections = Vec::new();
     let mut pos: u64 = 0;
@@ -125,17 +123,17 @@ pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Sect
     }
 }
 
-/// Bytes of a v3/v4 section header: 4-byte tag, `u32` version, `u32` length —
-/// the u32s big-endian like the v2 chain's length.
+/// Bytes of a v3/v4 section header: 4-byte tag, `u32` version, `u32` length, both
+/// big-endian like the v2 chain's length.
 pub const HEADER4_LEN: usize = 12;
 
-/// Opens a v3/v4 body. Its payload is 4 bytes — `0002000c` on every v3
-/// specimen, `00020005` on every v4 — constant per generation and unrelated to
-/// the stroke count. Meaning open; preserved verbatim.
+/// Opens a v3/v4 body. Its 4-byte payload is `0002000c` on every v3 specimen and
+/// `00020005` on every v4 one, whatever the stroke count. Its meaning is unknown,
+/// and it is preserved as read.
 pub const CONTAINER4: &[u8; 4] = b"NSMP";
 
-/// ⚠️ Three-letter tags are NUL-padded on the *left* in this chain (`\0hdr`),
-/// the opposite of the CBIN header's own three-letter tags (`nsp\0`).
+/// ⚠️ Three-letter tags are NUL-padded on the left in this chain (`\0hdr`),
+/// unlike the CBIN header's three-letter tags (`nsp\0`).
 pub const HDR4: &[u8; 4] = b"\0hdr";
 pub const CAT4: &[u8; 4] = b"\0cat";
 pub const MAP4: &[u8; 4] = b"\0map";
@@ -146,14 +144,14 @@ pub const META4: &[u8; 4] = b"meta";
 
 /// One section of a v3/v4 sample instrument body.
 ///
-/// The `4` is the tag width. Same walk rules as [`Section`]: the length counts
-/// the payload only, and the chain must land exactly on the end of the body.
+/// The `4` is the tag width. The walk rules match [`Section`]'s: the length counts
+/// the payload only, and the chain must end exactly at the end of the body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Section4 {
     pub tag: [u8; 4],
     /// Schema version of this section alone; sections revise independently.
-    /// The `map` version — 12/14 on v3 specimens, 21 on v4 — is what selects a
-    /// zone-record layout, not the file's content version.
+    /// The `map` version (12 or 14 on v3 specimens, 21 on v4) selects the
+    /// zone-record layout; the file's content version does not.
     pub version: u32,
     pub payload: Vec<u8>,
 }
@@ -187,8 +185,8 @@ impl Section4 {
     }
 }
 
-/// Walks a v3/v4 chain from the reader's position to its end, under the same
-/// open-with-[`CONTAINER4`] and land-exactly rules as [`read_chain`].
+/// Walks a v3/v4 chain from the reader's position to its end. As in [`read_chain`],
+/// the chain must open with [`CONTAINER4`] and end exactly at the end of the body.
 pub fn read_chain4(
     r: &mut impl std::io::Read,
     remaining: u64,
@@ -289,7 +287,8 @@ fn wire_len(len: usize) -> Result<u32, ParseError> {
 
 /// Finds the single v3/v4 section with `tag`.
 ///
-/// ⚠️ The same repeat trap as [`find`]: `stk` repeats, one per stroke.
+/// ⚠️ As with [`find`], `stk` repeats, once per stroke, and a lookup returns only the
+/// first.
 pub fn find4<'a>(sections: &'a [Section4], tag: &[u8; 4]) -> Option<&'a Section4> {
     sections.iter().find(|s| s.is(tag))
 }
@@ -310,9 +309,9 @@ impl std::fmt::Debug for Section4 {
 
 /// Finds the single section with `tag`.
 ///
-/// ⚠️ Only for tags that appear at most once. `stk` repeats — one per zone — so it must
-/// be collected in order instead; a lookup by tag silently keeps one stroke and drops the
-/// rest, and every single-zone file hides that completely.
+/// ⚠️ Only for tags that appear at most once. `stk` repeats, once per zone, and must be
+/// collected in order: a lookup returns the first stroke and drops the rest, which no
+/// single-zone file reveals.
 pub fn find<'a>(sections: &'a [Section], tag: &[u8; 3]) -> Option<&'a Section> {
     sections.iter().find(|s| s.is(tag))
 }
@@ -444,8 +443,6 @@ mod tests {
         );
     }
 
-    /// The byte behind the tag is modelled by no field, so a section carrying
-    /// one cannot be written back as it came.
     #[test]
     fn a_tag_not_padded_with_a_nul_is_refused() {
         let mut hdr = section(HDR, 1, &[7; 4]);

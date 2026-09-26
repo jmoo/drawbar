@@ -1,9 +1,10 @@
-//! `(tag, corpus body length, a version the reader accepts)` for every format
-//! this crate reads as a stub or a globals-decode. The lengths restate the
-//! modules' own constants so a swapped pair of tags cannot pass unnoticed.
+//! `(tag, corpus body length, a version the reader accepts)` for every CBIN
+//! format except the Electro 5 formats, `nsmp`, and `npno`. The lengths are the
+//! format modules' constants, so a swapped pair of tags fails the corpus check
+//! of body lengths.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy.
+//! ⚠️ Not a test target. Each test target that includes this module compiles its
+//! own copy.
 #![allow(dead_code)]
 
 use nord_format::formats::{
