@@ -953,7 +953,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 Some files in the "tests/data" subdirectory of this repository are under other
-licenses; see files named LICENSE.*.txt for details."#,
+licences; see files named LICENSE.*.txt for details."#,
             },
         ],
     },
