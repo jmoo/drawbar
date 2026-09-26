@@ -1677,8 +1677,6 @@ mod tests {
         assert_eq!(loud.hint, "no instrument has a folder for this note");
     }
 
-    /// Load on instrument stands on the document's link: offered for a program the
-    /// attached instrument holds, edited here or not, and for nothing else.
     #[test]
     fn a_document_offers_to_load_only_the_slot_it_is_linked_to() {
         use crate::device::Device;

@@ -962,8 +962,6 @@ pub fn read_only(class: ObjectClass) -> bool {
     matches!(class, ObjectClass::Unknown(_))
 }
 
-/// Whether the panel can be asked to play a slot: an instrument is attached, the class is
-/// one this app can name, and the last scan found something there.
 pub fn loadable(state: &DeviceState, class: ObjectClass, at: Location) -> bool {
     state.connected() && !read_only(class) && state.slot(class, at).flatten().is_some()
 }

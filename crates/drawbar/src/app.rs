@@ -693,7 +693,6 @@ mod tests {
         assert_eq!(said(&app), 2);
     }
 
-    /// The header's Load on instrument asks for what the instrument tree's item does.
     #[test]
     fn a_linked_documents_load_on_instrument_is_the_trees_act() {
         let ctx = egui::Context::default();
