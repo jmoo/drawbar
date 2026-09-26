@@ -14,10 +14,11 @@ use eframe::egui;
 
 use crate::app::{accent, bold, caption, good, unlit, warn};
 use crate::browser::Act;
+use crate::device::{NO_USB, NO_USB_BRIEF};
 use crate::icon::{sized, Glyph};
 use crate::panel::caps;
 use crate::sheet::{self, GAP};
-use crate::shell::GUIDE;
+use crate::shell::{BROWSERS, GUIDE};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -189,12 +190,20 @@ const RISK_LEAD: &str = "Keep your own backups.";
 const RISK_REST: &str =
     " This is alpha — treat what is in drawbar as a working copy, not an archive.";
 
-/// The three ways in, in the order the sheet offers them.
-const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Guide];
+/// The three ways in, in the order the sheet offers them. A browser that cannot
+/// connect is shown the browsers that can.
+fn offered(usb: bool) -> [Start; 3] {
+    let first = match usb {
+        true => Start::Connect,
+        false => Start::Browsers,
+    };
+    [first, Start::Open, Start::Guide]
+}
 
 #[derive(Clone, Copy)]
 enum Start {
     Connect,
+    Browsers,
     Open,
     Guide,
 }
@@ -220,6 +229,13 @@ impl Start {
                 hint: "Electro 5 over USB is the tested path",
                 lead: true,
             },
+            Start::Browsers => Card {
+                glyph: Glyph::Usb,
+                label: NO_USB_BRIEF,
+                sub: NO_USB,
+                hint: "",
+                lead: true,
+            },
             Start::Open => Card {
                 glyph: Glyph::FolderOpen,
                 label: "Open files…",
@@ -239,14 +255,14 @@ impl Start {
 }
 
 /// The welcome sheet. `Some` once the reader has asked for something.
-pub fn welcome(ctx: &egui::Context) -> Option<Wanted> {
+pub fn welcome(ctx: &egui::Context, usb: bool) -> Option<Wanted> {
     egui::Modal::new(egui::Id::new("welcome"))
         .frame(sheet::frame(&ctx.style().visuals))
-        .show(ctx, welcome_body)
+        .show(ctx, |ui| welcome_body(ui, usb))
         .inner
 }
 
-fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
+fn welcome_body(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
     ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
     let mut wanted = None;
     egui::ScrollArea::vertical()
@@ -263,7 +279,7 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
                 ui.add_space(GAP * 2.0);
                 legend(ui);
                 sheet::heading(ui, "Start here", None);
-                wanted = starts(ui);
+                wanted = starts(ui, usb);
             });
         });
     sheet::foot(
@@ -484,9 +500,10 @@ const CARD_TITLE: f32 = 12.0;
 const CARD_SUB: f32 = 10.5;
 
 /// The cards, as many across as the sheet has room for.
-fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
+fn starts(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
+    let offered = offered(usb);
     let full = ui.available_width();
-    let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, STARTS.len());
+    let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, offered.len());
     let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
     // Every card stands as tall as the tallest one's content needs, so a card without a
     // sub-line matches its neighbours in any row. A change of need asks for the frame again.
@@ -494,7 +511,7 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
     let height: f32 = ui.data(|data| data.get_temp(told)).unwrap_or(0.0);
     let mut tallest: f32 = 0.0;
     let mut wanted = None;
-    for row in STARTS.chunks(across) {
+    for row in offered.chunks(across) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
             for start in row {
@@ -505,6 +522,7 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
                 }
                 match start {
                     Start::Connect => wanted = Some(Wanted::Act(Act::Connect)),
+                    Start::Browsers => ui.ctx().open_url(egui::OpenUrl::new_tab(BROWSERS)),
                     Start::Open => wanted = Some(Wanted::Act(Act::OpenFiles)),
                     Start::Guide => ui.ctx().open_url(egui::OpenUrl::new_tab(GUIDE)),
                 }
@@ -1208,10 +1226,10 @@ mod tests {
         let size = crate::shell::LEAST;
         // Twice: the first frame is what the second lays itself out against.
         let _ = drawn_at(&ctx, size, |ctx| {
-            welcome(ctx);
+            welcome(ctx, true);
         });
         let said = drawn_at(&ctx, size, |ctx| {
-            welcome(ctx);
+            welcome(ctx, true);
         });
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
@@ -1249,6 +1267,54 @@ mod tests {
         assert!(box_of(&said, "Breaking").is_some(), "{said:?}");
     }
 
+    #[test]
+    fn a_browser_without_usb_is_offered_the_browsers_that_can_connect() {
+        let ctx = headless();
+        let size = egui::vec2(1200.0, 900.0);
+        // Twice: the first frame is what the second lays itself out against.
+        let _ = drawn_at(&ctx, size, |ctx| {
+            welcome(ctx, false);
+        });
+        let said = drawn_at(&ctx, size, |ctx| {
+            welcome(ctx, false);
+        });
+        assert!(
+            box_of(&said, "Connect an instrument…").is_none(),
+            "{said:?}"
+        );
+        let card = ctx
+            .read_response(card_id(NO_USB_BRIEF))
+            .unwrap_or_else(|| panic!("no {NO_USB_BRIEF} card: {said:?}"))
+            .rect;
+
+        let at = card.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events: vec![egui::Event::PointerMoved(at), press(true), press(false)],
+            ..Default::default()
+        };
+        let mut wanted = None;
+        let output = ctx.run(input, |ctx| wanted = welcome(ctx, false));
+
+        assert!(wanted.is_none(), "the card asked the app for something");
+        let opened: Vec<_> = output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [BROWSERS]);
+    }
+
     /// How tall the start cards stand on a screen `width` wide, once they have settled.
     fn cards_tall(ctx: &egui::Context, width: f32) -> f32 {
         let mut tall = 0.0;
@@ -1256,7 +1322,7 @@ mod tests {
             let _ = drawn_at(ctx, egui::vec2(width, 900.0), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let top = ui.cursor().top();
-                    starts(ui);
+                    starts(ui, true);
                     tall = ui.cursor().top() - top;
                 });
             });
@@ -1286,10 +1352,10 @@ mod tests {
             let size = egui::vec2(width, least.y);
             for _ in 0..3 {
                 let _ = drawn_at(&ctx, size, |ctx| {
-                    welcome(ctx);
+                    welcome(ctx, true);
                 });
             }
-            let rects: Vec<(&str, egui::Rect)> = STARTS
+            let rects: Vec<(&str, egui::Rect)> = offered(true)
                 .iter()
                 .map(|start| {
                     let label = start.card().label;
