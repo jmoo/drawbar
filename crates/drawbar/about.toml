@@ -1,6 +1,6 @@
-# cargo-about's configuration for `scripts/licences.bash`.
+# cargo-about's configuration for `scripts/licenses.bash`.
 
-# An `OR` expression resolves to the first licence here that it offers: those a binary
+# An `OR` expression resolves to the first license here that it offers: those a binary
 # need not credit, then those it must.
 accepted = [
   "0BSD",
@@ -56,7 +56,7 @@ files = [
 ]
 license = "Apache-2.0 AND MIT"
 
-# The windows crates name their licence files in lower case, which cargo-about does not find.
+# The windows crates name their license files in lower case, which cargo-about does not find.
 [windows.clarify]
 files = [
   { checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383", license = "MIT", path = "license-mit" },

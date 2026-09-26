@@ -1,10 +1,9 @@
-//! The Nord Stage 4 effects chain: one section's modulation, amp sim / EQ,
-//! compressor, delay and reverb, 52 bytes of it.
+//! The Nord Stage 4 effects chain: one section's modulation, amp sim and EQ,
+//! compressor, delay and reverb, in 52 bytes.
 //!
-//! Every section carries its own. A program holds six — the organ's, which its two
-//! layers share, plus one per piano and synth layer — and the preset banks carry
-//! theirs, so this one declaration is placed twelve times across the Stage 4
-//! formats.
+//! Every section carries its own. A program holds six (one for the organ, which its two
+//! layers share, and one per piano and synth layer), and the presets hold theirs, so
+//! this declaration is placed twelve times across the Stage 4 formats.
 //!
 //! Values are raw, as everywhere in [the Stage 4 modules](super).
 

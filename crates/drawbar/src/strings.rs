@@ -1,13 +1,12 @@
-//! What things are called, in the instrument's own words.
+//! Field and value names, in the instrument's own words.
 //!
-//! One table maps a registry path to the section it belongs in and the label the panel
-//! prints beside it; a second maps a stored value's spelling to the words a player would
-//! use for it. Both fall back rather than refusing — an unmapped field shows a
-//! prettified path, so a field added to `nord-format` appears here unpolished instead of
-//! invisibly.
+//! One table maps a registry path to its section and the label the panel prints beside
+//! it; a second maps a stored value's spelling to the words a player would use for it.
+//! Both fall back when a lookup misses: an unmapped field shows a prettified path, so a
+//! field added to `nord-format` still appears, unpolished.
 //!
-//! English is embedded. Another language is another pair of tables and one lookup;
-//! nothing above this module spells a field name for itself.
+//! Only English is embedded. Another language needs another pair of tables and one
+//! lookup; no module above this one spells a field name itself.
 
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
@@ -29,8 +28,8 @@ pub enum Section {
     Midi,
     Sound,
     Startup,
-    /// Anything the table does not place. Never empty in the UI without a reason: this
-    /// is where a newly declared field turns up.
+    /// Anything the table does not place, including a field newly declared in
+    /// `nord-format`.
     Other,
 }
 
@@ -52,8 +51,8 @@ impl Section {
     }
 }
 
-/// What a run of fields sharing no path prefix is called, where the registry's own paths
-/// are the only division there is.
+/// The heading for fields with no path prefix, where the registry paths are the only
+/// grouping.
 pub const UNPREFIXED: &str = "General";
 
 /// The sections a settings document shows, in menu order.
@@ -67,8 +66,8 @@ pub const SETTINGS_SECTIONS: [Section; 5] = [
 
 /// Registry path, the section it belongs in, and its label.
 ///
-/// Grouped by section and alphabetical by path inside each group; a test holds it that
-/// way. Display order is not this order: a document is laid out by the
+/// Grouped by section and alphabetical by path inside each group; a test enforces this.
+/// Display order is not this order: a document is laid out by the
 /// `nord_format::panel::Panel` its format declares, resolved in `document::field`.
 const FIELDS: &[(&str, Section, &str)] = &[
     ("center_panel.gain", Section::Keyboard, "Program level"),
@@ -414,9 +413,8 @@ fn entry(path: &str) -> Option<&'static (&'static str, Section, &'static str)> {
 
 /// What a field is called.
 ///
-/// An unmapped path falls back to its last segment with the underscores taken out, so a
-/// field the table has not caught up with reads as a slightly rough label rather than
-/// not appearing.
+/// An unmapped path falls back to its last segment with underscores replaced by spaces,
+/// so a field missing from the table still appears under a rough label.
 pub fn label(path: &str) -> String {
     if let Some((_, _, label)) = entry(path) {
         return (*label).to_string();
@@ -429,20 +427,19 @@ pub fn section(path: &str) -> Section {
     entry(path).map_or(Section::Other, |(_, section, _)| *section)
 }
 
-/// Whether the table knows this path at all — what tells a rough label from a real one.
+/// Whether the table maps this path, which tells a real label from a fallback.
 pub fn known(path: &str) -> bool {
     entry(path).is_some()
 }
 
-/// The last segment of a path, underscores turned back into spaces and the first letter
-/// raised.
+/// The last segment of a path as a heading.
 fn prettify(path: &str) -> String {
     title(path.rsplit('.').next().unwrap_or(path))
 }
 
-/// A stretch of a path as a heading: its separators turned back into spaces and the first
-/// letter raised. Takes more than one segment, so a nested body's prefix reads as words
-/// rather than as a path.
+/// Part of a path as a heading: dots and underscores become spaces and the first letter
+/// is capitalized. Accepts more than one segment, so a nested body's prefix reads as
+/// words.
 pub fn title(segment: &str) -> String {
     let spaced = segment.replace(['.', '_'], " ");
     let mut chars = spaced.chars();
@@ -468,8 +465,8 @@ const ORGAN_TYPE: Vocabulary = &[
     ("Vox", "Vox"),
 ];
 
-/// ⚠️ `Unknown` is a named variant, not an unrecognised value: it is how older firmware
-/// spelled *off*, and it presents as off on the instrument. Confirmed on hardware.
+/// ⚠️ `Unknown` is a named variant, not an unrecognized value: older firmware spelled
+/// off this way, and the instrument treats it as off. Confirmed on hardware.
 const ROUTING: Vocabulary = &[
     ("Lower", "lower"),
     ("Off", "off"),
@@ -605,35 +602,35 @@ fn vocabulary(path: &str) -> Option<Vocabulary> {
     })
 }
 
-/// How a stored value is spoken about.
+/// A stored value as the UI shows it.
 ///
-/// `raw` is the spelling `nord-format` reads out and takes back, which is what a caller
-/// must keep hold of — this is for showing only.
+/// For display only. A caller must keep `raw`, the spelling `nord-format` reads and
+/// accepts.
 pub fn value_label(path: &str, raw: &str) -> String {
-    if let Some(n) = unrecognised(raw) {
+    if let Some(n) = unrecognized(raw) {
         return format!("unrecognized value ({n})");
     }
     if let Some(pair) = vocabulary(path).and_then(|v| v.iter().find(|(stored, _)| *stored == raw)) {
         return pair.1.to_string();
     }
-    // A location pair is stored zero-indexed and labelled one-indexed everywhere else.
-    if let Some(labelled) = slot_pair(raw) {
-        return labelled;
+    // A location pair is stored zero-indexed and labeled one-indexed everywhere else.
+    if let Some(labeled) = slot_pair(raw) {
+        return labeled;
     }
     raw.to_string()
 }
 
 /// The stored number behind a value the library could not name.
 ///
-/// `nord-format` renders one as `unknown (5)`; nothing else does.
-pub fn unrecognised(raw: &str) -> Option<u32> {
+/// `nord-format` renders one as `unknown (5)`; no named value has that form.
+pub fn unrecognized(raw: &str) -> Option<u32> {
     raw.strip_prefix("unknown (")?
         .strip_suffix(')')?
         .parse()
         .ok()
 }
 
-/// `(0, 0)` — a zero-indexed bank/slot pair — as `1:1`.
+/// A zero-indexed bank/slot pair such as `(0, 0)`, one-indexed as `1:1`.
 fn slot_pair(raw: &str) -> Option<String> {
     let inner = raw.strip_prefix('(')?.strip_suffix(')')?;
     let (bank, slot) = inner.split_once(',')?;
@@ -643,8 +640,8 @@ fn slot_pair(raw: &str) -> Option<String> {
 }
 
 /// Whether a name already ends in something shaped like a format tag (`patch.ne5p`,
-/// `x.body`, `proj.nsmpproj`), so an export must not stack a second one on it and a
-/// reader need not be shown it.
+/// `x.body`, `proj.nsmpproj`), so an export must not add a second one and the user need
+/// not be shown it.
 pub fn carries_tag(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(stem, tag)| {
         !stem.trim().is_empty()
@@ -655,12 +652,10 @@ pub fn carries_tag(name: &str) -> bool {
     })
 }
 
-/// What a name becomes when the words in front of the tag are replaced: `typed`, under
-/// the format tag `stored` carries.
+/// `typed`, with the format tag `stored` carries, if any.
 ///
-/// The glyph beside a name already says what kind of file it is, so the tag is never in
-/// the box — and it must not be lost by typing in one, or by a duplicate being named
-/// after the thing it was copied from.
+/// The kind glyph beside a name already shows the file type, so the edit box never shows
+/// the tag. A rename, or a duplicate named after its original, must still keep it.
 pub fn tagged(stored: &str, typed: &str) -> String {
     match stored.rsplit_once('.').filter(|_| carries_tag(stored)) {
         Some((_, tag)) => format!("{typed}.{tag}"),
@@ -668,7 +663,7 @@ pub fn tagged(stored: &str, typed: &str) -> String {
     }
 }
 
-/// A name as a reader sees it: without the format tag, which the kind glyph beside it
+/// A name as the user sees it: without the format tag, which the kind glyph beside it
 /// already says.
 ///
 /// ⚠️ Showing only. The stored name keeps its tag, because that is what a rename edits,
@@ -706,17 +701,17 @@ pub fn place(class: ObjectClass, at: Location) -> String {
 
 /// How much of a set the attached instrument takes: `6 of 9 fit the Nord Electro 5D 73`.
 ///
-/// A clause rather than a sentence, because the library's footer sets it among others.
-/// `None` when all of it fits, which is nothing to report.
+/// A clause, because the library footer joins it with others. `None` when everything
+/// fits.
 pub fn fitting(fits: usize, of: usize, product: &str) -> Option<String> {
     (fits < of).then(|| format!("{fits} of {of} fit the {product}"))
 }
 
-/// What a row's kind is called, with the family in front of it where the word alone
-/// would not say whose files these are: `Stage 4 program` rather than `program`.
+/// A row's kind, prefixed with the family where the kind alone would not say which
+/// instrument the file is for: `Stage 4 program`.
 ///
-/// [`crate::browser::qualified`] is the rule for when that is; this is the only place
-/// the family's own name is put in front of anything.
+/// [`crate::browser::qualifier`] decides when; this is the only place a family name is
+/// prefixed.
 pub fn kind_word(kind: Kind, family: Option<Family>) -> String {
     match family {
         Some(family) => format!("{} {}", family.label(), kind.chip()),
@@ -729,8 +724,6 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// A path the table has not caught up with still reads as something, so a field
-    /// added to the library is never invisible.
     #[test]
     fn an_unmapped_path_falls_back_to_a_prettified_leaf() {
         assert_eq!(label("center_panel.brand_new_knob"), "Brand new knob");
@@ -739,7 +732,6 @@ mod tests {
         assert!(!known("center_panel.brand_new_knob"));
     }
 
-    /// A mapped path takes the panel's word for it.
     #[test]
     fn a_mapped_path_uses_the_panels_own_word() {
         assert_eq!(label("center_panel.organ_type"), "Organ model");
@@ -749,7 +741,7 @@ mod tests {
         assert_eq!(section("startup_program"), Section::Startup);
     }
 
-    /// One path, one entry: a second would silently shadow the first.
+    /// A second entry would silently shadow the first.
     #[test]
     fn no_path_is_listed_twice() {
         let mut seen = HashSet::new();
@@ -758,9 +750,9 @@ mod tests {
         }
     }
 
-    /// ⚠️ A queue diff names a field by its label and nothing else, so two fields a
-    /// reader can see side by side must not answer to one word. A program's fields and a
-    /// settings document's are never in one list, so each document is its own list.
+    /// ⚠️ A queue diff names a field only by its label, so two fields a user can see
+    /// together must not share one. Program and settings fields never share a list, so
+    /// each is checked on its own.
     #[test]
     fn no_two_fields_of_one_document_answer_to_one_label() {
         for settings in [false, true] {
@@ -777,8 +769,6 @@ mod tests {
         }
     }
 
-    /// The table is data, and data stays findable: grouped by section, alphabetical
-    /// inside each group.
     #[test]
     fn the_table_is_alphabetical_within_each_section() {
         let mut previous: Option<(Section, &str)> = None;
@@ -792,20 +782,17 @@ mod tests {
         }
     }
 
-    /// A value with no known meaning says so rather than showing a variant name that
-    /// does not exist.
     #[test]
-    fn an_unrecognised_value_is_named_as_one() {
+    fn an_unrecognized_value_is_named_as_one() {
         assert_eq!(
             value_label("center_panel.organ_type", "unknown (6)"),
             "unrecognized value (6)"
         );
-        assert_eq!(unrecognised("unknown (6)"), Some(6));
-        assert_eq!(unrecognised("B3"), None);
+        assert_eq!(unrecognized("unknown (6)"), Some(6));
+        assert_eq!(unrecognized("B3"), None);
     }
 
-    /// The value tables translate; anything they do not carry is passed through as the
-    /// library spelled it.
+    /// A value missing from the tables passes through as the library spells it.
     #[test]
     fn value_spellings_are_translated_where_they_are_unfriendly() {
         assert_eq!(
@@ -814,13 +801,12 @@ mod tests {
         );
         assert_eq!(value_label("effects_panel.fx3_type", "None_"), "none");
         assert_eq!(value_label("ctrl_pedal_type", "YamahaFc7"), "Yamaha FC-7");
-        // Real vibrato names, left alone.
+        // The panel's own vibrato names.
         assert_eq!(value_label("organ_panel.b3_vib", "C1"), "C1");
         // Numbers speak for themselves.
         assert_eq!(value_label("center_panel.gain", "96"), "96");
     }
 
-    /// `Routing::Unknown` is off under an older spelling, not an unrecognised value.
     #[test]
     fn the_older_spelling_of_off_reads_as_off() {
         assert_eq!(
@@ -829,15 +815,12 @@ mod tests {
         );
     }
 
-    /// A stored location pair is one-indexed everywhere a person reads it.
     #[test]
-    fn a_stored_location_pair_is_labelled_the_way_the_panel_labels_it() {
+    fn a_stored_location_pair_is_labeled_the_way_the_panel_labels_it() {
         assert_eq!(value_label("startup_program", "(0, 0)"), "1:1");
         assert_eq!(value_label("startup_song", "(3, 49)"), "4:50");
     }
 
-    /// A name is shown without the format tag the glyph beside it already says, and
-    /// anything that is not a tag stays where it is.
     #[test]
     fn a_shown_name_drops_a_format_tag_and_nothing_else() {
         assert_eq!(display_name("x.ne5p"), "x");
@@ -845,10 +828,9 @@ mod tests {
         assert_eq!(display_name("proj.nsmpproj"), "proj");
         assert_eq!(display_name(".hidden"), ".hidden", "there is no stem");
         assert_eq!(display_name("Africa Split v1.2"), "Africa Split v1.2");
-        assert_eq!(display_name("x."), "x.", "a tag of nothing is not one");
+        assert_eq!(display_name("x."), "x.", "an empty tag is not a tag");
     }
 
-    /// The two singleton classes and the folders are named, never numbered.
     #[test]
     fn a_place_reads_as_a_folder_and_a_slot() {
         let at = Location { bank: 6, slot: 3 };

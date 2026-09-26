@@ -1,11 +1,11 @@
 //! Typed values shared across models.
 //!
-//! A component owns its encoding, its validation and its `Display`, and knows nothing
-//! about which panel or offset holds it — so the same impl serves every `#[bits(...)]`
+//! A component owns its encoding, its validation and its `Display`. It knows nothing
+//! about which panel or offset holds it, so the same impl serves every `#[bits(...)]`
 //! placement of that value.
 //!
-//! Only what more than one model uses belongs here. A component with a single consumer
-//! lives beside that consumer, in the panel module that names it.
+//! Only values that more than one model uses belong here. A component with a single
+//! consumer lives in the panel module that uses it.
 
 use std::fmt::{self, Debug, Display, Formatter};
 
@@ -14,24 +14,24 @@ use crate::error::ParseError;
 use crate::fields::{ControlKind, Library, PackedOrder, Unit};
 use crate::types::RangedI8;
 
-/// Octave shift. The range and the storage bias are the model's business, so each
-/// names its own alias.
+/// Octave shift. Each model fixes its own range and storage bias and names its own
+/// alias.
 pub type OctaveShift<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
 
 /// Half-step transposition. As with [`OctaveShift`], the model fixes the parameters.
 pub type Transpose<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
 
-/// A continuous control on the panel's own `0..10` — level, compression, gain, tone.
+/// A continuous control on the panel's own `0..10`: level, compression, gain, tone.
 ///
 /// `FULL` is the stored value the panel reads as 10, and so also fixes the slot's width.
-/// Use the [`Level`] and [`Level6`] aliases rather than naming it — nearly every one of
-/// these is the seven-bit `0..=127`, and the Stage 4 puts a few of the same knobs in six
-/// bits.
+/// Use the [`Level`] and [`Level6`] aliases. Nearly every one of these is the seven-bit
+/// `0..=127`, and the Stage 4 puts a few of the same knobs in six bits.
 ///
-/// ⚠️ **A `0..=127` slot is not automatically one of these.** An envelope stage reads in
-/// milliseconds, a filter cutoff in hertz, an equalizer band in decibels either side of a
-/// centre — see [`Time`], [`Frequency`], [`Rate`] and [`Bipolar`]. Typing one of those as a
-/// `Level` makes the panel reading wrong rather than merely absent.
+/// ⚠️ A `0..=127` slot is not automatically one of these. An envelope stage reads in
+/// milliseconds, a filter cutoff in hertz, and an equalizer band in decibels either side
+/// of a center; see [`Time`], [`Frequency`], [`Rate`] and [`Bipolar`]. Typing one of
+/// those as a `Level` makes the panel reading wrong, where the right type would leave it
+/// absent.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LevelOf<const FULL: u8> {
     inner: u8,
@@ -57,8 +57,8 @@ impl<const FULL: u8> LevelOf<FULL> {
 
     /// The panel's 0..10 reading.
     ///
-    /// Confirmed on hardware. Reverb wet reads `43` in the file and the panel shows
-    /// 3.4, and `43 / 127 * 10 = 3.39`.
+    /// Confirmed on hardware. Reverb wet stores `43` and the panel shows 3.4:
+    /// `43 / 127 * 10 = 3.39`.
     pub fn as_panel(&self) -> f32 {
         let () = Self::VALID;
         f32::from(self.inner) / f32::from(FULL) * 10.0
@@ -133,11 +133,11 @@ pub type Level6 = LevelOf<63>;
 /// Declare a 0..=127 knob whose panel reading is in `$unit` over a curve no manual
 /// publishes.
 ///
-/// [`Level`] is the same slot on the panel's own `0..10`, where the transform *is* known.
-/// These are the ones where it is not: an envelope stage reads in milliseconds and a
-/// filter cutoff in hertz, but no published table converts the stored byte, so the byte
-/// is what they print. The unit is still worth carrying — it is what lets an interface
-/// label the control and pick a taper without a table of field names beside it.
+/// [`Level`] is the same slot on the panel's own `0..10`, where the transform is known.
+/// Here it is not: an envelope stage reads in milliseconds and a filter cutoff in hertz,
+/// but no published table converts the stored byte, so these print the byte. The unit
+/// still lets an interface label the control and pick a taper without its own table of
+/// field names.
 macro_rules! knob {
     ($(#[$meta:meta])* $name:ident, $unit:expr) => {
         knob!($(#[$meta])* $name, 127, 7, ControlKind::Knob($unit));
@@ -221,7 +221,7 @@ knob!(
 );
 
 knob!(
-    /// A filter cutoff or an equalizer sweep. The panel reads it in hertz — the Stage
+    /// A filter cutoff or an equalizer sweep. The panel reads it in hertz. The Stage
     /// manuals give the endpoints of the mid sweep (200 Hz to 8 kHz) but not the taper.
     Frequency,
     Unit::Hertz
@@ -230,7 +230,7 @@ knob!(
 knob!(
     /// A modulation or LFO rate, read in hertz.
     ///
-    /// ⚠️ Under a live master clock the same slot reads as a subdivision instead — see
+    /// ⚠️ Under a live master clock the same slot reads as a subdivision; see
     /// [`ClockDivision`]. The flag that switches it is a sibling field, so neither field
     /// answers alone.
     Rate,
@@ -240,9 +240,9 @@ knob!(
 knob!(
     /// A stereo position in a six-bit slot.
     ///
-    /// ⚠️ The mapping is not established: over the Stage 4 factory programs the slot's
-    /// mode is 0 rather than the mid-scale 32 a centre-encoded pan would show, so this
-    /// makes no claim about where centre sits and prints the stored value. It carries
+    /// ⚠️ The mapping is not established. Over the Stage 4 factory programs the slot's
+    /// most common value is 0, where a center-encoded pan would show the mid-scale 32. So
+    /// this makes no claim about where center sits, prints the stored value, and records
     /// only that the control is a pan. Inferred from specimens; not confirmed on
     /// hardware.
     Pan,
@@ -254,28 +254,28 @@ knob!(
 knob!(
     /// A pitch offset in semitones.
     ///
-    /// The Stage 4's coarse oscillator pitch holds 0, 7, 12, 24 and 40 — unison, a
-    /// fifth, an octave, two octaves — which is what makes the unit readable. Inferred
-    /// from specimens; not confirmed on hardware. The Stage 3 manual gives the same
-    /// control as "semitone steps, ranging from 0 to 48".
+    /// The Stage 4's coarse oscillator pitch holds 0, 7, 12, 24 and 40 (unison, a
+    /// fifth, an octave, two octaves), which identifies the unit. Inferred from
+    /// specimens; not confirmed on hardware. The Stage 3 manual gives the same control
+    /// as "semitone steps, ranging from 0 to 48".
     Interval,
     63,
     6,
     ControlKind::Shift(Unit::Semitones)
 );
 
-/// A 0..=127 slot whose musical zero is its centre, reading `±LIMIT` of the unit
-/// `UNIT` codes either side.
+/// A 0..=127 slot whose musical zero is its center, reading `±LIMIT` either side in the
+/// unit whose code is `UNIT`.
 ///
 /// The Stage equalizer bands are the clearest case: the manuals give "the boost/cut range
 /// is +/- 15 dB" for all three models, and rendering those on [`Level`]'s `0..10` reads a
 /// cut as a small boost.
 ///
-/// ⚠️ The unit is the declaration's, not the shape's: a `±10` modulation amount is not
-/// decibels because an equalizer band is. Name it through [`EqBand`] or [`Bipolar`]
-/// rather than writing the code out.
+/// ⚠️ The unit comes from the declaration, not the shape: a `±10` modulation amount is
+/// not in decibels just because an equalizer band is. Name the type through [`EqBand`]
+/// or [`Bipolar`] instead of writing the code out.
 ///
-/// ⚠️ The centre is taken as 64 — the midpoint of the slot. Inferred from specimens; not
+/// ⚠️ The center is taken as 64, the midpoint of the slot. Inferred from specimens; not
 /// confirmed on hardware. The corpus does not distinguish 63 from 64, and no manual
 /// states it. A reading is therefore accurate at the endpoints and approximate in
 /// between.
@@ -341,7 +341,7 @@ impl<const LIMIT: i16, const UNIT: u8> Packed for BipolarOf<LIMIT, UNIT> {
     }
 }
 
-/// The stored byte, so a retype from a plain integer leaves the field dumps alone.
+/// The stored byte, so retyping a field from a plain integer leaves field dumps alone.
 impl<const LIMIT: i16, const UNIT: u8> Debug for BipolarOf<LIMIT, UNIT> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner)
@@ -361,30 +361,30 @@ impl<const LIMIT: i16, const UNIT: u8> PartialEq<u8> for BipolarOf<LIMIT, UNIT> 
     }
 }
 
-/// An equalizer band, `±15 dB` — the range all three Stage manuals give.
+/// An equalizer band, `±15 dB`, the range all three Stage manuals give.
 pub type EqBand = BipolarOf<15, { Unit::Decibels.code() }>;
 
 /// A bipolar amount with no unit: a modulation depth the panel reads as a bare
 /// `±LIMIT`, such as the Stage 2's filter modulation.
 pub type Bipolar<const LIMIT: i16> = BipolarOf<LIMIT, { Unit::None.code() }>;
 
-/// The value a performance control morphs its parent parameter *to*.
+/// The value a performance control morphs its parent parameter to.
 ///
-/// Every morphable parameter has three of these beside it — `_wheel`, `_aftertouch` and
-/// `_ctrl_pedal` — and together they are half of every Stage body's field count. They are
-/// not controls of their own: an interface shows them **on the parent's knob**, as a
-/// second handle, which is what [`ControlKind::Morph`] tells it to do.
+/// Every morphable parameter has three of these beside it (`_wheel`, `_aftertouch` and
+/// `_ctrl_pedal`), and together they make up half of every Stage body's fields. They are
+/// not controls of their own. [`ControlKind::Morph`] tells an interface to show them on
+/// the parent's knob, as a second handle.
 ///
 /// `BITS` is the slot's width, which tracks the parent's: eight beside a `0..=127` knob,
 /// five beside a drawbar, three beside a switch.
 ///
-/// ⚠️ **The encoding is not established.** Stage 4 specimens use the whole byte,
-/// with 127 predominant. It may be a signed delta biased by 127 or a destination at
-/// twice the parent's resolution. Inferred from specimens; not confirmed on hardware.
+/// ⚠️ The encoding is not established. Stage 4 specimens use the whole byte, with 127
+/// predominant. It may be a signed delta biased by 127 or a destination at twice the
+/// parent's resolution. Inferred from specimens; not confirmed on hardware.
 /// [`Self::is_neutral`] is the only interpretation exposed.
 ///
-/// The experiment that settles it: assign one morph at a known depth, store, and diff the
-/// slot against its parent's value.
+/// To settle it, assign one morph at a known depth, store, and diff the slot against its
+/// parent's value.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MorphOf<const BITS: u32> {
     inner: u8,
@@ -423,9 +423,8 @@ impl<const BITS: u32> Packed for MorphOf<BITS> {
         BITS
     };
     const DECODE_BITS: u32 = u8::BITS;
-    /// The parent is the declaration site's business, not the type's — every morph slot
-    /// shares this type and each names a different parameter — so `#[bitbody]` fills it
-    /// in from the field's name.
+    /// Every morph slot shares this type, so `#[bitbody]` fills in the parent from the
+    /// field's name.
     const CONTROL: ControlKind = ControlKind::Morph { of: None };
     type Error = ::core::convert::Infallible;
 
@@ -439,7 +438,7 @@ impl<const BITS: u32> Packed for MorphOf<BITS> {
     }
 }
 
-/// The stored value — the encoding is unconfirmed, so this prints what is there.
+/// The stored value, since the encoding is unconfirmed.
 impl<const BITS: u32> Debug for MorphOf<BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner)
@@ -469,10 +468,10 @@ pub type MorphTarget = MorphOf<8>;
 /// The morph slot beside a drawbar.
 pub type DrawbarMorph = MorphOf<5>;
 
-/// The morph slot beside a three-position switch — the Stage 3's rotary speed.
+/// The morph slot beside a three-position switch, such as the Stage 3's rotary speed.
 pub type SwitchMorph = MorphOf<3>;
 
-/// A [`Selector`] over a list too long for a byte — a waveform, a sample slot.
+/// A [`Selector`] over a list too long for a byte, such as a waveform or a sample slot.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WideSelector<const BITS: u32> {
     inner: u16,
@@ -535,18 +534,17 @@ impl<const BITS: u32> PartialEq<u16> for WideSelector<BITS> {
 /// One drawbar, in the four-bit slot the Stage models give it.
 ///
 /// Positions are physical, `0..=8`. The slot holds four bits, so decoding is total: a
-/// nibble above 8 is preserved and reported by [`Self::position`] as `None` rather than
-/// refused, on the same rule as [`crate::types::RangedU8`] — the bound is the slot's, not
-/// the instrument's.
+/// nibble above 8 is preserved, and [`Self::position`] reports it as `None`. This follows
+/// the rule of [`crate::types::RangedU8`]: decoding is bounded by the slot, not the
+/// instrument.
 ///
-/// ⚠️ The two constructors therefore disagree on purpose. [`Self::new`] takes a
-/// *position* and refuses 9 and above; `from_bits` — and so `set_field`, which goes
-/// through the type's own parse — takes a *nibble* and accepts all sixteen, because a
-/// file holding one has to round-trip. A caller offering a bar to a player wants the
-/// former.
+/// ⚠️ The two constructors therefore disagree. [`Self::new`] takes a position and
+/// refuses 9 and above. `from_bits`, and so `set_field`, which goes through the type's
+/// own parse, takes a nibble and accepts all sixteen, because a file holding one has to
+/// round-trip. A caller offering a bar to a player wants [`Self::new`].
 ///
-/// ⚠️ On the Stage 2's Farfisa the register is a *tab*, and the file stores a bit rather
-/// than a nibble, so those fields are `bool` and not this type.
+/// ⚠️ On the Stage 2's Farfisa the register is a tab, and the file stores a bit per tab,
+/// so those fields are `bool`.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Drawbar {
     inner: u8,
@@ -556,8 +554,7 @@ impl Drawbar {
     /// The highest position a drawbar can be pulled to.
     pub const MAX: u8 = 8;
 
-    /// A bar at `position`, `0..=8`. A higher one is refused — this takes a position,
-    /// where decoding takes a nibble.
+    /// A bar at `position`, `0..=8`. A higher position is refused.
     pub fn new(position: u8) -> Result<Self, ParseError> {
         if position > Self::MAX {
             return Err(ParseError::OutOfBounds {
@@ -582,8 +579,8 @@ impl Drawbar {
 impl Packed for Drawbar {
     const MAX_BITS: u32 = 4;
     const DECODE_BITS: u32 = u8::BITS;
-    /// Which bar of the register this is comes from the declaration site — every bar
-    /// shares this type — so `#[bitbody]` fills the rank in from a `…_N` field name.
+    /// Every bar shares this type, so `#[bitbody]` fills in the rank from a `…_N` field
+    /// name.
     const CONTROL: ControlKind = ControlKind::Drawbar {
         bars: 1,
         rank: None,
@@ -623,9 +620,9 @@ impl PartialEq<u8> for Drawbar {
 /// A four-bit octave shift stored in two's complement, as the Stage 4 stores it.
 ///
 /// Inferred from specimens; not confirmed on hardware. Over the Stage 4 factory programs
-/// the slot holds only 0, 1, 2, 14 and 15 — a distribution centred on zero with the
-/// negative side wrapping, where the Stage 2 and 3 instead centre on a stored 7 and 6.
-/// Those two are [`OctaveShift`] aliases; this is the third encoding.
+/// the slot holds only 0, 1, 2, 14 and 15: a distribution centered on zero with the
+/// negative side wrapping. The Stage 2 and 3 center on a stored 7 and 6 and use
+/// [`OctaveShift`] aliases.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OctaveShiftNibble {
     /// The signed reading, -8..=7.
@@ -720,7 +717,7 @@ impl<const BITS: u32> Packed for Selector<BITS> {
     }
 }
 
-/// The stored index — this type exists precisely because there is no name to print.
+/// The stored index, since no names are known.
 impl<const BITS: u32> Debug for Selector<BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner)
@@ -741,18 +738,17 @@ impl<const BITS: u32> PartialEq<u8> for Selector<BITS> {
 
 /// A subdivision of the master clock, as a rate slot reads when its clock flag is set.
 ///
-/// The manuals give the vocabulary — "subdivisions of the Master Clock tempo, ranging
-/// from 1/2 to 1/32 notes. Apart from straight subdivisions there are also swing (S),
-/// triplet (T) and dotted (D) options" — which is sixteen readings for a four-bit slot.
+/// The manuals describe "subdivisions of the Master Clock tempo, ranging from 1/2 to
+/// 1/32 notes", with swing, triplet and dotted variants. That makes sixteen readings for
+/// a four-bit slot.
 ///
 /// ⚠️ Which index carries which subdivision is not established, so this names none of
-/// them. The experiment that settles it: store one specimen per detent of a clocked rate
-/// knob.
+/// them. To settle it, store one specimen per detent of a clocked rate knob.
 pub type ClockDivision = Selector<4>;
 
 /// The balance between a split's lower and upper parts, as a 0..=127 crossfade.
 ///
-/// ⚠️ Each side is clamped at 50, so the pair does not sum to 100 — a stored 16 reads
+/// ⚠️ Each side is clamped at 50, so the pair does not sum to 100: a stored 16 reads
 /// as `50.0/12.6`.
 #[derive(Copy, Default, Clone, PartialEq, Eq)]
 pub struct PartMix {
@@ -891,8 +887,8 @@ impl Packed for SplitPoint73 {
 
 /// A vibrato (`V`) or chorus (`C`) organ modulation at one of three depths.
 ///
-/// Which subset an organ offers is the model's business, and so is the index each sits
-/// at — see the per-model tables beside the organ panel.
+/// Each model sets which subset its organ offers and the index each one sits at; see
+/// the per-model tables beside the organ panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VibChorus {
     V1,
@@ -906,9 +902,9 @@ pub enum VibChorus {
 /// A Stage program's transpose slot: stored `0..=12`, biased by 6, reading
 /// `-6..=+6` semitones.
 ///
-/// ⚠️ Not a [`RangedI8`]: the Stage 2 EX factory live
-/// buffers hold 15 in this slot — an untouched buffer stores an out-of-table
-/// pattern — so the unknown patterns are preserved rather than refused.
+/// ⚠️ Not a [`RangedI8`]: the Stage 2 EX factory live buffers hold 15 in this slot, so
+/// an untouched buffer stores an out-of-table pattern. Unknown patterns are preserved,
+/// not refused.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StageTranspose {
     raw: u8,
@@ -986,7 +982,7 @@ impl Packed for MasterTempo {
 }
 
 impl Debug for MasterTempo {
-    /// The BPM reading — the stored byte is recoverable as `bpm - 30`.
+    /// The BPM reading. The stored byte is `bpm - 30`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.bpm())
     }
@@ -994,8 +990,8 @@ impl Debug for MasterTempo {
 
 /// Declare a sparse enumeration: known values, plus `Unknown` for the rest of the slot.
 ///
-/// The slot is wider than the set of values we have names for, so anything unrecognized
-/// decodes to `Unknown`, round-trips byte-exactly, and displays as `unknown (9)` — never
+/// The slot is wider than the set of named values. Anything unrecognized decodes to
+/// `Unknown`, round-trips byte-exactly, and displays as `unknown (9)`. It is never
 /// coerced to the nearest label. Match on it, or call `is_unknown()`, to find them.
 macro_rules! sparse_enum {
     (
@@ -1011,8 +1007,8 @@ macro_rules! sparse_enum {
         }
 
         /// Named variants as their names; an unknown as `unknown (raw)`. ⚠️ The corpus
-        /// tripwires match the lowercase spelling — a derived `Unknown(raw)` slips past
-        /// them.
+        /// tripwires match the lowercase spelling, so a derived `Unknown(raw)` would slip
+        /// past them.
         impl ::core::fmt::Debug for $name {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 match self {
@@ -1087,9 +1083,9 @@ pub(crate) use sparse_enum;
 
 /// Declare a one-bit field whose two states have names.
 ///
-/// A `bool` is the right shape for on/off, and the wrong one for a switch between two
-/// *named* positions: `false` is not a reading anyone can act on when the panel says
-/// Normal and Analog. This keeps the single bit and gives both states their word.
+/// A `bool` suits on/off. For a switch between two named positions, such as Normal and
+/// Analog, `false` is not a reading anyone can act on. This keeps the single bit and
+/// gives both states their word.
 macro_rules! switch {
     (
         $(#[$meta:meta])*
@@ -1135,8 +1131,8 @@ macro_rules! switch {
             }
         }
 
-        /// The variant name, which is what `--set` takes. ⚠️ Not [`Display`], which is
-        /// the panel's own word for the state and may differ.
+        /// The variant name, which is what `--set` takes. ⚠️ [`Display`] gives the
+        /// panel's own word for the state, which may differ.
         impl ::core::fmt::Debug for $name {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 match self {
@@ -1154,23 +1150,23 @@ macro_rules! switch {
     };
 }
 
-/// Sixteen pattern steps, two bits each — the Stage 4 arpeggiator's accent, gate and pan
+/// Sixteen pattern steps, two bits each: the Stage 4 arpeggiator's accent, gate and pan
 /// rows.
 ///
-/// The panel edits these as a grid: the manual's Pattern Edit page moves a cursor with a
+/// The panel edits these as a grid. The manual's Pattern Edit page moves a cursor with a
 /// Position dial and sets the step under it, and the Pattern Pan page moves a step
-/// "between Left, Center and Right". Three values per step is exactly two bits, and a
-/// pattern runs to sixteen steps, which is exactly the 32-bit slot.
+/// "between Left, Center and Right". Three values per step fit in two bits, and sixteen
+/// steps fill the 32-bit slot.
 ///
-/// ⚠️ **Step order is inferred, not established.** Read low-bits-first the corpus values
-/// fall out as music — `0x01010101` is an accent every fourth step, `0x55aa5500` is four
-/// left then four right then four left — but correlating the highest non-zero step
-/// against the sibling `arp_pattern_length` fails in both directions, so either the word
-/// keeps all sixteen steps regardless of the active length or that field is not a step
-/// count. Inferred from specimens; not confirmed on hardware.
+/// ⚠️ Step order is inferred. Read low bits first, the corpus values make musical sense:
+/// `0x01010101` is an accent every fourth step, and `0x55aa5500` is four left, four
+/// right, then four left. But the highest nonzero step does not correlate with the
+/// sibling `arp_pattern_length` in either direction. Either the word keeps all sixteen
+/// steps regardless of the active length, or that field is not a step count. Inferred
+/// from specimens; not confirmed on hardware.
 ///
-/// The slot is wider than [`crate::fields::ENUMERABLE_BITS`], so `--set` spells it by its
-/// stored bits — `0x55aa5500` is the readable form for a pattern anyway.
+/// The slot is wider than [`crate::fields::ENUMERABLE_BITS`], so `--set` takes its stored
+/// bits, such as `0x55aa5500`.
 #[derive(Copy, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ArpPattern {
     inner: u32,
@@ -1190,7 +1186,7 @@ impl ArpPattern {
         std::array::from_fn(|n| ((self.inner >> (2 * n)) & 0b11) as u8)
     }
 
-    /// Whether every step is zero — an unset row.
+    /// Whether every step is zero, as in an unset row.
     pub fn is_empty(&self) -> bool {
         self.inner == 0
     }
@@ -1224,7 +1220,7 @@ impl Debug for ArpPattern {
 }
 
 impl Display for ArpPattern {
-    /// The steps as a row: `1010 1010 ....` — a dot for a zero step.
+    /// The steps as a row, with a dot for a zero step: `1.1. 1.1. ....`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for (n, step) in self.steps().into_iter().enumerate() {
             if n > 0 && n % 4 == 0 {
@@ -1245,19 +1241,20 @@ impl PartialEq<u32> for ArpPattern {
     }
 }
 
-/// An opaque id into one of the instrument's libraries — a piano model, a sample.
+/// An opaque id into one of the instrument's libraries, such as a piano model or a
+/// sample.
 ///
-/// The id is only meaningful against the library that holds it, so the type names which:
-/// `LIBRARY` is a [`Library`] code, and the aliases below are the spellings to use.
-/// The file carries the reference and nothing else, which is what
-/// [`ControlKind::Reference`] tells a caller.
+/// The id is only meaningful against the library that holds it, so the type names that
+/// library: `LIBRARY` is a [`Library`] code. Use the [`PianoRef`] and [`SampleRef`]
+/// aliases. The file carries only the id, which [`ControlKind::Reference`] tells a
+/// caller.
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LibraryRefOf<const LIBRARY: u8> {
     inner: u32,
 }
 
 impl<const LIBRARY: u8> LibraryRefOf<LIBRARY> {
-    /// Which catalogue resolves this id.
+    /// Which catalog resolves this id.
     pub const LIBRARY: Library = Library::expect_code(LIBRARY);
 
     /// The stored id. Zero is "nothing referenced" on every model in the corpus.
@@ -1317,9 +1314,8 @@ pub type SampleRef = LibraryRefOf<{ Library::Sample.code() }>;
 switch!(
     /// Which of the two delay lines is running.
     ///
-    /// Both Stage manuals give the pair by name: "There are two different delay modes, the
-    /// normal ('non-analog') mode, and the Analog Mode … In Analog Mode the pitch of any
-    /// sounding repeats is altered if the tempo is changed."
+    /// Both Stage manuals name the two delay modes, normal and Analog. In Analog Mode,
+    /// changing the tempo alters the pitch of any sounding repeats.
     DelayCharacter, Normal = "normal", Analog = "analog"
 );
 
@@ -1333,21 +1329,20 @@ switch!(
     /// The rotary speaker's rotor speed. Manual: "Switch between fast and slow rotor
     /// speeds."
     ///
-    /// ⚠️ Stopped is not one of these — it is a separate flag, so neither field answers
-    /// on its own.
+    /// ⚠️ Stopped is a separate flag, so neither field answers on its own.
     RotorSpeed, Slow = "slow", Fast = "fast"
 );
 
 sparse_enum!(
     /// Which of the four keyboard zones a section occupies, as the Stage 3 and 4 store it.
     ///
-    /// The Stage 3 byte-map docs give the table as an occupancy picture — `o---` is the
+    /// The Stage 3 byte-map docs give the table as an occupancy picture: `o---` is the
     /// leftmost zone alone, `oooo` the whole keyboard. The Stage 3's piano and synth
     /// zone slots hold only values inside this table, with `oooo` dominating, so all
     /// three sections share it. Inferred from specimens; not confirmed on hardware.
     ///
     /// Unexplained: Stage 4 specimens reach stored value 10. It decodes as `Unknown(10)`
-    /// and survives verbatim.
+    /// and is preserved.
     KbZone4, 4, {
         0 => V0, "o---";
         1 => V1, "-o--";
@@ -1365,8 +1360,8 @@ sparse_enum!(
 sparse_enum!(
     /// Which of the three keyboard zones a section occupies, as the Stage 2 stores it.
     ///
-    /// The Stage 2 splits into two or three zones rather than four, and its panel spells
-    /// them in words. From the `ns2-*-kb-zone` tables in the Stage byte-map docs.
+    /// The Stage 2 splits into two or three zones, and its panel spells them in words.
+    /// From the `ns2-*-kb-zone` tables in the Stage byte-map docs.
     KbZone3, 3, {
         0 => Lo, "LO";
         1 => LoUp, "LO UP";
@@ -1440,10 +1435,9 @@ sparse_enum!(
 
 impl ProgramCategory {
     /// The category a Stage 2 or 3 header names, or `None` where the `aux` word carries
-    /// no category id at all or one too wide for this byte-sized table.
+    /// no category id or one too wide for this byte-sized table.
     ///
-    /// The whole id is examined: a value above `0xff` names no category here rather than
-    /// being truncated into one.
+    /// ⚠️ A value above `0xff` names no category. It is not truncated into one.
     pub fn of(header: &crate::cbin::Header) -> Option<ProgramCategory> {
         let id = u8::try_from(header.category()?).ok()?;
         match Self::from_bits(id as u64) {
@@ -1494,8 +1488,8 @@ mod tests {
     use super::*;
     use crate::fields::{ControlKind, Library, PackedOrder, Unit};
 
-    /// The whole point of the vocabulary: a field gets its control kind by choosing a
-    /// type, so an interface never needs a table of field names of its own.
+    /// A field gets its control kind by choosing a type, so an interface never needs a
+    /// table of field names of its own.
     #[test]
     fn a_type_says_what_kind_of_control_it_is() {
         assert_eq!(<Level as Packed>::CONTROL, ControlKind::Knob(Unit::Panel10));
@@ -1507,10 +1501,8 @@ mod tests {
             <EqBand as Packed>::CONTROL,
             ControlKind::Bipolar(Unit::Decibels)
         );
-        // The shape a caller needs to draw the control is on the kind: how many bars,
-        // how many steps, which catalogue. What the *type* cannot know — which bar of
-        // the register, which parameter a morph slot belongs to — is left open here and
-        // filled in by `#[bitbody]` from the field's name.
+        // What the type cannot know (which bar of the register, which parameter a morph
+        // slot belongs to) is left open here and filled in by `#[bitbody]`.
         assert_eq!(
             <MorphTarget as Packed>::CONTROL,
             ControlKind::Morph { of: None }
@@ -1524,9 +1516,8 @@ mod tests {
                 order: PackedOrder::HighFirst,
             }
         );
-        // ⚠️ The two multi-value kinds pack from opposite ends, which is why each says
-        // so: a pattern's first step is in the lowest bits and an Electro 5 register's
-        // first bar is in the highest.
+        // ⚠️ The two multi-value kinds pack from opposite ends: a pattern's first step
+        // is in the lowest bits and an Electro 5 register's first bar is in the highest.
         assert_eq!(
             <ArpPattern as Packed>::CONTROL,
             ControlKind::Pattern {
@@ -1549,19 +1540,18 @@ mod tests {
             <OctaveShiftNibble as Packed>::CONTROL,
             ControlKind::Shift(Unit::Octaves)
         );
-        // The default, and the standing invitation to give a field a better type.
+        // The default for an untyped field.
         assert_eq!(<u8 as Packed>::CONTROL, ControlKind::Number);
     }
 
-    /// A unit is a label, not a promise. Printing a millisecond reading off a curve no
-    /// manual publishes would be inventing precision the file does not carry.
+    /// A millisecond or hertz unit labels the control. With no published curve, the
+    /// value prints as the stored byte.
     #[test]
     fn a_unit_says_whether_it_can_be_computed() {
         assert!(Unit::Panel10.describes_a_known_transform());
         assert!(Unit::Decibels.describes_a_known_transform());
         assert!(!Unit::Milliseconds.describes_a_known_transform());
         assert!(!Unit::Hertz.describes_a_known_transform());
-        // So the type prints the stored byte rather than a converted one.
         assert_eq!(Time::new(96).unwrap().to_string(), "96");
         assert_eq!(Level::new(96).unwrap().to_string(), "96 (7.6)");
     }
@@ -1575,7 +1565,7 @@ mod tests {
         assert_eq!(read(2), 2);
         assert_eq!(read(15), -1);
         assert_eq!(read(14), -2);
-        // Every pattern round-trips, so an unreached value rides through a re-encode.
+        // Every pattern round-trips, including values no specimen holds.
         for bits in 0..16u64 {
             assert_eq!(OctaveShiftNibble::from_bits(bits).unwrap().to_bits(), bits);
         }
@@ -1593,7 +1583,6 @@ mod tests {
         let moved = MorphTarget::from_bits(254).unwrap();
         assert!(!moved.is_neutral());
         assert_eq!(moved.to_string(), "254");
-        // The whole byte is in use, so nothing may be refused or clamped.
         for bits in 0..256u64 {
             assert_eq!(MorphTarget::from_bits(bits).unwrap().to_bits(), bits);
         }
@@ -1610,22 +1599,21 @@ mod tests {
         );
         assert_eq!(accent.to_string(), "1... 1... 1... 1...");
 
-        // Four left, four right, four left — a pan row.
+        // A pan row: four left, four right, four left.
         let pan = ArpPattern::from_bits(0x55aa_5500).unwrap();
         assert_eq!(&pan.steps()[4..12], &[1, 1, 1, 1, 2, 2, 2, 2]);
 
         assert!(ArpPattern::default().is_empty());
-        // The slot is wider than the enumerable ceiling, so `--set` spells it in hex.
+        // The slot is wider than `ENUMERABLE_BITS`, so `--set` spells it in hex.
         assert_eq!(format!("{pan:?}"), "0x55aa5500");
     }
 
-    /// An equalizer band reads +/- 15 dB either side of the slot's centre.
+    /// An equalizer band reads ±15 dB either side of the slot's center.
     #[test]
     fn a_bipolar_band_reads_signed() {
         assert_eq!(EqBand::new(64).unwrap().reading(), 0.0);
         assert_eq!(EqBand::new(0).unwrap().to_string(), "0 (-15.0)");
         assert_eq!(EqBand::new(127).unwrap().to_string(), "127 (+15.0)");
-        // `Debug` is the stored byte, so retyping a plain integer leaves field dumps alone.
         assert_eq!(format!("{:?}", EqBand::new(96).unwrap()), "96");
     }
 
@@ -1645,8 +1633,8 @@ mod tests {
         assert_eq!(Bipolar::<10>::new(127).unwrap().reading(), 10.0);
     }
 
-    /// The code is only a way to carry a unit through a const generic, so it has to come
-    /// back as the unit it went in as.
+    /// A unit's code carries it through a const generic and must decode back to the same
+    /// unit.
     #[test]
     fn a_unit_survives_the_code_that_carries_it() {
         for unit in [
@@ -1678,8 +1666,8 @@ mod tests {
         assert_eq!(<DelayCharacter as Packed>::MAX_BITS, 1);
     }
 
-    /// A drawbar is total over its nibble: a position past the bar's travel is preserved
-    /// and reported as unnamed rather than refused.
+    /// A drawbar decodes every nibble: a value past the bar's travel is preserved and
+    /// has no position.
     #[test]
     fn a_drawbar_keeps_a_nibble_past_its_travel() {
         assert_eq!(Drawbar::from_bits(8).unwrap().position(), Some(8));

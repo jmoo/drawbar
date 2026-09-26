@@ -1,11 +1,11 @@
 //! The project file's text tree: `name {` opens a block, `}` closes it, and
 //! `key = value` is a field, every line indented two spaces per depth.
 //!
-//! The reader is strict — one of the three line shapes at exactly its depth's
-//! indent, LF line ends, a single root block, nothing after it — and the
-//! writer emits exactly that, so a tree read and written is the file it came
-//! from byte-for-byte. Anything the editor would not have written is refused
-//! rather than normalised away.
+//! The reader is strict: each line is one of the three shapes at its depth's
+//! indent, lines end in LF, and a single root block ends the file. The writer
+//! emits the same shape, so a tree read and written is the file it came from
+//! byte for byte. Anything the editor would not have written is refused, not
+//! normalized.
 
 use crate::error::ParseError;
 use std::fmt::Write as _;
@@ -16,7 +16,7 @@ const INDENT: usize = 2;
 
 /// Deepest nesting [`parse`] accepts. The editor writes five levels, and
 /// [`Node::render`], `Drop` and the derived traits all recurse per level, so an
-/// unbounded tree is a stack overflow rather than an error.
+/// unbounded tree would overflow the stack.
 const MAX_DEPTH: usize = 32;
 
 /// Refuse a field value the writer cannot render as one line.
@@ -42,8 +42,8 @@ pub struct Node {
 /// One line inside a block: a field, or a nested block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
-    /// `key = value`. The value is everything after the first ` = `, untrimmed
-    /// — `m_buffer = ` carries an empty one.
+    /// `key = value`. The value is everything after the first ` = `, untrimmed;
+    /// `m_buffer = ` carries an empty one.
     Field {
         key: String,
         value: String,
@@ -82,9 +82,9 @@ impl Node {
         })
     }
 
-    /// Overwrite the first field named `key`. Errs if there is none: a view
-    /// setter must not invent fields the editor never wrote, and errs on a
-    /// value [`check_value`] refuses.
+    /// Overwrite the first field named `key`. Errs if there is none, since a view
+    /// setter must not invent fields the editor never wrote. Also errs on a value
+    /// [`check_value`] refuses.
     pub fn set_field(&mut self, key: &str, value: impl Into<String>) -> Result<(), ParseError> {
         let value = value.into();
         check_value(&value)?;

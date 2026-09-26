@@ -1,9 +1,9 @@
 //! One synth layer's performance half: keyboard zone, octave, voicing, glide, the
 //! arpeggiator and the extern controls.
 //!
-//! ⚠️ A layer's **enable and volume are not in here** — the file packs those with
-//! the other layers', a bit and 31 bits apart respectively, so they stay on the
-//! owning body. This block is the part that repeats at a whole-byte stride.
+//! ⚠️ A layer's enable and volume are not in this block. The file packs them with the
+//! other layers' (a bit apart and 31 bits apart), so they stay on the owning body. This
+//! block is the part that repeats at a whole-byte stride.
 
 use crate::components::{
     ArpPattern, KbZone4, Level, MorphTarget, OctaveShiftNibble, SampleRef, Selector, Time,

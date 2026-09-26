@@ -4,11 +4,11 @@
 //! (<https://www.nordkeyboards.com/wt/documents/951/Nord%20Stage%204%20User%20Manual%20v1.6X-Edition-N.pdf>),
 //! by printed page: sections and layers 43; transpose and split 38–39; Extern 46–47;
 //! mono and legato 34–35; filter 31–33; arpeggiator and pattern 35–37; keyboard hold 36;
-//! effects 48; rotary 48 and 52–53. The manual describes operation, not storage: where a
-//! selector's encoding is not established, the layout keeps its dependents relevant
-//! rather than guess, and the group concerned says so.
+//! effects 48; rotary 48 and 52–53. The manual describes operation, not storage. Where a
+//! selector's encoding is unknown, the layout keeps its dependents relevant, and the
+//! group says so.
 //!
-//! Morph slots are named by nothing: each belongs to the parameter its name binds it to.
+//! No group names a morph slot; each belongs to the parameter its name binds it to.
 
 use crate::panel::{Group, Match, Panel, Relevance};
 
@@ -434,7 +434,7 @@ pub const PANEL: Panel = Panel {
                 "piano_section_enabled",
                 "synth_section_enabled",
                 "fx_enabled",
-                // Hold is released from here with the Synth section off.
+                // Hold can be released here while the Synth section is off.
                 "synth_kb_hold_enabled",
             ],
             groups: &[],
@@ -538,8 +538,8 @@ pub const PANEL: Panel = Panel {
             }],
         },
         Group {
-            // Which layer's stored chain a global effect plays is not established, so the
-            // flags sit here and every layer keeps its own chain.
+            // Which layer's chain a global effect plays is unknown, so the flags sit here
+            // and every layer keeps its own chain.
             title: "Effects, globally",
             selected_by: None,
             when: switched_on!("fx_enabled"),
@@ -551,9 +551,9 @@ pub const PANEL: Panel = Panel {
             groups: &[],
         },
         Group {
-            // ⚠️ Which value of `active_layer_scene` means scene 2 is not established, so a
-            // section or layer counts as enabled by either scene — asserting the wrong way
-            // round would hide the half that is playing.
+            // ⚠️ Which value of `active_layer_scene` means scene 2 is unknown, so a section
+            // or layer counts as enabled in either scene. Guessing wrong would hide the
+            // scene that is playing.
             title: "Scene 2",
             selected_by: None,
             when: None,
@@ -881,8 +881,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ The first group with this title, in layout order — three sections have a
-    /// "Layer A" and four have an "Effects", and the organ's come first.
+    /// ⚠️ The first group with this title, in layout order. Three sections have a
+    /// "Layer A", "Effects" appears six times, and the organ's come first.
     fn group(title: &str) -> &'static Group {
         PANEL
             .walk()
@@ -891,8 +891,8 @@ mod tests {
             .unwrap_or_else(|| panic!("no group {title}"))
     }
 
-    /// A section is relevant while it is switched on, and its layers while they are —
-    /// the nesting is the conjunction.
+    /// A section is relevant while it is switched on, and a layer while both it and its
+    /// section are.
     #[test]
     fn a_layer_needs_its_section_and_its_own_enable() {
         let off = program(&[]);
@@ -906,15 +906,14 @@ mod tests {
         assert!(group("Layer A").is_relevant(&a));
         assert!(!group("Layer B").is_relevant(&a));
 
-        // The switches that bring a section and a layer back are never inside what they
-        // govern.
+        // The switches for a section and a layer are outside the groups they govern.
         assert!(group("Sections").members.contains(&"organ_section_enabled"));
         assert!(group("Organ").members.contains(&"organ_a_layer_enabled"));
     }
 
-    /// The nine bars of a layer are consecutive and in register order — leftmost first —
-    /// which the registry alone does not give: each bar is followed by its three morph
-    /// slots there.
+    /// The nine bars of a layer are consecutive and in register order, leftmost first.
+    /// The registry alone does not give this order, because each bar is followed by its
+    /// three morph slots there.
     #[test]
     fn an_organ_layers_drawbars_read_in_order() {
         let specs = Program::field_specs();
@@ -935,13 +934,13 @@ mod tests {
                 .map(|n| format!("organ_a.drawbar_{n}"))
                 .collect::<Vec<_>>(),
         );
-        // ...and they are one run, not nine scattered through the layer.
+        // They are one consecutive run.
         let first = members.iter().position(|p| *p == bars[0]).unwrap();
         assert_eq!(&members[first..first + 9], &bars[..]);
     }
 
-    /// A morph slot is named by no group and is nobody's leftover: it is drawn on the
-    /// parameter its name binds it to, and that parameter is grouped.
+    /// No group names a morph slot, and it is not a leftover: it is drawn on the
+    /// parameter its name binds it to, which is grouped.
     #[test]
     fn morph_slots_ride_on_the_parameters_they_move() {
         let specs = Program::field_specs();
@@ -953,8 +952,8 @@ mod tests {
         assert_eq!(PANEL.leftovers(&specs), ["version_echo"]);
     }
 
-    /// The render path and the inspection path have to agree: one resolves against a
-    /// body's values and the other against its specs, and a layout means one thing.
+    /// Resolving the layout against a body's values and naming it against the specs must
+    /// agree.
     #[test]
     fn resolving_a_body_names_what_the_specs_say_it_will() {
         let fields = program(&[]);
@@ -1004,7 +1003,7 @@ mod tests {
             .find(|section| section.group.title == "Layer A")
             .expect("layer A");
         assert!(!layer.relevant, "and nothing inside it is being played");
-        // Its own condition still holds, which is what tells "the section is off" from
+        // Its own condition still holds, which distinguishes "the section is off" from
         // "this layer is off".
         assert!(layer.group.is_relevant(&layer_only));
     }

@@ -1,7 +1,7 @@
 # source: synthetic
-# note: driven by tests/ops.rs, which asserts the refusal is reported rather than
-#   panicking in Drop. SESSION_CLOSE answered with a device status; the GOODBYE
-#   still follows, because the HELLO is the half that wedges the instrument.
+# note: driven by tests/ops.rs, which asserts the refusal is reported and does not
+#   panic in Drop. SESSION_CLOSE is answered with a device status, and the GOODBYE
+#   still follows, because a HELLO without a GOODBYE wedges the instrument.
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec
 O 000000160000000c0000000a0000000400000004a218

@@ -111,7 +111,7 @@ html.light, html.rust, html.coal, html.navy, html.ayu,
 
   --color-scheme: light dark;
 
-  /* panel geometry, verbatim from the app */
+  /* panel geometry, copied from the app */
   --db-radius: 2px;
 }
 
@@ -234,7 +234,7 @@ kbd,
   color: var(--db-accent);
 }
 
-/* Syntax colours are the panel's signal colours — the same five the LEDs use. */
+/* Syntax colors are the panel's signal colors: the same five the LEDs use. */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -299,7 +299,7 @@ kbd,
   padding: 1.2rem 1rem 3rem;
 }
 /* chrome.css sizes the drag target from the indicator width zeroed above,
-   which would leave no handle; it now grips the sidebar's inner edge. */
+   which would leave no handle. This width gives it the sidebar's inner edge. */
 html.js .sidebar .sidebar-resize-handle {
   width: 6px;
 }
@@ -428,8 +428,8 @@ html.js .sidebar .sidebar-resize-handle {
 }
 .theme-popup .theme:hover { background: var(--theme-hover); }
 
-/* Both faces are reachable from the picker; these three are aliases of the
-   dark face, so hide them and leave Light / Coal as the two real choices. */
+/* Rust is an alias of the light face, and Navy and Ayu of the dark one. Hide
+   them from the picker and leave Light and Coal as the two real choices. */
 .theme-popup .theme#mdbook-theme-rust,
 .theme-popup .theme#mdbook-theme-navy,
 .theme-popup .theme#mdbook-theme-ayu { display: none; }

@@ -1,4 +1,4 @@
-//! Nord Piano (`.nppg`, `.npli`, `.npsy`) — container-verified, bodies unmapped.
+//! Nord Piano (`.nppg`, `.npli`, `.npsy`): container-verified, bodies unmapped.
 //!
 //! The first Piano's tags predate the model-prefix convention: program is `nppg`,
 //! live is `npli`, and the settings tag is `npsy` (the vendor calls it System).
@@ -12,7 +12,7 @@ raw_format!(
     31
 );
 raw_format!(
-    /// Live slots (`.npli`) — same length as a program.
+    /// Live slots (`.npli`), the same length as a program.
     live,
     "npli",
     31

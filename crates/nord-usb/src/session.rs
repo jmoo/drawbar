@@ -1,18 +1,17 @@
 //! The transaction wrapper every operation runs inside.
 //!
-//! Each operation is enclosed by the same exchange sequence, independent of what the
-//! operation does:
+//! Every operation is enclosed by the same exchange sequence:
 //!
 //! ```text
 //! O18 I22, O22 I26, [ operation ], O22 I42, O18 I22, O18 I22
 //! ```
 //!
-//! (Payload bytes. Captures quote frame lengths, which are 40 higher — that is the
-//! sniffer's Darwin header, not anything on the wire.)
+//! The numbers are payload bytes. Captures show frame lengths 40 higher, which is the
+//! capture tool's Darwin header and not part of the wire.
 //!
-//! Closing is explicit rather than in `Drop`: `Drop` is neither async nor fallible, so a
-//! failed close there would be swallowed where a half-open transaction may leave the
-//! device in an odd state. `Drop` only complains, in debug builds.
+//! Closing is explicit. `Drop` is neither async nor fallible, so a failed close there
+//! would be lost while a half-open transaction may leave the device in an odd state.
+//! `Drop` only complains, in debug builds.
 
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -30,11 +29,11 @@ pub struct ReadOnly;
 pub struct ReadWrite;
 
 /// How many queued [`cmd::CHANGED`] notifications one response read will drain before
-/// giving up. A cap, not a protocol fact: it exists so a device streaming
-/// notifications cannot pin the host in the read loop forever.
+/// giving up. A host limit, so a device streaming notifications cannot keep the host
+/// in the read loop forever.
 pub const DRAIN_CAP: usize = 32;
 
-/// Device status meaning "the session you are using is no longer valid".
+/// Device status meaning the session in use is not valid.
 ///
 /// Seen when a previous run left a session open, and after a session reset. It is
 /// recoverable without touching the instrument: see [`Session::open`].
@@ -47,8 +46,8 @@ pub const WRITE_LIMIT: Duration = Duration::from_secs(10);
 pub const READ_LIMIT: Duration = Duration::from_secs(30);
 
 pub struct Session<'t, T: Transport, C = ReadOnly> {
-    // `Option` rather than a plain `&mut` so the capability escalation can move the
-    // borrow out: a type implementing `Drop` cannot be destructured.
+    // An `Option` so the capability escalation can move the borrow out: a type
+    // implementing `Drop` cannot be destructured.
     transport: Option<&'t mut T>,
     class: ObjectClass,
     closed: bool,
@@ -60,9 +59,8 @@ pub struct Session<'t, T: Transport, C = ReadOnly> {
 impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     /// Open a transaction scoped to one [`ObjectClass`].
     ///
-    /// The class matters: `STATUS` and the addressing operations all report on
-    /// whichever class was opened, so opening the wrong one yields correct-looking
-    /// numbers about the wrong thing.
+    /// `STATUS` and the addressing operations report on the class that was opened, so
+    /// opening the wrong one yields plausible numbers about the wrong class.
     pub async fn open(transport: &'t mut T, class: ObjectClass) -> Result<Self> {
         let mut s = Self {
             transport: Some(transport),
@@ -78,8 +76,8 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
 
         let opened = s.open_class(class).await;
 
-        // ⚠️ This covers an abandoned *class* session only. An abandoned **UI** session
-        // reports every slot as empty without an error; [`recover`] handles that case.
+        // ⚠️ This covers an abandoned class session only. An abandoned UI session
+        // reports every slot as empty without an error; `op::recover` handles that case.
         let opened = match opened {
             Err(Error::DeviceStatus(STALE_SESSION)) => {
                 if let Err(error) = s.discard_stale_session().await {
@@ -135,14 +133,14 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
 
     /// Tell the device to drop a session it still thinks is open.
     ///
-    /// Sent **bare** — no `HELLO`, no open — because the machinery that would wrap it is
-    /// exactly what the device is refusing. Confirmed on hardware. An instrument that
-    /// answers `0x12` to everything is well again immediately afterwards.
+    /// Sent bare, with no `HELLO` and no open, because those are what the device is
+    /// refusing. Confirmed on hardware. An instrument that answers `0x12` to everything
+    /// recovers immediately afterward.
     async fn discard_stale_session(&mut self) -> Result<()> {
         let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
         self.notify(&close).await?;
-        // Its reply is uninteresting — the point is the side effect — but it must be
-        // taken off the wire, or it would be read as the answer to the next request.
+        // The reply is ignored, but it must be read or it would be taken as the answer
+        // to the next request.
         let _ = self.read_frame().await?;
         Ok(())
     }
@@ -152,7 +150,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         let transport = self.transport.take();
         let (class, closed, device_changed) = (self.class, self.closed, self.device_changed);
         let read_limit = self.read_limit;
-        // The husk is about to drop and no longer owns the transaction.
+        // The old session is about to drop and does not own the transaction.
         self.closed = true;
         Session {
             transport,
@@ -173,10 +171,9 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// Whether an unsolicited [`cmd::CHANGED`] notification arrived during this
     /// session.
     ///
-    /// The device queues one on its own when its contents change outside the session —
-    /// a front-panel STORE, for instance — and `Session::request` drains it rather than
-    /// mistaking it for a reply. `true` means the instrument changed under us: state
-    /// read earlier in this session may be stale.
+    /// The device queues one when its contents change outside the session, for example
+    /// after a front-panel STORE, and requests drain it instead of taking it for a
+    /// reply. `true` means state read earlier in this session may be stale.
     pub fn instrument_changed(&self) -> bool {
         self.device_changed
     }
@@ -189,7 +186,7 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// One frame from the device, honoring [`Self::set_read_limit`].
     ///
     /// `Ok(None)` means the limit passed with nothing read. The transport has already
-    /// cancelled the outstanding transfer by then, so the session is still in step.
+    /// canceled the outstanding transfer by then, so the session is still in step.
     async fn read_frame(&mut self) -> Result<Option<Message>> {
         self.read_frame_with_limit(self.read_limit).await
     }
@@ -220,22 +217,22 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Send an arbitrary command and return whatever comes back, enforcing nothing.
     ///
-    /// For reverse-engineering commands that have no typed operation yet. Unlike
-    /// `Session::request` this accepts a reply that is not `command + 1` and a non-zero
-    /// status, because on an undocumented command both are results rather than faults —
-    /// a device that does not implement one still answers, with a status saying so.
-    /// `Ok(None)` means it said nothing within `limit`.
-    /// Call [`Self::commit_with_read_limit`] with the same limit to bound cleanup too.
+    /// For reverse-engineering commands that have no typed operation yet. Unlike a typed
+    /// request, this accepts a reply that is not `command + 1` and a non-zero status:
+    /// on an undocumented command both are results, since a device that does not
+    /// implement one still answers with a status saying so. `Ok(None)` means it said
+    /// nothing within `limit`. Call [`Self::commit_with_read_limit`] with the same limit
+    /// to bound cleanup too.
     ///
-    /// Queued [`cmd::CHANGED`] notifications are drained as in `Session::request`, so a
+    /// Queued [`cmd::CHANGED`] notifications are drained as in a typed request, so a
     /// front-panel STORE cannot be mistaken for the probe's answer.
     ///
     /// # Warning
     ///
-    /// This sends bytes no capture has ever shown the device being sent. Unknown
-    /// commands have been reported to leave instrument firmware in a state only a power
-    /// cycle clears, and a write-shaped command reaching a real object destroys it.
-    /// Probe read-shaped commands, on backed-up content, or not at all.
+    /// This sends bytes no capture has shown the device receiving. Unknown commands have
+    /// been reported to leave instrument firmware in a state only a power cycle clears,
+    /// and a write-shaped command reaching a real object destroys it. Probe only
+    /// read-shaped commands, and only on backed-up content.
     pub async fn probe(
         &mut self,
         service: Service,
@@ -268,8 +265,7 @@ impl<T: Transport, C> Session<'_, T, C> {
         self.read_frame_as(limit, Message::decode_probe).await
     }
 
-    /// Send one request and read its response, enforcing the framing invariants: the
-    /// reply must be `command + 1`, and must report success.
+    /// Send one request and read its response through [`Self::response_to`].
     pub(crate) async fn request(
         &mut self,
         service: Service,
@@ -285,10 +281,10 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// Read the reply to `command`, enforcing the framing invariants: it must carry
     /// `command + 1` and must report success.
     ///
-    /// Unsolicited [`cmd::CHANGED`] notifications are drained (up to [`DRAIN_CAP`])
-    /// rather than mistaken for the reply. Any other failure to produce a usable,
-    /// matching reply is a desync: nothing read after it can be paired with its
-    /// request, so the transaction is released before the error is reported.
+    /// Unsolicited [`cmd::CHANGED`] notifications are drained, up to [`DRAIN_CAP`]. Any
+    /// other failure to produce a usable, matching reply is a desync: nothing read after
+    /// it can be paired with its request, so the transaction is released before the
+    /// error is reported.
     async fn response_to(&mut self, command: u32) -> Result<Message> {
         let expected = command.checked_add(1).ok_or_else(|| {
             Error::InvalidArgument("command 0xffffffff has no response code".into())
@@ -297,7 +293,8 @@ impl<T: Transport, C> Session<'_, T, C> {
         loop {
             let resp = match self.read_frame().await {
                 Ok(Some(resp)) => resp,
-                // A timed-out request desynchronizes replies, but cancellation may let close land.
+                // A timed-out request desynchronizes replies, but the canceled read
+                // may still let the release land.
                 Ok(None) => {
                     self.release().await;
                     return Err(Error::Transport(format!(
@@ -323,8 +320,8 @@ impl<T: Transport, C> Session<'_, T, C> {
                 });
             }
             return match resp.status() {
-                // A refusal is not a desync: request and reply are still in step, the
-                // session stays usable, and the caller still owes it a close.
+                // A refusal leaves request and reply in step: the session stays usable,
+                // and the caller still owes it a close.
                 Some(0) => Ok(resp),
                 Some(code) => Err(Error::DeviceStatus(code)),
                 None => {
@@ -353,10 +350,8 @@ impl<T: Transport, C> Session<'_, T, C> {
 
     /// Send a fire-and-forget message without waiting for a reply.
     ///
-    /// The UI progress strings ([`ui::label`], [`ui::percent`]) are sent this way: the
-    /// device never acknowledges them, so routing them through [`Self::request`] would
-    /// block forever on a response that never comes.
-    ///
+    /// The UI progress strings ([`ui::label`], [`ui::percent`]) are sent this way. The
+    /// device never acknowledges them, so [`Self::request`] would wait forever.
     pub(crate) async fn notify(&mut self, msg: &Message) -> Result<()> {
         let transport = self
             .transport
@@ -368,15 +363,15 @@ impl<T: Transport, C> Session<'_, T, C> {
         } else {
             Err(Error::Transport(format!(
                 "the device did not accept command {:#04x} within {}s: its bulk endpoints \
-                 are stalled, and a power cycle is the only way out — `nord device recover` \
-                 cannot help, because that frame cannot be delivered either",
+                 are stalled. Only a power cycle clears them; `nord device recover` cannot, \
+                 because its frames cannot be delivered either",
                 msg.command,
                 WRITE_LIMIT.as_secs()
             )))
         }
     }
 
-    /// Run the closing exchanges. Always prefer this over dropping.
+    /// Run the closing exchanges. Call this before dropping; [`Self::abort`] skips them.
     pub async fn commit(mut self) -> Result<()> {
         self.close().await
     }
@@ -424,18 +419,16 @@ impl<T: Transport, C> Session<'_, T, C> {
 
 impl<T: Transport, C> Drop for Session<'_, T, C> {
     fn drop(&mut self) {
-        // ⚠️ Asserting during an unwind aborts the process, burying the panic that is
-        // the actual finding.
+        // ⚠️ Asserting during an unwind aborts the process and hides the original panic.
         debug_assert!(
             self.closed || std::thread::panicking(),
-            "Session dropped without commit()/abort() — the device may be left \
+            "Session dropped without commit() or abort(); the device may be left \
              mid-transaction. Close it explicitly."
         );
     }
 }
 
-// Where a panic aborts rather than unwinds, the panic these tests observe would take
-// the test binary with it.
+// With `panic = "abort"`, the panic these tests catch would end the test binary.
 #[cfg(all(test, panic = "unwind"))]
 mod tests {
     use super::*;
@@ -452,8 +445,7 @@ mod tests {
         }
     }
 
-    /// A panic inside a session must arrive at the caller as itself. The `Drop`
-    /// assertion firing during the unwind would abort the process instead.
+    /// The `Drop` assertion firing during the unwind would abort the process.
     #[test]
     fn a_panic_inside_a_session_is_not_replaced_by_the_drop_assertion() {
         let mut transport = Silent;

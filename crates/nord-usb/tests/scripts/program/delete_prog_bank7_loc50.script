@@ -1,8 +1,8 @@
 # source: nsm
 # device: Nord Electro 5, firmware v2.04
 # trimmed: ui-refresh
-# note: the O36 O26 I30 shape - the progress label is fire-and-forget, so two host
-#   frames precede the one reply.
+# note: the O36 O26 I30 shape. The device does not answer the progress label, so
+#   two host frames precede the one reply.
 # intent: program delete 7:50
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

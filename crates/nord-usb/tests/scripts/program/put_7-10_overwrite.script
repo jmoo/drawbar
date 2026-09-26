@@ -1,10 +1,10 @@
 # source: nord
 # device: Nord Electro 5, firmware v2.04 build 592
-# note: the instrument will not overwrite in place, so a put into an
-#   occupied slot is five transactions: the address is checked against the
-#   device's own geometry, the occupant named and read back, then deleted,
-#   and only then is the file written. The name and timestamp are
-#   BEGIN_WRITE arguments the file itself does not carry.
+# note: programs are not overwritten in place, so a put into an occupied slot is
+#   five transactions. The address is checked against the device's geometry, the
+#   occupant is described and read back, then deleted, and then the file is
+#   written. The name and timestamp are BEGIN_WRITE arguments the file does not
+#   carry.
 # intent: program check-address 7:10
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

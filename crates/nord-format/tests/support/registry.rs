@@ -1,9 +1,9 @@
-//! The field registry behind any entity whose body declares one, and the
-//! mutation check every such entity can answer: each field takes a value it
-//! does not hold, reaches the bytes, reads back, and moves nothing else.
+//! The field registry of any entity whose body declares one, and the mutation
+//! check that applies to each such entity: every field is set to a value it does
+//! not hold, written, and read back, and no other field changes.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy.
+//! ⚠️ Not a test target. Each test target that includes this module compiles its
+//! own copy.
 #![allow(dead_code)]
 
 use nord_format::cbin::Cbin;
@@ -40,7 +40,7 @@ macro_rules! with_registry {
     };
 }
 
-/// The settable-field view, carrying both of a value's canonical spellings.
+/// The settable fields, each with its `set_field` spelling and its display.
 pub fn fields(entity: &Entity) -> Option<Vec<Field>> {
     with_registry!(entity, |f| f.fields())
 }
@@ -50,21 +50,20 @@ pub fn field_values(entity: &Entity) -> Option<Vec<FieldValue>> {
     with_registry!(entity, |f| f.field_values())
 }
 
-/// Which body an entity decodes to, as a name a file can be called after:
-/// the model module and the type — `ne5-Program`. Two entities over the same
-/// body share it, which is the point — `ne5p` and `ne5l` are one body.
+/// The body type an entity decodes to, named by model module and type, such as
+/// `ne5-Program`, so the name is usable in a file name. Entities over the same
+/// body share the name: `ne5p` and `ne5l` are one body.
 pub fn body_type(entity: &Entity) -> Option<String> {
     with_registry!(entity, |f| body_name(f))
 }
 
-/// The body's declared bit map, for walking what the source claims. Nested
-/// entries chain to their own layouts.
+/// The body's declared bit map. Nested entries link to their own layouts.
 pub fn layout(entity: &Entity) -> Option<&'static [LayoutField]> {
     with_registry!(entity, |f| body_layout(f))
 }
 
-/// Reached through the container so `with_registry!` can name the body type it
-/// never spells out.
+/// Generic over the container so `with_registry!` can name a body type it never
+/// spells out.
 fn body_name<B>(_: &Cbin<B>) -> String {
     model_qualified(std::any::type_name::<B>())
 }
@@ -73,8 +72,8 @@ fn body_layout<B: BodyLayout>(_: &Cbin<B>) -> &'static [LayoutField] {
     B::layout()
 }
 
-/// `…::formats::ne5::program::Program` → `ne5-Program`. The bare type name
-/// collides — four models declare a `Program` — so the model module qualifies it.
+/// `…::formats::ne5::program::Program` → `ne5-Program`. Several models declare a
+/// `Program`, so the model module qualifies the type name.
 fn model_qualified(path: &str) -> String {
     let parts: Vec<&str> = path.split("::").collect();
     let name = parts.last().copied().unwrap_or(path);
@@ -88,9 +87,10 @@ fn parse(bytes: &[u8]) -> Result<Entity, String> {
     nord_format::from_stream(&mut Cursor::new(bytes)).map_err(|e| e.to_string())
 }
 
-/// Every registry field of the entity in `bytes` takes one value it does not
-/// hold, reaches the bytes, reads back, and moves no other field doing it. A
-/// field too wide to enumerate is skipped. `Ok` for an entity with no registry.
+/// Sets each registry field of the entity in `bytes` to a value it does not hold,
+/// writes the file, and reads it back. The field must read back the new value and
+/// no other field may change. A field too wide to enumerate is skipped. `Ok` for
+/// an entity with no registry.
 pub fn each_field_moves_alone(bytes: &[u8]) -> Result<(), String> {
     let Some(baseline) = fields(&parse(bytes)?) else {
         return Ok(());

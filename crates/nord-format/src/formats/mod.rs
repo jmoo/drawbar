@@ -1,34 +1,37 @@
-//! One module per file format, named for the four-character CBIN tag it carries — or,
-//! where a model family shares a prefix across several tags, for that prefix; or,
-//! where the tags share no usable prefix (`nsclassic`, `np`), for the model.
+//! One module per file format. A CBIN module is named for the four-character tag it
+//! carries; where a model family shares a prefix across several tags, for that prefix;
+//! and where the tags share no usable prefix (`nsclassic`, `np`), for the model. The
+//! formats outside CBIN (`cn3`, `midi`, `sysex`, `nsmpproj`) are named for their file
+//! type.
 //!
 //! # How far each format goes
 //!
-//! Writable formats round-trip byte-exactly — `to_bytes(from_stream(x)) == x` —
-//! and a read verifies its container: CBIN header and checksum for the CBIN
-//! formats, the envelope for the SysEx/MIDI carriers. Archives are read-only.
-//! What differs is how much of the body decodes, in three tiers:
+//! Writable formats round-trip byte-exactly (`to_bytes(from_stream(x)) == x`), and a
+//! read verifies its container: the CBIN header and checksum for the CBIN formats, and
+//! the envelope for the SysEx and MIDI carriers. Archives are read-only. What differs is
+//! how much of the body decodes, in three tiers:
 //!
-//! - **Decoded** — the body is a bit-mapped struct of named fields. The struct's
-//!   own doc carries its byte map, a read gates on the schema versions the
-//!   offsets are validated against and range-checks every field, and bits no
-//!   field claims survive a re-encode verbatim. These are the Electro 5 program,
-//!   live slot, song and settings ([`ne5`]); the Stage 2, 3 and 4 programs and
-//!   live slots ([`ns2`], [`ns3`], [`ns4`]); the Stage 3 synth preset; and the
-//!   Stage 4 synth, piano and organ presets.
-//! - **Structurally decoded** — the body's framing decodes and is editable; sample
-//!   instruments ([`nsmp`] — section chain, zones, stroke metadata, and encoded
-//!   audio) and piano libraries ([`npno`] — the CNSP prefix, the stroke directory,
-//!   and audio spans the transforms drop and the writer re-lays) expose decoded
-//!   audio on request.
-//! - **Container-verified stubs** — everything else: body kept verbatim, waiting
-//!   to be reverse-engineered. Each stub module's doc records what is known of it.
+//! - **Decoded.** The body is a bit-mapped struct of named fields. The struct's doc
+//!   carries its byte map, a read gates on the schema versions the offsets are
+//!   validated against and range-checks every field, and bits no field claims survive
+//!   a re-encode unchanged. These are the Electro 5 program, live slot, song and
+//!   settings ([`ne5`]); the Stage 2, 3 and 4 programs and live slots ([`ns2`],
+//!   [`ns3`], [`ns4`]); the Stage 3 synth preset; and the Stage 4 synth, piano and
+//!   organ presets.
+//! - **Structurally decoded.** The body's framing decodes and is editable, and decoded
+//!   audio is available on request. These are sample instruments ([`nsmp`]: section
+//!   chain, zones, stroke metadata, and encoded audio) and piano libraries ([`npno`]:
+//!   the CNSP prefix, the stroke directory, and audio spans, which transforms can drop
+//!   and the writer lays out again). Sample Editor projects ([`nsmpproj`]) are text,
+//!   read and written as a key-value tree with typed views.
+//! - **Container-verified stubs.** Everything else. The body is kept as stored until
+//!   it is mapped, and each stub module's doc records what is known of it.
 //!
-//! Provenance is marked where each fact is stated, in four phrases: *confirmed
-//! on hardware*, *inferred from specimens*, *reported by public documentation*,
-//! *unexplained*. Broadly, the Electro 5 bodies are pinned by change-one-setting
-//! hardware sweeps; the Stage bodies come from community byte maps and corpus
-//! measurement, not confirmed on hardware — each module says which.
+//! Provenance is marked where each fact is stated, in four phrases: "Confirmed on
+//! hardware", "Inferred from specimens", "Reported by public documentation", and
+//! "Unexplained". Broadly, the Electro 5 bodies are pinned by hardware sweeps that
+//! change one setting at a time, and the Stage bodies come from community byte maps and
+//! specimen measurement, not confirmed on hardware. Each module says which.
 
 pub(crate) mod predictor;
 pub(crate) mod raw;
@@ -67,8 +70,8 @@ pub mod sysex;
 
 use crate::error::{Error, ParseError};
 
-/// Refuse a schema version the build's field offsets have never been validated
-/// against — decoding it would produce plausible-looking but wrong values.
+/// Refuse a schema version the field offsets have not been validated against;
+/// decoding it could produce plausible but wrong values.
 pub(crate) fn known_version(
     format: &'static str,
     version: u32,
@@ -88,10 +91,10 @@ pub(crate) fn known_version(
 
 /// One ZIP member, read under the length its directory entry declares.
 ///
-/// ⚠️ A member's decompressed length is the archive author's choice, not the
-/// archive's size: memory follows the bytes the entry yields, capped by the
-/// declaration, so neither the declaration nor the entry alone sizes an
-/// allocation. An entry yielding a length other than the one it declares is
+/// ⚠️ A member's decompressed length is chosen by the archive's author and can far
+/// exceed the archive's size. Memory grows with the bytes the entry yields, capped by
+/// the declaration, so neither the declaration nor the entry alone sizes an
+/// allocation. An entry that yields a length other than the one it declares is
 /// refused.
 #[cfg(feature = "bundle")]
 pub(crate) fn zip_member_bytes(file: &mut zip::read::ZipFile<'_>) -> Result<Vec<u8>, Error> {
@@ -127,8 +130,8 @@ pub(crate) fn zip_member_bytes(file: &mut zip::read::ZipFile<'_>) -> Result<Vec<
 
 /// Every member of a ZIP archive, each parsed as a CBIN file of `format`.
 ///
-/// For the drum banks, whose archives hold nothing else — a member that is not a
-/// `format` file fails the read rather than being skipped.
+/// For the drum banks, whose archives hold nothing else. A member that is not a
+/// `format` file fails the read; it is not skipped.
 #[cfg(feature = "bundle")]
 pub(crate) fn zip_members(
     reader: &mut (impl std::io::Read + std::io::Seek),
@@ -153,9 +156,9 @@ pub(crate) fn zip_members(
 ///
 /// The shape every model's bundles and backups take: a plain ZIP of ordinary
 /// program files, the member path encoding the slot. Reported by public
-/// documentation; not confirmed on hardware. Members therefore stay raw rather
-/// than dispatching to their format modules. A member that is not a CBIN file fails
-/// the read — this is the arbiter of whether an unrecognised ZIP is a bundle.
+/// documentation; not confirmed on hardware. Members stay raw and are not dispatched
+/// to their format modules. A member that is not a CBIN file fails the read, which is
+/// how an unrecognized ZIP is judged not to be a bundle.
 #[cfg(feature = "bundle")]
 pub(crate) fn zip_raw_members(
     reader: &mut (impl std::io::Read + std::io::Seek),
@@ -185,7 +188,7 @@ mod tests {
 
     /// A one-member stored archive whose headers declare `declared` uncompressed
     /// bytes while the entry still holds all of [`MEMBER`]: `zip` caps a stored
-    /// read at the *compressed* size, so patching only the uncompressed size
+    /// read at the compressed size, so patching only the uncompressed size
     /// leaves an entry that yields a length other than the one it declares.
     fn archive_declaring(declared: u32) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));

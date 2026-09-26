@@ -1,60 +1,58 @@
-//! What a body's fields *are* to a player: which controls sit together, and which of
-//! them the instrument is using for the state the file holds.
+//! How a body's fields appear to a player: which controls sit together, and which of them
+//! the instrument uses for the state the file holds.
 //!
-//! The field registry answers where a field sits, what it accepts and what kind of
-//! control it is. Three things it cannot answer, because none of them is a property of a
-//! placement:
+//! The field registry says where a field sits, what it accepts, and what kind of control
+//! it is. It cannot say three things, because none of them is a property of a placement:
 //!
 //! - **Order.** The registry lists fields in bit order, so an organ layer's nine drawbars
 //!   need not be adjacent and a knob need not follow the switch that arms it.
 //! - **Grouping.** A dotted prefix is the only structure a path carries, and a body as
 //!   flat as the Electro 5 program has one prefix per panel and nothing below it.
-//! - **Relevance.** Which controls the instrument is actually using is *stateful*: an
-//!   Electro 5 keeps every organ model's registration and plays one, a Stage keeps every
-//!   layer and enables some.
+//! - **Relevance.** Which controls the instrument uses depends on state: an Electro 5
+//!   keeps every organ model's registration and plays one, and a Stage keeps every layer
+//!   and enables some.
 //!
-//! A [`Panel`] states all three, as data, per format. It is hand-authored — semantics
-//! cannot be derived from bit placement — and it is inspectable and testable rather than
-//! a pile of closures.
+//! A [`Panel`] states all three as data, per format. It is written by hand, because
+//! semantics cannot be derived from bit placement, and as data it can be inspected and
+//! tested.
 //!
 //! # What a caller may rely on
 //!
-//! - [`of`] answers for a decoded file, and answers `None` where nobody has authored a
-//!   layout. **Absence is normal**: a caller falls back to whatever it does today, and no
-//!   format is required to have one.
+//! - [`of`] returns a decoded file's layout, or `None` where none has been written.
+//!   Absence is normal: no format is required to have a layout, and a caller falls back
+//!   to its own presentation.
 //! - [`Panel::resolve`] is the whole render path: one call over a body's `fields()`
 //!   returns the groups with their fields, their effective relevance, and whatever no
-//!   group named. It indexes the field list once, so it does not cost a scan per member.
-//!   [`Panel::named`] and [`Panel::leftovers`] are the same questions asked of a body's
-//!   *specs*, for a caller inspecting a layout without a file in hand.
-//! - A [`Group`] names its members in **reading order** — the order the panel puts them
-//!   in, not the order the bits do.
+//!   group named. It indexes the field list once. [`Panel::named`] and
+//!   [`Panel::leftovers`] ask the same questions of a body's specs, for a caller
+//!   inspecting a layout without a file.
+//! - A [`Group`] names its members in reading order: the order the panel shows them, not
+//!   the bit order.
 //! - A path a group names is a real registry path of that body, and no path is named
-//!   twice. A test in this module holds both against every layout the crate ships, so a
-//!   layout cannot quietly rot as a body gains fields.
+//!   twice. A test in this module checks both for every layout the crate ships, so a
+//!   layout cannot drift as a body gains fields.
 //! - [`Panel::exhaustive`] says whether the groups account for every registered field. If
-//!   it is false, the leftovers can be non-empty and a caller still has somewhere to put
+//!   it is false, the leftovers can be non-empty, and a caller needs somewhere to put
 //!   them.
-//! - A morph slot is **not** named by any group: it belongs to the parameter it morphs,
-//!   which the group names, and [`FieldSpec::morph_parent`] resolves the relation. It is
-//!   why a Stage body, most of whose fields are morph slots, takes a layout of a
-//!   hundred-odd lines rather than one line per field.
+//! - No group names a morph slot: the slot belongs to the parameter it morphs, which the
+//!   group names, and [`FieldSpec::morph_parent`] resolves the relation. That is why a
+//!   Stage body, most of whose fields are morph slots, needs a layout of about a hundred
+//!   lines instead of one line per field.
 //!
 //! # Relevance is not visibility
 //!
-//! [`Group::is_relevant`] answers one question: *for the state this file holds, is the
-//! instrument using these controls?* A group that is not relevant is still state the file
-//! carries and still writable — an organ registration for a model that is not selected is
-//! kept, not cleared. Whether that means hidden, dimmed, or shown behind a fold is the
-//! caller's decision, and it may reasonably differ by depth: a whole section nobody is
-//! playing is worth hiding, where the second of two registrations is worth showing
-//! quietly.
+//! [`Group::is_relevant`] answers one question: for the state this file holds, is the
+//! instrument using these controls? A group that is not relevant is still state the file
+//! carries, and still writable: an organ registration for a model that is not selected is
+//! kept. Whether an irrelevant group is hidden, dimmed, or folded is the caller's
+//! decision, and it may differ by depth: a whole section nobody is playing is worth
+//! hiding, while the second of two registrations is worth showing quietly.
 //!
 //! A condition is a set of value matches, any one of which satisfies it, and a nested
-//! group is relevant only if its parent is — so a disjunction is a wider condition and a
-//! conjunction is another level of nesting. That is deliberately less than a predicate
-//! language: every condition stays comparable, printable and checkable against the
-//! field's own legal values.
+//! group is relevant only if its parent is. A disjunction is a wider condition, and a
+//! conjunction is another level of nesting. This is less than a predicate language, so
+//! every condition stays comparable, printable, and checkable against the field's legal
+//! values.
 
 use std::collections::{HashMap, HashSet};
 
@@ -64,7 +62,7 @@ use crate::{Entity, Live, Program};
 
 /// One body's controls, grouped the way its instrument groups them.
 ///
-/// ⚠️ Not the Electro 5's `CenterPanel` and friends, which are *bodies* — nested
+/// ⚠️ Not the Electro 5's `CenterPanel` and similar types, which are bodies: nested
 /// `#[bitbody]`s at a byte range. This is the panel as a reader sees it, and it cuts
 /// across those bodies freely.
 #[derive(Debug)]
@@ -73,17 +71,18 @@ pub struct Panel {
     pub groups: &'static [Group],
     /// Whether the groups account for every field the body registers.
     ///
-    /// True is checked by this module's tests, so an exhaustive layout stays exhaustive
+    /// This module's tests check a true value, so an exhaustive layout stays exhaustive
     /// as the body grows: a newly declared field fails the test until it is placed. False
-    /// means [`Self::leftovers`] can be non-empty and a caller needs somewhere to put it.
+    /// means [`Self::leftovers`] can be non-empty and a caller needs somewhere to put
+    /// them.
     pub exhaustive: bool,
 }
 
 /// How a group is chosen when it is one of several stored alternatives: writing `value`
 /// to `field` makes the instrument play this one.
 ///
-/// Not a relevance condition. The other alternatives stay relevant — a stored preset the
-/// instrument is not playing is still state the panel offers — where a group whose
+/// Not a relevance condition. The other alternatives stay relevant, because a stored
+/// preset the instrument is not playing is still state the panel offers. A group whose
 /// [`Group::when`] fails is one the instrument is not using at all.
 #[derive(Debug)]
 pub struct Selection {
@@ -110,11 +109,10 @@ pub struct Group {
     /// Registry paths, in reading order.
     ///
     /// A member ending in `.*` is a nested body's prefix and stands for every field that
-    /// body registers, in registry order — the whole of `organ_a`, without naming its
-    /// nineteen fields.
+    /// body registers, in registry order: `organ_a.*` covers the whole organ body
+    /// without naming its fields.
     pub members: &'static [&'static str],
-    /// Groups within this one. Nesting has no depth limit; the layouts here go three
-    /// deep at most, and a caller should recurse rather than assume.
+    /// Groups within this one. Nesting has no depth limit, so a caller should recurse.
     pub groups: &'static [Group],
     /// What makes this group relevant, or `None` for a group that always is.
     pub when: Option<Relevance>,
@@ -123,7 +121,7 @@ pub struct Group {
     pub selected_by: Option<Selection>,
 }
 
-/// A condition on the body's own values: satisfied when **any** match holds.
+/// A condition on the body's own values: satisfied when any match holds.
 #[derive(Debug)]
 pub struct Relevance {
     pub any_of: &'static [Match],
@@ -134,14 +132,13 @@ pub struct Relevance {
 pub struct Match {
     /// A registry path of the same body.
     pub field: &'static str,
-    /// The values that satisfy it, spelled as [`Field::value`] spells them — which is
-    /// also what `set_field` takes. A test checks each against the field's own legal
-    /// values, so a renamed variant fails rather than silently never matching.
+    /// The values that satisfy it, spelled as [`Field::value`] spells them, which is
+    /// also what `set_field` takes. A test checks each against the field's legal values,
+    /// so a renamed variant fails the test instead of never matching.
     pub is: &'static [&'static str],
 }
 
-/// A body's fields by path, so resolving a layout is one pass rather than a scan per
-/// member.
+/// A body's fields by path, so resolving a layout takes one pass.
 type Index<'a> = HashMap<&'a str, &'a Field>;
 
 impl Match {
@@ -149,7 +146,7 @@ impl Match {
     ///
     /// A path the body does not register holds nothing, so an unknown field never
     /// satisfies a match. Scans `fields`; [`Panel::resolve`] answers the same question
-    /// off an index when a whole layout is being drawn.
+    /// from an index when a whole layout is being drawn.
     pub fn holds(&self, fields: &[Field]) -> bool {
         fields
             .iter()
@@ -184,9 +181,8 @@ impl Group {
     /// holds.
     ///
     /// ⚠️ This answers for the group alone. A nested group is relevant only if its parent
-    /// is too, and nothing here walks up to check — a caller recursing top-down has the
-    /// answer already, and one starting in the middle does not have a group to start
-    /// from.
+    /// is too, and nothing here checks the parent; a caller recursing top-down already
+    /// knows. [`Panel::resolve`] combines both.
     pub fn is_relevant(&self, fields: &[Field]) -> bool {
         self.when.as_ref().is_none_or(|when| when.holds(fields))
     }
@@ -194,12 +190,12 @@ impl Group {
     /// This group's own members, in reading order, with any `prefix.*` expanded against
     /// the registry. Members of nested groups are not included.
     ///
-    /// A `prefix.*` names that body's **controls**: a morph slot whose parameter the same
-    /// body declares is not one, because it is drawn on that parameter. A slot whose
-    /// parameter is missing has nothing to ride on and is named like any other field.
+    /// A `prefix.*` names that body's controls. A morph slot whose parameter the same
+    /// body declares is left out, because it is drawn on that parameter; a slot whose
+    /// parameter is missing is included like any other field.
     ///
-    /// A member the body does not register is skipped rather than reported: the tests
-    /// hold layouts to naming only real fields, so a caller need not carry the case.
+    /// A member the body does not register is skipped. The tests require layouts to name
+    /// only real fields, so a caller need not handle the case.
     pub fn members_of<'a>(&self, specs: &'a [FieldSpec]) -> Vec<&'a str> {
         members_in(self.members, specs, |member| {
             specs.iter().find(|spec| spec.name == member)
@@ -219,9 +215,8 @@ impl Group {
     }
 }
 
-/// What a layout reads off a registered field, whether it is holding the body's specs or
-/// one body's values: where the field sits, and which parameter it rides on if it is a
-/// morph slot.
+/// What a layout reads from a registered field, whether from a body's specs or from its
+/// values: the field's path, and the parameter it morphs if it is a morph slot.
 trait Placed {
     fn path(&self) -> &str;
     fn morph_parent(&self) -> Option<String>;
@@ -247,8 +242,8 @@ impl Placed for Field {
     }
 }
 
-/// The items `members` names, in reading order, with any `prefix.*` expanded — a body's
-/// controls, morph slots left to the parameters they are drawn on.
+/// The items `members` names, in reading order, with any `prefix.*` expanded to that
+/// body's controls; morph slots are left to the parameters they are drawn on.
 ///
 /// `find` resolves a plain member: a scan where a caller holds only the list, an index
 /// lookup where a whole layout is being resolved against one body.
@@ -272,7 +267,7 @@ fn members_in<'a, T: Placed>(
     out
 }
 
-/// The items `claimed` does not answer for, in registry order. A morph slot whose
+/// The items `claimed` does not cover, in registry order. A morph slot whose
 /// parameter is claimed is not among them: it is drawn on that parameter's control.
 fn unclaimed<T: Placed>(items: &[T], claimed: impl Fn(&str) -> bool) -> Vec<&T> {
     items
@@ -282,8 +277,8 @@ fn unclaimed<T: Placed>(items: &[T], claimed: impl Fn(&str) -> bool) -> Vec<&T> 
         .collect()
 }
 
-/// Whether `path` is a field of the body at `prefix` — one dotted segment deeper, not
-/// merely sharing the leading text.
+/// Whether `path` is a field of the body at `prefix`: one dotted segment deeper, not
+/// merely sharing a text prefix.
 fn under(path: &str, prefix: &str) -> bool {
     path.strip_prefix(prefix)
         .and_then(|rest| rest.strip_prefix('.'))
@@ -319,12 +314,12 @@ impl Panel {
     }
 }
 
-/// One group with the fields it names, resolved against a body — what a caller draws.
+/// One group with the fields it names, resolved against a body: what a caller draws.
 pub struct Section<'a> {
     pub group: &'a Group,
-    /// Whether the instrument is using these controls: this group's own condition **and**
+    /// Whether the instrument is using these controls: this group's own condition and
     /// every ancestor's. [`Group::is_relevant`] on `group` answers for this level alone,
-    /// where a caller wants to tell "the section is off" from "this cluster is not the
+    /// for a caller that wants to tell "the section is off" from "this cluster is not the
     /// selected one".
     pub relevant: bool,
     /// This group's own fields, in reading order, `prefix.*` expanded.
@@ -336,7 +331,7 @@ pub struct Section<'a> {
 /// A whole layout resolved against one body: the render path, in one call.
 pub struct Resolved<'a> {
     pub sections: Vec<Section<'a>>,
-    /// The fields no group named, in registry order — empty for an exhaustive layout.
+    /// The fields no group named, in registry order; empty for an exhaustive layout.
     /// A morph slot whose parameter was named is not among them; it is drawn on that
     /// parameter's control.
     pub leftovers: Vec<&'a Field>,
@@ -347,8 +342,8 @@ impl Panel {
     /// its effective relevance, plus whatever no group named.
     ///
     /// One pass builds an index of the body's paths, so drawing a layout costs about one
-    /// walk of the field list however many members the groups name — which matters at the
-    /// Stage bodies' scale.
+    /// walk of the field list, however many members the groups name. The Stage bodies are
+    /// large enough for this to matter.
     pub fn resolve<'a>(&'a self, fields: &'a [Field]) -> Resolved<'a> {
         let index: Index<'a> = fields.iter().map(|f| (f.path.as_str(), f)).collect();
         let mut claimed: HashSet<&'a str> = HashSet::new();
@@ -409,9 +404,8 @@ pub fn of(entity: &Entity) -> Option<&'static Panel> {
 
 /// A layout and the registry it describes.
 ///
-/// Every layout the crate ships is listed in [`AUTHORED`], which is what the consistency
-/// tests walk — so a layout is checked by existing, not by anyone remembering to check
-/// it.
+/// Every layout the crate ships is listed in [`AUTHORED`], which the consistency tests
+/// walk, so every layout is checked without anyone having to remember.
 pub struct Authored {
     pub name: &'static str,
     pub panel: &'static Panel,
@@ -436,8 +430,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// A layout may only name fields the body registers — including through a
-    /// `prefix.*`, which must reach something.
+    /// A layout may only name fields the body registers, and a `prefix.*` must reach at
+    /// least one.
     #[test]
     fn every_named_path_is_a_real_field() {
         for authored in AUTHORED {
@@ -464,8 +458,8 @@ mod tests {
         }
     }
 
-    /// A morph slot is drawn on the parameter it moves, so a layout never names one
-    /// itself — and a `prefix.*` leaves them out for the same reason.
+    /// A morph slot is drawn on the parameter it moves, so a layout never names one, and
+    /// a `prefix.*` leaves them out.
     #[test]
     fn no_group_names_a_morph_slot_whose_parameter_is_declared() {
         for authored in AUTHORED {
@@ -499,8 +493,8 @@ mod tests {
         }
     }
 
-    /// A condition is checked against the field's own legal values, so a renamed variant
-    /// fails here rather than becoming a condition that never holds.
+    /// A condition is checked against the field's legal values, so a renamed variant
+    /// fails here and cannot become a condition that never holds.
     #[test]
     fn every_condition_names_a_field_and_values_it_accepts() {
         for authored in AUTHORED {
@@ -538,7 +532,7 @@ mod tests {
     }
 
     /// A selection is written back through `set_field`, so it names a registered field
-    /// and a value that field accepts — and the selector is not among the group it
+    /// and a value that field accepts. The selector is not a member of the group it
     /// selects, or a caller drawing only the selected group would lose the switch.
     #[test]
     fn every_selection_names_a_field_and_a_value_it_accepts() {
@@ -575,8 +569,6 @@ mod tests {
         }
     }
 
-    /// A layout that claims to account for every field has to keep doing so as the body
-    /// gains fields — which is the point of saying it in the first place.
     #[test]
     fn an_exhaustive_layout_leaves_nothing_out() {
         for authored in AUTHORED {

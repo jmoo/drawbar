@@ -10,10 +10,11 @@ use crate::formats::{cn3, midi, nsmpproj, sysex};
 /// The container classes [`peek`] distinguishes.
 pub enum FileType {
     Cbin,
-    /// An Electro 2 `.cn3` library — `CNE3` magic, not CBIN.
+    /// An Electro 2 `.cn3` library, with `CNE3` magic instead of CBIN.
     Cne3,
     Midi,
-    /// A Nord Sample Editor project — `SMACEditorProject {` text, not CBIN.
+    /// A Nord Sample Editor project, which opens with `SMACEditorProject {` text instead
+    /// of CBIN.
     SampleProject,
     Sysex,
     Xml,
@@ -58,7 +59,7 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
         reader.seek(SeekFrom::Start(start))?;
 
         match head[0] {
-            // 'P' — a ZIP local-file header, checked in full so a stray P (or a bare
+            // 'P': a ZIP local-file header, checked in full so a stray P (or a bare
             // central directory) is not called an archive.
             0x50 => {
                 let mut head = [0u8; 4];
@@ -75,7 +76,7 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
 
             0x3c => Ok(unknown(FileType::Xml)),
 
-            // 'S' — a Sample Editor project, checked in full so a stray S is not one.
+            // 'S': a Sample Editor project, checked in full so a stray S is not called one.
             0x53 => {
                 let mut head = vec![0u8; nsmpproj::MAGIC.len()];
                 reader.read_exact(&mut head)?;
@@ -91,7 +92,7 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
 
             sysex::SYSEX_START => Ok(unknown(FileType::Sysex)),
 
-            // 'M' — `MThd`, checked in full so a stray M is not called MIDI.
+            // 'M': `MThd`, checked in full so a stray M is not called MIDI.
             0x4d => {
                 let mut head = [0u8; 4];
                 reader.read_exact(&mut head)?;
@@ -105,7 +106,7 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
                 }
             }
 
-            // 'C' — CBIN, or the Electro 2 library's CNE3.
+            // 'C': CBIN, or the Electro 2 library's CNE3.
             0x43 => {
                 let mut head = [0u8; 12];
                 reader.read_exact(&mut head)?;

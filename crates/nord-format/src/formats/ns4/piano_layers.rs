@@ -1,9 +1,9 @@
 //! One piano layer's stored state: model, keyboard zone, octave, timbre and the
 //! acoustic options.
 //!
-//! ⚠️ A layer's **enable and volume are not in here** — the file packs those with
-//! the other layers', a bit and 31 bits apart respectively, so they stay on the
-//! owning body. This block is the part that repeats at a whole-byte stride.
+//! ⚠️ A layer's enable and volume are not in this block. The file packs them with the
+//! other layers' (a bit apart and 31 bits apart), so they stay on the owning body. This
+//! block is the part that repeats at a whole-byte stride.
 
 use crate::components::{KbZone4, OctaveShiftNibble, PianoRef, Selector};
 #[nord_bits_derive::bitbody(9)]

@@ -1,4 +1,4 @@
-//! The browser a raw user agent names.
+//! The browser a raw user-agent string names.
 
 /// Product tokens in the order they identify a browser. Every Chromium browser also
 /// claims `Chrome/` and `Safari/`, so its own token comes first; Safari alone carries

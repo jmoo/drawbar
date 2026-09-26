@@ -1,4 +1,4 @@
-//! Nord Stage Classic and Stage EX (`.nspg`, `.nss`, `.nsp`) — container-verified,
+//! Nord Stage Classic and Stage EX (`.nspg`, `.nss`, `.nsp`): container-verified,
 //! bodies unmapped.
 //!
 //! The two products share every tag, and the EX ships the Classic's synth patches
@@ -23,8 +23,9 @@ raw_format!(
     27
 );
 raw_format!(
-    /// Piano libraries (`.nsp`) — megabytes per file, so the raw body allocation
-    /// is real; [`crate::cbin::inspect`] answers container questions in O(1).
+    /// Piano libraries (`.nsp`). These run to megabytes per file, and reading the raw
+    /// body allocates all of it; [`crate::cbin::inspect`] answers container questions
+    /// in O(1) memory.
     piano_library,
     "nsp\0"
 );

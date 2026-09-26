@@ -1,4 +1,4 @@
-//! What the browser has picked out, and the three gestures that change it.
+//! The browser's selection, and the three click gestures that change it.
 
 use std::collections::BTreeSet;
 
@@ -6,21 +6,21 @@ use eframe::egui;
 
 use super::drag::Item;
 
-/// Which of the three things a click on a row means.
+/// What a click on a row does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Gesture {
-    /// This row and nothing else, or nothing at all when it is the row already picked.
+    /// Select only this row, or deselect it when it is already selected.
     Plain,
-    /// ⌘: this row in or out of what is picked.
+    /// ⌘: add this row to the selection, or remove it.
     Toggle,
-    /// ⇧: the run from the anchor to this row.
+    /// ⇧: select the run from the anchor to this row.
     Extend,
 }
 
-/// What the modifiers held during a click make it.
+/// The gesture the modifiers held during a click make.
 ///
-/// ⚠️ ⌘ wins over ⇧. A run *and* a toggle has no meaning, and the toggle is the one
-/// about the row the pointer is actually over.
+/// ⚠️ ⌘ wins over ⇧. A run and a toggle together mean nothing, and the toggle acts on the
+/// row under the pointer.
 pub fn gesture(how: &egui::Modifiers) -> Gesture {
     if how.command {
         return Gesture::Toggle;
@@ -31,11 +31,10 @@ pub fn gesture(how: &egui::Modifiers) -> Gesture {
     }
 }
 
-/// The rows the browser has picked, and the one a ⇧-click measures from.
+/// The rows selected in the browser, and the anchor a ⇧-click measures from.
 ///
-/// ⚠️ Not [`crate::workspace::Workspace::selected`], which is the single asset the
-/// document editor is on. This is the browser's own, and a tag, an export or a drag
-/// acts on all of it.
+/// ⚠️ Not [`crate::tabs::Tabs::active`], which is the one document the center shows. This
+/// is the browser's own, and a tag, an export or a drag acts on all of it.
 #[derive(Default)]
 pub struct Selection {
     anchor: Option<Item>,
@@ -43,7 +42,7 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// The one row picked, or `None` when none or several are. What F2 renames.
+    /// The only selected row, or `None` when none or several are. F2 renames it.
     pub fn sole(&self) -> Option<Item> {
         match self.set.len() {
             1 => self.set.iter().copied().next(),
@@ -59,16 +58,15 @@ impl Selection {
         self.set.iter().copied()
     }
 
-    /// The assets on this computer among what is picked, in id order.
+    /// The selected assets on this computer, in id order.
     pub fn locals(&self) -> Vec<u64> {
         self.items().filter_map(Item::local).collect()
     }
 
-    /// A plain click: this row and nothing else, or this row let go of when it is
-    /// already picked.
+    /// A plain click: select only this row, or deselect it when it is already selected.
     ///
-    /// ⚠️ The only gesture that takes a row out without a modifier, which is what leaves
-    /// a set of one reachable from the keyboard alone.
+    /// ⚠️ The only gesture that removes a row without a modifier key. Without it, a
+    /// single selected row could not be deselected by a plain click.
     pub fn plain(&mut self, item: Item) {
         match self.holds(item) {
             true => self.toggle(item),
@@ -76,20 +74,20 @@ impl Selection {
         }
     }
 
-    /// This row and nothing else, whatever was picked before it.
+    /// Select only this row, whatever was selected before.
     pub fn only(&mut self, item: Item) {
         self.anchor = Some(item);
         self.set.clear();
         self.set.insert(item);
     }
 
-    /// Let go of everything.
+    /// Clear the selection and its anchor.
     pub fn clear(&mut self) {
         self.set.clear();
         self.anchor = None;
     }
 
-    /// ⌘-click: in or out, and the anchor follows the row that was pressed.
+    /// ⌘-click: add or remove the row, and move the anchor to it.
     pub fn toggle(&mut self, item: Item) {
         if !self.set.remove(&item) {
             self.set.insert(item);
@@ -97,10 +95,10 @@ impl Selection {
         self.anchor = Some(item);
     }
 
-    /// ⇧-click: the run between the anchor and this row, inside one list.
+    /// ⇧-click: select the run between the anchor and this row, within one list.
     ///
-    /// A list the anchor is not in cannot be spanned — the rows between them are in
-    /// neither — so that click selects the row it landed on and re-anchors there.
+    /// When the anchor is not in `list` there is no run, so the click selects only this
+    /// row and anchors there.
     pub fn extend(&mut self, item: Item, list: &[Item]) {
         let span = self
             .anchor
@@ -116,7 +114,7 @@ impl Selection {
         self.anchor = Some(anchor);
     }
 
-    /// Take a row out, because it is about to stop existing.
+    /// Remove a row that is about to go away.
     pub fn forget(&mut self, item: Item) {
         self.set.remove(&item);
         if self.anchor == Some(item) {
@@ -134,7 +132,6 @@ mod tests {
         (0..n).map(Item::Local).collect()
     }
 
-    /// A plain click is one row, whatever was picked before it.
     #[test]
     fn a_plain_click_picks_one_row_and_drops_the_rest() {
         let mut selection = Selection::default();
@@ -146,15 +143,15 @@ mod tests {
         assert_eq!(selection.sole(), Some(Item::Local(3)));
     }
 
-    /// ⚠️ A plain click on a row that is already picked lets go of it — the one gesture
-    /// that empties a selection without a modifier. A click that only ever re-picked the
-    /// row it landed on leaves no way of putting a set of one down.
+    /// ⚠️ A plain click on a selected row deselects it. It is the only way to empty a
+    /// selection without a modifier; a click that always re-selected its row would leave
+    /// no way to clear a set of one.
     #[test]
     fn a_plain_click_on_a_picked_row_lets_go_of_it() {
         let mut selection = Selection::default();
         selection.plain(Item::Local(1));
         selection.plain(Item::Local(1));
-        assert_eq!(selection.items().count(), 0, "the sole row let go of");
+        assert_eq!(selection.items().count(), 0, "the only row is deselected");
 
         selection.plain(Item::Local(1));
         selection.toggle(Item::Local(2));
@@ -162,12 +159,12 @@ mod tests {
         assert_eq!(
             selection.items().collect::<Vec<_>>(),
             vec![Item::Local(1)],
-            "and one of a set leaves the rest picked"
+            "and deselecting one of a set keeps the rest"
         );
     }
 
-    /// Escape lets go of everything, and the next ⇧-click measures from the row it
-    /// lands on rather than from the anchor the cleared set left behind.
+    /// After a clear, the next ⇧-click selects only the row it lands on, because the
+    /// anchor was cleared too.
     #[test]
     fn clearing_lets_go_of_the_anchor_too() {
         let rows = list(4);
@@ -180,7 +177,7 @@ mod tests {
         assert_eq!(selection.sole(), Some(rows[2]));
     }
 
-    /// ⌘-click adds and removes, so the same click twice leaves what it found.
+    /// The same ⌘-click twice leaves the selection as it was.
     #[test]
     fn a_command_click_puts_a_row_in_or_takes_it_out() {
         let mut selection = Selection::default();
@@ -195,12 +192,12 @@ mod tests {
         assert_eq!(
             selection.items().count(),
             0,
-            "a row goes out of a set of one, leaving nothing picked"
+            "removing the only row leaves nothing selected"
         );
     }
 
-    /// ⇧-click fills the run between the anchor and the row it landed on, either way
-    /// round, and the anchor stays where it was so the next one measures from it again.
+    /// ⇧-click fills the run between the anchor and the clicked row in either direction,
+    /// and the anchor stays put for the next one.
     #[test]
     fn a_shift_click_fills_the_run_from_the_anchor() {
         let rows = list(6);
@@ -216,13 +213,13 @@ mod tests {
         assert_eq!(
             selection.items().collect::<Vec<_>>(),
             vec![rows[3], rows[4], rows[5]],
-            "still anchored at 3, so this one runs the other way from there"
+            "still anchored at 3, so this run goes the other way"
         );
     }
 
-    /// ⚠️ A run needs both ends in one list. The rows of a folder and the rows of a bank
-    /// have nothing between them, so a ⇧-click across the two picks the row it landed on
-    /// rather than everything the tree happens to hold in between.
+    /// ⚠️ A run needs both ends in one list. Nothing lies between a folder's rows and a
+    /// bank's rows, so a ⇧-click across the two selects only the clicked row, not
+    /// everything the tree draws in between.
     #[test]
     fn a_shift_click_into_another_list_picks_one_row() {
         let elsewhere = Item::Slot {
@@ -243,7 +240,6 @@ mod tests {
         );
     }
 
-    /// ⌘ wins over ⇧, and a bare click is a bare click whatever else is held.
     #[test]
     fn the_modifiers_decide_which_of_the_three_gestures_a_click_is() {
         let with = |command, shift| {

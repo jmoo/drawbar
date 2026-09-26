@@ -8,8 +8,8 @@ terminal.
 
 > **Alpha software.** Back up your instrument and your files before you use it.
 > The file formats and the USB protocol were worked out by studying real
-> instruments, and [What is supported](getting-started/support.md) says exactly
-> what has been tested on hardware.
+> instruments. [What is supported](getting-started/support.md) lists what has
+> been tested on hardware.
 
 **Open drawbar** at [drawbar.app](https://drawbar.app/) in Chrome or Edge.
 [Install](getting-started/install.md) covers the desktop app and `nord`.

@@ -41,10 +41,10 @@ pub(in crate::browser) fn onto(class: ObjectClass, bank: u32, at: u32) -> Onto {
     }
 }
 
-/// A context dressed the way `DrawbarApp::new` dresses one.
+/// A context styled as `DrawbarApp::new` styles one.
 ///
-/// ⚠️ The named text styles a panel header resolves are installed there, on both faces.
-/// A face that never learned them panics the frame that resolves one.
+/// ⚠️ `DrawbarApp::new` installs the named text styles a panel header resolves, in both
+/// the dark and the light style. A style without them panics the frame that resolves one.
 pub(in crate::browser) fn context() -> egui::Context {
     let ctx = egui::Context::default();
     ctx.all_styles_mut(crate::app::metrics);
@@ -75,7 +75,7 @@ pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
         .collect()
 }
 
-/// Everything an act needs run against it.
+/// Everything [`super::apply`] runs an act against.
 pub(in crate::browser) fn bench() -> (Browser, Workspace, Device, Tabs, Queue, crate::log::Log) {
     let ctx = context();
     (

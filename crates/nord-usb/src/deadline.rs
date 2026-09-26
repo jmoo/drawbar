@@ -47,7 +47,7 @@ impl Timer {
         }
     }
 
-    /// Remove cancelled and due entries while holding the queue lock, but wake only
+    /// Remove canceled and due entries while holding the queue lock, but wake only
     /// after releasing it so a waker may immediately register another deadline.
     fn take_due(&self, now: Instant) -> Vec<Waker> {
         let mut pending = self.pending.lock().unwrap();
@@ -135,8 +135,8 @@ fn run(timer: &'static Timer) {
 
 /// `at` plus as much of `limit` as this platform's clock can represent.
 ///
-/// A limit too large to add is a caller asking not to be interrupted, so it is clamped
-/// to the furthest deadline rather than refused or panicked on.
+/// A limit too large to add means the caller does not want to be interrupted, so it is
+/// clamped to the furthest representable deadline.
 fn deadline(at: Instant, limit: Duration) -> Instant {
     let mut limit = limit;
     loop {
@@ -194,8 +194,7 @@ mod tests {
         assert_eq!(got, None);
     }
 
-    /// `nord --wait 18446744073709551615` reaches this. A limit no clock can add is a
-    /// caller asking not to be interrupted, and must not take the process down.
+    /// `nord --wait 18446744073709551615` reaches this, and it must not panic.
     #[test]
     fn a_limit_too_large_to_represent_becomes_the_furthest_deadline() {
         let now = Instant::now();
@@ -235,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_registration_purges_it_when_the_timer_scans() {
+    fn canceling_a_registration_purges_it_when_the_timer_scans() {
         let timer: &'static Timer = Box::leak(Box::new(Timer::new()));
         let waker = Waker::from(Arc::new(Counter(AtomicUsize::new(0))));
         let registration = Registration::new_on(timer, Instant::now(), &waker);

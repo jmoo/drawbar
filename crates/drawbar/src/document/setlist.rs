@@ -1,9 +1,8 @@
 //! The set list document: the four programs an Electro 5 song plays.
 //!
-//! The file stores four addresses and nothing else — no names, no bytes of the programs
-//! themselves. A name here is therefore always someone else's: the attached instrument's
-//! scan of that bank, or an asset on this computer that stands on that slot. Where
-//! neither answers, the row says so rather than inventing one.
+//! The file stores only four addresses: no names and no program bytes. A name shown here
+//! comes from the attached instrument's scan of that bank or from an asset on this
+//! computer that stands on that slot. Where neither answers, the row says so.
 
 use std::collections::HashMap;
 
@@ -41,8 +40,8 @@ fn song_mut(entity: &mut Entity) -> Option<&mut Cbin<Song>> {
     }
 }
 
-/// How many programs the set list orders, which is the one figure that stands in for a
-/// set list's size — it holds no bytes of its own worth measuring.
+/// How many programs the set list orders, which stands in for its size: it holds no bytes
+/// worth measuring.
 pub fn entries(entity: &Entity) -> Option<usize> {
     Some(song(entity)?.programs().len())
 }
@@ -93,9 +92,8 @@ enum Half {
 
 /// What the editor keeps between frames.
 ///
-/// Never an edit: a committed address lands on the working copy at once. These are the
-/// half-typed boxes, which belong to the person typing rather than to the file, and the
-/// one thing a reorder leaves behind to say.
+/// Holds no edits, since a committed address lands on the working copy at once. It keeps
+/// the half-typed boxes and whether a reorder has happened, which the footer reports.
 #[derive(Default)]
 pub struct State {
     boxes: HashMap<(usize, Half), String>,
@@ -103,16 +101,16 @@ pub struct State {
 }
 
 /// The two places a name for an address can come from.
-pub struct Catalogue<'a> {
+pub struct Catalog<'a> {
     pub device: &'a DeviceState,
     pub workspace: &'a Workspace,
 }
 
 /// What stands at one entry's address, and what the app knows about it.
 ///
-/// ⚠️ Exhaustive: every entry wears exactly one of these, and each is a claim with a
-/// source. Nothing here reports a slot as empty — an Electro 5 song stores four valid
-/// addresses and has no spelling for *no program*.
+/// Every entry has exactly one of these, and each is a claim with a source. No variant
+/// stands for an empty entry in the song itself: an Electro 5 song stores four valid
+/// addresses and cannot encode "no program".
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Stands {
     /// Something names it: the instrument's scan, or an asset here on that slot.
@@ -135,9 +133,8 @@ impl Stands {
         }
     }
 
-    /// The colour this state wears. `resolved` is what an entry that resolves takes:
-    /// the good ink where the state is spelled out, the accent on the disc that stands
-    /// for the program itself.
+    /// The color for this state. `resolved` is the color of an entry that resolves: the
+    /// good ink in the State column, the accent on the program's disc.
     fn ink(&self, visuals: &egui::Visuals, resolved: egui::Color32) -> egui::Color32 {
         match self {
             Stands::Resolves => resolved,
@@ -151,7 +148,7 @@ impl Stands {
         matches!(self, Stands::Vacant | Stands::Needs { .. })
     }
 
-    /// Whether nothing has been asked, which is not the same as nothing being there.
+    /// Whether the slot has not been read. An unread slot is not a vacant one.
     fn is_unread(&self) -> bool {
         matches!(self, Stands::Unread)
     }
@@ -175,7 +172,7 @@ impl Stands {
                 "the instrument has read that bank; this slot holds no program".to_string()
             }
             Stands::Unread => format!(
-                "nothing has read {}, so what stands there is not known",
+                "{} has not been read, so what is there is unknown",
                 place(ObjectClass::Program, at)
             ),
             Stands::Needs { class, id } => format!(
@@ -190,7 +187,7 @@ impl Stands {
 struct Row {
     /// The address the working copy holds, as the panel numbers it.
     at: Location,
-    /// The address the file was last saved with, where it is not this one.
+    /// The address the file was last saved with, where it differs.
     was: Option<Location>,
     name: Option<String>,
     /// What a click on the arrow opens, where there is something to open.
@@ -203,7 +200,7 @@ impl Row {
         index: usize,
         file: &Cbin<Song>,
         saved: Option<&Cbin<Song>>,
-        seen: &Catalogue<'_>,
+        seen: &Catalog<'_>,
     ) -> Row {
         let slot = song::Slot::at(index).expect("a set list entry");
         let at = panel(file.get(slot));
@@ -221,8 +218,8 @@ impl Row {
     }
 }
 
-/// The address as the instrument and this app spell one: one-indexed, and the same
-/// [`Location`] every other part of the app addresses a slot with.
+/// The address one-indexed, as the instrument shows it, in the [`Location`] the rest of
+/// the app addresses a slot with.
 fn panel(at: program::Location) -> Location {
     let (bank, slot) = at.inner();
     Location::from_user(u32::from(bank) + 1, u32::from(slot) + 1)
@@ -230,11 +227,10 @@ fn panel(at: program::Location) -> Location {
 
 /// What is known about one address.
 ///
-/// ⚠️ Ordered, and the order is what makes the name honest: the instrument's own scan
-/// answers for the instrument that is attached, and an asset here answers only for the
-/// slot it was taken off. A file opened from disk stands on no slot and resolves
-/// nothing.
-fn resolve(at: Location, seen: &Catalogue<'_>) -> (Option<String>, Option<Item>, Stands) {
+/// ⚠️ The order matters: the attached instrument's scan comes first, and an asset here
+/// speaks only for the slot it came off. A file opened from disk stands on no slot and
+/// resolves nothing.
+fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, Stands) {
     let slot = Item::Slot {
         class: ObjectClass::Program,
         at,
@@ -270,10 +266,9 @@ fn stands_on(at: Location, workspace: &Workspace) -> Option<&LocalEntity> {
 
 /// Whether the library a resolved program plays has a name.
 ///
-/// ⚠️ Only while an instrument is attached. A piano id nothing has resolved is the
-/// ordinary state of a program read with no instrument to ask — see [`Needs::Wanted`],
-/// which is *unresolved*, never *missing* — and flagging that as trouble would flag
-/// every entry of every set list opened off a disk.
+/// ⚠️ Only while an instrument is attached. With no instrument to ask, an unresolved
+/// piano id is normal ([`Needs::Wanted`] means unresolved, not missing), and flagging it
+/// would flag every entry of every set list opened from disk.
 fn plays(program: &LocalEntity, device: &DeviceState) -> Stands {
     if !device.connected() {
         return Stands::Resolves;
@@ -286,9 +281,8 @@ fn plays(program: &LocalEntity, device: &DeviceState) -> Stands {
 
 /// The reading beside the heading: what the whole list amounts to.
 ///
-/// ⚠️ Ordered, and nothing unread is ever counted as trouble: with no instrument
-/// attached every entry is unread, and a set list opened off a disk is not a set list
-/// with four problems in it.
+/// ⚠️ Unread entries never count as trouble: with no instrument attached every entry is
+/// unread, and a set list opened from disk does not have four problems.
 fn health(rows: &[Row]) -> (String, super::Ink) {
     let count = |wanted: fn(&Stands) -> bool| rows.iter().filter(|row| wanted(&row.stands)).count();
     match (count(Stands::wants_attention), count(Stands::is_unread)) {
@@ -300,9 +294,9 @@ fn health(rows: &[Row]) -> (String, super::Ink) {
     }
 }
 
-/// What the header claims about a saved set list: the entries that do not resolve, or
-/// nothing, which leaves the strip to say what it always says.
-pub fn claim(entity: &Entity, seen: &Catalogue<'_>) -> Option<super::StateLine> {
+/// What the header claims about a saved set list: the entries that need attention, or
+/// `None` to leave the strip's usual text.
+pub fn claim(entity: &Entity, seen: &Catalog<'_>) -> Option<super::StateLine> {
     let rows = read(song(entity)?, None, seen);
     let (words, ink) = health(&rows);
     (ink == super::Ink::Warn).then(|| super::StateLine {
@@ -314,30 +308,29 @@ pub fn claim(entity: &Entity, seen: &Catalogue<'_>) -> Option<super::StateLine> 
     })
 }
 
-fn read(file: &Cbin<Song>, saved: Option<&Cbin<Song>>, seen: &Catalogue<'_>) -> Vec<Row> {
+fn read(file: &Cbin<Song>, saved: Option<&Cbin<Song>>, seen: &Catalog<'_>) -> Vec<Row> {
     (0..SLOTS)
         .map(|index| Row::read(index, file, saved, seen))
         .collect()
 }
 
-/// The sentence under the rows: where a name came from, and what sending the list does
-/// and does not carry with it.
+/// The sentence under the rows: where names come from, and what sending the list leaves
+/// out.
 fn foot(reordered: bool) -> String {
     let mut words = "Names come from the library on this computer and the attached \
                      instrument; the file stores only bank:slot. Sending the list does not \
-                     send the programs it names — queue those separately if they differ."
+                     send the programs it names; queue those separately if they differ."
         .to_string();
     if reordered {
-        words.push_str(" Reordering rewrites every slot below the move.");
+        words.push_str(" Reordering rewrites the slots between the two positions.");
     }
     words
 }
 
 /// The `slotN = bank:slot` sets that move the entry at `from` to `to`.
 ///
-/// The file has no order of its own to rewrite: slot 1 is the first program and stays
-/// the first program, so moving an entry moves every address between the two ends along
-/// with it.
+/// The file has no order apart from its slots: slot 1 is always the first program, so
+/// moving an entry rewrites every address between the two ends.
 fn reorder(addresses: &[Location], from: usize, to: usize) -> Sets {
     let mut moved: Vec<Location> = addresses.to_vec();
     if from >= moved.len() || to >= moved.len() || from == to {
@@ -353,7 +346,7 @@ fn reorder(addresses: &[Location], from: usize, to: usize) -> Sets {
         .collect()
 }
 
-/// The row being carried, which is the index it was picked up from.
+/// The index of the row being dragged.
 #[derive(Clone, Copy)]
 struct Carried(usize);
 
@@ -368,7 +361,7 @@ const GLYPH: f32 = 13.0;
 const MARK: f32 = 11.0;
 
 /// The seven columns: the drag handle, the place in the set, the kind, the name, the
-/// address, what stands there, and the way out.
+/// address, what stands there, and the open arrow.
 const COLUMNS: [Width; 7] = [
     Width::Fixed(22.0),
     Width::Fixed(34.0),
@@ -388,7 +381,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     state: &mut State,
     entity: &LocalEntity,
-    seen: &Catalogue<'_>,
+    seen: &Catalog<'_>,
     sets: &mut Sets,
 ) -> Option<Item> {
     let file = song(entity.entity.as_ref()?)?;
@@ -432,8 +425,8 @@ fn entry(
     sets: &mut Sets,
 ) -> (Option<(usize, usize)>, Option<Item>) {
     let visuals = ui.visuals().clone();
-    // The row itself is where a dragged entry lands; the handle inside it is what
-    // picks one up, and the boxes are the only things on it to click.
+    // A dragged entry drops onto the row; the handle picks one up, and the boxes are the
+    // only click targets.
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_H),
         egui::Sense::hover(),
@@ -471,7 +464,7 @@ fn entry(
         cell_rect(cells[0], rect, GLYPH),
         quiet,
     );
-    grip.on_hover_text("drag to put this entry somewhere else in the set");
+    grip.on_hover_text("drag to move this entry within the set");
 
     let painter = ui.painter().clone();
     let number = painter.layout_no_wrap(
@@ -510,13 +503,11 @@ fn cell_rect((left, _): (f32, f32), rect: egui::Rect, size: f32) -> egui::Rect {
     )
 }
 
-/// The name the entry resolves to, and the one word under it where it resolves to
-/// nothing.
+/// The name the entry resolves to, with a note beside it for a vacant slot.
 fn plays_cell(ui: &mut egui::Ui, (left, width): (f32, f32), rect: egui::Rect, row: &Row) {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    // Italic for the word that stands where a name would: a row with nothing to call
-    // its program must not read as a program called “unresolved”.
+    // Italic, so an unnamed row does not read as a program called “unresolved”.
     let (text, format) = match &row.name {
         Some(name) => (
             name.clone(),
@@ -537,8 +528,7 @@ fn plays_cell(ui: &mut egui::Ui, (left, width): (f32, f32), rect: egui::Rect, ro
         ),
     };
     let ink = format.color;
-    // Only where the name column would otherwise say nothing the state column has not
-    // already said.
+    // Only a vacant slot gets a note; the State column covers the rest.
     let sub = match row.stands {
         Stands::Vacant => "nothing plays here",
         _ => "",
@@ -575,7 +565,7 @@ fn plays_cell(ui: &mut egui::Ui, (left, width): (f32, f32), rect: egui::Rect, ro
     );
 }
 
-/// The two boxes, the colon between them, and the dot that says this address is not the
+/// The two boxes, the colon between them, and a dot when the address differs from the
 /// one the file was saved with.
 fn address(
     ui: &mut egui::Ui,
@@ -624,17 +614,16 @@ fn address(
     }
 }
 
-/// What one box holds, and whether leaving it just asked for that to be written.
+/// What one box holds, and whether leaving it committed the value.
 struct Typed {
     text: String,
     committed: bool,
 }
 
-/// One box.
+/// One half of an address.
 ///
-/// ⚠️ A box nobody is typing into holds the file's own figure again. Left to keep what
-/// was last typed it would go on showing it after a reorder or a revert moved the
-/// address underneath it.
+/// ⚠️ A box without focus is reset to the file's value. Otherwise it would keep showing
+/// what was last typed after a reorder or a revert changed the address.
 fn half(
     ui: &mut egui::Ui,
     state: &mut State,
@@ -708,7 +697,7 @@ fn state_cell(
         .on_hover_text(row.stands.hint(row.at));
 }
 
-/// The way out of the list and into the program it names.
+/// The arrow that opens the program an entry names.
 fn arrow(
     ui: &mut egui::Ui,
     (left, width): (f32, f32),
@@ -756,7 +745,7 @@ fn footer(ui: &mut egui::Ui, reordered: bool) {
     });
 }
 
-/// The Advanced face: the four addresses as the body holds them, and nothing typed.
+/// The Advanced face: the four addresses as the body holds them.
 pub fn stored(ui: &mut egui::Ui, entity: &Entity) {
     let Some(file) = song(entity) else {
         return;
@@ -810,8 +799,7 @@ mod tests {
         Location::from_user(bank, slot)
     }
 
-    /// A slot lands where it was aimed, spelled the way the panel spells it, and
-    /// the result still decodes and round-trips.
+    /// A slot is set as the panel spells it, and the result decodes and round-trips.
     #[test]
     fn a_slot_edit_lands_and_round_trips() {
         let bytes = set_list();
@@ -835,9 +823,6 @@ mod tests {
         assert!(apply(&bytes, &[("slot5".into(), "1:1".into())]).is_err());
     }
 
-    /// Moving an entry moves every address between where it was and where it landed:
-    /// the file has no order of its own, so slot 2 playing what slot 4 played is the
-    /// whole of what a reorder is.
     #[test]
     fn a_reorder_rewrites_every_slot_between_the_two_ends() {
         let held = [at(1, 1), at(1, 2), at(1, 3), at(1, 4)];
@@ -892,13 +877,11 @@ mod tests {
         );
     }
 
-    /// The sentence says where a name came from, and says what a reorder did only when
-    /// one has been made.
     #[test]
-    fn the_footer_names_its_sources_and_owns_up_to_a_reorder() {
+    fn the_footer_names_its_sources_and_mentions_a_reorder_once_made() {
         assert!(foot(false).contains("the file stores only bank:slot"));
         assert!(!foot(false).contains("Reordering"));
-        assert!(foot(true).ends_with("Reordering rewrites every slot below the move."));
+        assert!(foot(true).ends_with("Reordering rewrites the slots between the two positions."));
     }
 
     /// One set list painted on its own, with whatever the instrument and this computer
@@ -967,7 +950,7 @@ mod tests {
             let output = self.ctx.clone().run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let entity = workspace.get(id).expect("it is still open");
-                    let seen = Catalogue { device, workspace };
+                    let seen = Catalog { device, workspace };
                     super::ui(ui, state, entity, &seen, &mut sets);
                 });
             });
@@ -1008,8 +991,6 @@ mod tests {
         painted.into_iter().map(|(word, _)| word).collect()
     }
 
-    /// The four entries are numbered as the panel numbers them, and each says where it
-    /// points.
     #[test]
     fn the_four_entries_paint_their_places_in_the_set() {
         let said = Shown::new().settle();
@@ -1018,8 +999,7 @@ mod tests {
         }
     }
 
-    /// A name is the instrument's or this computer's, never the file's — and where
-    /// neither has one the row says which of the two silences it is.
+    /// Where neither source names a slot, the row says whether it is unread or vacant.
     #[test]
     fn a_name_comes_from_the_instrument_or_from_an_asset_here() {
         let mut shown = Shown::new();
@@ -1041,7 +1021,7 @@ mod tests {
         assert!(said.iter().any(|word| word == "resolves"), "{said:?}");
         assert!(
             said.iter().any(|word| word == "no program at 1:2"),
-            "a scanned vacant slot is named as the trouble it is: {said:?}"
+            "a scanned vacant slot is reported: {said:?}"
         );
         assert!(
             said.iter().any(|word| word == "not read yet"),
@@ -1064,8 +1044,6 @@ mod tests {
         assert!(said.iter().any(|word| word == "Whiter Shade"), "{said:?}");
     }
 
-    /// A program that plays a library nothing has named is the one thing an attached
-    /// instrument can say about an entry that the address alone cannot.
     #[test]
     fn an_unnamed_library_is_only_reported_while_an_instrument_is_attached() {
         let mut shown = Shown::new();
@@ -1133,12 +1111,12 @@ mod tests {
         assert_eq!(sets, [("slot1".to_string(), "3:1".to_string())]);
         assert!(
             apply(&Fresh::SetList.bytes().unwrap(), &sets).is_ok(),
-            "and the format takes what was typed"
+            "the format accepts what was typed"
         );
     }
 
-    /// Dragging the handle of the first entry onto the last one moves it there, and the
-    /// sentence under the rows owns up to what that did to the slots between.
+    /// Dragging the first entry's handle onto the last entry moves it there, and the
+    /// footer says the slots between were rewritten.
     #[test]
     fn dragging_an_entry_onto_another_rewrites_the_slots_between_them() {
         let mut shown = Shown::new();
@@ -1181,22 +1159,21 @@ mod tests {
             shown
                 .settle()
                 .iter()
-                .any(|word| word.ends_with("Reordering rewrites every slot below the move.")),
+                .any(|word| word.ends_with("rewrites the slots between the two positions.")),
             "the sentence says what the drag did"
         );
     }
 
-    /// ⚠️ The reading counts two states, and the claim on the header stands for both of
-    /// them: a slot the instrument has read and found empty, and a program here playing
-    /// a library nothing has named.
+    /// The header's hint covers both states the reading counts: a slot read and found
+    /// empty, and a program here playing a library nothing has named.
     #[test]
-    fn the_header_claim_speaks_for_both_of_the_states_it_counts() {
+    fn the_header_claim_covers_both_states_it_counts() {
         let mut shown = Shown::new();
         shown
             .device
             .pretend_scanned(ObjectClass::Program, 1, &["Africa Split", ""]);
         let entity = shown.workspace.get(shown.id).expect("it is still open");
-        let seen = Catalogue {
+        let seen = Catalog {
             device: &shown.device.state,
             workspace: &shown.workspace,
         };
@@ -1216,8 +1193,6 @@ mod tests {
         );
     }
 
-    /// Each state says a different thing, and only the two that are trouble count
-    /// towards the heading's reading.
     #[test]
     fn every_state_says_its_own_thing_and_only_trouble_counts() {
         let where_ = at(7, 4);

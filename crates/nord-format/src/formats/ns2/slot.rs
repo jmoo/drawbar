@@ -1,8 +1,8 @@
-//! One Nord Stage 2 slot: a complete organ / piano / synth / extern / effects
-//! setup, 249 bytes of it.
+//! One Nord Stage 2 slot: a complete organ, piano, synth, extern and effects setup in
+//! 249 bytes.
 //!
-//! A program holds two — Slot A and Slot B — switched or layered by the Slot
-//! buttons. Same layout both times, so this is one type placed twice; see
+//! A program holds two, Slot A and Slot B, switched or layered by the Slot buttons.
+//! They share one layout, so this type is placed twice; see
 //! [`super::program::Program`].
 
 use super::program::*;
@@ -780,11 +780,11 @@ pub struct Slot {
     pub delay_ping_pong: bool,
     #[bits(1814..=1814)]
     pub delay_master_clock: bool,
-    /// ⚠️ **This run does not read like the rest of the model and is worth re-deriving
-    /// against the byte map before anything is built on it.** Three of its morph slots are
-    /// thirteen bits where every other morph slot in the Stage 2 is five or eight. The
-    /// manual gives the control as a 20–750 ms delay time; a twelve-bit slot would hold
-    /// that directly, and what the value below stores does not read as milliseconds.
+    /// ⚠️ This run is inconsistent with the rest of the format; re-derive it against the
+    /// byte map before relying on it. Three of its morph slots are thirteen bits, and every
+    /// other morph slot in the Stage 2 is five or eight. The manual gives the control as a
+    /// 20-750 ms delay time. A twelve-bit slot would hold that directly, but the stored
+    /// `delay_tempo` does not read as milliseconds.
     #[bits(1815..=1819)]
     pub delay_tempo_master_clock_divisor_wheel: MorphOf<5>,
     #[bits(1820..=1824)]

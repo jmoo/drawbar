@@ -1,4 +1,4 @@
-//! The Electro 5 live buffer (`.ne5l`) — the panel as it stands, in three slots.
+//! The Electro 5 live buffer (`.ne5l`): the current panel state, in three slots.
 //!
 //! The live buffer is the `ne5p` program body under another tag. Confirmed on hardware.
 //! The same panel state read as object class 6 slot `1:1` and as program `5:40` gives
@@ -13,10 +13,10 @@ use crate::formats::ne5::program::{self, Program};
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5l";
-/// Schema versions this build's field offsets have been validated against. Every corpus
-/// live slot reports 4, as every program does.
+/// Schema versions whose field offsets have been validated. Live slots report the same
+/// version as programs.
 pub const KNOWN_VERSIONS: &[u32] = &[4];
-/// Type-1 file length — the program length, because it is the program body.
+/// Type-1 file length, the same as a program's.
 pub const FILE_LEN: usize = program::FILE_LEN;
 
 /// The live buffer is one bank, wire-addressed `0`.
@@ -26,8 +26,8 @@ pub const SLOT_COUNT: u16 = 3;
 
 pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
 
-/// The live slot the file claims — the same header word a program reads as a bank and
-/// slot, in the three-slot space instead.
+/// The live slot the file claims. A program reads the same header word as a bank and
+/// slot; here it addresses the three-slot space.
 pub fn location(file: &Cbin<Program>) -> Result<Location, Error> {
     program::slot(&file.header)
 }
@@ -54,7 +54,6 @@ mod tests {
     use crate::error::ParseError;
     use std::io::Cursor;
 
-    /// A live slot writes out at the program's length and reads back where it was.
     #[test]
     fn a_live_slot_round_trips_at_the_program_length() {
         let live = new((0, 2).try_into().unwrap());
@@ -67,7 +66,6 @@ mod tests {
         assert_eq!(location(&back).unwrap(), (0, 2));
     }
 
-    /// There are three live slots, and the type will not name a fourth.
     #[test]
     fn the_live_slot_space_stops_at_three() {
         for slot in 0..SLOT_COUNT {
@@ -77,8 +75,8 @@ mod tests {
         assert!(Location::try_from((1, 0)).is_err());
     }
 
-    /// The bodies are interchangeable, so only the tag says which format a file is —
-    /// and a reader that ignored it would re-emit the file as the other one.
+    /// The bodies are interchangeable, so only the tag distinguishes the formats. A reader
+    /// that ignored it would write the file back as the other format.
     #[test]
     fn a_program_is_not_accepted_as_a_live_slot() {
         let program = program::new((0, 1).try_into().unwrap());
@@ -116,8 +114,7 @@ mod tests {
         );
     }
 
-    /// The two formats are one body: a live slot and a program at the same location
-    /// differ in the one tag byte that spells them apart, and nothing else.
+    /// A live slot and a program at the same location differ only in the tag byte.
     #[test]
     fn a_live_body_is_a_program_body() {
         let mut live = Vec::new();

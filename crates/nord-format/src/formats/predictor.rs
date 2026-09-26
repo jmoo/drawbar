@@ -24,9 +24,9 @@ pub fn binomial(n: usize, k: usize) -> i64 {
 
 /// One sample: `residual` integrated against `history`, which then carries it.
 ///
-/// The terms saturate rather than wrap, so a stream that runs the recurrence off `i64`
-/// yields a clamped sample its caller can report rather than a wrapped one it cannot
-/// tell from signal.
+/// The terms saturate instead of wrapping, so a stream that runs the recurrence past
+/// `i64` yields a clamped sample its caller can report. A wrapped sample would be
+/// indistinguishable from signal.
 pub fn predict(history: &mut [i64; MAX_ORDER], order: usize, residual: i64) -> i64 {
     let mut value = residual;
     for j in 1..=order {

@@ -31,8 +31,8 @@ let (info, file) = device
 
 Writes go through `device.destructive(class, …)`, which hands the closure a
 session that can write. Both brackets close the transaction whether the closure
-succeeds or fails, and that matters: an abandoned transaction leaves the
-instrument stuck on its progress screen until it is power-cycled.
+succeeds or fails. An abandoned transaction would leave the instrument stuck on
+its progress screen until it is power-cycled.
 
 ## Learn more
 

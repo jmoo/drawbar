@@ -1,4 +1,4 @@
-//! What the library is narrowed to, and the rows of the tree that narrow it.
+//! What the library is filtered by, and the tree rows that set the filter.
 
 use std::collections::BTreeSet;
 
@@ -11,20 +11,20 @@ pub enum Place {
     Keyboard,
 }
 
-/// What a row wants doing about it, where anything does.
+/// What a row needs done, if anything.
 ///
-/// ⚠️ The two are exclusive: a write already waiting is what the instrument will hold, so
-/// a row that both differs and is queued is waiting rather than differing.
+/// ⚠️ The two are exclusive. A waiting write is what the instrument will hold, so a row
+/// that differs and is queued counts as waiting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     /// A write to its slot is waiting to go.
     Waiting,
-    /// It is in a slot that no longer holds it, and nothing is waiting to put that right.
+    /// Its slot holds something different, and no write is waiting to fix that.
     Differs,
 }
 
 impl State {
-    /// The row of the tree that asks for it.
+    /// The label of the tree row that filters by it.
     pub fn title(self) -> &'static str {
         match self {
             State::Waiting => "Waiting to send",
@@ -40,16 +40,17 @@ impl State {
         }
     }
 
-    /// The whole of it, which is what a hover says.
+    /// The full description, shown on hover.
     pub fn sentence(self) -> &'static str {
         match self {
-            State::Waiting => "everything owed back to the instrument",
-            State::Differs => "here and on the instrument, and the two bodies differ",
+            State::Waiting => "everything waiting to be sent to the instrument",
+            State::Differs => "on this computer and on the instrument, with different contents",
         }
     }
 }
 
-/// What the library shows. Every field narrows, and an empty one asks for nothing.
+/// What the library shows. Each field that is set narrows the list; an empty one does
+/// not filter.
 #[derive(Default)]
 pub struct Filter {
     pub kind: Option<Kind>,
@@ -58,25 +59,24 @@ pub struct Filter {
     pub state: Option<State>,
 }
 
-/// One turn of one of the filter's knobs, as a row of the tree asks for it.
+/// One change to the filter, as a tree row requests it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Narrow {
-    /// A kind row: on, or off again when it is already the one.
+    /// A kind row: on, or off if it is already selected.
     Kind(Kind),
     /// A tag row: in or out of the set.
     Tag(u64),
-    /// A place row: what the library is over. The row asking for it is opening that
-    /// place's own tab in the same click, which it does either way.
+    /// A place row. The same click also opens that place's own tab.
     Place(Place),
-    /// A state row: what wants doing about it, and nothing else.
+    /// A state row.
     State(State),
 }
 
 impl Filter {
-    /// Whether a row of the library survives the narrowing.
+    /// Whether a library row passes the filter.
     ///
-    /// ⚠️ Tags **AND**. A row must wear every tag asked for, which is what makes a
-    /// second tag narrow the list rather than widen it.
+    /// ⚠️ Tags combine with AND: a row must have every selected tag, so a second tag
+    /// narrows the list.
     pub fn admits(
         &self,
         kind: Kind,
@@ -90,8 +90,8 @@ impl Filter {
             && self.tags.is_subset(tags)
     }
 
-    /// Turn one of the filter's knobs. ⚠️ Every row turns off when it is asked for
-    /// twice — the tree has no second gesture for stopping.
+    /// Apply one change. ⚠️ Every row toggles: asking for it again turns it off, because
+    /// the tree has no other gesture for that.
     pub fn narrow(&mut self, narrow: Narrow) {
         match narrow {
             Narrow::Kind(kind) => self.kind = (self.kind != Some(kind)).then_some(kind),
@@ -105,7 +105,7 @@ impl Filter {
         }
     }
 
-    /// Whether the row that would ask for this is the one the library is already on.
+    /// Whether this change is already in effect.
     pub fn on(&self, narrow: Narrow) -> bool {
         match narrow {
             Narrow::Kind(kind) => self.kind == Some(kind),
@@ -115,15 +115,14 @@ impl Filter {
         }
     }
 
-    /// A tag that has gone takes its narrowing with it.
+    /// Drop a deleted tag from the filter.
     pub fn forget_tag(&mut self, tag: u64) {
         self.tags.remove(&tag);
     }
 
-    /// ⚠️ A kind that is nowhere any more takes its narrowing with it. The row that
-    /// would turn it off has gone with it — an instrument let go while its folders are
-    /// what the library is narrowed to would otherwise leave an empty table and no way
-    /// back to a full one.
+    /// ⚠️ Drop a kind that is no longer present anywhere. Its tree row is gone too, so if
+    /// an instrument disconnects while the library is filtered to its folders, the table
+    /// would otherwise stay empty with no way to clear the filter.
     pub fn keep_kinds(&mut self, present: &[Kind]) {
         self.kind = self.kind.filter(|kind| present.contains(kind));
     }
@@ -137,7 +136,7 @@ mod tests {
         tags.iter().copied().collect()
     }
 
-    /// Nothing asked for admits everything, and a kind and a place each cut it down.
+    /// An empty filter admits everything, and a kind and a place each narrow it.
     #[test]
     fn an_empty_filter_admits_every_row() {
         let mut filter = Filter::default();
@@ -153,8 +152,6 @@ mod tests {
         assert!(!filter.admits(Kind::Program, Place::Keyboard, &worn(&[]), None));
     }
 
-    /// ⚠️ A second tag narrows. A row must wear every tag asked for, so asking for two
-    /// leaves what wears both rather than what wears either.
     #[test]
     fn tags_narrow_together_rather_than_apart() {
         let mut filter = Filter::default();
@@ -167,14 +164,12 @@ mod tests {
         assert!(filter.admits(Kind::Program, Place::Computer, &worn(&[1, 2]), None));
         assert!(!filter.admits(Kind::Program, Place::Computer, &worn(&[1]), None));
 
-        // A kind and the tags compose: both have to be satisfied.
+        // A kind and the tags combine: both must match.
         filter.narrow(Narrow::Kind(Kind::Program));
         assert!(filter.admits(Kind::Program, Place::Computer, &worn(&[1, 2]), None));
         assert!(!filter.admits(Kind::Live, Place::Computer, &worn(&[1, 2]), None));
     }
 
-    /// Every row of the tree that narrows turns off when it is asked for twice — the
-    /// tree has no second gesture for stopping.
     #[test]
     fn a_row_asked_for_twice_stops_narrowing() {
         let mut filter = Filter::default();
@@ -191,8 +186,7 @@ mod tests {
         }
     }
 
-    /// The state axis asks for one of the two things a row can want doing, and a row
-    /// wanting nothing survives neither.
+    /// A row that needs nothing passes neither state filter.
     #[test]
     fn a_state_admits_only_the_rows_in_it() {
         let mut filter = Filter::default();
@@ -208,17 +202,16 @@ mod tests {
         assert!(!admits(&filter, Some(State::Differs)));
         assert!(!admits(&filter, None));
 
-        // One state at a time: asking for the other lets the first go.
+        // One state at a time: selecting the other replaces the first.
         filter.narrow(Narrow::State(State::Differs));
         assert!(admits(&filter, Some(State::Differs)));
         assert!(!admits(&filter, Some(State::Waiting)));
 
-        // And it composes with the axes beside it rather than replacing them.
+        // It combines with the other filters.
         filter.narrow(Narrow::Kind(Kind::Live));
         assert!(!admits(&filter, Some(State::Differs)));
     }
 
-    /// A tag that has been removed cannot go on narrowing the library from nowhere.
     #[test]
     fn a_tag_that_is_gone_stops_narrowing() {
         let mut filter = Filter::default();

@@ -1,7 +1,7 @@
 //! Which format tags an instrument family takes, and the class it keeps each of them in.
 //!
-//! A file names its model in its four-character tag; an instrument names its own in the
-//! USB product string. [`Family`] is the vocabulary the two meet in, and
+//! A file names its model in its four-character tag, and an instrument names its own in
+//! the USB product string. [`Family`] maps both to one instrument family, and
 //! [`Family::accepts`] is the table: for one storage class and one tag, whether that
 //! family takes it and how that is known.
 //!
@@ -14,16 +14,16 @@ use crate::formats::{
     npip, npno, ns2, ns3, ns4, nsclassic, nsmp, nw, nw2,
 };
 
-/// One instrument family: the unit both a file's tag and an instrument's product string
-/// name.
+/// One instrument family, as named by both a file's tag and an instrument's product
+/// string.
 ///
-/// Models whose files carry one set of tags are one family — the Electro 3 and 3 HP, the
-/// Electro 4 and 4D, the Stage Classic and Stage EX — because nothing in a file says
+/// Models whose files carry one set of tags are one family (the Electro 3 and 3 HP, the
+/// Electro 4 and 4D, the Stage Classic and Stage EX), because nothing in a file says
 /// which of the pair wrote it.
 ///
-/// Two families are absent, because their files carry no tag to name them by: the older
-/// Leads ride a SysEx or MIDI carrier shared across four models, and the Electro 2's
-/// sample library is its own container under no CBIN tag at all.
+/// Two families are absent because their files carry no tag: the older Leads use a SysEx
+/// or MIDI carrier shared across four models, and the Electro 2's sample library is its
+/// own container with no CBIN tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
     Electro3,
@@ -56,15 +56,15 @@ pub enum Family {
 /// into, plus the two singleton buffers no reference points at.
 ///
 /// The wire codes live on `nord-usb`'s `ObjectClass`, which takes its library codes from
-/// [`Library`]. This is that same vocabulary without the wire, so a caller holding both
-/// converts rather than keeping a second table.
+/// [`Library`]. This enum names the same classes without the wire codes, so a caller
+/// holding both converts between them with no second table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     Piano,
     Sample,
     Program,
     SetList,
-    /// The live buffer — the panel as it stands.
+    /// The live buffer: the panel's current state.
     Live,
     /// The global settings singleton.
     Settings,
@@ -103,8 +103,8 @@ pub enum Acceptance {
     /// The tag names a family and this class is not where it goes: another family's
     /// tag, or this family's own in the wrong class.
     Refused,
-    /// Nothing here says either way: a tag no family's own files carry — the shared
-    /// library formats and the carriers — or one this crate does not read.
+    /// The table does not say: the tag belongs to no single family (a shared library
+    /// format or a carrier), or this crate does not read it.
     Unknown,
 }
 
@@ -132,7 +132,7 @@ impl Evidence {
 /// the instrument and read the body back byte-exact: programs and set lists into slots,
 /// a sample instrument and a trimmed piano library into their partitions, and the live
 /// and settings singletons written in place. Every other row is the tag its family's
-/// format module declares, in the class the module's own name gives it.
+/// format module declares, in the class the module's name implies.
 const TAKES: &[(Family, Slot, &str, Evidence)] = &[
     (
         Family::Electro3,
@@ -516,10 +516,9 @@ const TAKES: &[(Family, Slot, &str, Evidence)] = &[
 
 /// Which family's files carry a tag.
 ///
-/// ⚠️ The shared library formats are deliberately absent: a sample instrument and a
-/// piano library are one file several families read, so a tag missing here is *not*
-/// evidence that an instrument refuses it. Only a tag listed here can refuse another
-/// family's instrument.
+/// ⚠️ The shared library formats are absent: several families read the same sample
+/// instrument or piano library file, so a tag missing here is no evidence that an
+/// instrument refuses it. Only a tag listed here can refuse another family's instrument.
 const CARRIES: &[(&str, Family)] = &[
     (ne3::program::FORMAT, Family::Electro3),
     (ne3::organ_preset::FORMAT, Family::Electro3),
@@ -594,9 +593,8 @@ const CARRIES: &[(&str, Family)] = &[
     (nd3::kit::FORMAT, Family::Drum3),
 ];
 
-// Every hand-written `FORMAT` reaches one of these two tables, and the stub macro
-// asserts its own — so a tag of the wrong length fails the build rather than the
-// first `cbin::tag` call.
+// Every hand-written CBIN `FORMAT` reaches one of these two tables, and the stub macro
+// asserts its own, so a tag of the wrong length fails the build.
 const _: () = {
     let mut i = 0;
     while i < TAKES.len() {
@@ -668,13 +666,11 @@ impl Family {
         }
     }
 
-    /// What this family's USB product string contains, where the model's own name is
-    /// known.
+    /// What this family's USB product string contains, where the model's name is known.
     ///
-    /// Usually the [`label`](Self::label), and separate from it because two rows differ:
-    /// the Stage Classic calls itself `Nord Stage`, "Classic" being the name this
-    /// project gives it to tell it from the numbered Stages, and the `no3` organ's model
-    /// name is not known at all — so no product string names it.
+    /// Usually the [`label`](Self::label). Two families differ: the Stage Classic calls
+    /// itself `Nord Stage` ("Classic" is this project's name, to tell it from the
+    /// numbered Stages), and the `no3` organ's model name is unknown, so it has none.
     fn product_name(self) -> Option<&'static str> {
         match self {
             Family::StageClassic => Some("Stage"),
@@ -685,14 +681,13 @@ impl Family {
 
     /// The family a USB product string names.
     ///
-    /// The string is the model and then the keybed — an Electro 5 reads
-    /// `Nord Electro 5`, and a 73-key 5D reads `Nord Electro 5D 73` — so the family is
-    /// the **longest** [`product_name`](Self::product_name) the string contains. Longest
-    /// because `Stage` sits inside `Stage 3`, `Piano` inside `Piano 5` and `C2` inside
-    /// `C2D`.
+    /// The string is the model followed by the keybed: an Electro 5 reads
+    /// `Nord Electro 5`, and a 73-key 5D reads `Nord Electro 5D 73`. The family is the
+    /// longest [`product_name`](Self::product_name) the string contains, because `Stage`
+    /// sits inside `Stage 3`, `Piano` inside `Piano 5`, and `C2` inside `C2D`.
     ///
-    /// For the Electro 5, `Nord Electro 5` is the descriptor string the recorded
-    /// exchanges in `nord-usb`'s replay scripts carry. Confirmed on hardware.
+    /// `Nord Electro 5` is the descriptor string in the recorded exchanges of
+    /// `nord-usb`'s replay scripts. Confirmed on hardware.
     pub fn from_product(product: &str) -> Option<Family> {
         Family::ALL
             .into_iter()
@@ -719,9 +714,9 @@ impl Family {
         {
             return evidence.acceptance();
         }
-        // A tag naming a family, this one included, does not belong in a class the
-        // table does not list it under: a `ns4p` is refused from the piano partition by
-        // the Stage 4 as surely as by an Electro 5.
+        // A family's tag is refused outside the classes the table lists it under, even
+        // by its own family: the Stage 4 refuses an `ns4p` in the piano partition just as
+        // an Electro 5 does.
         match Family::of_tag(tag) {
             Some(_) => Acceptance::Refused,
             None => Acceptance::Unknown,
@@ -733,7 +728,7 @@ impl Family {
 mod tests {
     use super::*;
 
-    /// The four outcomes, on the one family whose rows are hardware.
+    /// The four outcomes, on the only family with hardware rows.
     #[test]
     fn an_electro_5_takes_its_own_program_and_refuses_a_stage_4s() {
         let e5 = Family::Electro5;
@@ -752,9 +747,8 @@ mod tests {
         assert_eq!(e5.accepts(Slot::Program, "zzzz"), Acceptance::Unknown);
     }
 
-    /// A family's own tag still belongs in one class: the Stage 4 keeps programs in the
-    /// program slots, so a `ns4p` offered to the piano partition is refused rather than
-    /// left an open question.
+    /// The Stage 4 keeps programs in the program slots, so an `ns4p` offered to the piano
+    /// partition is refused, not left `Unknown`.
     #[test]
     fn a_familys_own_tag_is_refused_outside_its_class() {
         assert_eq!(
@@ -817,7 +811,6 @@ mod tests {
         }
     }
 
-    /// A tag another family's files carry is refused in every class.
     #[test]
     fn a_foreign_tag_is_refused_in_every_class() {
         for family in Family::ALL {
@@ -854,7 +847,6 @@ mod tests {
         );
         assert_eq!(Family::from_product("Nord C2D"), Some(Family::C2D));
         assert_eq!(Family::from_product("Nord Wave 2"), Some(Family::Wave2));
-        // The instrument calls itself `Nord Stage`; "Classic" is this project's word.
         assert_eq!(
             Family::from_product("Nord Stage 88"),
             Some(Family::StageClassic)
@@ -867,7 +859,7 @@ mod tests {
             Family::from_product("Nord Stage 3 88"),
             Some(Family::Stage3)
         );
-        // No product string is known for the `no3` organ, so its label is not one.
+        // No product string is known for the `no3` organ.
         assert_eq!(Family::from_product("Nord no3 organ"), None);
         assert_eq!(Family::from_product("Some other keyboard"), None);
     }

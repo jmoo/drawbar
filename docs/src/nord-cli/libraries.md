@@ -8,15 +8,15 @@ verbs below reach the audio.
 
 ```sh
 nord sample decode inst.nsmp -o out/                 # every zone as a WAV
-nord sample verify --deep inst.nsmp                  # decode every recording too
+nord sample verify --deep inst.nsmp                  # walk every encoded stroke too
 nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimba.nsmpproj
 nord sample build marimba.nsmpproj -o marimba.nsmp   # render a Sample Editor project
 ```
 
 `encode` turns a single WAV into an instrument, and `build` renders a whole
 project, loops and stereo included. `--generation 2`, `3` or `4` picks the
-layout. Only v2 has been played on an instrument, so v3 and v4 require
-`--unverified`.
+layout, and v2 is the default. v3 and v4 also need `--unverified`, because they
+have not been played on an instrument.
 
 ## Pianos
 
@@ -32,8 +32,8 @@ nord piano verify --deep grand.npno
 
 `edit`, `trim` and `split` rewrite the library without touching its audio:
 rename it, retune or reroute a key, drop a bank or the quieter layers, narrow the
-range, or cut it in two. `trim` and `split` never write over their input. `edit`
-does only with `--yes`.
+range, or cut it in two. `trim` and `split` never write over their input, and
+`edit` does so only with `--yes`.
 
 ## Building a piano library
 
@@ -48,19 +48,14 @@ nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
 nord piano rebuild grand.npno -o again.npno        # re-encode a library's own strokes
 ```
 
-Every key up to a semitone above the highest root plays the nearest root above
-it. Keys beyond that are silent. Within a root, velocity picks the layer, with
-the layers spread across the velocity range in order. Write `-v12` instead of
-`-l00` to set a layer's velocity value directly.
+Every key up to a semitone above the highest root plays the nearest root at or
+above it. Keys beyond that are silent. Within a root, velocity picks the layer,
+with the layers spread across the velocity range in order. To set a layer's
+velocity value directly, name the file with `v12` in place of `l00`.
 
 Whatever the audio does not decide, such as decay and per-note tables, comes from
-`--template` when you give one, and from neutral defaults when you do not. Both
-kinds of library have been played on an instrument and sound the same.
+`--template` when you give one. Without a template, `--kind`, `--gain` and
+`--damper-top` set the playback values, and the rest uses neutral defaults.
 
-## What has been played
-
-Libraries drawbar has trimmed, built or rebuilt play on an instrument: mono and
-stereo, every key including the lowest and highest root, all three attack
-layers, the release stroke, and a vendor library re-encoded and indistinguishable
-from the original. Renames, retunes, remaps and a narrowed key range have not been
-played. See [What is supported](../getting-started/support.md).
+[What is supported](../getting-started/support.md) says which of these libraries
+have been played on an instrument.

@@ -81,8 +81,8 @@ pub struct SynthVoice {
     pub filter_freq_aftertouch: MorphTarget,
     #[bits(236..=243)]
     pub filter_freq_ctrl_pedal: MorphTarget,
-    /// ⚠️ The offset table's name runs two parameters together; the resonance is the one
-    /// the three slots below move. Inferred from specimens; not confirmed on hardware.
+    /// ⚠️ The offset table's name combines two parameters; the three morph slots below
+    /// move the resonance. Inferred from specimens; not confirmed on hardware.
     #[bits(244..=250)]
     pub filter_resonance_freq_hp: Level,
     #[bits(251..=258)]

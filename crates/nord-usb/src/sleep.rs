@@ -1,7 +1,7 @@
 //! Pause without a runtime, on whichever backend is built.
 //!
-//! The one caller is the library-write op, which polls the instrument between
-//! `WRITE_PREPARE_2` requests; the transport's own timeouts live in the transport.
+//! The library-write op uses this to space its `WRITE_PREPARE_2` polls. Transport
+//! timeouts are handled by each transport.
 
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ pub async fn sleep(d: Duration) {
     crate::deadline::with_timeout(std::future::pending::<()>(), d).await;
 }
 
-/// Resolve after `d`, through the page's `setTimeout` — looked up on the global object
-/// so the same code runs in a window or a worker.
+/// Resolve after `d` through `setTimeout`, looked up on the global object so the same
+/// code runs in a window or a worker.
 #[cfg(all(not(feature = "nusb"), feature = "web"))]
 pub async fn sleep(d: Duration) {
     use wasm_bindgen::JsCast;
@@ -29,8 +29,8 @@ pub async fn sleep(d: Duration) {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-/// ⚠️ Parks the thread: with neither backend there is no timer source, and the only
-/// callers are replay tests.
+/// ⚠️ Blocks the thread. With neither backend built there is no timer source, and only
+/// replay tests call this.
 #[cfg(not(any(feature = "nusb", feature = "web")))]
 pub async fn sleep(d: Duration) {
     std::thread::sleep(d);

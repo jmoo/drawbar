@@ -1,8 +1,7 @@
 //! The accessor-backed editors: bodies whose settable fields come from typed
-//! accessors rather than the generated registry — the sample instrument, the
-//! set list, and the Sample Editor project. One vocabulary — `--set
-//! path=value` — over each, with paths spelled the way `nord inspect` prints
-//! the same things.
+//! accessors instead of the generated registry. These are the sample instrument,
+//! the set list, and the Sample Editor project. Each takes `--set path=value`,
+//! with paths named the way `nord inspect` prints the same things.
 
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5::{program, song, Song};
@@ -22,7 +21,7 @@ pub struct Row {
 /// Column the values line up in, wide enough for the longest registry path.
 pub const PATH_WIDTH: usize = 40;
 
-/// A body whose fields are listed and set by hand-written accessors.
+/// A body whose fields can be listed and set.
 pub trait Fields {
     fn rows(&self) -> Result<Vec<Row>, String>;
     fn set(&mut self, path: &str, value: &str) -> Result<(), String>;
@@ -44,11 +43,11 @@ pub trait Fields {
     }
 }
 
-/// List the fields (`--fields`, `None`) or apply every `--set`, returning how
-/// many fields moved.
+/// List the fields (`--fields`, returning `None`) or apply every `--set`,
+/// returning how many fields changed.
 ///
-/// The one staging: a file and a slot, a noun and the file verb, an
-/// accessor-backed body and a generated registry all reach it.
+/// Every edit goes through here: file or slot, noun or file verb,
+/// accessor-backed body or generated registry.
 pub fn stage(
     ui: &Ui,
     fields: bool,
@@ -80,8 +79,8 @@ pub fn stage(
 
     let mut changed = 0;
     for (b, a) in before.iter().zip(&after) {
-        // The stored spelling, not the rendering: two stored values can read the
-        // same way, and it is the bits that get written.
+        // Compare stored values, not their display: two stored values can display
+        // the same way, and the stored value is what gets written.
         if b.value != a.value {
             changed += 1;
             ui.out(format!(
@@ -101,17 +100,18 @@ fn unknown(path: &str) -> String {
     format!("unknown field {path:?}; --fields lists what exists")
 }
 
-/// `zone3` → 3, under any label — the 1-based spelling every listing uses.
+/// `zone3` → 3, for any label, in the 1-based numbering every listing uses.
 ///
-/// The width is the ids the formats store, so an id too large to be one is no
-/// path rather than a wrapped id that names some other block.
+/// The result is as wide as the ids the formats store, so an id too large for
+/// that is not a path, and cannot wrap around to name another block.
 fn indexed(part: &str, label: &str) -> Option<u32> {
     part.strip_prefix(label)
         .and_then(|n| n.parse().ok())
         .filter(|&n| n >= 1)
 }
 
-/// The truth words the registry fields take, so one vocabulary spans both.
+/// The boolean words registry fields take, so both kinds of editor accept the same
+/// ones.
 const SWITCH_ACCEPTS: &str = "on or off";
 
 fn switch(v: bool) -> String {
@@ -256,8 +256,8 @@ const PERCENT: &str = "a percentage of the loop's length";
 /// key range, each stroke's trim, loop, gain and velocity window, the
 /// instrument's velocity defaults, and each audio file's path.
 ///
-/// Zones and files are addressed by the ids `nord inspect` prints; a stroke by
-/// the global id both blocks holding it name it with.
+/// Zones and files are addressed by the ids `nord inspect` prints, and a stroke
+/// by the global id that both blocks holding it use.
 pub struct ProjectEditor<'a>(pub &'a mut Project);
 
 impl Fields for ProjectEditor<'_> {
@@ -682,7 +682,6 @@ mod tests {
         assert_eq!(project.audio_files().unwrap()[0].path, before);
     }
 
-    /// Setting one end of a key range keeps the other end where it was.
     #[test]
     fn a_key_range_moves_one_end_at_a_time() {
         let mut project = project();

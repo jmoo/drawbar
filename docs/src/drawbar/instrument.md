@@ -7,16 +7,16 @@ have been tested.
 ## Connecting
 
 Close Nord Sound Manager first, since it keeps the USB connection to itself. Then
-click **Connect an instrument…** in the browser, or **Instrument ▸ Connect…**. The
-browser asks you to pick the device. The desktop app takes the first Nord it
-finds.
+click **Connect an instrument…** under **PLACES**, or **Instrument ▸ Connect…**.
+A web browser asks you to pick the device. The desktop app takes the first Nord
+it finds.
 
 Once connected, drawbar reads every folder the instrument declares, a bank at a
 time, and the instrument's controls appear: **Read** and **Send** in the toolbar,
 the Keyboard tab, the send queue, and the inspector's room meters. **Read**
 rereads everything, and each folder has its own **Read again**.
 
-Slots are labelled the way the panel shows them, `7:4 Africa Split`. Empty slots
+Slots are labeled the way the panel shows them, `7:4 Africa Split`. Empty slots
 are listed too, as places to drop things.
 
 ## Slots
@@ -38,12 +38,12 @@ the log says why.
 
 Nothing is written until you send. Drops, **Queue for sending**, and Save on a
 sound that belongs to a slot all add to the queue in the bottom dock. Each row
-shows its destination: click it to change it, × to remove the row, and pick a row
-to see what would change on the keyboard.
+shows its destination. Click the destination to change it, click × to remove the
+row, and select a row to see what would change on the keyboard.
 
 When a sound on this computer no longer matches the slot it came from, a **Queue**
 button appears in the toolbar beside **Send**, with how many there are. Click it
-to queue each of them for the slot it stands on.
+to queue each of them for the slot it came from.
 
 **Send all** asks once, listing every destination and what it replaces, then
 writes folder by folder. If the instrument refuses an item, that folder's batch
@@ -71,8 +71,8 @@ this computer becomes `Africa-Split` on the panel.
   plays the new sound, and unsaved panel changes to it are lost. A panel on any
   other slot is left alone, and nothing is reloaded after a failed write.
 
-These behaviours have been confirmed on an instrument. Progress shows on the
-instrument's own display; drawbar shows a spinner and cannot know a percentage.
+Progress shows on the instrument's own display. drawbar shows a spinner, because
+the instrument does not report a percentage.
 
 ## Disconnecting
 

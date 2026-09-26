@@ -1,7 +1,7 @@
 # source: nord
 # device: Nord Electro 5, firmware v2.04 build 592
-# note: one CLI move is three transactions - the source is named before it
-#   is moved, the destination before it is swapped into.
+# note: one CLI move is three transactions. The source is described before it is
+#   moved, and the destination before it is swapped into.
 # intent: program info 7:11
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

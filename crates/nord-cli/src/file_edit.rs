@@ -1,11 +1,11 @@
-//! `nord edit` — change fields inside any editable file, dispatched on what
-//! the file is rather than on an object class.
+//! `nord edit`: change fields in any editable file, dispatched on the file's
+//! format.
 //!
-//! The noun commands edit what the Electro 5 stores; this is the file verb
-//! beside `inspect` and `verify`, so the formats with no noun — the Stage
-//! programs and presets, the Sample Editor project — are editable too.
-//! Everything `nord-format` can set is settable here: the generated registry
-//! where the body declares one, and the accessor-backed editors otherwise.
+//! The noun commands edit what the instrument stores. This file verb sits beside
+//! `inspect` and `verify`, so formats with no noun (the Stage programs and
+//! presets, the Sample Editor project) are editable too. It reaches everything
+//! `nord-format` can set: the generated registry where the body declares one,
+//! and the accessor-backed editors otherwise.
 
 use std::path::PathBuf;
 
@@ -17,9 +17,9 @@ use crate::ui::Ui;
 
 #[derive(Args)]
 pub struct FileEditArgs {
-    /// The file to edit: any format with settable fields — a program, synth
-    /// or organ/piano preset whose body decodes, a set list, a sample
-    /// instrument, or a Sample Editor project.
+    /// The file to edit, in any format with settable fields: a program, live
+    /// slot, settings, or synth, organ or piano preset whose body decodes, a set
+    /// list, a sample instrument, or a Sample Editor project.
     pub file: PathBuf,
 
     #[command(flatten)]
@@ -64,8 +64,7 @@ pub(crate) mod tests {
     use nord_format::cbin::{Cbin, Header};
     use nord_format::formats::{ne5, ns3};
 
-    /// The file verb writes over the same file the noun edits do, so `-o` naming its
-    /// input meets the same guard.
+    /// `-o` naming the input needs `--yes`, as it does for the noun edits.
     #[test]
     fn an_output_that_is_the_input_takes_the_in_place_guard() {
         let dir = crate::edit::tests::scratch("file-edit-in-place");
@@ -91,9 +90,9 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
-    /// A zeroed Stage 3 program: every field's type decodes the whole of its
-    /// slot, so a body of zeros is legal — the same construction drawbar's New
-    /// menu uses.
+    /// A zeroed Stage 3 program. Every field's type accepts any value of its
+    /// bits, so an all-zero body is valid; drawbar's New menu builds one the same
+    /// way.
     pub fn stage3_program() -> Vec<u8> {
         let body =
             ns3::program::Program::try_from([0u8; ns3::program::BODY_LEN]).expect("legal body");

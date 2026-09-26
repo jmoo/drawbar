@@ -1,5 +1,5 @@
-//! The browser's half: which sheet a session opens on unasked, and the notes behind the
-//! change list.
+//! The browser's part: which sheet a session opens on unasked, and fetching the release
+//! notes for the change list.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -13,10 +13,10 @@ use crate::browser::Act;
 
 /// Which version's sheet has already been dismissed.
 ///
-/// ⚠️ Written straight to `localStorage` rather than through [`eframe::Storage`]. eframe
-/// 0.32's web runner saves on its auto-save timer and on focus loss, and subscribes its
-/// save-on-close to `onbeforeunload` — a name `addEventListener` never fires. A tab
-/// closed between two saves would lose the dismissal and open on this again.
+/// ⚠️ Written straight to `localStorage`, bypassing [`eframe::Storage`]. eframe 0.32's
+/// web runner saves on its auto-save timer and on focus loss, and subscribes its
+/// save-on-close to `onbeforeunload`, a name `addEventListener` never fires. A tab closed
+/// between two saves would lose the dismissal and show the sheet again.
 const KEY: &str = "drawbar.splash";
 
 const TAG: &str = concat!(
@@ -24,8 +24,8 @@ const TAG: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
-/// The most note text that is shown. A body past this is refused rather than cut: half a
-/// note reads as a whole one.
+/// The longest release body shown. A longer one is refused, because a truncated note
+/// would read as a complete one.
 const MOST: usize = 64 * 1024;
 
 /// Which sheet is up.
@@ -43,7 +43,7 @@ pub struct Splash {
 }
 
 impl Splash {
-    /// Open on whichever sheet the version already read calls for.
+    /// Open on whichever sheet the version last read calls for.
     pub fn new(ctx: &egui::Context) -> Splash {
         let (outbox, inbox) = channel();
         let mut splash = Splash {
@@ -64,7 +64,7 @@ impl Splash {
         self.showing = Some(Sheet::Welcome);
     }
 
-    /// Show the change list, reading the notes unless they are in hand or on the way.
+    /// Show the change list, fetching the notes unless they are loaded or loading.
     pub fn open_news(&mut self, ctx: &egui::Context) {
         self.showing = Some(Sheet::News);
         if matches!(self.notes, Notes::Loading | Notes::Read { .. }) {
@@ -74,7 +74,7 @@ impl Splash {
         fetch(ctx.clone(), self.outbox.clone());
     }
 
-    /// Draw whichever sheet is up, record the version once one is dismissed, and hand on
+    /// Draw whichever sheet is up, record the version once it is dismissed, and return
     /// what the reader asked for.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Act> {
         while let Ok(notes) = self.inbox.try_recv() {
@@ -106,7 +106,7 @@ impl Splash {
     }
 }
 
-/// Read the notes off GitHub and hand them to whichever frame draws next.
+/// Fetch the notes from GitHub and hand them to the next frame.
 fn fetch(ctx: egui::Context, sender: Sender<Notes>) {
     spawn_local(async move {
         let notes = read(TAG).await.unwrap_or(Notes::Unavailable);
@@ -147,7 +147,7 @@ async fn read(url: &str) -> Option<Notes> {
     Some(Notes::Read { body, page })
 }
 
-/// A field of the reply, present only when it really is a string.
+/// A field of the reply, when it is a string.
 fn text(json: &JsValue, field: &str) -> Option<String> {
     js_sys::Reflect::get(json, &JsValue::from_str(field))
         .ok()?

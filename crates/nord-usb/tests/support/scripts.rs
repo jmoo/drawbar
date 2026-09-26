@@ -1,8 +1,8 @@
-//! Finding and reading replay scripts. Nothing here knows how a tree is laid out — a
-//! script joins by having the extension, wherever it sits.
+//! Finding and reading replay scripts. Any file with the `.script` extension is a
+//! script, wherever it sits in the tree.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy.
+//! ⚠️ A support module, not a test target: each test target that includes it
+//! compiles its own copy.
 #![allow(dead_code)]
 
 use nord_usb::transport::Script;

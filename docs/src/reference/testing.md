@@ -1,13 +1,13 @@
 # Testing
 
-A failing test should say which behaviour or contract broke. The rules are in
+A failing test should say which behavior or contract broke. The rules are in
 [CONTRIBUTING.md](https://github.com/jmoo/drawbar/blob/master/CONTRIBUTING.md#tests-specify-behavior).
 Two file-driven sweeps carry most of the evidence: a specimen joins the format
 sweep by being readable, and a capture joins the replay sweep by existing.
 
 ## nord-format
 
-`cargo test -p nord-format` runs the unit tests, a dispatch test that synthesises
+`cargo test -p nord-format` runs the unit tests, a dispatch test that synthesizes
 a file for every registered tag and round-trips it through both container
 generations, the Stage body tests, and the specimen sweep over `tests/fixtures`:
 files this crate's own writers produced, with sidecars recording what was set.
@@ -16,7 +16,7 @@ values, and has every registry field set and read back without moving another.
 
 With `--features corpus` and `NORD_CORPUS_ROOT` pointing at a checkout of the
 private corpus, the same sweep runs over real files, plus format and codec
-behaviour suites and a coverage ledger: every bit the instrument varies must
+behavior suites and a coverage ledger: every bit the instrument varies must
 belong to a field or be listed as reviewed debt. `nix build
 .#nord.nord-format-corpus` runs it.
 

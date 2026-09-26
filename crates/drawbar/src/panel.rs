@@ -1,5 +1,5 @@
-//! The header a dock wears, the geometry every dock header shares, and how a button in
-//! a bar wears the bar it sits in.
+//! Shared chrome: section and dock headers, table column widths, chips, dashed borders,
+//! and flat buttons for bars.
 
 use std::ops::Range;
 
@@ -10,29 +10,29 @@ use crate::icon::{icon, Glyph};
 /// How tall a section header is, wherever it is drawn.
 pub const HEADER: f32 = 24.0;
 
-/// How tall a dock's own header is: the tab strip's height, so the strip and the header
-/// of every dock beside it read as one line across the window.
+/// How tall a dock's own header is: the tab strip's height, so the strip and every dock
+/// header beside it form one line across the window.
 pub const DOCK: f32 = crate::tabs::HEIGHT;
 
-/// The room a bar keeps at each end, and the gap between its parts. The title bar, the
-/// tool bar, the tab strip and every header share them, so their contents line up down
+/// A bar's padding at each end, and the gap between its parts. The title bar, the
+/// toolbar, the tab strip, and every header share them, so their contents line up down
 /// the window.
 pub(crate) const PAD: f32 = 8.0;
 pub(crate) const GAP: f32 = 6.0;
 
-/// A glyph in a bar: a toolbar action's, a tab's kind, a menu item's mark.
+/// The size of a glyph in a bar: a toolbar action, a tab's kind, a menu item's mark.
 pub(crate) const GLYPH: f32 = 13.0;
 
-/// The collapse triangle's box, and the grip a dock header wears before its title.
+/// The size of the collapse triangle, and of the grip before a dock header's title.
 const CHEVRON: f32 = 12.0;
 const GRIP: f32 = 12.0;
 
-/// How much of the caption ink the grip keeps. It is decoration, not a control.
+/// The grip's opacity relative to the caption color. It is decoration, not a control.
 const GRIP_ALPHA: f32 = 0.6;
 
-/// What a column of a table asks for: a fixed width, a share of what the fixed ones
-/// leave, or a share that stops growing once it holds `max` px and leaves the rest to
-/// the other shares.
+/// The width a table column asks for: a fixed width, a share of what the fixed columns
+/// leave, or a share that stops growing at `max` px and leaves the rest to the other
+/// shares.
 pub enum Track {
     Px(f32),
     Share(f32),
@@ -55,11 +55,11 @@ impl Track {
     }
 }
 
-/// What one unit of share buys out of `spare`, once every cap that binds has taken its
+/// The width one unit of share gets from `spare`, after every binding cap has taken its
 /// maximum and left the rest to the shares still growing.
 ///
-/// A cap binds when one share buys more than `max / share`, and each one that binds only
-/// raises what the rest are worth — so caps taken in that order settle in a single pass.
+/// A cap binds when one unit of share would get more than `max / share`, and each binding
+/// cap only raises what the rest get, so taking caps in that order settles in one pass.
 fn rate(spare: f32, wanted: &[Track]) -> f32 {
     let mut caps: Vec<(f32, f32)> = wanted
         .iter()
@@ -85,12 +85,12 @@ fn rate(spare: f32, wanted: &[Track]) -> f32 {
     }
 }
 
-/// Where each track sits across `width`, with `gap` between two of them.
+/// Where each track sits across `width`, with `gap` between neighbors.
 ///
 /// The fixed tracks are laid out first, the shares split what is left, and a share that
-/// reaches its cap passes the remainder to the others. When even the fixed ones do not
-/// fit, every track and every gap shrinks by one factor — so a track may reach zero, but
-/// none is ever negative and none reaches past `width`.
+/// reaches its cap passes the remainder to the others. When even the fixed tracks do not
+/// fit, every track and gap shrinks by one factor: a track may reach zero, but none is
+/// negative and none extends past `width`.
 pub fn tracks(width: f32, wanted: &[Track], gap: f32) -> Vec<Range<f32>> {
     let gaps = gap * (wanted.len().saturating_sub(1)) as f32;
     let fixed: f32 = wanted.iter().map(Track::px).sum();
@@ -121,11 +121,11 @@ pub fn tracks(width: f32, wanted: &[Track], gap: f32) -> Vec<Range<f32>> {
         .collect()
 }
 
-/// A bordered glyph and a word: what the library's bar is narrowed by, and what the
-/// selection wears.
+/// A bordered glyph and a word: a filter in the library's bar, or a tag on the
+/// selection.
 ///
-/// A chip given a `fill` is **solid** — what it says is true of everything it stands
-/// for. One without is hollow, and true of only some of it.
+/// A chip with a `fill` is solid: it is true of everything it stands for. One without is
+/// hollow, and true of only some.
 pub fn chip(
     ui: &mut egui::Ui,
     glyph: Glyph,
@@ -154,16 +154,16 @@ pub fn chip(
 
 /// A header title: [`crate::app::micro`], uppercased.
 ///
-/// Uppercasing is the whole of the treatment — egui has no letter spacing, and a faked
-/// one is worse than none.
+/// Uppercasing is the only treatment: egui has no letter spacing, and faking it looks
+/// worse than none.
 pub fn caps(text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase()).text_style(crate::app::micro())
 }
 
-/// A section header: a collapse triangle, a MICRO-caps title, an optional badge.
+/// A section header: a collapse triangle, a [`caps`] title, and an optional badge.
 ///
-/// It wears whatever panel it is on and lifts to `faint_bg_color` under the pointer
-/// alone. A dock's own header is [`dock_header`], which is not a control.
+/// It takes the color of the panel it is on, changing to `faint_bg_color` only under the
+/// pointer. A dock's own header is [`dock_header`], which is not a control.
 pub fn panel_header(
     ui: &mut egui::Ui,
     title: &str,
@@ -190,10 +190,10 @@ pub fn panel_header(
     })
 }
 
-/// A dock's own header: a grip, a MICRO-caps title, and nothing to click.
+/// A dock's own header: a grip and a [`caps`] title, with nothing to click.
 ///
-/// ⚠️ Collapsing a dock is its toolbar toggle and the View menu. A header carrying a
-/// triangle of its own would read as one of the sections beneath it.
+/// ⚠️ A dock collapses from its toolbar toggle and the View menu. A header with its own
+/// triangle would look like one of the sections beneath it.
 pub fn dock_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
     let fill = ui.visuals().faint_bg_color;
     let response = bar(ui, DOCK, fill, |ui| {
@@ -213,8 +213,8 @@ pub fn dock_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
     response
 }
 
-/// A dock header carrying its own controls: [`dock_header`]'s bar, with what the bottom
-/// dock puts on it in place of a plain title.
+/// A dock header with its own controls: [`dock_header`]'s bar, holding the bottom dock's
+/// controls in place of a title.
 pub fn strip<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
     let fill = ui.visuals().faint_bg_color;
     bar(ui, DOCK, fill, contents)
@@ -223,8 +223,8 @@ pub fn strip<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) ->
 /// The bar a header is drawn into: full bleed, padded at each end, laid out left to
 /// right. The response is the whole bar, so a header can be clicked as one thing.
 ///
-/// `resting` is what the bar wears when the pointer is elsewhere; under the pointer it
-/// is `faint_bg_color` whatever it wears at rest.
+/// `resting` is the bar's fill when the pointer is elsewhere; under the pointer the fill
+/// is always `faint_bg_color`.
 fn bar<R>(
     ui: &mut egui::Ui,
     height: f32,
@@ -250,7 +250,7 @@ fn bar<R>(
     response
 }
 
-/// The triangle that says which way a section will go, and answers a click of its own.
+/// The triangle that shows whether a section is open, with its own click response.
 pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     let glyph = match open {
         true => Glyph::ChevronDown,
@@ -260,9 +260,8 @@ pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     ui.interact(drawn.rect, drawn.id.with("chevron"), egui::Sense::click())
 }
 
-/// The four sides of a dashed border: the one stroke that says a thing is not there, or
-/// that an act has nothing to act on. egui draws dashes along a line, so a rectangle is
-/// four of them.
+/// A dashed rectangle: the border for something absent, or for an action with nothing
+/// to act on. egui draws dashes along a line, so a rectangle is four lines.
 pub fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
     const DASH: f32 = 3.0;
     let corners = [
@@ -277,10 +276,10 @@ pub fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stro
     }
 }
 
-/// Dress the buttons in a bar to wear the bar: no fill and no border until the pointer
-/// is on one, which is then the only thing on the bar that is lit.
+/// Style the buttons in a bar to blend with it: no fill and no border until the pointer
+/// is on one.
 ///
-/// Scope this into a child `Ui` — it edits the visuals every widget after it reads.
+/// Scope this to a child `Ui`: it changes the visuals every later widget reads.
 pub fn flat(ui: &mut egui::Ui) {
     let widgets = &mut ui.visuals_mut().widgets;
     widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
@@ -306,8 +305,6 @@ mod tests {
             .collect()
     }
 
-    /// A capped track grows with the others until it holds `max`, and what it does not
-    /// take goes to the shares beside it rather than to empty space.
     #[test]
     fn a_capped_track_stops_at_its_maximum_and_hands_the_rest_to_the_other_shares() {
         let wanted = [
@@ -322,8 +319,7 @@ mod tests {
         assert_eq!(widths(1000.0, &wanted), vec![40.0, 960.0]);
     }
 
-    /// Every track shrinks to nothing rather than turning negative or running past the
-    /// width, and a cap is a maximum only — it is no floor.
+    /// A cap is only a maximum, not a floor.
     #[test]
     fn a_width_below_the_fixed_tracks_shrinks_a_capped_track_like_any_other() {
         let wanted = [
@@ -353,12 +349,8 @@ mod tests {
         assert_eq!(caps("Browser").text(), "BROWSER");
     }
 
-    /// A header is full bleed and exactly as tall as its kind, so a dock's body always
-    /// starts at the same place and a header's fill reaches both edges of the panel it
-    /// heads.
-    ///
-    /// ⚠️ A dock's header is the tab strip's height: the strip and the header of every
-    /// dock beside it are one line across the window.
+    /// A header spans the full width at its kind's height, so a dock's body always starts
+    /// at the same place and a header's fill reaches both edges.
     #[test]
     fn a_header_claims_its_own_height_and_the_whole_width() {
         let ctx = egui::Context::default();
@@ -395,8 +387,8 @@ mod tests {
         found
     }
 
-    /// One frame with the pointer over the header or away from it, answering with what
-    /// the header painted behind itself.
+    /// Run frames with the pointer over the header or away from it, and return what the
+    /// header painted behind itself.
     fn header_fill(
         ctx: &egui::Context,
         under_pointer: bool,
@@ -424,8 +416,7 @@ mod tests {
         fill
     }
 
-    /// ⚠️ A section header is part of the panel it heads until the pointer is on it.
-    /// Three permanently grey bars down a dock read as three separate panels rather than
+    /// Three permanently gray bars down a dock would read as three separate panels, not
     /// as the headings of one.
     #[test]
     fn a_section_header_wears_the_panel_until_the_pointer_is_on_it() {
@@ -441,10 +432,9 @@ mod tests {
         );
     }
 
-    /// A dock's header is the one bar that keeps its own colour: it names the dock rather
-    /// than a section of it, and there is nothing on it to click.
+    /// A dock header names the dock, not a section, and has nothing to click.
     #[test]
-    fn a_dock_header_keeps_its_own_colour_whether_or_not_it_is_pointed_at() {
+    fn a_dock_header_keeps_its_own_color_whether_or_not_it_is_pointed_at() {
         let ctx = egui::Context::default();
         let faint = ctx.style().visuals.faint_bg_color;
         for pointed in [false, true] {
@@ -456,8 +446,6 @@ mod tests {
         }
     }
 
-    /// The triangle is the collapse control, so a click on it is what moves the dock —
-    /// not a second bool somewhere else.
     #[test]
     fn the_triangle_toggles_the_bool_it_was_handed() {
         let ctx = egui::Context::default();
@@ -501,6 +489,6 @@ mod tests {
         frame(true, &mut open);
         assert!(!open, "a click on the triangle shuts the dock");
         frame(true, &mut open);
-        assert!(open, "and the next one opens it again");
+        assert!(open, "the next click opens it again");
     }
 }

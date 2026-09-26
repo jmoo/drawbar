@@ -1,5 +1,5 @@
-//! The Electro 5 bundle walk: what lands where, and what a member the walk cannot
-//! place does to the rest.
+//! Reading an Electro 5 bundle: where each member goes, and how a member the reader
+//! cannot place affects the rest.
 #![cfg(feature = "bundle")]
 
 use nord_format::cbin::{Cbin, Header, RawBody};
@@ -29,8 +29,7 @@ fn program(slot: u16) -> Vec<u8> {
     nord_format::to_bytes(&Entity::Program(Program::Electro5(file))).unwrap()
 }
 
-/// A container-verified file of another model, which decodes to an entity a bundle has
-/// nowhere to put.
+/// A valid file of another model, which decodes to an entity a bundle has no place for.
 fn drum_program() -> Vec<u8> {
     let file = Cbin {
         header: Header::new("nd2p", (0, 0), 1),
@@ -72,8 +71,8 @@ fn an_empty_archive_is_an_empty_bundle() {
     assert!(bundle.skipped().is_empty());
 }
 
-/// A real backup carries both, and neither is a member: reporting them as unreadable
-/// would make every backup look partly understood.
+/// Real backups contain both. Reporting them as skipped would make every backup look
+/// partly unreadable.
 #[test]
 fn a_directory_entry_and_the_manifest_are_not_skipped_members() {
     let bytes = archive(&[
@@ -90,8 +89,7 @@ fn a_directory_entry_and_the_manifest_are_not_skipped_members() {
     );
 }
 
-/// Two members addressed to one slot: the bank keeps one, and the other is accounted
-/// for by name rather than vanishing.
+/// Of two members addressed to one slot, the bank keeps the later one.
 #[test]
 fn a_member_displaced_from_its_slot_is_reported_with_the_member_that_took_it() {
     let bytes = archive(&[
@@ -110,12 +108,11 @@ fn a_member_displaced_from_its_slot_is_reported_with_the_member_that_took_it() {
     assert_eq!(name, "Bank 1/First.ne5p");
     assert!(
         why.contains("Bank 1/Second.ne5p"),
-        "the reason names neither member: {why}"
+        "the reason does not name the member that took the slot: {why}"
     );
 }
 
-/// A member whose body does not match its stored checksum is not decodable, and the
-/// walk says so for that member rather than failing the whole bundle.
+/// A corrupt member does not fail the whole bundle.
 #[test]
 fn a_member_with_a_bad_checksum_is_skipped_by_name() {
     let mut corrupt = program(0);
@@ -126,11 +123,13 @@ fn a_member_with_a_bad_checksum_is_skipped_by_name() {
     assert_eq!(bundle.skipped().len(), 1);
     let (name, why) = &bundle.skipped()[0];
     assert_eq!(name, "Bank 1/One.ne5p");
-    assert!(why.contains("checksum"), "unhelpful reason: {why}");
+    assert!(
+        why.contains("checksum"),
+        "the reason does not mention the checksum: {why}"
+    );
 }
 
-/// A file of another model reads fine and still has no home here, which is a different
-/// answer from "it did not decode".
+/// A file of another model decodes, so its reason differs from a decode failure.
 #[test]
 fn a_member_of_another_model_is_skipped_as_having_no_place() {
     let bytes = archive(&[("One.nd2p", &drum_program())]);
@@ -142,8 +141,8 @@ fn a_member_of_another_model_is_skipped_as_having_no_place() {
     );
 }
 
-/// The archive layer's own failures are the read's failure: half a ZIP has no members
-/// to walk, so there is no partial bundle to report.
+/// A ZIP error fails the whole read: half an archive has no members to walk, so there is
+/// no partial bundle to report.
 #[test]
 fn a_truncated_archive_fails_the_read() {
     let bytes = archive(&[("Bank 1/One.ne5p", &program(0))]);

@@ -2,8 +2,8 @@
 //! played by a buffer source of its own. Every source goes to one destination, which
 //! mixes them.
 //!
-//! ⚠️ A `AudioBufferSourceNode` is single-use — the spec forbids starting one twice —
-//! so each play builds a new one and a voice ends by stopping the one it holds.
+//! ⚠️ An `AudioBufferSourceNode` is single-use (the spec forbids starting one twice), so
+//! each play builds a new one and a voice ends by stopping its own.
 
 use std::cell::Cell;
 use std::num::NonZero;
@@ -26,8 +26,8 @@ pub struct Voice {
     source: AudioBufferSourceNode,
     /// Set by the source's own `ended` event, which the spec fires once.
     played_out: Rc<Cell<bool>>,
-    /// ⚠️ Held for as long as the source it was handed to: a closure dropped here while
-    /// the page still holds it throws the moment the event fires.
+    /// ⚠️ Kept as long as the source that holds it: a closure dropped while the page
+    /// still references it throws when the event fires.
     _watch: Closure<dyn FnMut()>,
 }
 
@@ -56,7 +56,7 @@ impl Output {
             None => self.context.insert(AudioContext::new()?),
         };
         let buffer = context.create_buffer(channels, frames, FIELD_RATE as f32)?;
-        // Web Audio wants one plane per channel; the codec hands back interleaved.
+        // Web Audio takes one plane per channel; the codec returns interleaved samples.
         for channel in 0..channels {
             let plane: Vec<f32> = samples
                 .iter()
@@ -94,7 +94,7 @@ impl Voice {
 
 impl Drop for Voice {
     fn drop(&mut self) {
-        // ⚠️ The handler goes before the closure behind it does: stopping a source fires
+        // ⚠️ Clear the handler before its closure is dropped: stopping a source fires
         // `ended`, and a dropped `Closure` the page still holds throws.
         AudioScheduledSourceNode::set_onended(&self.source, None);
         // Through the base interface: the buffer-source spelling is deprecated.

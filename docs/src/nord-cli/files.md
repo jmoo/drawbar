@@ -13,8 +13,8 @@ non-zero if any file fails to parse.
 
 `verify` reads a file, writes it back, and checks that the bytes are identical,
 reporting the offset of the first difference if not. Every supported format
-passes, pianos and samples included. `nord piano verify --deep` and `nord sample
-verify --deep` also decode every recording inside.
+passes, pianos and samples included. `nord piano verify --deep` also decodes every
+recording inside, and `nord sample verify --deep` walks every encoded stroke.
 
 ## A file where a slot goes
 

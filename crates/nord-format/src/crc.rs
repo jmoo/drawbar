@@ -15,12 +15,12 @@ const CRC_32: crc32::Crc<crc32::LookupTable256xN<SLICES>> =
 const CRC_16: crc16::Crc<crc16::LookupTable256xN<SLICES>> =
     crc16::Crc::<crc16::LookupTable256xN<SLICES>>::new(&crc16::catalog::CRC_16_IBM_3740);
 
-/// CRC-32 (ISO-HDLC) of a contiguous slice — the type-1 body checksum.
+/// CRC-32 (ISO-HDLC) of a contiguous slice: the type-1 body checksum.
 pub fn crc32(bytes: &[u8]) -> u32 {
     CRC_32.compute(bytes)
 }
 
-/// CRC-16 (IBM-3740) of a contiguous slice — the type-0 whole-file checksum.
+/// CRC-16 (IBM-3740) of a contiguous slice: the type-0 whole-file checksum.
 ///
 /// Inferred from specimens; not confirmed on hardware. Identified by matching
 /// the trailing two bytes of specimens from four families (`nspg`, `ne5p`,

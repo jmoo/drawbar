@@ -1,8 +1,7 @@
 //! The vendor wire protocol.
 //!
-//! Every message on the vendor bulk endpoints is a length-prefixed, CRC-trailered
-//! frame of **big-endian** `u32`s. Note big-endian — the *file* formats
-//! ([`nord_format`]) are little-endian.
+//! Every message on the vendor bulk endpoints is a length-prefixed frame of big-endian
+//! `u32`s with a CRC trailer. The file formats in [`nord_format`] are little-endian.
 //!
 //! ```text
 //! ┌────────┬─────────┬───────────┬─────────┬───────────────┬───────┐
@@ -15,17 +14,16 @@
 //!
 //! Derived from captured traffic. Confirmed on hardware. This framing carries every
 //! operation the crate performs, and two platforms emit byte-identical request frames
-//! for the same verb. What an individual command *means* is a separate question, and
-//! several below are still open.
+//! for the same command. The meaning of several commands below is still open.
 //!
 //! A response to a request is `command + 1` and inserts a `u32` status (0 = success)
 //! ahead of the echoed arguments. The unsolicited [`cmd::CHANGED`] notification is
 //! status-less.
 //!
-//! Requests are *usually* even, but that is a pattern and not a rule — [`cmd::SELECT`]
-//! is `0x2f`, an odd request whose response is `0x30`. **Direction is the only reliable
-//! discriminator**, which is why this module records it at decode time rather than
-//! deriving it (see [`Message::decode_response`]).
+//! Requests are usually even, but [`cmd::SELECT`] is `0x2f`, an odd request whose
+//! response is `0x30`. Only the direction of travel reliably tells a request from a
+//! response, so this module records it at decode time (see
+//! [`Message::decode_response`]).
 
 use std::num::NonZeroU32;
 
@@ -40,9 +38,9 @@ pub const CRC_LEN: usize = 2;
 
 /// Functional area the message is addressed to.
 ///
-/// Only two are observed so far. `Ui` carries the human-readable progress strings
-/// NSM displays (`"Deleting..."`, `"Uploading..."`); `Program` is where the actual
-/// work happens.
+/// Only two have been observed. `Ui` carries session control and the progress strings
+/// shown on the instrument (`"Deleting..."`, `"Uploading..."`); `Program` carries the
+/// operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Service {
     /// Session control and UI progress strings. Pairs with subsystem `1`.
@@ -72,9 +70,9 @@ impl Service {
 
 /// Command codes observed on [`Service::Program`] (subsystem 10).
 ///
-/// The response is always the request `+1`, so only the request code is named. Codes are
-/// what the device actually sent — not guesses. Most requests happen to be even;
-/// [`cmd::SELECT`] is the counter-example, so do not treat parity as meaning anything.
+/// The response is always the request `+1`, so only the request code is named. Codes
+/// come from captured traffic unless their documentation says otherwise. Most requests
+/// are even, but [`cmd::SELECT`] is odd, so parity carries no meaning.
 pub mod cmd {
     /// Open the transaction (the `O22 I26` that starts every operation).
     pub const SESSION_OPEN: u32 = 0x04;
@@ -84,10 +82,10 @@ pub mod cmd {
     pub const STATUS: u32 = 0x08;
     /// Delete a program.
     pub const DELETE: u32 = 0x14;
-    /// Read a program's data. Response body is a reframed entity.
+    /// Read a chunk of an entity body. Args: bank, slot, offset, length.
     pub const READ: u32 = 0x12;
-    /// Copy/duplicate an object: `src_bank, src_slot, dst_bank, dst_slot`. The device
-    /// copies internally — no body crosses the wire.
+    /// Duplicate an object: `src_bank, src_slot, dst_bank, dst_slot`. The device copies
+    /// internally, and no body crosses the wire.
     pub const COPY: u32 = 0x16;
     /// Move a program between slots.
     pub const MOVE: u32 = 0x18;
@@ -95,25 +93,25 @@ pub mod cmd {
     pub const INFO: u32 = 0x1e;
     /// Rename a program; args carry a length-prefixed string.
     pub const RENAME: u32 = 0x1c;
-    /// Select an object live on the instrument ("open on device" / double-click).
-    /// Non-destructive: nothing stored changes, the device just loads it. This is the
-    /// one request with inverted parity — odd code, even response (`0x30`) — so its
-    /// direction cannot be inferred from the command number.
+    /// Load an object live on the instrument ("open on device", or a double-click).
+    /// Nothing stored changes. This is the only request with an odd code and an even
+    /// response (`0x30`), so direction cannot be inferred from the command number.
     pub const SELECT: u32 = 0x2f;
-    /// Re-link an object's dependency table ("set slot table"). Rewrites which library
-    /// pianos/samples a program points at, or which programs a set list holds. Its
-    /// payload semantics (notably the per-entry flag byte) are not fully pinned down,
-    /// so no typed operation is built on it yet — the code is named for completeness.
+    /// Relink an object's dependency table ("set slot table"). Rewrites which library
+    /// pianos and samples a program points at, or which programs a set list holds. Its
+    /// payload, notably the per-entry flag byte, is not fully understood, so no typed
+    /// operation uses it.
     pub const RELINK: u32 = 0x35;
 
     /// Begin writing an entity. Args: bank, slot, body length, format tag, timestamp,
-    /// `0xFFFFFFFF`, then the slot's **name**, length-prefixed — a placeholder name
-    /// becomes the slot's name.
+    /// `0xFFFFFFFF`, then the slot's name, length-prefixed. The name sent here becomes
+    /// the slot's name, even a placeholder.
     pub const BEGIN_WRITE: u32 = 0x0a;
 
-    /// Reclaim library storage; the argument is a block count (256KiB blocks, what
-    /// `STATUS` counts). A library `BEGIN_WRITE` short on free blocks is refused
-    /// `0x16` until this has run in the same session. Destroys nothing.
+    /// Reclaim library storage. The argument is a block count in the partition's
+    /// [`AllocationUnit`](super::AllocationUnit), the unit `STATUS` counts. A library
+    /// `BEGIN_WRITE` short on free blocks is refused `0x16` until this has run in the
+    /// same session. Destroys nothing.
     pub const WRITE_PREPARE: u32 = 0x22;
     /// Query the cleaning pass: three reply words `[requested, done, running]`, ready
     /// when `running` is 0. Only meaningful after `0x22` in the same session.
@@ -124,15 +122,16 @@ pub mod cmd {
     pub const END_TRANSFER: u32 = 0x0e;
     /// Push entity bytes. Args: bank, slot, offset, length, then the body.
     pub const WRITE_DATA: u32 = 0x10;
-    /// List an entity's piano/sample dependencies.
+    /// List an entity's dependencies: pianos and samples for a program, programs for a
+    /// set list.
     pub const DEPENDENCIES: u32 = 0x28;
 
     /// List the device's storage partitions. No arguments.
     ///
-    /// **The partition index is the object class code.** The classes this crate names
-    /// are positions in this table, which is why the numbering has gaps: 0 and 2 are
-    /// `(Native)` variants of the piano and sample libraries, holding the same objects in
-    /// a different order.
+    /// The partition index is the object class code. The classes this crate names are
+    /// positions in this table, so the numbering has gaps: 0 and 2 are `(Native)`
+    /// variants of the piano and sample libraries, holding the same objects in a
+    /// different order.
     pub const PARTITIONS: u32 = 0x00;
 
     /// List one partition's banks and their slot capacity. Args: partition index.
@@ -145,60 +144,60 @@ pub mod cmd {
     /// the reply is a bank/slot pair. The read half of [`SELECT`].
     ///
     /// Class-dependent: status `0x1` when nothing of the session's class is loaded, and
-    /// status `0x15` from the library classes, which have no focus at all.
+    /// status `0x15` from the library classes, which have no focus.
     pub const FOCUS: u32 = 0x31;
 
-    /// Adjacent occupied slot: `bank, slot, direction` (`0` forward, `1` backward);
-    /// slot `0xffff_ffff` walks from the bank's boundary. Status `1` is the
-    /// end-of-walk signal, not a fault; an empty bank and a missing bank answer
-    /// identically, so bank existence needs [`INFO`]. ⚠️ Omitting the direction word
-    /// is refused `0x11` after any write since power-up.
+    /// Adjacent occupied slot: `bank, slot, direction` (`0` forward, `1` backward).
+    /// Slot `0xffff_ffff` walks from the bank's boundary. Status `1` ends the walk. An
+    /// empty bank and a missing bank answer the same way, so bank existence comes from
+    /// [`BANKS`].
+    ///
+    /// ⚠️ Omitting the direction word is refused `0x11` after any write since power-up.
     pub const NEXT_SLOT: u32 = 0x20;
 
     /// Erases an entire partition.
     ///
-    /// Reported by public documentation; not confirmed on hardware. Deliberately left
-    /// unconfirmed: a session is class-scoped, so the session is what aims this —
-    /// opened on a library class it takes the whole piano or sample store, which is
-    /// hundreds of megabytes and a long restore from a backup. Named here so it can be
-    /// recognised and refused, not so it can be sent.
+    /// Reported by public documentation; not confirmed on hardware.
+    ///
+    /// ⚠️ It is left untested because the session's class selects the partition: in a
+    /// library session it would erase the whole piano or sample store, hundreds of
+    /// megabytes to restore from a backup. It is named so it can be recognized and
+    /// refused.
     pub const ERASE_ALL: u32 = 0x24;
 
-    /// Highest command the instrument has ever been seen to answer.
+    /// Highest command the instrument has been seen to answer.
     ///
-    /// Above this is unexplored space, and it is not empty: at least one code up there
-    /// reaches a destructive path, paints its own progress label, never replies, and
-    /// needs a power cycle. Distance from the known range is not evidence that a code is
-    /// unimplemented.
+    /// ⚠️ The codes above this are unexplored but not empty: at least one reaches a
+    /// destructive path, shows its own progress label, never replies, and needs a power
+    /// cycle. A code far from the known range may still be implemented.
     pub const HIGHEST_ANSWERING: u32 = 0x3d;
 
     /// Wedges the instrument: no reply, the session's close goes unanswered, and the
-    /// bulk endpoints stall until a power cycle. Reported elsewhere as the read half of
-    /// [`NOTIFY_ENABLE`], which is not what it does here.
+    /// bulk endpoints stall until a power cycle. It is reported elsewhere as the read
+    /// half of [`NOTIFY_ENABLE`], but that is not what it does here.
     pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
-    /// Unsolicited device → host notification — no request pairs with it, so it
-    /// arrives in place of whatever reply the host reads for next. Queued by a
-    /// front-panel STORE while a cable session was possible.
+    /// Unsolicited device → host notification. No request pairs with it, so it arrives
+    /// in place of whatever reply the host reads next. A front-panel STORE queues one
+    /// while a cable session is possible.
     ///
     /// Confirmed on hardware.
     ///
-    /// Unexplained: what it announces. It is absent from the capture corpus, so nothing
-    /// pins the meaning down beyond the store that produced it.
+    /// Unexplained: what it announces. It is absent from the capture corpus, and a
+    /// front-panel STORE is the only trigger observed.
     pub const CHANGED: u32 = 0x2c;
 
-    /// Enable/disable change notifications for a class: `class, on`. The reported
+    /// Enable or disable change notifications for a class: `class, on`. The reported
     /// read half is [`NOTIFY_READ_WEDGE`].
     pub const NOTIFY_ENABLE: u32 = 0x2d;
 }
 
-/// The UI/session service (service 6, subsystem 1): the transaction's outer handshake
-/// and the progress strings NSM paints on the **instrument's own display** during a
-/// transfer.
+/// The UI/session service (service 6, subsystem 1): the transaction's outer handshake,
+/// and the progress strings shown on the instrument's display during a transfer.
 ///
-/// The progress messages ([`ui::label`], [`ui::percent`]) are **fire-and-forget** — the
-/// device never replies. They must be sent with `Session::notify`, never `request`,
-/// which would block forever waiting for a response that never comes.
+/// The device never replies to the progress messages ([`ui::label`], [`ui::percent`]).
+/// They must be sent with `Session::notify`, because `request` would wait forever for
+/// a reply.
 pub mod ui {
     use super::{Message, Service};
     use crate::error::{Error, Result};
@@ -217,13 +216,12 @@ pub mod ui {
     /// The longest label the one-byte length field can describe.
     pub const MAX_LABEL_LEN: usize = u8::MAX as usize;
 
-    /// A progress label. Layout is six zero bytes, a one-byte length, then unpadded
-    /// ASCII — read straight off the wire and byte-for-byte reproducible.
+    /// A progress label: six zero bytes, a one-byte length, then unpadded ASCII, as
+    /// captured.
     ///
-    /// Fails for a label longer than [`MAX_LABEL_LEN`] **bytes** rather than truncating
-    /// the length into a `u8`: a 256-byte label would silently encode a length of `0`
-    /// and put a malformed frame on the wire. Note the bound is on UTF-8 bytes, not
-    /// characters.
+    /// Fails for a label longer than [`MAX_LABEL_LEN`] UTF-8 bytes. Truncating the
+    /// length into a `u8` would encode a 256-byte label with length `0` and send a
+    /// malformed frame.
     pub fn label(text: &str) -> Result<Message> {
         if text.len() > MAX_LABEL_LEN {
             return Err(Error::InvalidArgument(format!(
@@ -237,11 +235,10 @@ pub mod ui {
         Ok(Message::new(Service::Ui, SUBSYSTEM, LABEL, args))
     }
 
-    /// A progress percentage. Layout is a constant `u16` 1 then the value as a `u16`.
+    /// A progress percentage: a constant `u16` 1, then the value as a `u16`.
     ///
-    /// Clamped to 100. Unlike [`label`] an out-of-range value cannot produce a
-    /// malformed frame — every `u16` encodes fine — so this is a cosmetic nonsense
-    /// value on the instrument's display, not a protocol error.
+    /// Clamped to 100. Every `u16` encodes to a valid frame, so an out-of-range value
+    /// would only show a meaningless number on the display, and is not an error.
     pub fn percent(pct: u16) -> Message {
         let mut args = 1u16.to_be_bytes().to_vec();
         args.extend_from_slice(&pct.min(100).to_be_bytes());
@@ -253,35 +250,34 @@ pub mod ui {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramInfo {
     pub location: Location,
-    /// Length of the entity body on the wire — 121 for an Electro 5 program.
+    /// Length of the entity body on the wire, for example 121 for an Electro 5 program.
     pub body_len: u32,
     /// Four-character CBIN format tag, e.g. `ne5p`.
     pub format: String,
-    /// Schema/content version, the same field the CBIN header carries at `0x14` and
-    /// the one NSM prints in its "Version" column.
+    /// Schema or content version: the field the CBIN header carries at `0x14`, shown in
+    /// Nord Sound Manager's "Version" column.
     ///
-    /// Per format tag, not a per-item counter: `ne5p` reports 4 and `ne5t` reports 0
-    /// or 1. For library content it is the version in the object's own *name*, ×100 —
+    /// It is per format tag: `ne5p` reports 4 and `ne5t` reports 0 or 1. For library
+    /// content it is the version in the object's name times 100, so
     /// `Royal Grand 3D YaS6 XL 5.4` reports `540`.
     pub version: u32,
-    /// CRC-32 of the body, as the device reports it. Lets a read be verified
-    /// against the device's own checksum rather than trusting the transfer.
+    /// CRC-32 of the body as the device reports it, for verifying a read.
     ///
-    /// `None` for classes the device does not checksum — pianos and samples report
-    /// `0xffffffff` rather than a real value, which is normalized away here so callers
-    /// cannot mistake it for a checksum to verify against.
+    /// `None` for classes the device does not checksum. Pianos, samples, and Settings
+    /// report `0xffffffff`, which is mapped to `None` so callers cannot verify against
+    /// it.
     pub crc32: Option<u32>,
-    /// Slot name as shown on the instrument. Stored nowhere in the file itself.
+    /// Slot name as shown on the instrument. The file does not store it.
     pub name: String,
 }
 
 impl ProgramInfo {
-    /// Fixed offsets ahead of the name: bank, slot, body_len, format, version, and the
-    /// two `0xffffffff` words, then the name's own length.
+    /// Offset of the name's length word, after bank, slot, body_len, format, version,
+    /// and two more words.
     const NAME_LEN_AT: usize = 28;
 
     pub fn decode(msg: &Message) -> Result<Self> {
-        // A request-decoded message retains the status position and shifts every field.
+        // A message decoded as a request keeps the status word, shifting every field.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "object info must be decoded from a response (use Message::decode_response)".into(),
@@ -296,7 +292,7 @@ impl ProgramInfo {
         }
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
 
-        // Words 20 and 24 vary for libraries, so preserve their position without asserting them.
+        // Words 20 and 24 vary for libraries, so they are skipped without being checked.
         let name_len = word(Self::NAME_LEN_AT) as usize;
         let name_start = Self::NAME_LEN_AT + 4;
         let name_end = checked_end(p, name_start, name_len)?;
@@ -359,7 +355,7 @@ fn checked_end(buf: &[u8], start: usize, len: usize) -> Result<usize> {
 
 /// One of the device's storage partitions, from [`cmd::PARTITIONS`].
 ///
-/// **The index in the reply is the object class code** — `ObjectClass::from_raw` numbers
+/// The index in the reply is the object class code: [`ObjectClass::from_raw`] takes
 /// positions in this table, gaps included.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
@@ -368,14 +364,13 @@ pub struct Partition {
     /// The device's own name: `Piano`, `Samp Lib`, `Program`, `Set List`, …
     pub name: String,
     /// Whether this is the `(Native)` view of a library. Native and user partitions
-    /// describe **one** pool — identical capacity fields — ordered differently.
+    /// describe one pool, with identical capacity fields, in a different order.
     pub native: bool,
-    /// The 29 trailing bytes, verbatim: four big-endian words and then 13 one-byte
-    /// flags. Only the words this type exposes an accessor for are decoded; the rest are
-    /// carried so a caller can look at them without another read.
+    /// The 29 trailing bytes: four big-endian words, then 13 one-byte flags. Only the
+    /// words with an accessor are decoded; the rest are kept so a caller can inspect
+    /// them without another read.
     ///
-    /// Static configuration, not state — every value is unchanged by storing or deleting
-    /// content.
+    /// These are static configuration: storing or deleting content changes none of them.
     ///
     /// Confirmed on hardware.
     pub fields: Vec<u8>,
@@ -386,11 +381,11 @@ pub struct Partition {
 pub struct Bank {
     /// Zero-based position, as addresses use it. The panel shows this plus one.
     pub index: u32,
-    /// The device's name for it. For pianos these are the panel's **categories**
-    /// (`Grand`, `Upright`, `EPiano1`, …), not numbers.
+    /// The device's name for the bank. For pianos these are the panel's categories
+    /// (`Grand`, `Upright`, `EPiano1`, …).
     pub name: String,
-    /// How many slots the bank holds. `0xfffe` appears for the `(Native)` partitions and
-    /// is a sentinel, not a capacity.
+    /// How many slots the bank holds, or the [`Self::UNBOUNDED`] sentinel for the
+    /// `(Native)` partitions.
     pub slots: u32,
 }
 
@@ -398,9 +393,8 @@ impl Partition {
     /// Decode a [`cmd::PARTITIONS`] reply: `[u8 count]` then that many
     /// `[u32 name_len][name][29 bytes]` records.
     ///
-    /// ⚠️ The length prefix is a **`u32`**. Read as a `u16` the first record still parses
-    /// and every one after it lands mid-field, which looks like corruption rather than a
-    /// framing mistake.
+    /// ⚠️ The length prefix is a `u32`. Read as a `u16`, the first record still parses
+    /// and every later one lands mid-field, which looks like corruption.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
@@ -430,17 +424,17 @@ impl Partition {
         Ok(out)
     }
 
-    /// The partition's allocation granularity, in **net** bytes — the payload one unit of
-    /// whatever [`Status`] counts here holds.
+    /// The partition's allocation granularity in net bytes: the payload one unit of
+    /// [`Status`] holds in this partition.
     ///
-    /// Library partitions report a storage block minus its own overhead; an Electro 5
+    /// Library partitions report a storage block minus its overhead; an Electro 5
     /// reports `261632` (256 KiB − 512) for pianos and `131064` (128 KiB − 8) for
-    /// samples. Slot-addressed partitions report `1`, which is what says their counters
-    /// are byte-granular.
+    /// samples. Slot-addressed partitions report `1`, meaning their counters are
+    /// byte-granular.
     ///
-    /// ⚠️ Net, not gross. Sizing a write off the enclosing power-of-two block instead
-    /// differs only for a body within the overhead of an exact block boundary, but it
-    /// differs by a whole block when it does.
+    /// ⚠️ Size writes by this net unit. Sizing by the power-of-two block differs only for
+    /// a body within the overhead of a block boundary, but then it is off by a whole
+    /// block.
     ///
     /// Confirmed on hardware.
     pub fn allocation_unit(&self) -> Result<AllocationUnit> {
@@ -458,10 +452,10 @@ impl Partition {
     }
 }
 
-/// Net bytes per unit of whatever [`Status`] counts for a partition: `1` where the
-/// counters are byte-granular, the net storage block in a library.
+/// Net bytes per unit of [`Status`] for a partition: `1` where the counters are
+/// byte-granular, and the net storage block in a library.
 ///
-/// See [`Partition::allocation_unit`], which is the only source of one.
+/// Only [`Partition::allocation_unit`] creates one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocationUnit {
     partition: u32,
@@ -473,7 +467,7 @@ impl AllocationUnit {
         self.bytes.get()
     }
 
-    /// Whether this partition's counters are byte-granular rather than block-granular.
+    /// Whether this partition's counters count bytes.
     pub fn is_bytes(self) -> bool {
         self.bytes.get() == 1
     }
@@ -484,8 +478,8 @@ impl AllocationUnit {
 
     /// How many units a body of `bytes` occupies.
     ///
-    /// ⚠️ Rounds up. Undercounting makes [`cmd::BEGIN_WRITE`] refuse `0x16` even
-    /// straight after a cleaning pass that reclaimed what the undercount asked for.
+    /// ⚠️ Rounds up. Undercounting makes [`cmd::BEGIN_WRITE`] refuse `0x16` even right
+    /// after a cleaning pass that reclaimed what the undercount asked for.
     pub fn blocks_for(self, bytes: usize) -> Result<u32> {
         let bytes = u64::try_from(bytes)
             .map_err(|_| Error::InvalidArgument("the body is larger than u64".into()))?;
@@ -534,33 +528,30 @@ impl Bank {
     /// The sentinel the `(Native)` partitions report instead of a real capacity.
     pub const UNBOUNDED: u32 = 0xfffe;
 
-    /// Whether [`Self::slots`] is a real capacity rather than the sentinel.
+    /// Whether [`Self::slots`] is a real capacity and not the sentinel.
     pub fn is_bounded(&self) -> bool {
         self.slots != Self::UNBOUNDED
     }
 }
 
 /// One entry from a [`cmd::DEPENDENCIES`] response: a piano or sample that a program
-/// (or a program that a set list) references.
+/// references, or a program that a set list references.
 ///
-/// The library `id` is the same id the object carries in its own file — a
-/// `PianoPanel`'s piano id, a sample's sample id — so this is the bridge between the
-/// content on the wire and the bytes on disk.
+/// The library `id` is the id the object carries in its own file (a `PianoPanel`'s
+/// piano id, a sample's sample id), which links content on the wire to bytes on disk.
 pub struct Dependency {
-    /// Whether this reference is **live**: `1` when the section owning it (piano or
-    /// sample) is routed to a keyboard part in that program, `0` otherwise.
+    /// Whether this reference is live: `1` when the section owning it (piano or sample)
+    /// is routed to a keyboard part in that program, `0` otherwise.
     ///
-    /// ⚠️ Not a presence flag. The device resolves an unrouted section's model index to
-    /// a library object anyway, so a `0` row can name a piano the program's own body
-    /// records as `none` — and the same object reads `1` from one program and `0` from
-    /// another. **Filter on this before treating a row as a dependency**, or a bundle
-    /// walk collects objects nothing plays.
+    /// ⚠️ Not a presence flag. A `0` row can name a piano the program's body records as
+    /// `none`, and the same object can read `1` from one program and `0` from another.
+    /// Use [`Dependency::is_required`] before treating a row as a dependency.
     pub flag: u8,
     /// What kind of object this dependency is (piano, sample, program).
     pub class: ObjectClass,
     /// Content id, matching the id in the object's own file header.
     pub id: u32,
-    /// Human-readable name — which the `.ne5p`/`.ne5t` files do not themselves store.
+    /// Human-readable name, which the `.ne5p` and `.ne5t` files do not store.
     pub name: String,
     /// Slot address, for slot-addressed dependencies (programs). Library content
     /// (pianos, samples) is addressed by `id` and reports no location.
@@ -568,27 +559,24 @@ pub struct Dependency {
 }
 
 impl Dependency {
-    /// Whether this row is a dependency the object actually has.
+    /// Whether this row is a dependency the object has.
     ///
-    /// A row addresses its object one of two ways: library content (pianos, samples)
-    /// by [`Self::id`], slot-addressed content (a set list's programs) by
-    /// [`Self::location`] — with `id` always `0`. Confirmed on hardware. Requiredness
-    /// therefore asks whether the row addresses *anything*, by either field; an
-    /// id-only filter silently classifies every set-list dependency as unassigned and
-    /// a set-list bundle walk collects nothing.
+    /// A row addresses its object in one of two ways: library content (pianos, samples)
+    /// by [`Self::id`], and slot-addressed content (a set list's programs) by
+    /// [`Self::location`] with `id` always `0`. Confirmed on hardware. A row is therefore
+    /// required when it addresses something by either field; filtering on `id` alone
+    /// would drop every set-list dependency.
     ///
-    /// Two kinds of row are reported but are **not** dependencies, and both look like one
-    /// at a glance:
+    /// Two kinds of row are reported but are not dependencies:
     ///
     /// - The section owning it is not routed to a keyboard part ([`Self::flag`] `0`). The
     ///   device resolves the section's model index to a library object regardless, so the
-    ///   row can name a piano the object's own body records as `none`.
-    /// - The section *is* routed but nothing is assigned to it, giving a live flag with a
-    ///   null [`Self::id`] and no location.
+    ///   row can name a piano the object's body records as `none`.
+    /// - The section is routed but nothing is assigned to it: a live flag with a null
+    ///   [`Self::id`] and no location.
     ///
-    /// Anything collecting an object's real requirements — a bundle walk above all —
-    /// wants this rather than the raw list, or it goes looking for objects that either
-    /// are not played or do not exist.
+    /// Anything collecting an object's requirements, such as a bundle walk, should use
+    /// this and not the raw list.
     pub fn is_required(&self) -> bool {
         self.flag == 1 && (self.id != 0 || self.location.is_some())
     }
@@ -599,7 +587,7 @@ impl Dependency {
     /// `[u8 flag][u32 reserved][u32 class][u32 id][u32 name_len][name][u32 has_location][u32 bank][u32 slot]`
     /// with no alignment padding, so an entry is `29 + name_len` bytes.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
-        // Request decoding leaves the status position in place and shifts every entry.
+        // A message decoded as a request keeps the status word, shifting every entry.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "dependency list must be decoded from a response (use Message::decode_response)"
@@ -647,7 +635,7 @@ impl Dependency {
     }
 }
 
-/// CRC-16/CCITT-FALSE — poly `0x1021`, init `0xFFFF`, no reflection, no xorout.
+/// CRC-16/CCITT-FALSE: poly `0x1021`, init `0xFFFF`, no reflection, no xorout.
 ///
 /// Identified from known message/trailer pairs and checked across the capture corpus.
 pub fn crc16(data: &[u8]) -> u16 {
@@ -674,17 +662,16 @@ pub struct Message {
     /// Everything between the command word and the CRC. Ordinary responses include
     /// their leading status word; [`cmd::CHANGED`] does not.
     pub args: Vec<u8>,
-    /// Set by the decoder from the direction the bytes traveled. Not inferable from
-    /// the command code — see [`Message::is_response`].
+    /// Set by the decoder from the direction the bytes traveled. The command code does
+    /// not imply it; see [`Message::is_response`].
     is_response: bool,
 }
 
-/// The protocol version to put on [`Service::Program`] frames, when something other than
-/// the caller's is wanted.
+/// A protocol version to put on [`Service::Program`] frames in place of the caller's.
 ///
-/// The device treats 8, 9 and 10 as synonyms and drops anything newer; **values below 8
-/// stall the bulk endpoints and need a power cycle**, so this exists to compare the
-/// accepted window, not to sweep.
+/// ⚠️ The device treats 8, 9, and 10 as synonyms and drops anything newer. Values below 8
+/// stall the bulk endpoints until a power cycle, so use this to compare the accepted
+/// versions, never to sweep.
 #[cfg(feature = "fault-injection")]
 fn protocol_version_override() -> Option<u32> {
     std::env::var("NORD_PROTOCOL_VERSION")
@@ -700,8 +687,8 @@ fn protocol_version_override() -> Option<u32> {
 impl Message {
     /// A request, to send to the device.
     pub fn new(service: Service, subsystem: u32, command: u32, args: Vec<u8>) -> Self {
-        // Only the program service carries a version here; the UI service's `1` is a real
-        // subsystem selector and overriding it would be a different frame entirely.
+        // Only the program service's subsystem word is a protocol version. The UI
+        // service's `1` selects a subsystem, so overriding it would change the frame.
         let subsystem = match service {
             Service::Program => protocol_version_override().unwrap_or(subsystem),
             _ => subsystem,
@@ -717,12 +704,10 @@ impl Message {
 
     /// Whether this message was decoded as a device response.
     ///
-    /// **Direction, not parity.** Parity invites the guess and does not support it: the
-    /// "select in instrument" command is `0x2f` (odd) with response `0x30` (even),
-    /// exactly inverting it. The `response == request + 1` rule does hold — only the
-    /// parity of the request does not. Getting this backwards silently misaligns
-    /// [`Self::payload`] by four bytes and hides device errors, so it is recorded at
-    /// decode time by the side that knows.
+    /// Direction is recorded at decode time because the command code's parity does not
+    /// imply it: [`cmd::SELECT`] is `0x2f` (odd) with response `0x30` (even). The rule
+    /// `response == request + 1` still holds. Getting direction wrong misaligns
+    /// [`Self::payload`] by four bytes and hides device errors.
     pub fn is_response(&self) -> bool {
         self.is_response
     }
@@ -759,7 +744,7 @@ impl Message {
     /// Decode bytes received *from* the device.
     pub fn decode_response(buf: &[u8]) -> Result<Self> {
         let mut m = Self::decode(buf)?;
-        // CHANGED is an unsolicited notification, not a command response, and carries no status.
+        // CHANGED is an unsolicited notification and carries no status.
         if m.command != cmd::CHANGED && buf.len() < HEADER_LEN + 4 + CRC_LEN {
             return Err(Error::Truncated {
                 got: buf.len(),
@@ -770,8 +755,8 @@ impl Message {
         Ok(m)
     }
 
-    /// Decode an exploratory reply without requiring the ordinary status word.
-    /// A short frame is an observation, not a typed operation failure.
+    /// Decode a probe reply without requiring the status word. A short frame is a
+    /// result to report, not an error.
     pub fn decode_probe(buf: &[u8]) -> Result<Self> {
         let mut m = Self::decode(buf)?;
         m.is_response = true;
@@ -812,15 +797,16 @@ impl Message {
     }
 }
 
-/// What kind of object a session is about.
+/// The kind of object a session addresses.
 ///
 /// `SESSION_OPEN` carries one of these, and [`cmd::STATUS`] then reports on that class
-/// alone. Confirmed on hardware. **The class code is the device's partition index**,
-/// and the partition table names each one. An unrecognized numeric class is preserved.
+/// alone. Confirmed on hardware. The class code is the device's partition index, and
+/// the partition table names each class. An unrecognized code is kept in
+/// [`ObjectClass::Unknown`].
 ///
-/// The gaps at `0` and `2` are the `Piano (Native)` and `Samp Lib (Native)` partitions
-/// — a second view of the same objects in storage order rather than by category. Both
-/// are readable and neither is modelled here.
+/// The gaps at `0` and `2` are the `Piano (Native)` and `Samp Lib (Native)` partitions,
+/// which list the same objects in storage order instead of by category. Both are
+/// readable, and neither is modeled here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectClass {
     Piano,
@@ -835,8 +821,8 @@ pub enum ObjectClass {
     Unknown(u32),
 }
 
-/// The four library classes are the libraries a decoded body can refer into, and their
-/// codes are [`Library::code`]'s — one table for a caller holding both.
+/// The four library classes are the libraries a decoded body can refer to, and their
+/// codes are [`Library::code`]'s, so a caller holding both uses one table.
 impl From<Library> for ObjectClass {
     fn from(library: Library) -> Self {
         match library {
@@ -872,8 +858,8 @@ impl ObjectClass {
         }
     }
 
-    /// The classes worth querying for an inventory. Live and Settings also answer, but
-    /// report zero items — they are singletons, not slot-counted storage.
+    /// The classes to query for an inventory. Live and Settings also answer but report
+    /// zero items, because they are fixed buffers, not slot-counted storage.
     pub const INVENTORY: [ObjectClass; 4] = [
         ObjectClass::Piano,
         ObjectClass::Sample,
@@ -893,9 +879,8 @@ impl ObjectClass {
         }
     }
 
-    /// The storage class `nord_format`'s acceptance table names this one by — the four
-    /// libraries and the two singletons, without the wire. `None` for a code this crate
-    /// does not name, which no table row can be about.
+    /// The storage class `nord_format`'s acceptance table uses for this class. `None` for
+    /// a code this crate does not name.
     pub fn storage(self) -> Option<Slot> {
         match self {
             ObjectClass::Piano => Some(Slot::Piano),
@@ -914,16 +899,16 @@ impl ObjectClass {
         matches!(self, ObjectClass::Piano | ObjectClass::Sample)
     }
 
-    /// Whether a write into an *occupied* slot of this class lands without deleting it
+    /// Whether a write into an occupied slot of this class succeeds without a delete
     /// first.
     ///
     /// Confirmed on hardware.
     ///
     /// Live and Settings accept the ordinary `BEGIN_WRITE` → `WRITE_DATA` →
-    /// `END_TRANSFER` sequence at their occupied slots and the body
-    /// reads back as what was sent, where every other class answers status `0x4` until
-    /// the slot is empty. Their delete has never been attempted, so composing a write
-    /// out of delete-then-write there is both unnecessary and untested.
+    /// `END_TRANSFER` sequence at their occupied slots, and the body reads back as sent.
+    /// Every other class answers status `0x4` until the slot is empty. Delete has never
+    /// been tried on Live or Settings, so delete-then-write there is both unnecessary
+    /// and untested.
     pub fn overwrites_in_place(self) -> bool {
         matches!(self, ObjectClass::Live | ObjectClass::Settings)
     }
@@ -932,10 +917,10 @@ impl ObjectClass {
     ///
     /// Confirmed on hardware.
     ///
-    /// Live and Settings hold fixed names (`Live 1`, `Settings`) — they answer
-    /// `0x1c` rename with success and change nothing, and they carry `BEGIN_WRITE`'s
-    /// name argument and discard it. Partition record word 3, the slot-family name
-    /// length, is `0` for both.
+    /// Live and Settings hold fixed names (`Live 1`, `Settings`). They answer a `0x1c`
+    /// rename with success and change nothing, and they accept `BEGIN_WRITE`'s name
+    /// argument and discard it. Partition record word 3, the slot-family name length, is
+    /// `0` for both.
     pub fn names_its_slots(self) -> bool {
         !matches!(self, ObjectClass::Live | ObjectClass::Settings)
     }
@@ -943,17 +928,17 @@ impl ObjectClass {
 
 /// What [`cmd::STATUS`] reports, for whichever [`ObjectClass`] the session opened.
 ///
-/// **The unit differs by class family.** The slot-addressed classes (program, set list,
-/// live, settings) count **bytes**: a program costs 141 = 121 body + 16 name + 4 CRC, a
-/// set list 38 = 18 + 16 + 4. The library classes (piano, sample) count **storage
-/// blocks** of [`Partition::allocation_unit`] net payload bytes each — just under 256
-/// KiB for pianos and 128 KiB for samples on an Electro 5.
+/// The unit differs by class family. The slot-addressed classes (program, set list,
+/// live, settings) count bytes: a program costs 141 = 121 body + 16 name + 4 CRC, and a
+/// set list 38 = 18 + 16 + 4. The library classes (piano, sample) count storage blocks
+/// of [`Partition::allocation_unit`] net bytes each, just under 256 KiB for pianos and
+/// 128 KiB for samples on an Electro 5.
 ///
-/// ⚠️ **`free + used` is not the capacity.** A delete moves its space into
-/// [`Self::dirty`], not into `free`, so a report built from those two words shrinks
-/// every time something is deleted. [`Self::total`] sums all four storage words, which
-/// *is* constant, and [`Self::available`] is the space a write can actually reach —
-/// `free` now, plus whatever the cleaning pass can reclaim out of `dirty`.
+/// ⚠️ `free + used` is not the capacity. A delete moves its space into [`Self::dirty`],
+/// so a report built from those two words shrinks with every delete. [`Self::total`]
+/// sums all four storage words and stays constant, and [`Self::available`] is the
+/// space a write can reach: `free` plus what the cleaning pass can reclaim from
+/// `dirty`.
 ///
 /// `dirty` and `spare` read `0` outside the library partitions.
 ///
@@ -966,24 +951,24 @@ pub struct Status {
     pub free: u32,
     /// Space live objects occupy. Deleting lowers this and raises `dirty`.
     pub used: u32,
-    /// Space held by deleted objects, reclaimable by [`cmd::WRITE_PREPARE`]. Survives a
-    /// power cycle, where `free`'s prepared state does not reliably.
+    /// Space held by deleted objects, reclaimable by [`cmd::WRITE_PREPARE`]. It survives
+    /// a power cycle; `free`'s prepared state does not reliably survive one.
     pub dirty: u32,
-    /// The fifth word: a small per-partition constant (1 and 2 observed), never seen to
-    /// move. Meaning unknown, and counted in [`Self::total`] only because the four
-    /// storage words together sum to a value that does not change.
+    /// The fifth word: a small per-partition constant (1 and 2 observed) that has never
+    /// been seen to change. Its meaning is unknown. It is counted in [`Self::total`]
+    /// because the four storage words together sum to a constant.
     pub spare: u32,
 }
 
 impl Status {
-    /// The partition's capacity — constant per class, in the class's own unit.
+    /// The partition's capacity in the class's unit, constant per class.
     pub fn total(&self) -> u64 {
         u64::from(self.free) + u64::from(self.used) + u64::from(self.dirty) + u64::from(self.spare)
     }
 
-    /// Space a write can reach: what is free now plus what cleaning can reclaim.
+    /// Space a write can reach: what is free plus what cleaning can reclaim.
     ///
-    /// A partition reporting `free` 0 with a large `dirty` pool is entirely writable —
+    /// A partition reporting `free` 0 with a large `dirty` pool is writable:
     /// [`crate::op::write`] reclaims the shortfall before it begins.
     pub fn available(&self) -> u64 {
         u64::from(self.free) + u64::from(self.dirty)
@@ -991,10 +976,9 @@ impl Status {
 
     /// Bytes per item, when every item of this class costs the same.
     ///
-    /// Only the slot-addressed classes resolve: their `STATUS` unit is bytes and every
-    /// item is one fixed record. The library classes count blocks of genuinely
-    /// variable-size content, and a class this crate cannot name has no known unit, so
-    /// both yield `None` whatever their counters happen to divide into.
+    /// Only the slot-addressed classes have one: their `STATUS` unit is bytes and every
+    /// item is one fixed-size record. The library classes count blocks of variable-size
+    /// content, and an unknown class has no known unit, so both return `None`.
     pub fn bytes_per_item(&self) -> Option<u32> {
         if self.class.is_library() || matches!(self.class, ObjectClass::Unknown(_)) {
             return None;
@@ -1008,10 +992,9 @@ impl Status {
         (per != 0 && self.total().is_multiple_of(u64::from(per))).then_some(per)
     }
 
-    /// Total item slots, for classes where items are fixed-size.
+    /// Total item slots, for classes whose items are fixed-size.
     ///
-    /// Far more meaningful than a byte count: programs report 400, which is exactly the
-    /// 8 banks × 50 slots of an Electro 5.
+    /// On an Electro 5, programs report 400: 8 banks × 50 slots.
     pub fn slots(&self) -> Option<u32> {
         self.bytes_per_item()
             .and_then(|per| u32::try_from(self.total() / u64::from(per)).ok())
@@ -1032,7 +1015,7 @@ impl Status {
     /// first three words are required; a shorter reply decodes with the missing words as
     /// zero.
     pub fn decode(class: ObjectClass, msg: &Message) -> Result<Self> {
-        // Request decoding would leave the status position and shift every counter.
+        // A message decoded as a request keeps the status word, shifting every counter.
         if !msg.is_response() {
             return Err(Error::InvalidArgument(
                 "status must be decoded from a response (use Message::decode_response)".into(),
@@ -1063,9 +1046,8 @@ impl Status {
     }
 }
 
-/// A bank/slot address. **Zero-indexed on the wire**, one-indexed in the UI and in
-/// every capture directory name — `move_prog_8-13_to_7-16` puts `7, 12, 6, 15` on
-/// the wire.
+/// A bank/slot address. Zero-indexed on the wire, and one-indexed in the UI and in
+/// capture names: `move_prog_8-13_to_7-16` puts `7, 12, 6, 15` on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
     pub bank: u32,
@@ -1105,9 +1087,9 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
-    /// A library reference in a decoded body and a session on the wire name the same
-    /// catalogue by the same code, in both directions — and the acceptance table names
-    /// it by the same storage class.
+    /// A library reference in a decoded body and a session on the wire use the same
+    /// code for the same catalog, in both directions, and the acceptance table uses the
+    /// same storage class.
     #[test]
     fn a_library_class_code_is_the_librarys_own() {
         use super::ObjectClass;
@@ -1137,7 +1119,7 @@ mod tests {
 
     use super::*;
 
-    /// The middle exchange of `move_prog_8-13_to_7-16`, byte-for-byte off the wire.
+    /// The request in the middle exchange of `move_prog_8-13_to_7-16`, as captured.
     const MOVE: &str = "000000220000000c0000000a00000018000000070000000c000000060000000f4a55";
     /// Its response: command +1, status word inserted, arguments echoed.
     const MOVE_RESP: &str =
@@ -1208,31 +1190,27 @@ mod tests {
         assert_eq!(resp.command, req.command + 1);
         assert!(resp.is_response());
         assert_eq!(resp.status(), Some(0));
-        // Once the status word is stripped, the arguments are identical...
+        // Once the status word is stripped, the arguments are identical.
         assert_eq!(resp.payload(), req.payload());
-        // ...which is exactly why responses run 4 bytes longer.
         assert_eq!(hex(MOVE_RESP).len() - hex(MOVE).len(), 4);
     }
 
-    /// Direction cannot be inferred from the command code.
-    ///
-    /// "Select in instrument" is `0x2f` -> `0x30`: an **odd** request with an **even**
-    /// response, inverting the parity guess that held for every other decoded op. Both
-    /// messages are real, from `select_setlist_1-2` (set lists) and
-    /// `open_on_device_2-12` (programs) -- the same command at two object classes.
+    /// `SELECT` is `0x2f` -> `0x30`, an odd request with an even response. Both frames
+    /// are captured, from `select_setlist_1-2` (set lists) and `open_on_device_2-12`
+    /// (programs).
     #[test]
     fn direction_is_not_inferable_from_command_parity() {
-        // Request: cmd 0x2f, args (0, 1) -- displayed set list 1:2.
+        // Request: cmd 0x2f, args (0, 1), shown on the panel as set list 1:2.
         let req =
             Message::decode(&hex("0000001a0000000c0000000a0000002f00000000000000017f71")).unwrap();
         assert_eq!(req.command, 0x2f);
-        assert!(req.command & 1 == 1, "this request really is odd-numbered");
+        assert!(req.command & 1 == 1, "the request is odd-numbered");
         assert!(
             !req.is_response(),
             "an odd command must still decode as a request"
         );
         assert_eq!(req.status(), None);
-        // A request's payload must not have four bytes eaten as a status word.
+        // No request bytes are taken as a status word.
         assert_eq!(req.payload().len(), 8);
 
         // Response: cmd 0x30 (even), status 0, then the echoed args.
@@ -1243,13 +1221,13 @@ mod tests {
         assert_eq!(resp.command, req.command + 1);
         assert!(
             resp.command & 1 == 0,
-            "this response really is even-numbered"
+            "the response to 0x2f is even-numbered"
         );
         assert!(resp.is_response());
         assert_eq!(
             resp.status(),
             Some(0),
-            "status must be readable despite even command"
+            "the status is readable on an even command"
         );
         assert_eq!(
             resp.payload(),
@@ -1292,7 +1270,7 @@ mod tests {
 
     #[test]
     fn crc_matches_known_messages() {
-        // Session open/close and the UI hello, straight from the corpus.
+        // The UI hello and the session open and close, as captured.
         for raw in [
             "0000001200000006000000010000000006a1",
             "000000160000000c0000000a0000000400000004a218",
@@ -1302,7 +1280,7 @@ mod tests {
         }
     }
 
-    /// The progress strings encode byte-for-byte to what NSM put on the wire — the
+    /// The progress messages encode to the bytes Nord Sound Manager sent: the
     /// "Deleting..." label from `delete_prog_bank7_loc50` and the 100% bar from the
     /// program read.
     #[test]
@@ -1339,7 +1317,7 @@ mod tests {
         }
     }
 
-    /// A 54-character sample name, straight off the wire.
+    /// A 54-character sample name, as captured.
     #[test]
     fn object_info_reads_a_54_character_name() {
         let info = ProgramInfo::decode(
@@ -1356,16 +1334,14 @@ mod tests {
         assert_eq!(info.name.len(), 54);
     }
 
-    /// A label too long for the one-byte length field is refused, not truncated. The
-    /// failure it prevents is silent: `256 as u8` is 0, so the frame would claim an
-    /// empty string and carry 256 bytes of payload.
+    /// `256 as u8` is 0, so a truncated length would claim an empty string and carry
+    /// 256 bytes of payload.
     #[test]
     fn over_long_labels_are_refused_not_truncated() {
         assert!(super::ui::label(&"x".repeat(super::ui::MAX_LABEL_LEN)).is_ok());
         assert!(super::ui::label(&"x".repeat(super::ui::MAX_LABEL_LEN + 1)).is_err());
     }
 
-    /// Percent clamps rather than erroring — no `u16` can produce a malformed frame.
     #[test]
     fn percent_clamps_to_100() {
         assert_eq!(
@@ -1378,8 +1354,8 @@ mod tests {
         );
     }
 
-    /// Decoding a dependency list from a *request*-decoded message would shift every
-    /// offset by the four-byte status word. That must be an error, not a misparse.
+    /// A message decoded as a request keeps the status word in its payload, which would
+    /// shift every offset by four bytes.
     #[test]
     fn dependencies_require_a_response() {
         let raw = hex(
@@ -1389,8 +1365,8 @@ mod tests {
         assert!(Dependency::decode_all(&Message::decode_response(&raw).unwrap()).is_ok());
     }
 
-    /// Decode the dependency list a real duplicate read back: a piano and a sample,
-    /// each with the content id that also appears in the file header.
+    /// The dependency list read back after a captured duplicate: a piano and a sample,
+    /// each with the content id that also appears in its file header.
     #[test]
     fn decodes_real_dependencies() {
         let resp = Message::decode_response(&hex(
@@ -1410,13 +1386,13 @@ mod tests {
         assert_eq!(deps[1].name, "africa_split");
         assert_eq!(deps[1].location, None);
 
-        // The piano row reads flag 0 — reported, but its section is not routed.
+        // The piano row reads flag 0: reported, but its section is not routed.
         assert!(!deps[0].is_required());
         assert!(deps[1].is_required());
     }
 
-    /// A live flag addressing nothing — routed section, nothing assigned — is the one
-    /// row shape [`Dependency::is_required`] must reject that liveness alone accepts.
+    /// A live flag addressing nothing (a routed section with nothing assigned) passes a
+    /// flag check but is not required.
     #[test]
     fn a_live_row_addressing_nothing_is_not_required() {
         let d = Dependency {
@@ -1429,13 +1405,13 @@ mod tests {
         assert!(!d.is_required());
     }
 
-    /// A set list's dependencies are programs: slot-addressed, [`Dependency::id`]
-    /// always `0`, the address in the location words. Confirmed on hardware. A real
-    /// set list read back four such rows, all live. A required-filter keyed on id
-    /// alone classifies every one as "routed but nothing assigned".
+    /// A set list's dependencies are programs: slot-addressed, with [`Dependency::id`]
+    /// always `0` and the address in the location words. Confirmed on hardware. A real
+    /// set list read back four such rows, all live. A filter on `id` alone would treat
+    /// each as routed with nothing assigned.
     ///
-    /// The frame is constructed to the confirmed shape — echoed bank/slot, count,
-    /// then four 29-byte id-0 rows (empty name) with locations — not a byte capture.
+    /// The frame is built to the confirmed shape, not captured: echoed bank and slot,
+    /// count, then four 29-byte rows with id 0, an empty name, and a location.
     #[test]
     fn set_list_dependencies_are_required_by_location_not_id() {
         let mut args = Vec::new();
@@ -1446,8 +1422,8 @@ mod tests {
         }
         // Slots A–D held panel 1:7, 1:3, 1:39, 1:41.
         for slot in [6u32, 2, 38, 40] {
-            args.push(1); // flag: the slot is live
-                          // missing, class (program), id, name_len, has_location, bank, slot.
+            // flag (live), reserved, class (program), id, name_len, has_location, bank, slot.
+            args.push(1);
             for w in [0u32, 4, 0, 0, 1, 0, slot] {
                 args.extend_from_slice(&w.to_be_bytes());
             }
@@ -1468,8 +1444,8 @@ mod tests {
         }
     }
 
-    /// Every count, length and record in a partition table is the device's word, and a
-    /// reply that outruns its own payload must name how far past the end it reached.
+    /// Every count, length, and record in a partition table comes from the device, and a
+    /// reply that overruns its payload must report how far past the end it reached.
     #[test]
     fn a_partition_table_overrunning_its_payload_is_truncated() {
         let record = [length_prefixed(3, b"abc"), vec![0; PARTITION_FIELDS]].concat();
@@ -1506,8 +1482,8 @@ mod tests {
         );
     }
 
-    /// The bank table is what bounds every walk, so a short one must fail rather than
-    /// report fewer banks than the device has.
+    /// The bank table bounds every walk, so a short one must fail instead of reporting
+    /// fewer banks than the device has.
     #[test]
     fn a_bank_table_overrunning_its_payload_is_truncated() {
         let echo = 4u32.to_be_bytes();
@@ -1547,13 +1523,13 @@ mod tests {
         );
     }
 
-    /// A dependency list decides what a bundle walk collects, so a row that does not fit
-    /// its payload must be an error rather than a shorter list.
+    /// A dependency list decides what a bundle walk collects, so a row that overruns its
+    /// payload must fail instead of shortening the list.
     #[test]
     fn a_dependency_list_overrunning_its_payload_is_truncated() {
         // Echoed bank and slot, then the row count.
         let header = |count: u32| [0u32.to_be_bytes(), 0u32.to_be_bytes(), count.to_be_bytes()];
-        // flag, reserved, class, id, name_len, has_location, bank, slot — no padding.
+        // flag, reserved, class, id, name_len, has_location, bank, slot, with no padding.
         let row = |name_len: u32| {
             let mut row = vec![1u8];
             for word in [0u32, 4, 0, name_len, 0, 0, 0] {
@@ -1598,8 +1574,8 @@ mod tests {
         );
     }
 
-    /// Object info is read before every transfer, so a reply that does not reach its own
-    /// name must fail rather than decode a shorter one.
+    /// Object info is read before every transfer, so a reply that stops short of its
+    /// name must fail instead of decoding a shorter one.
     #[test]
     fn object_info_shorter_than_its_fields_is_truncated() {
         assert!(

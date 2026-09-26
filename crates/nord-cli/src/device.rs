@@ -1,11 +1,11 @@
 //! The operations that talk to an attached instrument.
 //!
-//! Each one is parameterised by object class: the same code drives a program and a set
+//! Each one is parameterized by object class: the same code drives a program and a set
 //! list, differing only in the class the session opened.
 //!
 //! Read-only queries (`status`, `get`, `info`, `deps`) and the non-destructive `select`
-//! need no confirmation; the mutating actions (`put`, `move`, `delete`, `rename`,
-//! `duplicate`) each describe what they will touch and then refuse to proceed without
+//! need no confirmation. The mutating actions (`put`, `move`, `delete`, `rename`,
+//! `duplicate`) each describe what they will change, then refuse to proceed without
 //! `--yes`.
 
 use std::io::Write;
@@ -25,8 +25,8 @@ use crate::ui::Ui;
 pub enum Source {
     /// A real instrument over USB.
     Usb,
-    /// A recorded exchange. Lets the whole path be demonstrated with no hardware —
-    /// and is how this command is exercised under Wine, qemu and in CI.
+    /// A recorded exchange, which runs the whole path with no hardware. This is how the
+    /// command is exercised under Wine, QEMU and CI.
     Replay(PathBuf),
 }
 
@@ -53,9 +53,9 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     // failed connection is an error of its own and never arrives here.
     if report.is_empty() {
         return Err(
-            "every object class refused — the instrument is not in a usable session \
-             state, and a power cycle clears it. `nord device info` shows what is on \
-             the bus."
+            "every object class refused: the instrument is not in a usable session \
+             state, and a power cycle clears it. `nord device info` shows what is \
+             attached."
                 .into(),
         );
     }
@@ -68,10 +68,10 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Report the attached instrument itself: what is on the bus, not what is stored on it.
+/// Report the attached instrument itself, not what it stores.
 ///
-/// Answered entirely from the USB descriptors, so it works before any transaction is
-/// opened and is the right first thing to run when nothing else responds.
+/// This reads only the USB descriptors and endpoint 0, so it opens no transaction and
+/// is the first thing to run when nothing else responds.
 pub fn info(ui: &Ui) -> Result<(), String> {
     let devices = nord_usb::transport::usb::list().map_err(|e| e.to_string())?;
     if devices.is_empty() {
@@ -103,7 +103,7 @@ pub fn info(ui: &Ui) -> Result<(), String> {
             if vendor_iface {
                 "vendor interface present"
             } else {
-                "no vendor interface — this tool cannot drive it"
+                "no vendor interface; this tool cannot drive it"
             }
         ));
 
@@ -190,8 +190,8 @@ fn print_table(ui: &Ui, report: &[Status]) {
         footnotes.push("`nord device geometry` reports its size; the slot classes count bytes");
     }
     if any_dirty {
-        footnotes.push("dirty blocks hold deleted content and are not free yet — a write that");
-        footnotes.push("needs them reclaims exactly the shortfall first");
+        footnotes.push("dirty blocks hold deleted content and are not free yet; a write that");
+        footnotes.push("needs them reclaims only the shortfall first");
     }
     if !footnotes.is_empty() {
         ui.note("");
@@ -223,10 +223,10 @@ fn print_json(ui: &Ui, report: &[Status]) {
     ui.out("]");
 }
 
-/// Turn the device's bare status code into something actionable.
+/// Turn the instrument's bare status code into something actionable.
 ///
-/// Confirmed on hardware. `0x1` from a vacant slot, `0x3` from an address past the
-/// instrument's geometry, `0x4` from a write aimed at an occupied slot.
+/// `0x1` answers a vacant slot, `0x3` an address past the instrument's geometry, and
+/// `0x4` a write aimed at an occupied slot. Confirmed on hardware.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
         nord_usb::Error::DeviceStatus(1) => {
@@ -262,14 +262,14 @@ fn explain_pair(e: nord_usb::Error, from: Location, to: Location) -> String {
 
 /// Turn a refusal from the enumeration walk into something actionable.
 ///
-/// No slot to name here — the failing command is the walk itself.
+/// There is no slot to name: the failing command is the walk itself.
 fn explain_walk(e: nord_usb::Error) -> String {
     match e {
         nord_usb::Error::DeviceStatus(usb_op::ENUMERATION_DISABLED) => {
-            "the instrument refused the enumeration request as malformed (status 0x11) \
-             — it refuses a cursor request without the direction word after any write \
-             since power-up. nord sends the full form, so this should not happen; \
-             per-slot `info` still works in the meantime"
+            "the instrument refused the enumeration request as malformed (status 0x11). \
+             After any write since power-up, it refuses a cursor request without the \
+             direction word; nord sends the full form, so this should not happen. \
+             Per-slot `info` still works"
                 .into()
         }
         other => other.to_string(),
@@ -284,12 +284,11 @@ pub fn set_recording(path: Option<PathBuf>) {
     let _ = RECORDING.set(path);
 }
 
-/// What a transaction needs from the transport it runs on beyond moving frames: the
-/// `--record` bracket, and the product string the acceptance table reads.
+/// What a transaction needs from its transport beyond moving frames: the `--record`
+/// bracket, and the product string the acceptance table reads.
 ///
-/// A [`UsbTransport`] carries both; a replayed exchange records nothing and names no
-/// product. Stating that here is what lets [`send`] — the one path that holds a slot's
-/// only copy — be driven by a script as well as by an instrument.
+/// A [`UsbTransport`] provides both. This trait lets [`send`], the one path that holds a
+/// slot's only copy, be driven by a script as well as by an instrument.
 trait Recorded {
     fn mark_intent(&mut self, intent: &str);
     fn mark_expect(&mut self, e: &nord_usb::Error);
@@ -298,7 +297,7 @@ trait Recorded {
 }
 
 /// A replayed exchange records nothing and names no product: the script is the
-/// recording, and what the instrument would have called itself is not in it.
+/// recording, and it does not include the instrument's product string.
 #[cfg(test)]
 impl Recorded for nord_usb::ReplayTransport {
     fn mark_intent(&mut self, _intent: &str) {}
@@ -332,17 +331,16 @@ impl Recorded for UsbTransport {
     }
 }
 
-/// Run one transaction on the instrument, recording what it was for and — if it failed —
+/// Run one transaction on the instrument, recording what it was for and, if it failed,
 /// what it produced.
 ///
-/// A recording is replayable only if the script says both, and they cannot be
-/// written at the same moment: the intent goes ahead of the frames, the outcome is only
-/// known once they are on disk. A success writes nothing, because a section that says
-/// nothing expects `ok`.
+/// A recording is replayable only if the script says both, and they are written at
+/// different times: the intent before the frames, and the outcome once the frames are
+/// on disk. A success writes no outcome, because a section without one expects `ok`.
 ///
 /// A recording that lost frames is reported once the transaction has closed, so a script
-/// is never silently short. The transaction's own failure outranks it: that is what the
-/// operator asked about.
+/// is never silently short. The transaction's own failure takes precedence, because that
+/// is what the user asked about.
 fn transact<T: Transport + Recorded, R>(
     device: &mut Device<T>,
     intent: impl std::fmt::Display,
@@ -387,7 +385,7 @@ fn declared_banks(
 
 /// One read in its own session: the slot's metadata, then its bytes.
 ///
-/// `body` returns the wire body verbatim; otherwise the bytes are a whole CBIN file.
+/// `body` returns the body as sent over USB; otherwise the bytes are a whole CBIN file.
 fn read_object(
     device: &mut Device<UsbTransport>,
     at: Location,
@@ -417,9 +415,8 @@ fn read_object(
 ///
 /// With `out` set, writes the file; otherwise decodes and prints a summary.
 ///
-/// `body` writes the wire body verbatim instead of wrapping it in a CBIN header, for
-/// classes whose header layout is not yet known and where wrapping would fabricate a
-/// wrong file.
+/// `body` writes the body without a CBIN header, for classes whose header layout is
+/// unknown, where a header would be wrong.
 pub fn get(
     ui: &Ui,
     at: Location,
@@ -427,8 +424,8 @@ pub fn get(
     class: ObjectClass,
     body: bool,
 ) -> Result<(), String> {
-    // Before the transport opens: a piano read is minutes long, and finding out at the
-    // end that there was nowhere to put it is the worst possible time.
+    // Checked before the transport opens: a piano read takes minutes, and failing at the
+    // end would waste them.
     if body && out.is_none() {
         return Err("--body writes a file; give -o a path".into());
     }
@@ -449,7 +446,7 @@ pub fn get(
 
     let entity = nord_format::from_stream(&mut std::io::Cursor::new(&file)).map_err(|e| {
         format!(
-            "{} decoded off the device but did not parse: {e}",
+            "{} was read from the instrument but did not parse: {e}",
             shown(at)
         )
     })?;
@@ -466,19 +463,19 @@ pub fn get(
     Ok(())
 }
 
-/// Read the same slot once per change the operator makes on the panel, filing each
-/// capture under what they say changed. Read-only.
+/// Read the same slot once per change the user makes on the panel, saving each capture
+/// under the user's description of the change. Read-only.
 ///
-/// ⚠️ **The read happens after the answer, not before.** The answer is the operator
-/// saying the instrument is now in the state to capture; reading first would file every
-/// capture under the change that comes next.
+/// ⚠️ The read happens after the answer. The answer means the instrument is now in the
+/// state to capture; reading first would save every capture under the next change's
+/// name.
 ///
-/// A failed read is reported and the sweep continues — one fumbled step should not cost
-/// the session, and nothing already written is at risk.
+/// A failed read is reported and the sweep continues: one bad step should not end the
+/// session, and nothing already written is at risk.
 ///
-/// ⚠️ The prompt sits *between* sessions, never inside one. Ctrl-C there ends the process
-/// outright ([`Ui::ask`]), and an interrupt taken mid-session would leave the instrument
-/// holding its progress label with no way out but a power cycle.
+/// ⚠️ The prompt sits between sessions, never inside one. Ctrl-C there ends the process
+/// at once ([`Ui::ask`]), and an interrupt mid-session would leave the instrument showing
+/// its progress label until a power cycle.
 pub fn sweep(
     ui: &Ui,
     at: Location,
@@ -524,8 +521,8 @@ pub fn sweep(
                 continue;
             }
         };
-        // The extension says what the bytes are: a wrapped file carries the device's own
-        // format tag, a `--body` dump is a fragment and no format at all.
+        // The extension says what the bytes are: a wrapped file takes the instrument's
+        // format tag, and a `--body` dump is a fragment with no format.
         let path = dir.join(match body {
             true => format!("{stem}.bin"),
             false => format!("{stem}.{}", info.format),
@@ -546,11 +543,11 @@ pub fn sweep(
     Ok(())
 }
 
-/// Turn what the operator typed into a filename stem.
+/// Turn what the user typed into a file name stem.
 ///
-/// The answer is prose — `split point C4`, `vol 5 -> 6` — and in the corpus directory it
-/// is the only record of what the bytes mean, so it stays readable: whitespace runs
-/// become one `-`, and only what a path cannot carry is dropped.
+/// The answer is free text, such as `split point C4` or `vol 5 -> 6`, and it is the only
+/// record of what the bytes mean, so it stays readable: each run of whitespace or
+/// path-unsafe characters becomes one `-`, and control characters are dropped.
 fn stem(label: &str) -> Result<String, String> {
     // Defer separators so runs collapse and trailing punctuation disappears.
     let mut owed = false;
@@ -570,7 +567,8 @@ fn stem(label: &str) -> Result<String, String> {
             }
         }
     }
-    // Trim shell-option prefixes and dots that are hidden or invalid across platforms.
+    // Trim leading and trailing dots and dashes, which make hidden files, shell options,
+    // or names invalid on some platforms.
     let out = out.trim_matches(['.', '-']);
     if out.is_empty() {
         return Err(format!("{label:?} leaves nothing usable as a filename"));
@@ -615,11 +613,10 @@ pub enum Admit {
 
 /// Whether the instrument `product` names takes a `tag` file in `class`.
 ///
-/// ⚠️ Only a tag another family carries is evidence that a file is in the wrong place,
-/// so everything short of that — a product string the table does not name, a class it
-/// says nothing about, or no product string at all — warns and lets the write proceed.
-/// Refusing what is merely unmeasured would put this table in the way of the next
-/// measurement.
+/// ⚠️ Only a tag another family carries is evidence that a file is in the wrong place.
+/// Anything less (a product string the table does not name, a class it says nothing
+/// about, or no product string at all) warns and lets the write proceed. Refusing what
+/// is merely unmeasured would block the next measurement.
 pub fn admit(product: Option<&str>, class: ObjectClass, tag: &str) -> Admit {
     let Some(product) = product else {
         return Admit::Warn(format!(
@@ -666,7 +663,7 @@ pub fn put(
     let file = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Fail before touching the device if the file is not what it claims to be.
     nord_usb::envelope::unwrap(&file).map_err(|e| e.to_string())?;
-    // The write carries the slot's name and the file supplies none: the stem is it.
+    // The write carries the slot's name, and the file has none, so the stem supplies it.
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -677,7 +674,7 @@ pub fn put(
                 path.display()
             )
         })?;
-    // The file's own modification time, as NSM sends.
+    // The file's modification time, as Nord Sound Manager sends.
     let stamp = std::fs::metadata(&path)
         .and_then(|m| m.modified())
         .ok()
@@ -703,16 +700,15 @@ pub fn put(
     )
 }
 
-/// Send an already-validated file into a slot, describing the target first. Shared with
-/// `edit`, which arrives with bytes rather than a path.
+/// Send an already validated file into a slot, describing the target first. `edit`
+/// shares this, passing bytes instead of a path.
 ///
-/// ⚠️ **On most classes an occupied destination is replaced, not overwritten.** The
-/// instrument answers status 4 to a write aimed at a slot that already holds something,
-/// so this reads the occupant, deletes it, writes, and puts the occupant back if the
-/// write fails — the slot is genuinely empty in between, and the only copy of its
-/// contents is in this process. The classes that
-/// [overwrite in place](ObjectClass::overwrites_in_place) skip the delete and keep the
-/// same backup-and-restore guard.
+/// ⚠️ On most classes an occupied destination is replaced, not overwritten. The
+/// instrument answers status 4 to a write aimed at an occupied slot, so this reads the
+/// occupant, deletes it, writes, and puts the occupant back if the write fails. The slot
+/// is empty in between, and the only copy of its contents is in this process. The
+/// classes that [overwrite in place](ObjectClass::overwrites_in_place) skip the delete
+/// and keep the same backup-and-restore guard.
 #[allow(clippy::too_many_arguments)]
 pub fn send(
     ui: &Ui,
@@ -740,11 +736,11 @@ pub fn send(
     )
 }
 
-/// [`send`] against an already-open device, spilling a rescue into `spill`.
+/// [`send`] against an already open device, spilling a rescue into `spill_into`.
 ///
-/// The split is what the replay tests drive: every step between the first `INFO` and the
-/// write can fail, and what this does with the occupant it is holding is the difference
-/// between a failed write and a lost slot.
+/// The replay tests drive this: every step between the first `INFO` and the write can
+/// fail, and how this handles the occupant it holds decides whether a failed write loses
+/// the slot.
 #[allow(clippy::too_many_arguments)]
 fn send_with<T: Transport + Recorded>(
     ui: &Ui,
@@ -800,8 +796,8 @@ fn send_with<T: Transport + Recorded>(
                     "the instrument overwrites {} in place, so nothing is deleted.",
                     shown(at)
                 ),
-                // The operator is consenting to the slot being empty for a moment, not
-                // just to a write, so the delete has to be part of the question.
+                // The user consents to the slot being empty for a moment, so the delete
+                // must be part of the question.
                 false => format!(
                     "{} the instrument will not overwrite in place, so {} is deleted first.",
                     ui.danger("note:"),
@@ -816,8 +812,8 @@ fn send_with<T: Transport + Recorded>(
         }
         None => ui.note(format!("{} is empty; writing {what}", shown(at))),
     }
-    // The write carries the slot's name, so say it up front — and say when the device
-    // will drop it, rather than reporting a naming that never happens.
+    // The write carries the slot's name, so say it up front, and say when the
+    // instrument will discard it.
     match name.filter(|n| !n.is_empty()) {
         Some(name) if class.names_its_slots() => {
             ui.note(format!("the slot will be named {name:?}"))
@@ -833,13 +829,12 @@ fn send_with<T: Transport + Recorded>(
         // Confirmed on hardware.
         ui.warn(
             "a settings write reloads the selected program: panel state that has not \
-             been stored is lost, so re-select and re-apply afterwards",
+             been stored is lost, so reselect and reapply afterward",
         );
     }
     // The file names its model in its tag and the instrument names its own in the
-    // product string, so this is the last thing that can be known before the write.
-    // Bytes carrying no tag are nothing the table can be about, and `put` has already
-    // refused those.
+    // product string, so this is the last check before the write. Bytes with no tag
+    // cannot be checked, and `put` has already refused those.
     if let Some(tag) = tag(file) {
         match admit(device.transport().product(), class, &tag) {
             Admit::Takes => {}
@@ -849,8 +844,8 @@ fn send_with<T: Transport + Recorded>(
     }
     ui.confirm(confirmed)?;
 
-    // After consent, not before: for a piano this read is minutes long, and nobody should
-    // sit through it only to be asked whether they meant it.
+    // After consent: for a piano this read takes minutes, and nobody should wait through
+    // it only to be asked whether they meant it.
     let backup = match &existing {
         Some(_) => Some(
             transact(device, format!("{} read {}", noun(class), addr(at)), |d| {
@@ -878,10 +873,10 @@ fn send_with<T: Transport + Recorded>(
             format!("{} delete {}", noun(class), addr(at)),
             |d| nord_usb::block_on(delete_for_replacement(d, class, at)),
         ) {
-            // ⚠️ A status is the instrument declining before the DELETE landed, so the
-            // occupant is still there. Anything else — a close that would not answer, a read
-            // that timed out — can have landed, and this process is then holding the only
-            // copy of what the slot held.
+            // ⚠️ A status means the instrument declined before the DELETE landed, so the
+            // occupant is still there. Any other failure (a close that did not answer, a
+            // read that timed out) may have come after the delete, and this process then
+            // holds the only copy of the slot's contents.
             if let nord_usb::Error::DeviceStatus(_) = e {
                 return Err(format!("deleting {}: {}", shown(at), explain(e, at)));
             }
@@ -902,8 +897,8 @@ fn send_with<T: Transport + Recorded>(
         .unwrap_or_default();
 
     let written = if fail_after_delete() {
-        // The backup is in hand and the write never happens: exactly the state the
-        // restore path exists for, reached without needing a real transport failure.
+        // The backup is in hand and the write never happens: the state the restore path
+        // exists for, reached without a real transport failure.
         Err(nord_usb::Error::Transport(
             "NORD_FAIL_AFTER_DELETE was set, so the write was not attempted".into(),
         ))
@@ -975,8 +970,8 @@ fn send_with<T: Transport + Recorded>(
 }
 
 /// Whether to skip the write and report a failure, so the restore and rescue paths can
-/// be exercised against a real instrument. Test tool: a genuine transport failure at this
-/// exact point is otherwise only reachable by pulling the cable mid-operation.
+/// be exercised against a real instrument. Test tool: otherwise a transport failure at
+/// this point is only reachable by pulling the cable mid-operation.
 ///
 /// ⚠️ It leaves the slot deleted, so point it at a scratch slot with a copy on disk.
 #[cfg(feature = "fault-injection")]
@@ -989,19 +984,19 @@ fn fail_after_delete() -> bool {
     false
 }
 
-/// Last resort: the slot's former contents exist only in this process. Put them next to
-/// the operator rather than exiting with them, and say where they went.
+/// Last resort: the slot's former contents exist only in this process. Save them to disk
+/// before exiting, and say where they went.
 ///
-/// Both paths that can leave a slot without them reach this — a delete that may have
-/// landed before its transaction failed, and a write whose restore failed too — so what
-/// the operator has to do next is worded once.
+/// Both paths that can leave a slot without its contents reach this (a delete that may
+/// have landed before its transaction failed, and a write whose restore also failed), so
+/// the next step is worded once.
 fn spill(ui: &Ui, dir: &Path, at: Location, backup: &[u8], lost: String) -> String {
     let path = dir.join(rescue_name(at, backup));
     match crate::edit::replace_file(&path, backup) {
         Ok(()) => {
             ui.warn(format!("wrote the original to {}", path.display()));
             format!(
-                "{lost}; its former contents were saved to {} — put it back with `nord put`",
+                "{lost}; its former contents were saved to {}; send them back with `put`",
                 path.display(),
             )
         }
@@ -1027,10 +1022,9 @@ async fn delete_for_replacement<T: Transport>(
 
 /// What a failed write left in the slot, for the line that reports it.
 ///
-/// The two write paths fail differently: the delete-first composition leaves the slot
-/// genuinely empty, while a class that overwrites in place leaves whatever the
-/// interrupted write put there. Naming the wrong one tells the operator to take the
-/// wrong next step.
+/// The two write paths fail differently: delete-then-write leaves the slot empty, and an
+/// in-place overwrite leaves whatever the interrupted write put there. Naming the wrong
+/// one sends the user to the wrong next step.
 fn aftermath(class: ObjectClass, at: Location) -> String {
     match class.overwrites_in_place() {
         true => format!("{} may hold a partly written body", shown(at)),
@@ -1038,8 +1032,8 @@ fn aftermath(class: ObjectClass, at: Location) -> String {
     }
 }
 
-/// Read one slot's metadata in a throwaway read-only session — used to show what a
-/// mutation is about to affect before it happens.
+/// Read one slot's metadata in a short read-only session, to show what a mutation will
+/// affect before it happens.
 fn peek_info<T: Transport + Recorded>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -1069,16 +1063,18 @@ enum DestFate {
     Swapped,
 }
 
-/// Describe what currently occupies a *destination* slot, for the pre-flight line.
+/// Describe what occupies a destination slot, for the pre-flight line.
 ///
-/// ⚠️ The two fates need different words, and saying "overwriting" for a swap is worse
-/// than saying nothing: it invites the reader to delete the destination first to protect
-/// it, which destroys the very thing the swap would have preserved.
+/// ⚠️ The two fates need different words. Saying "overwriting" for a swap invites the
+/// reader to delete the destination first to protect it, which destroys what the swap
+/// would have kept.
 ///
-/// Unlike [`peek`] this never fails: `INFO` answers status 1 on an empty destination,
-/// which is the normal case here, and the operation itself is a moment away from
-/// reporting anything worse. ⚠️ Only that status says the slot is empty — a fault
-/// reported as emptiness would have the reader expect a write where a swap is coming.
+/// Unlike [`peek`], this never fails: `INFO` answers status 1 on an empty destination,
+/// which is the normal case here, and the operation itself reports anything worse a
+/// moment later.
+///
+/// ⚠️ Only that status means the slot is empty. Reporting a fault as emptiness would
+/// have the reader expect a write when a swap is coming.
 fn peek_dest<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
@@ -1163,10 +1159,10 @@ fn describe_set_list_rewrites(
 }
 
 /// Move an object from one slot to another. Requires confirmation: it changes both slots,
-/// though an occupied destination is swapped rather than destroyed.
+/// though an occupied destination is swapped, not destroyed.
 ///
-/// For programs the pre-flight also names the set lists the instrument will rewrite —
-/// objects in another class, which the command line never mentions.
+/// For programs, the pre-flight also names the set lists the instrument will rewrite,
+/// which are objects of another class that the command line never mentions.
 pub fn move_object(
     ui: &Ui,
     from: Location,
@@ -1206,7 +1202,7 @@ pub fn move_object(
 }
 
 /// Delete one or more slots. Destructive; requires confirmation. All items run in one
-/// session, exactly as NSM batches a multi-delete.
+/// session, as Nord Sound Manager batches a multi-delete.
 pub fn delete(
     ui: &Ui,
     slots: &[Location],
@@ -1225,7 +1221,7 @@ pub fn delete(
     }
     ui.confirm(confirmed)?;
     let addresses: Vec<String> = slots.iter().map(|&at| addr(at)).collect();
-    // Each delete lands on the instrument as it is sent: a failure part-way leaves the
+    // Each delete lands on the instrument as it is sent: a failure partway leaves the
     // earlier ones gone, and the report has to say which.
     let mut done = 0;
     let outcome = transact(
@@ -1242,14 +1238,14 @@ pub fn delete(
         },
     );
     if let Err(e) = outcome {
-        // The slot the failure was about: the first one not deleted, or — when the
-        // session would not close after the last delete — that last slot.
+        // The slot the failure was about: the first one not deleted, or the last slot
+        // when the session would not close after the last delete.
         let at = slots[done.min(slots.len() - 1)];
         let gone: Vec<String> = slots[..done].iter().map(|&at| shown(at)).collect();
         return Err(match done {
             0 => format!("deleting {}: {}", shown(at), explain(e, at)),
             _ => format!(
-                "deleting {}: {} — {} already deleted ({}); {} left alone",
+                "deleting {}: {}; {} already deleted ({}), {} left alone",
                 shown(at),
                 explain(e, at),
                 done,
@@ -1289,7 +1285,7 @@ pub fn rename(
     Ok(())
 }
 
-/// Duplicate an object into another slot (a device-internal deep copy). Destructive;
+/// Duplicate an object into another slot, copied on the instrument. Destructive;
 /// requires confirmation.
 pub fn duplicate(
     ui: &Ui,
@@ -1322,8 +1318,8 @@ pub fn duplicate(
     Ok(())
 }
 
-/// Load an object live on the instrument (double-click in NSM). Non-destructive, so no
-/// confirmation is needed.
+/// Load an object live on the instrument, as a double-click in Nord Sound Manager does.
+/// It changes nothing stored, so no confirmation is needed.
 pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
     transact(
@@ -1336,7 +1332,7 @@ pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     Ok(())
 }
 
-/// Thousands separators. A nine-digit byte count is otherwise counted by eye.
+/// Adds thousands separators, so a nine-digit byte count is readable at a glance.
 pub(crate) fn grouped(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -1349,7 +1345,8 @@ pub(crate) fn grouped(n: u32) -> String {
     out
 }
 
-/// Rounded binary size, or `None` below a kibibyte where the byte count already reads.
+/// Rounded binary size, or `None` below a kibibyte, where the byte count is already
+/// readable.
 pub(crate) fn human_size(n: u32) -> Option<String> {
     const UNITS: [&str; 3] = ["KiB", "MiB", "GiB"];
     if n < 1024 {
@@ -1364,7 +1361,7 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
     Some(format!("{value:.1} {}", UNITS[unit]))
 }
 
-/// List the piano/sample library objects an entity depends on. Read-only.
+/// List the piano and sample library objects an object depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
     let deps = transact(
@@ -1410,8 +1407,8 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     if !idle.is_empty() {
         ui.note("");
         ui.note(format!(
-            "{} further row(s) reported but not in use — the section is not routed to a \
-             keyboard part, so the instrument names an object this object does not depend on:",
+            "{} more row(s) reported but not in use: the section is not routed to a \
+             keyboard part, so this object does not depend on what they name:",
             idle.len()
         ));
         for d in &idle {
@@ -1487,22 +1484,18 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
     Ok(())
 }
 
-/// Deliberately abandon an open session, wedging the instrument. Test tool.
+/// Abandon an open session, wedging the instrument, so recovery can be tested against a
+/// known wedge. Test tool, behind the `wedge` feature.
 ///
-/// Behind the `wedge` feature: it breaks the attached instrument on purpose.
-///
-/// Reproduces the half-open `HELLO` on purpose: opens a transaction and drops it without
-/// the closing exchanges. The instrument then answers "empty" for every slot in every
-/// class, which survives reopening.
-///
-/// Exists so recovery can be tested against a *known* wedge rather than one arrived at by
-/// accident. Nothing stored is harmed — but until it is cleared, every reading taken from
-/// the instrument is a lie, which is worse than an error.
+/// Opens a transaction and drops it without the closing exchanges, leaving a half-open
+/// `HELLO`. The instrument then answers "empty" for every slot in every class, and
+/// reopening does not clear it. Nothing stored is harmed, but until `nord device
+/// recover` clears it, every read returns a wrong answer with no error.
 #[cfg(feature = "wedge")]
 pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
     if !yes {
         return Err("refusing to wedge the instrument without --yes; \
-             clear it afterwards with `nord device recover`"
+             clear it afterward with `nord device recover`"
             .into());
     }
     let mut device = open_usb()?;
@@ -1513,19 +1506,19 @@ pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    ui.note("session abandoned with no GOODBYE — the instrument is now wedged");
-    ui.note("every slot will read as empty, and read *successfully*, until you run");
+    ui.note("session abandoned with no GOODBYE; the instrument is now wedged");
+    ui.note("every slot will read as empty, with no error, until you run");
     ui.note("`nord device recover`");
     Ok(())
 }
 
-/// Sweep vendor control requests on endpoint 0. Reverse-engineering tool.
+/// Try each vendor control request on endpoint 0. For reverse engineering.
 ///
-/// Read-only, and outside the bulk protocol: no session is opened, so nothing here can
-/// desync or wedge one. A request the device does not implement stalls the endpoint,
-/// which arrives as an error and is reported as a dash rather than as data.
+/// Read-only and outside the bulk protocol: no session is opened, so nothing here can
+/// desynchronize or wedge one. A request the instrument does not implement stalls the
+/// endpoint, which arrives as an error and is shown as a dash.
 ///
-/// `len` is the transfer's `wLength`, which the host controller states in 16 bits.
+/// `len` is the transfer's 16-bit `wLength`.
 pub fn controls(
     ui: &Ui,
     from: u8,
@@ -1594,7 +1587,7 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
     let (at, info) = transact(&mut device, format!("{} focus", noun(class)), |d| {
         nord_usb::block_on(d.read(class, async |s| {
             let at = usb_op::focus(s).await?;
-            // An empty focused slot is possible and is not an error to report as one.
+            // An empty focused slot is possible and is not an error.
             let info = match usb_op::info(s, at).await {
                 Ok(i) => Some(i),
                 Err(nord_usb::Error::DeviceStatus(1)) => None,
@@ -1614,8 +1607,8 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 
 /// List every occupied slot in a class, with each object's name. Read-only.
 ///
-/// One session: the cursor walk and every `info` share it, so a library of a few hundred
-/// items is a few hundred exchanges rather than a few hundred sessions.
+/// The cursor walk and every `info` share one session, so a few hundred items take a few
+/// hundred exchanges, not a few hundred sessions.
 pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
     let banks = declared_banks(&mut device, class)?;
@@ -1658,11 +1651,11 @@ pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
     Ok(())
 }
 
-/// Send a raw command code and print the reply verbatim. Reverse-engineering tool.
+/// Send a raw command code and print the reply as received. For reverse engineering.
 ///
-/// Interprets nothing: an unknown command's status word and payload are the finding, so
-/// both are printed as they arrived. A device that ignores the command is reported as a
-/// timeout rather than hanging the caller.
+/// Nothing is interpreted: for an unknown command, the status word and payload are the
+/// result, so both are printed as they arrived. An instrument that ignores the command
+/// is reported as a timeout.
 #[allow(clippy::too_many_arguments)]
 pub fn probe(
     ui: &Ui,
@@ -1680,8 +1673,8 @@ pub fn probe(
         words.extend_from_slice(&a.to_be_bytes());
     }
 
-    // Known wedges: no reply, and a power cycle to recover. A price, not a
-    // prohibition, so `--yes` proceeds informed.
+    // A known wedge costs a power cycle but no data, so this only warns, and `--yes`
+    // still proceeds.
     if op == nord_usb::wire::cmd::NOTIFY_READ_WEDGE {
         ui.note(format!(
             "{op:#04x} is known to wedge the instrument (no reply, session lost, \
@@ -1689,19 +1682,19 @@ pub fn probe(
         ));
     }
 
-    // The one code that destroys data rather than costing a power cycle. The session's
-    // class is what aims it, so the warning names the target it is currently pointed at.
+    // The one code known to destroy data. The session's class aims it, so the warning
+    // names the class it is aimed at.
     if op == nord_usb::wire::cmd::ERASE_ALL {
         ui.note(format!(
-            "{op:#04x} is reported to erase an ENTIRE PARTITION — as aimed, all of {}. \
-             Unlike the wedges this does not cost a power cycle, it costs the data; \
-             restoring a library means a backup and a long upload",
+            "{op:#04x} is reported to erase an ENTIRE PARTITION: as aimed, all of {}. \
+             Unlike the wedges, this costs the data, not a power cycle; restoring a \
+             library takes a backup and a long upload",
             class.label()
         ));
     }
 
-    // The general form of that warning. A code above the answering range is not a
-    // spare slot: one of them starts erasing and cannot be talked out of it.
+    // The general form of that warning. Codes above the answering range are not
+    // unused: one of them starts erasing and cannot be stopped.
     if op > nord_usb::wire::cmd::HIGHEST_ANSWERING {
         ui.note(format!(
             "{op:#04x} is above {:#04x}, the highest command this instrument has been \
@@ -1735,9 +1728,9 @@ pub fn probe(
             let req = nord_usb::Message::new(svc, subsystem, op, words.clone());
             let t = device.transport();
             let limit = std::time::Duration::from_secs(wait);
-            // ⚠️ `--bare` is the path for an instrument that is already refusing
-            // commands, and a stalled bulk endpoint blocks a plain write forever: the
-            // read timeout below is never reached and the caller hangs with no reason.
+            // ⚠️ `--bare` is for an instrument that already refuses commands, and a
+            // stalled bulk endpoint blocks a plain write forever: the read timeout below
+            // is never reached, and the caller hangs with no explanation.
             if !t.write_timeout(&req.encode(), limit).await? {
                 return Err(nord_usb::Error::Transport(format!(
                     "the device did not accept command {op:#04x} within {wait}s: its bulk \
@@ -1785,12 +1778,12 @@ pub fn probe(
         ui.note("the instrument reported a change during this session");
     }
     if let Some(e) = close_failed {
-        ui.note(format!("the session would not close afterwards: {e}"));
+        ui.note(format!("the session would not close afterward: {e}"));
     }
 
     let Some(reply) = reply else {
         ui.out(format!(
-            "no reply within {wait}s — the device ignored command {op:#04x}"
+            "no reply within {wait}s; the instrument ignored command {op:#04x}"
         ));
         return Ok(());
     };
@@ -1799,14 +1792,14 @@ pub fn probe(
     Ok(())
 }
 
-/// Print a probed reply verbatim: echoed command, status, and a hex/ASCII payload dump.
+/// Print a probed reply as received: echoed command, status, and a hex and ASCII
+/// payload dump.
 ///
-/// Interprets nothing. On an unknown command the status is the finding, and the payload
-/// of a non-zero status is uninitialised device memory rather than data — so it is shown
-/// as bytes and never decoded.
+/// On an unknown command the status is the result, and the payload of a nonzero status
+/// is uninitialized device memory, so it is shown as bytes and never decoded.
 fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
-    // `command` is the device's own echo, not an assumption: an unknown code may not
-    // answer with `op + 1`, and which code it does answer with is part of the finding.
+    // `command` is the instrument's echo: an unknown code may not answer with `op + 1`,
+    // and the code it does answer with is part of the result.
     ui.out(format!(
         "reply command {:#04x}{}",
         reply.command,
@@ -1818,8 +1811,8 @@ fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
     ));
     match reply.status() {
         Some(0) => ui.out("status  0 (ok)".to_string()),
-        Some(code) => ui.out(format!("status  {code} ({code:#x}) — not success")),
-        None => ui.out("status  absent — reply too short to carry one".to_string()),
+        Some(code) => ui.out(format!("status  {code} ({code:#x}), not success")),
+        None => ui.out("status  absent: the reply is too short to carry one".to_string()),
     }
 
     let payload = reply.payload();
@@ -1833,8 +1826,8 @@ fn report_reply(ui: &Ui, reply: &nord_usb::Message, op: u32) {
 /// Bytes as hex pairs, and the same bytes as text with everything unprintable shown
 /// as `.`.
 ///
-/// ⚠️ Both dumps read one run of bytes: a byte shown in one column and not the other
-/// would have the reader lining up different data.
+/// ⚠️ Both columns must show the same bytes, or the reader would line up different
+/// data.
 fn dump(bytes: &[u8]) -> (String, String) {
     let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let text = bytes
@@ -1852,9 +1845,8 @@ fn dump(bytes: &[u8]) -> (String, String) {
 
 /// Report everything the instrument knows about one slot. Read-only.
 ///
-/// This is `0x1e`: body length, format tag, version, name and CRC-32 — every field of the
-/// CBIN header, which is never itself transmitted, plus the name, which no `.ne5p`/`.ne5t`
-/// file stores at all.
+/// This is command `0x1e`: body length, format tag, version and CRC-32, the CBIN header
+/// fields a transfer leaves out, plus the name, which no `.ne5p` or `.ne5t` file stores.
 pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
     let info = transact(
@@ -1906,8 +1898,8 @@ pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
 }
 
 /// The intent line for a write: the file beside the script, the slot, and the two
-/// `BEGIN_WRITE` arguments the file itself does not carry — the name the slot ends up
-/// with, and the timestamp the device stores.
+/// `BEGIN_WRITE` arguments the file does not carry: the name the slot ends up with, and
+/// the timestamp the instrument stores.
 fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u32) -> String {
     let file = Path::new(what)
         .file_name()
@@ -1916,9 +1908,9 @@ fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u
     format!("{} put {file} {} {name:?} {stamp}", noun(class), addr(at))
 }
 
-/// The four-character format tag a body carries, where those bytes are one.
+/// The four-character format tag in a body, if those bytes are one.
 ///
-/// ⚠️ Read off the header rather than parsed: this has to answer for a body whose
+/// ⚠️ Read from the header bytes without parsing: this must work for a body whose
 /// checksum is bad, because that body may be a slot's last remaining copy.
 fn tag(body: &[u8]) -> Option<String> {
     body.get(8..12)
@@ -2013,8 +2005,8 @@ mod tests {
     /// instrument, so it has to be named something a person can act on.
     #[test]
     fn a_rescued_slot_is_named_for_its_location_and_format() {
-        // A minimal CBIN: magic, header type, tag. The checksum is deliberately left
-        // wrong — naming must not depend on the backup being intact.
+        // A minimal CBIN: magic, header type, tag. The checksum is left wrong, because
+        // naming must not depend on the backup being intact.
         let mut file = vec![0u8; 45];
         file[0..4].copy_from_slice(b"CBIN");
         file[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -2114,9 +2106,9 @@ mod tests {
         );
     }
 
-    /// ⚠️ A refusal is a file another family carries the tag of, and nothing else: the
-    /// instrument would take the write and store something it cannot play. Both models
-    /// are named, because which of the two is wrong is the operator's to decide.
+    /// ⚠️ Only a file whose tag belongs to another family is refused: the instrument
+    /// would take the write and store something it cannot play. Both models are named,
+    /// because the user decides which of the two is wrong.
     #[test]
     fn a_write_of_another_familys_file_is_refused_and_names_both() {
         let refused = admit(Some("Nord Electro 5D"), ObjectClass::Program, "ns4p");
@@ -2127,9 +2119,8 @@ mod tests {
         assert!(why.contains("Nord Electro 5D"), "{why}");
     }
 
-    /// ⚠️ Everything short of another family's tag warns and writes. An unmeasured
-    /// combination is not a wrong one, and a table that refused those would stand in
-    /// the way of the measurement.
+    /// ⚠️ Anything short of another family's tag warns and writes. An unmeasured
+    /// combination is not a wrong one, and refusing it would block the measurement.
     #[test]
     fn only_a_measured_write_is_silent_and_the_rest_warns() {
         let warning = |product, class, tag| match admit(product, class, tag) {
@@ -2173,12 +2164,12 @@ mod tests {
         assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
     }
 
-    /// The write path driven by the recorded `nord program put`, with one step of it
-    /// made to fail.
+    /// The write path driven by the recorded `nord program put`, with one step made to
+    /// fail.
     ///
-    /// Between the backup read and the write the slot is genuinely empty and this
-    /// process holds the only copy of what was in it, so what `send` does with that copy
-    /// is the whole difference between a failed write and a lost program.
+    /// Between the backup read and the write, the slot is empty and this process holds
+    /// the only copy of its contents, so what `send` does with that copy decides whether
+    /// a failed write loses the program.
     mod losing_the_occupant {
         use super::*;
         use nord_usb::transport::{Direction, ReplayTransport, Script, Step};
@@ -2251,8 +2242,8 @@ mod tests {
                 .collect()
         }
 
-        /// A refused write puts the occupant back, and the refusal reaches the operator
-        /// as what the status means rather than as its number.
+        /// A refused write puts the occupant back, and the refusal reaches the user as
+        /// what the status means, not as its number.
         #[test]
         fn a_refused_write_restores_the_occupant() {
             let dir = crate::edit::tests::scratch("send-restored");
@@ -2282,15 +2273,15 @@ mod tests {
             assert!(err.contains("restoring failed as well"), "{err}");
             assert!(err.contains("were saved to"), "{err}");
             assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
-            // The error tells the operator to hand it back to `nord put`, which reads it
-            // exactly this way before touching the instrument.
+            // The error says to send it back with `put`, which reads it this way before
+            // touching the instrument.
             let saved = std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap();
             assert!(nord_usb::envelope::unwrap(&saved).is_ok());
         }
 
-        /// ⚠️ A delete step that fails after the `DELETE` landed leaves the slot empty
-        /// just as surely as a failed write does, so the backup has to be spilled there
-        /// too — the restore path is never reached, because no write was attempted.
+        /// ⚠️ A delete step that fails after the `DELETE` landed leaves the slot empty,
+        /// just as a failed write does, so the backup must be spilled here too. The
+        /// restore path is never reached, because no write was attempted.
         #[test]
         fn a_delete_that_fails_after_it_landed_spills_the_occupant() {
             let dir = crate::edit::tests::scratch("send-delete-fails");
@@ -2306,8 +2297,8 @@ mod tests {
         }
 
         /// A status from the delete step is the instrument declining before the `DELETE`
-        /// landed: the occupant is still in the slot, and spilling a copy beside the
-        /// operator would invite them to put back what never left.
+        /// landed: the occupant is still in the slot, and spilling a copy to disk would
+        /// invite the user to put back what never left.
         #[test]
         fn a_refused_delete_leaves_the_occupant_where_it_is() {
             let dir = crate::edit::tests::scratch("send-delete-refused");
@@ -2327,8 +2318,8 @@ mod tests {
         }
     }
 
-    /// The answer is the only description the corpus will ever have of these bytes, so it
-    /// survives into the filename rather than being reduced to something opaque.
+    /// The answer is the only description these bytes will have, so it survives into
+    /// the file name.
     #[test]
     fn a_swept_capture_keeps_the_words_it_was_described_with() {
         assert_eq!(stem("split point C4").unwrap(), "split-point-C4");
@@ -2344,8 +2335,8 @@ mod tests {
         assert_eq!(stem(".hidden").unwrap(), "hidden");
     }
 
-    /// Rejected, not silently turned into some default — an unnamed capture in a sweep is
-    /// indistinguishable from the ones around it.
+    /// Refused instead of replaced by a default, because an unnamed capture cannot be
+    /// told apart from the ones around it.
     #[test]
     fn an_answer_with_no_filename_in_it_is_refused() {
         for bad in ["...", "/", "  ", "?*", "-", "CON", "lpt1.txt"] {

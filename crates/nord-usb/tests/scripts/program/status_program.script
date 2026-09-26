@@ -1,8 +1,8 @@
 # source: nsm
 # device: Nord Electro 5, firmware v2.04
 # trimmed: ui-refresh
-# note: the program-class STATUS transaction NSM performs; the counters are a real
-#   instrument's - 375 programs, 3525 free and 52875 used blocks.
+# note: the program-class STATUS transaction Nord Sound Manager performs. The
+#   counters are a real instrument's: 375 programs, 3525 bytes free, 52875 used.
 # intent: program status
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

@@ -11,16 +11,16 @@ activity log tells you if one does not. A file drawbar cannot read still gets a
 row, so you can see what went wrong.
 
 **New** makes a fresh program, live slot, set list, settings file or preset for
-each supported instrument, a sample instrument or piano library from WAVs, a
-text note, a Sample Editor project, or a folder. The rule across the menu parts
-what an instrument holds from what only this computer keeps. A fresh Stage file
-has every control at zero. It is not a factory program.
+the instruments drawbar supports, a sample instrument or piano library from WAVs,
+a text note, a Sample Editor project, or a folder. A line across the menu
+separates what an instrument can hold from what only this computer keeps. A fresh
+Stage file has every control at zero. It is not a factory program.
 
 ## Views
 
 Opening a slot on the instrument shows a **view**: the instrument's own copy, in
-place. It is not on this computer until you click **Keep on this computer**. If
-you edit a view, it is kept when its tab closes, so the edits are not lost.
+place. It is not on this computer until you click **Keep on this computer**. An
+edited view is kept when its tab closes, so the edits are not lost.
 
 ## Saving and reverting
 

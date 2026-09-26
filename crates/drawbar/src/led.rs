@@ -1,20 +1,20 @@
-//! A lamp with a switch under it: what the panel puts a yes/no on.
+//! A lamp with a switch under it, for an on/off value as on the panel.
 //!
-//! The instrument has no tick boxes. It has buttons that light, so this is a button that
-//! lights — lit is on, dark is off, and the two are told apart by brightness rather than
-//! by a glyph, which is how the panel is read from a stage away.
+//! The instrument has no checkboxes, only buttons that light, so this is a button that
+//! lights: lit is on and dark is off. The two differ in brightness, not by a glyph, which
+//! is how the panel is read from across a stage.
 
 use eframe::egui;
 
 const LENS: f32 = 9.0;
 const PAD: egui::Vec2 = egui::vec2(8.0, 5.0);
-/// Between the lens and the word it lights.
+/// The gap between the lens and its label.
 const GAP: f32 = 5.0;
 
-/// A lit button carrying `word`. Returns the state it was switched to.
+/// A lit button labeled `word`. Returns the state it was switched to.
 ///
-/// Focusable and switched by Space or Enter as well as by a click, because a panel
-/// control that only answers the mouse is a control half the operators cannot reach.
+/// Focusable, and switched by Space or Enter as well as by a click, so it can be used
+/// without a mouse.
 pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
     let text = egui::WidgetText::from(egui::RichText::new(word).small());
     let galley = text.into_galley(
@@ -53,14 +53,14 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
         let lens = egui::pos2(rect.left() + PAD.x + LENS / 2.0, rect.center().y);
         let lit = crate::app::accent(visuals);
         match showing {
-            // The glow is what carries "on" at a glance; the lens alone is a dot.
+            // The glow shows "on" at a glance; the lens alone is just a dot.
             true => {
                 painter.circle_filled(lens, LENS / 2.0 + 2.0, lit.gamma_multiply(0.30));
                 painter.circle_filled(lens, LENS / 2.0, lit);
             }
             false => {
-                // A dark lens on a dark panel is the panel's own colour; on a light one
-                // it has to be a grey, or an unlit lamp is invisible against the button.
+                // On a dark panel an unlit lens takes the panel's color; on a light one
+                // it must be gray, or it disappears against the button.
                 let dark_lens = match visuals.dark_mode {
                     true => visuals.extreme_bg_color,
                     false => egui::Color32::from_gray(0x88),
@@ -90,8 +90,7 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
 mod tests {
     use super::*;
 
-    /// Driving one lamp through a click and through the keyboard, the way both an
-    /// operator and a screen reader reach it.
+    /// Drive one lamp by pointer or keyboard.
     fn press(events: Vec<egui::Event>, focus: bool) -> Option<bool> {
         let ctx = egui::Context::default();
         let mut answer = None;
@@ -144,8 +143,6 @@ mod tests {
         assert_eq!(switched, Some(true), "a click lights a dark lamp");
     }
 
-    /// A panel control that only answers the mouse is one half the operators cannot
-    /// reach, so the focused lamp switches on Space.
     #[test]
     fn space_switches_the_focused_lamp() {
         let switched = press(

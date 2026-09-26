@@ -1,15 +1,16 @@
 //! The specimen sweep: one test per file, built at runtime with `libtest-mimic`.
 //!
-//! Two trees feed it. `tests/fixtures/` — files this crate's own writers
-//! produced, committed so the sweep has something to read in any checkout —
-//! always; the private corpus under `NORD_CORPUS_ROOT` with `--features corpus`.
-//! Every file the reader recognizes, wherever it sits, is a specimen: it passes
-//! its container checksum, parses, re-encodes byte-exactly, decodes no value its
-//! components cannot name, and its `<file>.oracle.json` sidecar holds where
-//! there is one. On a sample of them — every fixture, every specimen with a
-//! sidecar, and one of each container shape among the rest — every registry
-//! field also takes a new value without moving another. Nothing here names a
-//! model or a directory.
+//! Two trees feed it. `tests/fixtures/` holds files written by this crate's own
+//! writers, committed so the sweep has files to read in any checkout. With
+//! `--features corpus`, the private corpus under `NORD_CORPUS_ROOT` joins it.
+//!
+//! Every file the reader recognizes, wherever it sits, is a specimen. Each one
+//! must pass its container checksum, parse, re-encode to the same bytes, decode
+//! no value its components cannot name, and match its `<file>.oracle.json`
+//! sidecar if it has one. On a sample (every fixture, every specimen with a
+//! sidecar, and one of each container shape among the rest), every registry
+//! field must also take a new value without changing another. Nothing here names
+//! a model or a directory.
 //!
 //! ```sh
 //! cargo test -p nord-format --test corpus                        # the fixtures
@@ -38,8 +39,8 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-/// The path under its root, `/`-joined on every platform so the documented
-/// filters and the trial kinds read the same everywhere.
+/// The path under its root, joined with `/` on every platform so filters and trial
+/// kinds are the same everywhere.
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -49,8 +50,8 @@ fn rel(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// The body span of a CBIN file, from its generation: a type-1 body runs to end
-/// of file, a type-0 body stops short of the trailing crc16.
+/// The body span of a CBIN file, which depends on its generation: a V1 body runs
+/// to the end of the file, and a V0 body stops before the trailing CRC-16.
 fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
     let len = info.body_len as usize;
     match info.header.generation {
@@ -59,9 +60,9 @@ fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
     }
 }
 
-/// One specimen: checksum, parse, byte-exact round trip, no unnameable decoded
-/// values, the oracle sidecar if there is one, and — where `mutate` — every
-/// field moves alone.
+/// One specimen: checksum, parse, byte-exact round trip, no unnamed decoded
+/// values, the oracle sidecar if there is one, and, if `mutate`, the per-field
+/// mutation check.
 fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
@@ -79,8 +80,8 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
         .map_err(|e| Failed::from(format!("parse: {e}")))?;
 
-    // The archive layer does not re-encode, so for a bundle the parse itself —
-    // every member read and container-verified — is the whole check.
+    // The archive layer does not re-encode, so for a bundle the check is the
+    // parse, which reads and verifies every member.
     #[cfg(feature = "bundle")]
     let is_bundle = matches!(entity, Entity::Bundle(_));
     #[cfg(not(feature = "bundle"))]
@@ -118,12 +119,12 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     oracle::check_specimen(path, &bytes, &entity)
 }
 
-/// Out-of-table values the corpus is known to hold, exempted by exact field and
-/// rendering so anything new still fails. Each entry restates a doc on the
-/// component itself — the exemption lives where the value does.
+/// Out-of-table values the corpus is known to hold, exempted by field and
+/// rendering so that any new one still fails. Each entry repeats a fact
+/// documented on its component.
 fn known_unexplained(field: &str, value: &str) -> bool {
-    // Unexplained: Stage 4 factory programs reach a stored 10 in `KbZone4`
-    // fields, which the zone table does not name — see `KbZone4`'s rustdoc.
+    // Unexplained: Stage 4 factory programs store 10 in `KbZone4` fields, which
+    // the zone table does not name. See `KbZone4`.
     field.ends_with(".kb_zones") && value == "unknown (10)"
 }
 
@@ -148,7 +149,7 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
         );
     }
 
-    // A sidecar whose specimen is gone is an error, not a leftover.
+    // A sidecar without its specimen is an error.
     for sidecar in sidecars {
         let name = format!("{label}/{}", rel(root, &sidecar));
         let target = sidecar::specimen_of(&sidecar);
@@ -157,7 +158,7 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
                 Ok(())
             } else {
                 Err(format!(
-                    "sidecar for {}, which is gone",
+                    "sidecar for {}, which does not exist",
                     target.file_name().unwrap().to_string_lossy()
                 )
                 .into())
@@ -166,31 +167,34 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
     }
 }
 
-/// The field-path reader's own contract, as a trial because this target owns its
-/// harness and `#[test]` never runs here.
+/// The field-path reader's contract, as a trial: this target has its own harness,
+/// so `#[test]` does not run here.
 fn lookup_trial(fixtures: &Path) -> Trial {
     let program = fixtures.join("ne5/default.ne5p");
-    Trial::test("lookup: an organ accessor names preset 1 or 2", move || {
-        let bytes =
-            fs::read(&program).map_err(|e| Failed::from(format!("{}: {e}", program.display())))?;
-        let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
-            .map_err(|e| Failed::from(e.to_string()))?;
-        let asked = |preset: &str| format!("organ_panel.b3_perc_on({preset})");
-        for preset in ["1", "2"] {
-            lookup::lookup(&entity, &asked(preset))
-                .map_err(|e| Failed::from(format!("{}: {e}", asked(preset))))?;
-        }
-        for preset in ["", "0", "3", "9", "12", "+1", "one"] {
-            if let Ok(spellings) = lookup::lookup(&entity, &asked(preset)) {
-                return Err(format!(
-                    "{} answered {spellings:?} where the organ has no such preset",
-                    asked(preset)
-                )
-                .into());
+    Trial::test(
+        "lookup: an organ accessor takes preset 1 or 2 only",
+        move || {
+            let bytes = fs::read(&program)
+                .map_err(|e| Failed::from(format!("{}: {e}", program.display())))?;
+            let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
+                .map_err(|e| Failed::from(e.to_string()))?;
+            let asked = |preset: &str| format!("organ_panel.b3_perc_on({preset})");
+            for preset in ["1", "2"] {
+                lookup::lookup(&entity, &asked(preset))
+                    .map_err(|e| Failed::from(format!("{}: {e}", asked(preset))))?;
             }
-        }
-        Ok(())
-    })
+            for preset in ["", "0", "3", "9", "12", "+1", "one"] {
+                if let Ok(spellings) = lookup::lookup(&entity, &asked(preset)) {
+                    return Err(format!(
+                        "{} returned {spellings:?} for a preset the organ does not have",
+                        asked(preset)
+                    )
+                    .into());
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 fn main() {

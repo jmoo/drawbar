@@ -1,6 +1,7 @@
 //! Synthetic replay tests for the set-list scan used before program moves.
-//! Confirmed on hardware. A move rewrites every set list that references the program,
-//! and the scan has been run against the instrument.
+//!
+//! A move rewrites every set list that references the program, and the scan has been
+//! run against the instrument. Confirmed on hardware.
 
 #![cfg(feature = "replay")]
 
@@ -31,8 +32,8 @@ fn info_reply(at: Location, version: u32, name: &str) -> Step {
     response(cmd::INFO, &args)
 }
 
-/// A `0x28` reply for a set list: its four program slots, all live, addressed by
-/// location with a null content id.
+/// A `0x28` reply for a set list: its program slots, all live, addressed by location
+/// with a null content id.
 fn deps_reply(at: Location, programs: &[Location]) -> Step {
     let mut args = slot_args(at);
     args.extend_from_slice(&(programs.len() as u32).to_be_bytes());
@@ -53,8 +54,8 @@ fn deps_reply(at: Location, programs: &[Location]) -> Step {
     response(cmd::DEPENDENCIES, &args)
 }
 
-/// The one bank the scan is bounded by, as the Electro 5's set list partition declares
-/// each of its four: 50 slots.
+/// The single bank the scan is bounded by, with the 50 slots each of the Electro 5's
+/// four set-list banks declares.
 fn banks() -> Vec<Bank> {
     vec![Bank {
         index: 0,
@@ -65,8 +66,8 @@ fn banks() -> Vec<Bank> {
 
 /// The enumeration walk over one bank holding set lists at slots 0, 1 and 2.
 ///
-/// It is the walk `op::occupied_slots` performs: the cursor from the declared bank's
-/// boundary until the device ends the bank.
+/// It is the walk `op::occupied_slots` performs: the cursor from the bank's boundary
+/// until the device ends the bank.
 fn walk_of_three() -> Vec<Step> {
     let mut steps = Vec::new();
 

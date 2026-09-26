@@ -1,11 +1,11 @@
-//! Browser MIDI in: Web MIDI's input ports, each with a handler of its own.
+//! Browser MIDI input: Web MIDI input ports, each with its own handler.
 //!
-//! ⚠️ `requestMIDIAccess()` asks the reader for permission, and a browser only lets the
-//! page ask while a click's user activation is live. The promise is taken in the click
-//! and awaited in a task, as the device chooser is — see [`crate::device::web`].
+//! ⚠️ `requestMIDIAccess()` asks the user for permission, and a browser lets the page ask
+//! only while a click's user activation is live. The promise is created in the click and
+//! awaited in a task, as the device chooser does (see [`crate::device::web`]).
 //!
-//! There is one thread, so a handler does what the desktop's driver thread does: decode,
-//! queue, and ask for a repaint. Nothing here waits for anything.
+//! There is one thread, so a handler does what the desktop driver thread does: decode,
+//! queue, and request a repaint. Nothing here waits.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,10 +19,10 @@ use web_sys::{MidiAccess, MidiInput, MidiMessageEvent};
 
 use super::{Note, Queue, State, Stream};
 
-/// One input port, and the handler the page calls when it sends something.
+/// One input port, and the handler the page calls when it sends a message.
 struct Attached {
-    /// ⚠️ Held so the handler can be taken off the port it was put on. A closure dropped
-    /// while the page still holds it throws the next time the port sends anything.
+    /// ⚠️ Kept so the handler can be removed from its port. A closure dropped while the
+    /// page still holds it throws the next time the port sends anything.
     input: MidiInput,
     handler: Closure<dyn FnMut(MidiMessageEvent)>,
 }
@@ -32,10 +32,10 @@ struct Inner {
     queue: Queue,
     names: Vec<String>,
     attached: Vec<Attached>,
-    /// The permission the reader gave, kept so the ports can be read again when one
-    /// comes or goes.
+    /// The access the user granted, kept so the ports can be listed again when one is
+    /// connected or disconnected.
     access: Option<MidiAccess>,
-    /// ⚠️ Held for as long as the access it was handed to.
+    /// ⚠️ Kept as long as the access that holds it.
     watch: Option<Closure<dyn FnMut()>>,
     asking: bool,
     failed: Option<String>,
@@ -73,8 +73,8 @@ impl Ports {
         let ctx = ctx.clone();
         spawn_local(async move {
             let answer = JsFuture::from(request).await;
-            // ⚠️ The reader may have turned MIDI off while the browser was asking, and
-            // an answer that lands after that belongs to nothing.
+            // ⚠️ The user may have turned MIDI off while the browser was asking; an
+            // answer that arrives after that is ignored.
             if !held.borrow().asking {
                 return;
             }
@@ -122,16 +122,16 @@ impl Ports {
         }
     }
 
-    /// The browser says when a port comes or goes, so the frame clock goes unused. The
-    /// queue's clock is the page's own, which a message event's time stamp is read on.
+    /// The browser reports port changes, so the frame clock is unused. The queue uses the
+    /// page's clock, which message event timestamps are measured on.
     pub fn drain(&mut self, _now: f64) -> Vec<Note> {
         let now = page_time();
         self.inner.borrow_mut().queue.drain(now)
     }
 }
 
-/// Ask for access. Taken synchronously, inside the click: awaiting anything first spends
-/// the user activation the browser requires.
+/// Request access. Called synchronously inside the click: awaiting anything first would
+/// use up the user activation the browser requires.
 fn request() -> Result<Promise, JsValue> {
     if !Ports::supported() {
         return Err(JsValue::from_str(super::UNSUPPORTED));
@@ -142,10 +142,10 @@ fn request() -> Result<Promise, JsValue> {
         .request_midi_access()
 }
 
-/// Put a handler on every input port, taking off the ones already placed.
+/// Attach a handler to every input port, removing any already attached.
 ///
-/// Called again whenever a port comes or goes, so it must be the whole truth rather than
-/// a difference: a port that has gone is one the page may not touch again.
+/// Called again whenever a port is connected or disconnected, so it rebuilds the whole
+/// set: the page may not touch a port that has gone.
 fn attach(inner: &Rc<RefCell<Inner>>, access: &MidiAccess, ctx: &egui::Context) {
     detach(&mut inner.borrow_mut());
     let inputs = access.inputs();
@@ -155,7 +155,7 @@ fn attach(inner: &Rc<RefCell<Inner>>, access: &MidiAccess, ctx: &egui::Context) 
     let mut attached = Vec::new();
     let mut names = Vec::new();
     for entry in entries.flatten() {
-        // A maplike's iterator yields `[id, port]`, and the port is what is listened to.
+        // A maplike's iterator yields `[id, port]` pairs.
         let Ok(input) = js_sys::Array::from(&entry).get(1).dyn_into::<MidiInput>() else {
             continue;
         };
@@ -187,7 +187,7 @@ fn attach(inner: &Rc<RefCell<Inner>>, access: &MidiAccess, ctx: &egui::Context) 
     inner.names = names;
 }
 
-/// Take every handler off the port it was put on, before the closure behind it goes.
+/// Remove every handler from its port before its closure is dropped.
 fn detach(inner: &mut Inner) {
     for held in inner.attached.drain(..) {
         held.input.set_onmidimessage(None);
@@ -196,8 +196,8 @@ fn detach(inner: &mut Inner) {
     inner.names.clear();
 }
 
-/// Follow the ports the machine has: a controller plugged in after access was given is
-/// one the reader expects to be able to play.
+/// Track the system's ports: the user expects a controller connected after access was
+/// granted to play.
 fn watch(inner: &Rc<RefCell<Inner>>, access: &MidiAccess, ctx: &egui::Context) {
     let held = inner.clone();
     let following = access.clone();
@@ -210,16 +210,16 @@ fn watch(inner: &Rc<RefCell<Inner>>, access: &MidiAccess, ctx: &egui::Context) {
     inner.borrow_mut().watch = Some(watch);
 }
 
-/// Seconds since the page's time origin, which is the clock an event's `timeStamp` is
-/// read on. A page with no clock to read drains everything as fresh.
+/// Seconds since the page's time origin, the clock an event's `timeStamp` uses. Without
+/// a clock, everything drains as fresh.
 fn page_time() -> f64 {
     web_sys::window()
         .and_then(|window| window.performance())
         .map_or(0.0, |performance| performance.now() / 1000.0)
 }
 
-/// A rejected promise carries a `DOMException`, whose text is on the object rather than
-/// reachable by downcasting to `Error`.
+/// A rejected promise carries a `DOMException`, whose text must be read from its fields;
+/// it does not downcast to `Error`.
 fn describe(err: &JsValue) -> String {
     let field = |k: &str| {
         js_sys::Reflect::get(err, &JsValue::from_str(k))

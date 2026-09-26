@@ -1,12 +1,11 @@
-//! The one strip every document wears.
+//! The header strip at the top of every document.
 //!
-//! What it is, what it is called, where it lives, how big it is, what state it is in,
-//! which face is showing, and the one thing this kind of document is for — in that
-//! order, left to right. A kind with nothing to put in one of those parts leaves the
-//! part out rather than showing an empty one.
+//! Left to right: what the document is, its name, where it lives, how big it is, its
+//! state, which face is showing, and the one action this kind of document is for. A
+//! kind with nothing for one of those parts leaves the part out.
 //!
-//! The strip is full bleed on the window fill with a hairline under it; the body below
-//! it is the only thing given a margin.
+//! The strip runs edge to edge on the window fill with a hairline under it; only the
+//! body below it has a margin.
 
 use eframe::egui;
 use nord_format::accept::Family;
@@ -26,13 +25,13 @@ use crate::strings::{display_name, folder, kind_word, place, shown, tagged};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Origin};
 
-/// The strip's own room: how tall it is at least, what it keeps at each end, and the gap
-/// between two of its parts.
+/// The strip's minimum height, its padding at each end, and the gap between two of its
+/// parts.
 const HEIGHT: f32 = 38.0;
 const PAD: i8 = 12;
 const GAP: f32 = 10.0;
 
-/// Every control on the strip is this tall, and corners are cut to this.
+/// The height of every control on the strip, and its corner radius.
 const CONTROL: f32 = 20.0;
 const RADIUS: f32 = 2.0;
 
@@ -42,26 +41,25 @@ const SMALL: f32 = 11.0;
 const LOUD: f32 = 12.0;
 const TAG: f32 = 10.0;
 
-/// The state dot's box, which holds a 6 px dot — see [`claim`].
+/// The state dot's box, which holds a 6 px dot (see [`claim`]).
 const DOT: f32 = 8.0;
 
-/// The room between a glyph and the word after it.
+/// The space between a glyph and the word after it.
 const INSET: f32 = 5.0;
 
-/// The words a control carries, and the mono the badge, the place and the size are set
-/// in.
+/// The text size of a control's label, and of the mono badge, place, and size.
 const WORD: f32 = 10.5;
 const MONO: f32 = 10.5;
 
-/// A read-only value on the identity row, which stands where a text box would.
+/// The text size of a read-only value on the identity row.
 const READ: f32 = 11.5;
 
-/// The name box, the piano's shorter one, and the variant beside it.
+/// The widths of the name box, the piano's shorter name box, and the variant box.
 const NAME: f32 = 190.0;
 const PIANO_NAME: f32 = 150.0;
 const VARIANT: f32 = 84.0;
 
-/// The name the instrument owns, which is text rather than a box.
+/// The text size of a name the instrument owns, which is drawn as text with no box.
 const FIXED: f32 = 12.5;
 
 /// The identity row's indent, measured from the strip's outer edge, and its own height.
@@ -70,16 +68,15 @@ const CHIP: f32 = 18.0;
 
 /// Which face of a document is showing.
 ///
-/// Two files rather than two modes: Basic is the sound, and Advanced is what the file
-/// says about itself and the engineering under it. Which of them a document has is
-/// [`super::faces`].
+/// Basic is the sound. Advanced is what the file says about itself and the engineering
+/// under it. [`super::faces`] decides which faces a document has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Face {
     /// The panel, in the instrument's own words. Happy-path edits.
     #[default]
     Basic,
     /// What the file says about itself, the whole body as a table, and the record the
-    /// container keeps. Nothing hidden.
+    /// container keeps.
     Advanced,
 }
 
@@ -101,7 +98,7 @@ impl Face {
     fn hint(self) -> &'static str {
         match self {
             Face::Basic => "the fields that change the sound",
-            Face::Advanced => "the record, the offsets, the raw values — engineering",
+            Face::Advanced => "engineering detail: the record, the offsets, the raw values",
         }
     }
 }
@@ -131,15 +128,15 @@ pub fn stage(width: f32) -> Stage {
     }
 }
 
-/// The ink a header phrase or stroke may wear.
+/// The ink a header phrase or stroke may use.
 ///
-/// ⚠️ There is no `bad` here. Red is for the hatches in a key map, and a header that
-/// has already shouted has nothing louder left to say.
+/// ⚠️ There is no `bad` ink. The header never shows red; red is reserved for the
+/// hatches in a key map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ink {
     Good,
     Warn,
-    /// The caption ink: a figure rather than a claim.
+    /// The caption ink, for a figure that makes no claim.
     Quiet,
 }
 
@@ -179,7 +176,7 @@ pub enum Tone {
     Idle,
 }
 
-/// The one loud action a document has, in whichever of its three states it is in.
+/// The one loud action a document has, in one of its three states.
 pub struct Loud {
     pub label: String,
     /// What it is called where there is no room for the whole label.
@@ -187,45 +184,44 @@ pub struct Loud {
     pub glyph: Glyph,
     pub tone: Tone,
     pub hint: String,
-    /// The slot a click would queue a write for. `None` is an action nothing happens on.
+    /// The slot a click would queue a write for. `None` means a click does nothing.
     pub send: Option<(ObjectClass, Location)>,
 }
 
 /// What an editor adds to the header that the asset alone does not say.
 ///
-/// Each field is what the strip shows *instead* of what it works out for itself: the
+/// Each field that is set replaces what the strip would work out for itself: the
 /// piano's `188 of 194 MB`, its `trimmed`, and its refusal to queue a library that does
 /// not fit.
 #[derive(Default)]
 pub struct Extras {
     pub size: Option<SizeLine>,
-    /// The claim an unsaved document makes, where the editor has a better one than
-    /// `edited` — the field document's `N pending`. It stands in its own ink.
+    /// The state an unsaved document shows where the editor has something more specific
+    /// than `edited`, such as the field document's `N pending`. It keeps its own ink.
     pub edited: Option<StateLine>,
-    /// What a saved document claims instead of what the strip works out — a set list
-    /// naming programs the instrument does not have where it says.
+    /// The state a saved document shows in place of the strip's own, such as a set list
+    /// naming programs the instrument does not have where the list says.
     pub state: Option<StateLine>,
     pub loud: Option<Loud>,
 }
 
-/// One cell of the identity row: a MICRO-caps label and what the document wears under
-/// it.
+/// One cell of the identity row: a MICRO-caps label and the value beside it.
 pub struct Cell {
     pub label: &'static str,
     pub body: Body,
-    /// The one note that is shown rather than hovered: a constraint the field enforces.
+    /// A note drawn in the row instead of on hover, for a constraint the field enforces.
     pub note: Option<String>,
     pub hint: &'static str,
 }
 
-/// What a cell wears beside its label.
+/// What a cell shows beside its label.
 ///
-/// There is no third kind yet because no header-level field of any format has a setter:
-/// the sample's category and sub name are stated by the file and read here.
+/// No kind is editable because no header-level field of any format has a setter: the
+/// sample's category and sub name are stated by the file and only read here.
 pub enum Body {
     /// One chip per label the list puts on this asset.
     Chips(Vec<String>),
-    /// A value the file states and nothing here writes.
+    /// A value the file states, which is read-only here.
     Read(String),
 }
 
@@ -236,18 +232,17 @@ pub(super) struct Facts<'a> {
     pub device: &'a DeviceState,
     pub queue: &'a Queue,
     pub tags: &'a Tags,
-    /// Whether this is a view of the instrument's own copy rather than an asset held
-    /// here.
+    /// Whether this is a view of the instrument's own copy, not an asset held here.
     pub view: bool,
-    /// What a piano library's plan will save its name and its variant as, from
-    /// [`piano::State::renaming`]: the box holds what a save writes.
+    /// The name and variant a piano library's plan will save, from
+    /// [`piano::State::renaming`], so the boxes hold what a save writes.
     pub renaming: (Option<String>, Option<String>),
-    /// What the document is, which is what decides where its name is kept.
+    /// What the document is, which decides where its name is kept.
     pub shape: Shape,
     pub extras: Extras,
 }
 
-/// What the header was asked for this frame.
+/// What the header's controls asked for this frame.
 #[derive(Default)]
 pub(super) struct Clicked {
     pub revert: bool,
@@ -255,8 +250,8 @@ pub(super) struct Clicked {
     pub send: Option<SendBack>,
     /// The face picked, where one was.
     pub face: Option<Face>,
-    /// The name the asset is to be called, where a rename settled. Applied once nothing
-    /// is borrowing the asset.
+    /// The asset's new name, where a rename settled. Applied once nothing is borrowing
+    /// the asset.
     pub rename: Option<String>,
 }
 
@@ -305,12 +300,11 @@ pub(super) fn ui(
     act
 }
 
-/// One row of the strip: the right-hand group takes the width it needs at the right
-/// edge, and the left-hand group has the rest, wrapping onto a second line when the
-/// words run out of room rather than running under the controls.
+/// One row of the strip. The right-hand group takes the width it needs at the right
+/// edge. The left-hand group gets the rest and wraps onto a second line when it runs
+/// out of room, so it never runs under the controls.
 ///
-/// The right group is laid out first because its width is what decides the left
-/// group's room.
+/// The right group is laid out first because its width decides the left group's room.
 fn strip<T>(
     ui: &mut egui::Ui,
     state: &mut T,
@@ -402,8 +396,8 @@ fn left(
     }
 }
 
-/// The state as one widget, a dot and its phrase, so a wrapping row moves the two
-/// together rather than leaving the dot on one line and the words on the next.
+/// The state dot and its phrase as one widget, so a wrapping row keeps them on the same
+/// line.
 fn claim(ui: &mut egui::Ui, words: &str, ink: egui::Color32) -> egui::Response {
     let galley =
         ui.painter()
@@ -427,8 +421,8 @@ fn claim(ui: &mut egui::Ui, words: &str, ink: egui::Color32) -> egui::Response {
     response
 }
 
-/// The faces, the quiet actions and the loud one, in that order left to right — which
-/// in a right-to-left layout is this order backwards.
+/// The faces, the quiet actions, and the loud action, left to right. The layout runs
+/// right to left, so they are drawn in reverse.
 fn right(
     ui: &mut egui::Ui,
     entity: &LocalEntity,
@@ -473,7 +467,7 @@ fn right(
         });
     }
 
-    // Right to left: Export is drawn before Revert so the two read the other way round.
+    // Right to left: Export is drawn first so that Revert sits to its left.
     let words = stage == Stage::Full;
     let quiet_pill = |ui: &mut egui::Ui, glyph, label: &str, live| {
         pill(
@@ -525,8 +519,8 @@ fn right(
     act.face = segments(ui, facts, stage);
 }
 
-/// A hover that names the control as well as explaining it, once the stage has taken the
-/// word off its face.
+/// A hover that explains the control, and also names it once the stage has hidden its
+/// label.
 fn hint(label: &str, why: &str, words: bool) -> String {
     match words {
         true => why.to_string(),
@@ -534,8 +528,8 @@ fn hint(label: &str, why: &str, words: bool) -> String {
     }
 }
 
-/// The faces as one control: one stroke round the group, a rule between two of them, and
-/// the showing one filled. Only the faces this document has are in it.
+/// The faces as one control: one stroke around the group, a rule between segments, and
+/// the showing face filled. It holds only the faces this document has.
 fn segments(ui: &mut egui::Ui, facts: &Facts<'_>, stage: Stage) -> Option<Face> {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
@@ -614,8 +608,8 @@ fn segments(ui: &mut egui::Ui, facts: &Facts<'_>, stage: Stage) -> Option<Face> 
     picked
 }
 
-/// The identity row: a MICRO-caps label and what the document wears under it, one cell
-/// after another under the name.
+/// The identity row under the name: one cell after another, each a MICRO-caps label and
+/// its value.
 fn row(ui: &mut egui::Ui, cells: &[Cell], stage: Stage) {
     let indent = INDENT - f32::from(PAD);
     let draw = |ui: &mut egui::Ui| {
@@ -655,7 +649,7 @@ fn row(ui: &mut egui::Ui, cells: &[Cell], stage: Stage) {
     };
 }
 
-/// A value the file states: the eye that says nothing writes it, and the value in mono.
+/// A value the file states: an eye glyph marking it read-only, and the value in mono.
 fn read(ui: &mut egui::Ui, value: &str) {
     ui.spacing_mut().item_spacing.x = INSET;
     icon(ui, Glyph::Eye, SMALL, caption(ui.visuals()));
@@ -666,8 +660,8 @@ fn read(ui: &mut egui::Ui, value: &str) {
     );
 }
 
-/// One tag chip: the accent stroke and ink the inspector's own chips wear, in a box
-/// shorter than the strip's own controls.
+/// One tag chip, in the accent stroke and ink of the inspector's chips, and shorter
+/// than the strip's controls.
 fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let ink = accent(ui.visuals());
     pill(
@@ -690,7 +684,7 @@ fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
 struct Pill<'a> {
     /// The glyph, its box and its ink. The badge carries none.
     glyph: Option<(Glyph, f32, egui::Color32)>,
-    /// The word beside it, or nothing where the stage has taken it.
+    /// The word beside the glyph, or `None` where the stage has hidden it.
     label: Option<&'a str>,
     ink: egui::Color32,
     mono: bool,
@@ -698,7 +692,7 @@ struct Pill<'a> {
     dashed: bool,
     pad: f32,
     height: f32,
-    /// Whether the pointer lifts it and a click of it means anything.
+    /// Whether it highlights on hover and responds to a click.
     live: bool,
 }
 
@@ -756,9 +750,9 @@ fn pill(ui: &mut egui::Ui, held: Pill<'_>) -> egui::Response {
     response
 }
 
-/// A mono readout: the place and the size, which are figures rather than controls.
+/// A mono readout for a figure such as the place or the size.
 fn mono(ui: &mut egui::Ui, text: &str, ink: egui::Color32) -> egui::Response {
-    // Never broken inside: a figure that does not fit moves to the next line whole.
+    // A figure that does not fit moves to the next line whole; it never breaks.
     ui.add(
         egui::Label::new(
             egui::RichText::new(text)
@@ -778,8 +772,8 @@ fn rule(ui: &mut egui::Ui) {
 
 /// Where a document's name is kept, which decides what typing in the box does.
 enum Named {
-    /// The file stores it, under the `name` its editor already spells. `variant` is the
-    /// piano's second half, which is a box of its own.
+    /// The file stores it, and the editor's `name` field sets it. `variant` is the
+    /// piano's second half, which has a box of its own.
     Stored {
         limit: Option<usize>,
         variant: Option<String>,
@@ -787,13 +781,13 @@ enum Named {
     },
     /// The asset's own name on this computer: a rename, not an edit to the file.
     Asset,
-    /// The instrument's own, and there is one of it.
+    /// The instrument's one settings block, which is not renamed.
     Device,
 }
 
-/// The name the file itself stores, where this shape keeps one, and how its box is
-/// dressed. `renaming` is what a piano library's plan will save each half as, where it
-/// renames it.
+/// The name the file itself stores, where this shape keeps one, and how its box is laid
+/// out. `renaming` holds what a piano library's plan will save each half as, where it
+/// renames them.
 fn stored_name(
     entity: &LocalEntity,
     shape: Shape,
@@ -876,8 +870,8 @@ pub(super) fn boxes(
     (stored, variant)
 }
 
-/// The name, as a box where something here can change it and as text where it is the
-/// instrument's. Returns the name the asset is to be called, where a rename settled.
+/// The name: a text box where this app can change it, and plain text where the
+/// instrument owns it. Returns the asset's new name, where a rename settled.
 fn name(
     ui: &mut egui::Ui,
     entity: &LocalEntity,
@@ -926,12 +920,12 @@ fn name(
     }
 }
 
-/// A single-line name box that commits when it is done rather than per keystroke: half a
-/// name is a name the format would take.
+/// A single-line name box that commits when editing finishes, not per keystroke, because
+/// the format would accept a half-typed name.
 ///
-/// ⚠️ Done is this box giving up the focus, which a single-line `TextEdit` does on Enter.
-/// An Enter read from the window would settle every name box on screen, so a value the
-/// format had already refused went back to it on every Enter the operator pressed.
+/// ⚠️ Editing finishes when this box loses focus, which a single-line `TextEdit` does on
+/// Enter. Reading Enter from the window would settle every name box on screen, and send
+/// a value the format had already refused back to it on every Enter the operator pressed.
 fn settled(
     ui: &mut egui::Ui,
     text: &mut String,
@@ -954,8 +948,8 @@ fn settled(
 
 /// The mono badge over a document, and the sentence behind it.
 ///
-/// ⚠️ Exhaustive over [`Kind`], so a kind the browser learns is a badge decided here
-/// rather than a blank one.
+/// ⚠️ Exhaustive over [`Kind`], so a kind the browser learns must get its badge here and
+/// never shows a blank one.
 pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     let tag = entity.tag();
     let kind = Kind::of(entity);
@@ -1015,7 +1009,7 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     }
 }
 
-/// The stream version a piano library states, which is not the container's.
+/// The stream version a piano library states, which is separate from the container's.
 fn stream_version(entity: &LocalEntity) -> Option<u16> {
     match entity.entity.as_ref()? {
         nord_format::Entity::Piano(piano) => piano.stream_version().ok(),
@@ -1032,7 +1026,7 @@ pub(super) fn lives(entity: &LocalEntity) -> String {
     match &entity.origin {
         Origin::File(path) => folder_of(path, home()),
         Origin::Rescued { at } => shown(*at),
-        // ⚠️ Unreachable: a device origin is a slot, and `spot` answered for it.
+        // Unreachable: a device origin is a slot, and `spot` already returned it.
         Origin::Device { class, at } => place(*class, *at),
         Origin::Fresh => "This computer".to_string(),
     }
@@ -1045,8 +1039,8 @@ fn home() -> Option<String> {
 
 /// The folder a path is in, with the home directory written `~`.
 ///
-/// A name with no folder in it — what a drop and the file picker hand over — is on this
-/// computer and nothing more can be said about where.
+/// A bare name with no folder, which is what a drop or the file picker hands over, reads
+/// as `This computer`.
 fn folder_of(path: &str, home: Option<String>) -> String {
     let parent = match path.rsplit_once('/') {
         Some(("", _)) => "/".to_string(),
@@ -1059,8 +1053,8 @@ fn folder_of(path: &str, home: Option<String>) -> String {
     }
 }
 
-/// How big the document is, in whatever it is that a document of this kind has: bytes,
-/// or the entries a set list orders. Settings are one block and there is nothing to say.
+/// How big the document is, in the unit its kind uses: lines for a note, entries for a
+/// set list, and bytes for anything else. Settings are one block and show no size.
 fn sized(entity: &LocalEntity) -> Option<SizeLine> {
     let kind = Kind::of(entity);
     if kind == Kind::Settings {
@@ -1102,11 +1096,11 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
     })
 }
 
-/// The one claim the header makes about this document: what it holds that is not what it
-/// was saved as, or what the attached instrument holds where this document stands.
+/// The one state the header shows for this document: that it has unsaved edits, or how
+/// it compares with what the attached instrument holds in its slot.
 ///
-/// ⚠️ Ordered, unsaved first: a slot that agrees with the *saved* bytes says nothing
-/// about the ones in front of the reader.
+/// ⚠️ Unsaved is checked first: a slot that matches the saved bytes says nothing about
+/// the edited ones in front of the reader.
 fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
@@ -1122,10 +1116,9 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     Some(phrase(mark, waiting))
 }
 
-/// What a mark says in the strip, in the strip's own shorter words — and never in red.
+/// The strip's short phrase for a mark, never in red.
 ///
-/// ⚠️ Exhaustive over [`Mark`], and every arm's ink is an [`Ink`]: there is no spelling
-/// of this that reaches `bad`.
+/// ⚠️ Exhaustive over [`Mark`], and every arm's ink is an [`Ink`], which has no `bad`.
 fn phrase(mark: Mark, waiting: bool) -> StateLine {
     let hint = mark_words(mark).to_string();
     match mark {
@@ -1157,10 +1150,10 @@ fn phrase(mark: Mark, waiting: bool) -> StateLine {
 
 /// The one loud action, and which of its three states it is in.
 ///
-/// ⚠️ Ordered, and the order is what makes the label honest: a project has nothing to
-/// send whatever is attached, nor has a kind no folder holds that stands on no slot, an
-/// unattached instrument cannot be written to whatever the asset is, and a class this
-/// app does not write into is never a question of room.
+/// ⚠️ The checks are ordered so the label gives the right reason. A project has nothing
+/// to send whatever is attached, and neither does a kind with no folder and no slot. An
+/// unattached instrument cannot be written to whatever the asset is. A class this app
+/// does not write into is never a question of room.
 pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let send = |hint: String| Loud {
         label: "Queue send".to_string(),
@@ -1194,14 +1187,14 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
         ));
     }
     if !device.connected() {
-        return idle("no instrument attached — nothing to send to".to_string());
+        return idle("no instrument attached, so there is nothing to send to".to_string());
     }
     let Some((class, at)) = entity.spot() else {
-        return idle("this stands on no slot — there is nothing to replace".to_string());
+        return idle("this is in no slot, so there is nothing to replace".to_string());
     };
     if read_only(class) {
         return idle(format!(
-            "nothing here knows what {} holds, so nothing is written there",
+            "this app does not know what {} holds, so it writes nothing there",
             folder(class)
         ));
     }
@@ -1223,8 +1216,8 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     send(format!("replaces {}", place(class, at)))
 }
 
-/// How much larger the document is than the room left in its folder, and how much that
-/// room is — where the folder counts in bytes and the document is the larger.
+/// How far the document exceeds the free space in its folder, and that free space.
+/// `None` where the folder does not count in bytes or the document fits.
 fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Option<(u64, u64)> {
     let free = room::free_bytes(class, device)?;
     let bytes = entity.bytes.len() as u64;
@@ -1236,8 +1229,8 @@ fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Optio
 
 /// The identity cells this kind has: the header-level fields the strip cannot carry.
 ///
-/// ⚠️ A cell with nothing in it is left out, and a kind with no cell at all has no row —
-/// an indented empty line under the name reads as a field that failed to draw.
+/// ⚠️ An empty cell is left out, and a kind with no cells has no row: an indented empty
+/// line under the name reads as a field that failed to draw.
 fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
     let mut cells = Vec::new();
     if Kind::of(entity) == Kind::Program {
@@ -1285,11 +1278,8 @@ mod tests {
         (workspace, id)
     }
 
-    /// ⚠️ A name box settles on its own Enter. Read from the window, every box on
-    /// screen settled together, so a name the format had refused went back to it — and
-    /// into the log — on every Enter the operator pressed anywhere.
     #[test]
-    fn a_name_box_settles_on_its_own_enter_rather_than_the_windows() {
+    fn a_name_box_settles_only_on_an_enter_it_has_the_focus_for() {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::app::fonts());
         let mut text = "Marimba".to_string();
@@ -1332,12 +1322,10 @@ mod tests {
         let _ = frame(vec![at(egui::pos2(40.0, 20.0))], &mut text);
         assert!(
             frame(vec![key(egui::Key::Enter)], &mut text),
-            "an Enter typed in the box is the box being done with"
+            "an Enter typed in the box settles it"
         );
     }
 
-    /// The collapse order is decided on three widths, and a width exactly on one is
-    /// still the wider stage.
     #[test]
     fn each_breakpoint_belongs_to_the_stage_above_it() {
         assert_eq!(stage(1600.0), Stage::Full);
@@ -1350,7 +1338,7 @@ mod tests {
         assert_eq!(stage(0.0), Stage::Narrow);
     }
 
-    /// A path's folder, with the home directory written the way a person writes it.
+    /// The home directory is written `~`.
     #[test]
     fn a_path_reads_as_the_folder_it_is_in() {
         let home = || Some("/Users/x".to_string());
@@ -1361,15 +1349,13 @@ mod tests {
         assert_eq!(folder_of("/Users/x/a.nsmp", home()), "~");
         assert_eq!(folder_of("/opt/nord/a.nsmp", home()), "/opt/nord");
         assert_eq!(folder_of("/a.nsmp", home()), "/");
-        // Another account's home is not this one's, however it begins.
+        // A folder that only shares the home directory's prefix is not inside it.
         assert_eq!(folder_of("/Users/xavier/a.nsmp", home()), "/Users/xavier");
-        // A drop hands over a bare name, and a name says nothing about a folder.
+        // A drop hands over a bare name, which names no folder.
         assert_eq!(folder_of("a.nsmp", home()), "This computer");
         assert_eq!(folder_of("/opt/a.nsmp", None), "/opt");
     }
 
-    /// A slot beats a path: an asset matched to the instrument is where the instrument
-    /// has it.
     #[test]
     fn the_place_is_the_slot_where_there_is_one() {
         let (mut workspace, mut log) = workspace();
@@ -1389,8 +1375,7 @@ mod tests {
         assert_eq!(lives(workspace.get(copied).unwrap()), "Programs 7:4");
     }
 
-    /// One badge per kind, and the version behind it: the generation or kind in the
-    /// badge, the content or stream version in the hover.
+    /// The badge names the format, and the hover gives the content or stream version.
     #[test]
     fn every_kind_says_what_format_it_is() {
         let (mut workspace, mut log) = workspace();
@@ -1431,7 +1416,7 @@ mod tests {
         assert_eq!(
             badge(held.get(id).unwrap()),
             ("txt".to_string(), "note".to_string()),
-            "a note is the one badge the bytes decide rather than a container"
+            "a note has no container, so its bytes decide its badge"
         );
 
         let (held, id) = opened("Marimba.nsmp", sample_bytes());
@@ -1449,8 +1434,8 @@ mod tests {
         assert_eq!(badge(held.get(id).unwrap()).0, "wav");
     }
 
-    /// A set list is an order, so its size is the count of what it orders; settings are
-    /// one block and say nothing; everything else is its bytes.
+    /// A set list is measured in entries, settings show no size, and anything else is
+    /// measured in bytes.
     #[test]
     fn the_size_is_whatever_this_kind_measures_in() {
         let (mut workspace, mut log) = workspace();
@@ -1468,8 +1453,8 @@ mod tests {
         );
     }
 
-    /// A typed name keeps the tag the stored one carries, because the glyph beside the
-    /// box says what kind of file it is and the box never shows the tag.
+    /// A typed name keeps the stored name's tag, because the box never shows the tag and
+    /// the glyph beside it gives the kind of file.
     #[test]
     fn a_renamed_asset_keeps_the_tag_its_stored_name_carries() {
         assert_eq!(
@@ -1480,8 +1465,7 @@ mod tests {
         assert_eq!(tagged("notes.txt", "list"), "list.txt");
     }
 
-    /// One phrase per mark, the queue's own word where a write is waiting, and never red
-    /// — whatever the mark and whatever the editor calls an edit.
+    /// One phrase per mark, the queue's word where a write is waiting, and never red.
     #[test]
     fn every_mark_has_one_phrase_and_none_of_them_is_red() {
         let marks = [Mark::Unsaved, Mark::Agrees, Mark::Differs, Mark::Unknown];
@@ -1490,7 +1474,7 @@ mod tests {
                 let held = phrase(mark, waiting);
                 assert!(!held.words.is_empty(), "{mark:?} says something");
                 assert_eq!(held.hint, mark_words(mark), "{mark:?} explains itself");
-                // Only `dark_mode` decides an ink, so egui's own two faces answer.
+                // Only `dark_mode` decides an ink, so egui's two defaults cover every case.
                 for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
                     assert_ne!(
                         held.ink.color(&visuals),
@@ -1521,8 +1505,8 @@ mod tests {
         }
     }
 
-    /// An editor's own word for an unsaved document stands in the strip in the editor's
-    /// own ink: a piano library being laid out is unsaved, and says so quietly.
+    /// An editor's own phrase for an unsaved document replaces `edited` and keeps the
+    /// editor's ink.
     #[test]
     fn an_editors_own_state_phrase_stands_in_its_own_ink() {
         let (queue, tags) = (Queue::default(), Tags::default());
@@ -1575,7 +1559,7 @@ mod tests {
         );
         let held = action(workspace.get(id).unwrap(), &unattached.state);
         assert_eq!(held.tone, Tone::Idle, "{}", held.hint);
-        assert_eq!(held.send, None, "a dashed action asks for nothing");
+        assert_eq!(held.send, None, "an idle action queues nothing");
         assert!(
             held.hint.contains("no instrument attached"),
             "{}",
@@ -1591,9 +1575,8 @@ mod tests {
         assert_eq!(held.short, "Send");
         assert_eq!(held.hint, "replaces Set lists 7:4");
 
-        // A piano is sent like anything else that stands on a slot. Nothing has reported
-        // what the Pianos partition has free, and nothing that has not been said is a
-        // reason to refuse.
+        // A piano in a slot is sent like anything else. The Pianos partition has not
+        // reported its free space, and an unknown free space is no reason to refuse.
         let in_pianos = Location { bank: 0, slot: 3 };
         let library = workspace.ingest(
             "Grand.npno".into(),
@@ -1627,14 +1610,14 @@ mod tests {
             held.label,
             format!("Won't fit · {} over", room::measure(bytes.len() as u64))
         );
-        assert_eq!(held.send, None, "a blocked action asks for nothing");
+        assert_eq!(held.send, None, "a blocked action queues nothing");
         assert!(held.hint.contains("free in Pianos"), "{}", held.hint);
     }
 
-    /// A project lives on this computer, so its loud action is a build — and the build
-    /// refuses, because nothing here writes an nsmp from one yet.
+    /// A project lives on this computer, so its loud action is a build. The build is
+    /// blocked because this app cannot yet write an nsmp from a project.
     #[test]
-    fn a_project_offers_a_build_that_refuses_rather_than_a_send() {
+    fn a_project_offers_a_blocked_build_in_place_of_a_send() {
         let device = crate::device::Device::new(egui::Context::default());
         let (held, id) = opened("clarinet.nsmpproj", project_bytes());
         let loud = action(held.get(id).unwrap(), &device.state);

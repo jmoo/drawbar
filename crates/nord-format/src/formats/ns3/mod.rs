@@ -1,28 +1,29 @@
 //! Nord Stage 3 (`.ns3f`, `.ns3l`, `.ns3s`, `.ns3y`, `.ns3t`).
 //!
-//! The program body decodes in full, **both panels**. A program is 22 bytes of
-//! globals then two 263-byte panel blocks of the same layout — Panel A and Panel B,
-//! the instrument's two independent setups, each with its own organ, piano, synth,
-//! extern and effects. They are not copies of each other, `panel_enable` selects
-//! A, B, or both layered, and their fields are reached as `panel_a.*` and
-//! `panel_b.*`. The synth preset (`ns3y`) is Panel A's synth block under its own
-//! tag. The song and settings are stubs. ⚠️ The extension letters are
-//! traps here: `f` is the program, `s` is a *song* (a set list on the Electro 5),
-//! `y` is a synth patch (the *settings* on the Stage 2), and `t` is the settings.
+//! The program body decodes in full, including both panels. A program is 22 bytes of
+//! globals followed by two 263-byte panel blocks with the same layout: Panel A and
+//! Panel B, the instrument's two independent setups, each with its own organ, piano,
+//! synth, extern and effects. `panel_enable` selects A, B, or both layered, and their
+//! fields are reached as `panel_a.*` and `panel_b.*`. The synth preset (`ns3y`) is
+//! Panel A's synth block under its own tag. The song and settings are stubs.
 //!
-//! The community byte maps the placements come from are
+//! ⚠️ The extension letters differ from other models: `f` is the program, `s` is a
+//! song (what the Electro 5 calls a set list), `y` is a synth patch (the settings on
+//! the Stage 2), and `t` is the settings.
+//!
+//! The placements come from the community byte maps in
 //! [Chris55/nord-documentation](https://github.com/Chris55/nord-documentation), the
-//! public documentation this crate's provenance marks name.
+//! public documentation this module's provenance comments refer to.
 //!
 //! Community documentation reports a second checksum at file offset `0x78`
-//! ("covering synth and organ panel data"). The corpus refutes it: the word
-//! there is not any common CRC-32 over any contiguous or field-excised range,
-//! never changes between near-identical program pairs whose bodies differ (the
-//! `0x18` checksum always does), takes clustered values that many unrelated
-//! programs share, and sits beside bytes constant across every specimen — the
-//! signature of bit-packed panel parameters, which is what body offset `0x4c`
-//! holds. Programs re-saved after panel edits keep decoding, so nothing
-//! verifies it; treat the claim as mistaken until a specimen shows otherwise.
+//! ("covering synth and organ panel data"). Specimens contradict it. The word there
+//! is not a common CRC-32 over any contiguous or field-excised range. It does not
+//! change between near-identical program pairs whose bodies differ, while the `0x18`
+//! checksum always does. It takes clustered values that many unrelated programs
+//! share, and it sits beside bytes that are constant across every specimen: the
+//! signature of bit-packed panel parameters, which body offset `0x4c` holds. Programs
+//! re-saved after panel edits still decode, so nothing verifies the word. Treat the
+//! claim as mistaken until a specimen shows otherwise.
 
 use super::raw::raw_format;
 
@@ -35,8 +36,8 @@ pub mod synth;
 pub use synth::SynthPreset;
 
 pub mod live {
-    //! The live buffer (`.ns3l`): the panel as it stands, not a saved program.
-    //! Same body as a program, under its own tag.
+    //! The live buffer (`.ns3l`): the current panel state, as a program body under its
+    //! own tag.
 
     use super::program::{self, Program};
     use crate::cbin::{self, Cbin};
@@ -53,7 +54,7 @@ pub mod live {
 }
 
 raw_format!(
-    /// Songs (`.ns3s`) — the Stage 3's set-list entries.
+    /// Songs (`.ns3s`): the Stage 3's set-list entries.
     song,
     "ns3s",
     45

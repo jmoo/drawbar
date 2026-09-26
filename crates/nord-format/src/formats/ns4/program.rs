@@ -1,7 +1,7 @@
 //! The Stage 4 program body (`.ns4p`, `.ns4l`): 824 bytes, every parameter placed.
 //!
-//! All three sections and the globals that route them. Placements, naming and
-//! provenance are the [module docs](super); values are raw.
+//! All three sections and the globals that route them. The [module docs](super) cover
+//! placements, naming and provenance; values are raw.
 
 use super::fx::FxChain;
 use super::organ_layers::OrganLayer;
@@ -18,10 +18,9 @@ mod panel;
 pub use panel::PANEL;
 
 pub const FORMAT: &str = "ns4p";
-/// Schema versions this build's field offsets have been validated against,
-/// stored ×100. The corpus holds 3.13 throughout; ns4decode reports the same
-/// offsets back to 3.04, changing only how three values are *read*, which this
-/// decode does not do.
+/// Schema versions whose field offsets have been validated, stored ×100. Specimens
+/// hold 3.13; ns4decode reports the same offsets back to 3.04 and changes only how
+/// three values are interpreted, which this decode does not do.
 pub const KNOWN_VERSIONS: &[u32] = &[304, 305, 306, 307, 308, 309, 310, 311, 312, 313];
 pub const BODY_LEN: usize = 824;
 
@@ -29,8 +28,8 @@ pub const BODY_LEN: usize = 824;
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
-/// re-encode verbatim. Placements derived from ns4decode's published tables;
-/// values raw. Inferred from specimens; not confirmed on hardware.
+/// re-encode. Placements are derived from ns4decode's published tables, and values
+/// are raw. Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(824)]
 pub struct Program {
     #[bits(24..=31)]
@@ -117,8 +116,8 @@ pub struct Program {
     pub rotary_speaker_stop_enabled: bool,
     #[bits(515..=515)]
     pub rotary_speaker_slow_fast: RotorSpeed,
-    /// ⚠️ Seven bits and knob-spaced values in the corpus (`0, 21, 42, 59, 75, 89, 91`),
-    /// not a six-way index — what maps them onto the panel's C1–V3 is open.
+    /// ⚠️ Seven bits, holding knob-spaced values in specimens (`0, 21, 42, 59, 75, 89,
+    /// 91`), not a six-way index. How they map onto the panel's C1-V3 is unknown.
     #[bits(522..=528)]
     pub organ_vib_chorus_type: Level,
     #[bits(1481..=1481)]
@@ -227,8 +226,9 @@ pub struct Program {
 }
 
 /// The `(bank, location)` pair from the header, uninterpreted: bank 0..=5 for
-/// the six program banks and location 0..=63 on current exports. Not validated
-/// — see the Stage 3's note on out-of-range locations in old files.
+/// the six program banks and location 0..=63 on current exports. Not validated;
+/// see [`crate::formats::ns3::program::location`] on out-of-range locations in old
+/// files.
 pub fn location(file: &Cbin<Program>) -> (u16, u16) {
     file.header.slot()
 }

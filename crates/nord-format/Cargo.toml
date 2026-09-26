@@ -7,15 +7,14 @@ rust-version.workspace = true
 keywords = ["clavia", "electro", "nord", "parser"]
 license.workspace = true
 repository.workspace = true
-version = "0.6.0"
+version = "0.7.0"
 
 [lib]
 name = "nord_format"
 
 # Features the Nix build must enable when running tests. `bundle` gates the ZIP
 # backup-bundle tests and the corpus sweep's drum-bank walk; without it both
-# compile out and the run passes having read no archive at all. It is what CI
-# tests with too.
+# compile out and the run passes having read no archive at all.
 [package.metadata.nix]
 testFeatures = ["bundle"]
 
@@ -28,15 +27,15 @@ bundle = ["dep:zip"]
 # `bundle`, because the corpus holds ZIP banks and backups.
 corpus = ["bundle"]
 # Test-only: `npno::synthetic`, a piano library laid out from a description, for
-# another crate's tests — nothing public builds one without a template library. This
-# crate's own tests have it whether the feature is on or not.
+# another crate's tests. Nothing public builds one without a template library. This
+# crate's own tests have it whether or not the feature is on.
 synthetic = []
 
 # ⚠️ Pinned `=`: `#[bitbody]`-generated code names nord-format internals, so a
 # registry build must expand exactly the derive version this source was written
 # against. When the derive changes, publish it first, then bump this pin.
 [dependencies]
-nord-bits-derive = { path = "../nord-bits-derive", version = "=0.4.0" }
+nord-bits-derive = { path = "../nord-bits-derive", version = "=0.5.0" }
 crcxx = "0.3.1"
 thiserror = "2"
 zip = { version = "2", optional = true, default-features = false, features = [
@@ -47,7 +46,7 @@ zip = { version = "2", optional = true, default-features = false, features = [
 libtest-mimic = "0.8"
 serde_json = "1"
 
-# The specimen sweep builds its own test list — one trial per file — so it owns
+# The specimen sweep builds its own test list, one trial per file, so it owns
 # its harness. It reads the committed fixtures on every run and the corpus with
 # the feature on.
 [[test]]

@@ -1,14 +1,11 @@
 //! The Electro 5 program format (`.ne5p`).
 //!
-//! Reads top-down: the format's constants, then [`Program`] — the 121 bytes after
-//! the container header — then the read that pairs it with a header. A file is a
-//! `Cbin<Program>`, which derefs to the body. Each panel is a nested `#[bitbody]`
-//! in its own module, placed here by byte range; the registry paths
-//! (`center_panel.transpose`) follow the field names.
+//! A file is a `Cbin<Program>`, which derefs to [`Program`], the 121 bytes after the
+//! container header. Each panel is a nested `#[bitbody]` in its own module, placed here
+//! by byte range. Registry paths such as `center_panel.transpose` follow the field names.
 //!
-//! The live buffer ([`crate::formats::ne5::live`]) is this same body under the tag
-//! `ne5l`, addressed in three slots instead of eight banks of fifty; the two
-//! modules share [`Program`] and differ only in tag and slot space.
+//! The live buffer ([`crate::formats::ne5::live`]) is the same body under the tag
+//! `ne5l`, addressed in three slots instead of eight banks of fifty.
 
 mod center;
 mod effects;
@@ -34,17 +31,17 @@ use crate::types::RangedU16Pair;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ne5p";
-/// Schema versions this build's field offsets have been validated against. Every corpus
-/// program reports 4. See [`crate::error::ParseError::UnsupportedVersion`].
+/// Schema versions whose field offsets have been validated. See
+/// [`crate::error::ParseError::UnsupportedVersion`].
 pub const KNOWN_VERSIONS: &[u32] = &[4];
-/// What a newly authored program or live slot is written as, in the header and in the
-/// body's echo of it; a file read from disk carries whatever version it held.
+/// The version of a newly written program or live slot, in the header and in the body's
+/// echo. A file read from disk keeps the version it held.
 pub const DEFAULT_VERSION: u32 = 4;
 /// The panel body after the container header.
 pub const BODY_LEN: usize = 121;
 /// Type-1 file length: 44-byte CBIN header + the body. A type-0 file is 18 bytes
-/// shorter — 24-byte header, same body, 2-byte trailing checksum. Inferred from
-/// specimens; not confirmed on hardware.
+/// shorter: a 24-byte header, the same body, and a 2-byte trailing checksum. Inferred
+/// from specimens; not confirmed on hardware.
 pub const FILE_LEN: usize = 0x2c + BODY_LEN;
 pub const BANK_COUNT: u16 = 8;
 pub const SLOT_COUNT: u16 = 50;
@@ -53,12 +50,12 @@ pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
 pub type Bank = bank::Bank<Cbin<Program>, Location>;
 
 /// The 121-byte panel body: five panels behind a version echo. The pads between
-/// the panels are unclaimed bits, kept verbatim.
+/// the panels are unclaimed bits, preserved on write.
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`] and the aux word, validates the slot, and range-checks
-/// every field. Placements are pinned by a change-one-knob specimen corpus
-/// written by the instrument; each panel marks its own placements' provenance.
+/// every field. Placements come from instrument-written specimens that each change one
+/// knob; each panel marks its own placements' provenance.
 #[nord_bits_derive::bitbody(121)]
 pub struct Program {
     /// Every specimen echoes the header's schema version.
@@ -97,13 +94,13 @@ impl Default for Program {
 
 pub(crate) use crate::formats::known_version;
 
-/// Gate a read on the `aux` word every slot-addressed specimen holds.
+/// Refuses a header whose `aux` word is not `0xFFFFFFFF`.
 ///
-/// Inferred from specimens; not confirmed on hardware. Every slot-addressed file in
-/// the corpus carries `0xFFFFFFFF` at `0x10`. Another value there means the word
-/// carries something this build does not model, so the file is refused rather than
-/// decoded on the assumption it does not matter. ⚠️ Library formats (`nsmp`) use the
-/// word for real data and must not be gated on it.
+/// Inferred from specimens; not confirmed on hardware. Every slot-addressed specimen
+/// carries `0xFFFFFFFF` at `0x10`. Another value means the word carries something this
+/// build does not model, so the file is refused.
+///
+/// ⚠️ Library formats (`nsmp`) use the word for real data and must not be gated on it.
 pub(crate) fn unset_aux(format: &'static str, header: &Header) -> Result<(), Error> {
     if header.aux != 0xFFFF_FFFF {
         return Err(ParseError::AssertFail(format!(
@@ -126,8 +123,8 @@ pub(crate) fn slot<L: bank::Location>(header: &Header) -> Result<L, Error> {
 /// The program slot the file claims.
 ///
 /// ⚠️ A live slot is the same body under another tag, so this reads a `ne5l` file's
-/// location in the *program* slot space. [`crate::formats::ne5::live::location`] is the
-/// one that answers for a live buffer.
+/// location in the program slot space. Use [`crate::formats::ne5::live::location`] for
+/// a live buffer.
 pub fn location(file: &Cbin<Program>) -> Result<Location, Error> {
     slot(&file.header)
 }
@@ -149,8 +146,8 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error
 }
 
 /// ⚠️ Programs and live slots are one type, so a `ne5l` file placed in a program
-/// [`Bank`] lands wherever its live slot number falls in the program space. The tag
-/// in the header is what tells the two apart.
+/// [`Bank`] lands wherever its live slot number falls in the program space. Only
+/// the header's tag tells the two apart.
 impl bank::Item<Location> for Cbin<Program> {
     fn location(&self) -> Location {
         // Validated at `read_from` and `new`, and only `Header::set_slot` writes it.
@@ -164,12 +161,9 @@ mod tests {
     use crate::cbin::Generation;
     use std::io::Cursor;
 
-    /// An unknown schema version is refused at read, not decoded on a guess.
-    ///
-    /// Field offsets are only validated for the versions in the corpus. A future
-    /// firmware bumping `ne5p` to 5 could move fields; decoding it with version-4
-    /// offsets would yield plausible but wrong values, and writing it back would then
-    /// persist them. Refusing is the only safe default.
+    /// A future firmware could move fields in version 5. Decoding it with version-4
+    /// offsets would yield plausible but wrong values, and writing it back would persist
+    /// them.
     #[test]
     fn an_unknown_schema_version_is_refused() {
         let program = new((0, 0).try_into().unwrap());
@@ -185,7 +179,6 @@ mod tests {
         bytes[0x14..0x18].copy_from_slice(&5u32.to_le_bytes());
 
         let err = read_from(&mut Cursor::new(&mut bytes)).expect_err("version 5 must not decode");
-        // The refusal is a matchable variant carrying the facts, not a string.
         assert!(
             matches!(
                 err,
@@ -199,7 +192,6 @@ mod tests {
         );
     }
 
-    /// A header whose `aux` word is not `0xFFFFFFFF` is refused, not decoded past.
     #[test]
     fn an_unexpected_aux_word_is_refused() {
         let program = new((0, 0).try_into().unwrap());
@@ -215,11 +207,10 @@ mod tests {
         );
     }
 
-    /// Every panel's encode is `From`, not `TryFrom`: no field can overrun its slot.
+    /// Every panel's encode is `From`, so no field can overrun its slot.
     ///
-    /// The other half of that guarantee is not assertable from a test — giving a field a
-    /// type wider than its slot is a const-eval panic out of `Field::FITS`, so retyping
-    /// `PianoPanel::mono` from `bool` to `u8` fails to build rather than failing here.
+    /// A field typed wider than its slot fails the build instead, as a const-eval panic
+    /// from `Field::FITS`.
     #[test]
     fn every_panels_encode_is_total() {
         fn total<P, W>(_: &P)
@@ -243,12 +234,9 @@ mod tests {
         bytes[0x18..0x1c].copy_from_slice(&crc.to_le_bytes());
     }
 
-    /// Validation is part of the read, not a step a caller has to remember.
-    ///
-    /// The fallible decode runs inside `cbin::read`'s body pass, so every path to a
-    /// `Program` body validates. Note there is no way to build the corrupt input through
-    /// the API at all: `lower_part` is an `Instrument`, so a panel in memory *cannot*
-    /// hold the invalid value. It has to be forged in the bytes.
+    /// The fallible decode runs inside `cbin::read`, so every path to a `Program` body
+    /// validates. The corrupt input must be forged in bytes: `lower_part` is an
+    /// `Instrument`, so a panel in memory cannot hold the invalid value.
     #[test]
     fn no_decode_path_can_skip_validation() {
         let program = new((0, 0).try_into().unwrap());
@@ -266,7 +254,7 @@ mod tests {
 
         let front = read_from(&mut Cursor::new(&mut bytes))
             .expect_err("the front door accepted an undecodable panel");
-        // Structural, not textual: the typed refusal must survive the read's wrapping.
+        // The typed refusal must survive the read's error wrapping.
         assert!(
             matches!(
                 front,
@@ -280,7 +268,6 @@ mod tests {
         );
     }
 
-    /// A field set by name lands in the bits that field owns, and in no others.
     #[test]
     fn setting_a_field_by_name_moves_only_that_fields_bytes() {
         let mut program = new((0, 0).try_into().unwrap());
@@ -293,16 +280,16 @@ mod tests {
         let mut after = Vec::new();
         program.write_to(&mut Cursor::new(&mut after)).unwrap();
 
-        // `transpose` is bits 24..=27 of a panel starting at 0x2e, so byte 0x31 — plus
-        // the body CRC at 0x18..0x1c, which every body change moves.
+        // `transpose` is bits 24..=27 of a panel starting at 0x2e, so byte 0x31, plus
+        // the body CRC at 0x18..0x1c.
         let moved: Vec<usize> = (0..before.len())
             .filter(|&i| before[i] != after[i])
             .collect();
         assert_eq!(moved, vec![0x18, 0x19, 0x1a, 0x1b, 0x31], "{moved:x?}");
     }
 
-    /// The library's field names are the CLI's arguments, so a path that does not exist
-    /// has to say which half was wrong.
+    /// The field names are the CLI's arguments, so the error for a missing path names
+    /// the part that was not found.
     #[test]
     fn an_unknown_path_names_what_it_could_not_find() {
         let mut program = new((0, 0).try_into().unwrap());
@@ -316,7 +303,6 @@ mod tests {
         }
     }
 
-    /// Every field the panels declare is listed, and each lists a way to spell itself.
     #[test]
     fn every_declared_field_is_settable_by_its_listed_name() {
         let mut program = new((0, 0).try_into().unwrap());
@@ -336,8 +322,8 @@ mod tests {
         }
     }
 
-    /// A nine-nibble drawbar block has no named values, so it is spelled by its bits —
-    /// which for this field is also how a reader wants to see it.
+    /// A nine-nibble drawbar block has no named values, so its settable value is its
+    /// stored bits.
     #[test]
     fn a_wide_field_is_spelled_by_its_stored_bits() {
         let mut program = new((0, 0).try_into().unwrap());
@@ -358,7 +344,6 @@ mod tests {
         assert_eq!(listed.display, "[0, 8, 7, 6, 5, 4, 3, 2, 1]");
     }
 
-    /// Decode and encode are inverses on any bytes the decoder accepts.
     #[test]
     fn decode_and_encode_are_inverse() {
         for pattern in [0u64, u64::MAX, 0xa5a5_a5a5_a5a5_a5a5, 0x5a5a_5a5a_5a5a_5a5a] {
@@ -376,9 +361,8 @@ mod tests {
         }
     }
 
-    /// The layout the macro publishes is the layout the codec uses: the panels
-    /// sit where the declaration says, and a nested entry chains into the
-    /// panel's own field placements.
+    /// The published layout places each panel where the declaration does, and a nested
+    /// entry chains to the panel's own field placements.
     #[test]
     fn the_program_body_layout_is_published_as_data() {
         use crate::layout::BodyLayout;
@@ -403,8 +387,7 @@ mod tests {
         assert!(paths.contains(&"sample_panel.id".to_string()));
     }
 
-    /// A program re-tagged type 0 is the same 121-byte body behind the shorter
-    /// header, 18 bytes shorter in total, and it round-trips as itself.
+    /// A type-0 program round-trips as type 0.
     #[test]
     fn a_type_0_program_is_the_same_body_18_bytes_earlier() {
         let mut program = new((3, 7).try_into().unwrap());

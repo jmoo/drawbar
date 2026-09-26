@@ -1,9 +1,9 @@
-//! Hearing a zone: decoded strokes out of the speakers, and nothing else.
+//! Playback of decoded zones through the speakers.
 //!
-//! Each finger on the keys sounds a voice of its own, mixed with the others: the pointer
-//! holds one, and each controller key holds one until it is let go. The backend is the
-//! only part that differs between targets: a `rodio` mixer on the desktop and Web Audio
-//! buffer sources in a browser tab, each opening an output and handing back voices.
+//! Each finger on the keys sounds its own voice, mixed with the others: the pointer holds
+//! one, and each controller key holds one until it is released. Only the backend differs
+//! between targets: a `rodio` mixer on the desktop and Web Audio buffer sources in a
+//! browser. Each opens an output and returns voices.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -20,23 +20,23 @@ use std::collections::VecDeque;
 /// Which zone of which asset is sounding: the document's id, and the zone's index.
 pub type Zone = (u64, usize);
 
-/// How many voices sound at once. A voice past this takes the place of the oldest.
+/// How many voices sound at once. A voice past this replaces the oldest.
 pub const VOICES: usize = 16;
 
-/// What holds a voice, and so what may take it back.
+/// What holds a voice, and so what may release it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Finger {
     /// A click, on a zone's play control or on the keyboard. There is one pointer, so a
-    /// click takes the place of the last one.
+    /// click replaces the previous click's voice.
     Pointer,
     /// A key held on a MIDI controller, whose release stops it.
     Key(u8),
 }
 
-/// The playback rate that carries a stroke `semitones` from the key it was recorded at.
+/// The playback rate that shifts a stroke `semitones` from the key it was recorded at.
 ///
-/// One octave is twice the rate, which is the resampling every sampler does to answer a
-/// key with a stroke recorded at another.
+/// One octave doubles the rate. This is the resampling any sampler does to play a key
+/// from a stroke recorded at another.
 pub fn rate(semitones: i16) -> f32 {
     2.0_f32.powf(f32::from(semitones) / 12.0)
 }
@@ -61,7 +61,7 @@ impl Player {
     /// Stop `zone` where it sounds, or start it on the pointer's voice. `samples` are
     /// interleaved by channel, at whatever rate the backend was built for.
     ///
-    /// ⚠️ Nothing is marked as sounding until the backend has taken it: a device that
+    /// ⚠️ Nothing is marked as sounding until the backend accepts it: a device that
     /// refuses must not leave a Stop button over silence.
     pub fn toggle(&mut self, zone: Zone, samples: &[i16], channels: u16) -> Result<(), String> {
         if self.voices.sounds(zone) {
@@ -71,7 +71,7 @@ impl Player {
         self.strike(Finger::Pointer, zone, samples, channels, 1.0)
     }
 
-    /// Sound `zone` at `rate` times its recorded pitch on `finger`'s voice, in place of
+    /// Sound `zone` at `rate` times its recorded pitch on `finger`'s voice, replacing
     /// whatever that finger was sounding.
     ///
     /// ⚠️ Not a toggle: a struck key must sound even when the zone answering it is
@@ -104,10 +104,10 @@ impl Player {
         self.voices.held.clear();
     }
 
-    /// Forget the voices that have played themselves out, so a control reads Play again.
+    /// Drop the voices that have finished, so their control reads Play again.
     ///
-    /// Called once a frame while something sounds; the app also asks for a repaint so
-    /// the change is seen without the pointer moving.
+    /// Called once a frame while something sounds; the app also requests a repaint so
+    /// the change shows without the pointer moving.
     pub fn settle(&mut self) {
         self.voices.held.retain(|held| !held.voice.finished());
     }
@@ -115,7 +115,7 @@ impl Player {
 
 /// The voices sounding, oldest first, and the finger and zone each belongs to.
 ///
-/// ⚠️ Dropping a voice silences it, so every voice let go of here stops.
+/// ⚠️ Dropping a voice silences it, so every voice removed here stops.
 struct Voices<V> {
     held: VecDeque<Held<V>>,
 }
@@ -135,7 +135,7 @@ impl<V> Default for Voices<V> {
 }
 
 impl<V> Voices<V> {
-    /// Hold `voice` for `finger`, letting go of the oldest voice where every one is taken.
+    /// Hold `voice` for `finger`, dropping the oldest voice when all are taken.
     fn start(&mut self, finger: Finger, zone: Zone, voice: V) {
         self.release(finger);
         if self.held.len() == VOICES {
@@ -231,8 +231,6 @@ mod tests {
         assert!(!voices.sounds(ZONE));
     }
 
-    /// A key answered by a stroke recorded elsewhere plays at the rate that carries it
-    /// there: an octave is a doubling, and the root key itself is untouched.
     #[test]
     fn a_shifted_key_plays_at_the_rate_that_carries_it() {
         assert_eq!(rate(0), 1.0);

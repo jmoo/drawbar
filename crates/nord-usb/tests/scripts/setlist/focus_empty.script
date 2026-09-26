@@ -1,7 +1,7 @@
 # source: nord
 # device: Nord Electro 5, firmware v2.04 build 592
-# note: status 0x1 from FOCUS is the class having nothing loaded, not a
-#   fault; the session stays usable and still runs its closing exchanges.
+# note: status 0x1 from FOCUS means nothing of the class is loaded. The session
+#   stays usable and still runs its closing exchanges.
 # intent: setlist focus
 # expect: err device-status 0x1
 O 0000001200000006000000010000000006a1

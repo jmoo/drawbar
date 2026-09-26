@@ -7,7 +7,7 @@ git clone https://github.com/jmoo/drawbar && cd drawbar
 nix run .#drawbar                 # the desktop app
 nix run .#drawbar-web             # the browser build, served with this guide beside it
 nix run .#nord-cli -- --help      # the nord command
-nix build .#site                  # the tree published at drawbar.app
+nix build .#site                  # drawbar.app's layout, from this checkout
 nix build .#docs                  # this guide
 ```
 
@@ -40,10 +40,10 @@ nix run --inputs-from .. nixpkgs#wasm-bindgen-cli -- \
 cd drawbar && python3 -m http.server 8000
 ```
 
-Two things matter here. `--lib` is required, because the crate also has a binary
-target of the same name, and if that one wins the wasm module exports nothing.
-And `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`
-exactly. `--inputs-from ..` takes it from the flake's pinned nixpkgs, which does.
+`--lib` is required. The crate also has a binary target of the same name, and
+if that one wins, the wasm module exports nothing. `wasm-bindgen-cli` must also
+match the `wasm-bindgen` version in `Cargo.lock`. `--inputs-from ..` takes it
+from the flake's pinned nixpkgs, which matches.
 
 Serve over `http://localhost`, which counts as a secure context. WebUSB and the
 module import both fail from `file://`. This plain server has no guide beside the
@@ -57,8 +57,8 @@ at all when the server compresses it.
 
 ## Checks
 
-`nix flake check` runs formatting, Clippy with warnings denied, and the version
-check. `nix build .#nord.all` builds every crate with its tests, the cross
-targets, the browser build and this guide, which is what CI runs. `nix fmt`
-formats everything. [Testing](testing.md) describes the suites, and
+`nix flake check` runs the formatting check, Clippy with warnings denied, and
+the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every crate with
+its tests, the cross targets, the browser build and this guide. CI runs both.
+`nix fmt` formats everything. [Testing](testing.md) describes the suites, and
 [Contributing](contributing.md) the house rules.

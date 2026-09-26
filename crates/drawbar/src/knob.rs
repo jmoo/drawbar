@@ -1,27 +1,25 @@
-//! A rotary control: what the panel puts a continuous value on.
+//! A rotary control for a continuous value, as on the panel.
 //!
-//! The instrument's knobs turn through three quarters of a circle, so this one does too:
-//! the value's fraction of its own range is the fraction of that sweep, and the pointer
-//! and the travelled arc are both drawn from it. That mapping is the whole contract —
-//! the rest is paint.
+//! The instrument's knobs turn through three quarters of a circle, and so does this one:
+//! the value's fraction of its range is its fraction of that sweep, and both the pointer
+//! and the traveled arc are drawn from it. The rest is drawing.
 
 use eframe::egui;
 
-/// How far a knob turns, in radians. Three quarters of a turn, the panel's own.
+/// How far a knob turns, in radians: three quarters of a turn, as on the panel.
 pub const SWEEP: f32 = 1.5 * std::f32::consts::PI;
 
 /// Vertical drag, in points, that turns a knob from one stop to the other.
 ///
-/// A whole sweep in a short flick makes a 0..127 field unusable; this is about a hand's
-/// travel for the full range, and finer for the ranges that are shorter.
+/// A full sweep in a short flick would make a 0..127 field unusable. This is about a
+/// hand's travel for the full range, and finer for shorter ranges.
 const DRAG_FOR_SWEEP: f32 = 220.0;
 
 const DIAL: f32 = 42.0;
 
 /// Where `value` sits between the stops, as 0..=1.
 ///
-/// A range with one value in it reads as fully anticlockwise rather than dividing by
-/// zero: there is nowhere else for it to be.
+/// A range with one value reads as fully counterclockwise instead of dividing by zero.
 pub fn fraction(value: i64, min: i64, max: i64) -> f32 {
     if max <= min {
         return 0.0;
@@ -42,18 +40,17 @@ pub fn value_at(fraction: f32, min: i64, max: i64) -> i64 {
 
 /// The pointer's angle for a fraction, in radians clockwise from straight up.
 ///
-/// Symmetrical about twelve o'clock, so a field's midpoint is a knob pointing straight
-/// up — which is how a panel is read at a glance.
+/// Symmetrical about twelve o'clock, so a field's midpoint points straight up, the way a
+/// panel is read at a glance.
 pub fn angle(fraction: f32) -> f32 {
     (fraction.clamp(0.0, 1.0) - 0.5) * SWEEP
 }
 
-/// Where the lit arc starts: the bottom stop, or the centre for a range that straddles
-/// zero.
+/// Where the lit arc starts: the bottom stop, or zero for a range that straddles zero.
 ///
-/// A knob that runs either side of nothing — transpose, an EQ cut and boost — is read as
-/// a distance from the middle, so a lamp filling from the bottom stop would make zero
-/// look like half of something.
+/// A knob that runs either side of zero (transpose, an EQ cut and boost) is read as a
+/// distance from zero, so an arc filling from the bottom stop would make zero look like
+/// half of something.
 pub fn origin(min: i64, max: i64) -> f32 {
     match min < 0 && max > 0 {
         true => fraction(0, min, max),
@@ -62,33 +59,33 @@ pub fn origin(min: i64, max: i64) -> f32 {
 }
 
 /// A point on the dial at `angle` clockwise from straight up.
-fn on_dial(centre: egui::Pos2, radius: f32, angle: f32) -> egui::Pos2 {
+fn on_dial(center: egui::Pos2, radius: f32, angle: f32) -> egui::Pos2 {
     egui::pos2(
-        centre.x + radius * angle.sin(),
-        centre.y - radius * angle.cos(),
+        center.x + radius * angle.sin(),
+        center.y - radius * angle.cos(),
     )
 }
 
 /// The arc between two fractions, as a polyline dense enough not to read as a polygon.
-fn arc(centre: egui::Pos2, radius: f32, from: f32, to: f32) -> Vec<egui::Pos2> {
+fn arc(center: egui::Pos2, radius: f32, from: f32, to: f32) -> Vec<egui::Pos2> {
     const STEPS: usize = 32;
     (0..=STEPS)
         .map(|step| {
             let at = from + (to - from) * step as f32 / STEPS as f32;
-            on_dial(centre, radius, angle(at))
+            on_dial(center, radius, angle(at))
         })
         .collect()
 }
 
-/// A knob for `value` somewhere in `min..=max`, with its number under it. Returns what it
-/// was turned or typed to, spelled the way the field takes it.
+/// A knob for `value` in `min..=max`, with its number under it. Returns the value it was
+/// turned or typed to, spelled as the field accepts it.
 ///
-/// Drag up to open it out, down to close it; double-click to type a number; with the
-/// focus on it the arrows step and Home/End go to the stops.
+/// Drag up to increase and down to decrease; double-click to type a number. With focus,
+/// the arrow keys step and Home/End jump to the stops.
 ///
-/// ⚠️ A drag stops at the stops; what is typed is handed back as it was spelled, past a
-/// stop or not a number at all. The field is what refuses a value it cannot hold, and a
-/// widget that substituted one would write what nobody typed.
+/// ⚠️ A drag halts at the stops, but typed text is returned as typed, even past a stop or
+/// not a number. The field refuses a value it cannot hold; a widget that substituted one
+/// would write what nobody typed.
 pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> Option<String> {
     let id = ui.make_persistent_id(("knob", id_salt));
     let mut moved = None;
@@ -149,7 +146,7 @@ pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> O
 
         paint(ui, rect, &response, moved.unwrap_or(value), min, max);
         let typing = response.double_clicked();
-        response.on_hover_text(format!("{min} … {max} — drag, or double-click to type"));
+        response.on_hover_text(format!("{min} … {max}: drag, or double-click to type"));
 
         typed = readout(ui, id, value, typing);
     });
@@ -159,21 +156,20 @@ pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> O
         .filter(|want| *want != value.to_string())
 }
 
-/// The number under the dial, and the box it becomes when double-clicked. Answers with
-/// what was typed, exactly as it was spelled.
+/// The number under the dial, which becomes an edit box when double-clicked. Returns
+/// what was typed, unchanged.
 ///
-/// ⚠️ Nothing here clamps or parses. A number past a stop and text that is no number at
-/// all are both the field's to refuse, in the field's own words — dropping them here
-/// would leave the dial sitting on a value the operator did not type and no word on
-/// screen saying why.
+/// ⚠️ Nothing here clamps or parses. The field refuses a number past a stop, or text that
+/// is not a number, with its own message. Dropping them here would leave the dial on a
+/// value the user did not type, with nothing on screen saying why.
 fn readout(ui: &mut egui::Ui, id: egui::Id, value: i64, start_editing: bool) -> Option<String> {
     let editing = id.with("editing");
     let arming = id.with("arming");
     let mut buffer: Option<String> = ui.data(|d| d.get_temp(editing));
     if start_editing && buffer.is_none() {
         let text = value.to_string();
-        // Opened with the number selected, the way a value box opens everywhere else:
-        // the first keystroke is meant to replace what is there, not to join it.
+        // Opened with the number selected, like a value box anywhere else, so the first
+        // keystroke replaces it.
         let mut state = egui::text_edit::TextEditState::default();
         state
             .cursor
@@ -203,7 +199,8 @@ fn readout(ui: &mut egui::Ui, id: egui::Id, value: i64, start_editing: bool) -> 
             .font(egui::TextStyle::Small)
             .horizontal_align(egui::Align::Center),
     );
-    // ⚠️ egui reclaims focus on the opening press; arm requests until a later frame lands it.
+    // ⚠️ egui reclaims focus on the opening press; keep requesting it until a later frame
+    // gets it.
     if ui.data(|d| d.get_temp::<bool>(arming)).unwrap_or(false) {
         match box_.has_focus() {
             true => ui.data_mut(|d| d.remove::<bool>(arming)),
@@ -215,8 +212,8 @@ fn readout(ui: &mut egui::Ui, id: egui::Id, value: i64, start_editing: bool) -> 
     }
 
     let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
-    // Enter commits, and so does clicking away: a number typed and then abandoned is
-    // still what the operator meant. Only Escape throws it away.
+    // Enter commits, and so does clicking away: a number typed and then left is still
+    // what the user meant. Only Escape discards it.
     let done = ui.input(|i| i.key_pressed(egui::Key::Enter)) || box_.lost_focus();
 
     if escaped {
@@ -250,37 +247,37 @@ fn paint(
     }
     let visuals = ui.visuals();
     let widget = ui.style().interact(response);
-    let centre = rect.center();
+    let center = rect.center();
     let radius = rect.width() / 2.0;
     let at = fraction(value, min, max);
     let painter = ui.painter();
 
-    // The travelled arc, over the whole sweep drawn faintly: how far round a knob is
-    // reads off the lit part, the way a panel's own scale does.
+    // The traveled arc over a faint full sweep: the lit part shows how far the knob is
+    // turned, like the panel's own scale.
     let track = egui::Stroke::new(2.0_f32, crate::app::unlit(visuals));
     painter.add(egui::Shape::line(
-        arc(centre, radius - 1.0, 0.0, 1.0),
+        arc(center, radius - 1.0, 0.0, 1.0),
         track,
     ));
     let from = origin(min, max);
     if (at - from).abs() > f32::EPSILON {
         let lit = egui::Stroke::new(2.5_f32, crate::app::accent(visuals));
-        painter.add(egui::Shape::line(arc(centre, radius - 1.0, from, at), lit));
+        painter.add(egui::Shape::line(arc(center, radius - 1.0, from, at), lit));
     }
 
     let body = radius - 5.0;
-    painter.circle_filled(centre, body, widget.bg_fill);
+    painter.circle_filled(center, body, widget.bg_fill);
     let rim = match response.has_focus() {
         true => visuals.selection.stroke,
         false => widget.bg_stroke,
     };
-    painter.circle_stroke(centre, body, rim);
+    painter.circle_stroke(center, body, rim);
 
     let pointer = angle(at);
     painter.line_segment(
         [
-            on_dial(centre, body * 0.30, pointer),
-            on_dial(centre, body * 0.86, pointer),
+            on_dial(center, body * 0.30, pointer),
+            on_dial(center, body * 0.86, pointer),
         ],
         egui::Stroke::new(2.5_f32, widget.fg_stroke.color),
     );
@@ -290,8 +287,8 @@ fn paint(
 mod tests {
     use super::*;
 
-    /// The stops and the middle: a knob at the bottom of its range is fully
-    /// anticlockwise, at the top fully clockwise, and halfway points straight up.
+    /// A knob at the bottom of its range is fully counterclockwise, at the top fully
+    /// clockwise, and halfway points straight up.
     #[test]
     fn a_value_sits_where_its_share_of_the_range_puts_it() {
         assert_eq!(fraction(0, 0, 127), 0.0);
@@ -303,8 +300,6 @@ mod tests {
         assert_eq!(fraction(6, -6, 6), 1.0);
     }
 
-    /// Half a sweep either side of straight up, which is what makes a panel readable at
-    /// a glance.
     #[test]
     fn the_sweep_is_symmetrical_about_twelve_oclock() {
         assert!((angle(0.5)).abs() < 1e-6);
@@ -314,8 +309,8 @@ mod tests {
         assert!((angle(1.0) - angle(0.0) - SWEEP).abs() < 1e-6);
     }
 
-    /// Every value the field can hold comes back off the dial as itself. A mapping that
-    /// rounded the wrong way would make a knob unable to reach one of its own stops.
+    /// A mapping that rounded the wrong way would leave a knob unable to reach one of its
+    /// stops.
     #[test]
     fn a_value_survives_the_trip_to_the_dial_and_back() {
         for range in [(0i64, 127i64), (-6, 6), (0, 1), (0, 31)] {
@@ -330,8 +325,8 @@ mod tests {
         }
     }
 
-    /// Nothing off the ends: a drag runs past the stop long before the pointer stops
-    /// moving, and the value must sit still when it does.
+    /// A drag passes the stop long before the pointer stops moving, and the value must
+    /// hold still at the stop.
     #[test]
     fn past_the_stops_is_the_stops() {
         assert_eq!(value_at(-1.0, 0, 127), 0);
@@ -342,16 +337,16 @@ mod tests {
         assert!((angle(9.0) - SWEEP / 2.0).abs() < 1e-6);
     }
 
-    /// A knob that runs either side of nothing lights from the middle; one that runs up
-    /// from nothing lights from its bottom stop.
+    /// A knob that runs either side of zero lights from zero; one that starts at zero
+    /// lights from its bottom stop.
     #[test]
-    fn a_bipolar_range_lights_from_its_centre() {
+    fn a_bipolar_range_lights_from_zero() {
         assert_eq!(origin(0, 127), 0.0);
         assert_eq!(origin(0, 1), 0.0);
         assert!((origin(-6, 6) - 0.5).abs() < 1e-6);
-        // Zero is where the arc starts, so a knob sitting at zero lights nothing at all.
+        // The arc starts at zero, so a knob at zero lights nothing.
         assert!((origin(-6, 6) - fraction(0, -6, 6)).abs() < 1e-6);
-        // Lopsided either side of zero is still centred on zero, not on the middle value.
+        // An asymmetric range still starts at zero, not at its middle value.
         assert!((origin(-3, 9) - fraction(0, -3, 9)).abs() < 1e-6);
         assert!(origin(-3, 9) < 0.5);
     }
@@ -366,8 +361,7 @@ mod tests {
         assert_eq!(value_at(0.7, 9, 4), 9);
     }
 
-    /// Pulling upwards opens the value out, and the travel is the one the constant
-    /// promises: half a sweep of drag is half the range.
+    /// Dragging up by half of `DRAG_FOR_SWEEP` covers half the range.
     #[test]
     fn a_drag_up_turns_the_knob_open() {
         let ctx = egui::Context::default();
@@ -409,9 +403,6 @@ mod tests {
         assert!((60..=68).contains(&value), "half a sweep landed on {value}");
     }
 
-    /// Double-clicking the dial opens its number for typing, and what is typed is handed
-    /// on as it was spelled: a value past a stop, or no number at all, is the field's to
-    /// refuse in its own words.
     #[test]
     fn a_typed_number_is_handed_on_as_it_was_spelled() {
         for (typed, expected) in [
@@ -472,7 +463,6 @@ mod tests {
         }
     }
 
-    /// The same knob under the keyboard: focus it, and the arrows step it.
     #[test]
     fn the_arrows_step_a_focused_knob() {
         let ctx = egui::Context::default();
@@ -496,8 +486,8 @@ mod tests {
             let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     if !focused {
-                        // The dial answers to the knob's own id, so this is what Tab
-                        // would land on.
+                        // The dial uses the knob's own id, so this is where Tab would
+                        // land.
                         let id = ui.make_persistent_id(("knob", "gain"));
                         ui.memory_mut(|m| m.request_focus(id));
                     }
@@ -520,14 +510,14 @@ mod tests {
     /// either side of the bottom.
     #[test]
     fn the_dial_puts_its_points_where_the_angle_says() {
-        let centre = egui::pos2(0.0, 0.0);
-        let up = on_dial(centre, 10.0, 0.0);
+        let center = egui::pos2(0.0, 0.0);
+        let up = on_dial(center, 10.0, 0.0);
         assert!(up.x.abs() < 1e-5 && (up.y + 10.0).abs() < 1e-5);
-        let right = on_dial(centre, 10.0, std::f32::consts::FRAC_PI_2);
+        let right = on_dial(center, 10.0, std::f32::consts::FRAC_PI_2);
         assert!((right.x - 10.0).abs() < 1e-5 && right.y.abs() < 1e-5);
-        // Both stops sit below the centre, one to each side.
-        let low = on_dial(centre, 10.0, angle(0.0));
-        let high = on_dial(centre, 10.0, angle(1.0));
+        // Both stops sit below the center, one to each side.
+        let low = on_dial(center, 10.0, angle(0.0));
+        let high = on_dial(center, 10.0, angle(1.0));
         assert!(low.y > 0.0 && high.y > 0.0);
         assert!(low.x < 0.0 && high.x > 0.0);
     }

@@ -1,9 +1,8 @@
-//! What is waiting to go to the instrument, and where each of it lands.
+//! What is waiting to go to the instrument, and the slot each asset will be written to.
 //!
-//! One entry per destination and one per asset: queueing a second asset for a slot
-//! displaces the first, and queueing an asset that is already waiting moves it. Being in
-//! here is what being owed to the instrument means — [`Queue::holds`] is the flag
-//! `LocalEntity` used to carry.
+//! The queue holds one entry per destination and one per asset: queueing a second asset
+//! for a slot displaces the first, and queueing an asset that is already waiting moves it.
+//! An asset is owed to the instrument while [`Queue::holds`] it.
 
 use std::io::Cursor;
 use std::ops::Range;
@@ -32,25 +31,24 @@ pub struct Queued {
     pub replaces: Occupancy,
     /// How what is waiting differs from what the slot holds.
     pub diff: Diff,
-    /// How far the compare read of [`Queued::at`] has got.
+    /// How far the compare read of [`Queued::at`] has progressed.
     read: Read,
     /// The stamp of the asset's bytes [`Queued::diff`] was made from, so an edit under a
     /// waiting entry is noticed without comparing anything.
     stamp: u64,
     /// Why the last attempt to write it stopped. Cleared when it is queued again, and
-    /// when [`refit`] finds the instrument attached now takes it.
+    /// when [`refit`] finds that the attached instrument accepts it.
     pub failure: Option<String>,
 }
 
-/// How far the compare read of the slot an entry is waiting for has got.
+/// How far the compare read of the slot an entry is waiting for has progressed.
 enum Read {
-    /// Nothing to diff against and nothing on its way: nobody has asked, or the read
-    /// found the slot empty and there is nothing in it to compare.
+    /// No read has been asked for, or the read found the slot empty.
     Unasked,
-    /// Asked, and still out.
+    /// Asked for, and not yet answered.
     Asked,
-    /// The occupant's own bytes, kept so that an edit made after this entry was queued is
-    /// diffed against them again rather than by reading the slot a second time.
+    /// The occupant's bytes, kept so that an edit made after this entry was queued is
+    /// diffed against them without reading the slot again.
     Answered(Vec<u8>),
 }
 
@@ -70,9 +68,9 @@ pub enum Diff {
 
 /// One field the two bodies do not agree on.
 ///
-/// ⚠️ `path` is the registry's own spelling — what `nord-format` reads and writes — and
-/// is turned into words by [`crate::strings::label`] where it is shown. `here` and
-/// `there` are the rendered values, which is what a reader compares.
+/// ⚠️ `path` is the registry path that `nord-format` reads and writes;
+/// [`crate::strings::label`] turns it into words for display. `here` and `there` are the
+/// rendered values.
 pub struct FieldDiff {
     pub path: String,
     pub here: String,
@@ -81,9 +79,8 @@ pub struct FieldDiff {
 
 /// What is in the slot an entry is waiting for.
 ///
-/// ⚠️ The three answers are distinct: a bank nobody has read holds no less than a bank
-/// read and found empty, and calling the first free is the whole of what this exists to
-/// stop.
+/// ⚠️ `Unknown` is not `Vacant`: a bank nobody has read may hold something, and calling
+/// its slot free is the mistake this type exists to prevent.
 pub enum Occupancy {
     /// The bank has not been scanned, so a compare read is on its way to find out.
     Unknown,
@@ -94,8 +91,8 @@ pub enum Occupancy {
 }
 
 impl Occupancy {
-    /// What the scan cache says is in a slot. A bank no walk has reached is *unknown*,
-    /// never empty — the compare read [`enqueue`] asks for is what settles it.
+    /// What the scan cache says is in a slot. A slot in a bank no walk has reached is
+    /// `Unknown`, never empty; the compare read that [`enqueue`] asks for settles it.
     pub fn of(state: &DeviceState, class: ObjectClass, at: Location) -> Occupancy {
         match state.slot(class, at) {
             Some(Some(info)) => Occupancy::Held(Occupant::of(info)),
@@ -111,11 +108,11 @@ impl Occupancy {
         }
     }
 
-    /// What is known about the slot, in the words the question before a write and the
-    /// row waiting for it both use.
+    /// What is known about the slot, in the words used by both the question before a
+    /// write and the queue row.
     ///
-    /// ⚠️ The three answers read differently on purpose: a slot nothing has read is not
-    /// an empty one, and a write is about to happen either way.
+    /// ⚠️ The three variants must read differently: a slot nothing has read is not an
+    /// empty one, and a write is about to happen either way.
     pub fn said(&self, class: ObjectClass, at: Location) -> String {
         let where_ = place(class, at);
         match self {
@@ -132,8 +129,9 @@ impl Occupancy {
 /// What a slot holds, as the read that found it reported.
 pub struct Occupant {
     pub name: String,
-    /// ⚠️ `None` where the class reports no checksum or the occupant arrived as bytes
-    /// rather than as a walk's entry, which is *not comparable* rather than *the same*.
+    /// ⚠️ `None` where the class reports no checksum, or where the occupant arrived as
+    /// bytes from a read instead of as a walk's entry. `None` means the checksums cannot
+    /// be compared; it never means they match.
     pub crc: Option<u32>,
     pub body_len: u32,
 }
@@ -168,15 +166,15 @@ pub struct Queue {
     picked: Option<u64>,
 }
 
-/// What queueing an asset came to, which is what there is to say about it.
+/// The outcome of queueing an asset, which decides what the log says.
 enum Put {
     /// A new entry, for a slot nothing else was waiting for.
     Made,
     /// This asset was already waiting for this same slot. Nothing moved.
     Standing,
-    /// It was waiting for another slot, and is not any more.
+    /// It was waiting for another slot, and moved here.
     Moved(ObjectClass, Location),
-    /// Something else was waiting for this slot, and is not any more.
+    /// Something else was waiting for this slot, and was dropped.
     Instead(u64),
 }
 
@@ -192,15 +190,16 @@ fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Loc
     );
 }
 
-/// Wait for an asset to be written to a slot, and say in the log what that displaced.
+/// Queue an asset to be written to a slot, and log what that displaced.
 ///
-/// One entry per asset and one per destination, so this both moves what was waiting
-/// somewhere else and drops what was waiting for this slot. What the slot holds is read
-/// again unless the scan cache already answers for it and the two bodies are known to
-/// agree; a bank the scan has never reached is read rather than assumed vacant.
+/// The queue keeps one entry per asset and one per destination, so this moves the
+/// asset's entry if it was waiting for another slot and drops whatever else was waiting
+/// for this one. The slot is read unless the scan cache shows it empty or holding a body
+/// with the same checksum. A slot in a bank the scan never reached is read, not assumed
+/// vacant.
 ///
-/// Asking for what is already waiting for the same slot is asking for nothing: the plan
-/// says what it said, and neither the log nor the instrument hears about it again.
+/// Queueing an asset for the slot it is already waiting for does nothing: it logs
+/// nothing and asks the instrument nothing.
 pub fn enqueue(
     workspace: &Workspace,
     device: &mut Device,
@@ -215,8 +214,8 @@ pub fn enqueue(
     };
     let name = entity.name.clone();
     let where_ = place(class, at);
-    // Refused before the entry exists: the queue is what a send walks, so an asset the
-    // instrument would not take must never get into it.
+    // A send writes what the queue holds, so an asset the instrument refuses must never
+    // enter it.
     if let Fit::Refuses(why) = fit(&device.state, entity) {
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
@@ -230,7 +229,7 @@ pub fn enqueue(
         )),
         Put::Instead(other) => workspace.get(other).map(|other| {
             format!(
-                "“{name}” is waiting for {where_}; “{}” is not any more.",
+                "“{name}” is waiting for {where_}; “{}” is not anymore.",
                 other.name
             )
         }),
@@ -241,16 +240,16 @@ pub fn enqueue(
     log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
 }
 
-/// The assets whose slot on the attached instrument no longer holds what they were
-/// saved as, each with that slot.
+/// The assets not in the queue whose slot on the attached instrument no longer holds what
+/// they were saved as, each with that slot.
 ///
-/// An edit queues nothing; saving one that stands for a slot does. This is the gap
-/// between the two — what a send would walk straight past — and it is the same
-/// comparison [`crate::library::Where::Both`] shows in the table.
+/// An edit queues nothing; saving an asset that stands for a slot does. This finds saved
+/// assets that are not waiting, which a send would skip. It uses the same comparison that
+/// [`crate::library::Where::Both`] shows in the table.
 ///
-/// ⚠️ Over an asset's link, which is the one slot it stands on. An asset the attached
-/// instrument refuses has none however well its origin matches, and counting one would
-/// offer a send that [`enqueue`] refuses on every click.
+/// ⚠️ Only an asset's link counts, which is the one slot it stands for. An asset the
+/// attached instrument refuses has no link however well its origin matches, and counting
+/// it would offer a send that [`enqueue`] refuses on every click.
 pub fn changed(
     workspace: &Workspace,
     device: &DeviceState,
@@ -284,13 +283,13 @@ pub fn offer(
     })
 }
 
-/// Re-check everything waiting against the instrument attached now, and say what it
+/// Check everything waiting against the attached instrument again, and log what it
 /// refuses.
 ///
-/// ⚠️ The queue outlives a disconnection, so what is in it was checked against whatever
-/// was attached when it was queued. An entry this instrument refuses keeps its place and
-/// carries the reason; [`crate::browser::act`] leaves it out of the batch, and nothing
-/// writes it until it is queued again against an instrument that takes it.
+/// ⚠️ The queue outlives a disconnection, so each entry was checked against whatever was
+/// attached when it was queued. An entry this instrument refuses keeps its place and
+/// carries the reason. A send leaves it out of the batch, so nothing writes it until it
+/// is queued again against an instrument that accepts it.
 pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log: &mut Log) {
     for held in &mut queue.list {
         let Some(entity) = workspace.get(held.id) else {
@@ -300,7 +299,7 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
             Fit::Refuses(why) => Some(why),
             Fit::Unattached | Fit::Takes | Fit::Warn(_) => None,
         };
-        // Said once per instrument that refuses it, rather than again on every send.
+        // Logged only when the reason changes, so repeated refits stay quiet.
         if let Some(why) = &refusal {
             if held.failure.as_ref() != Some(why) {
                 log.say(format!(
@@ -314,12 +313,12 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
     }
 }
 
-/// Take back everything the instrument that went away said about the slots being waited
-/// for, and ask the one attached now.
+/// Discard what the previous instrument reported about the slots being waited for, and
+/// ask the attached one.
 ///
-/// ⚠️ A queue outlives a disconnection and the reads out over it do not. An entry left
-/// holding the answer it was still waiting for reads its slot for the rest of the
-/// session, and what the last instrument held in a slot is no claim about this one.
+/// ⚠️ The queue outlives a disconnection, but reads in flight do not. An entry left
+/// waiting for an answer that will never come would wait for the rest of the session,
+/// and what the last instrument held in a slot says nothing about this one.
 pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for held in &mut queue.list {
         let Some(entity) = workspace.get(held.id) else {
@@ -336,19 +335,19 @@ pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, l
     }
 }
 
-/// Queue every asset the instrument no longer agrees with, each for its own slot.
+/// Queue every asset [`changed`] finds, each for its own slot.
 pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for (id, class, at) in changed(workspace, &device.state, queue) {
         enqueue(workspace, device, queue, log, id, class, at);
     }
 }
 
-/// What a waiting entry says about a slot before either body has been read: vacant is
-/// nothing to replace, and two bodies whose checksums agree are known to agree, because
-/// the body's CRC-32 is the number the instrument reports for a slot.
+/// The diff before the occupant's bytes have been read. A vacant slot has nothing to
+/// replace, and two bodies whose checksums match are identical, because the instrument
+/// reports the body's CRC-32 for a slot.
 ///
-/// ⚠️ The bytes held now, which are the ones a send writes — not the saved baseline
-/// [`crate::device::link`] matches a slot on.
+/// ⚠️ The checksum is of the current bytes, which a send writes, and not of the saved
+/// baseline that [`crate::device::link`] matches a slot against.
 fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
     let here = entity.container.as_ref().map(|held| held.body_crc32);
     match replaces {
@@ -358,13 +357,12 @@ fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
     }
 }
 
-/// Diff every waiting entry whose asset has moved under it since it was queued.
+/// Diff again every waiting entry whose asset was edited since its last diff.
 ///
-/// The occupant's bytes are kept from the compare read, so an edit made after the entry
-/// was made is measured against them here rather than by asking the instrument for the
-/// same slot twice. An entry whose read has not come back waits for it; one the
-/// checksums settled without a read is settled the same way again, and asks for the read
-/// only where they no longer settle it.
+/// An entry with an answered compare read is diffed against the occupant's bytes it kept,
+/// without asking the instrument again. An entry whose read is still out keeps waiting
+/// for it. An entry the checksums settled without a read is checked against the
+/// checksums again, and asks for the read only when they no longer match.
 pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     let mut moved = Vec::new();
     for held in &mut queue.list {
@@ -388,11 +386,10 @@ pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log
     }
 }
 
-/// Send a waiting asset somewhere else instead.
+/// Move a waiting asset to another slot.
 ///
-/// The same bookkeeping as [`enqueue`] — the new slot is read again, and whatever was
-/// waiting for it stops — over an asset the queue is already holding. An asset it is not
-/// holding is not queued by asking where it goes.
+/// This is [`enqueue`] for an asset already in the queue: the new slot is read, and
+/// whatever was waiting for it is dropped. An asset not in the queue stays out of it.
 pub fn retarget(
     workspace: &Workspace,
     device: &mut Device,
@@ -408,14 +405,14 @@ pub fn retarget(
 }
 
 impl Queue {
-    /// Put one asset in the queue for one slot, and say what that moved out of the way:
-    /// where this asset was waiting before, and what was waiting for this slot.
+    /// Queue one asset for one slot, and report what that displaced: where this asset was
+    /// waiting before, or what was waiting for this slot.
     ///
-    /// [`enqueue`] is what callers use; this is the bookkeeping under it.
+    /// Callers use [`enqueue`], which wraps this.
     ///
-    /// ⚠️ An asset already waiting for this same slot keeps the entry it has, and with
-    /// it the read that entry is waiting on. Rebuilding it would throw away an occupant
-    /// already read and ask the instrument for it again.
+    /// ⚠️ An asset already waiting for this slot keeps its entry and the read that entry
+    /// is waiting on. Rebuilding the entry would discard an occupant already read and ask
+    /// the instrument for it again.
     fn put(
         &mut self,
         entity: &LocalEntity,
@@ -464,11 +461,10 @@ impl Queue {
         }
     }
 
-    /// The slot an entry is still owed a compare read of, marked as asked for.
+    /// The slot an entry still needs a compare read of, now marked as asked for.
     ///
-    /// The read answers once for one destination. Everything that can want it — a
-    /// queueing, a re-queueing, an edit made while it is out — asks here, and the
-    /// instrument hears the question once.
+    /// Queueing, re-queueing, and editing while the read is out all ask here, so the
+    /// instrument is asked about a destination only once.
     fn unread(&mut self, id: u64) -> Option<(ObjectClass, Location)> {
         let held = self.list.iter_mut().find(|held| held.id == id)?;
         if !matches!(held.diff, Diff::Pending) {
@@ -483,10 +479,10 @@ impl Queue {
         }
     }
 
-    /// The occupant of a slot something is waiting for, read at last.
+    /// Record the occupant a compare read returned for a slot something is waiting for.
     ///
-    /// The read is also the answer for a slot no walk had reached, so an entry that was
-    /// waiting to find out learns here that the slot is occupied.
+    /// For a slot no walk had reached, this is also how the entry learns that the slot is
+    /// occupied.
     pub fn arrived(
         &mut self,
         class: ObjectClass,
@@ -509,7 +505,7 @@ impl Queue {
         held.diff = compare(&entity.bytes, there);
     }
 
-    /// The read of a slot something is waiting for came back empty: nothing is there.
+    /// Record that the compare read of a slot something is waiting for found it empty.
     pub fn vacant(&mut self, class: ObjectClass, at: Location) {
         let Some(held) = self.waiting_for(class, at) else {
             return;
@@ -541,7 +537,7 @@ impl Queue {
             .find(|held| (held.class, held.at) == (class, at))
     }
 
-    /// It landed on the instrument, or it is not here to send any more.
+    /// Take an asset out of the queue.
     pub fn forget(&mut self, id: u64) {
         self.list.retain(|held| held.id != id);
         if self.picked == Some(id) {
@@ -549,18 +545,19 @@ impl Queue {
         }
     }
 
-    /// Nothing is waiting any more. A queue is a plan rather than data, so this deletes
-    /// nothing and asks nothing.
+    /// Empty the queue. The queue is only a plan, so this deletes no asset and sends
+    /// nothing to the instrument.
     pub fn clear(&mut self) {
         self.list.clear();
         self.picked = None;
     }
 
-    /// A write into `class` stopped, so the entry it stopped on says why.
+    /// Record why a write into `class` stopped, on the entry it stopped on.
     ///
-    /// ⚠️ A batch writes its entries in queue order and each one that lands leaves the
-    /// queue, so the first of that class still waiting is the one it stopped on — past
-    /// the ones [`refit`] took out of the batch, which no write reached.
+    /// ⚠️ A batch writes its entries in queue order and each written entry leaves the
+    /// queue, so the entry it stopped on is the first of that class still waiting without
+    /// a failure. Entries that already carry one were left out of the batch, and no write
+    /// reached them.
     pub fn stumbled(&mut self, class: ObjectClass, why: &str) {
         if let Some(held) = self
             .list
@@ -599,15 +596,14 @@ impl Queue {
 
 /// How what is waiting differs from what the slot holds.
 ///
-/// ⚠️ The bytes decide whether the two agree. A registry covers what it declares, and a
-/// bit no field claims is still a difference between this body and that one — saying
-/// two bodies are the same because every declared field reads the same would call a
-/// write unnecessary that is not.
+/// ⚠️ The bytes decide whether the two agree. A registry covers only the fields it
+/// declares, and a bit no field claims is still a difference. Calling two bodies identical
+/// because every declared field matches would call a necessary write unnecessary.
 ///
-/// What the difference is said to be is the other question: both bodies decoding into
-/// registries is what makes a field list possible, and anything else is an offset into
-/// the wire body — compared as the wire carries it rather than as it sits in a file,
-/// since two containers of one body differ in their headers alone.
+/// When both bodies decode into registries, the difference is a list of fields;
+/// otherwise it is an offset into the wire body. Bodies are compared as the wire carries
+/// them, without their file containers, because two containers of one body can differ
+/// in their headers alone.
 fn compare(here: &[u8], there: &[u8]) -> Diff {
     let body = |bytes: &[u8]| {
         nord_usb::envelope::unwrap(bytes)
@@ -616,7 +612,7 @@ fn compare(here: &[u8], there: &[u8]) -> Diff {
     };
     let (mine, held) = match (body(here), body(there)) {
         (Some(mine), Some(held)) => (mine, held),
-        // Not a container this app can strip, so the whole of what it holds is compared.
+        // Not a container this app can unwrap, so the whole input is compared.
         _ => (here.to_vec(), there.to_vec()),
     };
     let Some(first_at) = parted(&mine, &held) else {
@@ -628,17 +624,17 @@ fn compare(here: &[u8], there: &[u8]) -> Diff {
     }
 }
 
-/// The offset of the first byte the two do not share, where they part at all.
+/// The offset of the first byte where the two differ, if they differ.
 fn parted(here: &[u8], there: &[u8]) -> Option<usize> {
     if let Some(first_at) = here.iter().zip(there).position(|(mine, held)| mine != held) {
         return Some(first_at);
     }
-    // One runs out; the first difference is where the shorter one ended.
+    // One is a prefix of the other; the first difference is where the shorter one ends.
     (here.len() != there.len()).then(|| here.len().min(there.len()))
 }
 
-/// The registered fields two bodies do not agree on, where both carry a registry and any
-/// of them do.
+/// The registered fields two bodies disagree on, if both decode into a registry and any
+/// field differs.
 fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
     let decode = |bytes: &[u8]| nord_format::from_stream(&mut Cursor::new(bytes)).ok();
     let mine = fields_of(&decode(here)?)?;
@@ -657,7 +653,7 @@ fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
     (!differing.is_empty()).then_some(differing)
 }
 
-/// The height of one waiting item, and the room the list keeps at each end.
+/// The height of one waiting item, and the list's padding at each end.
 const ROW: f32 = 22.0;
 const PAD: f32 = 8.0;
 
@@ -668,11 +664,11 @@ const GAP: f32 = 6.0;
 const GLYPH: f32 = 13.0;
 const SMALL: f32 = 11.0;
 
-/// The destination chip's own height, and the room it keeps at each end.
+/// The destination chip's height, and its padding at each end.
 const CHIP: f32 = 17.0;
 const CHIP_PAD: f32 = 5.0;
 
-/// The faces a row paints in.
+/// The font sizes a row uses.
 const NAME: f32 = 12.0;
 const MONO: f32 = 10.5;
 
@@ -682,7 +678,7 @@ const HEAD: f32 = 20.0;
 const DIFF_ROW: f32 = 22.0;
 const DIFF_MONO: f32 = 11.0;
 
-/// Everything waiting, and what each of it runs into.
+/// The queue page of the dock: the waiting items, and the diff of the picked one.
 pub fn page(
     ui: &mut egui::Ui,
     queue: &mut Queue,
@@ -754,8 +750,8 @@ fn diff(ui: &mut egui::Ui, held: &Queued) {
     table(ui, held);
 }
 
-/// The four column heads, and under them either the fields two bodies do not agree on or
-/// the one line every other shape of difference comes to.
+/// The four column heads, and under them either the fields that differ or a single line
+/// describing any other kind of difference.
 pub fn table(ui: &mut egui::Ui, held: &Queued) {
     let ui = &mut inset(ui);
     let width = ui.available_width() - PAD;
@@ -763,7 +759,7 @@ pub fn table(ui: &mut egui::Ui, held: &Queued) {
     diff_head(ui, width, &tracks);
 
     let Diff::Fields(fields) = &held.diff else {
-        let (glyph, tint, said) = summarise(held, ui.visuals());
+        let (glyph, tint, said) = summarize(held, ui.visuals());
         return one_row(ui, width, &tracks, glyph, tint, &said);
     };
     egui::ScrollArea::vertical()
@@ -776,11 +772,11 @@ pub fn table(ui: &mut egui::Ui, held: &Queued) {
         });
 }
 
-/// The one line a diff that is not a field list comes to.
+/// The single line for a diff that is not a field list.
 ///
-/// ⚠️ Only a slot read and found empty is free. While the read is out, all this can say
-/// is that it is out.
-fn summarise(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
+/// ⚠️ Only a slot read and found empty is free. While the read is out, this says only
+/// that it is out.
+fn summarize(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
     let quiet = visuals.weak_text_color();
     match &held.diff {
         Diff::Pending => (
@@ -799,16 +795,16 @@ fn summarise(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, S
             warn(visuals),
             format!("bytes differ from {first_at:#06x}"),
         ),
-        // A field list is rows rather than a sentence.
+        // A field list is drawn as rows, not as this line.
         Diff::Fields(_) => (Glyph::ArrowRight, warn(visuals), String::new()),
     }
 }
 
-/// One waiting item: what it is, where it goes, and what is in the way.
+/// One waiting item: what it is, where it goes, and what it would replace.
 ///
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a
-/// label allocates a hover rect that wins the hit test over the row, and the click lands
-/// on whichever word happens to be under it.
+/// label allocates a hover rect that wins the hit test over the row, so a click would
+/// land on whichever word is under the pointer.
 #[allow(clippy::too_many_arguments)]
 fn item(
     ui: &mut egui::Ui,
@@ -839,7 +835,7 @@ fn item(
     };
     let quiet = cell_ink(selected, visuals.weak_text_color(), &visuals);
 
-    // The right end is claimed first, so the name is cut to whatever is left of the row.
+    // Lay out the right end first, so the name is truncated to the room left.
     let box_ = |right: f32| {
         egui::Rect::from_center_size(
             egui::pos2(right - SMALL / 2.0, rect.center().y),
@@ -851,7 +847,7 @@ fn item(
         ui.id().with(("unqueue", held.id)),
         egui::Sense::click(),
     );
-    // Flat: nothing under the × until the pointer is on it.
+    // The × stays weak until the pointer is over it.
     let leaving = match unqueue.hovered() {
         true => visuals.text_color(),
         false => visuals.weak_text_color(),
@@ -907,13 +903,12 @@ fn item(
         egui::Color32::PLACEHOLDER,
     );
 
-    // Opened the way the tree opens it: a waiting entry stands for an asset, and a
-    // reader who wants to see what is going out wants the document.
+    // Double-click opens the asset's document, as it does in the tree.
     if response.double_clicked() {
         acts.push(Act::Open(Item::Local(entity.id)));
     }
-    // Dragged like the row this asset has in the library, so a drop on a slot means
-    // there what it means anywhere else: this asset goes to that slot.
+    // A drag carries the same payload as the asset's library row, so dropping it on a
+    // slot sends it there.
     if response.dragged() {
         egui::DragAndDrop::set_payload(
             ui.ctx(),
@@ -922,7 +917,7 @@ fn item(
                     what: Item::Local(entity.id),
                     kind: Kind::of(entity),
                     filed: None,
-                    // Nothing the instrument refuses ever reaches the queue.
+                    // `enqueue` admitted it, so the instrument attached then accepted it.
                     fits: true,
                 },
                 name: entity.name.clone(),
@@ -930,13 +925,14 @@ fn item(
             },
         );
     }
-    // The name is shown short and cut to the row, so the hover carries the whole of it.
+    // The row truncates the name, so the hover text shows it in full.
     response.on_hover_text(format!("{}\n{why}", entity.name))
 }
 
-/// Where an entry is going, as a chip to click: the address, and the picker behind it.
+/// Where an entry is going, as a chip that opens a slot picker.
 ///
-/// Answers with the left edge it claimed, which is where the name before it must stop.
+/// Returns the left edge of the space it took, which is where the name before it must
+/// stop.
 #[allow(clippy::too_many_arguments)]
 fn destination(
     ui: &mut egui::Ui,
@@ -960,7 +956,7 @@ fn destination(
         ),
         egui::vec2(galley.size().x + 2.0 * CHIP_PAD, CHIP),
     );
-    // Flat: nothing under the address until the pointer is on it.
+    // Flat: no fill behind the address until the pointer is over it.
     let chip = ui.interact(
         box_,
         ui.id().with(("destination", held.id)),
@@ -979,8 +975,8 @@ fn destination(
         egui::Color32::PLACEHOLDER,
     );
     let chip = chip.on_hover_text("change where this goes");
-    // ⚠️ A menu shuts on any click, and switching banks is a click. The picker stays up
-    // until a cell is taken or the pointer lands outside it.
+    // ⚠️ A menu closes on any click, and switching banks is a click. The picker stays
+    // open until a cell is picked or a click lands outside it.
     egui::Popup::menu(&chip)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(crate::keyboard::grid_width(PICKER_COLUMNS) + ui.spacing().menu_margin.sum().x)
@@ -997,24 +993,23 @@ fn destination(
     box_.left() - GAP
 }
 
-/// How many cells across the picker lays a bank out. Wider than the map's own grid,
-/// which has a whole tab to fill and can afford the rows.
+/// Cells per row in the picker. Wider than the map's grid, which has a whole tab and
+/// room for more rows.
 const PICKER_COLUMNS: usize = 6;
 
-/// The ids the picker's own controls sense under.
+/// The base id of the picker's controls.
 ///
-/// ⚠️ Salted off the entry rather than off `ui.id()`: the picker is drawn inside a
-/// popup's `Ui`, which is not the one the row was drawn in, and two entries' pickers
-/// must not share a bank or a cell.
+/// ⚠️ Derived from the entry, not from `ui.id()`: the picker is drawn in a popup's `Ui`,
+/// not the row's, and two entries' pickers must not share a bank or a cell.
 fn salt(held: &Queued) -> egui::Id {
     egui::Id::new(("picker", held.class.to_raw(), held.id))
 }
 
-/// The picker behind the chip: one row of bank chips, then that bank's slots as the
-/// cells the keyboard's map paints. The slot a click asked for, if it asked for one.
+/// The picker behind the chip: a row of bank chips, then the shown bank's slots drawn as
+/// the keyboard map's cells. Returns the slot a click picked, if any.
 ///
-/// The bank on show is this popup's own state, so opening the picker again lands where
-/// it was left and every entry keeps its own.
+/// The bank shown is stored per entry, so reopening the picker shows the bank it was
+/// left on.
 fn picker(
     ui: &mut egui::Ui,
     held: &Queued,
@@ -1068,7 +1063,7 @@ fn picker(
             at == held.at,
             response.hovered(),
         );
-        // A cell shows a name cut to 42 px, so the hover is the whole of it.
+        // A cell truncates the name to 42 px, so the hover text shows it in full.
         let occupant = slots[index].as_ref().map(|info| info.name.trim());
         let response = response.on_hover_text(match occupant {
             Some(name) if !name.is_empty() => format!("{} — {name}", place(held.class, at)),
@@ -1081,10 +1076,10 @@ fn picker(
     picked
 }
 
-/// One bank of the picker: its number, lit while it is the bank on show.
+/// One bank chip in the picker: the bank number, highlighted while that bank is shown.
 ///
-/// Painted rather than laid out as a button, so it senses under an id of its own and
-/// wears the flat chip the row's destination wears.
+/// Painted by hand, so it senses under its own id and looks like the row's flat
+/// destination chip.
 fn bank_chip(ui: &mut egui::Ui, id: egui::Id, bank: u32, on: bool) -> egui::Response {
     let visuals = ui.visuals().clone();
     let ink = match on {
@@ -1118,9 +1113,9 @@ fn bank_chip(ui: &mut egui::Ui, id: egui::Id, bank: u32, on: bool) -> egui::Resp
     response
 }
 
-/// A grid inset from the left edge by the room its rows keep at the right, so the head
-/// and every row under it start where a row of the tree does. Taken here rather than in
-/// each cell, so the whole grid moves together.
+/// A child `Ui` inset from the left by the padding rows keep at the right, so the head
+/// and rows line up with a row of the tree. The inset is taken once here so the whole
+/// grid moves together.
 fn inset(ui: &mut egui::Ui) -> egui::Ui {
     let room = ui.available_rect_before_wrap();
     ui.new_child(
@@ -1131,7 +1126,7 @@ fn inset(ui: &mut egui::Ui) -> egui::Ui {
 }
 
 /// The diff's four columns: the field, what is here, the sign between them, and what
-/// the instrument holds. Every one of them may shrink to nothing.
+/// the instrument holds. Any of them may shrink to nothing.
 const DIFF_TRACKS: [Track; 4] = [
     Track::Share(1.4),
     Track::Share(1.0),
@@ -1139,7 +1134,7 @@ const DIFF_TRACKS: [Track; 4] = [
     Track::Share(1.0),
 ];
 
-/// 20 px of column heads over the diff.
+/// The row of column heads over the diff.
 fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let visuals = ui.visuals().clone();
@@ -1192,7 +1187,7 @@ fn field_row(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], field: &Field
     let _ = response.on_hover_text(format!("{name}: {} → {}", field.there, field.here));
 }
 
-/// The one row a diff that is not a field list comes to.
+/// The single row for a diff that is not a field list.
 fn one_row(
     ui: &mut egui::Ui,
     width: f32,
@@ -1212,7 +1207,7 @@ fn one_row(
     );
 }
 
-/// A cell of a row, from the track it sits in.
+/// The rect of a row's cell in one track.
 fn box_of(rect: egui::Rect, track: &Range<f32>) -> egui::Rect {
     egui::Rect::from_min_max(
         egui::pos2(rect.left() + track.start, rect.top()),
@@ -1245,7 +1240,7 @@ fn sign(ui: &egui::Ui, box_: egui::Rect, glyph: Glyph, tint: egui::Color32) {
     );
 }
 
-/// The glyph that says what this write runs into, and the sentence behind it.
+/// The state glyph of an item, its tint, and the sentence explaining it.
 fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
     if let Some(why) = &held.failure {
         return (Glyph::CircleAlert, bad(visuals), why.clone());
@@ -1268,7 +1263,8 @@ fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, Strin
         ),
         (_, Occupancy::Held(_)) => (Glyph::Replace, warn(visuals), said()),
         (_, Occupancy::Vacant) => (Glyph::CircleCheck, good(visuals), said()),
-        // Nothing has read it and no read is out: a write, and no saying into what.
+        // Unread, and no read is out: the write goes ahead without knowing what it
+        // replaces.
         (_, Occupancy::Unknown) => (Glyph::CircleDot, visuals.weak_text_color(), said()),
     }
 }
@@ -1323,7 +1319,7 @@ mod tests {
         (device, Tabs::default())
     }
 
-    /// The one command the enqueue asked the instrument for.
+    /// The first command queued for the instrument, which must be a read.
     fn asked(device: &Device) -> (ObjectClass, Location, Purpose) {
         match device.queued().front().expect("a read was queued") {
             DeviceCmd::Get { class, at, why, .. } => (*class, *at, *why),
@@ -1339,12 +1335,11 @@ mod tests {
         workspace.replace_bytes(id, edited, log);
     }
 
-    /// Identical means the instrument holds these very bytes. A registry covers what it
-    /// declares, so a body whose every declared field still reads the same can carry a
-    /// bit this app knows nothing about — and a write that would put it right must not
-    /// be called unnecessary.
+    /// Identical means the instrument holds the same bytes. A body whose declared fields
+    /// all match can still differ in a bit no field claims, and a write that would fix it
+    /// is not unnecessary.
     #[test]
-    fn a_body_byte_no_field_claims_still_parts_the_two() {
+    fn a_body_byte_no_field_claims_still_makes_the_bodies_differ() {
         let (_, _, bytes) = bench();
         let read = nord_usb::envelope::unwrap(&bytes).expect("a container");
         let (tag, at, version) = (
@@ -1353,8 +1348,8 @@ mod tests {
             read.header.version,
         );
         let body = read.body.0;
-        // The occupant as a read of the slot delivers it: the wire body in a container
-        // of this app's own making.
+        // The occupant as a slot read delivers it: the wire body in a container this app
+        // wraps.
         let flipped = |offset: usize| {
             let mut other = body.clone();
             other[offset] ^= 1;
@@ -1368,8 +1363,8 @@ mod tests {
             );
         }
 
-        // The one this exists for: a body that still decodes, whose every registered
-        // field still reads the same, and which is not the body this asset holds.
+        // A body that still decodes with every registered field unchanged, but differs
+        // from this asset's body.
         let unclaimed = (0..body.len()).find(|offset| {
             let other = flipped(*offset);
             apart(&bytes, &other).is_none()
@@ -1433,7 +1428,7 @@ mod tests {
         };
         assert_eq!(ids(&workspace, &device, &queue), Vec::<u64>::new());
 
-        // Edited and saved: the slot no longer holds what this is.
+        // Edited and saved: the slot no longer holds these bytes.
         for id in [saved, queued] {
             edit(&mut workspace, id, &mut log);
             workspace.mark_saved(id);
@@ -1546,7 +1541,7 @@ mod tests {
         );
         assert_eq!(queue.ids(), vec![second, first]);
 
-        // And putting it where it already is leaves the one entry it has alone.
+        // Queueing it for the slot it already waits for leaves its entry alone.
         let landed = queue.put(
             workspace.get(first).unwrap(),
             class,
@@ -1593,8 +1588,8 @@ mod tests {
         assert!(queue.entry(ids[2]).unwrap().failure.is_none());
     }
 
-    /// An asset the queue holds is owed to the instrument; that is the whole of what
-    /// `pending` meant, and it stops being owed when the write lands.
+    /// An asset is owed to the instrument while the queue holds it, and stops being owed
+    /// when the write lands.
     #[test]
     fn what_is_owed_is_what_the_queue_holds() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1622,18 +1617,18 @@ mod tests {
         assert!(!queue.holds(id) && queue.is_empty());
     }
 
-    /// The diff between two bodies with a registry is the fields they do not agree on,
-    /// and nothing else — the pair here is one program and the same program with one
-    /// field set through the registry.
+    /// The diff between two bodies with registries lists only the fields that differ.
+    /// The pair here is a program and the same program with one field set through the
+    /// registry.
     #[test]
-    fn a_registry_diff_lists_exactly_the_fields_that_differ() {
+    fn a_registry_diff_lists_only_the_fields_that_differ() {
         let (_workspace, _log, here) = bench();
         let (_, there) = crate::fields::apply(&here, &[("center_panel.gain".into(), "96".into())])
             .expect("the registry takes the set");
         assert_ne!(here, there);
 
         let Diff::Fields(fields) = compare(&here, &there) else {
-            panic!("two programs are two registries");
+            panic!("both programs decode into registries");
         };
         let paths: Vec<&str> = fields.iter().map(|field| field.path.as_str()).collect();
         assert_eq!(paths, vec!["center_panel.gain"]);
@@ -1641,7 +1636,6 @@ mod tests {
         assert_ne!(field.here, field.there);
         assert_eq!(field.there, "96");
 
-        // The same bytes on both sides differ in nothing at all.
         assert!(matches!(compare(&here, &here), Diff::Identical));
     }
 
@@ -1666,8 +1660,8 @@ mod tests {
         assert_eq!(first_at, 4);
     }
 
-    /// Four things waiting, two of them onto occupied slots: a slot whose occupant turns
-    /// out to be these very bytes is still a slot being written over.
+    /// Four entries, two for occupied slots. A slot whose occupant turns out to be the
+    /// same bytes still counts as a replacement.
     #[test]
     fn what_is_waiting_counts_its_replacements_whatever_the_bytes_turn_out_to_be() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1684,7 +1678,7 @@ mod tests {
         let mut ids = Vec::new();
         for slot in 0..4 {
             let held = match slot {
-                // The one that turns out to hold exactly what is waiting for it.
+                // Slot 1 turns out to hold the same bytes as its entry.
                 1 => bytes.clone(),
                 _ => edited.clone(),
             };
@@ -1726,14 +1720,12 @@ mod tests {
             vec!["center_panel.gain"]
         );
         assert!(matches!(queue.entry(ids[1]).unwrap().diff, Diff::Identical));
-        // Still a replacement, and still counted as one: identical bytes are written
-        // over identical bytes.
+        // Still counted as a replacement: the write goes ahead over identical bytes.
         assert_eq!((queue.len(), replacing(&queue)), (4, 2));
     }
 
-    /// The diff belongs to the asset, not to the moment it was queued. An edit made
-    /// while an entry waits is measured against the occupant already read, so the fields
-    /// change under it and the instrument is not asked about that slot again.
+    /// An edit made while an entry waits is diffed against the occupant already read,
+    /// without asking the instrument about that slot again.
     #[test]
     fn an_edit_under_a_waiting_entry_is_diffed_again_without_a_second_read() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1773,14 +1765,14 @@ mod tests {
         );
         assert_eq!(device.queued().len(), reads, "the slot was not read again");
 
-        // Nothing has moved since, so a second pass changes nothing and asks nothing.
+        // With no further edit, a second pass changes nothing and asks nothing.
         follow(&workspace, &mut device, &mut queue, &mut log);
         assert!(matches!(queue.entry(id).unwrap().diff, Diff::Fields(_)));
         assert_eq!(device.queued().len(), reads);
     }
 
-    /// An entry the checksums settled without a read has no occupant to measure a later
-    /// edit against, so that edit is what makes the read worth asking for.
+    /// An entry the checksums settled without a read has no occupant bytes to diff a
+    /// later edit against, so that edit asks for the read, once.
     #[test]
     fn an_edit_under_an_entry_settled_by_checksum_asks_for_the_read_once() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1817,10 +1809,10 @@ mod tests {
         assert_eq!(device.queued().len(), 1, "asked for once, not once a frame");
     }
 
-    /// ⚠️ A type-0 file — every Electro 5 factory program, and everything Nord Sound
-    /// Manager exports from one — stores no body checksum, so an entry for one settles
-    /// against the slot it already matches only because that checksum is hashed from the
-    /// body rather than read out of the header.
+    /// ⚠️ A type-0 file stores no body checksum. Every Electro 5 factory program is one,
+    /// as is everything Nord Sound Manager exports from one. An entry for such a file
+    /// settles against a slot it matches only because the checksum is computed from the
+    /// body, not read from the header.
     #[test]
     fn a_type_0_entry_settles_against_the_slot_reporting_its_checksum_without_a_read() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1850,10 +1842,9 @@ mod tests {
         assert!(device.queued().is_empty(), "the checksums settled it");
     }
 
-    /// A plan says what it says. Asking for an asset to go where it is already going
-    /// changes nothing about the queue, so the instrument is not asked about that slot
-    /// again and the log does not say it twice — which is what a checked set holding an
-    /// asset already waiting comes to.
+    /// Queueing an asset for the slot it is already waiting for changes nothing, so the
+    /// instrument is not asked about the slot again and the log does not repeat itself.
+    /// Sending a checked set that includes an asset already waiting does this.
     #[test]
     fn queueing_an_asset_where_it_is_already_going_asks_and_says_nothing_further() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1888,9 +1879,8 @@ mod tests {
         );
     }
 
-    /// An entry waiting on a read is waiting on the answer already coming. Every edit
-    /// made under it before that answer lands wants the same bytes back, and asking for
-    /// them again is one more read of one slot for nothing.
+    /// Edits made while a compare read is out all need the same answer, so none of them
+    /// asks for the read again.
     #[test]
     fn edits_made_while_a_compare_read_is_out_do_not_ask_for_it_again() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1922,10 +1912,9 @@ mod tests {
         assert_eq!(device.queued().len(), 1, "the answer was already coming");
     }
 
-    /// ⚠️ The queue outlives an instrument and the reads out over it do not. An entry
-    /// still holding the answer it was waiting for would read its slot for the rest of
-    /// the session, and one holding what the last instrument's slot held would say this
-    /// instrument holds it.
+    /// ⚠️ The queue outlives a connection, but reads in flight do not. An entry still
+    /// marked as waiting would wait for the rest of the session, and one keeping the last
+    /// instrument's occupant would claim this instrument holds it.
     #[test]
     fn an_entry_waiting_on_a_read_when_the_instrument_went_away_is_asked_again() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1960,7 +1949,7 @@ mod tests {
         assert!(matches!(held.diff, Diff::Pending));
         assert!(
             held.replaces.occupant().is_none(),
-            "the last instrument's occupant is no claim about this one"
+            "the last instrument's occupant says nothing about this one"
         );
         assert_eq!(
             asked(&device),
@@ -1969,8 +1958,8 @@ mod tests {
         );
     }
 
-    /// A bank no walk has reached says nothing about its slots, so an entry onto one is
-    /// waiting on a read rather than claiming the slot is free.
+    /// A bank no walk has reached says nothing about its slots, so an entry for one waits
+    /// on a read and does not call the slot free.
     #[test]
     fn a_slot_in_an_unscanned_bank_is_read_before_it_is_called_free() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1995,8 +1984,8 @@ mod tests {
         assert_eq!(asked(&device), (class, at(6), Purpose::Compare));
     }
 
-    /// The read is the answer for a slot no walk had reached: empty makes it a free
-    /// slot, and bytes make it a replacement of what the read named.
+    /// For a slot no walk had reached, the read settles it: an empty read makes the slot
+    /// free, and bytes make the entry a replacement of what the read named.
     #[test]
     fn the_read_of_an_unscanned_slot_settles_what_the_entry_replaces() {
         let (mut workspace, mut log, bytes) = bench();
@@ -2059,9 +2048,9 @@ mod tests {
         assert_eq!((queue.len(), replacing(&queue)), (2, 1));
     }
 
-    /// The scan cache is keyed by the panel's bank number — one more than the wire's,
-    /// and the number [`DeviceEvent::BankScanned`] carries — so an entry onto a slot a
-    /// walk has read carries the name that walk found in it.
+    /// The scan cache is keyed by the panel's bank number, which is one more than the
+    /// wire's and is the number [`DeviceEvent::BankScanned`] carries. An entry for a slot a
+    /// walk has read carries the name the walk found.
     #[test]
     fn a_slot_a_walk_has_read_carries_the_name_it_found() {
         let (mut workspace, mut log, bytes) = bench();
@@ -2105,7 +2094,7 @@ mod tests {
         assert_eq!(asked(&device), (class, occupied, Purpose::Compare));
     }
 
-    /// A slot a walk read and found empty is free, and free needs no reading.
+    /// A slot a walk found empty is free and needs no compare read.
     #[test]
     fn a_scanned_empty_slot_is_free_and_asks_the_instrument_nothing() {
         let (mut workspace, mut log, bytes) = bench();
@@ -2132,9 +2121,9 @@ mod tests {
         assert!(device.queued().is_empty(), "nothing to ask about");
     }
 
-    /// Sending a waiting asset somewhere else moves its one entry rather than adding a
-    /// second: the new slot is read again, what that slot holds is what the entry now
-    /// replaces, and whatever was waiting for it stops.
+    /// Retargeting a waiting asset moves its entry without adding a second. The entry
+    /// then replaces what the new slot holds, and whatever was waiting for that slot is
+    /// dropped.
     #[test]
     fn retargeting_moves_the_entry_and_displaces_what_was_waiting_there() {
         let (mut workspace, mut log, bytes) = bench();
@@ -2176,10 +2165,10 @@ mod tests {
         assert_eq!(
             held.replaces.occupant().map(|held| held.name.as_str()),
             Some("Africa Split"),
-            "what the new slot holds is what it now replaces"
+            "the entry replaces what the new slot holds"
         );
 
-        // Asking where something goes does not put it in the queue.
+        // Retargeting an asset that is not waiting does not queue it.
         retarget(
             &workspace,
             &mut device,
@@ -2192,8 +2181,8 @@ mod tests {
         assert_eq!(queue.ids(), vec![first]);
     }
 
-    /// ⚠️ A menu shuts on any click, and switching banks is a click. Reaching the second
-    /// bank's slots means the picker survives the chip that got there.
+    /// ⚠️ A menu closes on any click, and switching banks is a click. The picker must stay
+    /// open after a bank chip is clicked.
     #[test]
     fn a_click_on_a_bank_chip_leaves_the_picker_open_on_that_bank() {
         let ctx = egui::Context::default();
@@ -2252,8 +2241,8 @@ mod tests {
                     });
             });
         };
-        // The popup lands where the chip is and settles over a frame or two, so
-        // nothing is clicked until its cells stop moving.
+        // The popup settles into place over a frame or two, so nothing is clicked until
+        // it stops moving.
         let settle = || {
             for _ in 0..3 {
                 draw(Vec::new());
@@ -2283,7 +2272,7 @@ mod tests {
         settle();
         assert!(
             egui::Popup::is_id_open(&ctx, chip_id.get().with("popup")),
-            "the picker stays up across a bank"
+            "the picker stays open after a bank chip is clicked"
         );
         assert!(
             rect_of(salt(held).with(("slot", 7_u32, 0_u32))).is_some(),
@@ -2291,11 +2280,11 @@ mod tests {
         );
     }
 
-    /// A click on one of the picker's cells is what re-targets an entry. The cell's own
-    /// rect comes from the frame before the click, so nothing here depends on where the
-    /// bank chips over it happened to land.
+    /// A click on a picker cell returns that slot. The cell's rect comes from the frame
+    /// before the click, so the test does not depend on where the bank chips above it
+    /// land.
     #[test]
-    fn a_click_on_the_pickers_cell_answers_with_that_slot() {
+    fn a_click_on_a_picker_cell_returns_that_slot() {
         let ctx = egui::Context::default();
         ctx.all_styles_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
@@ -2361,11 +2350,10 @@ mod tests {
         assert_eq!(draw(vec![press(true), press(false)]).0, Some(wanted));
     }
 
-    /// Paint the page headlessly, with each shape a diff can be in it. What this catches
-    /// is a layout that panics or an id that collides, neither of which a test on the
-    /// rules would see.
+    /// Paints the page headlessly with each kind of diff, to catch a layout that panics
+    /// or an id that collides.
     #[test]
-    fn the_dock_page_paints_every_shape_a_diff_comes_in() {
+    fn the_dock_page_paints_every_kind_of_diff() {
         let ctx = egui::Context::default();
         ctx.all_styles_mut(crate::app::metrics);
         let mut workspace = Workspace::new(ctx.clone());
@@ -2404,7 +2392,7 @@ mod tests {
                 at(slot),
             );
         }
-        // One waiting on its read, one with a field list, one onto a free slot.
+        // One waiting on its read, one with a field list, one for a free slot.
         queue.arrived(class, at(1), "Squabble B", &bytes, &workspace);
 
         for width in [430.0_f32, 900.0] {
@@ -2438,11 +2426,11 @@ mod tests {
             let overlap = tracks.windows(2).any(|two| two[1].start < two[0].end);
             assert!(!overlap, "{width}");
         }
-        // Wide enough for the design's own geometry, every column says something.
+        // At the design width, every column has room.
         assert!(laid(620.0)
             .iter()
             .all(|track| track.end - track.start > 1.0));
-        // And past the point where the fixed track alone fits, nothing is negative.
+        // Narrower than the fixed track alone, no track is negative.
         assert!(laid(4.0).iter().all(|track| track.end >= track.start));
     }
 }

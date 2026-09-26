@@ -1,23 +1,21 @@
 //! The Stage 2 program body (`.ns2p`, `.ns2l`): 521 bytes, every documented
 //! parameter placed.
 //!
-//! The program-wide globals were decoded first and by hand; everything else — the
-//! organ's B3, Vox and Farfisa drawbar banks, the piano, synth, extern and the
-//! effects chain — comes from the byte maps. They are
+//! The program-wide globals are decoded by hand. Everything else (the organ's B3, Vox
+//! and Farfisa drawbar banks, the piano, synth, extern and the effects chain) comes
+//! from the byte maps in
 //! [Chris55/nord-documentation](https://github.com/Chris55/nord-documentation), the
-//! public documentation this module's provenance marks name.
+//! public documentation this module's provenance comments refer to.
 //!
-//! ⚠️ Stage 2 files are **type-0** containers, where the Stage 3's are type-1. The
-//! byte maps number both in the type-1 layout; since type-0 differs only by
-//! omitting `0x18..0x2b`, the body is the same either way and a documented offset
-//! is `doc - 0x2c` in both.
+//! ⚠️ Stage 2 files are type-0 containers, and the Stage 3's are type-1. The byte maps
+//! number both in the type-1 layout. Type 0 differs only by omitting `0x18..0x2b`, so
+//! the body is the same either way and a documented offset is `doc - 0x2c` in both.
 //!
-//! The body is 23 bytes of globals and then two [`Slot`]s — the program's two
-//! complete setups — so the slot is declared once and placed twice. Registry paths
-//! follow: `slot_a.organ_volume`.
+//! The body is 23 bytes of globals followed by two [`Slot`]s, the program's two
+//! complete setups, so the slot is declared once and placed twice. Registry paths
+//! follow, as in `slot_a.organ_volume`.
 //!
-//! Values are raw except where the documentation enumerates them; see [the module
-//! docs](super) for what that ceiling is and why.
+//! Values are raw except where the documentation enumerates them.
 
 use super::slot::Slot;
 use crate::cbin::{self, Cbin};
@@ -28,18 +26,18 @@ use crate::error::Error;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns2p";
-/// Schema versions this build's field offsets have been validated against. The
-/// corpus factory banks hold 6 and 7; the ns3-program-viewer accepts 2 through 7
-/// with the same offsets.
+/// Schema versions whose field offsets have been validated. The factory banks hold 6
+/// and 7; the ns3-program-viewer accepts 2 through 7 with the same offsets.
 pub const KNOWN_VERSIONS: &[u32] = &[2, 3, 4, 5, 6, 7];
 pub const BODY_LEN: usize = 521;
 
-/// The program-wide globals at the head of the body. Bits are MSB-first from body
-/// byte 0 (`0x2c` in a type-1 file), so byte 0x02 bit 5 is bit 18.
+/// The 521-byte program body: the program-wide globals, then Slot A and Slot B. Bits
+/// are MSB-first from body byte 0 (`0x2c` in a type-1 file), so byte 0x02 bit 5 is
+/// bit 18.
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
-/// re-encode verbatim. Placements from the community byte maps; values raw except
+/// re-encode. Placements come from the community byte maps, and values are raw except
 /// where those maps enumerate them. Inferred from specimens; not confirmed on
 /// hardware.
 #[nord_bits_derive::bitbody(521)]
@@ -111,12 +109,12 @@ pub struct Program {
     #[bits(169..=169)]
     pub rotary_speaker_speed_ctrl_pedal: MorphOf<1>,
 
-    /// Slot A — the first of the program's two complete setups.
+    /// Slot A, the first of the program's two complete setups.
     #[at(23..272)]
     pub slot_a: Slot,
 
-    /// Slot B. Same type: the two are the same layout, and neither is
-    /// a copy of the other — `slot_selection` says which sounds.
+    /// Slot B, with the same layout as Slot A and independent values.
+    /// `slot_selection` says which sounds.
     #[at(272..521)]
     pub slot_b: Slot,
 }
@@ -129,8 +127,8 @@ impl Program {
 }
 
 /// The `(bank, location)` pair from the header, uninterpreted: bank 0..=3,
-/// location 0..=99 on current exports. Not validated — see the Stage 3's note on
-/// out-of-range locations in old files.
+/// location 0..=99 on current exports. Not validated; see
+/// [`crate::formats::ns3::program::location`] on out-of-range locations in old files.
 pub fn location(file: &Cbin<Program>) -> (u16, u16) {
     file.header.slot()
 }
@@ -143,11 +141,11 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error
 
 /// The Stage 2's octave shift: a nibble biased by 7.
 ///
-/// **Corpus:** over the factory banks the slot holds 5..=10 with a decisive mode at 7,
-/// which is where an untransposed program has to sit. The Stage 3 centres on 6 and the
-/// Stage 4 stores two's complement, so each model names its own. Inferred from specimens;
-/// not confirmed on hardware.
+/// In the factory banks the slot holds 5..=10, with a clear mode at 7, where an
+/// untransposed program must sit. The Stage 3 centers on 6 and the Stage 4 stores two's
+/// complement, so each model names its own. Inferred from specimens; not confirmed on
+/// hardware.
 ///
-/// Total over the nibble: the widest encoding is `8 + 7 = 15`, so no stored pattern is
+/// Total over the nibble: the widest value is `8 + 7 = 15`, so no stored pattern is
 /// refused.
 pub type OctaveShift = crate::components::OctaveShift<7, -7, 8>;

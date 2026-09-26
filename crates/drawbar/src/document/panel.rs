@@ -1,10 +1,10 @@
-//! What is known about the piano a program plays, which is the one thing in a field
-//! document that the file alone cannot answer.
+//! What is known about the piano a program plays: the one fact in a field document
+//! that the file alone cannot supply.
 //!
-//! The division of a body into sections is `nord_format::panel`'s and the cells are
-//! [`super::field`]'s. This is the catalogue beside them: an id the file stores, the name
-//! only an attached instrument has for it, and the Model dial as that instrument's own
-//! list of pianos.
+//! `nord_format::panel` divides a body into sections and [`super::field`] draws the
+//! cells. This module is the catalog beside them: the id the file stores, the name only
+//! an attached instrument has for it, and the Model dial as that instrument's list of
+//! pianos.
 
 use eframe::egui;
 use nord_format::fields::{ControlKind, Field, Library};
@@ -17,10 +17,10 @@ pub const PIANO_MODEL: &str = "piano_panel.piano_model";
 /// What is known about the piano a program plays, and what it would take to know more.
 ///
 /// ⚠️ The file stores an **id** for the piano and, separately, the panel's category and
-/// Model dial position. The id is the identity; the dial position is a coordinate whose
-/// meaning lives in the instrument's own library. Only the id can be resolved to a name,
-/// and only the instrument can resolve it — so a name shown here always came off the
-/// wire, never out of the file.
+/// Model dial position. The id identifies the piano; the dial position means something
+/// only in the instrument's own library. Only the id resolves to a name, and only the
+/// instrument can resolve it, so a name shown here always comes from the instrument and
+/// never from the file.
 pub struct PianoLookup {
     /// The id the file names, or `None` where it references no piano at all.
     pub id: Option<u32>,
@@ -36,7 +36,7 @@ pub struct PianoLookup {
     /// Empty when the scan cannot answer, and the Model dial stays numeric.
     pub models: Vec<(u32, String)>,
     /// The scan's name for the current position, where it disagrees with the
-    /// instrument's dependency reply — the signal that the position mapping is wrong.
+    /// instrument's dependency reply. A disagreement means the position mapping is wrong.
     pub scan_disagrees: Option<String>,
 }
 
@@ -47,10 +47,10 @@ impl PianoLookup {
         self.can_ask && self.id.is_some() && self.name.is_none()
     }
 
-    /// The catalogue's name for a library reference, where this lookup resolves it.
+    /// The catalog's name for a library reference, where this lookup resolves it.
     ///
-    /// Only the piano library has a catalogue here, and only for the id the instrument
-    /// has named — every other reference shows the id the file stores.
+    /// Only the piano library has a catalog here, and only for the id the instrument has
+    /// named. Every other reference shows the id the file stores.
     pub(super) fn names(&self, field: &Field) -> Option<&str> {
         if field.spec.control != ControlKind::Reference(Library::Piano) {
             return None;
@@ -71,8 +71,7 @@ impl PianoLookup {
         let shown = current
             .and_then(|n| self.models.iter().find(|(position, _)| *position == n))
             .map(|(position, name)| format!("{position} — {name}"))
-            // A dial position past the scanned list is shown as the number it is,
-            // not silently snapped to a piano it does not name.
+            // A dial position past the scanned list shows its number.
             .unwrap_or_else(|| field.value.clone());
         controls::named_cell(ui, &field.path, 230.0, |ui| {
             egui::ComboBox::from_id_salt("piano-model-names")
@@ -94,8 +93,8 @@ impl PianoLookup {
     }
 
     /// ⚠️ The dependency reply is the instrument's own answer about the piano this
-    /// program plays; the model list is the scan's reading of a dial position. Where
-    /// the two disagree the position mapping is wrong, and the reader has to know it.
+    /// program plays; the model list is the scan's reading of a dial position. Where the
+    /// two disagree, the position mapping is wrong and the reader has to be told.
     pub(super) fn ui(&mut self, ui: &mut egui::Ui) {
         if self.refused && self.wants_a_name() {
             ui.horizontal_wrapped(|ui| {
@@ -117,7 +116,7 @@ impl PianoLookup {
             crate::app::warn(ui.visuals()),
             format!(
                 "the model list calls this position {scanned:?}, but the instrument's \
-                 dependency reply names the piano below — trust the instrument",
+                 dependency reply names the piano below. Trust the instrument.",
             ),
         );
     }

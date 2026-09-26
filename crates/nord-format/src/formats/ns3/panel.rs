@@ -1,9 +1,9 @@
-//! One Nord Stage 3 panel: a complete organ / piano / synth / extern /
-//! effects setup, 263 bytes of it.
+//! One Nord Stage 3 panel: a complete organ, piano, synth, extern and effects setup in
+//! 263 bytes.
 //!
-//! A program holds two of these — Panel A and Panel B — and the Panel buttons
-//! switch between them or layer both. They are the same layout, so this is one
-//! type placed twice; see [`super::program::Program`].
+//! A program holds two of these, Panel A and Panel B, and the Panel buttons switch
+//! between them or layer both. They share one layout, so this type is placed twice;
+//! see [`super::program::Program`].
 //!
 //! The Stage 3 synth preset (`ns3y`) is this panel's synth block under its own
 //! tag, at panel byte 0x39.

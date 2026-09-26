@@ -1,7 +1,7 @@
 # source: synthetic
 # note: 0x12 is a session an earlier run left open. The bare SESSION_CLOSE clears
-#   it and the open is retried once - a device that refuses the retry too is
-#   genuinely broken, and the caller is owed that error rather than a loop.
+#   it and the open is retried once. A device that refuses the retry too is broken,
+#   and the caller gets that error instead of a loop.
 # intent: program status
 # expect: err device-status 0x12
 O 0000001200000006000000010000000006a1

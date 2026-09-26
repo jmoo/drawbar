@@ -24,18 +24,18 @@ nord program info 7:4                   # size, format, name, checksum
 nord program deps 7:4                   # the piano and sample it uses, by name
 ```
 
-The same verbs work on `setlist`, `sample` and `piano`. `live` and `settings`
-take `get`, `info` and `edit`.
+The same verbs work on `setlist`, `sample` and `piano`. `live` takes `get`,
+`info`, `deps` and `edit`, and `settings` takes `get`, `info` and `edit`.
 
 ## Before anything changes
 
 A command that changes the instrument reads the slot first, says what it is
-about to do, and stops:
+about to do, and asks:
 
 ```
 $ nord program duplicate 7:2 7:3
 duplicating "Africa Split" from bank 7 slot 2 to bank 7 slot 3 — OVERWRITING "Squabble B"
-error: refusing to proceed without --yes
+proceed? [y/N]
 ```
 
 `move` reports a swap rather than an overwrite, because the instrument exchanges
@@ -43,7 +43,9 @@ the two slots and nothing is lost. It also lists the set lists that point at the
 program, since the instrument updates them to follow it. `put` names the slot
 after the file.
 
-`--yes` skips the question. There is no `--force`, and nothing skips the read.
+`--yes` skips the question. Without a terminal to ask on, the command stops
+with `refusing to proceed without --yes`. There is no `--force`, and nothing
+skips the read.
 
 ## What a write does
 

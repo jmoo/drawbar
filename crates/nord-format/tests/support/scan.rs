@@ -1,11 +1,11 @@
 //! Walking a specimen tree: every file the reader recognizes, wherever it sits,
-//! and every oracle sidecar beside one. Nothing here knows how a tree is laid
-//! out — a specimen joins by being readable, an oracle by existing.
+//! and every oracle sidecar beside one. Nothing here depends on the tree's
+//! layout: a file is a specimen if the reader recognizes it, and a sidecar
+//! applies if it exists.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy, and each must also include
-//! `support/sidecar.rs` as `sidecar`, which [`sampled`] reads the oracle
-//! convention from.
+//! ⚠️ Not a test target. Each test target that includes this module compiles its
+//! own copy, and must also include `support/sidecar.rs` as `sidecar`, which
+//! [`sampled`] uses to find oracle sidecars.
 #![allow(dead_code)]
 
 use nord_format::formats::nsmp;
@@ -24,9 +24,8 @@ pub fn root() -> PathBuf {
         .expect("set NORD_CORPUS_ROOT to a nord-corpus checkout for --features corpus")
 }
 
-/// Is this a file the reader takes? Decided by the leading bytes, the way
-/// `from_stream` decides. `.skip.` in the name is the corpus's marker for a
-/// file left out on purpose.
+/// Whether the reader takes this file, decided by its leading bytes as
+/// `from_stream` decides. `.skip.` in the name marks a corpus file to leave out.
 pub fn wanted(path: &Path) -> bool {
     let name = path.file_name().unwrap().to_string_lossy();
     if name.contains(".skip.") || name.ends_with(".oracle.json") {
@@ -46,7 +45,7 @@ pub fn wanted(path: &Path) -> bool {
     )
 }
 
-/// A CBIN file's tag and header generation — the shape its registry reads through.
+/// A CBIN file's tag and header generation.
 pub type Shape = (Vec<u8>, u8);
 
 /// A CBIN file's [`Shape`]. `None` for anything else.
@@ -60,12 +59,13 @@ pub fn shape(path: &Path) -> Option<Shape> {
         .then(|| (head[8..12].to_vec(), head[4]))
 }
 
-/// Is this specimen one of the sample the per-field mutation checks run on — every
-/// specimen with an oracle sidecar, plus the first of each container shape? `seen`
-/// carries the shapes already taken, so a caller sweeping a tree gets one of each.
+/// Whether the per-field mutation check runs on this specimen. It runs on every
+/// specimen with an oracle sidecar, every file that is not CBIN, and the first
+/// CBIN file of each [`Shape`]. `seen` holds the shapes already taken, so a sweep
+/// of a tree takes one of each.
 ///
-/// The check is a property of the code path; what more specimens add is diverse
-/// baselines, which those already are.
+/// The check exercises code paths, so more specimens would only add baselines,
+/// and this sample already varies them.
 pub fn sampled(path: &Path, seen: &mut BTreeSet<Shape>) -> bool {
     crate::sidecar::sidecar_of(path).exists() || shape(path).is_none_or(|s| seen.insert(s))
 }
@@ -75,7 +75,8 @@ pub fn unwritten(body: &[u8]) -> bool {
     !body.is_empty() && body.iter().all(|&byte| byte == 0xff)
 }
 
-/// Every file under `root` that is not a dotfile, in directory order.
+/// Every file under `root`, skipping dotfiles and dot directories, in directory
+/// order.
 fn visit(root: &Path, each: &mut impl FnMut(PathBuf)) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -128,10 +129,9 @@ pub struct Tree {
     pub unparsed: Vec<(PathBuf, String)>,
 }
 
-/// Every specimen under `root`, read and parsed. A file that fails to parse
-/// lands in `unparsed` rather than ending the run: the sweep in `tests/corpus`
-/// is where a parse failure is a failing trial, named. An empty tree is still
-/// fatal — that is a broken `root`, not a broken specimen.
+/// Every specimen under `root`, read and parsed. A file that fails to parse goes
+/// to `unparsed` and the run continues; the sweep in `tests/corpus` reports each
+/// one as a failing trial. An empty tree panics, because it means `root` is wrong.
 pub fn read_tree(root: &Path) -> Tree {
     let (paths, _) = walk(root);
     assert!(!paths.is_empty(), "no specimen under {}", root.display());
@@ -153,14 +153,13 @@ pub fn read_tree(root: &Path) -> Tree {
     tree
 }
 
-/// The specimens under `root`, with anything that did not parse named on
-/// stderr. The suites that call this run on what parsed; the sweep is what
-/// fails on what did not.
+/// The specimens under `root` that parsed. Each file that did not parse is named
+/// on stderr; the sweep in `tests/corpus` fails on it.
 fn parsed(root: &Path) -> Vec<Specimen> {
     let tree = read_tree(root);
     if !tree.unparsed.is_empty() {
-        // ⚠️ libtest captures the print macros per test, so a direct write is
-        // what reaches the terminal when the suite goes on to pass.
+        // ⚠️ libtest captures the print macros, so only a direct write reaches the
+        // terminal when the suite passes.
         use std::io::Write;
         let mut err = std::io::stderr().lock();
         let _ = writeln!(
@@ -184,15 +183,15 @@ pub fn corpus() -> &'static [Specimen] {
     CORPUS.get_or_init(|| parsed(&root()))
 }
 
-/// The committed fixtures, the tree that is there in any checkout, parsed once
-/// per test binary.
+/// The committed fixtures, present in every checkout, parsed once per test
+/// binary.
 pub fn fixtures() -> &'static [Specimen] {
     static FIXTURES: OnceLock<Vec<Specimen>> = OnceLock::new();
     FIXTURES
         .get_or_init(|| parsed(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")))
 }
 
-/// The one specimen with this file name.
+/// The corpus specimen with this file name. Panics unless exactly one matches.
 pub fn named(name: &str) -> &'static Specimen {
     let mut hits = corpus()
         .iter()
@@ -204,8 +203,9 @@ pub fn named(name: &str) -> &'static Specimen {
     found
 }
 
-/// The one corpus file with this name that [`wanted`] leaves out — the `.skip.`
-/// marker. Found by name, so a test naming one pins no directory in the tree.
+/// The corpus file with this name, including one that [`wanted`] leaves out for
+/// its `.skip.` marker. Found by name, so a test does not depend on the tree's
+/// layout.
 pub fn named_skipped(name: &str) -> PathBuf {
     let mut hits = Vec::new();
     visit(&root(), &mut |path| {

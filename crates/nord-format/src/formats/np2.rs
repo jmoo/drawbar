@@ -1,4 +1,4 @@
-//! Nord Piano 2 (`.np2p`, `.np2l`, `.np2s`) — container-verified, bodies unmapped.
+//! Nord Piano 2 (`.np2p`, `.np2l`, `.np2s`): container-verified, bodies unmapped.
 
 use super::raw::raw_format;
 
@@ -9,7 +9,7 @@ raw_format!(
     44
 );
 raw_format!(
-    /// Live slots (`.np2l`) — same length as a program.
+    /// Live slots (`.np2l`), the same length as a program.
     live,
     "np2l",
     44

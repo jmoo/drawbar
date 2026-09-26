@@ -14,23 +14,22 @@
 //! The cutoff `B` sits 4.29 % above the field rate's Nyquist. The window is `1/I₀(β)`
 //! at its edge, not zero, so `d = −15` (phase 0, `m = −15`) carries a real tap and
 //! `d = +15` does not. Per-phase DC gain is the ideal kernel's, within `1e-4` of
-//! unity, with no per-phase normalisation.
+//! unity, with no per-phase normalization.
 //!
 //! The arithmetic is single precision up to the sum. The table holds `h` rounded to
-//! `f32`; a 16-bit sample enters as the `f32` product of its value and `32767/32768`
-//! — the source's own unit as a fraction of full scale, a depth term rather than a
-//! kernel gain, since the instrument quantises in the source's units; each tap's
-//! product is an `f32`; the products are summed in `f64` and truncated toward zero
-//! once. A few taps are stored off the closed form and are listed by value in
-//! `MEASURED`. Where a tap is known only to within an `f32` rounding, a sum landing
-//! within that of a quantiser step can still store one count off the instrument's.
+//! `f32`. A 16-bit sample enters as the `f32` product of its value and `32767/32768`,
+//! the source's unit as a fraction of full scale. That factor is a depth term, not a
+//! kernel gain, because the instrument quantizes in the source's units. Each tap's
+//! product is an `f32`, and the products are summed in `f64` and truncated toward zero
+//! once. A few taps differ from the closed form and are listed by value in `MEASURED`.
+//! Where a tap is known only to within an `f32` rounding, a sum that close to a
+//! quantizer step can still store one count off the instrument's.
 //!
-//! The ratio is not baked into the bank: [`Kernel`] runs the same shape at another
-//! one, which is what a source at a rate other than
-//! [`SOURCE_RATE`](super::codec::SOURCE_RATE) needs. What moves with the ratio is the
-//! cutoff — it keeps the narrower of the two Nyquists, so a source faster than the
-//! target is band-limited to the target's and nothing folds back. At the measured
-//! ratio that is `B` to the bit, and the bank is the measured one.
+//! [`Kernel`] runs the same shape at another ratio, for a source at a rate other than
+//! [`SOURCE_RATE`](super::codec::SOURCE_RATE). The cutoff moves with the ratio and
+//! keeps the narrower of the two Nyquists, so a source faster than the target is
+//! band-limited to the target's and nothing folds back. At the measured ratio the
+//! cutoff is exactly `B` and the bank is the measured one.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
@@ -60,7 +59,7 @@ const BETA: f64 = 8.0;
 const DEPTH_16: f32 = 32767.0 / 32768.0;
 
 /// Taps whose stored value is not `h` rounded to `f32`, as `(phase, tap, value)`. The
-/// values are measured, not derived; each lies within `2e-7` of the closed form.
+/// values are measured; each lies within `2e-7` of the closed form.
 const MEASURED: [(usize, usize, f32); 88] = [
     (1, 16, 0.15957576),
     (2, 19, -0.050585914),
@@ -193,7 +192,7 @@ fn h_at(d: f64, b: f64) -> f64 {
 /// the same 4.29 % the measured bank carries. A faster source is cut at the field
 /// rate's Nyquist so that nothing folds back; a slower one keeps its own band.
 ///
-/// Exactly [`B`] at the measured ratio, however the caller spells it.
+/// Exactly [`B`] at the measured ratio, in any equivalent fraction.
 fn cutoff(num: u32, den: u32) -> f64 {
     let keep = f64::from(num.min(den)) / f64::from(num);
     let measured = f64::from(PITCH_DEN) / f64::from(PITCH_NUM);
@@ -282,10 +281,9 @@ pub fn field(source: &[i16], at: usize) -> i64 {
 
 /// The tap bank at one lattice ratio, for a source at a rate of its own.
 ///
-/// The taps are the measured ones where the ratio is the measured ratio, whatever
-/// pair of rates spells it, and the same shape at that ratio's own [`cutoff`]
-/// otherwise. Build one per resampling run: a derived bank is computed on
-/// construction, not per field.
+/// At the measured ratio, in any equivalent fraction, the taps are the measured ones.
+/// At any other ratio they are the same shape at that ratio's own cutoff. Build one
+/// per resampling run: a derived bank is computed on construction, not per field.
 pub struct Kernel {
     num: u32,
     den: u32,
@@ -293,8 +291,8 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    /// The kernel for a lattice of `num` source samples per `den` fields — a source
-    /// rate and a target rate, in that order, or any ratio equal to theirs.
+    /// The kernel for a lattice of `num` source samples per `den` fields: a source
+    /// rate and a target rate, in that order, or any equal ratio.
     pub fn new(num: u32, den: u32) -> Kernel {
         let cutoff = cutoff(num, den);
         Kernel {
@@ -415,9 +413,6 @@ mod tests {
         assert_eq!(lattice_at(2, 3, 2), (3, 0));
     }
 
-    /// The cutoff follows the ratio, and at the measured ratio it is the measured
-    /// value to the bit — however the caller spells that ratio — so the lattice the
-    /// bank was measured on runs the measured taps and nothing else does.
     #[test]
     fn the_cutoff_keeps_the_narrower_nyquist() {
         assert_eq!(cutoff(PITCH_NUM, PITCH_DEN), B);
@@ -435,8 +430,6 @@ mod tests {
         assert!(Kernel::new(22_050, FIELD_RATE).bank.is_some());
     }
 
-    /// A field on the measured lattice is the same field whichever entry point asks
-    /// for it.
     #[test]
     fn the_kernel_at_the_measured_ratio_is_the_free_function() {
         let source: Vec<i16> = (0..512).map(|n| ((n * 37) % 9001 - 4500) as i16).collect();

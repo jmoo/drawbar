@@ -1,15 +1,15 @@
-//! The vendored Lucide glyphs, and the one way they are drawn.
+//! The vendored Lucide glyphs and how they are drawn.
 //!
-//! The art in `assets/icons` is Lucide 0.469.0 under the ISC licence beside it,
-//! rewritten once from `currentColor` to white so a tint multiplies to exactly the
-//! colour asked for. Sizes in use are 10-15 px; a row picks one and keeps it.
+//! The art in `assets/icons` is Lucide 0.469.0 under the ISC license beside it, with
+//! `currentColor` replaced by white so a tint multiplies to the requested color. Sizes in
+//! use are 10-15 px; a row uses one size throughout.
 
 use eframe::egui;
 
-/// The vendored art: one line per glyph, naming the variant and the file behind it.
+/// The vendored art: one line per glyph, naming the variant and its file.
 ///
-/// The enum, the sweep over every variant and the art each one loads all come off this
-/// one list, so a glyph cannot be vendored, named or swept without the other two.
+/// The enum, the list of every variant, and the art each one loads all come from this
+/// list, so a glyph cannot be vendored, named, or tested without the other two.
 macro_rules! glyphs {
     ($($name:ident => $file:literal,)*) => {
         /// One vendored glyph. An enum, so a name nobody vendored is a compile error.
@@ -19,7 +19,7 @@ macro_rules! glyphs {
         }
 
         impl Glyph {
-            /// Every variant, so a sweep can prove each one still has art behind it.
+            /// Every variant, so a test can prove each one still has art.
             pub const ALL: &'static [Glyph] = &[$(Glyph::$name,)*];
 
             fn source(self) -> egui::ImageSource<'static> {
@@ -115,8 +115,7 @@ pub fn icon(ui: &mut egui::Ui, glyph: Glyph, size: f32, tint: egui::Color32) -> 
 
 /// Draw `glyph` into `rect`, painted in `tint`, claiming no space of its own.
 ///
-/// For the strips that compute their own geometry; [`icon`] is the one to reach for
-/// inside a layout.
+/// For strips that compute their own geometry; inside a layout, use [`icon`].
 pub fn painted(ui: &egui::Ui, glyph: Glyph, rect: egui::Rect, tint: egui::Color32) {
     glyph.image().tint(tint).paint_at(ui, rect);
 }
@@ -134,7 +133,7 @@ mod tests {
     use super::*;
     use egui::load::{ImagePoll, SizeHint};
 
-    /// A 10 px glyph on a 2x panel — the smallest raster the shell asks for.
+    /// A 10 px glyph on a 2x display, the smallest raster the shell requests.
     const RASTER: u32 = 20;
 
     fn headless() -> (egui::Context, egui::RawInput) {
@@ -151,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn every_glyph_rasterises_to_something_that_can_be_seen() {
+    fn every_glyph_rasterizes_to_something_that_can_be_seen() {
         let (ctx, input) = headless();
         let _ = ctx.run(input, |ctx| {
             for glyph in Glyph::ALL.iter().copied() {
@@ -175,22 +174,21 @@ mod tests {
                 };
                 assert!(
                     image.pixels.iter().any(|pixel| pixel.a() > 0),
-                    "{glyph:?} rasterised to nothing"
+                    "{glyph:?} rasterized to nothing"
                 );
                 // Premultiplied white is (a, a, a, a). Lucide ships `currentColor`,
-                // which resvg rasterises black — and no tint can lift black.
+                // which resvg rasterizes as black, and no tint can lighten black.
                 assert!(
                     image.pixels.iter().all(|pixel| pixel.r() == pixel.a()
                         && pixel.g() == pixel.a()
                         && pixel.b() == pixel.a()),
-                    "{glyph:?} has ink a tint cannot colour"
+                    "{glyph:?} has pixels a tint cannot color"
                 );
             }
         });
     }
 
-    /// A glyph takes the box it was given, so a row of them lines up whatever art is in
-    /// them.
+    /// A row of glyphs lines up whatever their art.
     #[test]
     fn the_widget_takes_exactly_the_box_it_was_asked_for() {
         let (ctx, input) = headless();

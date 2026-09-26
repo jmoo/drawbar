@@ -20,6 +20,12 @@ With [Nix](https://nixos.org/download/) and flakes enabled:
 nix run github:jmoo/drawbar#drawbar
 ```
 
+Or build it with Cargo. On Linux this needs the ALSA headers and `pkg-config`.
+
+```sh
+cargo install drawbar
+```
+
 ## The `nord` command
 
 ```sh
@@ -27,7 +33,7 @@ cargo install nord-cli                           # installs `nord`
 nix run github:jmoo/drawbar#nord-cli -- --help   # or run it with Nix
 ```
 
-There are no packaged downloads yet. To build either from a source checkout, see
+There are no prebuilt downloads yet. To build either from a source checkout, see
 [Building from source](../reference/building.md).
 
 ## If drawbar does not load

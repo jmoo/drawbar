@@ -31,7 +31,7 @@ CRC-16 trailer:
 The CRC is CRC-16/CCITT-FALSE. A response carries the request's command plus
 one, with a status word inserted before the echoed arguments. Two things bite.
 Request codes are not reliably even, so direction is recorded at decode time
-rather than inferred. And operations are generic primitives parameterised by
+rather than inferred. And operations are generic primitives parameterized by
 object class (1 piano, 3 sample, 4 program, 5 set list, 6 live, 7 settings), so
 one `rename` or `move` command serves every class.
 

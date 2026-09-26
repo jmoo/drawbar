@@ -1,4 +1,4 @@
-//! Browser transport, via WebUSB (`navigator.usb`). Chrome/Edge only — Firefox and
+//! Browser transport via WebUSB (`navigator.usb`). Chrome and Edge only; Firefox and
 //! Safari have declined the spec.
 //!
 //! Confirmed on hardware.
@@ -7,14 +7,12 @@
 //! program and sample writes. Configuration selection, multi-chunk reads, and the
 //! zero-length-packet edge on `read` remain untested.
 //!
-//! # Enumeration is not here
+//! # Enumeration
 //!
-//! A page can only obtain a device from `navigator.usb.requestDevice()`, and that call
-//! requires transient user activation — a click, in the page, that no library function
-//! can manufacture. So device *selection* belongs to the page (`crates/drawbar`
-//! shows the whole ceremony) and this module starts from a [`UsbDevice`] the page
-//! already has. That is the same split [`super::usb`] documents, arrived at from the
-//! other direction: there, enumeration is host-specific; here, it is gesture-bound.
+//! A page can only obtain a device from `navigator.usb.requestDevice()`, which requires
+//! transient user activation: a click in the page. Device selection therefore belongs
+//! to the page (`crates/drawbar` shows how), and this module starts from a
+//! [`UsbDevice`] the page already has.
 
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::JsValue;
@@ -24,7 +22,7 @@ use web_sys::{UsbDevice, UsbDirection, UsbTransferStatus};
 use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::error::{Error, Result};
 
-/// WebUSB addresses an endpoint by its *number*, without the direction bit that a
+/// WebUSB addresses an endpoint by its number, without the direction bit that a
 /// descriptor address carries: [`EP_IN`] `0x82` is endpoint 2, [`EP_OUT`] `0x03` is
 /// endpoint 3. Passing the raw address instead yields `NotFoundError`.
 const fn endpoint_number(address: u8) -> u8 {
@@ -32,7 +30,7 @@ const fn endpoint_number(address: u8) -> u8 {
 }
 
 /// Rejected promises carry a `DOMException`, which is not a `js_sys::Error`, so its
-/// text has to be read off the object rather than downcast to one.
+/// text is read off the object's fields.
 fn describe(err: &JsValue) -> String {
     let field = |k: &str| {
         Reflect::get(err, &JsValue::from_str(k))
@@ -68,7 +66,7 @@ fn check_status(status: UsbTransferStatus, what: &str) -> Result<()> {
 
 /// A [`Transport`] over an opened, claimed WebUSB device.
 ///
-/// ⚠️ The device must be **opened and its vendor interface claimed** before any
+/// ⚠️ The device must be opened and its vendor interface claimed before any
 /// transfer. [`WebUsbTransport::open`] does that; [`WebUsbTransport::new`] assumes the
 /// caller already has.
 pub struct WebUsbTransport {
@@ -77,15 +75,14 @@ pub struct WebUsbTransport {
     /// [`Self::close`] cannot release it on their behalf.
     interface_number: Option<u8>,
     /// `packetSize` for [`EP_OUT`], deciding which frames need a terminating
-    /// zero-length packet — see [`Transport::write`].
+    /// zero-length packet; see [`Transport::write`].
     out_packet: usize,
 }
 
 /// `packetSize` for the OUT endpoint of the device's vendor interface.
 ///
-/// The browser exposes the descriptor the desktop backend reads directly, so both
-/// backends terminate on the device's own number rather than on the 64 that happens to
-/// be right for a full-speed link.
+/// The browser exposes the same descriptor the desktop backend reads, so both backends
+/// use the device's packet size instead of assuming the full-speed 64.
 fn out_packet(device: &UsbDevice) -> Option<usize> {
     let endpoint = device
         .configuration()?
@@ -106,8 +103,8 @@ fn out_packet(device: &UsbDevice) -> Option<usize> {
 impl WebUsbTransport {
     /// Wrap a device that is already open with the vendor interface claimed.
     ///
-    /// ⚠️ [`Self::close`] will not release that interface — it does not know which one
-    /// to release. Release it yourself, or use [`Self::open`].
+    /// ⚠️ [`Self::close`] will not release that interface, because it does not know
+    /// which one to release. Release it yourself, or use [`Self::open`].
     pub fn new(device: UsbDevice) -> Result<Self> {
         let out_packet = out_packet(&device).ok_or_else(|| {
             Error::Transport(
@@ -123,13 +120,12 @@ impl WebUsbTransport {
         })
     }
 
-    /// Run the browser ceremony: open the device, configure it if the platform left it
-    /// unconfigured, find the vendor-specific interface **by class**, and claim it.
+    /// Open the device, select a configuration if the platform left it unconfigured,
+    /// find the vendor-specific interface by class, and claim it.
     ///
-    /// The interface number is discovered rather than hard-coded for the same reason as
-    /// on the desktop backend: the instrument's other interface is USB-MIDI and must be
-    /// left to the OS. (Chrome refuses to claim an audio-class interface at all, so
-    /// getting this wrong surfaces as a `SecurityError` rather than silent MIDI loss.)
+    /// The instrument's other interface is USB-MIDI and must be left to the OS. Chrome
+    /// refuses to claim an audio-class interface, so picking the wrong one fails with a
+    /// `SecurityError`.
     pub async fn open(device: UsbDevice) -> Result<Self> {
         JsFuture::from(device.open())
             .await
@@ -167,8 +163,8 @@ impl WebUsbTransport {
         JsFuture::from(device.claim_interface(interface_number))
             .await
             .map_err(map_err(
-                "claiming the vendor interface (another application holding it — \
-                 Nord Sound Manager — will block this)",
+                "claiming the vendor interface (another application holding it, such as \
+                 Nord Sound Manager, blocks this)",
             ))?;
 
         Ok(Self {
@@ -178,12 +174,12 @@ impl WebUsbTransport {
         })
     }
 
-    /// End a frame the device would otherwise still be reading — see
-    /// [`needs_terminator`]. Its rule was established through the desktop backend.
+    /// End a frame the device would otherwise still be reading; see
+    /// [`needs_terminator`], whose rule was established through the desktop backend.
     /// Confirmed on hardware.
     ///
-    /// An empty `transferOut` is the zero-length packet that satisfies it. Per the
-    /// WebUSB specification.
+    /// An empty `transferOut` sends the zero-length packet, per the WebUSB
+    /// specification.
     async fn terminate(&mut self, written: usize) -> Result<()> {
         if !needs_terminator(written, self.out_packet) {
             return Ok(());
@@ -206,8 +202,8 @@ impl WebUsbTransport {
     /// Release the interface and close the device.
     ///
     /// ⚠️ A claim is held for as long as the page holds the device handle, so a page
-    /// that never releases keeps Nord Sound Manager (and the desktop backend) locked
-    /// out until the tab closes.
+    /// that never releases it locks out Nord Sound Manager and the desktop backend
+    /// until the tab closes.
     pub async fn close(self) -> Result<()> {
         if let Some(number) = self.interface_number {
             JsFuture::from(self.device.release_interface(number))
@@ -223,7 +219,8 @@ impl WebUsbTransport {
 
 impl Transport for WebUsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        // ⚠️ WebUSB reads asynchronously; a view into growable wasm memory can be invalidated.
+        // ⚠️ WebUSB reads the buffer asynchronously, and a view into growable wasm memory
+        // can be invalidated, so the frame is copied.
         let data = Uint8Array::from(buf);
         let transfer = self
             .device

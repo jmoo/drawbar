@@ -12,8 +12,8 @@ use crate::formats::ne5::program;
 use crate::types::RangedU16Pair;
 
 pub const FORMAT: &str = "ne5t";
-/// Schema versions this build's field offsets have been validated against: 0 is the
-/// eight factory demo songs, 1 is everything user-written.
+/// Schema versions whose field offsets have been validated: 0 for the eight factory demo
+/// songs, 1 for user-written songs.
 pub const KNOWN_VERSIONS: &[u32] = &[0, 1];
 /// The body after the container header: the 8-byte program map and 10 zero bytes.
 pub const BODY_LEN: usize = 18;
@@ -22,8 +22,8 @@ pub const FILE_LEN: usize = 0x2c + BODY_LEN;
 pub const PROGRAM_COUNT: usize = 4;
 pub const BANK_COUNT: u16 = 4;
 pub const SLOT_COUNT: u16 = 50;
-/// What a newly authored song is written as; a song read from a file carries whatever
-/// version that file held.
+/// The version of a newly written song. A song read from a file keeps the version the
+/// file held.
 pub const DEFAULT_VERSION: u32 = 1;
 
 pub type Location = RangedU16Pair<BANK_COUNT, SLOT_COUNT>;
@@ -34,10 +34,11 @@ pub type Bank = bank::Bank<Cbin<Song>, Location>;
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`] and the aux word, and validates the slot.
 ///
-/// The container header is never transmitted over USB — the device sends only
-/// this body — so the version is echoed into bits the wire side can see. ⚠️ It
-/// must be the *read* version, never a constant: the eight factory demo songs
-/// are version 0, and stamping 1 here silently rewrites them.
+/// The container header is not transmitted over USB. The device sends only this body,
+/// so the body echoes the version.
+///
+/// ⚠️ The echo must be the version that was read, never a constant: the eight factory
+/// demo songs are version 0, and stamping 1 here silently rewrites them.
 #[nord_bits_derive::bitbody(18)]
 pub struct Song {
     #[bits(0..=15)]
@@ -52,10 +53,10 @@ pub struct Song {
     pub d: program::Location,
 }
 
-/// Which of the four programs a song plays — the entries in panel order.
+/// One of the four program entries in a song, in panel order.
 ///
-/// A song holds exactly these four, so naming one is total: [`Song::get`] and
-/// [`Song::set`] cannot be asked for a fifth.
+/// A song holds four entries, so [`Song::get`] and [`Song::set`] cannot be asked for a
+/// fifth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     A,
@@ -106,10 +107,8 @@ pub fn location(file: &Cbin<Song>) -> Result<Location, Error> {
 
 /// A song at `location` playing `programs`, written as schema `version`.
 ///
-/// ⚠️ The version is the caller's to state: the header and the body's echo must agree,
-/// and they only do because both are set from this one argument. A version
-/// [`read_from`] would refuse is refused here too, rather than written and then
-/// unreadable.
+/// ⚠️ The header and the body's echo must agree, so both are set from `version`. A
+/// version [`read_from`] would refuse is refused here too.
 pub fn new(
     location: Location,
     version: u32,
@@ -185,8 +184,6 @@ mod tests {
         Ok(())
     }
 
-    /// The body echoes the header's version, and both come from the one argument — so a
-    /// version the read would refuse cannot be written in the first place.
     #[test]
     fn a_version_no_read_accepts_is_not_written() -> Result<(), Error> {
         let at = [program::Location::default(); PROGRAM_COUNT];
@@ -201,17 +198,13 @@ mod tests {
             ),
             "refused for the wrong reason: {err}",
         );
-        // The echo is 16 bits wide, and `as` would have written 0 for this one.
+        // The echo is 16 bits wide; a truncating cast would write 0 for this version.
         assert!(new((0, 0).try_into()?, 0x1_0000, at).is_err());
         Ok(())
     }
 
-    /// A version-0 song must come back out as version 0.
-    ///
-    /// The eight factory demo songs are version 0 and everything user-written is
-    /// version 1. A writer stamping a constant into the header or the map's echo
-    /// silently promotes them — a real difference at offset `0x14` and again in the
-    /// body, on every one of the eight.
+    /// The factory demo songs are version 0, and a writer that stamped a constant would
+    /// promote them in both the header and the body echo.
     #[test]
     fn version_survives_a_round_trip() -> Result<(), Error> {
         for version in [0u32, 1] {
@@ -235,8 +228,7 @@ mod tests {
                 version,
                 "header version for v{version}",
             );
-            // ...and the echo in the top bits of the big-endian map word at 0x2c, which
-            // is the only copy the device ever sees.
+            // The body echo, big-endian at 0x2c, is the only copy the device sees.
             assert_eq!(
                 u16::from_be_bytes(bytes[0x2c..0x2e].try_into().unwrap()) as u32,
                 version,
@@ -250,7 +242,6 @@ mod tests {
         Ok(())
     }
 
-    /// Writing one entry moves that entry and leaves the other three where they were.
     #[test]
     fn setting_one_entry_leaves_the_others_alone() -> Result<(), Error> {
         let mut song = song_of([(1, 2), (2, 3), (3, 4), (4, 5)])?;
@@ -274,7 +265,6 @@ mod tests {
         Ok(())
     }
 
-    /// Four entries, and the index that names them stops there.
     #[test]
     fn a_song_holds_four_entries_and_no_fifth() {
         assert_eq!(Slot::ALL.len(), PROGRAM_COUNT);

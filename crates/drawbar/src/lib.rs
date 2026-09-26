@@ -1,8 +1,7 @@
-//! drawbar — an egui app over [`nord_format`] and `nord-usb`.
+//! drawbar: an egui app built on [`nord_format`] and `nord-usb`.
 //!
-//! Everything here is target-independent except the file-picker and download glue: the
+//! Everything here is target-independent except the file picker and download glue: the
 //! same shell runs as a native window and as a wasm module in a browser tab.
-//!
 
 pub mod about;
 pub mod app;

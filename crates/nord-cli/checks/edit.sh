@@ -9,8 +9,8 @@ set -euo pipefail
 }
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 here=$(cd "$(dirname "$0")" && pwd)
-# A real editor-written project for the file-verb section; POC_PROJECT
-# overrides it where the checkout is not beside the script (the nix build).
+# A project written by the Sample Editor, for the file-verb section. The Nix
+# build sets POC_PROJECT because the checkout is not beside the script there.
 : "${POC_PROJECT:=$here/../../nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj}"
 
 run() { ${NORD_RUNNER:-} "$bin" "$@"; }
@@ -26,8 +26,8 @@ run program edit --set center_panel.gain=64 -o base.ne5p >/dev/null 2>err.txt ||
   cat err.txt
   exit 1
 }
-# ⚠️ Under Wine, piping directly to grep can miss present output. Capture first;
-# the cause is unknown and the file path is reliable.
+# ⚠️ Under Wine, piping straight to grep can miss output that is there. Capture
+# to a file first; the cause is unknown, and the file is reliable.
 run verify base.ne5p >verified.txt 2>err.txt || {
   echo "a written program did not round-trip:"
   cat verified.txt err.txt
@@ -67,8 +67,8 @@ grep -q 'transpose: -5  (on)' decoded.txt || {
   exit 1
 }
 
-# Non-TTY output must omit escapes so Wine/Linux comparison reflects the decode,
-# not their consoles.
+# Output to a pipe must carry no ANSI escapes, so Wine and Linux runs compare
+# only the decode.
 run program edit base.ne5p --set center_panel.gain=1 --dry-run >plain.txt 2>&1
 run --color=always program edit base.ne5p --set center_panel.gain=1 --dry-run \
   >colored.txt 2>&1
@@ -92,7 +92,7 @@ grep -q '^center_panel.transpose ' fields.txt || {
   echo "--fields does not list the field --set just wrote"
   exit 1
 }
-echo "ok: edit moved exactly the bytes it named, and nothing else"
+echo "ok: edit moved only the bytes it named"
 
 echo
 echo "== nord edit: the file verb reaches the registry =="
@@ -148,8 +148,8 @@ echo "ok: a set list's four slots edit and round-trip"
 
 echo
 echo "== nord live edit and nord settings edit =="
-# The live buffer is the program body under another tag, so the two nouns have to
-# offer one field list, not two that drifted apart.
+# The live buffer is the program body under another tag, so the two nouns must
+# offer the same field list.
 run program edit --fields >program-fields.txt 2>err.txt
 run live edit --fields >live-fields.txt 2>err.txt || {
   echo "live --fields failed:"
@@ -159,7 +159,7 @@ run live edit --fields >live-fields.txt 2>err.txt || {
 awk 'NR > 1 {print $1}' program-fields.txt | sort >program-paths.txt
 awk 'NR > 1 {print $1}' live-fields.txt | sort >live-paths.txt
 diff program-paths.txt live-paths.txt >fields.diff || {
-  echo "live and program no longer offer the same fields:"
+  echo "live and program offer different fields:"
   cat fields.diff
   exit 1
 }

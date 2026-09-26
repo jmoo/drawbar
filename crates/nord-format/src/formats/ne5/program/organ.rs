@@ -4,9 +4,8 @@
 //! vib/perc registration for every model and both presets, so switching model or preset
 //! is lossless.
 //!
-//! Fields are storage; the methods below are meaning. Which block a model reads, whether
-//! a Farfisa nibble counts as on, where the b3-bass bars really live — none of that is
-//! expressible as a placement, so it lives in an accessor.
+//! The fields describe storage, and the methods interpret it: which block a model reads,
+//! whether a Farfisa nibble counts as on, and where the b3+bass bars are stored.
 
 use crate::bits::Packed;
 use crate::components::{Drawbar, PercSpeed, VibChorus};
@@ -18,8 +17,8 @@ use std::fmt::{self, Debug, Display, Formatter};
 /// Length of the organ panel block, 0x4e..=0x92.
 const ORGAN_LEN: usize = 0x92 - 0x4d;
 
-/// The Electro 5's four organ models. (B3-bass shares the B3 storage slots, so
-/// it isn't a separate model here.)
+/// The Electro 5's four organ models. b3+bass shares the B3's storage, so it is not a
+/// separate model here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrganModel {
     B3,
@@ -30,8 +29,8 @@ pub enum OrganModel {
 
 /// Which of a model's two stored registrations the instrument plays.
 ///
-/// The panel numbers them 1 and 2; the file spells the choice as each model's
-/// `…_preset2_selected` flag, which is what the conversions here are.
+/// The panel numbers them 1 and 2. The file stores the choice as each model's
+/// `…_preset2_selected` flag, and the `bool` conversions map to and from that flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     One,
@@ -55,7 +54,7 @@ impl From<Preset> for bool {
 }
 
 impl Display for Preset {
-    /// The panel's own number.
+    /// The panel's number.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Preset::One => "1",
@@ -86,9 +85,7 @@ pub struct OrganPanel {
     pub b3_preset1_vib: bool,
     #[bits(93..=93)]
     pub b3_preset1_perc: bool,
-    /// First bass drawbar of **b3+bass preset 1** — see [`OrganPanel::b3_bass_drawbars`].
-    /// It is not in the nine-nibble block, and the two nibbles it shadows there hold
-    /// stale leftovers.
+    /// First bass drawbar of b3+bass preset 1. See [`OrganPanel::b3_bass_drawbars`].
     #[bits(94..=97)]
     pub b3_bass_bar1: Drawbar,
     /// Second bass drawbar of b3+bass preset 1. The four bits after it are unused.
@@ -100,8 +97,8 @@ pub struct OrganPanel {
     pub b3_preset2_vib: bool,
     #[bits(149..=149)]
     pub b3_preset2_perc: bool,
-    // Bits 150..=157 survive panel stores but do not affect preset-2 bass, and are
-    // left unclaimed so they round-trip verbatim. Confirmed on hardware.
+    // Bits 150..=157 survive panel stores but do not affect preset-2 bass, so they are
+    // left unclaimed. Confirmed on hardware.
 
     // ── Vox ────────────────────────────────────────────────────────────────────
     /// Shared across presets.
@@ -124,7 +121,7 @@ pub struct OrganPanel {
     pub farfisa_vib: FarfisaVib,
     #[bits(313..=313)]
     pub farfisa_preset2_selected: bool,
-    /// Stored as positions, read by the instrument as tabs — see
+    /// Stored as positions and read by the instrument as tabs. See
     /// [`OrganPanel::farfisa_tabs`].
     #[bits(328..=363)]
     pub farfisa_preset1_drawbars: Drawbars,
@@ -145,8 +142,7 @@ pub struct OrganPanel {
     pub pipe_preset2_drawbars: Drawbars,
 }
 
-/// `[u8; 69]` has no `Default` — the std impls stop at 32 — so this one goes through the
-/// decode, which every organ field is total over.
+/// The decode of zeroed bytes, since `[u8; 69]` has no `Default`.
 impl Default for OrganPanel {
     fn default() -> Self {
         OrganPanel::try_from([0; ORGAN_LEN]).expect("every organ field decodes totally")
@@ -159,34 +155,32 @@ impl OrganPanel {
         (*self.preset_selected(model)).into()
     }
 
-    /// The nine drawbar positions (physical, 0..=8) stored for `model`'s `preset`. This
-    /// is the on-disk value; per-model display transforms (Farfisa on/off, Vox's ignored
-    /// 8th bar, B3-bass bass-bar remap) are not applied.
+    /// The nine stored drawbar positions for `model`'s `preset`, `0..=8`. Per-model
+    /// display transforms (Farfisa on/off, Vox's ignored 8th bar, the b3+bass bass bars)
+    /// are not applied.
     pub fn drawbars(&self, model: OrganModel, preset: Preset) -> [u8; 9] {
         self.drawbar_block(model, preset).positions()
     }
 
-    /// The two bass drawbars of **B3-with-bass, preset 1** — the bass manual.
+    /// The two bass drawbars of b3+bass preset 1, the bass manual.
     ///
-    /// These are *not* in the nine-nibble block. In b3+bass mode preset 1 is the bass
-    /// manual (only bars 1–2 are live) and preset 2 is the ordinary B3; the bass
-    /// registration sits in its own four-bit pair after the block, which is why it does
-    /// not move when the drawbars do.
+    /// In b3+bass mode, preset 1 is the bass manual (only bars 1-2 sound) and preset 2
+    /// is an ordinary B3. The bass bars are stored in their own pair of nibbles after the
+    /// nine-nibble block, independent of it.
     ///
-    /// ⚠️ Do **not** read bars 1–2 from [`Self::drawbars`] in this mode — those two
-    /// nibbles hold stale leftovers, not zero and not the bass values.
+    /// ⚠️ Do not read bars 1-2 from [`Self::drawbars`] in this mode. Those two nibbles
+    /// hold stale values, which are neither zero nor the bass values.
     ///
     /// Confirmed on hardware. The captures are `1100_400000000` and `1100_040000000`.
     pub fn b3_bass_drawbars(&self) -> [u8; 2] {
         [self.b3_bass_bar1.raw(), self.b3_bass_bar2.raw()]
     }
 
-    /// Farfisa drawbars as the instrument actually treats them: **on/off tabs**, not
-    /// continuous positions.
+    /// Farfisa drawbars as the instrument treats them: on/off tabs.
     ///
-    /// A stored nibble of **≥5 reads as on**, anything lower as off. Use this rather
-    /// than [`Self::drawbars`] for Farfisa — the raw 0..=8 value is stored faithfully
-    /// but has no meaning beyond which side of the threshold it falls.
+    /// A stored nibble of 5 or more is on, and anything lower is off. Use this instead of
+    /// [`Self::drawbars`] for Farfisa: the raw 0..=8 value has no meaning beyond which
+    /// side of the threshold it falls on.
     pub fn farfisa_tabs(&self, preset: Preset) -> [bool; 9] {
         self.drawbars(OrganModel::Farfisa, preset)
             .map(|bar| bar >= 5)
@@ -223,23 +217,20 @@ impl OrganPanel {
         self.b3_perc_third
     }
 
-    /// B3 percussion decay speed (shared across presets). The on-disk encoding is not
-    /// monotonic — soft, fast and both store 2, 1 and 3.
+    /// B3 percussion decay speed, shared across presets. Soft, fast and both store 2, 1
+    /// and 3.
     pub fn b3_perc_speed(&self) -> PercSpeed {
         self.b3_perc_speed
             .get()
             .expect("all four two-bit indices are named")
     }
 
-    // ── writes ──────────────────────────────────────────────────────────────────
-
     /// Play `preset` on `model`.
     pub fn set_preset(&mut self, model: OrganModel, preset: Preset) {
         *self.preset_selected_mut(model) = preset.into();
     }
 
-    /// Store nine drawbar positions, `0..=8`. A higher one is refused rather than
-    /// truncated, since two bars share a byte.
+    /// Store nine drawbar positions. A position above 8 is refused.
     pub fn set_drawbars(
         &mut self,
         model: OrganModel,
@@ -250,10 +241,10 @@ impl OrganPanel {
         Ok(())
     }
 
-    /// Set the Farfisa tabs: on stores `8`, off stores `0`. Any other stored value is
-    /// lost — the instrument only reads which side of the ≥5 threshold it falls on, but
-    /// the byte does change, so this will not round-trip a program you only meant to
-    /// read.
+    /// Set the Farfisa tabs: on stores `8`, off stores `0`.
+    ///
+    /// ⚠️ Other stored values are replaced. The sound is unchanged, but the bytes are
+    /// not, so a program passed through this no longer round-trips byte for byte.
     pub fn set_farfisa_tabs(&mut self, preset: Preset, tabs: [bool; 9]) {
         let bars = tabs.map(|on| if on { Drawbars::MAX } else { 0 });
         self.set_drawbars(OrganModel::Farfisa, preset, bars)
@@ -304,8 +295,8 @@ impl OrganPanel {
         self.b3_perc_third = on;
     }
 
-    /// Percussion decay speed (shared across presets). Note the encoding is not
-    /// monotonic — see [`Self::b3_perc_speed`].
+    /// Percussion decay speed, shared across presets. See [`Self::b3_perc_speed`] for
+    /// the encoding.
     pub fn set_b3_perc_speed(&mut self, speed: PercSpeed) {
         self.b3_perc_speed =
             B3PercSpeed::select(speed).expect("all four speeds have a two-bit index");
@@ -317,8 +308,6 @@ impl OrganPanel {
         self.b3_bass_bar2 = Drawbar::new(bars[1])?;
         Ok(())
     }
-
-    // ── which field a model and preset name ─────────────────────────────────────
 
     fn drawbar_block(&self, model: OrganModel, preset: Preset) -> &Drawbars {
         match (model, preset) {
@@ -388,11 +377,12 @@ impl OrganPanel {
         })
     }
 }
+
 /// Declare a model's index into a shared enumeration.
 ///
-/// The slot holds an index, not the value: which modes an organ offers, and in what
-/// order, differs per model. An index the model does not use decodes to `None` rather
-/// than being coerced to a neighbor, and round-trips whatever it held.
+/// The slot holds an index into a per-model table, because the modes each organ offers,
+/// and their order, differ by model. An index the model does not use decodes to `None`
+/// and round-trips unchanged.
 macro_rules! model_index {
     ($(#[$meta:meta])* $name:ident, $bits:expr, $of:ty, [$($variant:ident),+ $(,)?]) => {
         $(#[$meta])*
@@ -467,20 +457,18 @@ model_index!(
 );
 
 model_index!(
-    /// The B3's percussion decay speed. The stored order is not the panel's: soft, fast
-    /// and both are 2, 1 and 3.
+    /// The B3's percussion decay speed. Soft, fast and both store 2, 1 and 3.
     B3PercSpeed, 2, PercSpeed, [Off, Fast, Soft, Both]
 );
 
-/// Nine drawbar positions, nibble-packed high-nibble first — the on-disk form every
-/// organ model shares.
+/// Nine drawbar positions, one per nibble, high nibble first. Every organ model stores
+/// its drawbars this way.
 ///
-/// Positions are physical, `0..=8`, stored identity. Decoding is total: a nibble outside
-/// that range is preserved rather than refused. [`Drawbars::new`] refuses one on the way
-/// in.
+/// Positions are `0..=8`, stored as is. Decoding is total and preserves a nibble outside
+/// that range; [`Drawbars::new`] refuses one.
 ///
-/// Per-model display transforms — Farfisa's on/off threshold, Vox's ignored 8th bar,
-/// the b3-bass remap — are not applied here.
+/// Per-model display transforms (Farfisa's on/off threshold, Vox's ignored 8th bar, the
+/// b3+bass bass bars) are not applied here.
 #[derive(Copy, Clone, Default, PartialEq, Eq)]
 pub struct Drawbars([u8; 9]);
 
@@ -510,8 +498,7 @@ impl Drawbars {
 impl Packed for Drawbars {
     const MAX_BITS: u32 = 4 * Drawbars::BARS as u32;
     const DECODE_BITS: u32 = Self::MAX_BITS;
-    /// The whole register in one field, so the first bar is the leftmost one and the
-    /// nibbles run down from the top of the slot.
+    /// The whole register is one field, and the first bar is the top nibble of the slot.
     const CONTROL: crate::fields::ControlKind = crate::fields::ControlKind::Drawbar {
         bars: Drawbars::BARS as u8,
         rank: Some(1),
@@ -535,14 +522,14 @@ impl Packed for Drawbars {
 }
 
 impl Debug for Drawbars {
-    /// The positions alone, so a panel's `Debug` reads as the array it is.
+    /// The positions alone, so a panel's `Debug` shows a plain array.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.0)
     }
 }
 
 impl Display for Drawbars {
-    /// `888000000` — the form the corpus filenames use.
+    /// `888000000`, the form specimen filenames use.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for bar in self.0 {
             write!(f, "{bar}")?;
@@ -569,8 +556,8 @@ mod tests {
         OrganPanel::try_from(raw).expect("every organ field decodes totally")
     }
 
-    /// The bass drawbars of b3+bass preset 1 live outside the nine-nibble block, in a
-    /// 12-bit field across `0x59`'s low nibble and `0x5a`. Values are from real
+    /// The bass drawbars of b3+bass preset 1 are stored outside the nine-nibble block,
+    /// in a 12-bit field across `0x59`'s low nibble and `0x5a`. Values are from real
     /// specimens: `1100_400000000`, `1100_040000000`, `1100_87gfedcba`.
     #[test]
     fn b3_bass_drawbars_decode_from_the_packed_field() {
@@ -598,9 +585,8 @@ mod tests {
         assert_eq!(panel(&[]).b3_bass_drawbars(), [0, 0]);
     }
 
-    /// `0x59` is shared. Its high nibble is bar 9 of the main block and bits 3/2 are
-    /// vibrato/percussion — none of which may leak into the bass drawbars. Regression
-    /// guard for the placement.
+    /// `0x59` is shared: its high nibble is bar 9 of the main block, and bits 3 and 2 are
+    /// vibrato and percussion.
     #[test]
     fn b3_bass_drawbars_ignore_the_flags_sharing_that_byte() {
         // Same field as `1100_88iiiiiii`: bar 9 = 8 in the high nibble, bars still 8,8.
@@ -619,8 +605,6 @@ mod tests {
         );
     }
 
-    /// Farfisa's drawbars are on/off tabs: >= 5 is on. The raw nibble is still stored
-    /// faithfully, it just carries no meaning beyond the threshold.
     #[test]
     fn farfisa_drawbars_are_on_off_tabs() {
         // 0x77 is Farfisa preset 1: nine nibbles, high-nibble first.
@@ -652,7 +636,6 @@ mod tests {
         assert!(!edge.farfisa_tabs(Preset::One)[1], "4 should read as off");
     }
 
-    /// Preset 2 reads from its own block, so the two presets never alias.
     #[test]
     fn farfisa_presets_are_independent() {
         let p = panel(&[(0x77, 0x80), (0x7d, 0x08)]);
@@ -662,8 +645,6 @@ mod tests {
         assert!(p.farfisa_tabs(Preset::Two)[1]);
     }
 
-    /// Every model and preset reads its own nine nibbles and writes them back where it
-    /// found them — no placement lands on a neighbor's block.
     #[test]
     fn every_model_and_preset_has_its_own_block() {
         for (n, (model, preset)) in [
@@ -706,7 +687,6 @@ mod tests {
         }
     }
 
-    /// A mode the model does not offer is refused rather than stored at some free index.
     #[test]
     fn a_model_only_accepts_the_modes_it_has() {
         let mut p = OrganPanel::default();
@@ -721,7 +701,6 @@ mod tests {
         assert_eq!(p.vib_type(OrganModel::Vox), Some(VibChorus::V3));
     }
 
-    /// The two speed bits are not in panel order.
     #[test]
     fn perc_speed_stores_soft_fast_and_both_as_2_1_and_3() {
         let bits = |speed| {

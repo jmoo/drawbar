@@ -1,9 +1,9 @@
 //! Reading `<specimen>.oracle.json`: the sidecar vocabulary and the validation
-//! every corpus suite applies before trusting one. A sidecar that fails here is
-//! refused, never skipped.
+//! every corpus suite applies before trusting a sidecar. A sidecar that fails
+//! validation is an error, never skipped.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy.
+//! ⚠️ Not a test target. Each test target that includes this module compiles its
+//! own copy.
 #![allow(dead_code)]
 
 use serde_json::Value;
@@ -36,15 +36,15 @@ pub fn sidecar_of(specimen: &Path) -> PathBuf {
 /// pins or states that it pins nothing.
 const CLAIMS: &[&str] = &["fields", "same_body_as", "traits"];
 
-/// Parse a sidecar, refusing an unknown schema, an unknown key, a key whose value
-/// has the wrong type, or a claim beside `unoracled` — rather than skipping it. A
-/// reader may take any present key at its declared type without re-checking.
+/// Parse a sidecar. An unknown schema, an unknown key, a value of the wrong type,
+/// or a claim beside `unoracled` is an error. A reader may take any present key
+/// at its declared type without re-checking.
 pub fn load(path: &Path, allowed: &[&str]) -> Result<Value, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("sidecar: {e}"))?;
     let value: Value = serde_json::from_str(&text).map_err(|e| format!("sidecar: {e}"))?;
     let object = value.as_object().ok_or("sidecar is not an object")?;
     if object.get("schema").and_then(Value::as_u64) != Some(1) {
-        return Err("sidecar schema is not 1 — refusing rather than skipping".into());
+        return Err("sidecar schema is not 1".into());
     }
     if let Some(unknown) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(format!("unknown sidecar key {unknown:?}"));
@@ -72,7 +72,7 @@ pub fn load(path: &Path, allowed: &[&str]) -> Result<Value, String> {
     if object.contains_key("unoracled") {
         if let Some(claim) = CLAIMS.iter().find(|key| object.contains_key(**key)) {
             return Err(format!(
-                "unoracled beside {claim} — the two are mutually exclusive"
+                "unoracled beside {claim}; the two are mutually exclusive"
             ));
         }
     }

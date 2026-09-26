@@ -275,8 +275,8 @@
         padding: 0 16px;
       }
 
-      /* Over the canvas, so the page answers a screen the shell cannot lay out in
-         before the module that would answer has loaded. */
+      /* Covers the canvas, so a screen too small for the shell gets its notice
+         before the module has loaded. */
       #toosmall {
         display: none;
         position: absolute;
@@ -305,8 +305,8 @@
         color: #e05040;
       }
 
-      /* `drawbar::shell::LEAST`, which a test holds these two numbers to. A CSS pixel
-         is the point the app lays itself out in. */
+      /* `drawbar::shell::LEAST`; a test keeps these two numbers equal to it. The app
+         lays itself out in points, and a point is a CSS pixel. */
       @media (width < 660px), (height < 430px) {
         #toosmall {
           display: flex;
@@ -341,7 +341,7 @@
         </div>
       </div>
       <div id="footer">
-        <a id="guide" href="docs/" target="_blank" rel="noopener" title="Opens the user guide in a new tab — it does not wait for drawbar to finish loading">
+        <a id="guide" href="docs/" target="_blank" rel="noopener" title="Opens the user guide in a new tab without waiting for drawbar to finish loading">
           <svg class="icon small"><use href="#book-open" /></svg>
           <span>Read the user guide</span>
         </a>

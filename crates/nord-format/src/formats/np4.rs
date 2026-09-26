@@ -1,4 +1,4 @@
-//! Nord Piano 4 (`.np4p`, `.np4l`, `.np4t`) — container-verified, bodies unmapped.
+//! Nord Piano 4 (`.np4p`, `.np4l`, `.np4t`): container-verified, bodies unmapped.
 
 use super::raw::raw_format;
 
@@ -9,7 +9,7 @@ raw_format!(
     90
 );
 raw_format!(
-    /// Live slots (`.np4l`) — same length as a program.
+    /// Live slots (`.np4l`), the same length as a program.
     live,
     "np4l",
     90

@@ -8,10 +8,10 @@
 //! bits 0..4   the residual field width in bits
 //! bits 5..7   the backward-difference order, 0..=4
 //! bits 8..15  a per-block attenuation statistic, in dB against a full scale of
-//!             8192; nothing here reads it, and it is not a gain to apply
+//!             8192; the decoder ignores it, and it is not a gain to apply
 //! ```
 //!
-//! ⚠️ **The packing is low-bit-first.** Append each big-endian word to the high end
+//! ⚠️ The packing is low-bit-first. Append each big-endian word to the high end
 //! of a reservoir and take fields from its low bits, so global bit `b` is bit
 //! `b % 16` of word `b / 16` counting that word's least significant bit as bit 0.
 //! Fields are two's complement, they cross word boundaries freely, and on a stereo
@@ -27,20 +27,21 @@
 //!
 //! seeded from the four samples the stroke's record carries, oldest first.
 //!
-//! A block holds `⌊8 · (block bytes − 2) / (width · channels)⌋` frames, of which
-//! the **last [`OVERLAP`] repeat as the first frames of the next block**. Only the
-//! frames before that repeat are emitted, and the history carried into the next
-//! block is the four samples immediately before it rather than the four at the
-//! physical block end. Their sum is the frame count the record states, and the
-//! repeat is bit-exact — [`decode`] checks both and refuses a stroke that fails
-//! either. The last block has no next block to repeat into, so its own final
-//! [`OVERLAP`] frames sit past the stroke's end; [`Audio::tail`] carries them.
+//! A block holds `⌊8 · (block bytes − 2) / (width · channels)⌋` frames, and its last
+//! [`OVERLAP`] frames repeat as the first frames of the next block. Only the frames
+//! before that repeat are emitted. ⚠️ The history carried into the next block is the
+//! four samples immediately before the repeat, not the four at the physical block end.
+//! The emitted frames sum to the frame count the record states, and the repeat is
+//! bit-exact; [`decode`] refuses a stroke that fails either check. The last block has
+//! no next block to repeat into, so its final [`OVERLAP`] frames sit past the stroke's
+//! end, in [`Audio::tail`].
 //!
-//! The packing and the predictor: Inferred from specimens; not confirmed on
-//! hardware. Nothing here is played, only reconstructed. Confirmed on hardware.
-//! The frames play at [`RATE`], and a stroke owns the whole
-//! `blocks × BLOCK_WORDS × 2 × channels` bytes the container gives it — a library
-//! whose spans were moved at that size still plays.
+//! The packing and the predictor: Inferred from specimens; not confirmed on hardware.
+//! This module only reconstructs samples; it plays nothing.
+//!
+//! The frames play at [`RATE`], and a stroke owns all
+//! `blocks × BLOCK_WORDS × 2 × channels` bytes the container gives it: a library whose
+//! spans were moved at that size still plays. Confirmed on hardware.
 
 use super::Stroke;
 use crate::error::{Error, ParseError};
@@ -61,12 +62,12 @@ pub const MAX_ORDER: usize = predictor::MAX_ORDER;
 /// Narrowest residual field a block header can express.
 pub const MIN_WIDTH: u8 = 1;
 
-/// Widths a block header can express. A field wider than a reservoir top-up is
-/// refused rather than read across an unbounded number of words.
+/// Widest residual field accepted: one 16-bit word. The header's five width bits can
+/// state more, and a wider field is refused.
 pub const MAX_WIDTH: u8 = 16;
 
-/// Frames a block of `width` carries, the [`OVERLAP`] it repeats included. A wider
-/// block is a shorter one, so the width and the frame count are one choice.
+/// Frames a block of `width` carries, including the [`OVERLAP`] it repeats. Wider
+/// fields mean fewer frames, so choosing the width fixes the frame count.
 pub fn block_frames(width: u8, block_bytes: usize, channels: usize) -> usize {
     8 * (block_bytes - 2) / (usize::from(width) * channels)
 }
@@ -77,12 +78,12 @@ pub struct Audio {
     /// One vector per channel, each [`Audio::frames`] long.
     pub lanes: Vec<Vec<i16>>,
     /// The [`OVERLAP`] frames per channel the last block carries past the stroke's
-    /// end. The stroke does not own them and nothing plays them; they are here
-    /// because coding that block again needs them.
+    /// end. The stroke does not own them and nothing plays them, but re-encoding that
+    /// block needs them.
     pub tail: Vec<Vec<i16>>,
-    /// Samples the reconstruction put outside `i16` and that were saturated. A non-zero
-    /// count means the stroke is not what this codec describes. Inferred from
-    /// specimens; not confirmed on hardware.
+    /// Samples the reconstruction put outside `i16`, saturated to fit. A nonzero count
+    /// means the stroke is not what this codec describes. Inferred from specimens; not
+    /// confirmed on hardware.
     pub clipped: usize,
     /// Repeated samples compared against the block before, all of which matched.
     pub overlap_checked: usize,
@@ -98,7 +99,7 @@ impl Audio {
         self.frames() as f64 / f64::from(RATE)
     }
 
-    /// The frames interleaved by channel, which is what a WAV wants.
+    /// The frames interleaved by channel, as a WAV file stores them.
     pub fn interleaved(&self) -> Vec<i16> {
         let frames = self.frames();
         let mut out = Vec::with_capacity(frames * self.lanes.len());
@@ -114,8 +115,8 @@ impl Audio {
 pub struct BlockHeader {
     pub width: u8,
     pub order: u8,
-    /// Attenuation in dB against a full scale of 8192 — a statistic the encoder
-    /// recorded, not a gain the decoder applies.
+    /// Attenuation in dB against a full scale of 8192. The encoder recorded it as a
+    /// statistic; it is not a gain to apply.
     pub attenuation: u8,
 }
 
@@ -170,7 +171,7 @@ impl<'a> Fields<'a> {
 
 /// Decode one stroke, checking the block overlap and the record's frame count.
 ///
-/// `channels` is the library's — 1 or 2, and any other count is refused — and
+/// `channels` is the library's channel count, 1 or 2; any other count is refused.
 /// `stroke.audio()` must be the whole span.
 pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
     if !(1..=2).contains(&channels) {
@@ -439,8 +440,8 @@ mod tests {
         assert!(error.contains("the record states 7"), "{error}");
     }
 
-    /// The record states its frame count in bytes the file carries, so the blocks the
-    /// stroke holds bound it before anything is reserved to hold them.
+    /// The frame count comes from the file, so the stroke's blocks bound it before any
+    /// memory is reserved.
     #[test]
     fn a_frame_count_larger_than_the_blocks_can_hold_is_refused_before_reserving() {
         let audio = block(8, 0, 1, &[0i32; 16]);

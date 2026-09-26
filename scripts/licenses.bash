@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 # nix-deps: cargo cargo-about git jq nix
-# Regenerate the licence notices drawbar's About box shows for the Rust crates in it.
+# Regenerate the license notices drawbar's About box shows for the Rust crates in it.
 set -euo pipefail
 
 repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 drawbar="$repo/crates/drawbar"
-licences="$drawbar/licences"
+licenses="$drawbar/licenses"
 out="$drawbar/src/about/crates.rs"
 
 about="$(cargo about generate --format json --fail --locked \
   --manifest-path "$drawbar/Cargo.toml" --config "$drawbar/about.toml")"
 
-# licences.tsv supplies the text of a crate whose package carries none, fetched from
+# licenses.tsv supplies the text of a crate whose package carries none, fetched from
 # the upstream file its `source` column names.
-vendored="$(tail -n +2 "$repo/scripts/licences.tsv" |
-  while IFS=$'\t' read -r name version licence file _; do
-    jq -n --arg crate "$name $version" --arg licence "$licence" \
-      --rawfile text "$licences/$file" '{$crate, $licence, $text}'
+vendored="$(tail -n +2 "$repo/scripts/licenses.tsv" |
+  while IFS=$'\t' read -r name version license file _; do
+    jq -n --arg crate "$name $version" --arg license "$license" \
+      --rawfile text "$licenses/$file" '{$crate, $license, $text}'
   done | jq -s 'INDEX(.crate)')"
 
 # Apache-2.0.txt is https://www.apache.org/licenses/LICENSE-2.0.txt verbatim.
-entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licences/Apache-2.0.txt" '
-  # Licences that ask nothing of a binary copy.
+entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-2.0.txt" '
+  # Licenses that ask nothing of a binary copy.
   def unconditional: [
     "0BSD",      # grants use "for any purpose with or without fee" and sets no condition
     "BSL-1.0",   # its notice may be left out of "machine-executable object code"
@@ -36,54 +36,54 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licences/Apache-
   def offers_apache: [splits("\\s+OR\\s+|/") | gsub("^[(\\s]+|[)\\s]+$"; "")] | index("Apache-2.0");
 
   [
-    .licenses[] as $licence
-    | $licence.used_by[].crate
+    .licenses[] as $license
+    | $license.used_by[].crate
     # Path crates are the workspace, which the drawbar row covers.
     | select(.source != null)
-    | select($licence.id | IN(unconditional[]) | not)
-    | select(.name != "epaint_default_fonts" or ($licence.id | IN(fonts[]) | not))
+    | select($license.id | IN(unconditional[]) | not)
+    | select(.name != "epaint_default_fonts" or ($license.id | IN(fonts[]) | not))
     | {
         crate: "\(.name) \(.version)",
         name,
         version,
         offers_apache: (.license // "" | offers_apache != null),
         dir: (.manifest_path | rtrimstr("/Cargo.toml")),
-        licence: $licence.id,
-        text: $licence.text
+        license: $license.id,
+        text: $license.text
       }
   ]
   | (map(.crate) | unique) as $shipped
   | ($vendored | keys - $shipped) as $stale
-  | if $stale != [] then error("licences.tsv names crates drawbar does not ship: \($stale)") end
+  | if $stale != [] then error("licenses.tsv names crates drawbar does not ship: \($stale)") end
   | map(
       if $vendored[.crate] == null then .
-      elif $vendored[.crate].licence == .licence then .text = $vendored[.crate].text
-      else error("\(.crate) is under \(.licence), not the \($vendored[.crate].licence) licences.tsv gives")
+      elif $vendored[.crate].license == .license then .text = $vendored[.crate].text
+      else error("\(.crate) is under \(.license), not the \($vendored[.crate].license) licenses.tsv gives")
       end
     )
-  # Apache-2.0 needs no copyright line, so its text is complete where the other licence
+  # Apache-2.0 needs no copyright line, so its text is complete where the other license
   # a crate offers is only a template.
-  | map(if (.text | unfilled) and .offers_apache then .licence = "Apache-2.0" | .text = $apache end)
+  | map(if (.text | unfilled) and .offers_apache then .license = "Apache-2.0" | .text = $apache end)
   # rustc reads CRLF in a raw string as LF, and rejects a lone CR.
   | map(.text |= gsub("\r\n"; "\n"))
   | (map(select(.text | unfilled) | .crate) | unique) as $unfilled
-  | if $unfilled != [] then error("these crates have only a licence template: \($unfilled)") end
-  | if any(.[].text; test("\r|\"#")) then error("a licence text holds a CR or \"#") end
+  | if $unfilled != [] then error("these crates have only a license template: \($unfilled)") end
+  | if any(.[].text; test("\r|\"#")) then error("a license text holds a CR or \"#") end
 ' <<<"$about")"
 
 # Apache-2.0 §4(d) requires a NOTICE file's contents to travel with the binary.
-notices="$(jq -r '.[] | select(.licence == "Apache-2.0") | .dir' <<<"$entries" | sort -u |
+notices="$(jq -r '.[] | select(.license == "Apache-2.0") | .dir' <<<"$entries" | sort -u |
   xargs -I{} find {} -maxdepth 1 -iname 'NOTICE*')"
 if [[ -n $notices ]]; then
   printf 'the About box does not carry these NOTICE files:\n%s\n' "$notices" >&2
   exit 1
 fi
 
-# licences/<id>.txt holds the one text the About box shows for a licence id. A new id
+# licenses/<id>.txt holds the one text the About box shows for a license id. A new id
 # needs a new file, and reading it here is what says so.
-canon="$(jq -r '[.[].licence] | unique[]' <<<"$entries" |
+canon="$(jq -r '[.[].license] | unique[]' <<<"$entries" |
   while read -r id; do
-    jq -n --arg id "$id" --rawfile text "$licences/$id.txt" '{($id): $text}'
+    jq -n --arg id "$id" --rawfile text "$licenses/$id.txt" '{($id): $text}'
   done | jq -s 'add')"
 
 locked="$(awk -F' = ' '
@@ -109,7 +109,7 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
   def opens: test("^(?i:copyright|\\(c\\)|©)[^A-Za-z0-9]*(?=.*[a-z0-9])");
   def indent: length - (sub("^[ \t]*"; "") | length);
 
-  # A licence file split into the copyright notices it carries and the terms around them.
+  # A license file split into the copyright notices it carries and the terms around them.
   # A notice runs on while the lines under it are indented, continue with "and", or are
   # the "All rights reserved." that BSD-2-Clause wraps onto its own line.
   def notices:
@@ -147,16 +147,16 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
 
   map(
     . + (
-      # Apache-2.0 asks a binary to pass on the licence, not a copyright line.
-      if .licence == "Apache-2.0" then {notice: "", body: .text} else .text | notices end
+      # Apache-2.0 asks a binary to pass on the license, not a copyright line.
+      if .license == "Apache-2.0" then {notice: "", body: .text} else .text | notices end
     )
   )
-  | map(.variant = ($canon[.licence] as $whole | .body | covered($whole) | not))
-  | group_by(.licence)
+  | map(.variant = ($canon[.license] as $whole | .body | covered($whole) | not))
+  | group_by(.license)
   | map(
       (map(select(.variant | not))) as $shared
       | {
-          licence: .[0].licence,
+          license: .[0].license,
           holders: (
             $shared
             | map(select(.notice != ""))
@@ -173,8 +173,8 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
           )
         }
     )
-  | sort_by(.licence)
-  | "// Generated by scripts/licences.bash; do not edit by hand.",
+  | sort_by(.license)
+  | "// Generated by scripts/licenses.bash; do not edit by hand.",
     "",
     "use super::{Group, Holder, Text};",
     "",
@@ -184,8 +184,8 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
     "pub(super) const GROUPS: &[Group] = &[",
     (.[] |
       "    Group {",
-      "        licence: \(.licence | tojson),",
-      "        text: include_str!(\"../../licences/\(.licence).txt\"),",
+      "        license: \(.license | tojson),",
+      "        text: include_str!(\"../../licenses/\(.license).txt\"),",
       (if .holders == [] then "        holders: &[],"
        else "        holders: &[",
          (.holders[] |

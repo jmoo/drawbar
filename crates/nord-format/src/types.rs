@@ -1,4 +1,4 @@
-//! Range-checked integers for bit-packed fields — an out-of-range stored
+//! Range-checked integers for bit-packed fields. An out-of-range stored
 //! value is a decode error, never a silent wrap.
 
 use std::fmt::{Debug, Formatter};
@@ -8,7 +8,7 @@ use crate::bits::{bits_for, Packed};
 use crate::error::ParseError;
 use crate::fields::{ControlKind, Unit};
 
-/// An i8 value that is bounded by MIN and MAX and can be converted to a u8 by adding OFFSET.
+/// An `i8` bounded by `MIN..=MAX`, stored as a `u8` by adding `OFFSET`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct RangedI8<const OFFSET: u8, const MIN: i8, const MAX: i8> {
     inner: i8,
@@ -55,9 +55,9 @@ impl<const OFFSET: u8, const MIN: i8, const MAX: i8> Packed for RangedI8<OFFSET,
         bits_for((MAX as i16 + OFFSET as i16) as u64)
     };
     const DECODE_BITS: u32 = u8::BITS;
-    /// A signed shift. ⚠️ The unit is the model's — octaves for an octave shift,
-    /// semitones for a transpose — and the alias does not carry it, so the kind says
-    /// only that the control is signed.
+    /// A signed shift. ⚠️ The unit depends on the field (octaves for an octave shift,
+    /// semitones for a transpose) and the alias does not carry it, so the kind says only
+    /// that the control is signed.
     const CONTROL: ControlKind = ControlKind::Shift(Unit::None);
     type Error = ParseError;
 
@@ -212,12 +212,12 @@ macro_rules! ranged_unsigned {
 ranged_unsigned! {
     /// An unsigned value constrained to `0..=MAX`.
     ///
-    /// The counterpart to [`RangedI8`] for fields that are still plain integers — knob
-    /// positions, model slots, selectors. Expressing the bound in the type means the value
-    /// cannot be built too wide for its slot, so encoding it can never fail.
+    /// The counterpart to [`RangedI8`] for fields that are still plain integers: knob
+    /// positions, model slots, selectors. With the bound in the type, a value cannot be
+    /// built too wide for its slot, so encoding it cannot fail.
     ///
-    /// `MAX` is what the *slot* holds, not what the instrument uses: tightening it to the
-    /// real range would reject files this decoder currently accepts.
+    /// `MAX` is what the slot holds, not what the instrument uses: tightening it to the
+    /// instrument's range would reject files this decoder accepts.
     RangedU8, u8, as_u8
 }
 
@@ -231,9 +231,9 @@ ranged_unsigned! {
 
 /// A pair of u16 coordinates over an `X_COUNT` × `Y_COUNT` space.
 ///
-/// Both parameters are **counts**, so the valid coordinates are `0..X_COUNT` and
+/// Both parameters are counts, so the valid coordinates are `0..X_COUNT` and
 /// `0..Y_COUNT`. The pair packs into a single u16 as `x * Y_COUNT + y`, which is a
-/// bijection onto `0..X_COUNT * Y_COUNT` exactly because `Y_COUNT` is the stride.
+/// bijection onto `0..X_COUNT * Y_COUNT` because `Y_COUNT` is the stride.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RangedU16Pair<const X_COUNT: u16, const Y_COUNT: u16> {
     inner: (u16, u16),

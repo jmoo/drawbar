@@ -4,7 +4,7 @@ use crate::components::{sparse_enum, PianoRef};
 use crate::types::RangedU8;
 use nord_bits_derive::bitbody;
 
-// 0x3a..=0x41 — the piano panel.
+// File offsets 0x3a..=0x41.
 
 /// The piano panel: category and model slot, plus the clav and acoustic
 /// playing options.
@@ -13,8 +13,8 @@ use nord_bits_derive::bitbody;
 pub struct PianoPanel {
     #[bits(0..=2)]
     pub category: PianoCategory,
-    /// Zero-based model slot *within* [`category`](Self::category) — the panel's
-    /// Model dial. A slot coordinate, not an identity; see [`id`](Self::id).
+    /// Zero-based model slot within [`category`](Self::category), set by the panel's
+    /// Model dial. It is a position, not an identity; see [`id`](Self::id).
     #[bits(5..=9)]
     pub piano_model: RangedU8<31>,
     #[bits(15..=16)]
@@ -26,19 +26,20 @@ pub struct PianoPanel {
     #[bits(21..=21)]
     pub mono: bool,
     /// The piano (`.npno`) this program depends on: a stable id, independent of where
-    /// the piano sits in the library, and `0` when none is referenced. Use this — not
-    /// [`category`](Self::category)/[`piano_model`](Self::piano_model), which are slot
-    /// coordinates — to resolve the song → program → piano chain.
+    /// the piano sits in the library, and `0` when none is referenced. Use this to
+    /// resolve the song → program → piano chain; [`category`](Self::category) and
+    /// [`piano_model`](Self::piano_model) are positions.
     ///
-    /// It is the same id the instrument reports for this program over USB in a
-    /// `DEPENDENCIES` reply, which is what lets a file on disk be matched to the library
-    /// content it needs. The wire carries the piano's *name* too; the file does not, so
-    /// resolving one to the other needs the device or a bundle manifest.
+    /// The instrument reports the same id for this program in a USB `DEPENDENCIES`
+    /// reply, so a file on disk can be matched to the library content it needs. The reply
+    /// also carries the piano's name, which the file does not, so resolving an id to a
+    /// name needs the device or a bundle manifest.
     #[bits(22..=53)]
     pub id: PianoRef,
 }
+
 sparse_enum!(
-    /// The piano panel's Type dial — which library category the model comes from.
+    /// The piano panel's Type dial: the library category the model comes from.
     PianoCategory, 3, {
         0 => Grand, "grand";
         1 => Upright, "upright";

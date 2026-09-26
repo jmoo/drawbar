@@ -1,10 +1,10 @@
-//! The `CBIN` container: one type owning what every Nord file format shares — the
-//! header (both generations), the checksum policy, and the length bookkeeping.
+//! The `CBIN` container, which owns what every Nord file format shares: the header
+//! (both generations), the checksum policy, and the length bookkeeping.
 //!
 //! A format module contributes a [`Body`]: the bytes after the header, decoded from
 //! a [`BodyReader`] scoped so that position 0 is the first body byte. Bodies never
-//! see the header layout, the checksum, or the generation — which is what makes a
-//! type-0 format the same amount of work as a type-1 format.
+//! see the header layout, the checksum, or the generation, so a type-0 format takes
+//! the same work as a type-1 format.
 //!
 //! Type 1's tag, location, version, and body length match the device's object-info
 //! reply. Combining them with the downloaded body reproduces the file byte for byte.
@@ -69,15 +69,14 @@ impl Generation {
 /// format spells all four bytes and nothing pads implicitly.
 pub type Tag = [u8; 4];
 
-/// `format` as its 4-byte tag. Every format module's constant is four bytes by a
-/// compile-time assertion; a caller-supplied string of any other length is a bug in
-/// the caller, not a file condition, hence the panic.
+/// `format` as its 4-byte tag. A compile-time assertion holds every format module's
+/// constant to four bytes, so any other length is a caller bug and panics.
 #[track_caller]
 fn tag(format: &str) -> Tag {
     format
         .as_bytes()
         .try_into()
-        .unwrap_or_else(|_| panic!("format tag {format:?} is not 4 bytes — bug in format module"))
+        .unwrap_or_else(|_| panic!("format tag {format:?} is not 4 bytes: a format module bug"))
 }
 
 fn tag_str(tag: &Tag) -> String {
@@ -86,9 +85,9 @@ fn tag_str(tag: &Tag) -> String {
 
 /// The five fields both generations carry, verbatim.
 ///
-/// No asserts live here: what `location` and `aux` mean is per format — a
-/// bank/slot pair on programs, a library location on samples, `0xFFFFFFFF` where
-/// unset — so the container preserves them and the format modules interpret them.
+/// Nothing here is validated. `location` and `aux` mean different things per format
+/// (a bank/slot pair on programs, a library location on samples, `0xFFFFFFFF` where
+/// unset), so the container preserves them and the format modules interpret them.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Header {
     pub generation: Generation,
@@ -105,8 +104,8 @@ pub struct Header {
 }
 
 impl Header {
-    /// A fresh type-1 header — the generation every current device writes — with
-    /// `aux` at the `0xFFFFFFFF` the slot-addressed formats hold.
+    /// A new type-1 header (the generation every current device writes), with `aux` at
+    /// the `0xFFFFFFFF` that slot-addressed formats hold.
     pub fn new(format: &str, location: (u16, u16), version: u32) -> Header {
         Header {
             generation: Generation::V1,
@@ -123,7 +122,7 @@ impl Header {
     }
 
     /// The program category id most program formats keep in `aux`: the low u16
-    /// when the high u16 is zero, `None` for `0xFFFFFFFF` (no category — the
+    /// when the high u16 is zero, `None` for `0xFFFFFFFF` (no category: the
     /// formats whose panel has no category picker) and for the both-halves
     /// shape the preset/library tags hold. What an id names is per model; the
     /// Stage 2/3 names are [`ProgramCategory`](crate::components::ProgramCategory).
@@ -173,9 +172,9 @@ pub trait Body: Sized {
     const LEN: Option<u64> = None;
 
     /// Decode from `r`, which is scoped to the body: position 0 is the first body
-    /// byte and [`BodyReader::len`] is known. `header` is for version gating and
-    /// `location`/`aux` interpretation, not for layout — the container already
-    /// consumed the header bytes.
+    /// byte and [`BodyReader::len`] is known. `header` is for version gating and for
+    /// interpreting `location` and `aux`; the container has already consumed the
+    /// header bytes.
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, header: &Header) -> Result<Self, Error>;
 
     /// Encode to `w` in one forward pass.
@@ -184,8 +183,8 @@ pub trait Body: Sized {
 
 /// One decoded file: its header and its body.
 ///
-/// Derefs to the body: the body *is* the entity, and the container is its file
-/// identity, so `file.center_panel` reads as the entity access it is.
+/// Derefs to the body, which is the entity; the container is its file identity. So
+/// `file.center_panel` reads a field of the entity.
 #[derive(Debug)]
 pub struct Cbin<B> {
     pub header: Header,
@@ -266,8 +265,7 @@ pub(crate) fn read_header(r: &mut impl Read) -> Result<(Header, u32), Error> {
         r.read_exact(&mut rest)?;
         stored_crc32 = le_u32(&rest, 0);
         // Zero on every specimen. Inferred from specimens; not confirmed on
-        // hardware. A file that used these bytes would round-trip wrong silently,
-        // so refuse it loudly instead.
+        // hardware. A write would lose a nonzero pad, so refuse it.
         if rest[4..] != [0u8; 16] {
             return Err(ParseError::AssertFail(
                 "nonzero bytes in the 0x1c..0x2c header pad".into(),
@@ -339,8 +337,8 @@ fn read_inner<B: Body>(
 
     let mut hash = Hash::new(header.generation);
     if header.generation == Generation::V0 {
-        // The crc16 covers the header too. Re-encoding is exact: every one of the
-        // 0x18 bytes is either verified (magic) or held verbatim in `header`.
+        // The crc16 covers the header too. Re-encoding is exact: the magic is
+        // verified and the other header bytes are held in `header`.
         hash.update(&header.head_bytes());
     }
     let mut reader = BodyReader {
@@ -405,10 +403,11 @@ impl<B: Body> Cbin<B> {
 
 /// A body kept verbatim: bytes in, bytes out, checksum verified, nothing decoded.
 ///
-/// For formats whose body is not yet mapped, for one parsed as a borrowed view over
-/// these bytes rather than a bit-mapped struct (`npno`), and for wire code that moves
-/// bodies whole. ⚠️ Allocates the body — a library-sized file wants [`inspect`],
-/// which holds O(1), not a `RawBody`.
+/// Used for formats whose body is not yet mapped, for one parsed as a borrowed view
+/// over these bytes (`npno`), and by wire code that moves bodies whole.
+///
+/// ⚠️ Allocates the whole body. For a library-sized file use [`inspect`], which runs
+/// in O(1) memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawBody(pub Vec<u8>);
 
@@ -434,13 +433,13 @@ impl Body for RawBody {
 pub struct Info {
     pub header: Header,
     pub body_len: u64,
-    /// Whether the stored checksum matches the bytes. A mismatch is a fact to
-    /// report, not an error: reporting bad files is this function's job.
+    /// Whether the stored checksum matches the bytes. A mismatch is reported here, not
+    /// raised as an error, because [`inspect`] exists to report bad files.
     pub checksum_ok: bool,
 }
 
-/// One streaming pass over any CBIN file, no body knowledge needed. O(1) memory,
-/// so it serves the formats too large or too unmapped to decode.
+/// One streaming pass over any CBIN file, with no knowledge of the body. It runs in
+/// O(1) memory, so it serves formats too large to decode or not yet mapped.
 pub fn inspect(r: &mut (impl Read + Seek)) -> Result<Info, Error> {
     let start = r.stream_position()?;
     let (header, stored_crc32) = read_header(r)?;
@@ -617,8 +616,8 @@ pub struct BodyWriter<'a, W: Write + Seek> {
 impl<W: Write + Seek> Write for BodyWriter<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(buf)?;
-        // Only the bytes accepted — hashing past `n` would checksum bytes the
-        // caller will retry, counting them twice.
+        // Hash only the accepted bytes: the caller retries the rest, and hashing
+        // them now would count them twice.
         self.hash.update(&buf[..n]);
         self.pos += n as u64;
         Ok(n)
@@ -636,7 +635,7 @@ mod tests {
     use std::io::Cursor;
 
     /// The three `aux` shapes: category under a zero high u16, unset, and the
-    /// both-halves preset/library shape — only the first yields a category.
+    /// both-halves preset/library shape.
     #[test]
     fn category_reads_only_the_program_shape() {
         let mut h = Header::new("ne5p", (0, 0), 4);
@@ -700,7 +699,7 @@ mod tests {
         out
     }
 
-    /// Both generations round-trip and differ only by their 18-byte checksum layout.
+    /// Type 1 adds 20 header bytes of checksum and pad; type 0 adds a 2-byte trailer.
     #[test]
     fn both_generations_round_trip_and_differ_by_18_bytes() {
         let body = [0xaa, 0xbb, 0xcc, 0xdd, 0xee];
@@ -776,8 +775,8 @@ mod tests {
         );
     }
 
-    /// An unread body tail still reaches the checksum: the container drains what
-    /// the body left behind, so verification never silently narrows.
+    /// The container drains whatever the body left unread, so verification covers
+    /// every byte.
     #[test]
     fn an_unread_tail_is_still_verified() {
         struct TwoOfFive;
@@ -817,7 +816,7 @@ mod tests {
                 r.seek(SeekFrom::Start(4))?; // skip forward over unread bytes
                 let mut b = [0u8; 1];
                 r.read_exact(&mut b)?;
-                r.seek(SeekFrom::Start(0))?; // back to the start
+                r.seek(SeekFrom::Start(0))?;
                 r.read_exact(&mut b)?; // re-read an already-hashed byte
                 Ok(Skipper)
             }
@@ -849,8 +848,8 @@ mod tests {
         }
     }
 
-    /// The header names its own layout, so a type this build has never laid out is
-    /// refused rather than read with one of the two it knows.
+    /// A header type other than 0 or 1 is refused, not read with one of the two known
+    /// layouts.
     #[test]
     fn a_header_type_that_is_neither_generation_is_refused() {
         let mut bytes = v1_file(&[1, 2, 3, 4, 5]);
@@ -862,8 +861,7 @@ mod tests {
         );
     }
 
-    /// The sixteen bytes after the type-1 checksum are zero in every specimen. A file
-    /// using them would round-trip wrong silently, so it is refused loudly.
+    /// The sixteen bytes after the type-1 checksum are zero in every specimen.
     #[test]
     fn a_nonzero_header_pad_is_refused() {
         for at in 0x1c..0x2c {
@@ -876,8 +874,8 @@ mod tests {
         }
     }
 
-    /// A file shorter than the header and checksum its own generation declares has no
-    /// body to speak of, and the length arithmetic must say so rather than wrap.
+    /// A file shorter than its generation's header and checksum is refused, and the
+    /// length arithmetic does not wrap.
     #[test]
     fn a_file_shorter_than_its_container_is_refused() {
         // A type-0 container is the 0x18 header plus its 2-byte trailer.

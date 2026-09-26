@@ -14,7 +14,7 @@ pub const PAD: f32 = 12.0;
 const GAP: f32 = 10.0;
 const HEAD_H: f32 = 20.0;
 const HEAD_TEXT: f32 = 9.0;
-/// The first column of a row, which is what the row is called.
+/// The text size of a row's first column, which names the row.
 pub const NAME_TEXT: f32 = 11.5;
 
 /// What one column is worth: a figure the list fixes, or a share of what the fixed ones
@@ -48,7 +48,7 @@ pub fn columns<const N: usize>(rect: egui::Rect, widths: [Width; N]) -> [(f32, f
     for (cell, width) in out.iter_mut().zip(widths) {
         let width = match width {
             Width::Fixed(width) => width,
-            // A table of nothing but fixed columns has no free room to divide.
+            // Shares that sum to zero get no width instead of dividing by zero.
             Width::Share(share) if shares > 0.0 => free * share / shares,
             Width::Share(_) => 0.0,
         };
@@ -61,8 +61,8 @@ pub fn columns<const N: usize>(rect: egui::Rect, widths: [Width; N]) -> [(f32, f
 /// The strip above the rows: a hairline over and under, and each column's name in MICRO
 /// caps. A column named with an empty string gets no head.
 ///
-/// `right` names the columns whose figures are set right to left, so the head stands over
-/// them rather than over the room beside them.
+/// `right` lists the columns whose figures are right-aligned. Their heads align right too,
+/// so each stands over its figures.
 pub fn heads<const N: usize>(
     ui: &mut egui::Ui,
     widths: [Width; N],
@@ -127,8 +127,8 @@ mod tests {
         assert_eq!(cells[3].1, 74.0);
         assert_eq!(cells[3].0 + cells[3].1, 500.0 - PAD);
 
-        // Narrower than the fixed columns: the shared ones vanish rather than going
-        // negative and painting to the left of the column before them.
+        // Narrower than the fixed columns: the shared ones get zero width, so none goes
+        // negative and paints over the column before it.
         let tight = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(40.0, 20.0));
         let cells = columns(tight, [Width::Fixed(56.0), Width::Share(1.0)]);
         assert_eq!(cells[1].1, 0.0);

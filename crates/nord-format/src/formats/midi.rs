@@ -1,11 +1,10 @@
-//! Standard MIDI files (`.mid`) — carriers for the Lead SysEx banks.
+//! Standard MIDI files (`.mid`), which carry the Lead SysEx banks.
 //!
-//! Kept verbatim: the interesting bytes are the embedded SysEx messages, and
-//! extracting them means walking MTrk events, which is unimplemented. ⚠️ The
-//! `.mid` and `.syx` editions of a bank are not interchangeable on every model:
-//! the Lead 2X pairs carry the same messages in the same order, the Lead 3 pairs
-//! the same set in a different order. Inferred from specimens; not confirmed on
-//! hardware.
+//! Kept verbatim. The useful bytes are the embedded SysEx messages, and extracting
+//! them would mean walking MTrk events, which is not implemented. ⚠️ The `.mid` and
+//! `.syx` editions of a bank are not interchangeable on every model: the Lead 2X pairs
+//! carry the same messages in the same order, and the Lead 3 pairs carry the same set
+//! in a different order. Inferred from specimens; not confirmed on hardware.
 
 use crate::error::{Error, ParseError};
 use std::io::{Read, Write};

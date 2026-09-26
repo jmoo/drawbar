@@ -1,19 +1,19 @@
-//! `nord piano` — the verbs that only mean anything for a piano library.
+//! `nord piano`: the verbs that apply only to a piano library.
 //!
 //! A library is a directory of strokes: one recording per root note, bank and
 //! velocity layer, each owning a span of encoded audio. `inspect` reports that
 //! directory, `decode` turns one stroke back into a WAV, and `edit`, `trim` and
-//! `split` are the transforms `nord_format`'s model can express — renaming,
+//! `split` are the transforms `nord_format`'s model can express: renaming,
 //! retuning and rerouting keys, dropping banks and layers, narrowing the key range,
-//! and cutting a library in two. Nothing here re-encodes audio: a stroke that
-//! survives a transform moves byte for byte.
+//! and cutting a library in two. None of these re-encodes audio; a stroke that
+//! survives a transform is copied byte for byte.
 //!
-//! `build` and `rebuild` are the two verbs that do write audio: one lays a library out
-//! from a directory of WAVs, the other codes a library's own strokes again and reports
-//! how each one came back.
+//! `build` and `rebuild` write audio. `build` lays a library out from a directory of
+//! WAVs, and `rebuild` re-encodes a library's own strokes and reports how each one
+//! came back.
 //!
-//! These verbs take a file. A library is tens of megabytes, so moving one to or
-//! from the instrument is `nord piano get` and `nord piano put`.
+//! These verbs take a file. A library is tens of megabytes, so it moves to or from
+//! the instrument with `nord piano get` and `nord piano put`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -27,8 +27,8 @@ use nord_format::Entity;
 use crate::edit::{write_edit, write_file};
 use crate::ui::Ui;
 
-/// The banks a trim can drop by name. The attack bank is every library's reason to
-/// exist and dropping it would leave silence, so it is not offered.
+/// The banks a trim can drop by name. Dropping the attack bank would leave silence, so
+/// it is not offered.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum DroppableBank {
     /// The pedal-down resonance set, which the larger libraries add.
@@ -52,7 +52,7 @@ pub struct InspectArgs {
     #[arg(required = true, value_name = "FILE")]
     pub files: Vec<PathBuf>,
 
-    /// List every stroke rather than one line per root.
+    /// List every stroke instead of one line per root.
     #[arg(long)]
     pub strokes: bool,
 
@@ -67,7 +67,7 @@ pub struct DecodeArgs {
     #[arg(value_name = "FILE")]
     pub file: PathBuf,
 
-    /// The stroke by its index in the directory. The alternative to `--key`.
+    /// The stroke's index in the directory. An alternative to `--key`.
     #[arg(long, value_name = "N", conflicts_with = "key")]
     pub stroke: Option<usize>,
 
@@ -117,12 +117,12 @@ pub struct EditArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Replace the variant — the text after the `#`, where the vendor records the
-    /// voicing and the library's size. It cannot itself hold a `#`.
+    /// Replace the variant: the text after the `#`, where the vendor records the
+    /// voicing and the library's size. It cannot contain a `#`.
     #[arg(long)]
     pub variant: Option<String>,
 
-    /// Replace the voicing, a field of its own that only the newer stream carries.
+    /// Replace the voicing, a separate field that only the newer stream version has.
     #[arg(long)]
     pub voicing: Option<String>,
 
@@ -156,13 +156,13 @@ pub struct TrimArgs {
     #[arg(long, value_enum, value_name = "BANK")]
     pub drop_bank: Vec<DroppableBank>,
 
-    /// `N` keeps the N loudest layers of each root and bank; `=0,3,7` keeps exactly
-    /// those layer values. Surviving layers keep the numbers they had.
+    /// `N` keeps the N loudest layers of each root and bank; `=0,3,7` keeps only
+    /// those layer values. The layers kept keep their numbers.
     #[arg(long, value_name = "N|=LIST")]
     pub layers: Option<String>,
 
     /// `LO..HI`, inclusive: uncover every key outside it and drop the roots nothing
-    /// plays any more. Both ends take a note name or a number.
+    /// plays anymore. Both ends take a note name or a number.
     #[arg(long, value_name = "LO..HI")]
     pub range: Option<String>,
 
@@ -175,32 +175,32 @@ pub struct TrimArgs {
 pub struct BuildArgs {
     /// A directory of WAVs, one per stroke, named `<root>-b<bank>-l<layer>.wav`:
     /// `060-b0-l00.wav` is MIDI note 60, the attack bank, the loudest layer. Banks are
-    /// 0 attack, 1 pedal resonance, 2 release; `l00`, `l01`, … count from the loudest
-    /// and are spread over the layer values 0..27 the instrument selects by. Write
-    /// `v12` in place of `l00` to state a layer's value outright; one root's bank
-    /// names all its layers the same way. Files that are not WAVs are skipped, and a
-    /// WAV named some other way is refused.
+    /// 0 attack, 1 pedal resonance and 2 release. `l00`, `l01`, … count from the
+    /// loudest and are spread over the layer values 0..27 the instrument selects by.
+    /// Write `v12` in place of `l00` to set a layer's value directly; all layers of one
+    /// root and bank must use the same form. Files that are not WAVs are skipped, and
+    /// a WAV named any other way is refused.
     ///
-    /// A stroke holds whole blocks and every frame of its WAV, so it states the
-    /// silence that fills out the block the WAV ends in; the `frames` column below is
-    /// the WAV's, not the stroke's.
+    /// A stroke holds whole blocks and every frame of its WAV, so it includes the
+    /// silence that pads out the WAV's last block. The `frames` column in the output
+    /// counts the WAV's frames, not the stroke's.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
     /// A library to take everything the audio does not decide from: the length marks,
-    /// the decay coefficients, the per-note tables, the playback parameters, the
-    /// stream version and the word at the body's start. Each new stroke inherits from
-    /// the template stroke of its own bank and nearest root.
+    /// decay coefficients, per-note tables, playback parameters, stream version and
+    /// the word at the start of the body. Each new stroke inherits from the template's
+    /// stroke of the same bank and nearest root.
     ///
-    /// Without one, the library states those fields by rule instead: nothing applied
-    /// over what the recordings hold, each stroke trimmed by its own layer value, and
-    /// the damper reaching the keys `--kind` names. A library written that way has
-    /// been played, and sounds like the same audio built against a template.
+    /// Without a template, those fields follow fixed rules: no decay applied over the
+    /// recordings, each stroke trimmed by its own layer value, and the damper covering
+    /// the keys `--kind` implies. A library built that way has been played, and sounds
+    /// the same as the same audio built with a template.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 
-    /// What kind of instrument the library holds. Only the damper limit follows from
-    /// it; the rest is how the instrument files the library.
+    /// The kind of instrument the library holds. It sets the damper limit and how the
+    /// instrument files the library.
     #[arg(long, value_enum, default_value_t = KindName::Grand, conflicts_with = "template")]
     pub kind: KindName,
 
@@ -270,7 +270,7 @@ impl From<KindName> for encode::Kind {
 
 #[derive(Args)]
 pub struct RebuildArgs {
-    /// The piano library to code again from its own audio.
+    /// The piano library to re-encode from its own audio.
     #[arg(value_name = "FILE")]
     pub file: PathBuf,
 
@@ -322,8 +322,8 @@ fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
     }
 }
 
-/// A trim or a split writes a new library; overwriting the one it reads would
-/// leave nothing to compare against, and no flag says that was meant.
+/// A trim or a split writes a new library. Overwriting its input would leave
+/// nothing to compare against, and there is no flag to ask for that.
 fn refuse_in_place(input: &Path, output: &Path) -> Result<(), String> {
     let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -706,8 +706,8 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
 /// `-4` is fine-tune units; `+2.1c` is cents, rounded to the nearest unit.
 fn parse_tune(value: &str) -> Result<i8, String> {
     if let Some(cents) = value.strip_suffix(['c', 'C']) {
-        // `nan` and `inf` parse; rounding either one lands on 0, which is a tuning
-        // nobody asked for rather than the refusal the value deserves.
+        // `nan` and `inf` parse, and rounding either gives 0, a tuning nobody asked
+        // for. Refuse them instead.
         let cents: f32 = cents
             .parse()
             .ok()
@@ -784,7 +784,7 @@ pub fn trim(ui: &Ui, args: TrimArgs) -> Result<(), String> {
     report_size(ui, original.len(), trimmed.len());
     if total.keys_uncovered > 0 {
         ui.note(format!(
-            "{} key(s) are left playing nothing, and {} root(s) dropped out entirely",
+            "{} key(s) are left silent, and {} root(s) were dropped",
             total.keys_uncovered, total.roots_removed
         ));
     }
@@ -806,7 +806,7 @@ fn report_size(ui: &Ui, before: usize, after: usize) {
     ));
 }
 
-/// `N` keeps the N loudest; `=0,3,7` keeps exactly those layer values.
+/// `N` keeps the N loudest; `=0,3,7` keeps only those layer values.
 fn parse_layers(spec: &str) -> Result<Layers, String> {
     let spec = spec.trim();
     if let Some(list) = spec.strip_prefix('=') {
@@ -939,7 +939,7 @@ fn verify_one(path: &Path, deep: bool) -> Result<Counted, String> {
                 .map_err(|e| format!("{stroke:?}: {e}"))?;
             if audio.clipped > 0 {
                 return Err(format!(
-                    "{stroke:?}: {} sample(s) left int16",
+                    "{stroke:?}: {} sample(s) fell outside the 16-bit range",
                     audio.clipped
                 ));
             }
@@ -1013,9 +1013,9 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
         let (root, bank, layer) = parse_stroke_name(&stem, Stem::None).ok_or_else(|| {
             format!(
-                "{}: a WAV here is named <root>-b<bank>-l<layer>.wav, as in \
-                 060-b0-l00.wav — MIDI note 60, bank 0 (attack), layer 0; \
-                 <root>-b<bank>-v<value>.wav states the layer value instead",
+                "{}: a WAV here must be named <root>-b<bank>-l<layer>.wav, as in \
+                 060-b0-l00.wav for MIDI note 60, bank 0 (attack), layer 0, or \
+                 <root>-b<bank>-v<value>.wav to give the layer value directly",
                 path.display()
             )
         })?;
@@ -1050,7 +1050,7 @@ fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
         match clash.how {
             Clash::BothForms => format!(
                 "{what} names some of its layers by index (l..) and some by value \
-                 (v..); one root's bank names them one way"
+                 (v..); all layers of one root and bank must use the same form"
             ),
             Clash::Twice => format!("{what} names one of its layers twice"),
         }
@@ -1069,8 +1069,7 @@ fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
     Ok(values)
 }
 
-/// The rules a build states where it is given no template, from the flags that name
-/// them.
+/// The rules a build follows without a template, from the flags that set them.
 fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
     let kind = encode::Kind::from(args.kind);
     let tenths = (args.gain * 10.0).round();
@@ -1165,29 +1164,27 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     ));
     if resampled > 0 {
         ui.note(format!(
-            "{resampled} WAV(s) were resampled onto the {} Hz lattice the instrument \
-             plays at",
+            "{resampled} WAV(s) were resampled to the {} Hz rate the instrument plays at",
             codec::RATE
         ));
     }
     if clipped > 0 {
         ui.note(format!(
-            "{clipped} resampled sample(s) saturated at int16; the source is loud \
-             enough that the kernel overshoots it"
+            "{clipped} resampled sample(s) clipped at the 16-bit limit; the source is \
+             loud enough that the resampling filter overshoots"
         ));
     }
     ui.note(match &args.template {
         Some(_) => format!(
-            "{} states the length marks, the decay coefficients, the per-note tables, the \
-             playback parameters and the word at the body's start as the template donated \
-             them; the instrument accepts them, and what it makes of them beyond accepting \
-             is not known",
+            "{} takes the length marks, decay coefficients, per-note tables, playback \
+             parameters and the word at the start of the body from the template; the \
+             instrument accepts them, but their effect is not known",
             args.out.display()
         ),
         None => format!(
-            "{} states neutral playback where a template would have donated it: no decay \
-             applied over the recordings, each stroke trimmed by its own layer value, {:+.1} dB \
-             of library gain and the damper reaching {}",
+            "{} uses neutral playback in place of a template: no decay applied over the \
+             recordings, each stroke trimmed by its own layer value, {:+.1} dB of library \
+             gain, and the damper reaching {}",
             args.out.display(),
             f64::from(rules.gain) / 10.0,
             damper_reach(rules.damper_top),
@@ -1248,16 +1245,15 @@ pub fn rebuild(ui: &Ui, args: RebuildArgs) -> Result<(), String> {
     report_size(ui, original.len(), bytes.len());
     if restated > 0 {
         ui.note(format!(
-            "{restated} block(s) declare a different attenuation. It is a statistic \
-             the file's own encoder measured, not a function of the frames it stored, \
-             and the decode never reads it"
+            "{restated} block(s) declare a different attenuation. The original encoder \
+             measured that value independently of the stored frames, and decoding never \
+             reads it"
         ));
     }
     if recoded > 0 {
         ui.note(format!(
-            "{} {recoded} block(s) came back with different residuals, a different \
-             width or a different order — this library was not laid out the way the \
-             coder lays one out",
+            "{} {recoded} block(s) came back with different residuals, width or order; \
+             this library was not encoded the way this tool encodes one",
             ui.danger("warning:")
         ));
     }
@@ -1290,8 +1286,8 @@ mod tests {
         to_bytes(&built, Path::new("kit.npno")).unwrap()
     }
 
-    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
-    /// meets the guard that spelling it with no `-o` meets.
+    /// `-o` naming the input overwrites the file being edited, so it needs `--yes` as
+    /// an in-place edit does.
     #[test]
     fn an_output_that_is_the_input_takes_the_in_place_guard() {
         let dir = crate::edit::tests::scratch("piano-edit-in-place");
@@ -1324,8 +1320,8 @@ mod tests {
         }
     }
 
-    /// `v255` parses and is a layer no key would ever sound, so the name is refused
-    /// rather than built into a library as a stroke nothing plays.
+    /// `v255` parses, but no key would ever sound it, so the name is refused instead of
+    /// building a stroke nothing plays.
     #[test]
     fn a_named_layer_value_no_velocity_selects_is_refused() {
         let highest = encode::HIGHEST_PLAYED_LAYER;

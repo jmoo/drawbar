@@ -1,12 +1,12 @@
 //! The replay sweep: one test per script, built at runtime with `libtest-mimic`.
 //!
-//! Two trees feed it. `tests/scripts/` — protocol framing this repo may hold, committed
-//! so the sweep has something to read in any checkout — always; the private corpus under
-//! `NORD_CORPUS_ROOT` with `--features corpus`. Every `*.script` under either, wherever
-//! it sits, is a trial: it parses, and every frame's length field agrees with its bytes.
-//! A script that declares an `intent` is also *driven* — its sections replayed in order
-//! through an exact-match transport, each judged against its `expect`, the whole script
-//! required to be consumed. Nothing here names a directory.
+//! Two trees feed it: `tests/scripts/`, committed so the sweep has something to read in
+//! any checkout, and the private corpus under `NORD_CORPUS_ROOT` with `--features
+//! corpus`. Every `*.script` under either, wherever it sits, is a trial: it must parse,
+//! and every frame's length field must agree with its bytes. A script that declares an
+//! `intent` is also driven: its sections are replayed in order through an exact-match
+//! transport, each is judged against its `expect`, and the whole script must be
+//! consumed.
 //!
 //! ```sh
 //! cargo test -p nord-usb --features replay --test replay        # the fixtures
@@ -131,8 +131,8 @@ fn where_(i: usize, intent: &str, what: impl std::fmt::Display) -> Failed {
     Failed::from(format!("section {} ({intent}): {what}", i + 1))
 }
 
-/// One script: it parses, its frames are framed, and if it says what it was doing, it
-/// does it again.
+/// One script: it parses, its frames are well formed, and any intents it declares are
+/// driven.
 fn trial(path: &Path) -> Result<(), Failed> {
     let text = fs::read_to_string(path).map_err(|e| Failed::from(format!("read: {e}")))?;
     let script = Script::parse(&text).map_err(|e| Failed::from(e.to_string()))?;

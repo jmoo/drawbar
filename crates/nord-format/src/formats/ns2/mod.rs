@@ -1,13 +1,14 @@
 //! Nord Stage 2 and 2 EX (`.ns2p`, `.ns2l`, `.ns2s`, `.ns2y`).
 //!
-//! The program body decodes in full, **both slots**. A program is 23 bytes of
-//! globals then two 249-byte slot blocks of the same layout — Slot A and Slot B,
-//! the two complete setups the panel's Slot buttons switch between, each with its
-//! own organ, piano, synth, extern and effects. They are not copies of each other,
-//! and their fields are reached as `slot_a.*` and `slot_b.*`. The rest are
-//! container-verified stubs; the synth file (`ns2s`) is Slot A's synth block,
-//! located but not yet declared. ⚠️ `s` is a synth patch here (a song on the Stage
-//! 3) and `y` is the settings (a synth patch on the 3/4).
+//! The program body decodes in full, including both slots. A program is 23 bytes of
+//! globals followed by two 249-byte slot blocks with the same layout: Slot A and Slot
+//! B, the two complete setups the panel's Slot buttons switch between, each with its
+//! own organ, piano, synth, extern and effects. Their fields are reached as `slot_a.*`
+//! and `slot_b.*`. The other formats are container-verified stubs; the synth file
+//! (`ns2s`) is Slot A's synth block, located but not declared.
+//!
+//! ⚠️ `s` is a synth patch here (a song on the Stage 3), and `y` is the settings (a
+//! synth patch on the Stage 3 and 4).
 
 use super::raw::raw_format;
 
@@ -17,7 +18,7 @@ pub mod program;
 pub use program::Program;
 
 pub mod live {
-    //! The live buffer (`.ns2l`): same body as a program, under its own tag.
+    //! The live buffer (`.ns2l`): a program body under its own tag.
 
     use super::program::{self, Program};
     use crate::cbin::{self, Cbin};

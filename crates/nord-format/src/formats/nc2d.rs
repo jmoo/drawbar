@@ -1,7 +1,7 @@
-//! Nord C2D (`.nc2p`, `.nc2s`) — container-verified, bodies unmapped.
+//! Nord C2D (`.nc2p`, `.nc2s`): container-verified, bodies unmapped.
 //!
-//! ⚠️ The C2D's tags carry the `nc2` prefix while the original C2 uses `ncpg` /
-//! `ncsy` — the prefix names the *other* model. Dispatch by tag, never by guess.
+//! ⚠️ The C2D's tags carry the `nc2` prefix, while the original C2 uses `ncpg` and
+//! `ncsy`, so the prefix names the other model. Dispatch by tag, never by guess.
 
 use super::raw::raw_format;
 

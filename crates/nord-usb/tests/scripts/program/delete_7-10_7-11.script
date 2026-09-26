@@ -1,7 +1,7 @@
 # source: nord
 # device: Nord Electro 5, firmware v2.04 build 592
-# note: every slot is named first, one transaction each, and then both
-#   deletes run inside a single session - the way NSM batches a multi-delete.
+# note: each slot is described first, one transaction each, and then both
+#   deletes run inside one session, as Nord Sound Manager batches a multi-delete.
 # intent: program info 7:10
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec

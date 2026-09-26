@@ -17,9 +17,7 @@ pub struct Bundle {
     songs: song::Bank,
     pianos: Vec<Piano>,
     samples: Vec<Cbin<Sample>>,
-    /// Entries the walk could not place: `(archive member name, why)`. Kept on the
-    /// bundle rather than printed — a library owns no terminal — so a caller can decide
-    /// whether a partial read is acceptable.
+    /// Archive members the walk could not place, as `(member name, reason)`.
     skipped: Vec<(String, String)>,
 }
 
@@ -41,8 +39,7 @@ impl Bundle {
 
         for i in 0..zip.len() {
             let mut file = zip.by_index(i)?;
-            // A directory entry carries no file, and a backup manifest describes the
-            // archive rather than being a member of it.
+            // Skip directories and the backup manifest, which describes the archive.
             if file.is_dir() || file.name().ends_with("meta.xml") {
                 continue;
             }
@@ -69,8 +66,7 @@ impl Bundle {
                     Entity::Sample(crate::Sample::V2(sample)) => {
                         bundle.samples.push(sample);
                     }
-                    // Named by identity, not Debug — a stub entity's Debug dump
-                    // is its entire body.
+                    // Named by identity: a stub entity's Debug output is its entire body.
                     other => bundle.skipped.push((
                         name,
                         format!("no place in a bundle for a {}", other.identity().kind),
@@ -112,11 +108,10 @@ impl Default for Bundle {
     }
 }
 
-/// Report the member a later one pushed out of its slot.
+/// Records the member a later one pushed out of its slot.
 ///
-/// A bank holds one item per slot and the file carries the slot, so two members
-/// addressed to the same one cannot both be kept: the last read wins and the loser is
-/// accounted for rather than dropped.
+/// A bank holds one item per slot, and each file names its slot. When two members name
+/// the same slot, the last one read wins and the earlier one is listed as skipped.
 fn note_displaced<T>(skipped: &mut Vec<(String, String)>, displaced: Option<Entry<T>>, by: &str) {
     let Some(entry) = displaced else { return };
     skipped.push((

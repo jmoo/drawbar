@@ -28,7 +28,7 @@ jobs:
       - name: same-repo branches only
         if: github.event.pull_request.head.repo.full_name != github.repository
         run: |
-          echo "::error::cannot push to a fork — run scripts/bump.bash locally"
+          echo "::error::cannot push to a fork; run scripts/bump.bash locally"
           exit 1
       - name: mint an app token
         id: token

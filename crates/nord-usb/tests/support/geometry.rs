@@ -1,10 +1,10 @@
 //! The committed recording of `device geometry`, replayed on a transport of its own.
 //!
-//! A recording that carries no geometry section is bounded by these tables: the same
-//! instrument, and static configuration a new recording carries for itself.
+//! A recording without a geometry section is bounded by these tables, which come from
+//! the same instrument and are static configuration. A new recording carries its own.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy. It reads the crate-root `scripts` module.
+//! ⚠️ A support module, not a test target: each test target that includes it
+//! compiles its own copy. It reads the crate-root `scripts` module.
 #![allow(dead_code)]
 
 use nord_usb::device::Geometry;

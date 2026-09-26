@@ -1,9 +1,9 @@
 //! One organ layer's stored state: drawbars and their morph targets, percussion,
 //! vibrato, model and octave.
 //!
-//! ⚠️ A layer's **enable and volume are not in here** — the file packs those with
-//! the other layers', a bit and 31 bits apart respectively, so they stay on the
-//! owning body. This block is the part that repeats at a whole-byte stride.
+//! ⚠️ A layer's enable and volume are not in this block. The file packs them with the
+//! other layers' (a bit apart and 31 bits apart), so they stay on the owning body. This
+//! block is the part that repeats at a whole-byte stride.
 
 use crate::components::{Drawbar, DrawbarMorph, KbZone4, OctaveShiftNibble, Selector};
 #[nord_bits_derive::bitbody(29)]
@@ -107,9 +107,8 @@ mod tests {
     use super::*;
     use crate::fields::ControlKind;
 
-    /// Nine bars, each declaring which one it is, and each with its three morph slots
-    /// bound to it — the two relations a caller would otherwise have to read out of the
-    /// field names itself.
+    /// Each bar declares its rank and owns its three morph slots, so a caller need not
+    /// parse field names.
     #[test]
     fn every_bar_declares_its_rank_and_owns_its_morph_slots() {
         let specs = OrganLayer::field_specs();
@@ -143,8 +142,8 @@ mod tests {
             }
         }
 
-        // A field that is not a drawbar keeps what its type said, whatever its name ends
-        // in.
+        // A field that is not a drawbar keeps its type's control kind, whatever its name
+        // ends in.
         assert_eq!(spec("kb_zones").control, ControlKind::Selector);
     }
 }

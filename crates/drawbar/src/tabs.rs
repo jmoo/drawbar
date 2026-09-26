@@ -1,9 +1,9 @@
-//! The centre: one tab per open document, plus the library and the keyboard.
+//! The center: one tab per open document, plus the library and the keyboard.
 //!
-//! A document tab is a view of an asset on this computer. Opening something off the
-//! instrument copies it here first, so what a tab holds is always a working copy —
-//! editing it changes nothing on the instrument until it is sent back. The library and
-//! the keyboard are views of what is already there, so they hold nothing.
+//! A document tab shows an asset on this computer. Opening something from the instrument
+//! copies it here first, so a tab always holds a working copy: editing it changes nothing
+//! on the instrument until it is sent back. The library and the keyboard show what is
+//! already there, so they hold nothing.
 
 use eframe::egui;
 use nord_usb::ObjectClass;
@@ -14,15 +14,15 @@ use crate::panel::{GAP, GLYPH, PAD};
 use crate::shell::new_button;
 use crate::workspace::Workspace;
 
-/// ⚠️ The strip's own scroll id. The strip and the document body are drawn into the same
-/// `Ui`, and egui salts an unsalted `ScrollArea` with that `Ui` alone — two of them there
-/// share one state, and a wheel over the body moves the strip instead of the document.
+/// ⚠️ The strip's scroll id. The strip and the document body are drawn into the same
+/// `Ui`, and egui salts an unsalted `ScrollArea` with only that `Ui`, so two of them
+/// there would share one state and a wheel over the body would scroll the strip.
 pub const SCROLL: &str = "tab_strip";
 
 /// How tall the strip is.
 pub const HEIGHT: f32 = 26.0;
 
-/// Which of the centre's views a tab shows.
+/// Which of the center's views a tab shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Spot {
     Document(u64),
@@ -31,13 +31,12 @@ pub enum Spot {
 }
 
 pub struct Tabs {
-    /// ⚠️ [`Spot::Library`] is the first of these and stays there: it is what the centre
-    /// falls back to, so nothing closes it and nothing moves it.
+    /// ⚠️ [`Spot::Library`] is first and stays there: the center falls back to it, so
+    /// nothing closes or moves it.
     open: Vec<Spot>,
     active: Option<Spot>,
-    /// Which class the keyboard tab is switched to, as the tree last asked. There is one
-    /// keyboard tab, so the class it is on is the tab's state rather than a tab of its
-    /// own.
+    /// The class the keyboard tab shows, as the tree last set it. There is one keyboard
+    /// tab, so the class is its state, not a separate tab.
     keyboard: Option<ObjectClass>,
 }
 
@@ -52,7 +51,7 @@ impl Default for Tabs {
 }
 
 impl Tabs {
-    /// Open a document, or bring the tab already on it forward.
+    /// Open a document, or bring its existing tab forward.
     pub fn open(&mut self, id: u64) {
         if !self.holds(id) {
             self.open.push(Spot::Document(id));
@@ -60,10 +59,10 @@ impl Tabs {
         self.active = Some(Spot::Document(id));
     }
 
-    /// Bring a tab forward, opening the keyboard if that is what is asked for.
+    /// Bring a tab forward, opening the keyboard if needed.
     ///
-    /// ⚠️ There is one keyboard, so showing it is opening it. The library is always
-    /// open, and a document tab is made by [`Tabs::open`] alone.
+    /// ⚠️ There is one keyboard, so showing it opens it. The library is always open, and
+    /// only [`Tabs::open`] makes a document tab.
     pub fn show(&mut self, spot: Spot) {
         let held = self.open.contains(&spot);
         match (held, spot) {
@@ -74,22 +73,22 @@ impl Tabs {
         self.active = Some(spot);
     }
 
-    /// Switch the keyboard tab to a class. Bringing the tab forward is [`Tabs::show`];
-    /// this says what it opens on.
+    /// Switch the keyboard tab to a class. [`Tabs::show`] brings the tab forward; this
+    /// sets what it shows.
     pub fn keyboard_on(&mut self, class: ObjectClass) {
         self.keyboard = Some(class);
     }
 
-    /// The class the keyboard tab is switched to, if anything has asked for one.
+    /// The class the keyboard tab is switched to, if one has been set.
     pub fn keyboard_class(&self) -> Option<ObjectClass> {
         self.keyboard
     }
 
-    /// Move the tab at `from` to sit where the one at `to` is, the rest closing up
-    /// behind it. An index the strip does not hold moves nothing.
+    /// Move the tab at `from` to position `to`, shifting the rest to close the gap. An
+    /// index out of range moves nothing.
     ///
     /// The keyboard moves like any other tab. ⚠️ The library is the first tab and stays
-    /// there: it is never what moves, and a tab let go over it lands after it.
+    /// there: it never moves, and a tab dropped on it lands after it.
     pub fn reorder(&mut self, from: usize, to: usize) {
         let to = to.max(1);
         if from == 0 || from == to || from >= self.open.len() || to >= self.open.len() {
@@ -99,9 +98,9 @@ impl Tabs {
         self.open.insert(to, tab);
     }
 
-    /// Shut a tab, falling back to whatever is nearest the front.
+    /// Close a tab, falling back to the last tab in the strip.
     ///
-    /// ⚠️ The library is where every close lands, so asking to close it does nothing.
+    /// ⚠️ The library is the final fallback, so closing it does nothing.
     pub fn close(&mut self, spot: Spot) {
         if spot == Spot::Library {
             return;
@@ -112,12 +111,12 @@ impl Tabs {
         }
     }
 
-    /// What the centre is drawing.
+    /// What the center is drawing.
     pub fn showing(&self) -> Option<Spot> {
         self.active
     }
 
-    /// The document the centre is on, if it is on one.
+    /// The document the center shows, if any.
     pub fn active(&self) -> Option<u64> {
         match self.active {
             Some(Spot::Document(id)) => Some(id),
@@ -125,7 +124,7 @@ impl Tabs {
         }
     }
 
-    /// The document tab nearest the front, whether or not it is showing.
+    /// The active document, or else the last document tab in the strip.
     pub fn last_document(&self) -> Option<u64> {
         self.active().or_else(|| {
             self.open.iter().rev().find_map(|spot| match spot {
@@ -135,7 +134,7 @@ impl Tabs {
         })
     }
 
-    /// Whether a tab is open on this document, in front or behind.
+    /// Whether a tab is open on this document, active or not.
     pub fn holds(&self, id: u64) -> bool {
         self.open.contains(&Spot::Document(id))
     }
@@ -154,8 +153,8 @@ impl Tabs {
     /// The strip. The open view draws itself below it.
     ///
     /// ⚠️ The scroll area is a direct child of the caller's `Ui`, and its salt is
-    /// [`SCROLL`]: the document body below carries its own, and two unsalted areas in one
-    /// `Ui` would share a state.
+    /// [`SCROLL`]: the document body below has its own salt, and two unsalted areas in
+    /// one `Ui` would share a state.
     pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, acts: &mut Vec<Act>) {
         let rect = egui::Rect::from_min_size(
             egui::pos2(ui.max_rect().left(), ui.cursor().top()),
@@ -171,7 +170,7 @@ impl Tabs {
         egui::ScrollArea::horizontal()
             .id_salt(SCROLL)
             .max_height(HEIGHT)
-            // A bar inside 26 px would take a third of the strip it is scrolling.
+            // A scroll bar would take a third of the 26 px strip.
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .auto_shrink([false; 2])
             .show(ui, |ui| {
@@ -222,8 +221,8 @@ impl Tabs {
     }
 }
 
-/// Which tab a drag was let go over: the one the pointer is inside, or the tab at
-/// whichever end it was carried past.
+/// The tab a drag was dropped on: the one under the pointer, or the tab at whichever end
+/// it went past.
 fn landing(painted: &[(usize, egui::Rect)], x: f32) -> Option<usize> {
     let (first, left) = painted.first()?;
     let (last, right) = painted.last()?;
@@ -239,17 +238,16 @@ fn landing(painted: &[(usize, egui::Rect)], x: f32) -> Option<usize> {
         .map(|(index, _)| *index)
 }
 
-/// A tab as it is drawn: what it wears, what it says, and whether it is saved.
+/// A tab as drawn: its glyph, its name, and whether it is saved.
 struct Face {
     glyph: Glyph,
     name: String,
-    /// It holds something other than what it was last saved as, which the name says by
-    /// going italic and wearing a star — the mark it wears everywhere else.
+    /// It differs from what was last saved, shown by an italic name with a star, as
+    /// everywhere else.
     unsaved: bool,
-    /// What a hover says: the whole of the name a tab shows short, and what else there
-    /// is to know about this tab.
+    /// The hover text: the full name, and anything else to know about this tab.
     hint: Option<String>,
-    /// The × at the end. The library has none: it is what a close falls back to.
+    /// Whether the tab has a × at the end. The library has none: closes fall back to it.
     shut: bool,
 }
 
@@ -276,7 +274,7 @@ fn face(spot: Spot, workspace: &Workspace) -> Option<Face> {
                 name: entity.name.clone(),
                 unsaved: entity.is_unsaved(),
                 hint: Some(match workspace.is_view(id) {
-                    true => format!("{} — the instrument's copy, viewed in place", entity.name),
+                    true => format!("{}: the instrument's copy, viewed in place", entity.name),
                     false => entity.name.clone(),
                 }),
                 shut: true,
@@ -285,14 +283,14 @@ fn face(spot: Spot, workspace: &Workspace) -> Option<Face> {
     }
 }
 
-/// What a click on a drawn tab landed on.
+/// The responses of a drawn tab.
 struct Drawn {
     tab: egui::Response,
     /// The ×, on every tab that has one.
     close: Option<egui::Response>,
 }
 
-/// The × at the end of every tab.
+/// The size of the × at the end of a tab.
 const SHUT: f32 = 11.0;
 
 fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
@@ -384,7 +382,6 @@ mod tests {
         Workspace::new(egui::Context::default())
     }
 
-    /// Opening the same asset twice is the same tab, brought forward.
     #[test]
     fn opening_an_asset_that_is_already_open_just_activates_it() {
         let mut tabs = Tabs::default();
@@ -395,8 +392,7 @@ mod tests {
         assert_eq!(tabs.active(), Some(1));
     }
 
-    /// Closing what is in front falls back to another tab, and closing the last document
-    /// falls back to the library.
+    /// Closing the last document falls back to the library.
     #[test]
     fn closing_the_active_tab_falls_back_to_another() {
         let mut tabs = Tabs::default();
@@ -409,8 +405,7 @@ mod tests {
         assert_eq!(tabs.showing(), Some(Spot::Library));
     }
 
-    /// ⚠️ The library is where a close lands, so it is not itself closable — and the
-    /// strip is never empty, whatever is asked of it.
+    /// The strip is never empty.
     #[test]
     fn closing_the_library_does_nothing_and_leaves_the_strip_standing() {
         let mut tabs = Tabs::default();
@@ -428,7 +423,6 @@ mod tests {
         assert_eq!(tabs.showing(), Some(Spot::Library));
     }
 
-    /// Closing a tab that is not in front leaves the front one showing.
     #[test]
     fn closing_a_background_tab_leaves_the_front_one_showing() {
         let mut tabs = Tabs::default();
@@ -438,27 +432,26 @@ mod tests {
         assert_eq!(tabs.active(), Some(2));
     }
 
-    /// Whether a tab is open is its own question, not one inferred from what it is over
-    /// — a document over nothing at all is still open.
+    /// Whether a tab is open does not depend on the workspace: a tab over a missing
+    /// asset is still open.
     #[test]
     fn a_tab_says_whether_it_is_open_whatever_it_holds() {
         let mut tabs = Tabs::default();
         assert!(!tabs.holds(1));
-        // Nothing in the workspace under this id, so the tab stands for nothing.
+        // No asset has this id.
         tabs.open(1);
         tabs.open(2);
         assert!(tabs.holds(1) && tabs.holds(2), "both are open");
         assert!(!tabs.holds(3));
 
-        // Behind the front one still counts.
+        // A background tab still counts.
         tabs.close(Spot::Document(2));
         assert!(tabs.holds(1) && !tabs.holds(2));
         tabs.close(Spot::Document(1));
         assert!(!tabs.holds(1));
     }
 
-    /// The one mark a tab wears: an unsaved document's name goes italic and takes a
-    /// star, which is what it wears in the tree and the table as well.
+    /// An unsaved document's name takes a star, as in the tree and the table.
     #[test]
     fn a_tab_over_an_unsaved_document_wears_a_star() {
         let ctx = egui::Context::default();
@@ -502,8 +495,6 @@ mod tests {
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
-    /// There is one library and one keyboard, so asking for either twice is one tab
-    /// brought forward — and a document opened between them does not make a second.
     #[test]
     fn the_library_and_the_keyboard_are_each_one_tab() {
         let mut tabs = Tabs::default();
@@ -512,13 +503,12 @@ mod tests {
         tabs.show(Spot::Library);
         assert_eq!(tabs.open.len(), 3);
         assert_eq!(tabs.showing(), Some(Spot::Library));
-        // The centre is on the library, so no document is open in it.
+        // The center shows the library, so no document is active.
         assert_eq!(tabs.active(), None);
         assert_eq!(tabs.last_document(), Some(1));
     }
 
-    /// A document is opened with its bytes or not at all: `show` cannot make one, and
-    /// asking it to leaves what was in front where it was.
+    /// Only `open` makes a document tab; `show` leaves the front tab unchanged.
     #[test]
     fn showing_a_document_that_no_tab_holds_changes_nothing() {
         let mut tabs = Tabs::default();
@@ -528,8 +518,7 @@ mod tests {
         assert!(!tabs.holds(7));
     }
 
-    /// Moving a tab closes the strip up behind it, wherever it came from and wherever it
-    /// lands. ⚠️ The library stays first: neither end of a move may be it.
+    /// ⚠️ The library stays first: it can be neither end of a move.
     #[test]
     fn reordering_moves_one_tab_and_closes_the_strip_up_behind_it() {
         let mut tabs = Tabs::default();
@@ -578,7 +567,7 @@ mod tests {
                 Spot::Document(1),
                 Spot::Keyboard
             ],
-            "a tab let go over the library lands after it"
+            "a tab dropped on the library lands after it"
         );
         assert_eq!(
             tabs.showing(),
@@ -587,8 +576,7 @@ mod tests {
         );
     }
 
-    /// An index the strip does not hold is not a move, so nothing is dropped and nothing
-    /// panics on the way.
+    /// An out-of-range index moves nothing and does not panic.
     #[test]
     fn reordering_past_the_end_of_the_strip_moves_nothing() {
         let mut tabs = Tabs::default();
@@ -601,8 +589,6 @@ mod tests {
         assert_eq!(tabs.open, before);
     }
 
-    /// Where a drop lands: the tab under the pointer, or the tab at whichever end it was
-    /// carried past.
     #[test]
     fn a_drop_lands_on_the_tab_under_it_or_on_the_end_it_passed() {
         let box_ = |left: f32, right: f32| {
@@ -616,10 +602,9 @@ mod tests {
         assert_eq!(landing(&[], 30.0), None, "an empty strip takes no drop");
     }
 
-    /// Dragging a tab across its neighbour and letting go swaps the two. Nothing is
-    /// activated by it: a release that moved is a drop, not a click.
+    /// A release after a drag is a drop, not a click, so nothing is activated.
     #[test]
-    fn dragging_a_tab_across_its_neighbour_swaps_them() {
+    fn dragging_a_tab_across_its_neighbor_swaps_them() {
         let ctx = egui::Context::default();
         ctx.all_styles_mut(crate::app::metrics);
         let mut ws = Workspace::new(ctx.clone());
@@ -628,8 +613,8 @@ mod tests {
             .create(crate::workspace::Fresh::Program, &mut log)
             .unwrap();
         let second = ws.create(crate::workspace::Fresh::Live, &mut log).unwrap();
-        // Long enough that the tab reaches well past the library's own, which is the one
-        // tab a drag may not start on.
+        // Long enough that the tab extends well past the library's tab, which a drag may
+        // not start on.
         ws.rename(
             first,
             "Africa Split, the one with the long tail".to_string(),
@@ -677,7 +662,7 @@ mod tests {
         assert_eq!(
             tabs.open,
             vec![Spot::Library, Spot::Document(second), Spot::Document(first)],
-            "the dragged tab landed past its neighbour"
+            "the dragged tab landed past its neighbor"
         );
         assert_eq!(
             tabs.showing(),
@@ -686,8 +671,7 @@ mod tests {
         );
     }
 
-    /// Pruning drops documents the list no longer holds; the two singletons are views of
-    /// what is there rather than of an asset, so nothing prunes them.
+    /// The library and keyboard tabs show no single asset, so pruning never removes them.
     #[test]
     fn pruning_takes_documents_and_leaves_the_singletons() {
         let (mut tabs, mut ws) = (Tabs::default(), workspace());

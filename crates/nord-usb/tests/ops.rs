@@ -37,8 +37,8 @@ fn session_frames(class: ObjectClass, middle: Vec<Step>) -> ReplayTransport {
 /// A transport that answers from a list and records the read limit each answer was
 /// asked for. An entry of `None` is the device saying nothing before the limit passed.
 ///
-/// It accepts whatever is sent, so only a test whose claim is about *when* the host
-/// reads belongs on it; everything else uses a script the exact-match transport polices.
+/// It accepts whatever is sent, so only a test about when the host reads belongs on it.
+/// Everything else uses a script checked by the exact-match transport.
 struct LimitTransport {
     replies: VecDeque<Option<Vec<u8>>>,
     limits: Vec<Duration>,
@@ -98,7 +98,7 @@ fn info_rejects_a_response_for_a_different_location() {
 }
 
 /// A frame whose checksum does not cover its bytes cannot be paired with the request
-/// that asked for it, so the transaction is released rather than carried on.
+/// that asked for it, so the transaction is released.
 #[test]
 fn a_reply_whose_crc_is_wrong_is_refused_and_releases_the_session() {
     let at = nord_usb::Location { bank: 1, slot: 2 };
@@ -133,7 +133,7 @@ fn a_reply_whose_crc_is_wrong_is_refused_and_releases_the_session() {
 }
 
 /// A request the device never answers desynchronizes every later reply, so the session
-/// is released within the same transaction rather than left half-open.
+/// is released within the same transaction.
 #[test]
 fn a_request_that_reads_nothing_within_the_limit_releases_the_session() {
     let mut t = LimitTransport {

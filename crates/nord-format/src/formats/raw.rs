@@ -1,10 +1,9 @@
 //! The stub-format machinery: a module per tag whose body is not yet mapped.
 //!
-//! A stub reads and writes the container — header parsed, checksum verified, body
-//! kept verbatim — so every file round-trips byte-exactly while its body waits to
-//! be reverse-engineered. The observed body length is recorded as data for tests,
-//! never enforced on read: a raw body cannot misread, so an unexpected length is
-//! preserved rather than refused.
+//! A stub reads and writes the container (header parsed, checksum verified, body
+//! kept verbatim), so every file round-trips byte-exactly while its body is unmapped.
+//! The observed body length is recorded as data for tests and never enforced on
+//! read: a raw body cannot be misread, so an unexpected length is preserved.
 
 /// Declare one stub format module: its tag, and the body length its corpus
 /// specimens share (omit the length for variable-length library formats).
@@ -24,9 +23,9 @@ macro_rules! raw_format {
             const _: () = assert!(FORMAT.len() == 4, "a CBIN tag is four bytes");
 
             $(
-                /// The body length every corpus specimen holds. Observed, never
-                /// enforced on read: a raw body cannot misread, so a file of
-                /// another length is preserved rather than refused.
+                /// The body length every corpus specimen holds. It is not
+                /// enforced on read: a raw body cannot be misread, so a file of
+                /// another length is preserved.
                 pub const BODY_LEN: usize = $body_len;
             )?
 
