@@ -205,7 +205,8 @@ Cargo from `crates/` inside the development shell; the parent
 
 - `nix develop -c cargo test --workspace` runs the default test suite.
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
-- `nix flake check` checks formatting and evaluates every flake output.
+- `nix flake check` checks formatting, runs Clippy and the tests of
+  `scripts/bump.bash`, and evaluates every flake output.
 - `nix build .#<crate>` builds and tests one crate.
 - `nix build .#nord.all` covers every crate and cross target.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private

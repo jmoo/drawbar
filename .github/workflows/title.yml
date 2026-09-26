@@ -26,6 +26,6 @@ jobs:
         run: |
           pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: .+'
           if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
-            echo "::error::PR title must be a Conventional Commit, e.g. 'fix(nord-format): ...' — see CONTRIBUTING.md"
+            echo "::error::PR title must be a Conventional Commit, e.g. 'fix(nord-format): ...'; see CONTRIBUTING.md"
             exit 1
           fi

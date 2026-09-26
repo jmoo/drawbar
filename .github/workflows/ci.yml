@@ -2,19 +2,20 @@
 # `nix flake check` and `nix build .#nord.all` on a laptop. The PR title check
 # lives in title.yml, which alone re-runs when a title is edited:
 #
-#   check — treefmt (fails on anything `nix fmt` would change) and clippy over the
-#           workspace with `--deny warnings`.
-#   build — every crate with its test suite, the cross matrix (Windows under Wine,
-#           aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
-#   corpus — `nord.all-corpus`, the committed tier of the private specimen
-#            corpus. Needs a deploy key, so it does not run on forks.
-#   release — master pushes only, and only after check, build and corpus pass:
-#             scripts/release.bash publishes un-tagged crate versions and tags
-#             them. Cargo.toml is the only source of truth for versions.
-#   pages — every master push once release has run: the app from the newest
-#           `drawbar-v*` tag, the guide from master. It hangs off release
-#           because a tag GITHUB_TOKEN creates fires no workflow event, so
-#           `on: push: tags:` would never deploy one.
+#   check: `nix flake check`. treefmt (fails on anything `nix fmt` would change),
+#          clippy over the workspace with `--deny warnings`, and the tests of
+#          scripts/bump.bash.
+#   build: every crate with its test suite, the cross matrix (Windows under Wine,
+#          aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
+#   corpus: `nord.all-corpus`, the committed tier of the private specimen
+#           corpus. Needs a deploy key, so it does not run on forks.
+#   release: master pushes only, and only after check, build and corpus pass.
+#            scripts/release.bash publishes untagged crate versions and tags
+#            them. Cargo.toml is the only source of truth for versions.
+#   pages: every master push once release has run. The app comes from the newest
+#          `drawbar-v*` tag and the guide from master. It hangs off release
+#          because a tag GITHUB_TOKEN creates fires no workflow event, so
+#          `on: push: tags:` would never deploy one.
 #
 # cache-nix-action keeps the store between runs in the GitHub Actions cache
 # (10 GB per repo, LRU-evicted); without it every run rebuilds Wine, QEMU and
@@ -80,8 +81,8 @@ jobs:
   # `nord.all`. Without this gate a pin bump lands green and leaves
   # `nix build .#nord.all-corpus` broken for whoever runs it next.
   #
-  # The committed tier only. `nord.all-corpus-full` splices in the R2 tier —
-  # several GB of vendor payload — and stays on the machines that already hold
+  # The committed tier only. `nord.all-corpus-full` splices in the R2 tier
+  # (several GB of vendor payload) and stays on the machines that already hold
   # R2 credentials and a seeded store.
   #
   # ⚠️ This job never writes a cache. The committed tier carries vendor bytes,
@@ -106,7 +107,7 @@ jobs:
       - name: deploy key is present
         run: |
           if [ -z "$DEPLOY_KEY" ]; then
-            echo "::error::NORD_CORPUS_DEPLOY_KEY is unset — the corpus gate needs a read-only deploy key on jmoo/nord-corpus (CONTRIBUTING.md)"
+            echo "::error::NORD_CORPUS_DEPLOY_KEY is unset; the corpus gate needs a read-only deploy key on jmoo/nord-corpus (CONTRIBUTING.md)"
             exit 1
           fi
       - uses: nixbuild/nix-quick-install-action@v35
@@ -119,7 +120,7 @@ jobs:
           primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock') }}
           restore-prefixes-first-match: nix-build-${{ runner.os }}-
       # `builtins.fetchGit` resolves the pin at evaluation time, in the
-      # evaluator — so the key belongs to the invoking user, not the daemon.
+      # evaluator, so the key belongs to the invoking user, not the daemon.
       - name: corpus read access
         run: |
           mkdir -p ~/.ssh
@@ -178,7 +179,7 @@ jobs:
       id-token: write # OIDC token exchange with the Pages deployment
       pages: write
     concurrency:
-      cancel-in-progress: false # cancelling mid-upload leaves the site partial
+      cancel-in-progress: false # canceling mid-upload leaves the site partial
       group: pages
     environment:
       name: github-pages

@@ -1,8 +1,8 @@
 # Editing
 
-There is no Apply. A control you move is set on the document at once, and the
-name shows a `*` until you save. Nothing on the instrument changes until you
-queue the document and send it.
+There is no Apply button. A control you move is set on the document at once,
+and the name shows a `*` until you save. Nothing on the instrument changes until
+you queue the document and send it.
 
 ## The document header
 
@@ -11,10 +11,10 @@ badge, where it lives (a slot, a folder, or this computer), its size, and its
 state: `edited`, `matches keyboard`, `differs from keyboard`, `waiting to send`
 or `on the keyboard`. Hover any of them for the detail.
 
-To the right are the document's faces, **Revert**, **Export…**, and the one
-action the document is for. That is usually **Queue send**. It is greyed when
-there is nowhere to send to, and becomes a warning such as `Won't fit · 70 MB
-over` when the send cannot happen yet.
+To the right are the two faces, **Revert**, **Export…**, and the document's
+main action, usually **Queue send**. That action is grayed out when there is
+nowhere to send to, and becomes a warning such as `Won't fit · 70 MB over` when
+the send cannot happen yet.
 
 ## The faces
 
@@ -27,13 +27,13 @@ over` when the send cannot happen yet.
   - **Changes**: the bytes that have moved since the file was last saved.
   - **On the instrument**, for a document read from a slot: what the
     instrument reports about that slot.
-  - The body. For a program, live slot, setting or preset this is every field
-    as a table, for a value the Basic face does not draw. Type into the
-    **Writes** column to set a field. A value the field cannot hold is refused,
-    with the reason. Samples and pianos list what drawbar can edit in them and
-    where it lands in the file, a set list shows its four stored slots, and a
-    file with nothing to edit shows its **Body bytes**. A WAV and bytes drawbar
-    could not read have no body to show.
+  - The body. For a program, live slot, settings file or preset this is
+    **Every field**, a table that includes values the Basic face does not draw.
+    Type into the **Writes** column to set a field. A value the field cannot
+    hold is refused, with the reason. Samples and pianos list what drawbar can
+    edit in them and where each edit lands in the file. A set list shows its
+    four stored slots, and a file with nothing to edit shows its **Body bytes**.
+    A WAV and bytes drawbar could not read have no body to show.
 
 ## Programs, live slots, settings and presets
 
@@ -41,8 +41,8 @@ These open on a panel divided into sections the way the instrument's is, with a
 strip of chips at the top to jump between them. Each field is drawn as the
 control the panel uses: a lamp for a switch, a menu for a selector, a knob with
 the panel's own reading, drawbars you pull down, a grid for a pattern. A value
-drawbar has no name for reads `unknown (6)`, and stays in its menu so you can
-change back.
+drawbar has no name for reads `unrecognized value (6)` with a warning mark, and
+stays in its menu so you can change back to it.
 
 Every control answers the keyboard. Tab reaches it, the arrow keys step a knob,
 Page Up and Page Down jump it, Home and End take it to its stops, and Space flips
@@ -78,9 +78,10 @@ gives its size. Notes stay on this computer; see
 
 ## Files with nothing to edit
 
-A file drawbar recognises but cannot yet edit opens with what the container
-says; its bytes are under **Body bytes** on the Advanced face. It can still be
-sent, copied and tagged, and goes up byte for byte as it came down.
+A file drawbar recognizes but cannot yet edit opens with what the container
+says, and its bytes are under **Body bytes** on the Advanced face. It can still
+be sent, copied and tagged, and goes back to the instrument byte for byte as it
+came off.
 
 Sample instruments and piano libraries have editors of their own. See
 [Samples](samples.md) and [Pianos](pianos.md).

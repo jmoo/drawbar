@@ -163,8 +163,7 @@ let
           '';
         });
 
-    # `nord-cli` additionally proves, before it is allowed to be a package at
-    # all, that the binary it installed runs.
+    # `nord-cli` also runs the binary it installed, as an install check.
     nord-cli =
       (mkCrate {
         crate = "nord-cli";
@@ -227,8 +226,8 @@ let
   # wasm's lld arguments with the misleading error `no such file or directory: wasm`.
   needsLinker = spec: spec ? crossPkgs && !hasPrefix "wasm" (tripleOf spec);
 
-  # Where a target needs a linker or extra static libs, cargo learns about it through
-  # the environment rather than through the cc wrapper.
+  # A target's linker and extra static libs reach cargo through the environment, not
+  # through the cc wrapper.
   targetEnv =
     spec:
     optionalAttrs (needsLinker spec) {
@@ -247,8 +246,8 @@ let
       ) spec.libs;
     }
     // optionalAttrs (spec ? testRunner) {
-      # cargo hands each test binary to this instead of executing it directly, which
-      # is the whole difference between a target that is built and one that is run.
+      # cargo hands each test binary to this runner, which is what lets a foreign
+      # target's tests run here.
       "CARGO_TARGET_${envTriple (tripleOf spec)}_RUNNER" = spec.testRunner.cmd;
     };
 
@@ -281,8 +280,8 @@ let
           inherit (manifests.${crate}) version;
         }
         // optionalAttrs (spec ? testRunner) {
-          # wasmtime wants somewhere to cache compiled modules; the sandbox has no
-          # HOME, so give it one rather than letting it fail on /homeless-shelter.
+          # wasmtime caches compiled modules under HOME, which the sandbox lacks;
+          # without one it fails on /homeless-shelter.
           preCheck = ''
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
@@ -311,10 +310,9 @@ let
               ! -name '*.d' \
               -exec cp -t "$out/" {} +
 
-            # Refuse to install nothing. A cross build that produces no artifact is
-            # a failure, not a pass — that is the whole point of these derivations.
+            # A cross build that produces no artifact fails.
             if [ -z "$(find "$out" -maxdepth 1 -type f -print -quit)" ]; then
-              echo "no artifacts found in $rel — the build produced nothing" >&2
+              echo "no artifacts found in $rel; the build produced nothing" >&2
               ls -la "$rel" >&2 || true
               exit 1
             fi
@@ -347,7 +345,7 @@ let
   # Cross-build applications to exercise their whole dependency stack. `nord-usb`
   # also keeps wasip1 because its own suite executes there in a wasm VM.
   crateTargets = {
-    # A CLI has no wasi story.
+    # A CLI has no use on WASI.
     nord-cli = filter (t: t != "wasip1") (attrNames targets);
     nord-usb = [ "wasip1" ];
   };
@@ -365,8 +363,8 @@ let
         cargoExtraArgs = "--locked -p drawbar --lib";
         # A wasm module runs in a browser, not here.
         doCheck = false;
-        # ⚠️ nixpkgs' rustc links wasm through the system `lld` rather than
-        # carrying a bundled one; without it the cdylib dies at link time.
+        # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none;
+        # without it the cdylib fails to link.
         nativeBuildInputs = [ final.lld ];
         pname = "drawbar-web";
         inherit (manifests.drawbar) version;
@@ -510,7 +508,7 @@ let
   pocProject = ./crates/nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj;
 
   # Run CLI checks against the installed binary, through an emulator when foreign.
-  # This proves execution and behavior rather than linking alone.
+  # This proves that the binary runs and behaves, not only that it links.
   pocInstallCheck =
     {
       bin,
@@ -593,7 +591,7 @@ in
       all-corpus-full = final.linkFarm "all-corpus-full" full;
 
       # Clippy over every crate and target, with each crate's test features on so the
-      # tests are linted too. A warning fails it — this is `nix flake check`'s gate.
+      # tests are linted too. A warning fails it. `nix flake check` runs it.
       clippy = crane.cargoClippy (
         commonArgs
         // audioArgs
@@ -653,7 +651,7 @@ in
           elif command -v xdg-open >/dev/null 2>&1; then
             xdg-open "$url"
           else
-            echo "no opener found — open $url yourself" >&2
+            echo "no opener found; open $url yourself" >&2
           fi
 
           wait "$server"

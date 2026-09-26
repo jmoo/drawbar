@@ -49,12 +49,11 @@ it as a WAV, or drop it. **Per key** paints a fine tune across the keyboard.
 **New ▸ Piano library…** takes one WAV per stroke. A file named like
 `060-b0-l00.wav` fills in its root (MIDI note 60), bank and layer for you.
 Otherwise set them in the dialog. **Template** builds on a library already on
-this computer, and the default builds from drawbar's own rules. Set the kind,
-gain and damper limit in the new document afterwards.
+this computer. Without one, drawbar builds from its own rules. Set the kind,
+gain and damper limit in the new document afterward.
 
-Libraries drawbar has built or trimmed play on an instrument across every key.
-Renames, retunes and remaps have not been played. See
-[What is supported](../getting-started/support.md).
+[What is supported](../getting-started/support.md) says which of these edits
+have been played on an instrument.
 
 ## Sending
 

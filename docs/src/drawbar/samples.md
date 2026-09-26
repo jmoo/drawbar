@@ -8,7 +8,7 @@ points at WAV files.
 
 The key map stays at the top. Each zone is a band over the keys it answers, and
 keys nothing answers are hatched. Drag a band's edge to move it. The older v2
-layout stores only each zone's top note, so dragging one moves its neighbour too.
+layout stores only each zone's top note, so dragging one moves its neighbor too.
 The v3 and v4 layouts let you pull zones apart and leave keys silent.
 
 Click a key to hear it, or play the keys on a
@@ -40,8 +40,9 @@ instrument. **New ▸ Sample instrument…** takes several WAVs, one zone each, 
 root key for each. **New ▸ Sample Editor project…** makes a project from them
 instead, and the Sample Editor expects the WAVs to stay beside it.
 
-Instruments encoded as v2 have been played on an instrument. v3 and v4 are
-offered but unverified. See [What is supported](../getting-started/support.md).
+drawbar can encode v2, v3 and v4 instruments.
+[What is supported](../getting-started/support.md) says which have been played
+on an instrument.
 
 ## Sending
 
