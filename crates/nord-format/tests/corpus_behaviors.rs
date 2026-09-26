@@ -1428,7 +1428,7 @@ fn built_v2(
         nsmp::encode::Instrument {
             name,
             map_gain: 1.0,
-            predictor: nsmp::encode::Predictor::Minimising,
+            predictor: nsmp::encode::Predictor::Minimizing,
             layout: nsmp::codec::Layout::V2,
             preset: nsmp::encode::Preset::default(),
         },

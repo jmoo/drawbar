@@ -506,7 +506,7 @@ fn predictor(plain: bool) -> encode::Predictor {
     if plain {
         encode::Predictor::Plain
     } else {
-        encode::Predictor::Minimising
+        encode::Predictor::Minimizing
     }
 }
 

@@ -537,7 +537,7 @@ impl Draft {
             encode::Instrument {
                 name: &self.name,
                 map_gain: 1.0,
-                predictor: encode::Predictor::Minimising,
+                predictor: encode::Predictor::Minimizing,
                 layout: Layout::V2,
                 preset: encode::Preset::default(),
             },

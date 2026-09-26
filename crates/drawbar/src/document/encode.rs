@@ -115,7 +115,7 @@ pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
         .layout(draft.layout)
         .predictor(match draft.plain {
             true => encode::Predictor::Plain,
-            false => encode::Predictor::Minimising,
+            false => encode::Predictor::Minimizing,
         });
     let instrument = encode::instrument(&pcm.samples, &options).map_err(|e| e.to_string())?;
     instrument.to_bytes().map_err(|e| e.to_string())

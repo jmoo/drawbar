@@ -7,7 +7,7 @@
 //! occasional field one count from the editor's. No structural field, pitch or length
 //! differs because of it.
 //!
-//! [`Predictor::Minimising`], the editor's record coding, is the default.
+//! [`Predictor::Minimizing`], the editor's record coding, is the default.
 //! [`Predictor::Plain`] stores every content field outright: the same audio in a file
 //! several times larger on smooth material, and not the editor's bytes.
 //!
@@ -322,7 +322,7 @@ pub enum Predictor {
     /// editor does. Smaller than plain records, and exact through this crate's
     /// decoder.
     #[default]
-    Minimising,
+    Minimizing,
 }
 
 /// A sustain loop, in source frames.
@@ -1049,7 +1049,7 @@ fn widths_at(
 ) -> Vec<u8> {
     let orders = match predictor {
         Predictor::Plain => 1,
-        Predictor::Minimising => DIFFERENCE.len(),
+        Predictor::Minimizing => DIFFERENCE.len(),
     };
     (0..orders as u8)
         .map(|order| width_at(values, first, order, cell, stride))
@@ -2504,7 +2504,7 @@ mod tests {
         // 3 and 4 both fit width 2.
         let values: Vec<i32> = (0..48).map(|k| k * (k - 1) * (k - 2) / 6).collect();
         assert_eq!(
-            widths_at(&values, 8, Predictor::Minimising, CELL, 1)[3..],
+            widths_at(&values, 8, Predictor::Minimizing, CELL, 1)[3..],
             [MIN_WIDTH, MIN_WIDTH]
         );
         assert_eq!(widths_at(&values, 8, Predictor::Plain, CELL, 1).len(), 1);
@@ -2570,7 +2570,7 @@ mod tests {
     #[test]
     fn every_predictor_round_trips_through_the_decoder_exactly() {
         let mut differenced = 0usize;
-        for predictor in [Predictor::Plain, Predictor::Minimising] {
+        for predictor in [Predictor::Plain, Predictor::Minimizing] {
             for source in [
                 sine(440.0, 12_000.0, 44_100),
                 sine(30.0, 32_000.0, 20_000),
@@ -2897,7 +2897,7 @@ mod tests {
     fn header_shift(source: &[i16], channels: u16) -> i32 {
         let options = Options::new("Shift")
             .channels(channels)
-            .predictor(Predictor::Minimising);
+            .predictor(Predictor::Minimizing);
         let file = instrument(source, &options).unwrap();
         let (_, stroke) = file.stroke_streams()[0];
         codec::shift(stroke, codec::Layout::V2).unwrap()
@@ -2920,7 +2920,7 @@ mod tests {
 
     #[test]
     fn no_field_overflows_the_width_its_record_declares() {
-        for predictor in [Predictor::Plain, Predictor::Minimising] {
+        for predictor in [Predictor::Plain, Predictor::Minimizing] {
             let source = sine(440.0, 32_000.0, 30_000);
             let plan = plan(source.len(), 1).unwrap();
             let q = quantize(&source, &plan, None);
@@ -2963,7 +2963,7 @@ mod tests {
         let plan = plan(source.len(), 1).unwrap();
         let q = quantize(&source, &plan, None);
         let (plain, _) = records(&q.values, &plan, Predictor::Plain).unwrap();
-        let (minimized, _) = records(&q.values, &plan, Predictor::Minimising).unwrap();
+        let (minimized, _) = records(&q.values, &plan, Predictor::Minimizing).unwrap();
 
         let bits = |specs: &[Spec]| -> usize { specs.iter().map(|s| s.span(MONO)).sum() };
         assert!(
@@ -3313,7 +3313,7 @@ mod tests {
     fn the_loop_starts_a_packet_and_the_directory_says_so() {
         let source = sine(330.0, 14_000.0, 60_000);
         for (start, end) in [(8_192, 24_576), (20_000, 40_000), (4_096, 59_000)] {
-            for predictor in [Predictor::Plain, Predictor::Minimising] {
+            for predictor in [Predictor::Plain, Predictor::Minimizing] {
                 let file = instrument(
                     &source,
                     &Options::new("Looped")
@@ -3478,7 +3478,7 @@ mod tests {
     #[test]
     fn a_looped_stroke_round_trips_through_the_decoder_exactly() {
         let source = sine(180.0, 16_000.0, 60_000);
-        for predictor in [Predictor::Plain, Predictor::Minimising] {
+        for predictor in [Predictor::Plain, Predictor::Minimizing] {
             for points in [
                 Loop::new(8_192, 40_960),
                 Loop::new(8_192, 40_960).crossfade(4_096.0),
@@ -3647,7 +3647,7 @@ mod tests {
         let mut refused = 0usize;
         for start in (4_096..48_000).step_by(7_919) {
             for length in [900, 1_500, 4_096, 11_000] {
-                for predictor in [Predictor::Plain, Predictor::Minimising] {
+                for predictor in [Predictor::Plain, Predictor::Minimizing] {
                     let points =
                         Loop::new(start, start + length).crossfade((length / 4).min(start) as f64);
                     let options = Options::new("Sweep").predictor(predictor).loops(points);
@@ -3706,7 +3706,7 @@ mod tests {
 
     #[test]
     fn a_stereo_stroke_round_trips_through_the_decoder_exactly() {
-        for predictor in [Predictor::Plain, Predictor::Minimising] {
+        for predictor in [Predictor::Plain, Predictor::Minimizing] {
             let source = stereo(220.0, 1.5, 14_000.0, 30_000);
             let file = instrument(
                 &source,
@@ -3745,7 +3745,7 @@ mod tests {
             &source,
             &Options::new("Ramps")
                 .channels(2)
-                .predictor(Predictor::Minimising),
+                .predictor(Predictor::Minimizing),
         )
         .unwrap();
         let (at, stroke) = file.stroke_streams()[0];
@@ -3833,7 +3833,7 @@ mod tests {
                     &Options::new("Round trip")
                         .layout(layout)
                         .channels(channels)
-                        .predictor(Predictor::Minimising),
+                        .predictor(Predictor::Minimizing),
                 )
                 .unwrap();
                 let (at, stroke) = file.stroke_streams()[0];
