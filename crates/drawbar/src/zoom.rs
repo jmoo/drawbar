@@ -1,4 +1,8 @@
 //! How large the whole window is drawn: one factor on every point the shell lays out.
+//!
+//! The reader sees steps from the default, never the factor behind them.
+
+use std::cmp::Ordering;
 
 /// The zooms offered, in percent, smallest first.
 const STEPS: [u16; 8] = [80, 90, 100, 110, 125, 150, 175, 200];
@@ -30,6 +34,16 @@ impl Zoom {
             .map_or(DEFAULT, Zoom)
     }
 
+    /// "Default", or how many steps from it, signed with a true minus.
+    pub(crate) fn label(self) -> String {
+        match self.0.cmp(&DEFAULT.0) {
+            Ordering::Equal => "Default".to_string(),
+            Ordering::Greater => format!("+{}", self.0 - DEFAULT.0),
+            Ordering::Less => format!("\u{2212}{}", DEFAULT.0 - self.0),
+        }
+    }
+
+    /// The factor in percent, which is also how it is stored.
     pub(crate) fn percent(self) -> u16 {
         STEPS[self.0]
     }
@@ -64,6 +78,27 @@ mod tests {
             seen.push(zoom.percent());
         }
         assert_eq!(seen, [80, 90, 100, 110, 125, 150, 175, 200]);
+    }
+
+    #[test]
+    fn each_zoom_is_named_by_its_steps_from_the_default() {
+        let labels: Vec<String> = STEPS
+            .iter()
+            .map(|percent| Zoom::read(&percent.to_string()).label())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "\u{2212}3",
+                "\u{2212}2",
+                "\u{2212}1",
+                "Default",
+                "+1",
+                "+2",
+                "+3",
+                "+4"
+            ]
+        );
     }
 
     #[test]

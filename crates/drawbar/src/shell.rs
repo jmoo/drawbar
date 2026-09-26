@@ -881,7 +881,7 @@ impl DrawbarApp {
         for (label, shortcut, zoom) in [
             ("Zoom in", key::ZOOM_IN, self.zoom.larger()),
             ("Zoom out", key::ZOOM_OUT, self.zoom.smaller()),
-            ("Reset zoom", key::ZOOM_RESET, reset),
+            ("Default size", key::ZOOM_RESET, reset),
         ] {
             let clicked = ui
                 .add_enabled_ui(zoom.is_some(), |ui| item(ui, label, Some(shortcut)))
@@ -1121,8 +1121,8 @@ impl DrawbarApp {
             });
     }
 
-    /// The zoom between a step down and a step up, laid right to left. The figure puts
-    /// the default back.
+    /// The zoom between a step down and a step up, laid right to left. The label puts
+    /// the default back, and is as wide as its widest so the step down stays put.
     fn zoom_chip(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let larger = self.zoom.larger();
         let smaller = self.zoom.smaller();
@@ -1138,13 +1138,21 @@ impl DrawbarApp {
             {
                 picked = larger;
             }
-            let figure = egui::RichText::new(format!("{}%", self.zoom.percent()))
-                .monospace()
-                .size(10.0)
-                .weak();
+            let font = egui::FontId::monospace(10.0);
+            let widest = Zoom::default().label();
+            let width = ui
+                .fonts(|fonts| {
+                    fonts.layout_no_wrap(widest, font.clone(), egui::Color32::PLACEHOLDER)
+                })
+                .size()
+                .x;
+            let label = egui::RichText::new(self.zoom.label()).font(font).weak();
             if ui
-                .add(egui::Label::new(figure).sense(egui::Sense::click()))
-                .on_hover_text(format!("reset zoom to {}%", Zoom::default().percent()))
+                .add_sized(
+                    [width, BUTTON],
+                    egui::Label::new(label).sense(egui::Sense::click()),
+                )
+                .on_hover_text("back to the default size")
                 .clicked()
             {
                 picked = Some(Zoom::default());
@@ -1407,10 +1415,7 @@ pub fn too_small_notice(ctx: &egui::Context, smaller: Option<Zoom>) -> Option<Zo
                 ui.label(TOO_SMALL_WHY);
                 ui.add_space(GAP * 2.0);
                 if let Some(zoom) = smaller {
-                    if ui
-                        .button(format!("Zoom out to {}%", zoom.percent()))
-                        .clicked()
-                    {
+                    if ui.button("Zoom out").clicked() {
                         picked = Some(zoom);
                     }
                     ui.add_space(GAP);
@@ -1632,10 +1637,7 @@ mod tests {
             "nothing smaller to offer: {smallest:?}"
         );
         let zoomed = said(Zoom::default().smaller());
-        assert!(
-            zoomed.iter().any(|word| word == "Zoom out to 100%"),
-            "{zoomed:?}"
-        );
+        assert!(zoomed.iter().any(|word| word == "Zoom out"), "{zoomed:?}");
     }
 
     /// In a window ⌘+ and ⌘- step through the zooms and stop at either end, and ⌘0
@@ -1677,7 +1679,7 @@ mod tests {
             let mut before = app(&ctx, None);
             let _ = drawn(&ctx, &mut before);
             assert_eq!(ctx.zoom_factor(), 1.1, "a fresh install");
-            assert!(drawn(&ctx, &mut before).wrote("110%"));
+            assert!(drawn(&ctx, &mut before).wrote("Default"));
             before.zoom = Zoom::read("150");
             before.save(&mut store);
         }
@@ -1686,7 +1688,7 @@ mod tests {
         let _ = drawn(&ctx, &mut after);
         assert_eq!(after.zoom.percent(), 150);
         assert_eq!(ctx.zoom_factor(), 1.5);
-        assert!(drawn(&ctx, &mut after).wrote("150%"));
+        assert!(drawn(&ctx, &mut after).wrote("+2"));
     }
 
     /// Every fixed region fits inside the window the design is drawn to, and the centre
