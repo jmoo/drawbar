@@ -758,10 +758,7 @@ impl DrawbarApp {
                 acts.push(Act::CopyLog);
             }
             if item(ui, "About drawbar", None) {
-                self.about = Some(crate::about::About::new(
-                    &self.device.state,
-                    &self.workspace,
-                ));
+                self.about = Some(crate::about::About::new(&self.device, &self.workspace));
             }
         });
     }
