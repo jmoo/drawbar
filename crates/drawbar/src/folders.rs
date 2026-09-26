@@ -54,6 +54,15 @@ impl Folders {
         self.list.make("New folder")
     }
 
+    /// The folder called `name`, made if there is none, or nothing where the list has no
+    /// id left ([`List::make`]).
+    pub(crate) fn named_or_made(&mut self, name: &str) -> Option<u64> {
+        match self.list.all().iter().find(|folder| folder.name == name) {
+            Some(folder) => Some(folder.id),
+            None => self.list.make(name),
+        }
+    }
+
     pub(crate) fn rename(&mut self, id: u64, name: String) {
         self.list.rename(id, name);
     }

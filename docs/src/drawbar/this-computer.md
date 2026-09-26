@@ -16,6 +16,13 @@ text note, a Sample Editor project, or a folder. The rule across the menu parts
 what an instrument holds from what only this computer keeps. A fresh Stage file
 has every control at zero. It is not a factory program.
 
+## Demo sounds
+
+**Get the demo sounds** on the welcome sheet (**Help ▸ Welcome**) fetches a tine
+electric piano and a looped pad from drawbar.app into a **Demo sounds** folder.
+The pad comes in two sample formats: the `.nsmp` plays on an Electro 5. Asking
+again brings back any you have removed and leaves the rest alone.
+
 ## Views
 
 Opening a slot on the instrument shows a **view**: the instrument's own copy, in

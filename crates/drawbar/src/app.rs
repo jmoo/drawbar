@@ -408,6 +408,7 @@ impl eframe::App for DrawbarApp {
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
         acts.extend(asked);
+        acts.extend(self.workspace.take_demos().map(browser::Act::Demos));
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
         self.status_bar(ctx, &mut acts);

@@ -25,6 +25,10 @@ pub enum Act {
     Connect,
     Disconnect,
     OpenFiles,
+    /// Fetch the demo sounds; see [`crate::demo`].
+    FetchDemos,
+    /// File the demo sounds a fetch brought back.
+    Demos(Vec<(String, Vec<u8>)>),
     New(Fresh),
     /// Pick the WAVs a new project or instrument is laid out from. What they make is
     /// made once the dialog has each file's root key — see [`crate::newproject`].
@@ -328,6 +332,13 @@ pub fn apply(
             Act::Connect => device.connect(log),
             Act::Disconnect => device.disconnect(log),
             Act::OpenFiles => workspace.open_dialog(),
+            Act::FetchDemos => {
+                workspace.fetch_demos();
+                log.say("Fetching the demo sounds…");
+            }
+            Act::Demos(files) => {
+                crate::demo::file(files, workspace, &mut browser.folders, log);
+            }
             Act::New(kind) => {
                 if let Some(id) = workspace.create(kind, log) {
                     tabs.open(id);

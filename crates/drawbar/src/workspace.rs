@@ -740,6 +740,8 @@ enum Incoming {
         making: Making,
         files: Vec<(String, Vec<u8>)>,
     },
+    /// Every demo file, fetched; see [`crate::demo`].
+    Demos(Vec<(String, Vec<u8>)>),
     Note(String),
     Failed(String),
 }
@@ -756,6 +758,9 @@ pub struct Workspace {
     /// The WAVs a New pick came back with, waiting on their root keys. See
     /// [`crate::newproject`].
     draft: Option<Draft>,
+    /// Demo files fetched and waiting to be filed, which takes the folders this list
+    /// does not hold.
+    demos: Option<Vec<(String, Vec<u8>)>>,
 }
 
 impl Workspace {
@@ -769,6 +774,7 @@ impl Workspace {
             tx,
             rx,
             draft: None,
+            demos: None,
         }
     }
 
@@ -998,6 +1004,7 @@ impl Workspace {
                     self.ingest(name.clone(), Origin::File(name), bytes, log);
                 }
                 Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
+                Incoming::Demos(files) => self.demos = Some(files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
             }
@@ -1021,6 +1028,31 @@ impl Workspace {
             }
             ctx.request_repaint();
         });
+    }
+
+    /// Fetch the demo sounds, to be filed once they arrive; see [`Workspace::take_demos`].
+    pub fn fetch_demos(&self) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        spawn(async move {
+            let _ = tx.send(match crate::demo::fetch().await {
+                Ok(files) => Incoming::Demos(files),
+                Err(why) => Incoming::Failed(why),
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// The demo files a fetch brought back, once.
+    pub fn take_demos(&mut self) -> Option<Vec<(String, Vec<u8>)>> {
+        self.demos.take()
+    }
+
+    /// Whether an asset on this computer holds `bytes`, or was last saved as them.
+    pub fn holds(&self, bytes: &[u8]) -> bool {
+        self.entities
+            .iter()
+            .any(|e| e.kept && (e.bytes == bytes || e.saved.bytes == bytes))
     }
 
     /// Pick the WAVs a new project or instrument is laid out from.
