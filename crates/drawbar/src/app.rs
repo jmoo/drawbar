@@ -17,6 +17,7 @@ use crate::queue::Queue;
 use crate::shell::Shell;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
+use crate::zoom::Zoom;
 
 /// A theme-specific success color with enough contrast for small text.
 pub fn good(visuals: &egui::Visuals) -> egui::Color32 {
@@ -166,6 +167,7 @@ pub struct DrawbarApp {
     pub(crate) document: Document,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
+    pub(crate) zoom: Zoom,
     /// The MIDI controllers listened to, whichever tab is in front.
     pub(crate) midi: Midi,
     pub(crate) splash: crate::splash::Splash,
@@ -197,6 +199,14 @@ impl DrawbarApp {
             .and_then(|storage| storage.get_string(ThemeChoice::KEY))
             .map_or(ThemeChoice::default(), |text| ThemeChoice::read(&text));
         cc.egui_ctx.set_theme(theme.preference());
+        let zoom = cc
+            .storage
+            .and_then(|storage| storage.get_string(Zoom::KEY))
+            .map_or(Zoom::default(), |text| Zoom::read(&text));
+        cc.egui_ctx.set_zoom_factor(zoom.factor());
+        // egui's own keys step by a tenth and reset to 100%, off the steps drawbar offers.
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
         let mut app = DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
@@ -209,6 +219,7 @@ impl DrawbarApp {
             document: Document::default(),
             log: Log::default(),
             theme,
+            zoom,
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
@@ -340,6 +351,7 @@ impl eframe::App for DrawbarApp {
         let left = crate::store::save(storage, &self.workspace, &self.queue);
         self.report(left);
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
+        storage.set_string(Zoom::KEY, self.zoom.percent().to_string());
         // Not written from the frame that changed it, the way the theme is: a divider
         // moves on every frame of a drag, and the whole store is rewritten each time.
         self.browser.keep(storage);
@@ -356,12 +368,14 @@ impl eframe::App for DrawbarApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Only the browser build: a native window cannot be dragged below the minimum
-        // size `main` gives it. Nothing under this draws, so no input reaches a shell
-        // with nowhere to lay itself out, and the state it holds is untouched.
-        #[cfg(target_arch = "wasm32")]
+        // A native window too: its minimum size is in points at the zoom it opened at.
+        // Nothing under this draws, so no input reaches a shell with nowhere to lay
+        // itself out, and the state it holds is untouched.
         if crate::shell::too_small(ctx.screen_rect().size()) {
-            crate::shell::too_small_notice(ctx);
+            let smaller = self.zoom.smaller();
+            if let Some(zoom) = crate::shell::too_small_notice(ctx, smaller) {
+                self.pick_zoom(ctx, frame, zoom);
+            }
             return;
         }
         self.log.tick(ctx);
@@ -410,7 +424,7 @@ impl eframe::App for DrawbarApp {
         acts.extend(asked);
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
-        self.status_bar(ctx, &mut acts);
+        self.status_bar(ctx, frame, &mut acts);
         self.bottom_dock(ctx, &mut acts);
         self.browser_dock(ctx, &mut acts);
         self.inspector_dock(ctx, &mut acts);

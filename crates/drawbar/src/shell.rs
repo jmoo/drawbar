@@ -19,6 +19,7 @@ use crate::log::Level;
 use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK, GAP, GLYPH, PAD};
 use crate::strings::folder;
 use crate::tabs::Spot;
+use crate::zoom::Zoom;
 
 /// The window's own bar: the mark, the menus, the instrument, the theme.
 pub const TITLEBAR: f32 = 30.0;
@@ -47,9 +48,9 @@ const CENTRE_TALL: f32 = 200.0;
 /// The least room the whole shell lays out in: the three docks at the least each opens
 /// to, around a centre that still keeps [`CENTRE_WIDE`] by [`CENTRE_TALL`].
 ///
-/// A window is held above this by its own minimum size; a browser tab is any size the
-/// device is, so the web build shows [`too_small_notice`] instead of a shell that cannot
-/// fit.
+/// A browser tab is any size the device is, and a window's minimum size is in points
+/// at the zoom it opened at, so either may show [`too_small_notice`] instead of a shell
+/// that cannot fit.
 pub const LEAST: egui::Vec2 = egui::vec2(
     SIDE_LEAST + CENTRE_WIDE + SIDE_LEAST,
     TITLEBAR + TOOLBAR + STATUS + DOCK + BODY_LEAST + CENTRE_TALL,
@@ -331,12 +332,17 @@ mod key {
     pub const DOCK: Shortcut = Shortcut::new(With::COMMAND.plus(With::ALT), Key::L);
     pub const RESYNC: Shortcut = Shortcut::new(With::COMMAND, Key::R);
     pub const QUEUE: Shortcut = Shortcut::new(With::COMMAND.plus(With::SHIFT), Key::S);
+    pub const ZOOM_IN: Shortcut = Shortcut::new(With::COMMAND, Key::Plus);
+    /// ⌘= is ⌘+ without the shift a US layout needs for `+`.
+    pub const ZOOM_IN_UNSHIFTED: Shortcut = Shortcut::new(With::COMMAND, Key::Equals);
+    pub const ZOOM_OUT: Shortcut = Shortcut::new(With::COMMAND, Key::Minus);
+    pub const ZOOM_RESET: Shortcut = Shortcut::new(With::COMMAND, Key::Num0);
 }
 
 /// Whether this build may bind a key a browser tab keeps for itself.
 ///
-/// ⚠️ ⌘W, ⌘Q and ⌘2–⌘3 reach the tab, not the page. On the web those items work by
-/// click alone.
+/// ⚠️ ⌘W, ⌘Q, ⌘2–⌘3 and the zoom keys reach the tab, not the page. On the web those
+/// items work by click alone, and the zoom keys zoom the browser's page.
 const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 
 /// The user guide, published beside the browser build.
@@ -585,7 +591,7 @@ impl DrawbarApp {
                 along(ui, |ui| {
                     icon(ui, Glyph::SlidersVertical, 14.0, accent(ui.visuals()));
                     ui.label(egui::RichText::new("drawbar").font(egui::FontId::new(12.0, bold())));
-                    self.shortcuts(ui, acts);
+                    self.shortcuts(ui, frame, acts);
                     ui.scope(|ui| {
                         flat(ui);
                         self.menus(ui, frame, acts);
@@ -676,8 +682,17 @@ impl DrawbarApp {
         }
     }
 
+    /// Draw the window at `zoom`, and write it where the next session reads it.
+    pub(crate) fn pick_zoom(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, zoom: Zoom) {
+        self.zoom = zoom;
+        ctx.set_zoom_factor(zoom.factor());
+        if let Some(storage) = frame.storage_mut() {
+            storage.set_string(Zoom::KEY, zoom.percent().to_string());
+        }
+    }
+
     /// Every key a menu item binds, answered whether or not a menu is open.
-    fn shortcuts(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+    fn shortcuts(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
         let hit = |shortcut: &egui::KeyboardShortcut| {
             ui.input_mut(|input| input.consume_shortcut(shortcut))
         };
@@ -721,6 +736,19 @@ impl DrawbarApp {
             if let Some(id) = self.tabs.last_document() {
                 acts.push(Act::ShowTab(Spot::Document(id)));
             }
+        }
+        if WINDOWED && (hit(&key::ZOOM_IN) || hit(&key::ZOOM_IN_UNSHIFTED)) {
+            if let Some(zoom) = self.zoom.larger() {
+                self.pick_zoom(ui.ctx(), frame, zoom);
+            }
+        }
+        if WINDOWED && hit(&key::ZOOM_OUT) {
+            if let Some(zoom) = self.zoom.smaller() {
+                self.pick_zoom(ui.ctx(), frame, zoom);
+            }
+        }
+        if WINDOWED && hit(&key::ZOOM_RESET) {
+            self.pick_zoom(ui.ctx(), frame, Zoom::default());
         }
         // ⚠️ Never a file export. ⌘S means "save what I did", which for a view of a slot
         // is the write back to that slot. The library and the keyboard are views of
@@ -828,6 +856,8 @@ impl DrawbarApp {
             }
         }
         ui.separator();
+        self.zoom_items(ui, frame);
+        ui.separator();
         ui.menu_button("Theme", |ui| {
             for choice in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
                 if marked(ui, choice.label(), self.theme == choice, None) {
@@ -842,6 +872,24 @@ impl DrawbarApp {
         self.usb_items(ui, acts);
         ui.separator();
         self.midi_item(ui);
+    }
+
+    /// A step either way, and back to where a fresh install starts. Each is offered
+    /// disabled where it would change nothing.
+    fn zoom_items(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let reset = Some(Zoom::default()).filter(|&zoom| zoom != self.zoom);
+        for (label, shortcut, zoom) in [
+            ("Zoom in", key::ZOOM_IN, self.zoom.larger()),
+            ("Zoom out", key::ZOOM_OUT, self.zoom.smaller()),
+            ("Default size", key::ZOOM_RESET, reset),
+        ] {
+            let clicked = ui
+                .add_enabled_ui(zoom.is_some(), |ui| item(ui, label, Some(shortcut)))
+                .inner;
+            if let (true, Some(zoom)) = (clicked, zoom) {
+                self.pick_zoom(ui.ctx(), frame, zoom);
+            }
+        }
     }
 
     /// Listening to MIDI controllers, on or off, for the whole app.
@@ -1014,8 +1062,13 @@ impl DrawbarApp {
         }
     }
 
-    /// 22 px: what just happened, and how much room is left.
-    pub(crate) fn status_bar(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+    /// 22 px: what just happened, how much room is left, and the zoom.
+    pub(crate) fn status_bar(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        acts: &mut Vec<Act>,
+    ) {
         let fill = ctx.style().visuals.panel_fill;
         egui::TopBottomPanel::bottom("status")
             .resizable(false)
@@ -1048,17 +1101,14 @@ impl DrawbarApp {
                         acts.push(Act::ShowPage(Page::Log));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut first = true;
+                        self.zoom_chip(ui, frame);
                         for class in [ObjectClass::Sample, ObjectClass::Program] {
                             let unit = self.device.state.allocation_unit(class);
                             let Some(room) = occupancy(class, &self.device.state.inventory, unit)
                             else {
                                 continue;
                             };
-                            if !first {
-                                rule(ui, 12.0);
-                            }
-                            first = false;
+                            rule(ui, 12.0);
                             ui.label(
                                 egui::RichText::new(format!("{} {room}", folder(class)))
                                     .monospace()
@@ -1069,6 +1119,57 @@ impl DrawbarApp {
                     });
                 });
             });
+    }
+
+    /// The zoom between a step down and a step up, laid right to left. The label puts
+    /// the default back, and is as wide as its widest so the step down stays put.
+    fn zoom_chip(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let larger = self.zoom.larger();
+        let smaller = self.zoom.smaller();
+        let mut picked = None;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            if ui
+                .add_enabled_ui(larger.is_some(), |ui| {
+                    glyph_button(ui, Glyph::Plus, false, "zoom in")
+                })
+                .inner
+                .clicked()
+            {
+                picked = larger;
+            }
+            let font = egui::FontId::monospace(10.0);
+            let widest = Zoom::default().label();
+            let width = ui
+                .fonts(|fonts| {
+                    fonts.layout_no_wrap(widest, font.clone(), egui::Color32::PLACEHOLDER)
+                })
+                .size()
+                .x;
+            let label = egui::RichText::new(self.zoom.label()).font(font).weak();
+            if ui
+                .add_sized(
+                    [width, BUTTON],
+                    egui::Label::new(label).sense(egui::Sense::click()),
+                )
+                .on_hover_text("back to the default size")
+                .clicked()
+            {
+                picked = Some(Zoom::default());
+            }
+            if ui
+                .add_enabled_ui(smaller.is_some(), |ui| {
+                    glyph_button(ui, Glyph::Minus, false, "zoom out")
+                })
+                .inner
+                .clicked()
+            {
+                picked = smaller;
+            }
+        });
+        if let Some(zoom) = picked {
+            self.pick_zoom(ui.ctx(), frame, zoom);
+        }
     }
 
     /// The bottom dock: a header that picks a page, and the page under it.
@@ -1295,8 +1396,10 @@ pub fn too_small(screen: egui::Vec2) -> bool {
     screen.x < LEAST.x || screen.y < LEAST.y
 }
 
-/// What a screen too small for the shell shows instead of it.
-pub fn too_small_notice(ctx: &egui::Context) {
+/// What a screen too small for the shell shows instead of it, and the `smaller` zoom
+/// if it was asked for.
+pub fn too_small_notice(ctx: &egui::Context, smaller: Option<Zoom>) -> Option<Zoom> {
+    let mut picked = None;
     let fill = ctx.style().visuals.panel_fill;
     egui::CentralPanel::default()
         .frame(
@@ -1311,9 +1414,16 @@ pub fn too_small_notice(ctx: &egui::Context) {
                 ui.add_space(GAP);
                 ui.label(TOO_SMALL_WHY);
                 ui.add_space(GAP * 2.0);
+                if let Some(zoom) = smaller {
+                    if ui.button("Zoom out").clicked() {
+                        picked = Some(zoom);
+                    }
+                    ui.add_space(GAP);
+                }
                 crate::sheet::link(ui, "User guide", GUIDE);
             });
         });
+    picked
 }
 
 #[cfg(test)]
@@ -1489,24 +1599,96 @@ mod tests {
         assert!(favicon.contains(&dark), "favicon.svg lacks `{dark}`");
     }
 
-    /// The notice is the whole of what a gated frame draws: what is wrong, and the
-    /// guide to read while the reader finds a bigger screen.
+    /// The notice is the whole of what a gated frame draws: what is wrong, a smaller
+    /// zoom where there is one, and the guide to read while the reader finds a bigger
+    /// screen.
     #[test]
-    fn the_notice_says_what_is_wrong_and_offers_the_guide() {
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(390.0, 844.0),
-            )),
-            ..Default::default()
+    fn the_notice_says_what_is_wrong_and_offers_a_smaller_zoom_and_the_guide() {
+        let said = |smaller: Option<Zoom>| {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(390.0, 844.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                too_small_notice(ctx, smaller);
+            });
+            crate::tabs::words(&output)
         };
-        let output = ctx.run(input, too_small_notice);
-        let said = crate::tabs::words(&output);
 
-        assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");
-        assert!(said.iter().any(|word| word == TOO_SMALL_WHY), "{said:?}");
-        assert!(said.iter().any(|word| word == "User guide"), "{said:?}");
+        let smallest = said(None);
+        assert!(
+            smallest.iter().any(|word| word == TOO_SMALL),
+            "{smallest:?}"
+        );
+        assert!(
+            smallest.iter().any(|word| word == TOO_SMALL_WHY),
+            "{smallest:?}"
+        );
+        assert!(
+            smallest.iter().any(|word| word == "User guide"),
+            "{smallest:?}"
+        );
+        assert!(
+            !smallest.iter().any(|word| word.starts_with("Zoom out")),
+            "nothing smaller to offer: {smallest:?}"
+        );
+        let zoomed = said(Zoom::default().smaller());
+        assert!(zoomed.iter().any(|word| word == "Zoom out"), "{zoomed:?}");
+    }
+
+    /// In a window ⌘+ and ⌘- step through the zooms and stop at either end, and ⌘0
+    /// puts back the zoom a fresh install starts at.
+    #[test]
+    fn the_zoom_keys_step_the_window_and_stop_at_the_ends() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let press = |key: egui::Key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let mut zoomed = |key: egui::Key| {
+            let _ = frame_of(&ctx, &mut app, SCREEN, vec![press(key)]);
+            let _ = drawn(&ctx, &mut app);
+            assert_eq!(ctx.zoom_factor(), app.zoom.factor(), "after {key:?}");
+            app.zoom.percent()
+        };
+
+        assert_eq!(zoomed(egui::Key::Equals), 125);
+        assert_eq!(zoomed(egui::Key::Plus), 150);
+        assert_eq!(zoomed(egui::Key::Num0), 110);
+        let out: Vec<u16> = (0..4).map(|_| zoomed(egui::Key::Minus)).collect();
+        assert_eq!(out, [100, 90, 80, 80]);
+        let up: Vec<u16> = (0..8).map(|_| zoomed(egui::Key::Plus)).collect();
+        assert_eq!(up, [90, 100, 110, 125, 150, 175, 200, 200]);
+    }
+
+    /// The zoom picked is the zoom the next session opens at, and the status bar says
+    /// which it is.
+    #[test]
+    fn the_zoom_comes_back_as_it_was_left_and_the_status_bar_shows_it() {
+        let mut store = Fake::default();
+        {
+            let ctx = egui::Context::default();
+            let mut before = app(&ctx, None);
+            let _ = drawn(&ctx, &mut before);
+            assert_eq!(ctx.zoom_factor(), 1.1, "a fresh install");
+            assert!(drawn(&ctx, &mut before).wrote("Default"));
+            before.zoom = Zoom::read("150");
+            before.save(&mut store);
+        }
+        let ctx = egui::Context::default();
+        let mut after = app(&ctx, Some(&store));
+        let _ = drawn(&ctx, &mut after);
+        assert_eq!(after.zoom.percent(), 150);
+        assert_eq!(ctx.zoom_factor(), 1.5);
+        assert!(drawn(&ctx, &mut after).wrote("+2"));
     }
 
     /// Every fixed region fits inside the window the design is drawn to, and the centre

@@ -36,6 +36,7 @@ pub mod tabs;
 pub mod tags;
 pub mod work;
 pub mod workspace;
+pub mod zoom;
 
 pub use app::DrawbarApp;
 
