@@ -13,7 +13,7 @@ use super::act::{will_write, Act, Bulk};
 use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
-use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
+use crate::device::{occupancy, read_only, Connection, Device, DeviceState, NO_USB};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
 use crate::newproject::Making;
@@ -412,23 +412,28 @@ impl Browser {
             nothing(ui, 0, "Looking for an instrument…");
             return;
         }
-        let drawn = row(
-            ui,
-            false,
-            &Cells {
-                indent: indent(0, false),
-                glyph: Some(Glyph::Keyboard),
-                name: "Connect an instrument…",
-                faint: true,
-                ..Cells::default()
-            },
-        );
+        let drawn = ui
+            .add_enabled_ui(device.usb(), |ui| {
+                row(
+                    ui,
+                    false,
+                    &Cells {
+                        indent: indent(0, false),
+                        glyph: Some(Glyph::Keyboard),
+                        name: "Connect an instrument…",
+                        faint: true,
+                        ..Cells::default()
+                    },
+                )
+            })
+            .inner;
         if drawn
             .response
             .on_hover_text(
                 "Close Nord Sound Manager first — it holds the instrument on its own, and \
-                 nothing else can reach it alongside.\n\nIn a browser: Chrome or Edge only.",
+                 nothing else can reach it alongside.",
             )
+            .on_disabled_hover_text(NO_USB)
             .clicked()
         {
             acts.push(Act::Connect);

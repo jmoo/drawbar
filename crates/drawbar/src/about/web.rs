@@ -6,17 +6,6 @@ use wasm_bindgen::JsValue;
 /// paragraph of version numbers, and the sheet has one line.
 const MOST: usize = 60;
 
-/// Whether this browser has WebUSB at all.
-///
-/// ⚠️ Read off `navigator` rather than through `web_sys::Navigator::usb`, which answers
-/// with a `Usb` object whatever the browser supports.
-pub fn has_usb() -> bool {
-    let Some(navigator) = navigator() else {
-        return false;
-    };
-    field(&navigator, "usb").is_some()
-}
-
 /// The browser and the system under it, as short as it can be said.
 pub fn agent() -> String {
     let Some(navigator) = navigator() else {

@@ -396,7 +396,7 @@ impl eframe::App for DrawbarApp {
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
-        let asked = self.splash.show(ctx);
+        let asked = self.splash.show(ctx, self.device.usb());
         crate::about::dialog(ctx, &mut self.about, &self.log);
 
         // Before the panels, so an editor open in this frame still has the focus Escape

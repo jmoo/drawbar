@@ -6,7 +6,7 @@
 
 use eframe::egui;
 
-use crate::device::DeviceState;
+use crate::device::Device;
 use crate::icon::{sized, Glyph};
 use crate::log::Log;
 use crate::sheet::{self, GAP};
@@ -224,7 +224,7 @@ struct Build {
 }
 
 impl Build {
-    fn new(device: &DeviceState, workspace: &Workspace) -> Build {
+    fn new(device: &Device, workspace: &Workspace) -> Build {
         let mut lines = vec![Line::new("Version", sheet::VERSION, "alpha"), target()];
         #[cfg(target_arch = "wasm32")]
         lines.push(Line::new("Browser", web::agent(), ""));
@@ -246,9 +246,9 @@ fn target() -> Line {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn usb(device: &DeviceState) -> Line {
-    let instrument = device.product().unwrap_or("no instrument connected");
-    match web::has_usb() {
+fn usb(device: &Device) -> Line {
+    let instrument = device.state.product().unwrap_or("no instrument connected");
+    match device.usb() {
         true => Line::new("Web USB", "available", instrument),
         false => Line::new(
             "Web USB",
@@ -259,9 +259,9 @@ fn usb(device: &DeviceState) -> Line {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn usb(device: &DeviceState) -> Line {
+fn usb(device: &Device) -> Line {
     use crate::device::Connection;
-    match &device.connection {
+    match &device.state.connection {
         Connection::Connected(card) => Line::new("USB", "connected", card.product.as_str()),
         Connection::Connecting => Line::new("USB", "connecting", ""),
         Connection::Disconnected => Line::new("USB", "no instrument connected", ""),
@@ -305,7 +305,7 @@ pub struct About {
 
 impl About {
     /// Read what this build is. Called when the box opens.
-    pub fn new(device: &DeviceState, workspace: &Workspace) -> About {
+    pub fn new(device: &Device, workspace: &Workspace) -> About {
         About {
             build: Build::new(device, workspace),
             copied: None,

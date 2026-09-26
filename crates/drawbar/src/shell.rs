@@ -12,7 +12,7 @@ use nord_usb::ObjectClass;
 
 use crate::app::{accent, bold, ui as ui_text, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
-use crate::device::occupancy;
+use crate::device::{occupancy, NO_USB};
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
@@ -751,10 +751,7 @@ impl DrawbarApp {
                 acts.push(Act::CopyLog);
             }
             if item(ui, "About drawbar", None) {
-                self.about = Some(crate::about::About::new(
-                    &self.device.state,
-                    &self.workspace,
-                ));
+                self.about = Some(crate::about::About::new(&self.device, &self.workspace));
             }
         });
     }
@@ -869,7 +866,12 @@ impl DrawbarApp {
     /// instrument, and the send queue is only ever owed to one.
     fn usb_items(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         if !self.attached() {
-            if item(ui, "Connect…", None) {
+            let picked = ui
+                .add_enabled(self.device.usb(), egui::Button::new("Connect…"))
+                .on_disabled_hover_text(NO_USB)
+                .clicked();
+            if picked {
+                ui.close();
                 acts.push(Act::Connect);
             }
             return;
@@ -1351,13 +1353,21 @@ mod tests {
     struct Painted {
         centre: egui::Rect,
         panels: Vec<(String, egui::Rect)>,
-        /// Every string the frame painted, headers and button labels included.
-        words: Vec<String>,
+        /// Every string the frame painted, headers and button labels included, with
+        /// the box it was painted in.
+        words: Vec<(String, egui::Rect)>,
     }
 
     impl Painted {
         fn wrote(&self, word: &str) -> bool {
-            self.words.iter().any(|said| said == word)
+            self.at(word).is_some()
+        }
+
+        fn at(&self, word: &str) -> Option<egui::Rect> {
+            self.words
+                .iter()
+                .find(|(said, _)| said == word)
+                .map(|(_, rect)| *rect)
         }
 
         fn region(&self, want: &str) -> Option<egui::Rect> {
@@ -1408,8 +1418,57 @@ mod tests {
         Painted {
             centre,
             panels,
-            words: crate::tabs::words(&output),
+            words: crate::tabs::said(&output),
         }
+    }
+
+    /// Frames with the pointer resting at `at`, long enough for a tooltip to open.
+    fn rest(ctx: &egui::Context, app: &mut DrawbarApp, at: egui::Pos2) -> Painted {
+        let _ = frame_of(ctx, app, SCREEN, vec![egui::Event::PointerMoved(at)]);
+        for _ in 0..60 {
+            let _ = drawn(ctx, app);
+        }
+        drawn(ctx, app)
+    }
+
+    fn click(at: egui::Pos2) -> Vec<egui::Event> {
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        vec![egui::Event::PointerMoved(at), press(true), press(false)]
+    }
+
+    #[test]
+    fn without_usb_connect_is_greyed_out_and_says_why_on_hover() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.device.pretend_no_usb();
+        let _ = drawn(&ctx, &mut app);
+        let row = drawn(&ctx, &mut app)
+            .at("Connect an instrument…")
+            .expect("the sidebar offers to connect");
+
+        let hovered = rest(&ctx, &mut app, row.center());
+        assert!(hovered.wrote(NO_USB), "{:?}", hovered.words);
+        let _ = frame_of(&ctx, &mut app, SCREEN, click(row.center()));
+        assert_ne!(
+            app.log.status().1,
+            NO_USB,
+            "the sidebar row asked to connect"
+        );
+
+        let menu = drawn(&ctx, &mut app)
+            .at("Instrument")
+            .expect("the menu bar has an Instrument menu");
+        let _ = frame_of(&ctx, &mut app, SCREEN, click(menu.center()));
+        let connect = drawn(&ctx, &mut app)
+            .at("Connect…")
+            .expect("the Instrument menu offers to connect");
+        let hovered = rest(&ctx, &mut app, connect.center());
+        assert!(hovered.wrote(NO_USB), "{:?}", hovered.words);
     }
 
     /// The gate is the screen and the metrics alone: what the reader has shut, and what

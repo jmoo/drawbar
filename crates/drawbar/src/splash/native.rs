@@ -20,11 +20,11 @@ impl Splash {
     }
 
     /// Draw the sheet while it is up, and hand on whatever the reader asked for.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<Act> {
+    pub fn show(&mut self, ctx: &egui::Context, usb: bool) -> Option<Act> {
         if !self.showing {
             return None;
         }
-        match welcome(ctx)? {
+        match welcome(ctx, usb)? {
             Wanted::Done => self.showing = false,
             Wanted::Act(act) => {
                 self.showing = false;

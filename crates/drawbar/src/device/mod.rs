@@ -986,8 +986,15 @@ enum Asked {
     Refused,
 }
 
+/// Why nothing can be connected, in a browser with no WebUSB.
+pub const NO_USB: &str =
+    "This browser can't reach an instrument over USB. Open drawbar in Chrome or Edge to connect.";
+
 pub struct Device {
     pub state: DeviceState,
+    /// Whether this build can reach an instrument at all. Settled once: a browser does
+    /// not gain or lose WebUSB while the page is open.
+    usb: bool,
     events: Receiver<DeviceEvent>,
     /// A second handle on the worker's end of the channel, so a headless test can hand
     /// [`Device::poll`] the events an instrument would have reported.
@@ -1020,6 +1027,7 @@ impl Device {
         let (sender, events) = std::sync::mpsc::channel();
         Device {
             state: DeviceState::default(),
+            usb: Link::available(),
             events,
             #[cfg(test)]
             from_worker: sender.clone(),
@@ -1035,10 +1043,20 @@ impl Device {
         }
     }
 
+    /// Whether an instrument can be reached from here at all. Anything that offers to
+    /// connect asks this first, and is greyed out with [`NO_USB`] on hover when it cannot.
+    pub fn usb(&self) -> bool {
+        self.usb
+    }
+
     /// ⚠️ Must be reached from the frame the button was clicked in. On the web the
     /// device chooser needs the click's transient user activation, and awaiting
     /// anything first spends it.
     pub fn connect(&mut self, log: &mut Log) {
+        if !self.usb {
+            log.trouble(NO_USB);
+            return;
+        }
         if !matches!(self.state.connection, Connection::Disconnected) {
             return;
         }
@@ -1204,6 +1222,12 @@ impl Device {
         };
         self.state.in_flight = Some(cmd.words());
         self.link.send(cmd);
+    }
+
+    /// Stand in for a browser with no WebUSB.
+    #[cfg(test)]
+    pub fn pretend_no_usb(&mut self) {
+        self.usb = false;
     }
 
     /// Hand `poll` an event as though the worker had reported it.
@@ -1672,6 +1696,20 @@ mod tests {
         device.pretend(DeviceEvent::Disconnected { lost: false });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
         assert!(device.state.classes().is_empty());
+    }
+
+    #[test]
+    fn connecting_without_usb_says_so_and_never_starts_looking() {
+        let mut device = Device::new(egui::Context::default());
+        let mut log = Log::default();
+        device.pretend_no_usb();
+
+        device.connect(&mut log);
+        assert!(
+            matches!(device.state.connection, Connection::Disconnected),
+            "a connection that cannot start must not be left looking"
+        );
+        assert_eq!(log.status(), (crate::log::Level::Error, NO_USB));
     }
 
     /// The unit a count is measured in is the partition's own, so it arrives with the
