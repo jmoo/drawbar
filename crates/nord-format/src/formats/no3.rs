@@ -1,4 +1,4 @@
-//! The `no3` organ (`.no3p`, `.no3t`) — container-verified, bodies unmapped.
+//! The `no3` organ (`.no3p`, `.no3t`): container-verified, bodies unmapped.
 
 use super::raw::raw_format;
 

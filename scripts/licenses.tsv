@@ -1,4 +1,4 @@
-crate	version	licence	file	source
+crate	version	license	file	source
 block2	0.5.1	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/4fc083f1c6d6784577e38b0ee8dbd344481e2fd2/LICENSE.txt
 block2	0.6.2	MIT	MIT-Steven-Sheldon.txt	https://github.com/madsmtm/objc2/blob/757cd841d0293341dbefd9b99d7548dec244ffde/LICENSE.txt
 dispatch	0.2.0	MIT	MIT-Steven-Sheldon.txt	https://docs.rs/crate/dispatch/0.2.0/source/Cargo.toml

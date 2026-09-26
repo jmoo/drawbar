@@ -1,31 +1,46 @@
-//! Parse and write Clavia / Nord keyboard binary file formats.
+//! Read and write Clavia Nord keyboard files.
 //!
-//! > This is an unofficial, community project: **not affiliated with, endorsed
+//! > This is an unofficial community project. It is **not affiliated with, endorsed
 //! > by, or supported by Clavia DMI AB**. "Nord" and the instrument names are
-//! > Clavia's trademarks, used here only to identify which files this crate
-//! > reads.
+//! > Clavia's trademarks, used here only to identify which files this crate reads.
 //!
-//! The formats — programs, live slots, songs, settings, presets, synth
-//! patches, sample and piano libraries, across the Nord keyboard range — are
-//! reverse engineered from specimen files and hardware observation, never
-//! from Clavia's software, and are in varying states of completion: some
-//! bodies decode to named fields, others are container-verified and kept
-//! verbatim. [`formats`] is the map of what exists and how far each format's
-//! decoding goes.
+//! The crate reads programs, live slots, songs, settings, presets, synth patches, and
+//! sample and piano libraries across the Nord keyboard range. The formats are reverse
+//! engineered from specimen files and hardware observation, never from Clavia's
+//! software, and each is decoded to a different depth: some bodies decode to named
+//! fields, and others are only container-verified. [`formats`] lists every format and
+//! how far its decoding goes.
 //!
-//! Completeness never gates I/O. Every supported file reads and writes
-//! whether its body decodes fully, partially, or not at all: decoded values
-//! are views over a verbatim body, bits no field claims survive untouched,
-//! and `to_bytes(from_stream(x)) == x` bit-for-bit (archives are read-only).
-//! That invariant is tested against a private corpus of real files.
+//! # Reading and writing
 //!
-//! [`from_path`] / [`from_stream`] sniff any supported file and decode it
-//! into an [`Entity`]; [`to_bytes`] is the inverse.
+//! [`from_path`] and [`from_stream`] sniff any supported file and decode it into an
+//! [`Entity`]. [`to_bytes`] and [`Entity::write_to`] serialize it again.
 //!
-//! Runtime dependencies are `crcxx` and `thiserror` (plus `zip` behind the
-//! `bundle` feature), and no I/O happens beyond `Read`/`Seek`/`Write`, so the
-//! crate runs anywhere `std` does — wasm included. Device access lives in the
-//! companion `nord-usb` crate, in the same repository.
+//! Every supported file reads and writes however much of its body decodes. Decoded
+//! values are views over the stored body, bits that no field claims survive untouched,
+//! and `to_bytes(from_stream(x)) == x` byte for byte. Archives are read-only. This
+//! invariant is tested against a private corpus of real files.
+//!
+//! [`Entity::registry`] and [`Entity::registry_mut`] list and set the named fields of a
+//! decoded body by dotted path, such as `center_panel.transpose`.
+//!
+//! # Modules
+//!
+//! - [`cbin`] is the container most formats share: header, checksum and body length.
+//! - [`formats`] has one module per file format.
+//! - [`fields`] and [`layout`] describe a decoded body's fields at runtime, and
+//!   [`panel`] groups them the way the instrument's panel does.
+//! - [`components`] and [`types`] are the typed values those fields hold.
+//! - [`accept`] says which format tags each instrument family takes.
+//! - [`wav`] moves decoded audio in and out of WAV files.
+//!
+//! # Features and dependencies
+//!
+//! The `bundle` feature reads ZIP archives: bundles, backups and Drum banks. It is off
+//! by default and pulls in `zip`. The other runtime dependencies are `crcxx` and
+//! `thiserror`. The crate does no I/O beyond `Read`, `Seek` and `Write`, so it runs
+//! anywhere `std` does, including wasm. Device access lives in the companion `nord-usb`
+//! crate.
 
 pub mod accept;
 pub mod bank;
@@ -62,15 +77,15 @@ pub enum Bundle {
     Drum2Bank(nd2::bank::Bank),
     Drum3KitBank(nd3::kit_bank::KitBank),
     Electro5(ne5::Bundle),
-    /// A ZIP of CBIN files under any mix of tags — every model's bundle/backup
-    /// shape. Reported by public documentation; not confirmed on hardware.
-    /// Members are kept container-verified and raw, under their archive paths —
-    /// which encode the slot, uninterpreted here.
+    /// A ZIP of CBIN files under any mix of tags, the shape of every model's bundle and
+    /// backup. Reported by public documentation; not confirmed on hardware.
+    /// Members are container-verified and kept raw under their archive paths. The paths
+    /// encode the slot, which this crate does not interpret.
     Members(Vec<(String, Cbin<RawBody>)>),
 }
 
-/// A stored program, one variant per model. Only the Electro 5 and the three
-/// Stages decode anything of the body; the rest are container-verified stubs.
+/// A stored program, one variant per model. Only the Electro 5 and Stage 2, 3 and 4
+/// bodies decode; the rest are container-verified stubs.
 ///
 /// Left unboxed for the reason [`Entity`] gives.
 #[allow(clippy::large_enum_variant)]
@@ -80,11 +95,11 @@ pub enum Program {
     C2D(Cbin<RawBody>),
     /// A Nord Drum 2 program (`nd2p`), usually met inside a bank archive.
     Drum2(Cbin<RawBody>),
-    /// A Nord Drum 3P kit (`nd3k`) — the model's program-equivalent.
+    /// A Nord Drum 3P kit (`nd3k`), the model's equivalent of a program.
     Drum3(Cbin<RawBody>),
-    /// Electro 3 and 3HP — the file does not say which.
+    /// Electro 3 and 3HP. The file does not say which.
     Electro3(Cbin<RawBody>),
-    /// Electro 4 and 4D — likewise.
+    /// Electro 4 and 4D. The file does not say which.
     Electro4(Cbin<RawBody>),
     Electro5(Cbin<ne5::Program>),
     Electro6(Cbin<RawBody>),
@@ -108,8 +123,8 @@ pub enum Program {
     Wave2(Cbin<RawBody>),
 }
 
-/// The live buffer — the panel as it stands, not a saved program. Same body as
-/// [`Program`], under its own format tag.
+/// The live buffer: the panel's current state, as opposed to a saved program. It has the
+/// same body as [`Program`] under its own format tag.
 ///
 /// Left unboxed for the reason [`Entity`] gives.
 #[allow(clippy::large_enum_variant)]
@@ -131,8 +146,8 @@ pub enum Live {
     Wave2(Cbin<RawBody>),
 }
 
-/// A stored song / set list, one variant per model that has them. Only the
-/// Electro 5 body decodes; the Stage 3 is container-verified verbatim.
+/// A stored song or set list, one variant per model that has them. Only the Electro 5
+/// body decodes; the Stage 3 body is container-verified and kept raw.
 #[derive(Debug)]
 pub enum Song {
     Electro5(Cbin<ne5::Song>),
@@ -165,8 +180,8 @@ pub enum Settings {
     Wave2(Cbin<RawBody>),
 }
 
-/// A synth patch, on the models that bank them separately from programs. Only
-/// the Stage 4's decodes.
+/// A synth patch, on the models that bank them separately from programs. The Stage 3
+/// and Stage 4 bodies decode.
 ///
 /// Left unboxed for the reason [`Entity`] gives.
 #[allow(clippy::large_enum_variant)]
@@ -178,7 +193,7 @@ pub enum Synth {
     StageClassic(Cbin<RawBody>),
 }
 
-/// A Lead performance — the multi-slot layer above that family's programs.
+/// A Lead performance, the multi-slot layer above that family's programs.
 #[derive(Debug)]
 pub enum Performance {
     Lead4(Cbin<RawBody>),
@@ -204,13 +219,13 @@ pub enum PianoPreset {
     Stage4(Cbin<ns4::piano_preset::PianoPreset>),
 }
 
-/// A sample instrument, decoded by generation: all three share the `nsmp` tag,
-/// and the header version says which schema the body holds.
+/// A sample instrument, decoded by generation. All three generations share the `nsmp`
+/// tag, and the header version says which schema the body holds.
 #[derive(Debug)]
 pub enum Sample {
     V2(Cbin<nsmp::Sample>),
-    /// The nsmp3/nsmp4 generations: section chain decoded, strokes stored
-    /// verbatim and decodable through [`nsmp::codec`].
+    /// The nsmp3 and nsmp4 generations: the section chain decodes, and the strokes are
+    /// kept as stored and decode through [`nsmp::codec`].
     V3(Cbin<nsmp::SampleV3>),
 }
 
@@ -254,14 +269,13 @@ impl Sample {
 
     /// Whether this generation stores a zone's lowest note.
     ///
-    /// False where zones tile — a zone reaches down to one above the next-lower zone's
-    /// top, so only the top note is stored — which is what makes
-    /// [`Self::set_zone_low_note`] refuse there.
+    /// False where zones tile: a zone reaches down to one above the next-lower zone's
+    /// top, so only the top note is stored. [`Self::set_zone_low_note`] refuses there.
     pub fn has_low_note(&self) -> bool {
         matches!(self, Sample::V3(_))
     }
 
-    /// Move a zone's lowest note, on the generations that store one — see
+    /// Move a zone's lowest note, on the generations that store one. See
     /// [`Self::has_low_note`].
     pub fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
         match self {
@@ -275,7 +289,7 @@ impl Sample {
     ///
     /// False where the zone table does not read, or where a `map` that also
     /// describes the keyboard note by note cannot be recomputed from the layout.
-    /// The setters say which at length.
+    /// The setters' errors say which.
     pub fn zones_are_editable(&self) -> bool {
         match self {
             Sample::V2(s) => s.zones().is_ok() && s.strokes().is_ok(),
@@ -283,8 +297,8 @@ impl Sample {
         }
     }
 
-    /// Which section chain this body's sections form. A narrow body whose `map`
-    /// version names no chain we have a specimen of reports the error.
+    /// Which section chain this body's sections form. A narrow body whose `map` version
+    /// names no chain with a known specimen is an error.
     pub fn chain(&self) -> Result<nsmp::Chain, Error> {
         match self {
             Sample::V2(s) => s.chain(),
@@ -293,7 +307,7 @@ impl Sample {
     }
 
     /// Which generation's units this body's stroke streams are in. A content version
-    /// past the generations the codec describes is refused rather than guessed at.
+    /// past the generations the codec describes is refused.
     pub fn layout(&self) -> Result<nsmp::codec::Layout, Error> {
         match self {
             Sample::V2(_) => Ok(nsmp::codec::Layout::V2),
@@ -310,8 +324,8 @@ impl Sample {
         }
     }
 
-    /// The generation to name in a report, taken from the content version rather
-    /// than the file name.
+    /// The generation to name in a report, taken from the content version, not the
+    /// file name.
     pub fn generation(&self) -> &'static str {
         match self {
             Sample::V2(_) => "v2",
@@ -322,8 +336,8 @@ impl Sample {
 
     /// Every zone in stored order, paired with the stream that plays it.
     ///
-    /// One codec reads all three generations, so the only thing that branches here
-    /// is which accessors reach the zones and their streams.
+    /// One codec reads all three generations. Only the accessors that reach the zones
+    /// and their streams differ.
     pub fn zones(&self) -> Result<Vec<nsmp::ZoneAudio<'_>>, Error> {
         match self {
             Sample::V2(s) => {
@@ -386,21 +400,21 @@ impl Sample {
 
 /// One decoded file.
 ///
-/// The decoded program variants are much the largest: a decoded panel holds its
-/// fields *and* the bytes it came from. Left unboxed — one of these exists per
-/// file being read, never in a collection.
+/// The decoded program variants are much the largest, because a decoded panel holds its
+/// fields and the bytes it came from. They are left unboxed because one of these exists
+/// per file being read, never in a collection.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Entity {
-    /// An Electro 2 sample library — the one non-CBIN library format.
+    /// An Electro 2 sample library, the only library format outside CBIN.
     Cne3(cn3::Cne3),
     Live(Live),
-    /// A MIDI carrier for a Lead SysEx bank, verbatim.
+    /// A MIDI file carrying a Lead SysEx bank, kept raw.
     Midi(midi::Midi),
     OrganPreset(OrganPreset),
     /// A piano library (`npno`).
     Piano(npno::Piano),
-    /// A Stage Classic piano library (`nsp`). ⚠️ Megabytes, allocated whole —
+    /// A Stage Classic piano library (`nsp`). ⚠️ Megabytes, read into memory whole.
     /// [`cbin::inspect`] answers container questions in O(1).
     PianoLibrary(Cbin<RawBody>),
     PianoPreset(PianoPreset),
@@ -409,21 +423,21 @@ pub enum Entity {
     Performance(Performance),
     Program(Program),
     Sample(Sample),
-    /// A Nord Sample Editor project (`.nsmpproj`) — the text file the editor
-    /// saves and generates an `nsmp` from.
+    /// A Nord Sample Editor project (`.nsmpproj`), the file the editor saves and
+    /// generates an `nsmp` from.
     SampleProject(nsmpproj::Project),
     Settings(Settings),
     Song(Song),
     Synth(Synth),
-    /// A Lead 1/2/2X/3 SysEx dump, verbatim.
+    /// A Lead 1, 2, 2X or 3 SysEx dump, kept raw.
     Sysex(sysex::Sysex),
     #[cfg(feature = "bundle")]
     Bundle(Bundle),
 }
 
-/// Sniff `reader` and decode one supported file into an [`Entity`] — the
-/// counterpart to [`to_bytes`]. The container class comes from the leading
-/// bytes; a CBIN body is then dispatched on the format tag at offset 8.
+/// Sniff `reader` and decode one supported file into an [`Entity`]. The inverse is
+/// [`to_bytes`]. The leading bytes identify the container, and a CBIN body is then
+/// dispatched on the format tag at offset 8.
 pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Error> {
     let header = peek(reader)?;
 
@@ -573,10 +587,9 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     let start = reader.stream_position()?;
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
-        // The entries the walks skip are not members: a directory holds no file, and a
-        // backup manifest describes the archive. Classifying on them would call an
-        // archive of directories a bundle of none, and a `kits/` entry would stop a drum
-        // bank being one.
+        // Directories and the backup manifest are not members. Counting them would make
+        // an archive of directories an empty bundle, and a `kits/` entry would stop a
+        // drum bank from classifying as one.
         let names: Vec<&str> = zip
             .file_names()
             .filter(|name| !is_dir_entry(name) && !name.ends_with("meta.xml"))
@@ -599,8 +612,8 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
         } else if names.iter().all(|n| n.ends_with(".nd3k")) {
             ZipKind::Drum3
         } else {
-            // Anything else — a bundle only if every member is a CBIN file,
-            // which `zip_raw_members` decides below.
+            // A bundle only if every member is a CBIN file, which `zip_raw_members`
+            // checks.
             ZipKind::Members
         }
     };
@@ -614,8 +627,8 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     }))
 }
 
-/// A directory entry, spelled as `zip`'s own `is_dir` spells it — the name alone, since
-/// classification reads the archive's names rather than its entries.
+/// A directory entry, by the same test as `zip`'s own `is_dir`. It takes the name alone
+/// because classification reads the archive's names, not its entries.
 #[cfg(feature = "bundle")]
 fn is_dir_entry(name: &str) -> bool {
     name.ends_with('/') || name.ends_with('\\')
@@ -667,8 +680,8 @@ mod registry_tests {
         assert!(entity.registry_mut().is_none());
     }
 
-    /// A song's fields are private, so its registry would list nothing — it is
-    /// deliberately not a registry entity, and `Song::set` is its editing surface.
+    /// A song's fields are private, so a registry would list nothing. `Song::set` is its
+    /// editing surface.
     #[test]
     fn a_song_is_not_a_registry_entity() {
         let song = ne5::song::new(
@@ -714,8 +727,8 @@ mod bundle_tests {
         zip.finish().unwrap().into_inner()
     }
 
-    /// A ZIP of mixed CBIN members — the reported family bundle shape — reads
-    /// as [`Bundle::Members`] with paths preserved.
+    /// A ZIP of mixed CBIN members, the reported bundle shape, reads as
+    /// [`Bundle::Members`] with paths preserved.
     #[test]
     fn a_zip_of_mixed_cbin_members_is_a_bundle() {
         let a = member("ns3f");
@@ -732,17 +745,16 @@ mod bundle_tests {
         assert_eq!(&members[1].1.header.tag, b"ns3y");
     }
 
-    /// An empty archive satisfies every all-members check vacuously, so it has to be
-    /// refused up front rather than read as a drum bank holding no programs.
+    /// An empty archive would pass every all-members check and read as a drum bank
+    /// holding no programs.
     #[test]
     fn an_empty_zip_is_refused() {
         let bytes = archive(&[]);
         assert!(from_stream(&mut Cursor::new(bytes)).is_err());
     }
 
-    /// A directory entry holds no file and a manifest describes the archive, so an
-    /// archive of nothing else holds no members — the same refusal as an empty one,
-    /// rather than a bundle of none.
+    /// Directory entries and a manifest are not members, so an archive of only those is
+    /// refused like an empty one.
     #[test]
     fn a_zip_of_directories_and_a_manifest_is_refused() {
         let bytes = archive(&[("kits/", b""), ("meta.xml", b"<meta/>")]);
@@ -753,8 +765,8 @@ mod bundle_tests {
         );
     }
 
-    /// A backup's directory entries are not members, so they do not stop a bank whose
-    /// files are all one CBIN format being read as that bank.
+    /// A backup's directory entries do not stop a bank whose files are all one CBIN
+    /// format from reading as that bank.
     #[test]
     fn a_directory_entry_does_not_hide_a_drum_bank() {
         let program = member("nd2p");
@@ -790,18 +802,17 @@ mod bundle_tests {
     }
 }
 
-/// Serialize an [`Entity`] back to the bytes of its file — the counterpart to
+/// Serialize an [`Entity`] back to the bytes of its file. The inverse is
 /// [`from_stream`].
 ///
-/// For every format this crate reads, `to_bytes(from_stream(x)) == x` byte-for-byte,
-/// whichever header generation `x` carries. That is the crate's central invariant —
-/// decoded values are read-only views over a verbatim body, so a re-emit cannot
-/// drift — and `nord verify` exists to check it against real specimens. Fixed-length
-/// formats declare their body length on their [`cbin::Body`] impl, and the container
-/// refuses to emit a wrong-sized file.
+/// For every format this crate reads, `to_bytes(from_stream(x)) == x` byte for byte,
+/// whichever header generation `x` carries. Decoded values are views over the stored
+/// body, so an unedited file re-emits unchanged; `nord verify` checks this against real
+/// files. Fixed-length formats declare their body length on their [`cbin::Body`] impl,
+/// and the container refuses to emit a file of the wrong size.
 ///
-/// Bundles are unsupported: a bundle is a ZIP walk over other entities, not a
-/// re-emittable structure.
+/// Bundles are an error: a bundle is a ZIP walk over other entities, which this crate
+/// does not re-encode.
 pub fn to_bytes(entity: &Entity) -> Result<Vec<u8>, Error> {
     use std::io::Cursor;
 
@@ -813,7 +824,7 @@ pub fn to_bytes(entity: &Entity) -> Result<Vec<u8>, Error> {
 /// What an entity is: a human label and the format tag its file carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
-    /// `"Electro 6 program"` — model then role, as the summary prints it.
+    /// Model then role, as the summary prints it: `"Electro 6 program"`.
     pub kind: &'static str,
     /// The CBIN tag, or the carrier name (`zip`, `syx`, `mid`, `cn3`).
     pub format: &'static str,
@@ -847,10 +858,9 @@ registry_bodies!(
     ns4::synth::SynthPreset,
 );
 
-/// The registry-declaring entities, read through `&` or `&mut` as asked. One
-/// list serving both directions. The live buffer is the program body under
-/// another tag, so the two share an arm. `ne5::Song` declares no public
-/// fields — its registry would be empty, so it is not one of these.
+/// The entities that declare a registry, borrowed through `&` or `&mut`, so one list
+/// serves both directions. The live buffer is the program body under another tag, so
+/// the two share an arm. `ne5::Song` declares no public fields, so it has no registry.
 macro_rules! with_registry {
     ($entity:expr, $($reference:tt)*) => {
         match $entity {
@@ -881,9 +891,8 @@ macro_rules! with_registry {
 }
 
 impl Entity {
-    /// The container of a stub-backed entity — every variant whose body is
-    /// container-verified but undecoded. `None` for the decoded formats and the
-    /// non-CBIN carriers.
+    /// The container of a stub-backed entity, one whose body is container-verified but
+    /// undecoded. `None` for the decoded formats and the non-CBIN carriers.
     pub fn raw(&self) -> Option<&Cbin<RawBody>> {
         use {Live as L, OrganPreset as OP, Program as P, Settings as St, Synth as Sy};
         match self {
@@ -958,9 +967,8 @@ impl Entity {
         with_registry!(self, &)
     }
 
-    /// The registry again, for setting fields. The same bodies answer both:
-    /// a body that lists its fields but refuses to set them cannot be
-    /// declared here.
+    /// The registry, for setting fields. Every body with a registry supports both
+    /// reading and setting.
     pub fn registry_mut(&mut self) -> Option<&mut dyn fields::Registry> {
         with_registry!(self, &mut)
     }
@@ -1076,8 +1084,8 @@ impl Entity {
 
     /// Re-encode to `w`, byte-exact for anything read and unedited.
     ///
-    /// Bundles are the one exception: the archive layer does not re-encode, so a
-    /// bundle refuses rather than writing something almost like its source.
+    /// Bundles are an error: the archive layer does not re-encode, and an approximate
+    /// archive would not match its source.
     pub fn write_to(&self, w: &mut (impl std::io::Write + Seek)) -> Result<(), Error> {
         match self {
             Entity::Cne3(f) => f.write_to(w),

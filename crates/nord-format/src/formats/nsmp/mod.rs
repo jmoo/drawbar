@@ -1,14 +1,14 @@
-//! Sample instruments (`.nsmp`) — the Nord Sample Library format.
+//! Sample instruments (`.nsmp`) in the Nord Sample Library format.
 //!
-//! Shared across the Nord line rather than specific to one model, so it carries its own
-//! tag rather than a model's. A file is the CBIN header followed by a chain of tagged
-//! [`section`]s: an `hdr` carrying the name, a `cat` of category strings, a `map`
-//! ending in the [`zone`] table, one [`stroke`] per zone, and a trailing `sty`.
+//! The format is shared across the Nord line, so it carries its own tag instead of a
+//! model's. A file is the CBIN header followed by a chain of tagged [`section`]s: an
+//! `hdr` carrying the name, a `cat` of category strings, a `map` ending in the [`zone`]
+//! table, one [`stroke`] per zone, and a trailing `sty`.
 //!
-//! **Strokes are stored verbatim**, so this reads and rewrites instruments byte-exactly
-//! and can retune, rename and remap them without touching a byte of audio, in either
-//! chain. The [`codec`] decodes that audio to samples in every generation — it is one
-//! codec in three sets of units, so a caller only picks the right [`codec::Layout`].
+//! Strokes are kept as stored, so this module reads and rewrites instruments
+//! byte-exactly and can retune, rename and remap them in either chain without touching
+//! the audio. The [`codec`] decodes that audio in every generation; it is one codec in
+//! three sets of units, and a caller selects the units with [`codec::Layout`].
 //! [`encode`] builds a new instrument from PCM in all three generations.
 
 /// A zone and the stroke stream that plays it, ready for [`codec::decode`].
@@ -51,28 +51,28 @@ pub const FORMAT: &str = "nsmp";
 
 /// The content version at which the body leaves the `NWS` chain for the wide
 /// `NSMP` chain. All generations share the `nsmp` tag; the u32 at `0x14` is the
-/// generation marker, running `format × 100 + revision` — `.nsmp3` content
-/// stores 300 and up, `.nsmp4` 400 and up.
+/// generation marker, `format × 100 + revision`. `.nsmp3` content stores 300 and
+/// up, `.nsmp4` 400 and up.
 pub const V3_FROM_VERSION: u32 = 300;
 
-/// The content version at which the wide chain becomes v4. Same chain and the same
-/// stream units as v3 — what changes is the codec, so the number matters to
-/// [`codec::Layout`] rather than to the reader.
+/// The content version at which the wide chain becomes v4. v4 keeps the v3 chain and
+/// stream units and changes the codec, so the number matters to [`codec::Layout`], not
+/// to the section reader.
 pub const V4_FROM_VERSION: u32 = 400;
 
 /// Which section chain a body's sections form, and the shapes that follow from it.
 ///
-/// The narrow chain has two schemas and the content version does not separate them —
+/// The narrow chain has two schemas, and the content version does not separate them:
 /// it tracks the library release, and releases on both sides of the change carry a
-/// spread of numbers. The gate is the `map` section's own version, which the other
-/// section versions agree with on every specimen.
+/// spread of numbers. The `map` section's own version selects the schema, and the
+/// other section versions agree with it on every specimen.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chain {
-    /// `NWS` 8 / `hdr` 8 / `map` 9 / `stk` 8 / `sty` 5, and no `cat` section at all.
-    /// The `hdr` is 18 bytes with no name field: these instruments carry no name,
-    /// and the library's filename is the only one they have.
+    /// `NWS` 8 / `hdr` 8 / `map` 9 / `stk` 8 / `sty` 5, and no `cat` section.
+    /// The 18-byte `hdr` has no name field, so these instruments are named only by
+    /// their library filename.
     Early,
     /// `NWS` 11 / `hdr` 9 / `cat` 5 / `map` 10 / `stk` 9 / `sty` 5, the `hdr` naming
     /// the instrument.
@@ -103,8 +103,8 @@ impl Chain {
         }
     }
 
-    /// The chain [`encode`] emits for a stream layout. It writes the current schemas
-    /// only: [`Chain::Early`] is read, never produced.
+    /// The chain [`encode`] emits for a stream layout. [`Chain::Early`] is read but
+    /// never written.
     pub const fn written_for(layout: codec::Layout) -> Chain {
         match layout {
             codec::Layout::V2 => Chain::Library2,
@@ -118,21 +118,19 @@ impl Chain {
     }
 
     /// Whether a looped stroke also sets the mark bit on the record its directory
-    /// points at. [`Chain::Early`] never does — the pointer alone marks the loop —
-    /// so a reader that requires the flag rejects those libraries outright.
+    /// points at. [`Chain::Early`] never does; the pointer alone marks the loop, so a
+    /// reader that requires the flag rejects those libraries.
     pub const fn flags_the_marked_record(self) -> bool {
         !matches!(self, Chain::Early)
     }
 }
 
-/// A body decoded by generation: v2 in full, v3/v4 as a section chain with
-/// strokes verbatim.
+/// A body read by generation: v2 as [`Sample`], v3 and v4 as [`SampleV3`].
 ///
-/// ⚠️ The v2 pool also holds versions that are not `2xx` — 8 (the original
-/// Sample Library) and 200 (Sample Library 2.0) — so the gate is "at least
-/// 300", not "exactly 2xx". Inferred from specimens; not confirmed on hardware.
-/// The number tracks the library release rather than the codec. Reported by
-/// public documentation; not confirmed on hardware.
+/// ⚠️ v2 content includes version 8 (the original Sample Library) as well as 200
+/// (Sample Library 2.0), so the gate is "below 300", not a match on `2xx`. Inferred
+/// from specimens; not confirmed on hardware. The number tracks the library release,
+/// not the codec. Reported by public documentation; not confirmed on hardware.
 #[derive(Debug)]
 pub enum AnyBody {
     V2(Sample),
@@ -185,9 +183,8 @@ impl StringField {
 
     /// The string, up to its terminator.
     ///
-    /// A payload that stops inside the field is read as far as it goes rather than
-    /// refused: the oldest narrow `hdr` is 18 bytes and carries no name at all, and it
-    /// reads back empty.
+    /// A payload that stops inside the field is read as far as it goes: the oldest
+    /// narrow `hdr` is 18 bytes, has no name field, and reads back empty.
     fn read(self, payload: &[u8]) -> String {
         let span = self.at.min(payload.len())..self.next.min(payload.len());
         nul_terminated(&payload[span])
@@ -211,8 +208,8 @@ impl StringField {
     }
 }
 
-/// What a NUL-terminated, zero-padded field holds. An unterminated field is the whole
-/// of it.
+/// The string in a NUL-terminated, zero-padded field. An unterminated field is read
+/// whole.
 fn nul_terminated(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
@@ -221,11 +218,11 @@ fn nul_terminated(bytes: &[u8]) -> String {
 /// Longest instrument name the narrow chain holds.
 pub const MAX_NAME_LEN: usize = StringField::NAME.capacity();
 
-/// A sample instrument's body: the section chain, held in file order including
-/// repeats — `stk` appears once per zone. A file is a `Cbin<Sample>`.
+/// A v2 sample instrument's body: the section chain in file order, including repeats
+/// (`stk` appears once per zone). A file is a `Cbin<Sample>`.
 ///
 /// Reads and writes byte-exactly, checksum verified. The name, categories, zones
-/// and stroke metadata decode and are editable; the audio stays verbatim.
+/// and stroke metadata decode and are editable; the audio is left as stored.
 pub struct Sample {
     pub sections: Vec<Section>,
 }
@@ -251,10 +248,10 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error>
     cbin::read(reader, FORMAT)
 }
 
-/// A v3/v4 body: the wide-section (`NSMP`) chain, held in file order including
-/// repeats — `stk` appears once per stroke. Sections are preserved verbatim, so
-/// a file round-trips byte-exactly, and the name, zone boundaries and root keys
-/// patch in place without touching the audio.
+/// A v3/v4 body: the wide (`NSMP`) section chain in file order, including repeats
+/// (`stk` appears once per stroke). Sections are kept as stored, so a file
+/// round-trips byte-exactly, and the name, zone boundaries and root keys patch in
+/// place without touching the audio.
 ///
 /// Every corpus specimen chains `NSMP`, `hdr`, `cat`, `map`, N × `stk`, `sty`,
 /// `meta`, in that order, in both container generations. Inferred from
@@ -283,9 +280,9 @@ impl cbin::Body for SampleV3 {
     }
 }
 
-/// Longest main name the wide chain holds. The two fields around it are what the
-/// filename convention joins — `Bass Clarinet 2` + `KG  mono` → `Bass Clarinet
-/// 2_KG  mono 3.11`.
+/// Longest main name the wide chain holds. Vendor filenames join the main name and
+/// the sub name with `_`: `Bass Clarinet 2` and `KG  mono` make
+/// `Bass Clarinet 2_KG  mono 3.11`.
 pub const MAX_NAME_V3_LEN: usize = StringField::NAME_V3.capacity();
 
 impl Cbin<SampleV3> {
@@ -299,18 +296,18 @@ impl Cbin<SampleV3> {
         Ok(StringField::NAME_V3.read(&self.hdr()?.payload))
     }
 
-    /// The sub name — the string after the `_` in the vendor's filenames.
-    /// Empty on files that carry none.
+    /// The sub name: the string after the `_` in vendor filenames. Empty on files
+    /// that carry none.
     ///
-    /// It starts where the main name's field ends. Where it ends is unmapped, so this
-    /// reads to the terminator with no field bound behind it and there is no setter.
+    /// It starts where the main name's field ends. Its end is unmapped, so this reads
+    /// to the terminator and there is no setter.
     pub fn sub_name(&self) -> Result<String, Error> {
         let payload = &self.hdr()?.payload;
         let from = StringField::NAME_V3.next.min(payload.len());
         Ok(nul_terminated(&payload[from..]))
     }
 
-    /// How many strokes the body carries — one `stk` section each.
+    /// How many strokes the body carries, one `stk` section each.
     pub fn stroke_count(&self) -> usize {
         self.body
             .sections
@@ -319,9 +316,8 @@ impl Cbin<SampleV3> {
             .count()
     }
 
-    /// Each stroke's `(global id, root key)` — the u32 its payload leads with,
-    /// and the byte at offset 5. Inferred from specimens; not confirmed on
-    /// hardware.
+    /// Each stroke's `(global id, root key)`: the u32 its payload leads with and
+    /// the byte at offset 5. Inferred from specimens; not confirmed on hardware.
     fn stroke_ids(&self) -> Result<Vec<(u32, u8)>, Error> {
         self.body
             .sections
@@ -419,9 +415,9 @@ impl Cbin<SampleV3> {
 
     /// Apply one zone-record edit, keeping the `map`'s per-key table in step.
     ///
-    /// The layout the edit produces is worked out and the table planned from it
-    /// before any byte moves, so a layout the partner law cannot read refuses
-    /// rather than half-applying.
+    /// The new layout and the table planned from it are computed before any byte
+    /// moves, so a layout the partner law cannot express is refused with nothing
+    /// written.
     fn edit_zone(&mut self, index: usize, field: zone::Field, note: u8) -> Result<(), Error> {
         let table = self.zone_table()?;
         let mut zones = self.zones()?;
@@ -456,17 +452,16 @@ impl Cbin<SampleV3> {
 
     /// Retunes one zone by moving the note its sample plays untransposed at.
     ///
-    /// ⚠️ The root key is stored twice — once in the stroke, once duplicated into
-    /// the zone record — and the table stops reading if the two disagree, so both
-    /// move here or neither does.
+    /// ⚠️ The root key is stored twice, in the stroke and in the zone record, and the
+    /// table stops reading if the two disagree. Both move here or neither does.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
         let gid = self
             .zones()?
             .get(index)
             .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?
             .stroke_gid;
-        // Both copies are located before either moves: a half-written pair is a
-        // file whose zone table no longer reads.
+        // Both copies are located before either moves: a half-written pair leaves a
+        // zone table that does not read.
         let at = self
             .body
             .sections
@@ -486,8 +481,8 @@ impl Cbin<SampleV3> {
     /// file order.
     ///
     /// The offset is the base the stroke's own [`codec::Directory`] is written
-    /// against, so a caller checking those pointers needs this pairing rather than
-    /// the payload alone. Decode the streams with
+    /// against, so a caller checking those pointers needs it as well as the payload.
+    /// Decode the streams with
     /// [`codec::Layout::from_version(self.header.version)`](codec::Layout::from_version).
     pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
         let mut at = 0;
@@ -536,19 +531,18 @@ fn stroke_id(section: &Section) -> Option<u32> {
     Some(u32::from_be_bytes(b.try_into().ok()?))
 }
 
-/// The global id a v3/v4 `stk` payload leads with. Unlike [`stroke_id`]'s
-/// narrow counterpart it is compared whole: a wide zone record stores the same
-/// u32.
+/// The global id a v3/v4 `stk` payload leads with. Unlike the narrow
+/// [`stroke_id`], it is compared whole: a wide zone record stores the same u32.
 fn stroke_gid(section: &section::Section4) -> Option<u32> {
     let b = section.payload.get(0..4)?;
     Some(u32::from_be_bytes(b.try_into().ok()?))
 }
 
-/// Whether a stroke is the one a zone record names.
+/// Whether a stroke is the one a narrow zone record names.
 ///
-/// ⚠️ The record holds one byte and the stroke holds a u32, so the pairing is modulo
-/// 256. Library instruments whose ids run past 255 exist in both narrow chains, and
-/// comparing the whole u32 hands those files a zone table that does not read.
+/// ⚠️ The record holds one byte and the stroke a u32, so they pair modulo 256. Library
+/// instruments with ids past 255 exist in both narrow chains, and comparing the whole
+/// u32 leaves their zones without strokes.
 fn names_stroke(id: u32, named: u8) -> bool {
     id as u8 == named
 }
@@ -564,11 +558,11 @@ impl Cbin<Sample> {
     /// Instrument name, as the Nord display shows it.
     ///
     /// The editor composes this from separate Main, Sub and Aux fields joined with `_`,
-    /// so an empty Sub shows up as a doubled underscore rather than a typo.
+    /// so a doubled underscore marks an empty Sub.
     ///
-    /// ⚠️ Empty on [`Chain::Early`], whose 18-byte `hdr` has no name field at all —
-    /// those instruments carry no name and [`Self::set_name`] has nowhere to put one.
-    /// Ask [`Self::chain`] before reporting the empty string as the name.
+    /// ⚠️ Empty on [`Chain::Early`], whose 18-byte `hdr` has no name field. Those
+    /// instruments carry no name, and [`Self::set_name`] refuses them. Check
+    /// [`Self::chain`] before reporting the empty string as the name.
     pub fn name(&self) -> Result<String, Error> {
         Ok(StringField::NAME.read(&self.hdr()?.payload))
     }
@@ -581,8 +575,8 @@ impl Cbin<Sample> {
     }
 
     /// Which narrow chain this body's sections form, from the `map` section's own
-    /// version. An unknown one refuses rather than decoding on a guess; the section
-    /// chain, the name and the checksum still read.
+    /// version. An unknown version is refused; the section chain, the name and the
+    /// checksum still read.
     pub fn chain(&self) -> Result<Chain, Error> {
         Ok(Chain::from_map_version(self.map()?.version)?)
     }
@@ -592,7 +586,7 @@ impl Cbin<Sample> {
         Ok(zone::read(self.chain()?, &self.map()?.payload)?)
     }
 
-    /// The instrument's default sound preset — nine enum-quantised bytes.
+    /// The instrument's default sound preset: nine enum-quantized bytes.
     pub fn sty(&self) -> Result<StyV2, Error> {
         let s = section::find(&self.body.sections, section::STY)
             .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
@@ -619,14 +613,14 @@ impl Cbin<Sample> {
     /// MIDI note.
     pub fn key_table(&self) -> Result<KeyTable, Error> {
         // Both narrow chains carry the same table ahead of their zone tables; a `map`
-        // this crate does not recognise may carry something else.
+        // this crate does not recognize may carry something else.
         self.chain()?;
         Ok(KeyTable::read(&self.map()?.payload)?)
     }
 
     /// Replaces the keyboard map. The zone table and the strokes are untouched.
     pub fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
-        // As in `key_table`: the table is shared, an unrecognised `map` is refused.
+        // As in `key_table`, an unrecognized `map` is refused.
         self.chain()?;
         let map = section::find_mut(&mut self.body.sections, section::MAP)
             .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
@@ -634,11 +628,11 @@ impl Cbin<Sample> {
         Ok(())
     }
 
-    /// One stroke per zone, **in [`Self::zones`] order** — which is not file order.
+    /// One stroke per zone, in [`Self::zones`] order, which can differ from file order.
     ///
     /// Each zone names its stroke by id, and only instruments built in a single editor
-    /// pass have those ids running parallel to the sections. Zipping this against
-    /// `zones()` is therefore safe; indexing it as "the nth `stk` section" is not.
+    /// pass number their strokes in section order. Zip this with `zones()`; do not
+    /// index it as the nth `stk` section.
     pub fn strokes(&self) -> Result<Vec<Stroke>, Error> {
         let zones = self.zones()?;
         let by_id = self.strokes_in_file_order()?;
@@ -665,8 +659,7 @@ impl Cbin<Sample> {
     /// file order.
     ///
     /// The offset is the base the stroke's own [`codec::Directory`] is written
-    /// against, so a caller checking those pointers needs this pairing rather than
-    /// the payload alone.
+    /// against, so a caller checking those pointers needs it as well as the payload.
     pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
         let mut at = 0;
         let mut out = Vec::new();
@@ -705,14 +698,13 @@ impl Cbin<Sample> {
         .into())
     }
 
-    /// Every stroke with the global id it carries, in the order the sections appear.
+    /// Every stroke with the global id it carries, in section order.
     ///
-    /// The header length depends on a stroke's *position in the file*, so the read has
-    /// to happen here, before anything reorders them.
+    /// A stroke's header length depends on its position in the file, so strokes are
+    /// read here, before anything reorders them.
     fn strokes_in_file_order(&self) -> Result<Vec<(u32, Stroke)>, Error> {
-        // The first stroke's header is the remainder of a preamble it shares with
-        // these two, so their sizes are what fixes where its audio starts. The
-        // pre-2.0 chain has no `cat` and a budget that is larger by as much.
+        // The first stroke's header fills out a fixed preamble it shares with the
+        // `cat` and `map` payloads, so their sizes fix where its audio starts.
         let chain = self.chain()?;
         let map_len = self.map()?.payload.len();
         let cat_len =
@@ -737,9 +729,9 @@ impl Cbin<Sample> {
 
     /// Retunes one zone by moving the note its sample plays untransposed at.
     ///
-    /// `index` is into [`Self::zones`], matching [`Self::set_zone_top_note`] — so the
-    /// stroke it reaches is the one that zone names, not the nth section. The two are
-    /// the same file order only for instruments the editor built in a single pass.
+    /// `index` is into [`Self::zones`], as for [`Self::set_zone_top_note`], so the
+    /// stroke it reaches is the one that zone names. That is the nth `stk` section only
+    /// for instruments the editor built in a single pass.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
         let zones = self.zones()?;
         let zone = zones
@@ -771,8 +763,8 @@ impl Cbin<Sample> {
         while i < cat.payload.len() {
             let len = cat.payload[i] as usize;
             let from = i + 1;
-            // A length running past the end means this is not a string here; the
-            // section holds a few leading bytes before the labels start.
+            // A length running past the end marks a byte that is not a label prefix;
+            // the section holds a few leading bytes before the labels start.
             match cat.payload.get(from..from + len) {
                 Some(s) if len > 0 && s.iter().all(|&b| (0x20..0x7f).contains(&b)) => {
                     out.push(String::from_utf8_lossy(s).into_owned());
@@ -811,8 +803,6 @@ impl fmt::Debug for Sample {
 mod tests {
     use super::*;
 
-    /// The content version tracks the library release and both chains ship several,
-    /// so the `map` section's own version is the gate.
     #[test]
     fn the_map_version_selects_the_chain_and_an_unknown_one_refuses() {
         assert_eq!(Chain::from_map_version(9).unwrap(), Chain::Early);
@@ -891,7 +881,6 @@ mod tests {
         assert_eq!(nul_terminated(&payload[field.next..]), "KG mono");
     }
 
-    /// The oldest narrow `hdr` is 18 bytes and stops inside the name field.
     #[test]
     fn a_header_with_no_name_field_reads_back_empty_and_refuses_a_rename() {
         assert_eq!(StringField::NAME.read(&[0u8; 18]), "");

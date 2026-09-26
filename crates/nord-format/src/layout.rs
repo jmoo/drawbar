@@ -1,18 +1,17 @@
 //! Body layouts as data.
 //!
 //! `#[bitbody]` generates an implementation of [`BodyLayout`] alongside the codec,
-//! so a body's bit map exists once in the source and is readable at runtime — for
-//! generated documentation, for `nord inspect`, for anything that wants to answer
-//! "which bits does this field own" without re-stating the layout. Nested bodies
-//! chain to their own layouts, so the whole map is one recursive walk.
+//! so a body's bit map exists once in the source and can be read at runtime by
+//! anything that asks which bits a field owns. Nested bodies chain to their own
+//! layouts, so the whole map is one recursive walk.
 
 /// One field's placement: an inclusive bit range, MSB-first from byte 0 of the
 /// body that declares it. For the file offset a hex dump shows, add the enclosing
-/// placements and the container's body start — `0x2c` on a type-1 file, `0x18` on
-/// a type-0.
+/// placements and the container's body start (`0x2c` on a type-1 file, `0x18` on
+/// a type-0).
 #[derive(Clone)]
 pub struct LayoutField {
-    /// The field's registry path within its body — the field's own name. A walker
+    /// The field's registry path within its body, which is the field's name. A walker
     /// prefixes nested children with this path and a dot.
     pub path: &'static str,
     /// The field's Rust type, as written.
@@ -26,8 +25,7 @@ pub struct LayoutField {
 /// A structure whose bit map is declared once, by `#[bitbody]`.
 pub trait BodyLayout {
     /// Every placed field, in declaration order. Bits no field claims are
-    /// preserved by the codec but have no entry here — there is no name to
-    /// report them under.
+    /// preserved by the codec but have no entry here, since they have no name.
     fn layout() -> &'static [LayoutField];
 }
 
@@ -92,12 +90,12 @@ mod tests {
         b
     }
 
-    /// Both placement kinds serve both directions, and unclaimed bits ride along
-    /// at every level.
+    /// Both placement kinds serve both directions, and unclaimed bits survive at
+    /// every level.
     #[test]
     fn the_codec_is_the_declaration() {
         let raw = <[u8; 6]>::from(&body());
-        // Claimed fields change; inner and outer unclaimed bits remain verbatim.
+        // Claimed fields change; inner and outer unclaimed bits are unchanged.
         assert_eq!(raw, [0x01, 0x02, 0x05, 0x50, 0xff, 0x07]);
         let back = Outer::try_from(raw).unwrap();
         assert_eq!(back.word, 0x0102);
@@ -105,8 +103,8 @@ mod tests {
         assert_eq!(back.level, 7);
     }
 
-    /// The generated `Body` impl carries a bitbody through the container whole,
-    /// both generations.
+    /// The generated `Body` impl carries a bitbody through the container in both
+    /// generations.
     #[test]
     fn a_bitbody_rides_the_container() {
         for generation in [cbin::Generation::V1, cbin::Generation::V0] {
@@ -137,7 +135,7 @@ mod tests {
         b.set_field("inner.level", "3").unwrap();
         assert_eq!(b.inner.level, 3);
         // ⚠️ `level` and `inner.level` are different fields: the bare name is the
-        // outer leaf, and nothing about a nested body's child reaches it.
+        // outer leaf.
         b.set_field("level", "9").unwrap();
         assert_eq!(b.level, 9);
         assert_eq!(b.inner.level, 3);
@@ -166,9 +164,9 @@ mod tests {
         pub seventh: crate::components::Drawbar,
     }
 
-    /// The parameter is bound by name, and only where the body registers one; the rank
-    /// likewise. Neither reaches a field whose type has no use for it, and a declared
-    /// binding stands in where the name says nothing.
+    /// A morph slot binds its parameter by name, only where the body registers one, and
+    /// a `…_N` drawbar takes its rank from its name. Neither reaches a field whose type
+    /// has no use for it, and `#[morphs]` or `#[rank]` binds where the name says nothing.
     #[test]
     fn a_name_binds_a_morph_slot_and_places_a_drawbar() {
         let specs = Named::field_specs();
@@ -192,8 +190,8 @@ mod tests {
         assert_eq!(of("volume"), ControlKind::Knob(Unit::Panel10));
     }
 
-    /// The layout publishes every placement — including the unregistered word —
-    /// and a nested entry chains to the nested body's own layout.
+    /// The layout publishes every placement, including the unregistered word, and a
+    /// nested entry chains to the nested body's own layout.
     #[test]
     fn the_layout_is_readable_as_data() {
         let fields = Outer::layout();

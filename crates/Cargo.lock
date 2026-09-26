@@ -932,7 +932,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "drawbar"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "eframe",
@@ -2119,7 +2119,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nord-bits-derive"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "nord-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clap",
  "dialoguer",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "nord-format"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "crcxx",
  "libtest-mimic",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "nord-usb"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "js-sys",
  "libtest-mimic",

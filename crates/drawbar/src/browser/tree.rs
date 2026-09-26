@@ -1,9 +1,9 @@
-//! The browser's one tree: the places a sound can live, the kinds there are, and the
-//! tags on the list on this computer.
+//! The browser's tree: the places a sound can be, the kinds of sound, and the tags on
+//! this computer's list.
 //!
-//! Every row is [`super::row::row`], and the tree computes its own indents rather than
-//! nesting `Ui`s — a leaf skips the triangle's box so its glyph lines up under the glyph
-//! of the branch beside it.
+//! Every row is drawn by [`super::row::row`]. The tree computes its own indents instead
+//! of nesting `Ui`s, so a leaf can skip the triangle's box and line its glyph up under
+//! the glyph of the branch beside it.
 
 use eframe::egui;
 use nord_format::accept::Family;
@@ -24,17 +24,14 @@ use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
 
-/// The New menu, parted by the rule across it: above it the files an instrument holds,
-/// below it the files only this computer keeps.
+/// The New menu. Above the separator are files an instrument holds: each family's
+/// defaults, and the two instrument files built from audio. Below it are files only this
+/// computer keeps: a note, a Sample Editor project, and a folder.
 ///
-/// Above are each family's own defaults and the two instrument files laid out from
-/// audio rather than started from a default. Below are a note, the Sample Editor's own
-/// project file, and the folder that groups what is here.
-///
-/// ⚠️ Written once and offered whole. The tree's context menu, the File menu, the toolbar
-/// and the tab strip all say "New", and four menus of that name holding different things
-/// is four things to learn. Connecting an instrument is not one of them — it makes
-/// nothing on this computer — and lives on the tree's own instrument row.
+/// ⚠️ One menu, used everywhere. The tree's context menu, the File menu, the toolbar and
+/// the tab strip all offer "New", and four different menus of one name would be four
+/// things to learn. Connecting an instrument makes nothing on this computer, so it is on
+/// the tree's instrument row instead.
 pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     for family in &Fresh::FAMILIES {
         ui.menu_button(family.label, |ui| {
@@ -55,7 +52,7 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     }
     if ui
         .button("New folder")
-        .on_hover_text("a way of grouping the list on this computer; the instrument never sees one")
+        .on_hover_text("groups the list on this computer; the instrument never sees it")
         .clicked()
     {
         acts.push(Act::NewFolder);
@@ -63,7 +60,7 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     }
 }
 
-/// One kind this app builds from nothing, wherever the menu offers it from.
+/// One kind this app creates from a default.
 fn entry(ui: &mut egui::Ui, kind: Fresh, acts: &mut Vec<Act>) {
     let mut button = ui.button(kind.label());
     if let Some(note) = kind.note() {
@@ -75,8 +72,7 @@ fn entry(ui: &mut egui::Ui, kind: Fresh, acts: &mut Vec<Act>) {
     }
 }
 
-/// One kind laid out from audio files rather than started from a default, which is why
-/// it asks for the files before it exists.
+/// One kind built from audio files, which asks for the files before it exists.
 fn from_wavs(ui: &mut egui::Ui, making: Making, acts: &mut Vec<Act>) {
     let (item, hint) = making.item();
     if ui.button(item).on_hover_text(hint).clicked() {
@@ -92,8 +88,8 @@ pub(super) enum Branch {
     Folder(u64),
     Instrument,
     Class(u32),
-    /// ⚠️ The bank as the panel counts it, which is the numbering the scan cache is keyed
-    /// by — never a [`Location`]'s own zero-indexed one.
+    /// ⚠️ The bank as the panel numbers it, which keys the scan cache. Never a
+    /// [`Location`]'s zero-based bank.
     Bank(u32, u64),
 }
 
@@ -117,9 +113,9 @@ impl Default for Sections {
 
 /// Where a row's contents start.
 ///
-/// A branch at the top is 8 px in, a leaf beside it 26, and a leaf one level down 40:
-/// a leaf skips the triangle's box, which is what lines its glyph up under the glyph of
-/// a branch at the same depth.
+/// A top-level branch starts 8 px in, a leaf beside it at 26, and a leaf one level down
+/// at 40. A leaf skips the triangle's box, which lines its glyph up under the glyph of a
+/// branch at the same depth.
 fn indent(depth: usize, branch: bool) -> f32 {
     const FIRST: f32 = 8.0;
     const DOWN: f32 = 14.0;
@@ -136,7 +132,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: &mut bool) -> bool {
     *open
 }
 
-/// Whether a click landed on the triangle, which opens the branch rather than picking
+/// Whether a click landed on the triangle, which opens the branch instead of selecting
 /// the row.
 fn on_triangle(drawn: &Drawn) -> bool {
     let (Some(box_), Some(at)) = (drawn.chevron, drawn.response.interact_pointer_pos()) else {
@@ -145,8 +141,8 @@ fn on_triangle(drawn: &Drawn) -> bool {
     box_.expand(3.0).contains(at)
 }
 
-/// Turn one of the library's filters, and bring the library forward to show what it
-/// left. A narrowing nobody can see is a narrowing that will surprise whoever finds it.
+/// Turn one of the library's filters on or off, and bring the library forward to show the
+/// result. A filter applied out of sight would surprise whoever finds it later.
 fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
     acts.push(Act::ShowTab(Spot::Library));
     acts.push(Act::Narrow(narrow));
@@ -167,10 +163,9 @@ fn nothing(ui: &mut egui::Ui, depth: usize, said: &str) {
     );
 }
 
-/// Whether the kinds section is worth a section at all.
-///
-/// One kind is what everything in both places is, so there is nothing to choose between
-/// and the rows would only narrow the library to what it already shows.
+/// Whether the kinds section is worth showing. With one kind in both places there is
+/// nothing to choose between, and the row would only narrow the library to what it
+/// already shows.
 fn worth_choosing(kinds: &[Kind]) -> bool {
     kinds.len() > 1
 }
@@ -180,27 +175,25 @@ pub(super) fn bank_branch(class: ObjectClass, bank: u64) -> Branch {
     Branch::Bank(class.to_raw(), bank)
 }
 
-/// What a local row's kind word needs from beyond the row: the families the list on this
-/// computer spans, and the attached instrument's own.
-///
-/// Read once a frame rather than per row — every row asks the same question of the whole
-/// list.
+/// What a local row's kind word needs from outside the row: the families on this
+/// computer's list, and the attached instrument's family. Read once a frame, because
+/// every row asks the same question of the whole list.
 struct Naming {
     kept: Vec<Family>,
     instrument: Option<Family>,
 }
 
-/// Where a duplicate of a slot lands: the first slot of its own folder that a walk found
-/// free and nothing is already waiting for.
+/// Where a duplicate of a slot lands: the first slot of its folder that a scan found
+/// empty and nothing in the queue is waiting for.
 ///
-/// ⚠️ The same exclusion a queued asset is placed by. Two writes handed one address are
-/// one write.
+/// ⚠️ The same exclusion that places a queued asset. Two writes to one address would
+/// leave only one.
 fn spare_slot(device: &DeviceState, class: ObjectClass, queue: &Queue) -> Option<Location> {
     device.first_free(class, &queue.waiting_in(class))
 }
 
-/// Where a drop onto a row of the local list lands: the folder that row is drawn under,
-/// or the loose part of the list.
+/// Where a drop onto a row of the local list lands: the folder the row is drawn under, or
+/// the loose part of the list.
 pub(super) fn onto_list(folder: Option<u64>) -> Onto {
     match folder {
         Some(id) => Onto::Group(id),
@@ -208,11 +201,11 @@ pub(super) fn onto_list(folder: Option<u64>) -> Onto {
     }
 }
 
-/// Whether a bank's own name says anything the number beside every row does not.
+/// Whether a bank's name says anything the number beside every row does not.
 ///
-/// Programs come back called "Bank 1", "Bank 2" — a caption repeating the number the
-/// location column already carries is a line of furniture. Pianos come back called
-/// "Grand" and "Upright", which is the whole reason to show a caption at all.
+/// Program banks come back named "Bank 1", "Bank 2", which only repeats the location
+/// column. Piano banks come back named "Grand" and "Upright", which is why a caption is
+/// shown at all.
 fn worth_captioning(bank: u32, name: &str) -> bool {
     let name = name.trim();
     !name.is_empty()
@@ -250,8 +243,7 @@ impl Browser {
             });
     }
 
-    /// The room under the last row: a click there is a click on no row, which lets go of
-    /// everything picked.
+    /// The space below the last row. A click there clears the selection.
     fn empty_below(&mut self, ui: &mut egui::Ui) {
         let rest = ui.available_rect_before_wrap();
         if rest.height() <= 0.0 {
@@ -271,8 +263,8 @@ impl Browser {
         }
     }
 
-    /// Right-clicking a row nothing has picked picks it; right-clicking one that is
-    /// already picked leaves the rest alone, so a menu acts on the whole selection.
+    /// Right-clicking an unselected row selects only it; right-clicking a selected row
+    /// keeps the selection, so the menu acts on all of it.
     fn aim(&mut self, item: Item) {
         if !self.selection.holds(item) {
             self.select(item);
@@ -337,8 +329,8 @@ impl Browser {
             ),
         ];
         for ((state, glyph, dot), count) in states.into_iter().zip(counts) {
-            // A row that has gone to nothing stays while it is the one narrowing, so
-            // there is always something left to click to widen the library again.
+            // A row whose count drops to zero stays while its filter is on, so there is
+            // always a row to click to turn the filter off.
             let asked = Narrow::State(state);
             if count == 0 && !filter.on(asked) {
                 continue;
@@ -382,8 +374,8 @@ impl Browser {
                 ..Cells::default()
             },
         );
-        // The head of the branch takes a drop, so there is one target that is never
-        // also a place a drag could have started from.
+        // The branch's head row takes a drop, so there is always a target that no drag
+        // can have started from.
         self.drop_zone(ui, &drawn.response, Onto::Computer, acts);
         if drawn.response.clicked() {
             match on_triangle(&drawn) {
@@ -403,10 +395,10 @@ impl Browser {
         });
     }
 
-    /// The row that stands in for an instrument until there is one.
+    /// The row shown in place of an instrument until one is connected.
     ///
-    /// ⚠️ The click reaches `requestDevice()` inside the frame it landed in, which is
-    /// what keeps the browser's transient user activation alive for it.
+    /// ⚠️ The click reaches `requestDevice()` in the frame it landed in, which keeps the
+    /// browser's transient user activation alive.
     fn connect_row(&mut self, ui: &mut egui::Ui, device: &Device, acts: &mut Vec<Act>) {
         if matches!(device.state.connection, Connection::Connecting) {
             nothing(ui, 0, "Looking for an instrument…");
@@ -426,8 +418,8 @@ impl Browser {
         if drawn
             .response
             .on_hover_text(
-                "Close Nord Sound Manager first — it holds the instrument on its own, and \
-                 nothing else can reach it alongside.\n\nIn a browser: Chrome or Edge only.",
+                "Close Nord Sound Manager first. It keeps the USB connection to itself while \
+                 it is open.\n\nIn a browser: Chrome or Edge only.",
             )
             .clicked()
         {
@@ -435,8 +427,8 @@ impl Browser {
         }
     }
 
-    /// The folders in the order they were made. Taken as ids so a row can change the
-    /// list it is drawn from.
+    /// The folder ids in creation order, copied out so a row can change the list it is
+    /// drawn from.
     fn folder_ids(&self) -> Vec<u64> {
         self.folders.all().iter().map(|folder| folder.id).collect()
     }
@@ -469,8 +461,8 @@ impl Browser {
             if let Some(name) = self.rename_row(ui, indent(1, true), &name) {
                 acts.push(Act::RenameFolder { id, name });
             }
-            // A folder is renamed with its contents in view: what is in it is what the
-            // name is about.
+            // A folder being renamed shows its contents, since they are what the name
+            // describes.
             open = true;
         } else {
             let drawn = row(
@@ -506,7 +498,7 @@ impl Browser {
                     }
                     if ui
                         .button("Remove folder")
-                        .on_hover_text("what is in it goes back to the list; nothing is deleted")
+                        .on_hover_text("its contents go back to the list; nothing is deleted")
                         .clicked()
                     {
                         acts.push(Act::RemoveFolder(id));
@@ -520,7 +512,7 @@ impl Browser {
             return;
         }
         if members.is_empty() {
-            nothing(ui, 2, "empty — drag sounds in");
+            nothing(ui, 2, "empty; drag sounds here");
         }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
             self.local_row(
@@ -558,8 +550,8 @@ impl Browser {
             None => 1,
         };
 
-        // While a name is being typed the row stops sensing anything: a drag sense over
-        // the field would take the clicks that place the cursor in it.
+        // While a name is being typed, the row senses nothing: a drag sense over the
+        // field would take the clicks that place the cursor.
         if self.rename.as_ref().is_some_and(|r| r.what == item) {
             if let Some(name) = self.rename_row(ui, indent(depth, false), &entity.name) {
                 acts.push(Act::RenameLocal {
@@ -589,8 +581,8 @@ impl Browser {
                 ..Cells::default()
             },
         );
-        // ⚠️ The whole name is the row's own hover, where the row had to cut it. A second
-        // one here shows it twice.
+        // ⚠️ The row already shows the full name on hover when it truncates it. A hover
+        // here would show it twice.
         let response = drawn.response;
 
         if response.dragged() {
@@ -599,8 +591,8 @@ impl Browser {
                 egui::DragAndDrop::set_payload(ui.ctx(), carried);
             }
         }
-        // A drop onto a row lands where that row is drawn, and is taken here so the
-        // branch's own zone does not act on it a second time.
+        // A drop onto a row lands where the row is drawn. It is taken here so the
+        // branch's zone does not act on it again.
         self.drop_zone(ui, &response, onto_list(folder), acts);
 
         if response.double_clicked() {
@@ -615,13 +607,12 @@ impl Browser {
         response.context_menu(|ui| self.menu(ui, item, workspace, device, queue, acts));
     }
 
-    /// The menu a row standing for a set of assets offers: what can be asked of the
-    /// whole set, then whatever can be asked of the row itself.
+    /// The menu of a row that stands for a set of assets: the bulk actions on the set,
+    /// then the row's own items.
     ///
     /// One builder for the folder, tag, kind, place and class rows. They differ in which
-    /// assets they stand for and in what the row itself can be told to do; between those
-    /// two they offer the same things, dead for the same reasons and labelled the same
-    /// way.
+    /// assets they stand for and in their own items. Otherwise they offer the same
+    /// actions, disabled for the same reasons and labeled the same way.
     fn set_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -647,13 +638,13 @@ impl Browser {
             .collect()
     }
 
-    /// The menu a row offers, wherever it is drawn — the tree, or the library table.
+    /// The menu a row offers, in the tree or in the library table.
     ///
     /// A row inside a checked set of several offers what the library's footer offers,
-    /// because the menu is about the set rather than about the row under the pointer.
+    /// because the menu acts on the whole set.
     ///
-    /// A folder and a tag are rows of the tree alone; their menus stay with the rows
-    /// that draw them.
+    /// Folders and tags appear only in the tree, so the rows that draw them build their
+    /// menus.
     pub fn menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -712,7 +703,7 @@ impl Browser {
         ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
         if ui
             .button("Save as gig…")
-            .on_hover_text("what is picked, under a tag of its own")
+            .on_hover_text("puts the selection under a new tag")
             .clicked()
         {
             acts.push(Act::SaveAsGig);
@@ -725,7 +716,7 @@ impl Browser {
         }
     }
 
-    /// Where an asset can be put, for the operators who would rather pick than drag.
+    /// The folders an asset can be moved into, for those who prefer a menu to dragging.
     fn filing_menu(&self, ui: &mut egui::Ui, id: u64, filed: Option<u64>, acts: &mut Vec<Act>) {
         if self.folders.all().is_empty() {
             return;
@@ -750,10 +741,10 @@ impl Browser {
         });
     }
 
-    /// Every tag, checked where it is on everything picked, and one more.
+    /// Every tag, checked where it is on everything selected, then New tag.
     ///
-    /// The items alone, so the row's own menu and the library's footer can each put
-    /// their own label over them.
+    /// Only the items, so the row's menu and the library's footer can each give them
+    /// their own label.
     pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         for tag in self.tags.all() {
             let on = self.tags.on_all(picked, tag.id);
@@ -826,11 +817,10 @@ impl Browser {
             .into_iter()
             .filter_map(|class| device.state.scan.progress(class))
             .any(|progress| progress.running);
-        // The label states what the batch would do, so it counts what the batch takes:
-        // an entry this instrument has already refused is not one of them.
+        // The label counts what the batch would write, which leaves out entries this
+        // instrument has refused.
         let waiting = will_write(queue).count();
-        // What this row stands for on this computer: everything that came off a slot of
-        // the instrument it names.
+        // What this row stands for on this computer: every asset that stands for a slot.
         let off_it = Browser::standing_for(workspace, |entity| entity.spot().is_some());
         drawn.response.context_menu(|ui| {
             self.set_menu(ui, &off_it, workspace, device, acts, |_, ui, acts| {
@@ -857,8 +847,7 @@ impl Browser {
         if !self.open.contains(&Branch::Instrument) {
             return;
         }
-        // The slots something is looking at right now, which the list on this computer
-        // deliberately does not show.
+        // The slots open as views, which the list on this computer does not show.
         let viewed: Vec<(ObjectClass, Location)> = workspace
             .entities()
             .iter()
@@ -881,8 +870,8 @@ impl Browser {
         queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
-        // A jump wins over whatever the branch was left in: the point of it is to reach
-        // a slot that is inside something closed.
+        // A jump opens the branches it needs, since its purpose is to reach a slot inside
+        // a closed one.
         if let Some((held, at)) = self.jump.filter(|(held, _)| *held == class) {
             self.open.insert(Branch::Class(class.to_raw()));
             self.open.insert(bank_branch(held, at.user_bank()));
@@ -949,8 +938,8 @@ impl Browser {
             });
         });
 
-        // ⚠️ A jump at a slot the walk has never reached would hold the branch open for
-        // as long as the instrument stays attached: nothing draws the row that clears it.
+        // ⚠️ A jump to a slot no scan has reached would hold the branch open as long as
+        // the instrument stays attached, because no row is drawn to clear it.
         if self
             .jump
             .is_some_and(|(held, at)| held == class && device.state.slot(class, at).is_none())
@@ -964,20 +953,19 @@ impl Browser {
         if banks.is_empty() {
             nothing(ui, 2, "nothing read yet");
         }
-        // The live buffer and the settings singleton divide into one bank.
+        // The live buffer and the settings have a single bank, drawn without a bank row.
         let cut = banks.len() > 1;
         for bank in banks {
             self.bank_rows(ui, device, class, bank, cut, viewed, workspace, queue, acts);
         }
     }
 
-    /// One bank, as a branch over its own slots.
+    /// One bank, as a branch over its slots.
     ///
-    /// ⚠️ A container in the browser and a numbering everywhere else. The instrument has
-    /// no folders inside a class — a location is a bank and a slot and that is all — but
-    /// four hundred rows in one run is a tree nobody can navigate, so the numbering is
-    /// what the list is cut on. A bank the device named says so in its row; for pianos
-    /// those names are the panel's categories.
+    /// ⚠️ A bank is a container only in the browser. The instrument has no folders inside
+    /// a class, only a bank and slot number per location, but four hundred rows in one
+    /// run cannot be navigated, so the list is split by bank. A bank the device named
+    /// shows its name; for pianos, those names are the panel's categories.
     #[allow(clippy::too_many_arguments)]
     fn bank_rows(
         &mut self,
@@ -1065,8 +1053,8 @@ impl Browser {
         let item = Item::Slot { class, at };
         let selected = self.selection.holds(item);
 
-        // While a name is being typed the row stops sensing anything: a drag sense over
-        // the field would take the clicks that place the cursor in it.
+        // While a name is being typed, the row senses nothing: a drag sense over the
+        // field would take the clicks that place the cursor.
         if self.rename.as_ref().is_some_and(|r| r.what == item) {
             let was = held.clone().unwrap_or_default();
             if let Some(name) = self.rename_row(ui, indent(depth, false), &was) {
@@ -1076,8 +1064,8 @@ impl Browser {
         }
 
         let loaded = device.state.focused(class) == Some(at);
-        // A slot open as a view says so here, because the tab strip cannot: what a tab
-        // shows is the document's name, and a view's name is the slot's own.
+        // A slot open as a view says so here, because the tab strip cannot: a tab shows
+        // the document's name, which for a view is the slot's name.
         let viewing = viewed.contains(&(class, at));
         let drawn = row(
             ui,
@@ -1096,11 +1084,11 @@ impl Browser {
         );
         let mut response = drawn.response;
         if loaded {
-            response = response.on_hover_text("on the instrument's panel now");
+            response = response.on_hover_text("loaded on the instrument's panel");
         }
         if viewing {
             response = response
-                .on_hover_text("open in a tab as a view of this slot — it is not on this computer");
+                .on_hover_text("open in a tab as a view of this slot; it is not on this computer");
         }
         // A jump can scroll only after the branches holding this row have opened.
         if self.jump == Some((class, at)) {
@@ -1109,7 +1097,7 @@ impl Browser {
             response.scroll_to_me(Some(egui::Align::Center));
         }
 
-        // ⚠️ A partition this app cannot name is listed and nothing more.
+        // ⚠️ A partition this app cannot name is only listed.
         let fetchable = !read_only(class);
 
         if let Some(name) = &held {
@@ -1141,7 +1129,7 @@ impl Browser {
         response.context_menu(|ui| self.menu(ui, item, workspace, device, queue, acts));
     }
 
-    /// What a slot offers. A vacant one offers nothing, so nothing is drawn for it.
+    /// The menu of a slot. An empty slot has no menu.
     fn slot_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -1159,16 +1147,16 @@ impl Browser {
         else {
             return;
         };
-        // ⚠️ A partition this app cannot name is listed and nothing more.
+        // ⚠️ A partition this app cannot name is only listed.
         if read_only(class) {
-            ui.label(egui::RichText::new("Nothing here knows what this folder holds.").weak());
+            ui.label(egui::RichText::new("drawbar does not know what this folder holds.").weak());
             return;
         }
         let item = Item::Slot { class, at };
         let free = spare_slot(&device.state, class, queue);
         if ui
             .button("Open")
-            .on_hover_text("a view of this slot; nothing joins the list on this computer")
+            .on_hover_text("a view of this slot, without adding it to the list on this computer")
             .clicked()
         {
             acts.push(Act::Open(item));
@@ -1189,7 +1177,7 @@ impl Browser {
         }
         if ui
             .add_enabled(free.is_some(), egui::Button::new("Duplicate"))
-            .on_disabled_hover_text("every slot read so far is taken or already spoken for")
+            .on_disabled_hover_text("every slot read so far is taken or already queued")
             .clicked()
         {
             if let Some(to) = free {
@@ -1295,7 +1283,7 @@ impl Browser {
                         }
                         if ui
                             .button("Remove tag")
-                            .on_hover_text("it comes off everything wearing it; nothing is deleted")
+                            .on_hover_text("removes the tag from everything; nothing is deleted")
                             .clicked()
                         {
                             acts.push(Act::RemoveTag(id));
@@ -1326,7 +1314,7 @@ impl Browser {
     }
 }
 
-/// The dot a local row wears, in its own ink and its own words.
+/// The status dot on a local row, with its color and hover text.
 fn mark(
     entity: &LocalEntity,
     device: &DeviceState,
@@ -1352,8 +1340,8 @@ mod tests {
     use crate::browser::bench::{bench, context, words};
     use crate::shell::Shell;
 
-    /// ⚠️ Everything laid out from audio is on the one New menu. A pick of WAVs makes
-    /// any of them, and a menu offering only some hides what the dialog does.
+    /// ⚠️ Everything built from audio is on the New menu. One pick of WAVs can make any
+    /// of them, and a menu offering only some would hide what the dialog does.
     #[test]
     fn the_new_menu_offers_everything_a_pick_of_wavs_makes() {
         let ctx = context();
@@ -1368,9 +1356,8 @@ mod tests {
         assert!(said.iter().any(|word| word == "New folder"));
     }
 
-    /// ⚠️ The rule across the New menu parts the files an instrument holds from the
-    /// files only this computer keeps. A kind on the wrong side of it says something
-    /// untrue about where what the operator is making can go.
+    /// ⚠️ The New menu's separator splits files an instrument holds from files only this
+    /// computer keeps. A kind on the wrong side would misstate where the new file can go.
     #[test]
     fn the_new_menu_parts_instrument_files_from_the_rest() {
         let ctx = context();
@@ -1410,8 +1397,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ A row says what a sound is called, not what file it is in. The name the
-    /// workspace holds keeps its format tag; only the paint drops it.
+    /// ⚠️ A row shows the sound's name without its format tag. The name the workspace
+    /// holds keeps the tag; only the drawn text drops it.
     #[test]
     fn a_row_paints_its_name_without_the_format_tag() {
         let (mut browser, mut workspace, device, _tabs, queue, mut log) = bench();
@@ -1433,8 +1420,8 @@ mod tests {
         assert_eq!(workspace.get(id).unwrap().name, "Africa Split.ne5p");
     }
 
-    /// ⚠️ A filter turned while a document is in front narrows a table nobody is looking
-    /// at. Every row of the tree that narrows brings the library forward with it.
+    /// ⚠️ A filter applied while a document is in front would narrow a table nobody is
+    /// looking at, so every tree row that narrows brings the library forward.
     #[test]
     fn narrowing_the_library_brings_it_forward() {
         for asked in [
@@ -1466,8 +1453,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ A place row narrows the library like a kind or a tag row, so it reads as on
-    /// like one. Without it nothing in the window says where the narrowing came from.
+    /// ⚠️ A place row narrows the library like a kind or tag row, so it is highlighted
+    /// like one. Otherwise nothing in the window shows where the filter came from.
     #[test]
     fn the_place_row_reads_as_on_while_the_library_is_over_that_place() {
         fn selections(shape: &egui::Shape, want: egui::Color32) -> usize {
@@ -1501,11 +1488,11 @@ mod tests {
         assert_eq!(on(&Filter::default()), 0, "nothing is narrowed to a place");
         let mut filter = Filter::default();
         filter.narrow(Narrow::Place(Place::Computer));
-        assert_eq!(on(&filter), 1, "This computer is the one row lit");
+        assert_eq!(on(&filter), 1, "only This computer is highlighted");
     }
 
-    /// The kinds row list is what the two places actually hold, in one order. A row for
-    /// a kind neither place holds narrows the library to nothing.
+    /// The kinds section lists what the two places hold, in one order. A row for a kind
+    /// neither place holds would narrow the library to nothing.
     #[test]
     fn the_kinds_section_lists_the_union_of_the_two_places() {
         let (_browser, mut workspace, mut device, _tabs, _queue, mut log) = bench();
@@ -1532,8 +1519,8 @@ mod tests {
         assert!(worth_choosing(&kinds_present(&workspace, &device.state)));
     }
 
-    /// ⚠️ The row that turns a narrowing off goes with the kind. A filter left pointing
-    /// at a kind that is nowhere shows an empty table with nothing to click to refill it.
+    /// ⚠️ The row that turns a filter off goes away with its kind. A filter left on a
+    /// kind that is nowhere would show an empty table with nothing to click to clear it.
     #[test]
     fn a_kind_that_leaves_the_union_stops_narrowing() {
         let (_browser, workspace, mut device, _tabs, _queue, _log) = bench();
@@ -1554,8 +1541,8 @@ mod tests {
         assert_eq!(filter.kind, None, "the instrument took its folders with it");
     }
 
-    /// ⚠️ A duplicate goes where nothing else is going. A slot something in the queue is
-    /// already bound for is spoken for, and two writes handed one address are one write.
+    /// ⚠️ A duplicate skips slots the queue is already bound for, because two writes to
+    /// one address would leave only one.
     #[test]
     fn a_duplicate_lands_past_the_slot_the_queue_is_bound_for() {
         let (_browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
@@ -1579,12 +1566,12 @@ mod tests {
         assert_eq!(
             spare_slot(&device.state, class, &queue),
             Some(Location::from_user(7, 3)),
-            "7:2 is already waiting for something"
+            "the queue is already bound for 7:2"
         );
     }
 
-    /// A caption earns its line by saying something the location column does not. The
-    /// piano categories do; "Bank 1" over the rows already labelled `1:…` does not.
+    /// The piano categories say something the location column does not; "Bank 1" over
+    /// rows already labeled `1:…` does not.
     #[test]
     fn a_bank_caption_only_shows_what_the_number_does_not_say() {
         assert!(worth_captioning(1, "Grand"));
@@ -1592,13 +1579,13 @@ mod tests {
         for furniture in ["Bank 1", "bank 1", "BANK 1", "1", " ", ""] {
             assert!(!worth_captioning(1, furniture), "{furniture:?}");
         }
-        // The number has to match to be redundant — "Bank 2" over bank 1 is worth saying,
-        // because one of the two is wrong and hiding it would hide that.
+        // Only a matching number is redundant. "Bank 2" over bank 1 is shown, because one
+        // of the two is wrong.
         assert!(worth_captioning(1, "Bank 2"));
     }
 
     /// ⚠️ A leaf's glyph lines up under the glyph of the branch beside it, because a
-    /// leaf's indent already carries the triangle's box that a branch's does not.
+    /// leaf's indent includes the triangle's box that a branch draws.
     #[test]
     fn a_leaf_starts_where_the_branch_beside_it_puts_its_glyph() {
         assert_eq!(indent(0, true), 8.0);

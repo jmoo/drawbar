@@ -12,8 +12,9 @@ nord program put louder.ne5p 7:4 --yes     # and send it back
 nord piano build strokes/ --name Marimba -o marimba.npno   # a piano library from WAVs
 ```
 
-Anything that changes the instrument says what it is about to replace and
-refuses without `--yes`. Data goes to stdout and everything else to stderr.
+Anything that changes the instrument says what it is about to replace and asks
+first. `--yes` answers in advance, for scripts. Data goes to stdout and everything
+else to stderr.
 
 ```sh
 cargo install nord-cli

@@ -1,9 +1,9 @@
-//! The library: one table over every kind, in both places.
+//! The library: one table of every kind of asset, on this computer and on the instrument.
 //!
-//! A [`Row`] is what the table knows about one thing — where it is, where it goes, how
-//! big it is, what it plays — and it is built from the list on this computer and the
-//! scanned slots without a frame in sight. [`arrange`] narrows and orders a set of them.
-//! Everything under those two is paint.
+//! A [`Row`] is what the table knows about one asset: where it is, where it goes, how big
+//! it is, and what it plays. Rows are built from the list on this computer and the
+//! scanned slots without any UI. [`arrange`] filters and orders them. Everything else
+//! here paints.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -28,25 +28,26 @@ use crate::workspace::{LocalEntity, Workspace};
 
 /// Which of the two places a row's contents are in.
 ///
-/// ⚠️ `Both` is a **link**: a slot this asset was matched to — see
-/// [`crate::device::link`]. Its sign says whether the two still agree, which saving an
-/// edit here turns to `false` while the link stays where it was.
+/// ⚠️ `Both` is a **link**: a slot [`crate::device::link`] matched this asset to. Its
+/// value says whether the two still agree. Saving an edit here turns it to `false`, and
+/// the link stays where it was.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Where {
-    /// A link, and whether the two still agree — see [`agrees`]. `None` is a link the
-    /// two places cannot be compared across.
+    /// A link, and whether the two still agree according to [`agrees`]. `None` means
+    /// the two copies cannot be compared.
     Both(Option<bool>),
     Computer,
-    /// On this computer, and the attached instrument is not the one whose files these
-    /// are. It is in one place and can only stay there.
+    /// On this computer, and the attached instrument refuses it, so it can only stay
+    /// here.
     Foreign,
     Keyboard,
-    /// It came off a slot nothing has read, so the other copy cannot be spoken about.
+    /// It came off a slot this session has not read, so nothing is known about the other
+    /// copy.
     Unread,
 }
 
 impl Where {
-    /// The short word the column carries.
+    /// The short word in the WHERE column.
     pub fn short(self) -> &'static str {
         match self {
             Where::Both(Some(true)) => "both =",
@@ -58,10 +59,10 @@ impl Where {
         }
     }
 
-    /// The whole of it, which is what the tooltip says.
+    /// The full sentence, for the tooltip.
     pub fn sentence(self) -> &'static str {
         match self {
-            Where::Both(Some(true)) => "On this computer and in a slot holding these very bytes.",
+            Where::Both(Some(true)) => "On this computer and in a slot holding the same bytes.",
             Where::Both(Some(false)) => {
                 "On this computer and in a slot it was matched to, and the two bodies \
                  no longer agree."
@@ -71,13 +72,13 @@ impl Where {
                  whether the two bodies agree."
             }
             Where::Computer => "On this computer only.",
-            Where::Foreign => "On this computer only — not for this keyboard.",
+            Where::Foreign => "On this computer only. Not for this keyboard.",
             Where::Keyboard => "On the instrument only.",
             Where::Unread => "It came off a slot this session has not read.",
         }
     }
 
-    /// The places it is in, which is what a place filter asks about.
+    /// The places it is in, which a place filter checks.
     fn places(self) -> &'static [Place] {
         match self {
             Where::Both(_) => &[Place::Computer, Place::Keyboard],
@@ -86,7 +87,7 @@ impl Where {
         }
     }
 
-    /// Both first, then this computer, the instrument, and the unsayable.
+    /// Sort rank: both places first, then this computer, the instrument, and unread.
     fn rank(self) -> u8 {
         match self {
             Where::Both(Some(false)) => 0,
@@ -100,11 +101,11 @@ impl Where {
     }
 }
 
-/// The library object a row plays that the row's own bytes do not carry.
+/// The library (piano or sample) a row plays, which the row's bytes do not name.
 ///
-/// ⚠️ A name can only come from the instrument — a program file stores a bare id and no
-/// name at all — so `Wanted` is an id **nothing has resolved**, never one the instrument
-/// said it did not hold. No read this app makes reports a missing library.
+/// ⚠️ A name can only come from the instrument, because a program file stores a bare id
+/// and no name. `Wanted` is an id **nothing has resolved**, never one the instrument said
+/// it did not hold. No read this app makes reports a missing library.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Needs {
     Nothing,
@@ -113,7 +114,7 @@ pub enum Needs {
 }
 
 impl Needs {
-    /// The words the column carries.
+    /// The text in the NEEDS column.
     pub fn text(&self) -> String {
         match self {
             Needs::Nothing => String::new(),
@@ -124,7 +125,7 @@ impl Needs {
         }
     }
 
-    /// The whole of it, which is what the tooltip says.
+    /// The full sentence, for the tooltip.
     pub fn sentence(&self) -> String {
         match self {
             Needs::Nothing => "Nothing here says what it plays.".to_string(),
@@ -154,35 +155,35 @@ pub struct Row {
     pub item: Item,
     pub kind: Kind,
     /// The family to put in front of the kind's word, where the word alone would not say
-    /// whose files these are. [`crate::browser::qualified`] is the rule.
+    /// whose files these are. [`crate::browser::qualifier`] decides it.
     pub family: Option<Family>,
     pub name: String,
     pub tags: usize,
     /// It holds something other than what it was last saved as. Only a row on this
-    /// computer can: a slot holds what it holds.
+    /// computer can be unsaved.
     pub unsaved: bool,
     pub where_: Where,
-    /// The slot it came off, or the slot it is. Nothing on this computer that never came
-    /// off one has an address at all.
+    /// The slot it came off, or the slot it is. An asset that never came off a slot has
+    /// none.
     pub at: Option<(ObjectClass, Location)>,
     pub size: u64,
     pub needs: Needs,
 }
 
 impl Row {
-    /// Where a send would write this row, which is [`crate::device::read_only`]'s rule
-    /// over an asset that came off a slot. A row that is already on the instrument goes
-    /// nowhere.
+    /// Where a send would write this row: the slot an asset came off, unless
+    /// [`crate::device::read_only`] rules out its class. A row already on the instrument
+    /// goes nowhere.
     fn destination(&self) -> Option<(ObjectClass, Location)> {
         let (class, at) = self.at?;
         (matches!(self.item, Item::Local(_)) && !read_only(class)).then_some((class, at))
     }
 }
 
-/// Everything the library holds, narrowed by kind, place and tags.
+/// Everything the library holds, narrowed by kind, place, and tags.
 ///
-/// The list on this computer comes first, and a slot one of its assets came off is that
-/// asset's row rather than a second one: a program read off 7:4 and kept is one thing in
+/// The list on this computer comes first. A slot one of its assets came off is shown in
+/// that asset's row, not as a second row: a program read off 7:4 and kept is one thing in
 /// two places, which is what [`Where::Both`] says.
 pub fn rows(
     workspace: &Workspace,
@@ -196,7 +197,7 @@ pub fn rows(
     let kept = families_present(workspace);
     let instrument = device.product().and_then(Family::from_product);
     for entity in workspace.listed() {
-        // The slot the row stands for, so the instrument's own list does not repeat it.
+        // Claim the row's slot so the instrument's list does not repeat it.
         if let Some(slot) = entity.spot() {
             claimed.push(slot);
         }
@@ -240,13 +241,13 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>, state: Option<State>
         .any(|place| filter.admits(row.kind, *place, tags, state))
 }
 
-/// What a row wants doing about it: a write already waiting, or a slot that no longer
-/// holds what this row was last saved as. A slot on the instrument wants nothing —
-/// it *is* what the instrument holds.
+/// What a row needs: a write already waiting, or a slot that no longer holds what this
+/// row was last saved as. A slot on the instrument needs nothing, since it is what the
+/// instrument holds.
 ///
-/// ⚠️ A queued row is waiting rather than differing, however the two bodies compare. The
-/// write already agreed to is what settles them, so counting it under both would ask
-/// twice for one thing.
+/// ⚠️ A queued row counts as waiting, never as differing, however the two bodies compare.
+/// The queued write settles them, so counting the row under both would ask twice for one
+/// thing.
 pub fn state(item: Item, where_: Where, queue: &Queue) -> Option<State> {
     match item {
         Item::Local(id) if queue.holds(id) => Some(State::Waiting),
@@ -255,8 +256,8 @@ pub fn state(item: Item, where_: Where, queue: &Queue) -> Option<State> {
     }
 }
 
-/// How many rows the two places hold differently with no write waiting to settle it —
-/// the count the tree's row and the library's chip both carry.
+/// How many assets differ from their slot with no write waiting to settle them. The
+/// tree's row and the library's chip both show this count.
 pub fn differing(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> usize {
     workspace
         .listed()
@@ -270,11 +271,10 @@ pub fn differing(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> 
         .count()
 }
 
-/// The row one item makes, for a caller holding an item rather than the whole table.
+/// The row for one item, for a caller that needs one item and not the whole table.
 ///
-/// The same two builders [`rows`] uses, so what the inspector reads about a picked row
-/// is what the table shows on it. A folder or a tag is a grouping rather than a thing,
-/// and makes no row.
+/// Uses the same two builders as [`rows`], so the inspector shows what the table shows.
+/// A folder or a tag is a grouping and makes no row.
 pub fn row_of(
     item: Item,
     workspace: &Workspace,
@@ -328,7 +328,7 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
     Row {
         item: Item::Slot { class, at },
         kind: Kind::from_class(class),
-        // What is on the instrument is the instrument's own; the word never needs it.
+        // A slot is the instrument's own, so its kind word never needs a family.
         family: None,
         name: info.name.trim().to_string(),
         tags: 0,
@@ -340,8 +340,8 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
     }
 }
 
-/// Where a row's contents are, which for anything on this computer is decided by its
-/// link: a linked asset is in both places, and the sign is [`agrees`].
+/// Where an asset's contents are. A linked asset is in both places, and whether the two
+/// agree comes from [`agrees`].
 fn whereabouts(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Where {
     let held = entity
         .link
@@ -360,19 +360,19 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Whe
 
 /// Whether the slot an asset stands for still holds what that asset was last saved as.
 ///
-/// The one comparison behind the library's sign, the tree's dot and what a "queue
-/// changed" walks. Equality is claimed only where something says so:
+/// This comparison drives the library's sign, the tree's dot, and what "queue changed"
+/// finds. Equality is claimed only on evidence:
 ///
-/// - the checksum a walk reported for the slot against the checksum of the saved bytes,
-///   which is read once at ingest and nothing hashes again;
-/// - a write this app made into that slot, whose bytes are the ones it is saved as —
-///   the one thing it knows about a slot without reading it back;
-/// - a compare read that fetched the occupant and found the bodies equal.
+/// - the checksum a walk reported for the slot matches the checksum of the saved bytes,
+///   which is taken once at ingest;
+/// - this app wrote the saved bytes into that slot, which is the only thing it knows
+///   about a slot without reading it back;
+/// - a compare read fetched the occupant and found the bodies equal.
 ///
-/// ⚠️ `None` where none of them answers, which is *not known* rather than *the same*.
-/// An address and a length are not evidence: a class reporting no checksum is linked by
-/// name or by being the only slot there is, and neither says anything about the body in
-/// it. Only a read settles one of those.
+/// ⚠️ `None` where none of these answers. It means unknown, never the same. An address
+/// and a length are not evidence: a class reporting no checksum is linked by name or
+/// because it has only one slot, and neither says anything about the body in it. Only a
+/// read settles one of those.
 pub fn agrees(
     entity: &LocalEntity,
     class: ObjectClass,
@@ -392,31 +392,30 @@ pub fn agrees(
     }
 }
 
-/// Whether this app wrote what the asset is saved as into this very slot.
+/// Whether this app wrote the asset's saved bytes into this slot.
 ///
-/// ⚠️ The checksums are the two sets of bytes: a save of anything else moves the
-/// baseline off the bytes the write put there, and the write stops answering for it.
+/// ⚠️ Compared by checksum: saving anything else moves the baseline off the bytes the
+/// write put there, and the write no longer counts as evidence.
 fn wrote(entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
     entity.wrote.is_some_and(|wrote| {
         (wrote.class, wrote.at) == (class, at) && Some(wrote.crc32) == entity.saved.crc32
     })
 }
 
-/// What a mark on a row claims: the dot the tree paints at a row's right end, the ink
-/// the table's WHERE cell carries, and the star a name wears.
+/// What a mark on a row claims: the dot the tree paints at a row's right end, the color
+/// of the table's WHERE cell, and the star after a name.
 ///
-/// Four of them, and every one is explained by [`mark_words`] wherever it is drawn.
+/// [`mark_words`] explains each one wherever it is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
     Agrees,
     Differs,
-    /// A slot nothing can say either way about, which is the unsigned `both` of
-    /// [`Where::Both`].
+    /// A slot whose agreement is unknown: the unsigned `both` of [`Where::Both`].
     Unknown,
     Unsaved,
 }
 
-/// The ink a mark is painted in, wherever it is painted.
+/// The color a mark is painted in, everywhere it is painted.
 pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     match mark {
         Mark::Agrees => crate::app::good(visuals),
@@ -426,11 +425,10 @@ pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// What a mark says, in the only words that explain it.
+/// What a mark means, in words.
 ///
-/// The one place these are written: a dot's hover, a coloured WHERE cell's, and each
-/// part of the queue's count line — so that line reads as the legend for every mark in
-/// the window.
+/// The tree dot's hover, the colored WHERE cell's hover, and the document header's hint
+/// all use these words, so every mark in the window is explained the same way.
 pub fn mark_words(mark: Mark) -> &'static str {
     match mark {
         Mark::Agrees => "on the keyboard, the same as saved here",
@@ -442,11 +440,11 @@ pub fn mark_words(mark: Mark) -> &'static str {
     }
 }
 
-/// The mark a local row wears at its right end: what the attached instrument holds where
-/// this asset stands.
+/// The mark at a local row's right end: what the attached instrument holds in the slot
+/// this asset stands for.
 ///
-/// ⚠️ The one rule, and the only dot a local row wears. Nothing at all is an asset with
-/// no slot to stand on — its link, which is the slot [`whereabouts`] reads and no other.
+/// ⚠️ The only rule for a local row's dot. An asset with no link gets no mark. The link
+/// is the slot [`whereabouts`] reads, and no other slot counts.
 pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Option<Mark> {
     let (class, at) = entity.link?;
     let info = device.slot(class, at).flatten()?;
@@ -456,17 +454,17 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
     match agrees(entity, class, info, queue) {
         Some(true) => Some(Mark::Agrees),
         Some(false) => Some(Mark::Differs),
-        // A green dot is a claim, and nothing here has the evidence to make one.
+        // A green dot is a claim, and there is no evidence for one.
         None => Some(Mark::Unknown),
     }
 }
 
-/// The library a file names, and the name the instrument gave it where it has named it.
+/// The library a program names, and its name if the instrument has reported one.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
     let Some(fields) = entity.entity.as_ref().and_then(crate::fields::fields_of) else {
         return Needs::Nothing;
     };
-    // One cell, so the first of the two a program can name is the one it shows.
+    // One cell, so it shows the first library the program names.
     for (path, class) in [
         ("piano_panel.id", ObjectClass::Piano),
         ("sample_panel.id", ObjectClass::Sample),
@@ -491,10 +489,10 @@ pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
     Needs::Nothing
 }
 
-/// What the instrument said a slot plays, where that slot is the one it was last asked
+/// What the instrument said a slot plays, if that slot is the one it was last asked
 /// about.
 ///
-/// ⚠️ Programs only: the piano or sample a program plays is what this column stands for.
+/// ⚠️ Programs only: this column shows the piano or sample a program plays.
 fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
     if class != ObjectClass::Program || device.detail.at != Some((class, at)) {
         return Needs::Nothing;
@@ -556,7 +554,7 @@ impl Column {
         Column::Needs,
     ];
 
-    /// The word over the column. The two that carry a mark rather than a word have none.
+    /// The column's heading. The two columns that show a mark have none.
     fn head(self) -> &'static str {
         match self {
             Column::Mark | Column::Glyph => "",
@@ -570,7 +568,7 @@ impl Column {
         }
     }
 
-    /// Where this column sits in a row, which is where its track is.
+    /// This column's position in a row, which is also the index of its track.
     fn index(self) -> usize {
         match self {
             Column::Mark => 0,
@@ -590,8 +588,8 @@ impl Column {
         match self {
             Column::Mark => Track::Px(18.0),
             Column::Glyph => Track::Px(20.0),
-            // A kind is a handful of known words, and 96 px holds the longest of them —
-            // asked for as a share so a narrow centre spends the room on the name.
+            // 96 px holds the longest kind word. It is a capped share so a narrow center
+            // gives the room to the name.
             Column::Kind => Track::Capped {
                 share: 0.7,
                 max: 96.0,
@@ -616,10 +614,10 @@ pub fn tracks(width: f32) -> [Range<f32>; 9] {
     std::array::from_fn(|index| held[index].clone())
 }
 
-/// The rows the table shows: what the omnibox admits, in the order a column asks for.
+/// The rows the table shows: those matching the omnibox, sorted by a column.
 ///
-/// ⚠️ Ties break on the name and then the row itself, so the order does not depend on
-/// the order the rows happened to be built in.
+/// ⚠️ Ties break on the name and then the item, so the order does not depend on the
+/// order the rows were built in.
 pub fn arrange(mut rows: Vec<Row>, query: &str, by: Column, order: Order) -> Vec<Row> {
     let query = query.trim().to_lowercase();
     if !query.is_empty() {
@@ -639,8 +637,8 @@ pub fn arrange(mut rows: Vec<Row>, query: &str, by: Column, order: Order) -> Vec
 
 fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
     match by {
-        // A mark is a control rather than a fact about the row, so its head sorts
-        // nothing and the tie-breakers stand.
+        // The mark is a control, not a fact about the row, so sorting by it leaves the
+        // order to the tie-breakers.
         Column::Mark => Ordering::Equal,
         // The glyph and the word beside it are the same fact, so a click on either
         // orders the table the same way.
@@ -654,12 +652,12 @@ fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
     }
 }
 
-/// The word the KIND column carries, which is what the glyph beside it stands for.
+/// The word in the KIND column, which the glyph beside it also represents.
 fn word(row: &Row) -> String {
     crate::strings::kind_word(row.kind, row.family)
 }
 
-/// A row with no address sorts after every row that has one, rather than at `0:0`.
+/// A row with no address sorts after every row that has one.
 fn address(row: &Row) -> (bool, u32, u32, u32) {
     match row.at {
         Some((class, at)) => (false, class.to_raw(), at.bank, at.slot),
@@ -716,7 +714,7 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String
         }
     }
     match said.is_empty() {
-        true => "Nothing picked goes to the instrument.".to_string(),
+        true => "Nothing selected goes to the instrument.".to_string(),
         false => said.join(" · "),
     }
 }
@@ -744,15 +742,15 @@ fn spans(going: &[(ObjectClass, Location)]) -> String {
     runs.join(", ")
 }
 
-/// The height of a row, of the head over them, and of the bar over that.
+/// The height of a row, of the column heads, and of the bar above them.
 const ROW: f32 = 24.0;
 const HEAD: f32 = 20.0;
 const BAR: f32 = 28.0;
 
-/// The room the bar, the table and the footer keep at each end.
+/// The padding the bar, the table, and the footer keep at each end.
 ///
-/// ⚠️ The table's is the tree's own row indent. Without it the first track starts at the
-/// panel's edge and the mark's left stroke is painted half outside the window.
+/// ⚠️ It matches the tree's row indent. Without it the first track starts at the panel's
+/// edge and the mark's left stroke is painted half outside the window.
 const PAD: f32 = 8.0;
 
 /// A kind glyph in a row, and the smaller ones beside a count.
@@ -762,12 +760,12 @@ const SMALL: f32 = 10.0;
 /// The selection mark's box.
 const MARK: f32 = 11.0;
 
-/// The faces a cell paints in. Painted rather than laid out, so the sizes are here
-/// rather than resolved from the named styles in [`crate::app`].
+/// The font sizes a cell uses. Cells are painted directly, so the sizes are set here and
+/// not taken from the named styles in [`crate::app`].
 const NAME: f32 = 12.0;
 const MONO: f32 = 10.5;
 
-/// The centre's default view.
+/// The center panel's default view.
 pub struct Library {
     by: Column,
     order: Order,
@@ -792,8 +790,8 @@ impl Library {
         queue: &Queue,
         shell: &Shell,
     ) -> Vec<Act> {
-        // The bar, the head and the rows are flush: the table's own lines are the only
-        // horizontal rules in it.
+        // The bar, the heads, and the rows are flush, so the table's own lines are its
+        // only horizontal rules.
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut acts = Vec::new();
         let held = rows(
@@ -812,8 +810,8 @@ impl Library {
             .filter(|row| browser.picked().holds(row.item))
             .collect();
         if !picked.is_empty() {
-            // Claimed before the table, so the strip keeps its height whatever the table
-            // does with what is left.
+            // Laid out before the table, so the strip keeps its height and the table takes
+            // what is left.
             egui::TopBottomPanel::bottom("library_footer")
                 .resizable(false)
                 .frame(egui::Frame::new())
@@ -844,8 +842,8 @@ impl Library {
         queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
-        // The head and every row start where a row of the tree starts, so the whole grid
-        // moves together and the scroll bar stays at the panel's own edge.
+        // The heads and rows start where a tree row starts. Insetting the whole grid keeps
+        // it aligned and leaves the scroll bar at the panel's edge.
         let room = ui.available_rect_before_wrap();
         let mut inset = ui.new_child(
             egui::UiBuilder::new()
@@ -880,8 +878,7 @@ impl Library {
                     );
                 }
             });
-        // The room under the last row: a click there is a click on no row, which lets go
-        // of everything picked.
+        // A click in the space under the last row clears the selection.
         let rest = shown
             .inner_rect
             .with_min_y(shown.inner_rect.top() + shown.content_size.y);
@@ -894,7 +891,8 @@ impl Library {
         }
     }
 
-    /// 20 px of column heads, each one a click that sorts by it.
+    /// The column heads. Clicking one sorts by that column, and clicking it again reverses
+    /// the order.
     fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 9]) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::click());
@@ -915,8 +913,8 @@ impl Library {
             };
             let mut room = track.end - track.start;
             if sorted {
-                // ⚠️ The vendored Lucide set has no chevron-up, so ascending points the
-                // way the tree's shut branch does rather than upwards.
+                // ⚠️ The vendored Lucide set has no chevron-up, so ascending points right,
+                // like a collapsed tree branch.
                 let glyph = match self.order {
                     Order::Up => Glyph::ChevronRight,
                     Order::Down => Glyph::ChevronDown,
@@ -965,11 +963,12 @@ impl Library {
     }
 }
 
-/// 28 px: what the library is over, the tags narrowing it, and what wants attention.
+/// The bar over the table: what the library shows, the tags narrowing it, and what needs
+/// attention.
 ///
-/// ⚠️ Both counts are the whole list's, not this view's. They are the numbers the tree's
-/// own rows carry and the toolbar's Send acts on — and a chip counting only what survives
-/// its own narrowing would report a different number the moment it was clicked.
+/// ⚠️ Both counts cover the whole list, not this view. They match the numbers on the
+/// tree's rows and what the toolbar's Send acts on. A chip counting only what passes its
+/// own filter would change the moment it was clicked.
 fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts: &mut Vec<Act>) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), BAR), egui::Sense::hover());
@@ -996,8 +995,8 @@ fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts
             (State::Differs, Glyph::CircleAlert),
         ];
         for ((state, glyph), count) in states.into_iter().zip(counts) {
-            // A chip that has gone to nothing stays while it is the one narrowing, so
-            // there is always something left to click to widen the table again.
+            // A chip whose count is zero stays while it is the active filter, so there is
+            // always something to click to clear it.
             if count == 0 && !filter.on(Narrow::State(state)) {
                 continue;
             }
@@ -1017,7 +1016,7 @@ fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts
     });
 }
 
-/// What the library is over, in the words the filter's own rows use.
+/// What the library shows, in the words the filter's rows use.
 fn over(filter: &Filter) -> String {
     let mut narrowed = Vec::new();
     if let Some(kind) = filter.kind {
@@ -1055,9 +1054,9 @@ fn under(response: &egui::Response, rect: egui::Rect, tracks: &[Range<f32>; 9]) 
 /// One row of the table.
 ///
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a label
-/// allocates a hover rect that wins the hit test over the row, and the click lands on
-/// whichever word happens to be under it. The row is the only thing that senses, and the
-/// tooltip is whichever cell the pointer is in.
+/// allocates a hover rect that wins the hit test over the row, so a click would land on
+/// whichever word is under the pointer. Only the row and its checkbox sense input, and
+/// the tooltip comes from the cell under the pointer.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     ui: &mut egui::Ui,
@@ -1166,7 +1165,7 @@ fn paint(
             false,
         );
     }
-    // The same mark the tree's dot paints, in the words this column carries.
+    // The same mark the tree's dot paints, as the color of this column's word.
     let mark = row
         .item
         .local()
@@ -1198,7 +1197,7 @@ fn paint(
         quiet,
         false,
     );
-    // ⚠️ Quiet, id and all. An id nothing has resolved is a question nobody has asked
+    // ⚠️ Weak ink even for a bare id. An unresolved id is a question nobody has asked
     // the instrument, not a library reported missing.
     write(
         cell(Column::Needs),
@@ -1208,8 +1207,8 @@ fn paint(
         false,
     );
 
-    // A row of the table is dragged like a row of the tree: the same payload, so it
-    // lands on the same targets and means the same thing there.
+    // A table row drags like a tree row, with the same payload, so it has the same drop
+    // targets and meaning.
     if response.dragged() {
         if let Some(head) = browser.held(row.item, workspace, &device.state) {
             let carried = browser.carrying(head, &row.name, workspace, &device.state);
@@ -1250,8 +1249,8 @@ fn paint(
     response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, queue, acts));
 }
 
-/// The 11 px box that says whether a row is checked, and takes the click that changes
-/// it. A column too narrow to draw the box offers none.
+/// The checkbox that shows whether a row is checked and takes the click that toggles it.
+/// A column too narrow for the box offers none.
 fn mark(
     ui: &egui::Ui,
     box_: egui::Rect,
@@ -1288,12 +1287,12 @@ fn mark(
     Some(ui.interact(at, row.id.with("mark"), egui::Sense::click()))
 }
 
-/// The whole of a cell, which is what a hover asks for.
+/// The hover text for a cell.
 ///
-/// Three columns grow a fact the row does not carry: the tags column holds a count and
-/// the hover is where the names are, the address is one of possibly several slots holding
-/// these very bytes, and the WHERE cell's ink is a [`Mark`] the row does not hold. All
-/// three are worked out for the hovered row alone.
+/// Three columns add a fact the row does not carry: the tags column shows a count and
+/// the hover names the tags, the address may be one of several slots holding the same
+/// bytes, and the WHERE cell's color is a [`Mark`] the row does not hold. All three are
+/// computed for the hovered row only.
 fn tooltip(
     row: &Row,
     column: Column,
@@ -1304,7 +1303,7 @@ fn tooltip(
 ) -> String {
     match column {
         Column::Mark => {
-            "check it to act on several at once; a click on the row picks it alone".to_string()
+            "check it to act on several at once; a click on the row selects it alone".to_string()
         }
         Column::Glyph | Column::Kind => word(row),
         Column::Name => row.name.clone(),
@@ -1312,8 +1311,8 @@ fn tooltip(
             names if names.is_empty() => "no tags".to_string(),
             names => names.join(", "),
         },
-        // The cell takes the mark's ink, so the hover says what that ink claims under
-        // the sentence saying where it is.
+        // The cell takes the mark's color, so the hover explains the color under the
+        // sentence saying where the row is.
         Column::Where => match mark {
             Some(mark) => format!("{}\n{}", row.where_.sentence(), mark_words(mark)),
             None => row.where_.sentence().to_string(),
@@ -1322,9 +1321,8 @@ fn tooltip(
             Some((class, at)) => {
                 let where_ = place(class, at);
                 match (row.where_, also_holding(row, workspace, device)) {
-                    // A class reporting no checksum is linked by the name it gave this
-                    // asset, so the address is where the name is rather than where the
-                    // body is.
+                    // A class reporting no checksum is linked by name, so the address is
+                    // where the name matched and says nothing about the body.
                     (Where::Both(None), _) => format!("{where_}, matched by name"),
                     (_, 0) => where_,
                     (_, more) => format!("{where_}, and {more} more hold the same bytes"),
@@ -1337,8 +1335,8 @@ fn tooltip(
     }
 }
 
-/// How many slots beyond the linked one hold this row's own bytes. A row that is a slot
-/// is not linked to anything and answers zero.
+/// How many slots beyond the linked one hold this row's saved bytes. A slot row is not
+/// linked and returns zero.
 fn also_holding(row: &Row, workspace: &Workspace, device: &Device) -> usize {
     row.item
         .local()
@@ -1348,7 +1346,7 @@ fn also_holding(row: &Row, workspace: &Workspace, device: &Device) -> usize {
         })
 }
 
-/// What a row is labelled with. Only a kept asset wears anything: a tag hangs on a
+/// The names of a row's tags. Only an asset on this computer has tags: a tag belongs to a
 /// workspace id, and a slot has none.
 fn worn(row: &Row, tags: &Tags) -> Vec<String> {
     let Item::Local(id) = row.item else {
@@ -1391,7 +1389,7 @@ fn footer(
                         .add(egui::Button::new(
                             egui::RichText::new("clear").text_style(ui_text()),
                         ))
-                        .on_hover_text("let go of everything picked — or press Escape")
+                        .on_hover_text("clear the selection, or press Escape")
                         .clicked()
                     {
                         browser.unpick();
@@ -1407,8 +1405,8 @@ fn footer(
                     if ui.small_button("Review send queue").clicked() {
                         acts.push(Act::ShowPage(Page::Queue));
                     }
-                    // Backwards: the strip runs right to left, so [`Bulk::ALL`]'s first
-                    // action has to be drawn last to sit furthest left.
+                    // Reversed: the strip runs right to left, so [`Bulk::ALL`]'s first
+                    // action has to be drawn last to sit farthest left.
                     for action in Bulk::ALL.iter().rev() {
                         browser.bulk_item(ui, *action, &checked, workspace, device, acts);
                     }
@@ -1417,12 +1415,12 @@ fn footer(
         });
 }
 
-/// The one line the table shows when nothing survives the narrowing.
+/// The line the table shows when no row passes the filters.
 fn nothing(ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(
-            "Nothing here — drop Nord files in, attach an instrument, or ask for less.",
+            "Nothing here. Drop Nord files in, attach an instrument, or ask for less.",
         )
         .text_style(micro())
         .weak()
@@ -1442,8 +1440,8 @@ mod tests {
         Location { bank, slot }
     }
 
-    /// A context dressed the way `DrawbarApp::new` dresses one: the named text styles a
-    /// panel resolves are installed there, on both faces.
+    /// A context set up as `DrawbarApp::new` sets one up, with the named text styles
+    /// installed in both themes.
     fn context() -> egui::Context {
         let ctx = egui::Context::default();
         ctx.all_styles_mut(crate::app::metrics);
@@ -1465,9 +1463,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ Every track shrinks and none goes negative. At the width the centre has with
-    /// both docks open, the three that carry an address, a size and a dependency are
-    /// still wide enough to say something.
+    /// ⚠️ Every track shrinks and none goes negative. At the center's width with both
+    /// docks open, the address, size, and dependency columns still have room.
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
@@ -1498,9 +1495,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ The kind is worth 96 px and no more, and it is the name that must stay
-    /// readable when the centre is narrow — two programs are told apart by their names,
-    /// not by both being programs.
+    /// ⚠️ The kind column gets at most 96 px, and the name must stay readable when the
+    /// center is narrow: programs are told apart by their names.
     #[test]
     fn the_kind_reaches_96_px_when_wide_and_yields_to_the_name_when_narrow() {
         let width_of = |tracks: &[Range<f32>; 9], column: Column| {
@@ -1527,8 +1523,8 @@ mod tests {
         );
     }
 
-    /// A column's track is the one at its own index, or every cell after the first
-    /// mismatch is painted into the column beside it.
+    /// Each column's track is at its own index. Otherwise every cell after the first
+    /// mismatch is painted into the next column.
     #[test]
     fn every_column_indexes_its_own_track() {
         for (index, column) in Column::ALL.iter().enumerate() {
@@ -1536,8 +1532,8 @@ mod tests {
         }
     }
 
-    /// A width nothing fits in still lays out: the tracks shrink together rather than
-    /// running past the edge or turning negative.
+    /// A width too small for the fixed columns still lays out: every track shrinks, and
+    /// none runs past the edge or turns negative.
     #[test]
     fn a_width_below_the_fixed_columns_shrinks_every_track_instead_of_going_negative() {
         for width in [0.0_f32, 40.0, 120.0] {
@@ -1578,12 +1574,12 @@ mod tests {
         };
         let names = |rows: &[Row]| -> Vec<String> { rows.iter().map(|r| r.name.clone()).collect() };
 
-        // The search is a case-insensitive substring on the name and nothing else.
+        // The search is a case-insensitive substring match on the name only.
         let found = arrange(held(), "AFRICA", Column::Name, Order::Up);
         assert_eq!(names(&found), ["africa bass", "Africa Split"]);
         assert!(arrange(held(), "nothing at all", Column::Name, Order::Up).is_empty());
 
-        // And the sort is over what the search left, either way round.
+        // The sort orders what the search left, in either direction.
         let biggest = arrange(held(), "africa", Column::Size, Order::Down);
         assert_eq!(names(&biggest), ["Africa Split", "africa bass"]);
         let smallest = arrange(held(), "africa", Column::Size, Order::Up);
@@ -1608,8 +1604,8 @@ mod tests {
         assert_eq!(names, ["first", "later", "no slot"]);
     }
 
-    /// A kind, a place and a tag narrow together, and a thing in both places survives a
-    /// filter naming either of them.
+    /// A kind, a place, and a tag narrow together, and an asset in both places passes a
+    /// filter naming either place.
     #[test]
     fn the_kind_place_and_tag_filters_compose_over_the_row_model() {
         use crate::filter::Narrow;
@@ -1676,14 +1672,14 @@ mod tests {
         filter.narrow(Narrow::Place(Place::Keyboard));
         assert_eq!(names(&filter), ["Africa-Split.ne5p", "Squabble B"]);
 
-        // And a tag narrows what the kind and the place left.
+        // A tag narrows what the kind and the place left.
         filter.narrow(Narrow::Tag(sunday));
         assert_eq!(names(&filter), ["Africa-Split.ne5p"]);
     }
 
     /// A linked asset is in both places, and the sign says whether the slot still
-    /// reports the asset's own checksum — which an edit here turns over while the link
-    /// stays where it was.
+    /// reports the asset's saved checksum. Saving an edit turns the sign over, and the
+    /// link stays where it was.
     #[test]
     fn a_linked_asset_is_in_both_places_and_says_when_the_two_stop_agreeing() {
         let ctx = egui::Context::default();
@@ -1718,7 +1714,7 @@ mod tests {
                 .find(|row| matches!(row.item, Item::Local(_)))
                 .map(|row| row.where_)
         };
-        // Nothing read: the other copy cannot be spoken about at all.
+        // Nothing read: nothing is known about the other copy.
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Unread));
 
@@ -1750,10 +1746,10 @@ mod tests {
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
     }
 
-    /// ⚠️ One rule for the word, the dot and the count. An asset the attached instrument
-    /// refuses stands on nothing however well its origin names a slot, so reading it
-    /// against that slot would paint a difference and offer a send that
-    /// [`crate::queue::enqueue`] refuses on every click.
+    /// ⚠️ One rule for the word, the dot, and the count. An asset the attached instrument
+    /// refuses has no link, however well its origin names a slot. Comparing it with that
+    /// slot would paint a difference and offer a send that [`crate::queue::enqueue`]
+    /// refuses on every click.
     #[test]
     fn a_foreign_asset_is_neither_marked_against_a_slot_nor_counted_as_changed() {
         let ctx = context();
@@ -1791,10 +1787,10 @@ mod tests {
         assert!(crate::queue::changed(&workspace, &device.state, &queue).is_empty());
     }
 
-    /// Equality is claimed only where something says so. A settings folder holds one
-    /// slot and that slot reports no checksum, so an asset matched to it stands in both
-    /// places with nothing said about the two bodies — until a read fetches the occupant,
-    /// or this app writes the bytes there itself.
+    /// Equality is claimed only on evidence. A settings folder holds one slot that
+    /// reports no checksum, so an asset matched to it is in both places with nothing known
+    /// about the two bodies, until a read fetches the occupant or this app writes the
+    /// bytes there.
     #[test]
     fn a_slot_reporting_no_checksum_says_nothing_until_it_is_read_or_written() {
         let ctx = context();
@@ -1812,8 +1808,7 @@ mod tests {
         let crc = held.saved.crc32.expect("a container");
         let body_len = held.container.as_ref().expect("a container").body_len();
 
-        // The walk reports what such a slot reports: a name and a length, and no
-        // checksum at all — the length being this asset's own.
+        // The walk reports a name and this asset's length, and no checksum.
         device.pretend_attached();
         device.pretend(crate::device::DeviceEvent::BankScanned {
             class,
@@ -1831,7 +1826,7 @@ mod tests {
         assert_eq!(
             workspace.get(id).unwrap().link,
             Some((class, held_at)),
-            "the one slot the folder has"
+            "the folder's only slot"
         );
 
         let said = |workspace: &Workspace, device: &Device, queue: &Queue| {
@@ -1870,7 +1865,7 @@ mod tests {
         queue.arrived(class, held_at, "Live Settings", &bytes, &workspace);
         assert_eq!(said(&workspace, &device, &queue).0, Some(true));
 
-        // A write of this app's own, with nothing waiting to change it.
+        // This app wrote the bytes, and nothing is waiting to change them.
         queue.clear();
         workspace.landed(id, class, held_at, bytes.clone());
         device.relink(&mut workspace);
@@ -1894,13 +1889,13 @@ mod tests {
                 Some(Where::Both(Some(false))),
                 Some(Mark::Differs)
             ),
-            "what the instrument reports outlives our own write"
+            "a checksum the instrument reports wins over this app's own write"
         );
     }
 
     /// ⚠️ An Electro 5 factory program is a type-0 file, and so is every copy Nord Sound
     /// Manager exports from one. Its header carries no body checksum, so nothing links
-    /// it to the slot it came off unless that checksum is hashed from the body.
+    /// it to the slot it came off unless the checksum is computed from the body.
     #[test]
     fn a_type_0_asset_links_to_the_slot_reporting_its_body_checksum() {
         let ctx = context();
@@ -1925,7 +1920,7 @@ mod tests {
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
-            .expect("hashed from the body the header does not checksum");
+            .expect("computed from the body, since the header carries no checksum");
 
         device.pretend_bodies(
             ObjectClass::Program,
@@ -1949,11 +1944,10 @@ mod tests {
         );
     }
 
-    /// A link is matched on the saved bytes, which is what the sign and the dot are
-    /// already read against. An asset holding an edit nothing has saved still finds the
-    /// slot holding what it was saved as, however far its bytes have moved since; saving
-    /// that edit takes the baseline off the slot and turns both signs over, leaving the
-    /// link where it was matched.
+    /// A link is matched on the saved bytes, as the sign and the dot are. An asset with an
+    /// unsaved edit still links to the slot holding what it was saved as. Saving the edit
+    /// moves the baseline off the slot and turns both signs over, and the link stays
+    /// where it was.
     #[test]
     fn an_unsaved_edit_still_links_to_the_slot_holding_the_saved_bytes() {
         let ctx = context();
@@ -1981,7 +1975,7 @@ mod tests {
                 .as_ref()
                 .map(|held| held.body_crc32),
             Some(saved_as),
-            "the edit moved the bytes it holds now"
+            "the edit changed the current bytes"
         );
 
         let where_ = |workspace: &Workspace, device: &Device| {
@@ -2004,7 +1998,7 @@ mod tests {
         assert_eq!(
             crate::device::also_holding(&device.state, workspace.get(id).unwrap()),
             0,
-            "the one slot holding it is the one it is linked to"
+            "the only slot holding it is the linked one"
         );
         assert_eq!(mark(&workspace, &device), Some(Mark::Agrees));
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
@@ -2014,16 +2008,16 @@ mod tests {
         assert_eq!(
             workspace.get(id).unwrap().link,
             Some((ObjectClass::Program, held_at)),
-            "no slot holds the new baseline, and where it stands is where it stands"
+            "no slot holds the new baseline, so the link stays put"
         );
         assert_eq!(mark(&workspace, &device), Some(Mark::Differs));
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(false))));
     }
 
-    /// An edit an editor has not laid over the bytes yet wears the same star as any
-    /// other: a piano library's plan moves no byte, and the star is the only thing on a
-    /// row saying the file is not what the operator has been editing. The dot is the
-    /// slot's own claim and still answers for the saved bytes.
+    /// An edit an editor has not yet applied to the bytes gets the same star as any other.
+    /// A piano library's plan changes no byte, and the star is the only sign on the row
+    /// that the file differs from what the user is editing. The dot is about the slot and
+    /// still reflects the saved bytes.
     #[test]
     fn a_row_wears_the_star_for_an_edit_that_is_still_an_editors_plan() {
         let ctx = context();
@@ -2058,9 +2052,9 @@ mod tests {
         );
     }
 
-    /// The state axis narrows the library to what wants doing about it — and a write
-    /// already waiting takes its row out of "differs" and into "waiting", so one thing
-    /// to do is asked for once.
+    /// The state filter narrows the library to rows that need something. A write already
+    /// waiting moves its row from "differs" to "waiting", so one task is not counted
+    /// twice.
     #[test]
     fn a_row_waiting_to_be_sent_is_not_also_one_that_differs() {
         use crate::filter::{Narrow, State};
@@ -2079,7 +2073,7 @@ mod tests {
             .expect("every CBIN container has one");
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
         device.relink(&mut workspace);
-        // Edited and saved: the link stays where it was and the two bodies part.
+        // Edited and saved: the link stays where it was and the two bodies differ.
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
@@ -2124,7 +2118,7 @@ mod tests {
         assert_eq!(
             differing(&workspace, &device.state, &queue),
             0,
-            "the write already agreed to is what settles the two"
+            "the queued write settles the two"
         );
         assert_eq!(
             narrowed(&workspace, &device, &queue, &tags, State::Waiting),
@@ -2165,8 +2159,8 @@ mod tests {
         );
     }
 
-    /// Four marks, four sentences, four inks. Two marks a reader cannot tell apart, or
-    /// two that say the same thing, explain nothing between them.
+    /// Four marks, four sentences, four colors. Two marks a reader cannot tell apart
+    /// explain nothing.
     #[test]
     fn every_mark_is_painted_and_said_apart_from_the_others() {
         let all = [Mark::Agrees, Mark::Differs, Mark::Unknown, Mark::Unsaved];
@@ -2182,10 +2176,10 @@ mod tests {
         }
     }
 
-    /// A WHERE cell takes its ink from the mark the tree paints as a dot, so its hover
-    /// says what that ink claims as well as where the row is.
+    /// A WHERE cell takes its color from the mark the tree paints as a dot, so its hover
+    /// explains the color as well as where the row is.
     #[test]
-    fn a_coloured_where_cell_says_what_its_colour_claims() {
+    fn a_colored_where_cell_says_what_its_color_claims() {
         let ctx = context();
         let workspace = Workspace::new(ctx.clone());
         let device = Device::new(ctx);
@@ -2245,8 +2239,7 @@ mod tests {
             "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not named"
         );
 
-        // One of them is already in the queue, which the sentence says rather than
-        // counting it twice over.
+        // One of them is already in the queue, and the sentence says so.
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         going[3].item = Item::Local(id);
         crate::queue::enqueue(
@@ -2280,11 +2273,11 @@ mod tests {
         };
         assert_eq!(
             consequence(&only.iter().collect::<Vec<_>>(), &device.state, &queue),
-            "Nothing picked goes to the instrument."
+            "Nothing selected goes to the instrument."
         );
         assert_eq!(
             consequence(&[], &device.state, &queue),
-            "Nothing picked goes to the instrument."
+            "Nothing selected goes to the instrument."
         );
     }
 
@@ -2343,11 +2336,11 @@ mod tests {
         assert_eq!(
             browser.picked().items().count(),
             2,
-            "both boxes were ticked, and neither click dropped the other row"
+            "both boxes were checked, and neither click dropped the other row"
         );
     }
 
-    /// Every word one frame painted, wherever in the tree of shapes it ended up.
+    /// Every string one frame painted, anywhere in its shape tree.
     fn painted(output: &egui::FullOutput) -> Vec<String> {
         fn words(shape: &egui::Shape, into: &mut Vec<String>) {
             match shape {
@@ -2394,7 +2387,7 @@ mod tests {
         let same = off(&mut workspace, 0, &mut log);
         let other = off(&mut workspace, 1, &mut log);
         let waiting = off(&mut workspace, 2, &mut log);
-        // Typed here, and no slot holds its body: there is nothing for it to stand on.
+        // Made here, and no slot holds its body, so it has no link.
         let (_, typed) = crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
             .expect("the registry takes the set");
         let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, typed, &mut log);
@@ -2403,7 +2396,7 @@ mod tests {
         let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
             keyboard_mark(workspace.get(id).unwrap(), &device.state, queue)
         };
-        // Nothing scanned: no slot holds anything, so no row says anything about one.
+        // Nothing scanned: no row has a mark.
         assert_eq!(mark(&workspace, &device, &queue, same), None);
 
         device.pretend_bodies(
@@ -2421,10 +2414,10 @@ mod tests {
         assert_eq!(
             mark(&workspace, &device, &queue, nowhere),
             None,
-            "it came off nowhere"
+            "it has no link"
         );
 
-        // Waiting to be written wins: the slot agrees now, and is about to stop.
+        // A waiting write takes precedence: the slot agrees now, and is about to stop.
         assert_eq!(mark(&workspace, &device, &queue, waiting), Some(good));
         crate::queue::enqueue(
             &workspace,
@@ -2482,8 +2475,8 @@ mod tests {
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
-    /// The KIND column carries the word the browser's own note carries, so the table and
-    /// the tree cannot call one thing two things; and the head over it orders by it.
+    /// The KIND column shows the same word as the browser, so the table and the tree
+    /// cannot name one thing two ways, and its heading sorts by it.
     #[test]
     fn the_kind_column_writes_the_browsers_own_word_and_sorts_by_it() {
         const WIDTH: f32 = 900.0;
@@ -2532,9 +2525,8 @@ mod tests {
         assert_eq!(ordered, ["program", "settings"]);
     }
 
-    /// ⚠️ A row of the table is a row of the tree: it starts the same drag, and a drop
-    /// files the asset exactly as a drag from the tree's own row does. Two drag paths
-    /// would be two sets of rules for one gesture.
+    /// ⚠️ A table row starts the same drag as a tree row, and a drop files the asset the
+    /// same way. Two drag paths would be two sets of rules for one gesture.
     #[test]
     fn a_row_dragged_from_the_table_onto_a_folder_files_the_asset() {
         const WIDTH: f32 = 900.0;
@@ -2560,8 +2552,8 @@ mod tests {
             &mut log,
         );
 
-        // The one row of the table, in its name column; and the folder row of the tree,
-        // under the section header and the 22 px row for this computer.
+        // The table's only row, in its name column, and the tree's folder row, under the
+        // section header and the 22 px row for this computer.
         let from = egui::pos2(crate::shell::BROWSER + PAD + 60.0, BAR + HEAD + ROW / 2.0);
         let onto = egui::pos2(100.0, crate::panel::HEADER + 22.0 + 10.0);
         let button = |pos, pressed| egui::Event::PointerButton {
@@ -2632,13 +2624,11 @@ mod tests {
         );
     }
 
-    /// Paint the table headlessly at the width the centre has with both docks open and
-    /// at the width it has with none, and pick a row in each so the footer is drawn too.
-    ///
-    /// Nothing checks pixels. What this catches is a layout that panics, an id that
-    /// collides, or a track that a row paints past.
+    /// Paints the table headlessly at the center's width with both docks open and with
+    /// none, and picks a row at each so the footer is drawn too. Nothing checks pixels:
+    /// this catches a layout that panics or an id that collides.
     #[test]
-    fn the_table_paints_at_every_width_the_centre_has() {
+    fn the_table_paints_at_every_width_the_center_has() {
         let ctx = context();
         let mut workspace = Workspace::new(ctx.clone());
         let mut device = Device::new(ctx.clone());
@@ -2684,7 +2674,7 @@ mod tests {
                     ..Default::default()
                 };
                 let _ = ctx.run(input, |ctx| {
-                    // The frame the centre actually uses: panels own their own padding.
+                    // The frame the center uses: panels handle their own padding.
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new())
                         .show(ctx, |ui| {
@@ -2705,7 +2695,7 @@ mod tests {
             }
             assert!(
                 browser.picked().sole().is_some(),
-                "a click on a row picked it at {width}"
+                "a click on a row selected it at {width}"
             );
         }
     }

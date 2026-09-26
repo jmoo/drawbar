@@ -16,13 +16,13 @@ use crate::strings;
 
 /// What every cell needs and none of them should compute twice.
 ///
-/// ⚠️ Asking a field for its legal values walks every bit pattern it can hold — four
-/// thousand at the enumerable ceiling — and a Stage body declares hundreds of fields, so
-/// a field is asked the first time something draws it and never again. A section nobody
-/// has opened costs nothing.
+/// ⚠️ Asking a field for its legal values walks every bit pattern it can hold (4,096 at
+/// the enumerable ceiling), and a Stage body declares hundreds of fields. A field is asked
+/// the first time something draws it and never again, so an unopened section costs
+/// nothing.
 ///
-/// ⚠️ Keyed by path, so one belongs to one document: two formats declare paths that
-/// collide, and a shared cache would hand one body's control the other's values.
+/// ⚠️ Keyed by path, so each document needs its own: two formats can declare the same
+/// path, and a shared cache would hand one body's control the other's values.
 #[derive(Default)]
 pub struct Ctx {
     read: RefCell<HashMap<String, Rc<Vec<String>>>>,
@@ -30,7 +30,7 @@ pub struct Ctx {
 
 impl Ctx {
     /// Every value the field accepts, spelled the way `set_field` takes them. Empty above
-    /// the enumerable ceiling, where the stored bits are the only spelling there is.
+    /// the enumerable ceiling.
     pub fn legal(&self, field: &Field) -> Rc<Vec<String>> {
         if let Some(legal) = self.read.borrow().get(&field.path) {
             return Rc::clone(legal);
@@ -48,9 +48,9 @@ pub type Sets = Vec<(String, String)>;
 
 /// Cut `text` back to what a format's name field can hold.
 ///
-/// ⚠️ The limit is **bytes** — `StringField::write` refuses by byte length — so a box
-/// counting characters takes an accented name the format then turns down. The cut lands
-/// on a character boundary: a name loses a letter rather than half of one.
+/// ⚠️ The limit is in bytes, because `StringField::write` refuses by byte length. A box
+/// that counts characters would accept an accented name the format then refuses. The cut
+/// lands on a character boundary, so a name loses a whole letter.
 pub fn fits(text: &mut String, limit: usize) {
     let end = text
         .char_indices()
@@ -64,8 +64,8 @@ pub fn fits(text: &mut String, limit: usize) {
 /// A section of a page: a sentence-case title, a note beside it, and an optional reading
 /// at the right.
 ///
-/// ⚠️ Not [`crate::panel::panel_header`], which is the shell's: MICRO caps on
-/// `faint_bg_color`, with a bar across the dock.
+/// ⚠️ Distinct from [`crate::panel::panel_header`], the shell's heading, which sets MICRO
+/// caps on `faint_bg_color` in a bar across the dock.
 pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, egui::Color32)>) {
     const ROW: f32 = 18.0;
     const PAD: f32 = 12.0;
@@ -74,8 +74,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, 
     const NOTE: f32 = 10.5;
     const READING: f32 = 10.0;
 
-    // The page's own margin stands above the first heading on it; the rest carry their
-    // own room from the section before them.
+    // The first heading on a page needs less room above it than one after a section.
     let above = match ui.min_rect().height() > 0.0 {
         true => 12.0,
         false => 8.0,
@@ -120,9 +119,8 @@ pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, 
 
 /// A cell whose control is the caller's, with the panel's name for it over the top.
 ///
-/// `path` names the caption; an unmapped one still gets the prettified fallback, so a
-/// field the strings table has not caught up with reads as a rough name rather than as a
-/// nameless knob.
+/// `path` names the caption. A path the strings table does not know gets a prettified
+/// fallback in italics, with the path on hover.
 pub fn named_cell(
     ui: &mut egui::Ui,
     path: &str,
@@ -141,7 +139,7 @@ pub fn named_cell(
                 text.color(crate::app::caption(ui.visuals())),
             ));
             if rough {
-                response.on_hover_text(format!("{path} — this app has no name for it yet"));
+                response.on_hover_text(format!("{path}: this app has no name for it yet"));
             }
             body(ui);
         });
@@ -154,9 +152,8 @@ mod tests {
     use super::*;
     use crate::workspace::Fresh;
 
-    /// ⚠️ A document's section heading is part of the page, not a bar across it: it says
-    /// its three parts in sentence case and paints no ground of its own. The shell's
-    /// [`crate::panel::panel_header`] is the one that wears `faint_bg_color`.
+    /// A section heading paints its three parts in sentence case and no background. The
+    /// shell's [`crate::panel::panel_header`] is the one on `faint_bg_color`.
     #[test]
     fn a_section_heading_says_its_parts_and_paints_no_bar() {
         fn walk(shape: &egui::Shape, into: &mut (Vec<String>, Vec<egui::Color32>)) {
@@ -187,12 +184,11 @@ mod tests {
                 .1
                 .iter()
                 .all(|fill| *fill == ctx.style().visuals.panel_fill),
-            "the heading painted a ground of its own: {:?}",
+            "the heading painted its own background: {:?}",
             painted.1,
         );
     }
 
-    /// A name is cut by byte length, and on a character boundary.
     #[test]
     fn a_name_is_cut_to_the_bytes_the_field_holds() {
         let cut = |text: &str, limit: usize| {
@@ -208,9 +204,6 @@ mod tests {
         assert_eq!(cut("", 8), "");
     }
 
-    /// ⚠️ A field is asked for its values when something draws it and not before, and
-    /// then never again. A Stage body declares hundreds of fields, and walking every one
-    /// of them on open is a stall the operator spends watching an empty document.
     #[test]
     fn a_field_is_read_as_it_is_drawn_and_only_once() {
         let bytes = Fresh::Stage4Program.bytes().unwrap();

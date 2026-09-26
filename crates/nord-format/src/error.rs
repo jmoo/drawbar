@@ -18,7 +18,7 @@ pub enum ParseError {
     #[error("unknown format: {0}")]
     UnknownFormat(String),
 
-    #[error("unknown filetype: {0}")]
+    #[error("unknown file type: {0}")]
     UnknownFileType(String),
 
     /// A CBIN tag other than the one the reader was asked for. Formats sharing a body
@@ -33,11 +33,11 @@ pub enum ParseError {
     /// A file whose schema version this build has never been validated against.
     ///
     /// Field offsets are only known to be right for the versions in the corpus.
-    /// Decoding a newer one would produce plausible-looking but wrong values, and
-    /// writing it back would then persist them — so refuse instead.
+    /// Decoding a newer one could produce plausible but wrong values, and writing it
+    /// back would persist them.
     #[error(
         "{format}: schema version {version} is not supported (known: {supported:?}); \
-             refusing to decode rather than risk misreading fields"
+             decoding it could misread fields"
     )]
     UnsupportedVersion {
         format: &'static str,
@@ -45,12 +45,9 @@ pub enum ParseError {
         supported: &'static [u32],
     },
 
-    /// A body whose length is not the one the format declares — a truncated or
-    /// padded file on read, a miscounting writer on write.
-    #[error(
-        "{format}: the body is {got} bytes where the format holds {expected}; \
-             refusing rather than misread fields"
-    )]
+    /// A body whose length is not the one the format declares: a truncated or padded
+    /// file on read, or a miscounting writer on write.
+    #[error("{format}: the body is {got} bytes, but the format holds {expected}")]
     WrongBodyLength {
         format: String,
         got: u64,

@@ -1,22 +1,22 @@
 //! Piano libraries (`.npno`).
 //!
-//! The body is a `CNSP` stream: a metadata prefix carrying the name, a 128-entry
-//! key map and ten per-note tables; then a directory of **strokes** — one
-//! recorded note each — and the encoded audio those strokes own. [`Piano`] is the
-//! file, body verbatim and checksum verified; [`Library`] is the container
-//! parsed, a view whose writer re-lays the directory and the audio from the model
-//! it holds. [`codec`] turns one stroke's audio back into samples.
+//! The body is a `CNSP` stream. A metadata prefix carries the name, a 128-entry key
+//! map and ten per-note tables. A directory of **strokes** follows, one recorded note
+//! each, and then the encoded audio those strokes own. [`Piano`] is the file, with the
+//! body kept as read and the checksum verified. [`Library`] is the parsed container,
+//! and its writer re-lays the directory and the audio from the strokes it holds.
+//! [`codec`] turns one stroke's audio back into samples.
 //!
-//! Offsets below are relative to the body's first byte, and the stream's own
-//! integers are big-endian where the CBIN header's are little-endian.
+//! Offsets below are relative to the body's first byte. The stream's integers are
+//! big-endian, unlike the CBIN header's.
 //!
 //! | body offset | field |
 //! |---|---|
 //! | `0x00` | `"CNSP"` |
-//! | `0x04` | u16 stream version — `0x450` or `0x464` |
-//! | `0x06` | u32, unique per file; meaning open |
+//! | `0x04` | u16 stream version, `0x450` or `0x464` |
+//! | `0x06` | u32, unique per file; meaning unknown |
 //! | `0x1c` | `Name#Variant`, NUL-padded to 32 bytes |
-//! | `0x3c` | the bare name, and at `0x5c` the variant — `0x464` streams only |
+//! | `0x3c` | the bare name, and at `0x5c` the voicing (`0x464` streams only) |
 //! | `0x8c` | 128-entry key map: the root note that plays each key, `0xFF` uncovered |
 //! | `0x18c` | 128-entry per-key fine tune, one of ten per-note tables from `0x10c` |
 //! | `0x61c` | u16 stream version, echoed |
@@ -25,28 +25,29 @@
 //! | `0x622` | 128 × u16 strokes per root note, summing to `N` |
 //! | `0x732` | `N` × 118-byte stroke records, grouped in ascending root order |
 //!
-//! The prefix's individual field placements: Inferred from specimens; not
-//! confirmed on hardware. The container layout as [`Library::to_body`] writes it — a
-//! library whose directory and audio this crate re-laid, and one whose audio
-//! [`encode`] coded outright, load on the instrument and play at the original's
-//! level — and, within it, the key map's value being the recording's root note, a
-//! stroke's [`Bank`] being what it is played for, and [`Stroke::layer`] stating the
-//! softness the velocity threshold reads: Confirmed on hardware.
+//! The prefix's individual field placements: Inferred from specimens; not confirmed on
+//! hardware.
 //!
-//! Audio follows the directory, one span per record in the directory's own order.
-//! The first span starts at the next `1022 × channels` boundary offset by
-//! [`AUDIO_ALIGN_BIAS`] (the bias is unexplained), the gap in front of it is zero,
-//! each span abuts the one before, and the last ends at the body's end. Because a
-//! stroke carries its own predictor seeds and its blocks overlap only each other, a
-//! span is self-contained and moves verbatim — which is what makes the transforms
-//! on [`Library`] no more than a re-lay.
+//! The container layout that [`Library::to_body`] writes loads on the instrument and
+//! plays at the original's level, both for a library whose directory and audio this
+//! crate re-laid and for one whose audio [`encode`] coded from scratch. Within that
+//! layout, the key map holds the recording's root note, a stroke's [`Bank`] says when
+//! it plays, and [`Stroke::layer`] states the softness the velocity threshold reads.
+//! Confirmed on hardware.
 //!
-//! ⚠️ Real libraries are tens of megabytes and reading one allocates the body —
-//! [`crate::cbin::inspect`] answers container questions in O(1) instead.
+//! Audio follows the directory, one span per record in directory order. The first span
+//! starts at the next `1022 × channels` boundary, offset by [`AUDIO_ALIGN_BIAS`], and
+//! the gap before it is zero. Each span abuts the one before, and the last ends at the
+//! body's end. A stroke carries its own predictor seeds and its blocks overlap only
+//! each other, so a span is self-contained and moves unchanged. The transforms on
+//! [`Library`] therefore only re-lay spans.
 //!
-//! ⚠️ The header's `location` and `aux` are unchecked here on purpose: this is a
-//! library format, where those words hold something other than a bank/slot pair, and
-//! no local specimen says what. Gating on them would refuse real files.
+//! ⚠️ Real libraries are tens of megabytes, and reading one allocates the whole body.
+//! [`crate::cbin::inspect`] answers container questions in O(1).
+//!
+//! ⚠️ The header's `location` and `aux` are not checked. In a library these words hold
+//! something other than a bank and slot, and no specimen shows what. Checking them
+//! would refuse real files.
 
 pub mod codec;
 pub mod encode;
@@ -74,12 +75,12 @@ pub const NOTES: usize = 128;
 /// A key map entry for a note the library does not cover.
 pub const UNCOVERED: u8 = 0xff;
 
-/// The stream versions the prefix offsets are validated against. A body with
-/// another version still reads and writes verbatim; its fields are refused rather
-/// than read from offsets that may not hold them.
+/// The stream versions the prefix offsets are validated against. A body with another
+/// version still reads and writes unchanged, but its fields are refused, since the
+/// offsets may not hold them.
 pub const KNOWN_VERSIONS: &[u32] = &[0x450, 0x464];
 
-/// The stream version that also carries a long name and a voicing of their own.
+/// The stream version that also carries separate long-name and voicing fields.
 const VERSION_SPLIT_NAME: u16 = 0x464;
 
 const KEY_MAP_AT: usize = 0x8c;
@@ -132,22 +133,23 @@ const SEEDS: usize = 4;
 const MARKS: usize = 4;
 
 /// One-pole decay coefficients a record carries after the one at [`REC_DECAY`], from
-/// [`REC_DECAYS`] up to the identifier. This ladder is the decay the instrument applies
-/// over the stroke's own; it is non-decreasing across its entries, and a stroke of any
-/// bank carries it — including a release stroke, which zeroes only the coefficient at
-/// [`REC_DECAY`]. Nothing here derives them from audio. Confirmed on hardware.
+/// [`REC_DECAYS`] up to the identifier. This ladder is decay the instrument applies on
+/// top of the stroke's own. Its entries are non-decreasing, and strokes of every bank
+/// carry it, including release strokes, which zero only the coefficient at
+/// [`REC_DECAY`]. This crate does not derive them from audio. Confirmed on hardware.
 pub const DECAYS: usize = 14;
 const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
 
-/// One [`REC_DECAYS`] entry applying nothing: 1.0 in the ladder's fixed point, where
-/// the vendor's own entries sit just below it.
+/// A [`REC_DECAYS`] entry that applies no decay: 1.0 in the ladder's fixed point.
+/// Vendor entries sit just below it.
 pub const LADDER_UNITY: u32 = 0x0080_0000;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
-/// Unexplained: every library holds it and nothing in the file derives it. The grid
-/// it defines is the one the instrument reads. Confirmed on hardware. A library laid
-/// out on it plays.
+/// Unexplained: every library holds it and nothing in the file derives it.
+///
+/// The instrument reads the grid it defines: a library laid out on it plays. Confirmed
+/// on hardware.
 pub const AUDIO_ALIGN_BIAS: usize = 192;
 
 /// Cents one unit of [`Library::fine_tune`] is worth. Measured between 0.6 and
@@ -205,16 +207,16 @@ impl fmt::Display for Bank {
 
 /// Which velocity layers of a root to keep.
 ///
-/// A root's layers are counted within one [`Bank`], since each bank indexes its
-/// own set. Nothing is renumbered, and nothing should be: selection reads the value
-/// a layer states rather than its rank among the layers left ([`Stroke::layer`]), so
-/// the survivors keep their place in the velocity range and the softest one left
-/// takes over the velocities below it. Confirmed on hardware.
+/// A root's layers are counted within one [`Bank`], since each bank indexes its own
+/// set. Kept layers are not renumbered. The instrument selects a layer by the value it
+/// states ([`Stroke::layer`]), not by its rank, so the survivors keep their place in the
+/// velocity range and the softest one left takes over the velocities below it.
+/// Confirmed on hardware.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layers {
-    /// The loudest `n` of each root and bank — the `n` lowest layer values.
+    /// The loudest `n` of each root and bank: the `n` lowest layer values.
     Loudest(usize),
-    /// Exactly these layer values, wherever they occur.
+    /// These layer values, wherever they occur.
     Only(BTreeSet<u8>),
 }
 
@@ -264,21 +266,21 @@ impl TextField {
         String::from_utf8_lossy(&field[..end]).into_owned()
     }
 
-    /// Text any of these fields carries back as it was written. The field is a fixed
-    /// width of bytes ended by a NUL and read lossily, so a NUL, a control character
-    /// and anything outside ASCII are all refused rather than stored.
+    /// Accept only text these fields read back as written. A field is fixed-width,
+    /// NUL-terminated and read lossily, so a NUL, a control character or anything
+    /// outside printable ASCII is refused.
     fn check_text(text: &str) -> Result<(), Error> {
         match text.chars().find(|&c| !c.is_ascii_graphic() && c != ' ') {
             None => Ok(()),
             Some(bad) => Err(ParseError::AssertFail(format!(
-                "{text:?} holds {bad:?}, which the field would not read back as written; it \
-                 carries printable ASCII"
+                "{text:?} holds {bad:?}, which the field would not read back as written; the \
+                 field takes only printable ASCII"
             ))
             .into()),
         }
     }
 
-    /// [`TextField::check_text`], and short enough to fit with its terminator.
+    /// [`TextField::check_text`], plus a length that fits with the terminator.
     fn check(self, text: &str) -> Result<(), Error> {
         TextField::check_text(text)?;
         if text.len() > self.capacity() {
@@ -300,23 +302,23 @@ impl TextField {
     }
 }
 
-/// One half of `Name#Variant` as a caller supplies it. A separator inside a half
-/// would move the split, so the halves that read back would not be the ones written.
+/// Check one half of `Name#Variant` as a caller supplies it. A separator inside a half
+/// would move the split on the next read.
 fn check_half(what: &str, text: &str) -> Result<(), Error> {
     if text.contains(NAME_SEPARATOR) {
         return Err(ParseError::AssertFail(format!(
-            "the {what} {text:?} holds {NAME_SEPARATOR:?}, which is what splits the name from \
-             the variant in the field they share"
+            "the {what} {text:?} holds {NAME_SEPARATOR:?}, which separates the name from the \
+             variant in the field they share"
         ))
         .into());
     }
     TextField::check_text(text)
 }
 
-/// A piano library (`npno`): the CBIN container with the `CNSP` body verbatim.
+/// A piano library (`npno`): the CBIN container with the `CNSP` body kept as read.
 ///
-/// Reads and writes byte-exactly, checksum verified. [`Piano::library`] parses the
-/// body into the model the transforms and the writer work on.
+/// Reads and writes byte-exactly, with the checksum verified. [`Piano::library`] parses
+/// the body into the model that the transforms and the writer work on.
 pub struct Piano {
     pub file: Cbin<RawBody>,
 }
@@ -341,8 +343,8 @@ impl Piano {
         self.file.write_to(writer)
     }
 
-    /// The body bytes, after checking the magic and that the stream version is one
-    /// the prefix offsets are pinned to.
+    /// The body bytes, after checking the magic and that the prefix offsets are
+    /// validated for the stream version.
     fn mapped(&self) -> Result<&[u8], Error> {
         let body = &self.file.body.0;
         check_mapped(body)?;
@@ -354,9 +356,8 @@ impl Piano {
         version_of(&self.file.body.0)
     }
 
-    /// The `(name, variant)` pair from the `Name#Variant` field — for
-    /// *Electric Grand 1 CP80*, `("Electric Grand 1", "CP80")`. The variant is
-    /// empty when the field carries none.
+    /// The `(name, variant)` pair from the `Name#Variant` field, such as
+    /// `("Electric Grand 1", "CP80")`. The variant is empty when the field has none.
     pub fn name(&self) -> Result<(String, String), Error> {
         let body = self.mapped()?;
         if body.len() < DIRECTORY_AT {
@@ -401,8 +402,8 @@ fn raw_halves(field: &str) -> (&str, &str) {
     field.split_once(NAME_SEPARATOR).unwrap_or((field, ""))
 }
 
-/// `Name#Variant` split on its separator, each half trimmed of the padding the
-/// vendor lays either side of it.
+/// `Name#Variant` split on its separator, each half trimmed of the padding vendor
+/// libraries put around it.
 fn split_name(field: &str) -> (String, String) {
     let (name, variant) = raw_halves(field);
     (name.trim().to_owned(), variant.trim().to_owned())
@@ -444,7 +445,7 @@ fn version_of(body: &[u8]) -> Result<u16, Error> {
     Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
 }
 
-/// The magic, and a stream version the prefix offsets are pinned to.
+/// Check the magic, and that the prefix offsets are validated for the stream version.
 fn check_mapped(body: &[u8]) -> Result<(), Error> {
     let version = version_of(body)?;
     crate::formats::known_version(FORMAT, u32::from(version), KNOWN_VERSIONS)
@@ -468,8 +469,8 @@ fn be32(bytes: &[u8], at: usize) -> u32 {
 
 /// Where the first audio span starts, given the directory's end and the block size.
 ///
-/// The grid is whole blocks offset by [`AUDIO_ALIGN_BIAS`]; the bytes between the
-/// directory and it are zero.
+/// The grid is whole blocks offset by [`AUDIO_ALIGN_BIAS`]. The bytes between the
+/// directory and the first span are zero.
 fn first_audio_offset(directory_end: usize, block: usize) -> Result<usize, Error> {
     directory_end
         .checked_add(AUDIO_ALIGN_BIAS)
@@ -481,21 +482,20 @@ fn first_audio_offset(directory_end: usize, block: usize) -> Result<usize, Error
 
 /// One recorded note: the directory record, and the audio bytes it owns.
 ///
-/// The record is carried verbatim apart from its audio offset, which is a
-/// placement and is recomputed every time a library is written.
+/// The record is kept as read except for its audio offset, which is recomputed every
+/// time a library is written.
 #[derive(Clone)]
 pub struct Stroke<'a> {
     /// The note the recording was made at. It comes from the record's position in
-    /// the count table rather than from a field of the record itself. Confirmed on
-    /// hardware.
+    /// the count table, not from a field of the record. Confirmed on hardware.
     pub root: u8,
     record: [u8; RECORD],
     audio: Cow<'a, [u8]>,
 }
 
 impl<'a> Stroke<'a> {
-    /// The `+0x04` bank byte. Specimens hold only the codes [`Bank`] names, but an
-    /// unnamed one is carried rather than refused.
+    /// The `+0x04` bank byte. Specimens hold only the codes [`Bank`] names; any other
+    /// code is preserved.
     pub fn bank_code(&self) -> u8 {
         self.record[REC_BANK]
     }
@@ -504,10 +504,10 @@ impl<'a> Stroke<'a> {
         Bank::from_code(self.bank_code())
     }
 
-    /// Softness value within the root's bank; 0 is the loudest recording, and a
-    /// bank's values need be neither dense nor start at zero.
+    /// Softness within the root's bank, where 0 is the loudest recording. A bank's
+    /// values need not be contiguous or start at zero.
     ///
-    /// A key sounds the largest value the root holds that is at most
+    /// A key plays the largest value the root holds that is at most
     /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
     /// value above 30 ([`encode::HIGHEST_PLAYED_LAYER`]) never plays at all. Confirmed
     /// on hardware. The 31 is measured to about ±2, so a layer sitting on the bound
@@ -517,8 +517,8 @@ impl<'a> Stroke<'a> {
         self.record[REC_LAYER]
     }
 
-    /// Frames the stroke owns, which is what [`codec::decode`] emits: the block
-    /// overlap is excluded.
+    /// Frames the stroke owns, excluding the block overlap. [`codec::decode`] emits
+    /// this many.
     pub fn frames(&self) -> u32 {
         be32(&self.record, REC_FRAMES)
     }
@@ -542,9 +542,8 @@ impl<'a> Stroke<'a> {
         std::array::from_fn(|entry| be32(&self.record, REC_DECAYS + entry * 4))
     }
 
-    /// The identifier at `+0x6e`. Distinguishes a recording across libraries;
-    /// what else it means is open. Inferred from specimens; not confirmed on
-    /// hardware.
+    /// The identifier at `+0x6e`. It distinguishes a recording across libraries; any
+    /// other meaning is unknown. Inferred from specimens; not confirmed on hardware.
     pub fn id(&self) -> u32 {
         be32(&self.record, REC_ID)
     }
@@ -566,8 +565,8 @@ impl<'a> Stroke<'a> {
         &self.audio
     }
 
-    /// The record as stored, its audio offset excluded from any meaning: the
-    /// writer replaces it.
+    /// The record as stored. Its audio offset means nothing here, because the writer
+    /// replaces it.
     pub fn record(&self) -> &[u8; RECORD] {
         &self.record
     }
@@ -587,11 +586,11 @@ impl fmt::Debug for Stroke<'_> {
 
 /// A piano library parsed: the prefix, and every stroke with its audio.
 ///
-/// Strokes borrow their audio from the [`Piano`] they were parsed from, so a
-/// transform that drops strokes copies nothing. The fields the container derives —
-/// the stroke count, the per-root counts and every audio offset — are not stored in
-/// the model at all; [`Library::to_body`] computes them from the stroke list, which
-/// is what makes an unmodified library rebuild to the bytes it was read from.
+/// Strokes borrow their audio from the [`Piano`] they were parsed from, so a transform
+/// that drops strokes copies nothing. The model does not store the fields the container
+/// derives: the stroke count, the per-root counts and every audio offset.
+/// [`Library::to_body`] computes them from the stroke list, so an unmodified library
+/// rebuilds to the bytes it was read from.
 #[derive(Clone)]
 pub struct Library<'a> {
     /// The container header, carried so a transform yields a whole file.
@@ -604,11 +603,11 @@ pub struct Library<'a> {
 }
 
 impl<'a> Library<'a> {
-    /// A whole `.npno` file parsed over a borrowed slice: the body is taken as a
-    /// subslice, so every stroke's audio points into `file` rather than a copy of it.
+    /// A whole `.npno` file parsed over a borrowed slice. Every stroke's audio points
+    /// into `file`.
     ///
-    /// The container's checksum is not verified here — the caller has inspected the
-    /// container.
+    /// ⚠️ The container's checksum is not verified here. The caller must have checked
+    /// the container already.
     pub fn borrow(file: &'a [u8]) -> Result<Library<'a>, Error> {
         let mut head: &[u8] = file;
         let (header, _) = cbin::read_header(&mut head)?;
@@ -770,8 +769,8 @@ impl<'a> Library<'a> {
         &self.strokes
     }
 
-    /// This library's prefix and stroke records with no audio behind them: what a
-    /// [`encode::Donor::Template`] reads, and nothing [`Library::to_body`] can lay out.
+    /// This library's prefix and stroke records with no audio: what an
+    /// [`encode::Donor::Template`] reads. [`Library::to_body`] refuses it.
     pub fn without_audio(&self) -> Library<'static> {
         Library {
             header: self.header.clone(),
@@ -829,8 +828,8 @@ impl<'a> Library<'a> {
         Ok((root != UNCOVERED).then_some(root))
     }
 
-    /// The keys the map routes to `root`, ascending. A root the map never names —
-    /// including one outside the MIDI range — has no keys.
+    /// The keys the map routes to `root`, ascending. A root the map never names,
+    /// including one outside the MIDI range, has no keys.
     pub fn keys_for(&self, root: u8) -> Vec<u8> {
         self.key_map()
             .iter()
@@ -885,7 +884,7 @@ impl<'a> Library<'a> {
 
     /// File the library under another kind of instrument.
     ///
-    /// The byte changes nothing a library sounds like. Confirmed on hardware.
+    /// The byte does not change how the library sounds. Confirmed on hardware.
     pub fn set_kind(&mut self, kind: encode::Kind) {
         self.prefix[KIND_AT] = kind.code();
     }
@@ -893,7 +892,7 @@ impl<'a> Library<'a> {
     /// The long name at `0x3c` and the voicing at `0x5c`, which only
     /// [`VERSION_SPLIT_NAME`] streams carry. Both are `None` on the older stream.
     ///
-    /// They are their own fields, not a split of the `Name#Variant` one: a library can
+    /// They are separate fields, not a split of `Name#Variant`: a library can
     /// spell the long name differently from the name before the `#`, and the voicing
     /// holds neither the padding nor the size suffix the variant does. Inferred from
     /// specimens; not confirmed on hardware.
@@ -915,20 +914,19 @@ impl<'a> Library<'a> {
     /// refused; so is one too long for the field it shares with the variant. Nothing
     /// is written unless every field the rename touches accepts its text.
     ///
-    /// On a stream that carries one, the long name is set to the same text: both
-    /// are the library's name, and a rename that moved only one would leave the
-    /// old name showing wherever the instrument reads the other. Which of the two it
-    /// reads: Inferred from specimens; not confirmed on hardware. That is why both
-    /// move.
+    /// On a stream with a long name, the long name is set to the same text. Both
+    /// fields hold the library's name, and a rename that moved only one would leave the
+    /// old name showing wherever the instrument reads the other. Which field the
+    /// instrument reads: Inferred from specimens; not confirmed on hardware.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
         let field = TextField::COMBINED.read(&self.prefix);
         let variant = raw_halves(&field).1.to_owned();
         self.set_name_and_variant(name, &variant)
     }
 
-    /// Replace the variant — the text after [`NAME_SEPARATOR`], where the vendor
-    /// records the voicing and the library's size — leaving both names alone. A
-    /// variant holding the separator itself is refused.
+    /// Replace the variant, leaving both names alone. The variant is the text after
+    /// [`NAME_SEPARATOR`], where vendor libraries record the voicing and the library's
+    /// size. A variant holding the separator is refused.
     pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
         check_half("variant", variant)?;
         let field = TextField::COMBINED.read(&self.prefix);
@@ -936,13 +934,12 @@ impl<'a> Library<'a> {
         TextField::COMBINED.write(&mut self.prefix, &combined)
     }
 
-    /// Write both halves of the `Name#Variant` field at once, which is what a caller
-    /// replacing both states.
+    /// Write both halves of the `Name#Variant` field at once.
     ///
-    /// The name a caller gives is checked against the variant it will share the field
-    /// with rather than the one the prefix holds, so a name that fits beside its own
-    /// variant is not refused for a longer one it replaces. The long name follows the
-    /// name as it does in [`Library::set_name`].
+    /// The name is checked against the variant it will share the field with, not the
+    /// one the prefix holds, so a name that fits beside its new variant is not refused
+    /// because of a longer old one. The long name follows the name as it does in
+    /// [`Library::set_name`].
     fn set_name_and_variant(&mut self, name: &str, variant: &str) -> Result<(), Error> {
         check_half("name", name)?;
         check_half("variant", variant)?;
@@ -977,8 +974,8 @@ impl<'a> Library<'a> {
     /// A root the directory does not record is refused: the instrument would have
     /// no stroke to play.
     ///
-    /// That the instrument follows a rewritten map — a key routed to another root, or
-    /// to nothing: Inferred from specimens; not confirmed on hardware.
+    /// That the instrument follows a rewritten map, with a key routed to another root
+    /// or to nothing: Inferred from specimens; not confirmed on hardware.
     pub fn set_key_root(&mut self, key: u8, root: Option<u8>) -> Result<(), Error> {
         let key = midi_key("key", key)?;
         if let Some(root) = root {
@@ -995,11 +992,11 @@ impl<'a> Library<'a> {
         Ok(())
     }
 
-    /// Drop every stroke of one bank — the resonance set turns a large library into
-    /// a small one, the release set silences the note-off sample.
+    /// Drop every stroke of one bank. Dropping the resonance set turns a large library
+    /// into a small one; dropping the release set silences the note-off sample.
     ///
-    /// For [`Bank::Release`], the instrument damps the note at note-off where the
-    /// library it came from plays a release tail. Confirmed on hardware.
+    /// Without [`Bank::Release`] strokes, the instrument damps the note at note-off
+    /// where the source library plays a release tail. Confirmed on hardware.
     pub fn drop_bank(&mut self, bank: Bank) -> Change {
         let code = bank.code();
         self.retain(|s| s.bank_code() != code)
@@ -1037,22 +1034,22 @@ impl<'a> Library<'a> {
     /// Keep the strokes `keep` accepts and drop the rest, then uncover the keys whose
     /// root has gone.
     ///
-    /// The selection every other transform here is a named case of, for a caller whose
-    /// own is none of them — one layer on one root, say. A stroke carries its own
-    /// predictor seeds and its blocks overlap only each other, so whichever subset is
-    /// left re-lays into a library the writer can lay out.
+    /// The other transforms here are named cases of this one. Use it for a selection
+    /// they do not cover, such as one layer on one root. Each stroke carries its own
+    /// predictor seeds and its blocks overlap only each other, so any subset lays out
+    /// as a playable library.
     ///
-    /// Inferred from specimens; not confirmed on hardware. [`Library::drop_bank`] and
-    /// [`Library::keep_layers`] are the two selections a hardware read covers.
+    /// Inferred from specimens; not confirmed on hardware. The hardware results cover
+    /// only [`Library::drop_bank`] and [`Library::keep_layers`].
     pub fn retain_strokes(&mut self, keep: impl FnMut(&Stroke<'a>) -> bool) -> Change {
         self.retain(keep)
     }
 
-    /// Uncover every key outside `range`, then drop the roots nothing plays any
-    /// more. Keys inside the range keep the roots they had.
+    /// Uncover every key outside `range`, then drop the roots nothing plays anymore.
+    /// Keys inside the range keep the roots they had.
     ///
-    /// That an uncovered key falls silent rather than reaching for a neighbouring
-    /// root: Inferred from specimens; not confirmed on hardware.
+    /// That an uncovered key falls silent instead of borrowing a neighboring root:
+    /// Inferred from specimens; not confirmed on hardware.
     pub fn cut_range(&mut self, range: RangeInclusive<u8>) -> Result<Change, Error> {
         midi_key("the range's lowest key", *range.start())?;
         midi_key("the range's highest key", *range.end())?;
@@ -1062,9 +1059,9 @@ impl<'a> Library<'a> {
     /// Two libraries, one covering the keys below `key` and one covering `key` and
     /// above, each cut the way [`Library::cut_range`] cuts.
     ///
-    /// A root whose keys straddle `key` lands in both halves — each half has to be
-    /// playable on its own — so the two together hold more strokes than the one they
-    /// came from. Each half carries [`Library::cut_range`]'s provenance.
+    /// A root whose keys straddle `key` lands in both halves, since each half must play
+    /// on its own, so the two together can hold more strokes than the original. Each half
+    /// carries [`Library::cut_range`]'s provenance.
     pub fn split_at(&self, key: u8) -> Result<(Library<'a>, Library<'a>), Error> {
         midi_key("the split key", key)?;
         let mut low = self.clone();
@@ -1117,8 +1114,8 @@ impl<'a> Library<'a> {
 
     /// The first audio offset and the body length the current stroke list implies.
     ///
-    /// A stroke holding anything other than the `blocks × block_bytes` its record states
-    /// is refused: a body laid out around it is one a read of that body rejects.
+    /// A stroke whose audio is not the `blocks × block_bytes` its record states is
+    /// refused, because a read of the resulting body would reject it.
     fn extent(&self) -> Result<(usize, usize), Error> {
         let directory_end = RECORD
             .checked_mul(self.strokes.len())
@@ -1149,9 +1146,9 @@ impl<'a> Library<'a> {
     /// every audio offset recomputed, the zero gap, then the audio spans in
     /// directory order.
     ///
-    /// Confirmed on hardware. A body laid out here, with a directory the transforms
-    /// shortened and every span moved, is accepted by the instrument and plays at the
-    /// level the library it came from plays at.
+    /// Confirmed on hardware. The instrument accepts a body laid out here, even with a
+    /// directory the transforms shortened and every span moved, and plays it at the
+    /// source library's level.
     pub fn to_body(&self) -> Result<Vec<u8>, Error> {
         let count = u16::try_from(self.strokes.len()).map_err(|_| ParseError::OutOfBounds {
             value: format!("{} strokes", self.strokes.len()),
@@ -1159,8 +1156,8 @@ impl<'a> Library<'a> {
         })?;
         if self.strokes.windows(2).any(|w| w[0].root > w[1].root) {
             return Err(ParseError::AssertFail(
-                "the strokes are not in ascending root order, which is what the per-root \
-                 counts index them by"
+                "the strokes are not in ascending root order, which the per-root counts \
+                 require"
                     .into(),
             )
             .into());
@@ -1201,10 +1198,9 @@ impl<'a> Library<'a> {
     /// checksum.
     ///
     /// The u32 at body `0x06` is unique per file and is not a checksum, a size or a
-    /// hash of anything in it; with nothing to recompute it from, an edit carries
-    /// it over rather than inventing a value. The hardware evidence reaches no further
-    /// than this: a library carrying its source's word loads and plays. Confirmed on
-    /// hardware. What the word means is open.
+    /// hash of the contents. With nothing to recompute it from, an edit keeps the
+    /// source's value. A library carrying its source's value loads and plays. Confirmed
+    /// on hardware. What the word means is unknown.
     pub fn to_piano(&self) -> Result<Piano, Error> {
         Ok(Piano {
             file: Cbin {
@@ -1259,7 +1255,7 @@ mod tests {
         assert_eq!(piano.stream_version().unwrap(), 0x500);
         assert!(
             piano.name().is_err(),
-            "the name offset is only pinned on known versions"
+            "the name offset is validated only for known versions"
         );
         assert!(piano.key_map().is_err());
         assert!(piano.library().is_err());
@@ -1327,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_bank_relays_the_audio_and_leaves_the_rest_verbatim() {
+    fn dropping_a_bank_moves_the_audio_and_leaves_the_rest_unchanged() {
         let piano = Build::new().piano();
         let before = piano.library().unwrap();
         let mut after = piano.library().unwrap();
@@ -1356,7 +1352,11 @@ mod tests {
             .filter(|s| s.bank() != Some(Bank::Release))
             .zip(reparsed.strokes())
         {
-            assert_eq!(kept.audio(), moved.audio(), "a span moved verbatim");
+            assert_eq!(
+                kept.audio(),
+                moved.audio(),
+                "a kept span changed when it moved"
+            );
             assert_eq!(kept.id(), moved.id());
             assert_eq!(&kept.record()[REC_BANK..], &moved.record()[REC_BANK..]);
         }
@@ -1419,9 +1419,8 @@ mod tests {
         assert_eq!(kept, [(60, 5), (72, 5)]);
     }
 
-    /// The stroke-level selection: one layer on one root, which no named transform
-    /// expresses. What the predicate rejects goes, what it accepts stays verbatim, and
-    /// a root left with no strokes at all stops answering its keys.
+    /// One layer on one root, which no named transform expresses. Rejected strokes go,
+    /// accepted ones stay unchanged, and a root left with no strokes uncovers its keys.
     #[test]
     fn retaining_strokes_drops_what_the_predicate_rejects_and_nothing_else() {
         let mut build = Build::new();
@@ -1460,20 +1459,20 @@ mod tests {
         assert_eq!(
             library.key_map()[72],
             UNCOVERED,
-            "root 72 lost every stroke, so its key answers nothing"
+            "root 72 lost every stroke, so its key should be uncovered"
         );
-        assert_eq!(library.key_map()[60], 60, "and the other root is untouched");
+        assert_eq!(library.key_map()[60], 60, "root 60 should be untouched");
         library.to_body().unwrap();
     }
 
-    /// The builder hands back a file, not only a body: a `.npno` another crate's tests
-    /// can read back through the front door.
+    /// The builder returns a whole `.npno` file that another crate's tests can read
+    /// through `from_stream`.
     #[test]
     fn a_synthetic_library_reads_back_as_the_file_it_was_built_as() {
         let bytes = Build::new().bytes().unwrap();
         let entity = crate::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         let crate::Entity::Piano(piano) = &entity else {
-            panic!("{entity:?} is no piano library");
+            panic!("{entity:?} is not a piano library");
         };
         assert_eq!(
             piano.name().unwrap(),
@@ -1483,9 +1482,8 @@ mod tests {
         assert_eq!(crate::to_bytes(&entity).unwrap(), bytes);
     }
 
-    /// A borrowed library is a view over the caller's own bytes: tens of megabytes of
-    /// audio stay where they were read, and what the view states is what the file
-    /// states.
+    /// A borrowed library is a view over the caller's bytes, so its audio is never
+    /// copied.
     #[test]
     fn borrowing_a_file_reads_it_without_copying_the_audio() {
         let bytes = Build::new().bytes().unwrap();
@@ -1524,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn cutting_the_range_drops_the_roots_nothing_plays_any_more() {
+    fn cutting_the_range_drops_the_roots_nothing_plays_anymore() {
         let piano = Build::new().piano();
         let mut library = piano.library().unwrap();
         let change = library.cut_range(0..=70).unwrap();
@@ -1557,7 +1555,7 @@ mod tests {
             .sum();
         assert_eq!(
             halves, audio,
-            "a split shares every stroke out exactly once"
+            "with no straddling root, a split should hold every stroke once"
         );
     }
 
@@ -1575,7 +1573,7 @@ mod tests {
         assert_eq!(
             library.voicing().as_deref(),
             Some("Nordiska"),
-            "the voicing is its own field, not the variant's head"
+            "the voicing is a separate field from the variant"
         );
     }
 
@@ -1673,8 +1671,8 @@ mod tests {
         assert_eq!(library.to_body().unwrap(), before);
     }
 
-    /// The trim is a u16, so a value that fits one byte and one that does not must each
-    /// reach the field whole, and neither may touch the record beside it.
+    /// The trim is a u16: a one-byte value and a two-byte value each write the whole
+    /// field and nothing else.
     #[test]
     fn a_retrim_writes_both_bytes_of_one_strokes_own_field() {
         let piano = Build::new().piano();
@@ -1744,8 +1742,8 @@ mod tests {
         assert_eq!(library.name(), ("Test Piano".into(), "Variant".into()));
     }
 
-    /// A library with its audio dropped is a donor, not a file: laying it out would
-    /// write a directory whose block counts nothing in the body backs.
+    /// A library with its audio dropped is a donor. Laying it out would write block
+    /// counts that no audio backs.
     #[test]
     fn a_stroke_holding_other_than_the_blocks_its_record_states_is_not_laid_out() {
         let piano = Build::new().piano();
@@ -1761,8 +1759,8 @@ mod tests {
         assert!(skeleton.body_len().is_err());
     }
 
-    /// The halves either side of the separator are the vendor's own bytes, padding and
-    /// all: setting one leaves the other exactly as the field spells it.
+    /// Setting one half of the field leaves the other half's bytes as stored, padding
+    /// included.
     #[test]
     fn setting_one_half_of_the_name_field_leaves_the_other_as_it_was_written() {
         let mut piano = Build::new().piano();

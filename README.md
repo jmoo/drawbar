@@ -8,9 +8,9 @@ your terminal, or from your own code.
 ![drawbar with an instrument attached and a piano library open in its editor](docs/src/assets/screenshot.png)
 
 > ⚠️ **Alpha.** Back up your instrument and your files first. Everything here was
-> worked out by studying real instruments, and
-> [what has been tested on hardware](docs/src/getting-started/support.md) is
-> written down.
+> worked out by studying real instruments.
+> [What is supported](docs/src/getting-started/support.md) lists what has been
+> tested on hardware.
 
 ## What's here
 

@@ -1,10 +1,10 @@
-//! The `stk` sections — one per zone, each holding one zone's encoded audio.
+//! The `stk` sections: one per zone, each holding that zone's encoded audio.
 
 use super::codec::Layout;
 use super::Chain;
 use crate::error::ParseError;
 
-/// Within a stroke payload: the MIDI note the sample was recorded at.
+/// Offset in a stroke payload of the root key, the MIDI note the sample was recorded at.
 pub(super) const ROOT_KEY: usize = 5;
 
 /// Encoded audio is emitted in fixed-size packets; the count varies with how
@@ -27,22 +27,21 @@ const fn later_header_len(layout: Layout) -> usize {
 /// Bytes the metadata region reserves ahead of the first packet, over the `cat` and
 /// `map` payloads and the first stroke's own header.
 ///
-/// **Encoded audio begins at a fixed offset.** Everything before it — the `hdr`, the
-/// category strings, the keyboard map, and the first stroke's header — is a preamble
-/// of constant size, so the first stroke's header is not a field of its own so much as
-/// whatever space the rest did not use. Adding a zone grows `map` by a record and takes
-/// exactly that much off the header; when the metadata would fill the preamble
-/// completely, the whole thing grows by one packet and the header starts over with a
-/// full packet's worth of room.
+/// Encoded audio begins at a fixed offset. The `hdr`, the category strings, the keyboard
+/// map and the first stroke's header form a preamble of constant size, so the first
+/// stroke's header is whatever space the rest leave. Adding a zone grows `map` by a
+/// record and takes that much off the header. When the metadata would fill the
+/// preamble, the preamble grows by one packet and the header gets a full packet of
+/// room again.
 ///
-/// The narrow chain's own budget also explains the 15-byte header difference between
-/// vendor files and our output at equal zone counts: their `cat` payload is 9 bytes
-/// and ours is 24.
+/// This also explains why vendor files carry 15 more bytes of first-stroke header than
+/// this crate's output at equal zone counts: their `cat` payload is 9 bytes and ours is
+/// 24.
 ///
-/// The two narrow budgets are the same absolute grid seen from different places:
-/// [`Chain::Early`] has no `cat` and a 93-byte-shorter `hdr`, so its chain spends 102
-/// bytes fewer ahead of the `map` payload and its budget is 102 larger. Every stroke
-/// payload in either chain ends 3 bytes past a packet boundary measured from the body.
+/// The two narrow budgets describe the same absolute grid. [`Chain::Early`] has no
+/// `cat` and a `hdr` 93 bytes shorter, so its chain spends 102 fewer bytes ahead of the
+/// `map` payload and its budget is 102 larger. Every stroke payload in either chain ends
+/// 3 bytes past a packet boundary measured from the body.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 const fn preamble(chain: Chain) -> usize {
@@ -60,14 +59,15 @@ const fn preamble(chain: Chain) -> usize {
 pub fn first_header_len(layout: Layout, chain: Chain, cat_len: usize, map_len: usize) -> usize {
     let used = cat_len + map_len;
     let mut room = preamble(chain);
-    // Exact-boundary metadata advances because a zero-length header does not occur.
+    // Metadata that fills the preamble exactly still advances: no specimen has a
+    // zero-length header.
     while room <= used {
         room += packet_len(layout);
     }
     room - used
 }
 
-/// Bytes of stroke header. Only the first stroke's depends on anything.
+/// Bytes of stroke header. Only the first stroke's varies.
 pub fn header_len(
     layout: Layout,
     chain: Chain,
@@ -87,11 +87,11 @@ pub fn header_len(
 pub struct Stroke {
     /// MIDI note the sample plays back untransposed at.
     pub root_key: u8,
-    /// Encoded audio packets. Content-dependent: predictable material costs fewer.
+    /// Encoded audio packets. Predictable material needs fewer.
     ///
-    /// `None` only when the length does not decompose — a header this crate has
-    /// mismodelled rather than a corrupt file, so it reports nothing instead of a
-    /// number that would look measured. Everything else about the stroke still reads.
+    /// `None` when the length is not a header plus whole packets. That points to a
+    /// header this crate models wrongly, not a corrupt file, so the stroke still reads
+    /// and only the count is withheld.
     pub packets: Option<usize>,
 }
 
@@ -127,12 +127,12 @@ pub fn set_root_key(payload: &mut [u8], note: u8) -> Result<(), ParseError> {
 mod tests {
     use super::*;
 
-    /// `map` payload for `z` zones, per the section's own rule.
+    /// `map` payload length for `z` zones.
     fn map_len(z: usize) -> usize {
         801 + 15 * (z - 1)
     }
 
-    /// Our editor's `cat` section; the vendor's is 9.
+    /// The `cat` payload this crate writes; the vendor's is 9.
     const OUR_CAT: usize = 24;
 
     fn stroke(index: usize, zones: usize, packets: usize, root: u8) -> Vec<u8> {
@@ -159,7 +159,7 @@ mod tests {
             header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(3)),
             135
         );
-        // Position, not the zone table, decides the rest.
+        // Later strokes are fixed whatever the zone count.
         assert_eq!(
             header_len(Layout::V2, Chain::Library2, 1, OUR_CAT, map_len(2)),
             372
@@ -170,12 +170,9 @@ mod tests {
         );
     }
 
-    /// The zone-count ladder, generated for exactly this question: identical audio in
-    /// the first zone at 4, 6, 8, 12 and 16 zones. The header shrinks a record per zone
-    /// and then, when the metadata would fill the preamble, the whole thing gains a
-    /// packet and the header starts over.
+    /// Specimens with identical audio in the first zone at 4, 6, 8, 12 and 16 zones.
     #[test]
-    fn the_preamble_grows_by_a_packet_rather_than_going_negative() {
+    fn the_preamble_grows_by_a_packet_when_the_metadata_fills_it() {
         for (zones, header) in [(4, 120), (6, 90), (8, 60), (12, 381), (16, 321)] {
             assert_eq!(
                 header_len(Layout::V2, Chain::Library2, 0, OUR_CAT, map_len(zones)),
@@ -190,9 +187,7 @@ mod tests {
         );
     }
 
-    /// The vendor library's `cat` section is 9 bytes where ours is 24, and that alone
-    /// is why their first stroke carries 15 bytes more header at the same zone count.
-    /// The preamble is the same size in both.
+    /// The preamble is the same size in vendor files and ours.
     #[test]
     fn a_smaller_cat_section_lends_its_bytes_to_the_header() {
         const VENDOR_CAT: usize = 9;
@@ -215,9 +210,7 @@ mod tests {
         );
     }
 
-    /// The pre-2.0 chain has no `cat` section and a 93-byte-shorter `hdr`, so its
-    /// budget is 102 larger and lands the first packet at the same absolute offset.
-    /// Lengths taken off library instruments: `map` is 786 + 12 per zone there.
+    /// Lengths from library instruments, where `map` is 786 + 12 per zone.
     #[test]
     fn the_pre_library_2_chain_spends_its_missing_cat_on_the_header() {
         const NO_CAT: usize = 0;
@@ -244,8 +237,8 @@ mod tests {
         );
     }
 
-    /// Lengths off wide instruments the editor rendered: `cat` is 8 bytes there and
-    /// `map` is 776 + 16 per zone at v3, 1324 + 16 at v4.
+    /// Lengths from wide instruments the editor rendered: `cat` is 8 bytes, and `map`
+    /// is 776 + 16 per zone at v3 and 1324 + 16 per zone at v4.
     #[test]
     fn the_wide_chain_budgets_its_preamble_the_same_way() {
         const WIDE_CAT: usize = 8;
@@ -282,16 +275,16 @@ mod tests {
 
     #[test]
     fn lengths_from_the_corpus_decompose_exactly() {
-        // (index, zones, total length, packets) taken off real instruments — ours at
-        // the top, then vendor library files.
+        // (index, zones, cat, total length, packets) from real instruments: ours
+        // first, then vendor library files.
         for (index, zones, cat, len, packets) in [
             (0, 1, OUR_CAT, 1689, 4), // single zone
             (0, 2, OUR_CAT, 1674, 4), // same audio, one more zone
             (1, 2, OUR_CAT, 1896, 4),
             (0, 3, OUR_CAT, 2040, 5),
             (2, 3, OUR_CAT, 1896, 4),
-            (0, 1, OUR_CAT, 165, 0), // 16 frames: a header and no audio at all
-            (0, 4, OUR_CAT, 2787, 7), // the zone ladder
+            (0, 1, OUR_CAT, 165, 0),   // 16 frames: a header and no audio
+            (0, 4, OUR_CAT, 2787, 7),  // the zone ladder
             (0, 12, OUR_CAT, 3048, 7), // same audio, past the step
             (0, 16, OUR_CAT, 2988, 7),
             (0, 6, 9, 10773, 28), // vendor Kalimba
@@ -310,8 +303,6 @@ mod tests {
         }
     }
 
-    /// A length that does not divide means the header is mismodelled, which is a thing
-    /// we know happens — so it reports no count rather than refusing the instrument.
     #[test]
     fn a_length_that_is_not_header_plus_packets_has_no_count() {
         let mut v = stroke(0, 1, 2, 60);
@@ -324,8 +315,6 @@ mod tests {
         );
     }
 
-    /// Shorter than its own header: no count, and still no refusal — the root key is
-    /// the only thing a caller structurally needs, and it is present.
     #[test]
     fn a_stroke_shorter_than_its_header_has_no_count() {
         assert_eq!(

@@ -1,21 +1,20 @@
-//! `nord sample` — the verbs that only mean anything for a sample instrument.
+//! `nord sample`: the verbs that apply only to a sample instrument.
 //!
-//! `edit` mirrors `nord program edit`, but the fields come from
-//! [`editors::SampleEditor`]'s accessors rather than a declarative panel: a
-//! sample is mostly encoded audio, and only what the format crate can patch in
-//! place is settable — always the name, plus each zone's root key and boundaries
-//! when its keyboard map can be read and recomputed.
-//! `decode` turns the audio back into WAV, and `verify --deep` walks the
-//! encoded stream rather than only the container. Both take a slot wherever
-//! they take a file; reading a slot is a read-only transaction, so neither
-//! asks for confirmation.
+//! `edit` mirrors `nord program edit`, but its fields come from
+//! [`editors::SampleEditor`]'s accessors instead of a declarative panel. Only what
+//! the format crate can patch in place is settable: always the name, plus each
+//! zone's root key and boundaries when its keyboard map can be read and recomputed.
 //!
-//! `encode` builds a one-zone instrument from a WAV; `build` builds a whole one
-//! from a Sample Editor project, which is where the zones, root keys, top notes
-//! and trim points come from instead of the command line.
+//! `decode` turns the audio back into WAV, and `verify --deep` walks the encoded
+//! stream as well as the container. Both take a slot wherever they take a file.
+//! Reading a slot changes nothing, so neither asks for confirmation.
 //!
-//! `project new` writes the Sample Editor's own `.nsmpproj` save file from a
-//! set of WAVs, one zone per file.
+//! `encode` builds a one-zone instrument from a WAV. `build` builds a whole
+//! instrument from a Sample Editor project, which supplies the zones, root keys, top
+//! notes and trim points.
+//!
+//! `project new` writes the Sample Editor's `.nsmpproj` save file from a set of
+//! WAVs, one zone per file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -36,8 +35,8 @@ use crate::ui::Ui;
 
 #[derive(Args)]
 pub struct EditArgs {
-    /// A `.nsmp` file, or a slot on the instrument (`1:14`). A slot makes this a
-    /// read-modify-write over USB, so it is a mutation and obeys `--yes`.
+    /// A `.nsmp` file or a slot on the instrument (`1:14`). Editing a slot reads it,
+    /// changes it and writes it back over USB, so it needs `--yes` or a confirmation.
     #[arg(value_name = "FILE|BANK:SLOT")]
     pub target: String,
 
@@ -108,7 +107,7 @@ pub struct DecodeArgs {
     pub targets: Vec<String>,
 
     /// Write one WAV per zone into this directory. Without it, nothing is written
-    /// and the run is a coverage report.
+    /// and the run only reports what decodes.
     #[arg(short, long, value_name = "DIR")]
     pub out: Option<PathBuf>,
 }
@@ -124,12 +123,13 @@ pub struct EncodeArgs {
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
-    /// Instrument name. Defaults to the WAV's file stem. The `hdr` name field is
-    /// fixed-width and wider on the wide generations; a longer name is refused.
+    /// Instrument name. Defaults to the WAV's file name without its extension. The
+    /// name field has a fixed width, wider in v3 and v4, and a longer name is refused.
     #[arg(long)]
     pub name: Option<String>,
 
-    /// The note the sample plays untransposed at: a name (`C4`, `F#3`) or 0-127.
+    /// The note that plays the sample at its recorded pitch: a name (`C4`, `F#3`) or
+    /// 0-127.
     #[arg(long, value_name = "NOTE", default_value = "C4")]
     pub root_key: String,
 
@@ -151,19 +151,19 @@ pub struct EncodeArgs {
     )]
     pub loop_crossfade: usize,
 
-    /// State every content field outright instead of the editor's own record
-    /// coding: order-zero records in a larger file, and not the editor's bytes.
-    /// Decoded back exactly either way.
+    /// Store every content field directly, in order-zero records, instead of the
+    /// editor's record coding. The file is larger and differs from the editor's, but
+    /// decodes to the same audio.
     #[arg(long)]
     pub plain: bool,
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
-    /// audio is the same in all three; the container and the stream's units differ.
+    /// audio is the same in all three. The container and the stream's units differ.
     /// Only v2 has been played on hardware, so 3 and 4 need `--unverified`.
     #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
     pub generation: u8,
 
-    /// Quantise every stroke at this shift instead of the rule's. Experimental.
+    /// Quantize every stroke at this shift instead of the computed one. Experimental.
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
 
@@ -175,8 +175,8 @@ pub struct EncodeArgs {
 
 #[derive(Args)]
 pub struct BuildArgs {
-    /// A Nord Sample Editor project (`.nsmpproj`). The audio paths inside it
-    /// resolve from the project's own directory.
+    /// A Nord Sample Editor project (`.nsmpproj`). Relative audio paths in it
+    /// resolve from the project's directory.
     #[arg(value_name = "PROJECT")]
     pub project: PathBuf,
 
@@ -185,24 +185,24 @@ pub struct BuildArgs {
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
 
-    /// Instrument name. Defaults to the project's own. The `hdr` name field is
-    /// fixed-width and wider on the wide generations; a longer name is refused.
+    /// Instrument name. Defaults to the name in the project. The name field has a
+    /// fixed width, wider in v3 and v4, and a longer name is refused.
     #[arg(long)]
     pub name: Option<String>,
 
-    /// State every content field outright instead of the editor's own record
-    /// coding: order-zero records in a larger file, and not the editor's bytes.
-    /// Decoded back exactly either way.
+    /// Store every content field directly, in order-zero records, instead of the
+    /// editor's record coding. The file is larger and differs from the editor's, but
+    /// decodes to the same audio.
     #[arg(long)]
     pub plain: bool,
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
-    /// audio is the same in all three; the container and the stream's units differ.
+    /// audio is the same in all three. The container and the stream's units differ.
     /// Only v2 has been played on hardware, so 3 and 4 need `--unverified`.
     #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
     pub generation: u8,
 
-    /// Quantise every stroke at this shift instead of the rule's. Experimental.
+    /// Quantize every stroke at this shift instead of the computed one. Experimental.
     #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
     pub shift: Option<u8>,
 
@@ -232,7 +232,8 @@ pub struct ProjectNewArgs {
     #[arg(long = "zone", required = true, value_name = "WAV=NOTE")]
     pub zones: Vec<String>,
 
-    /// The instrument's name inside the project. Defaults to the output's stem.
+    /// The instrument's name inside the project. Defaults to the output file's name
+    /// without its extension.
     #[arg(long)]
     pub name: Option<String>,
 
@@ -241,7 +242,7 @@ pub struct ProjectNewArgs {
     pub out: Option<PathBuf>,
 }
 
-/// How a run of zones came out: decoded, or refused with a reason worth counting.
+/// How a run's zones came out: decoded, or refused with a reason.
 #[derive(Default)]
 struct Coverage {
     files: usize,
@@ -294,8 +295,8 @@ fn body(bytes: &[u8]) -> Result<nord_format::Sample, String> {
     }
 }
 
-/// The bytes behind a target. A slot is read over USB and never written back,
-/// so this is the whole of what `decode` and `verify` do to an instrument.
+/// The bytes of a target. A slot is read over USB and never written back, so this
+/// is all `decode` and `verify` do to an instrument.
 fn read(origin: &Target) -> Result<Vec<u8>, String> {
     match origin {
         Target::File(path) => std::fs::read(path).map_err(|e| e.to_string()),
@@ -303,8 +304,8 @@ fn read(origin: &Target) -> Result<Vec<u8>, String> {
     }
 }
 
-/// A decoded name reduced to a filename: what a path takes literally survives,
-/// and every run of anything else becomes a single `-`.
+/// A decoded name reduced to a file name: ASCII letters, digits and `_` survive,
+/// and each run of anything else becomes one `-`.
 fn sanitized(name: &str) -> String {
     let mut out = String::new();
     for c in name.chars() {
@@ -317,8 +318,8 @@ fn sanitized(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// What the WAVs of one target are named after: a file's own stem, or — a slot
-/// having no name outside the instrument — the name the body carries.
+/// What one target's WAVs are named after: a file's stem, or for a slot, the name
+/// stored in the body.
 fn stem(origin: &Target, body: &nord_format::Sample) -> String {
     match origin {
         Target::File(path) => path
@@ -337,9 +338,9 @@ fn stem(origin: &Target, body: &nord_format::Sample) -> String {
 
 /// Where a decode puts its WAVs, and the ones it has already put there.
 ///
-/// ⚠️ Targets are named after their own stem, and two of them can share one — the same
-/// instrument in two directories, or a file and a slot of the same name. Without this
-/// the second target's audio replaces the first's under the same filename.
+/// ⚠️ Two targets can share a stem: the same instrument in two directories, or a file
+/// and a slot with the same name. Without this check, the second target's audio would
+/// replace the first's.
 struct Wavs<'a> {
     dir: &'a Path,
     written: BTreeSet<PathBuf>,
@@ -360,7 +361,8 @@ impl Wavs<'_> {
     }
 }
 
-/// `nord sample decode`: the encoded audio back to WAV, and what did not decode.
+/// `nord sample decode`: the encoded audio back to WAV, and a report of what did not
+/// decode.
 pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
     if let Some(dir) = &args.out {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -377,8 +379,8 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
             Ok(()) => coverage.files += 1,
             Err(e) => {
                 failed += 1;
-                // A whole file that will not open is not a codec gap, so it is
-                // reported rather than counted against coverage.
+                // A file that will not open is not a codec gap, so it is reported
+                // but not counted in the coverage line.
                 ui.note(format!("  {} {e}", ui.danger("error")));
             }
         }
@@ -457,31 +459,31 @@ fn decode_target(
     Ok(())
 }
 
-/// The gate the wide generations sit behind.
+/// The gate in front of v3 and v4.
 ///
-/// v2 has no gate. Confirmed on hardware. Mono, stereo and looped v2 encodes play on
-/// an Electro 5.
+/// v2 has no gate: mono, stereo and looped v2 encodes play on an Electro 5. Confirmed
+/// on hardware.
 fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), String> {
     if generation == 2 || acknowledged {
         return Ok(());
     }
     Err(format!(
-        "no v{generation} encode has been played: no instrument that plays that \
-         generation has been available, so all that is known about the file is that it \
-         matches what Nord Sample Editor renders. Pass --unverified to write it anyway."
+        "no v{generation} encode has been played on an instrument, so the file is known \
+         only to match what Nord Sample Editor renders. Pass --unverified to write it \
+         anyway."
     ))
 }
 
 /// One WAV as this encoder needs it: [`crate::wav::pcm16`] at [`codec::SOURCE_RATE`].
 ///
-/// Unlike a piano build, nothing here resamples: the field lattice is defined against
+/// Unlike a piano build, this does not resample: the field lattice is defined against
 /// that rate.
 fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
     let source = crate::wav::pcm16(path)?;
     if source.rate != codec::SOURCE_RATE {
         return Err(format!(
-            "{}: {} Hz — the field lattice is defined against {} Hz, and the instrument's \
-             own resampler is not decoded, so resample the WAV first",
+            "{}: {} Hz, but the encoder needs {} Hz because the instrument's resampler \
+             is not decoded; resample the WAV first",
             path.display(),
             source.rate,
             codec::SOURCE_RATE,
@@ -504,7 +506,7 @@ fn predictor(plain: bool) -> encode::Predictor {
     if plain {
         encode::Predictor::Plain
     } else {
-        encode::Predictor::Minimising
+        encode::Predictor::Minimizing
     }
 }
 
@@ -597,11 +599,11 @@ struct ProjectZone {
     /// Interleaved, so `samples.len()` is `channels` times the frame count.
     samples: Vec<i16>,
     channels: u16,
-    /// The file frame `samples` starts at — the project's `m_start`.
+    /// The file frame `samples` starts at: the project's `m_start`.
     start: usize,
     source: PathBuf,
     loops: Option<encode::Loop>,
-    /// Where the stream resynchronises, in frames from the start of `samples`.
+    /// Where the stream resynchronizes, in frames from the start of `samples`.
     secondary_start: f64,
     /// The project's `m_startSecondary` when the editor would not keep it, so a build
     /// says where it encoded from instead.
@@ -610,13 +612,13 @@ struct ProjectZone {
     gain: f64,
     /// The stroke's `m_loopDecay`, which only a wide header carries.
     loop_decay: f32,
-    /// Loop settings the project carries that the instrument has no field for, named
-    /// so a build says what it dropped rather than dropping it quietly.
+    /// Loop settings in the project that the instrument has no field for, so a build
+    /// can name what it dropped.
     dropped: Vec<String>,
 }
 
-/// The zone gain at which both of the instrument's gain stores overflow their 24 bits.
-/// The file still reproduces the editor's; what it states is no longer the project.
+/// The zone gain at which both of the instrument's gain fields overflow their 24 bits.
+/// The file still matches the editor's render, but no longer states the project's gain.
 const WRAPPING_ZONE_GAIN: f64 = 16.0;
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
@@ -686,8 +688,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     let ceiling = 10f64.powf(encode::MAX_MAP_GAIN_DB / 20.0);
     if !(0.0..=ceiling).contains(&map_gain) {
         ui.note(ui.dim(format!(
-            "the map's own gain is {map_gain}, which the instrument clamps at \
-             +{:.3} dB as the editor does",
+            "the map's gain is {map_gain}, which the instrument clamps at +{:.3} dB, \
+             as the editor does",
             encode::MAX_MAP_GAIN_DB
         )));
     }
@@ -715,7 +717,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         if zone.gain >= WRAPPING_ZONE_GAIN {
             ui.warn(format!(
                 "zone{} sets gain {}, which overflows both of the instrument's gain \
-                 fields; the file will state a far quieter level, as the editor's own \
+                 fields; the file will state a far quieter level, as the editor's \
                  render of this project does",
                 index + 1,
                 zone.gain
@@ -771,9 +773,8 @@ fn project_preset(project: &Project, layout: codec::Layout) -> Result<encode::Pr
 
 /// Resolve a project's zones, highest first, into audio and keyboard placement.
 ///
-/// Everything the editor can express that this writer does not lay out is refused by
-/// name here rather than dropped: the file it would otherwise produce would be a
-/// silent reinterpretation of the project.
+/// Anything the editor can express that this writer cannot lay out is refused here by
+/// name, because dropping it would silently change what the project describes.
 fn project_zones(
     project: &Project,
     dir: &Path,
@@ -793,14 +794,14 @@ fn project_zones(
             let at = format!("zone{}", index + 1);
             if !zone.enabled {
                 return Err(format!(
-                    "{at} is switched off in the project; turn it on or remove it — an \
-                     instrument has no way to carry a zone that does not sound"
+                    "{at} is switched off in the project; turn it on or remove it, since \
+                     an instrument cannot hold a zone that does not sound"
                 ));
             }
             let [layer] = zone.strokes.as_slice() else {
                 return Err(format!(
                     "{at} plays {} strokes, which is a velocity split or a round robin; \
-                     one stroke per zone is the layout this writer lays down",
+                     this writer supports one stroke per zone",
                     zone.strokes.len()
                 ));
             };
@@ -874,12 +875,11 @@ fn project_zones(
 /// One stroke's loop as the encoder states it, and the loop settings that reach no
 /// instrument.
 ///
-/// The project's loop points count in the audio file's own frames, so they move with
-/// the trim. Whichever loop is switched on maps onto the one loop the container holds:
-/// a short loop is the same start with the short length, and nothing in the file says
-/// which of the two it was. The two loops state their crossfades differently — the
-/// long one in frames, the short one as a percentage of its own length — and the
-/// switched-on loop's fade is the only one that reaches the audio.
+/// The project's loop points count frames of the audio file, so they move with the
+/// trim. Whichever loop is switched on becomes the container's single loop: a short
+/// loop has the same start with the short length, and nothing in the file records which
+/// of the two it was. The long loop states its crossfade in frames, and the short loop
+/// as a percentage of its length. Only the switched-on loop's fade reaches the audio.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn zone_loop(
@@ -916,9 +916,9 @@ fn zone_loop(
         ));
     }
 
-    // Mode 1 rewrites the long loop's tail some way this crate has not decoded. It
-    // governs that fade only: with the short loop switched on the editor writes the
-    // same bytes whatever the enum holds.
+    // Mode 1 rewrites the long loop's tail in a way not yet decoded. It affects only
+    // that fade: with the short loop switched on, the editor writes the same bytes
+    // whatever the mode.
     // Inferred from specimens; not confirmed on hardware.
     if !short && stroke.loop_crossfade_mode != 0 {
         return Err(format!(
@@ -927,8 +927,6 @@ fn zone_loop(
             stroke.loop_crossfade_mode
         ));
     }
-    // The short loop's crossfade is a percentage of its own length, where the long
-    // loop's is a frame count outright.
     let crossfade = if short {
         exact_frame(
             at,
@@ -951,7 +949,7 @@ fn zone_loop(
                 format!("m_loopDecayEnabled and m_loopDecay = {}", stroke.loop_decay)
             }
             codec::Layout::V3 | codec::Layout::V4 => {
-                "m_loopDecayEnabled — the amount is written, the switch is not".into()
+                "m_loopDecayEnabled (the amount is written, the switch is not)".into()
             }
         });
     }
@@ -960,7 +958,7 @@ fn zone_loop(
     }
     if short && stroke.loop_crossfade != 0.0 {
         dropped.push(format!(
-            "m_loopXFadeLengthLong = {} — the short loop is the one encoded",
+            "m_loopXFadeLengthLong = {} (the short loop is the one encoded)",
             stroke.loop_crossfade
         ));
     }
@@ -1008,16 +1006,16 @@ fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
 
 /// A project's frame position as an index into the file it points at.
 ///
-/// Positions are `%f` decimals counted at 44 100 Hz whatever the file's own rate says.
+/// Positions are `%f` decimals counted at 44,100 Hz, whatever the file's own rate.
 /// A zone encodes `start..stop`, not the whole `begin..end` extent.
 /// Inferred from specimens; not confirmed on hardware.
 fn frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<usize, String> {
     Ok(exact_frame(zone, label, value, frames)?.round() as usize)
 }
 
-/// The same bound, for a value the encoder wants unrounded — a crossfade a project
-/// states as a percentage, which lands between two frames and moves a field if it is
-/// rounded before it reaches the field lattice.
+/// [`frame`] without the rounding, for a value the encoder needs exact: a crossfade
+/// stated as a percentage can fall between two frames, and rounding it first would move
+/// a field on the field lattice.
 fn exact_frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<f64, String> {
     if !value.is_finite() || !(0.0..=frames as f64).contains(&value) {
         return Err(format!(
@@ -1091,9 +1089,9 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
         {
             return Err(format!("stroke {index}: resync does not name a record"));
         }
-        // ⚠️ A directory pointer is a u16 count of words, so on a stroke longer than
-        // WRAP words it answers for every record that far apart; which one it means
-        // takes the walk, and a pointer at the terminator can still alias a record.
+        // ⚠️ A directory pointer is a u16 word count, so on a stroke longer than WRAP
+        // words it matches every record a multiple of WRAP apart. Only the walk tells
+        // which one it means, and a pointer at the terminator can still alias a record.
         let ends_at_mark = names(directory.mark, stream.terminator);
         let named_by_mark: Vec<_> = stream
             .records
@@ -1128,8 +1126,8 @@ fn deep_body(body: &nord_format::Sample) -> Result<String, String> {
             ));
         }
         looped += 1;
-        // A loop opens a fresh packet, so the words it covers form whole packets. The
-        // wide generations pack to their own size and are not checked against this one.
+        // A loop opens a new packet, so the words it covers form whole packets. v3 and
+        // v4 use their own packet size and are not checked here.
         if layout == codec::Layout::V2 {
             let packet = nsmp::stroke::packet_len(layout) / layout.word();
             if !named_by_mark
@@ -1175,7 +1173,7 @@ fn zone_spec(spec: &str) -> Result<ZoneSpec, String> {
     })
 }
 
-/// A WAV's frame count as the project states it, named where it cannot be stated.
+/// A WAV's frame count as the project states it, or an error when it cannot be stated.
 fn project_frames(frames: usize, rate: u32) -> Result<u64, String> {
     if rate == 0 {
         return Err("the WAV declares 0 Hz".into());
@@ -1186,9 +1184,8 @@ fn project_frames(frames: usize, rate: u32) -> Result<u64, String> {
         .ok_or_else(|| format!("{frames} frames at {rate} Hz overflows a frame count"))
 }
 
-/// The path a project records for a WAV: relative to the project's own
-/// directory when the file lies under it, which is how the editor stores every
-/// specimen; otherwise exactly what was given.
+/// The path a project records for a WAV: relative to the project's directory when
+/// the file is inside it, as the editor stores it, and otherwise as given.
 fn stored_path(wav: &Path, project: &Path) -> String {
     let dir = project.parent().unwrap_or(Path::new(""));
     if dir.as_os_str().is_empty() {
@@ -1208,8 +1205,8 @@ fn zone(spec: &ZoneSpec, wav: &[u8], project: &Path) -> Result<NewZone, String> 
     })
 }
 
-/// The instrument's name and the file to write, each standing in for the other
-/// when only one was given.
+/// The instrument's name and the file to write, each derived from the other when
+/// only one is given.
 fn destination(name: Option<String>, out: Option<PathBuf>) -> Result<(String, PathBuf), String> {
     match (name, out) {
         (Some(name), Some(out)) => Ok((name, out)),
@@ -1230,11 +1227,9 @@ fn destination(name: Option<String>, out: Option<PathBuf>) -> Result<(String, Pa
                 })?;
             Ok((name, out))
         }
-        (None, None) => Err(
-            "pass --name or -o: the name defaults to the output's stem, \
-                             and the output to the name, so one of them has to be given"
-                .into(),
-        ),
+        (None, None) => {
+            Err("pass --name or -o: each defaults from the other, so one of them is needed".into())
+        }
     }
 }
 
@@ -1339,7 +1334,7 @@ mod tests {
 
         let played = dir.join("gate.nsmp");
         encode(&ui, encode_args(&source, played.clone(), 2, false))
-            .expect("v2 is hardware-verified and needs no acknowledgement");
+            .expect("v2 is confirmed on hardware and needs no --unverified");
         assert!(played.is_file());
 
         for generation in [3u8, 4] {
@@ -1355,8 +1350,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A count the project cannot state stops the zone being written, naming which
-    /// of the two ways the WAV cannot be counted.
+    /// A frame count the project cannot state is refused, and the error says why.
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn a_frame_count_a_project_cannot_state_is_refused_by_name() {
@@ -1464,8 +1458,8 @@ mod tests {
         );
     }
 
-    /// `-o` pointing back at the input is an overwrite of the file being edited, so it
-    /// meets the guard that spelling it with no `-o` meets.
+    /// `-o` naming the input overwrites the file being edited, so it needs `--yes` as
+    /// an in-place edit does.
     #[test]
     fn an_output_that_is_the_input_takes_the_in_place_guard() {
         let dir = scratch();

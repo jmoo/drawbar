@@ -1,18 +1,16 @@
 //! The Stage 3 program body (`.ns3f`, `.ns3l`): 548 bytes, every documented
 //! parameter placed.
 //!
-//! The program-wide globals were decoded first and by hand; everything else — the
-//! organ's two presets and their drawbars, the piano, synth, extern and the whole
-//! effects chain — comes from the byte maps. Where the two disagree the hand
-//! decode wins: the map has one 22-bit `split` run where the companion doc, and
-//! this module, break it into ten fields.
+//! The program-wide globals are decoded by hand. Everything else (the organ's two
+//! presets and their drawbars, the piano, synth, extern and the effects chain) comes
+//! from the byte maps. Where the two disagree, the hand decode wins: the map has one
+//! 22-bit `split` run, which the companion doc and this module break into ten fields.
 //!
-//! The body is 22 bytes of globals and then two [`Panel`]s — the program's two
-//! complete setups — so the panel is declared once and placed twice rather than
-//! spelled out either side. Registry paths follow: `panel_a.organ_type`.
+//! The body is 22 bytes of globals followed by two [`Panel`]s, the program's two
+//! complete setups, so the panel is declared once and placed twice. Registry paths
+//! follow, as in `panel_a.organ_type`.
 //!
-//! Values are raw except where the documentation enumerates them; see [the module
-//! docs](super) for what that ceiling is and why.
+//! Values are raw except where the documentation enumerates them.
 
 use super::panel::Panel;
 use crate::cbin::{self, Cbin};
@@ -24,19 +22,19 @@ use crate::error::Error;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns3f";
-/// Schema versions this build's field offsets have been validated against:
-/// program v3.00 (OS v0.92) through v3.04 (OS v2.10 and later), stored ×100.
+/// Schema versions whose field offsets have been validated: program v3.00 (OS v0.92)
+/// through v3.04 (OS v2.10 and later), stored ×100.
 pub const KNOWN_VERSIONS: &[u32] = &[300, 301, 302, 303, 304];
 pub const BODY_LEN: usize = 548;
 
 /// The Stage 3's octave shift: a nibble biased by 6.
 ///
-/// **Corpus:** over the factory banks the slot holds 3..=9 with a decisive mode at 6,
-/// which is where an untransposed program has to sit. The bias differs per model — the
-/// Stage 2 centres on 7 and the Stage 4 stores two's complement — so each names its own.
-/// Inferred from specimens; not confirmed on hardware.
+/// In the factory banks the slot holds 3..=9, with a clear mode at 6, where an
+/// untransposed program must sit. The bias differs per model (the Stage 2 centers on 7
+/// and the Stage 4 stores two's complement), so each model names its own. Inferred from
+/// specimens; not confirmed on hardware.
 ///
-/// Total over the nibble: the widest encoding is `9 + 6 = 15`, so no stored pattern is
+/// Total over the nibble: the widest value is `9 + 6 = 15`, so no stored pattern is
 /// refused.
 pub type OctaveShift = crate::components::OctaveShift<6, -6, 9>;
 
@@ -59,16 +57,17 @@ sparse_enum!(
     }
 );
 
-/// The program-wide globals at the head of the body. Bits are MSB-first from body
-/// byte 0 (`0x2c` in a type-1 file), so byte 0x05 bit 7 is bit 40.
+/// The 548-byte program body: the program-wide globals, then Panel A and Panel B. Bits
+/// are MSB-first from body byte 0 (`0x2c` in a type-1 file), so byte 0x05 bit 7 is
+/// bit 40.
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
-/// re-encode verbatim. Placements from the community byte maps; values raw except
+/// re-encode. Placements come from the community byte maps, and values are raw except
 /// where those maps enumerate them. Inferred from specimens; not confirmed on
 /// hardware.
 ///
-/// ⚠️ The three split notes can be stored out of order — the panel reorders them on
+/// ⚠️ The three split notes can be stored out of order; the panel reorders them for
 /// display (documented with specimens in the ns3-program-viewer sources). The
 /// decode reports what is stored.
 #[nord_bits_derive::bitbody(548)]
@@ -128,21 +127,21 @@ pub struct Program {
     #[bits(120..=123)]
     pub synth_pitch_stick_range: Selector<4>,
 
-    /// Panel A — the first of the program's two complete setups.
+    /// Panel A, the first of the program's two complete setups.
     #[at(22..285)]
     pub panel_a: Panel,
 
-    /// Panel B. Same type: the two are the same layout, and neither is
-    /// a copy of the other — `panel_enable` says which sound.
+    /// Panel B, with the same layout as Panel A and independent values.
+    /// `panel_enable` says which panels sound.
     #[at(285..548)]
     pub panel_b: Panel,
 }
 
 /// The `(bank, location)` pair from the header, uninterpreted.
 ///
-/// Not validated: current exports hold bank 0..=15 and location 0..=24, but v3.00
-/// files in the wild hold out-of-range locations (norduserforum.com t=14414), so
-/// gating on them would refuse real files.
+/// Not validated: current exports hold bank 0..=15 and location 0..=24, but some v3.00
+/// files hold out-of-range locations (norduserforum.com t=14414), so validating would
+/// refuse real files.
 pub fn location(file: &Cbin<Program>) -> (u16, u16) {
     file.header.slot()
 }
@@ -190,7 +189,7 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// The organ's vibrato/chorus selection — the six [`VibChorus`] modes, in the order
+    /// The organ's vibrato/chorus selection: the six [`VibChorus`] modes, in the order
     /// the `ns3-organ-vibrato-mode` table in the Stage byte-map docs stores them.
     /// Inferred from specimens; not confirmed on hardware.
     ///

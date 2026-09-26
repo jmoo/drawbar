@@ -1,8 +1,8 @@
-//! The app: the theme both faces share, and the routing between the regions.
+//! The app: the light and dark themes, and the routing between the regions.
 //!
-//! The regions themselves — the title bar, the toolbar, the three docks, the status
-//! bar — are [`crate::shell`]; [`DrawbarApp::update`] is the order they claim space in
-//! and nothing else.
+//! The regions themselves (the title bar, the toolbar, the three docks, the status bar)
+//! live in [`crate::shell`]; `DrawbarApp::update` sets only the order they claim space
+//! in.
 
 use eframe::egui;
 
@@ -40,7 +40,7 @@ pub fn bad(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// The red the instrument itself is: a lit lamp, a knob's travelled arc, a selected row.
+/// The instrument's own red: a lit lamp, a knob's traveled arc, a selected row.
 pub fn accent(visuals: &egui::Visuals) -> egui::Color32 {
     match visuals.dark_mode {
         true => egui::Color32::from_rgb(0xd6, 0x46, 0x3a),
@@ -48,7 +48,7 @@ pub fn accent(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// The ink a MICRO-caps header wears: a step quieter than the body ink beneath it.
+/// The text color of a [`micro`] header, a step quieter than the body text under it.
 pub fn caption(visuals: &egui::Visuals) -> egui::Color32 {
     match visuals.dark_mode {
         true => egui::Color32::from_gray(0xa0),
@@ -64,10 +64,10 @@ pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// The ivory of a white key or an unison drawbar stop.
+/// The ivory of a white key or a unison drawbar stop.
 ///
-/// Both faces share it: a key is the same colour under any light, and the stops are the
-/// instrument's own plastic rather than part of the app's dress.
+/// Both themes share it: a key is the same color in either theme, and the stops are the
+/// instrument's own plastic, not part of the app's styling.
 pub fn stop_white(_visuals: &egui::Visuals) -> egui::Color32 {
     egui::Color32::from_rgb(0xd8, 0xd6, 0xd0)
 }
@@ -114,7 +114,7 @@ impl ThemeChoice {
         }
     }
 
-    /// The three words beside the sun or the moon.
+    /// The label beside the sun or moon icon.
     pub(crate) fn label(self) -> &'static str {
         match self {
             ThemeChoice::System => "Theme: auto",
@@ -125,9 +125,9 @@ impl ThemeChoice {
 
     pub(crate) fn hint(self) -> &'static str {
         match self {
-            ThemeChoice::System => "following the system — click for light",
-            ThemeChoice::Light => "held light — click for dark",
-            ThemeChoice::Dark => "held dark — click to follow the system again",
+            ThemeChoice::System => "following the system; click for light",
+            ThemeChoice::Light => "always light; click for dark",
+            ThemeChoice::Dark => "always dark; click to follow the system again",
         }
     }
 
@@ -142,11 +142,11 @@ impl ThemeChoice {
 
 /// A small filled dot: something changed here, or something is attached here.
 ///
-/// `size` is the box it claims; the dot inside keeps a pixel of air either side, so a
-/// row of them reads as marks rather than as a rule.
+/// `size` is the box it takes. The dot keeps a pixel of margin on each side, so a row of
+/// dots does not merge into a line.
 ///
-/// ⚠️ Painted rather than typed. The bundled fonts have no glyph for `●`, and a missing
-/// one renders as an empty box — which reads as a checkbox nobody can tick.
+/// ⚠️ Painted, not drawn as text. The bundled fonts have no glyph for `●`, and a missing
+/// glyph renders as an empty box that looks like a checkbox.
 pub fn dot(ui: &mut egui::Ui, color: egui::Color32, size: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
     ui.painter()
@@ -173,9 +173,9 @@ pub struct DrawbarApp {
     pub(crate) about: Option<crate::about::About>,
     /// The list's revision as the store last saw it.
     saved: u64,
-    /// When the store was last caught up, on egui's own clock.
+    /// When the store was last written, in egui time.
     saved_at: f64,
-    /// What the last write left out, as it was last said out loud.
+    /// What the last write left out, as last reported.
     left: crate::store::Left,
 }
 
@@ -184,13 +184,12 @@ impl DrawbarApp {
         // Without this every `Glyph` draws as egui's broken-image warning.
         egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.set_fonts(fonts());
-        // Both faces are dressed up front, so the system flipping from light to dark mid
-        // session lands on this app's own colours rather than egui's defaults.
+        // Both themes are set up front, so a system switch between light and dark
+        // mid-session uses this app's colors, not egui's defaults.
         cc.egui_ctx.set_visuals_of(egui::Theme::Dark, dark());
         cc.egui_ctx.set_visuals_of(egui::Theme::Light, light());
-        // ⚠️ Both faces, not the one showing: egui keeps a `Style` per theme, and a
-        // face that never learned the named text styles panics the frame that resolves
-        // one.
+        // ⚠️ Both themes, not only the visible one: egui keeps a `Style` per theme, and
+        // resolving a named text style that a theme lacks panics.
         cc.egui_ctx.all_styles_mut(metrics);
         let theme = cc
             .storage
@@ -222,7 +221,7 @@ impl DrawbarApp {
             app.shell.restore(storage);
             #[cfg(not(target_arch = "wasm32"))]
             app.midi.restore(storage, &cc.egui_ctx);
-            // Both stores are read; only now does the grouping know what survived.
+            // Only after both stores are read does the grouping know what survived.
             app.browser.settle(&app.workspace);
         }
         app.saved = app.workspace.revision();
@@ -233,7 +232,7 @@ impl DrawbarApp {
     /// open and it is a WAV.
     ///
     /// The web backend fills `bytes` and the native backend fills `path`, so both are
-    /// handled rather than cfg'd apart.
+    /// handled on every target.
     fn take_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         let drafting = self.workspace.draft_mut().is_some();
@@ -277,8 +276,8 @@ impl DrawbarApp {
         }
     }
 
-    /// What changed in the version running: the change list in a tab, where the notes
-    /// can be fetched; the release they were published on in a window, where they cannot.
+    /// What changed in the running version. The web build shows the change list in the
+    /// app, where it can fetch the notes; the native build opens the release page.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn whats_new(&mut self, ctx: &egui::Context) {
         self.splash.open_news(ctx);
@@ -293,7 +292,7 @@ impl DrawbarApp {
     /// Persist changes from their own frame; an idle egui window may not repaint.
     /// Writes are rate-limited because dragging changes the list every frame.
     fn keep_up(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        /// How often the store is allowed to be rewritten, in seconds.
+        /// The minimum time between store writes, in seconds.
         const EVERY: f64 = 2.0;
 
         if self.workspace.revision() == self.saved {
@@ -301,7 +300,7 @@ impl DrawbarApp {
         }
         let now = ctx.input(|i| i.time);
         if now - self.saved_at < EVERY {
-            // Nothing else may be about to ask for a frame, and the write is still owed.
+            // Nothing else may request a frame, and the write is still pending.
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
             return;
         }
@@ -314,11 +313,11 @@ impl DrawbarApp {
         self.saved_at = now;
     }
 
-    /// Say what a write could not keep, the once.
+    /// Report what a write could not keep, once per change.
     ///
-    /// ⚠️ Every few seconds one of the two callers writes the list again. Announcing the
-    /// same losses each time would hold the status line against everything else that has
-    /// something to say, and fill the log inside an hour.
+    /// ⚠️ eframe writes the list every five seconds and [`Self::keep_up`] every two.
+    /// Repeating the same losses each time would crowd everything else off the status
+    /// line and fill the log within an hour.
     fn report(&mut self, left: crate::store::Left) {
         if left == self.left {
             return;
@@ -334,14 +333,15 @@ impl eframe::App for DrawbarApp {
         std::time::Duration::from_secs(5)
     }
 
-    /// eframe calls this on its own timer and on the way out, so an edit is kept
-    /// without anyone asking for it to be.
+    /// eframe calls this on a timer and at exit, so edits are kept without an explicit
+    /// save.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let left = crate::store::save(storage, &self.workspace, &self.queue);
         self.report(left);
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
-        // Not written from the frame that changed it, the way the theme is: a divider
-        // moves on every frame of a drag, and the whole store is rewritten each time.
+        // Unlike the theme, these are not written from the frame that changed them: a
+        // divider moves on every frame of a drag, and each write rewrites the whole
+        // store.
         self.browser.keep(storage);
         self.shell.keep(storage);
         #[cfg(not(target_arch = "wasm32"))]
@@ -349,16 +349,16 @@ impl eframe::App for DrawbarApp {
         self.saved = self.workspace.revision();
     }
 
-    /// eframe calls this once on the way out, after [`Self::save`].
+    /// eframe calls this once at exit, after `save`.
     #[cfg(not(target_arch = "wasm32"))]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.device.release();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Only the browser build: a native window cannot be dragged below the minimum
-        // size `main` gives it. Nothing under this draws, so no input reaches a shell
-        // with nowhere to lay itself out, and the state it holds is untouched.
+        // Browser build only: a native window cannot shrink below the minimum size
+        // `main` sets. Nothing below this draws, so no input reaches a shell with no room
+        // to lay out, and its state is untouched.
         #[cfg(target_arch = "wasm32")]
         if crate::shell::too_small(ctx.screen_rect().size()) {
             crate::shell::too_small_notice(ctx);
@@ -372,8 +372,8 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.queue,
         );
-        // An edit under a waiting entry changes what that write would do, and the queue
-        // says so from the occupant it already read.
+        // An edit to an asset with a waiting entry changes what that write would do; the
+        // queue diffs it again against the occupant it already read.
         crate::queue::follow(
             &self.workspace,
             &mut self.device,
@@ -386,24 +386,24 @@ impl eframe::App for DrawbarApp {
         self.workspace
             .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
         self.midi.report(&mut self.log);
-        // ⚠️ Taken every frame, whatever is in front: keys played over the library or the
-        // keyboard are dropped rather than left to sound when a document comes forward.
+        // ⚠️ Drained every frame, whatever is in front, so keys played over the library
+        // or the keyboard are dropped instead of sounding when a document comes forward.
         let played = self.midi.played(ctx.input(|input| input.time));
         self.take_dropped_files(ctx);
         drop_hint(ctx);
-        // Raised by a New pick of WAVs, and answered before anything else this frame
-        // draws: it is a modal over the whole window.
+        // Opened by choosing WAVs under New. It is drawn before anything else this frame
+        // because it is a modal over the whole window.
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
         let asked = self.splash.show(ctx);
         crate::about::dialog(ctx, &mut self.about, &self.log);
 
-        // Before the panels, so an editor open in this frame still has the focus Escape
-        // belongs to.
+        // Before the panels, so an editor open this frame still has focus when Escape is
+        // handled.
         self.browser.let_go(ctx);
 
-        // Outside in. A panel claims its space from what the ones before it left.
+        // Outside in: each panel claims its space from what the earlier ones left.
         let mut acts = self
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
@@ -414,11 +414,11 @@ impl eframe::App for DrawbarApp {
         self.bottom_dock(ctx, &mut acts);
         self.browser_dock(ctx, &mut acts);
         self.inspector_dock(ctx, &mut acts);
-        self.centre(ctx, &played, &mut acts);
+        self.center(ctx, &played, &mut acts);
 
-        // ⚠️ Between the panels and the acts they asked for: a piano library's plan is
-        // not in its bytes yet, and whatever would carry those bytes waits here until it
-        // is.
+        // ⚠️ Between the panels and the acts they requested: a piano library's plan is
+        // not in its bytes yet, and any act that would carry those bytes waits here until
+        // it is.
         let acts = self
             .document
             .settle(ctx, acts, &mut self.workspace, &mut self.log);
@@ -432,8 +432,8 @@ impl eframe::App for DrawbarApp {
             &mut self.queue,
             &mut self.log,
         );
-        // Last, so a command the user just asked for is ahead of the background read of
-        // the tree in the one slot the protocol allows.
+        // Last, so a command the user just requested takes the protocol's single slot
+        // ahead of the background tree read.
         self.device.pump();
 
         self.keep_up(ctx, frame);
@@ -441,18 +441,17 @@ impl eframe::App for DrawbarApp {
 }
 
 impl DrawbarApp {
-    /// The tab strip, and whatever the tab in front is a view of.
+    /// The tab strip, and the view of the front tab.
     ///
-    /// Keys `played` on a MIDI controller strike the key map of the document in front,
-    /// and nothing else.
-    fn centre(&mut self, ctx: &egui::Context, played: &Played, acts: &mut Vec<browser::Act>) {
+    /// Keys `played` on a MIDI controller reach only the key map of the front document.
+    fn center(&mut self, ctx: &egui::Context, played: &Played, acts: &mut Vec<browser::Act>) {
         let fill = ctx.style().visuals.panel_fill;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(fill))
             .show(ctx, |ui| {
                 self.tabs.ui(ui, &self.workspace, acts);
                 match self.tabs.showing() {
-                    // The library is what the centre shows when no tab claims it.
+                    // The center shows the library when no tab claims it.
                     None | Some(Spot::Library) => {
                         self.document.leave();
                         acts.extend(self.library.ui(
@@ -538,18 +537,18 @@ fn drop_hint(ctx: &egui::Context) {
     );
 }
 
-/// Dark, panel-like, with the accents kept for status alone.
+/// The dark theme, like the instrument panel, with accent colors reserved for status.
 fn dark() -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(0x16, 0x17, 0x19);
     visuals.window_fill = egui::Color32::from_rgb(0x1c, 0x1d, 0x20);
     visuals.faint_bg_color = egui::Color32::from_rgb(0x22, 0x23, 0x26);
-    // A group's border is the only thing between one section and the next, so it is
-    // lifted clear of egui's own hairline.
+    // A group's border is the only separator between sections, so it is brighter than
+    // egui's default hairline.
     visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x4e);
-    // ⚠️ Both slots carry the body ink: `noninteractive` is what `Visuals::text_color`
-    // answers, so a painted row and a button would otherwise disagree. The quieter
-    // caption ink is `caption`.
+    // ⚠️ Both slots use the body text color: `Visuals::text_color` returns
+    // `noninteractive`, so a painted row and a button would otherwise differ. The quieter
+    // caption color is `caption`.
     visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
     visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
     visuals.selection.bg_fill = egui::Color32::from_rgb(0x7a, 0x24, 0x24);
@@ -578,7 +577,7 @@ fn light() -> egui::Visuals {
     visuals
 }
 
-/// The one family with weight in it, for the word-mark and nothing else.
+/// The bold family, used only for the word mark.
 pub fn bold() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
@@ -586,8 +585,8 @@ pub fn bold() -> egui::FontFamily {
 /// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces.
 ///
 /// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
-/// Licence 1.0 beside them. egui bundles Ubuntu Light alone, so without these there is no
-/// heavier weight to ask for and no 400 to set the body in.
+/// Licence 1.0 beside them. egui bundles only Ubuntu Light, so without these there is no
+/// bold weight and no regular (400) weight for body text.
 pub(crate) fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
@@ -626,9 +625,9 @@ pub fn micro() -> egui::TextStyle {
     egui::TextStyle::Name("micro".into())
 }
 
-/// The metrics both faces share: the room a control is given, and the room around it.
+/// The spacing both themes share: the size of a control and the space around it.
 ///
-/// Theme-independent on purpose — flipping light to dark must not move anything.
+/// It is independent of the theme, so switching between light and dark moves nothing.
 pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(8.0, 4.0);
@@ -652,9 +651,6 @@ mod tests {
     use super::*;
     use crate::store::MAX_ENTITY;
 
-    /// ⚠️ eframe writes the list every five seconds and [`DrawbarApp::keep_up`] every
-    /// two. A save that announced its own losses each time would hold the status line
-    /// against everything else with something to say, and fill the log inside an hour.
     #[test]
     fn what_a_save_cannot_keep_is_said_once_however_often_the_list_is_written() {
         use eframe::App as _;
@@ -684,7 +680,7 @@ mod tests {
         app.save(&mut store);
         assert_eq!(said(&app), 1, "the same asset is not announced again");
 
-        // What is left out has changed, so it is worth saying again.
+        // A new loss is reported.
         huge(&mut app, "also-huge.nsmp");
         app.save(&mut store);
         assert_eq!(said(&app), 2);
@@ -701,7 +697,7 @@ mod tests {
         }
         assert_eq!(seen, ["system", "light", "dark"]);
         assert_eq!(choice, ThemeChoice::System, "the cycle closes");
-        // Anything the store cannot account for is the unset state, never a forced one.
+        // An unrecognized stored value reads as the unset choice.
         assert_eq!(ThemeChoice::read("moonlight"), ThemeChoice::System);
         assert_eq!(ThemeChoice::read(""), ThemeChoice::System);
     }
@@ -713,7 +709,7 @@ mod tests {
         for accent in [good, warn, bad, accent] {
             assert_ne!(accent(&dark), accent(&light));
         }
-        // The panel is dark and the paper is light, whatever egui's own defaults do.
+        // A dark panel and a light one, independent of egui's defaults.
         assert!(dark.panel_fill.intensity() < 0.2);
         assert!(light.panel_fill.intensity() > 0.8);
     }
@@ -756,7 +752,7 @@ mod tests {
             }
             let lit = contrast(accent(&visuals), panel);
             assert!(lit >= 3.0, "{where_} accent: {lit:.2}:1");
-            // The untravelled track is quieter than a mark but must remain visible.
+            // The untraveled track is quieter than a mark but must remain visible.
             let track = contrast(unlit(&visuals), panel);
             assert!(track >= 2.4, "{where_} track: {track:.2}:1");
             // Selection needs legible text and a fill distinct from the panel.
@@ -778,10 +774,10 @@ mod tests {
         }
     }
 
-    /// The light face is read on paper, where a mid grey is a whisper. Its body ink is
-    /// `#1c1c1c` and its captions `#282828`, and neither is allowed to drift back up.
+    /// A mid gray is too faint on the light panel, so body text is `#1c1c1c` and
+    /// captions `#282828`.
     #[test]
-    fn the_light_face_writes_in_ink_rather_than_pencil() {
+    fn the_light_theme_uses_near_black_text() {
         let light = light();
         let panel = light.panel_fill;
         assert_eq!(light.text_color(), egui::Color32::from_gray(0x1c));
@@ -791,14 +787,12 @@ mod tests {
         assert!(body >= 12.0, "light body: {body:.2}:1");
         let heading = contrast(caption(&light), panel);
         assert!(heading >= 12.0, "light caption: {heading:.2}:1");
-        // Weak text carries a whole sentence in the inspector, so it holds body-text
-        // contrast rather than the 3.0 a large mark would get away with.
+        // Weak text carries whole sentences in the inspector, so it needs body-text
+        // contrast, not the 3.0 a large mark could get by with.
         let weak = contrast(light.weak_text_color(), panel);
         assert!(weak >= 4.5, "light weak: {weak:.2}:1");
     }
 
-    /// A caption sits over the same panel as the body it heads, and is quieter than it
-    /// without becoming a grey nobody can read.
     #[test]
     fn a_caption_is_quieter_than_the_body_under_it_in_both_themes() {
         for visuals in [dark(), light()] {
@@ -832,7 +826,7 @@ mod tests {
         assert_eq!(body[1..], mark[1..]);
         assert!(
             !body[1..].is_empty(),
-            "a glyph Ubuntu lacks would draw as tofu"
+            "a glyph Ubuntu lacks would draw as an empty box"
         );
     }
 
@@ -840,7 +834,6 @@ mod tests {
     fn the_shared_metrics_do_not_depend_on_the_theme() {
         let mut style = egui::Style::default();
         metrics(&mut style);
-        // Both faces read one style, so there is nothing here to disagree about.
         let spacing = &style.spacing;
         assert_eq!(spacing.item_spacing, egui::vec2(8.0, 4.0));
         assert_eq!(spacing.button_padding, egui::vec2(7.0, 3.0));

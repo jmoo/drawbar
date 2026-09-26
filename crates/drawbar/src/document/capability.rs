@@ -1,8 +1,8 @@
 //! What a format holds, as the Advanced face states it: one row per capability the
 //! instrument editors know, each in the state this format puts it in.
 //!
-//! A field the format lacks is absent from the Basic face; this table is the one place
-//! that absence is written down, so the reader can tell a missing knob from a bug.
+//! A field the format lacks is absent from the Basic face. This table records the absence,
+//! so the reader can tell a missing knob from a bug.
 
 use eframe::egui;
 
@@ -17,7 +17,7 @@ pub enum State {
     ReadOnly,
     /// The format has no such field.
     Absent,
-    /// The bytes can only be made by encoding audio, which this app cannot yet do here.
+    /// The bytes can only be made by encoding audio, which this page cannot do yet.
     NeedsEncode,
     /// A round trip the test suite proves byte for byte.
     Verified,
@@ -53,8 +53,8 @@ impl State {
     }
 }
 
-/// One capability as one format holds it. `note` is the format's own detail — an
-/// offset, a limit, a bank — and may be empty.
+/// One capability as one format holds it. `note` is the format's own detail (an offset,
+/// a limit, a bank) and may be empty.
 pub struct Row {
     pub name: &'static str,
     pub state: State,
@@ -100,7 +100,7 @@ pub fn table(ui: &mut egui::Ui, rows: &[Row]) {
     let note = match absent.len() {
         0 => "every capability this editor knows is live on this format".to_string(),
         n => format!(
-            "absent here because it is absent there: {}{}",
+            "not in this format: {}{}",
             absent
                 .iter()
                 .take(3)
@@ -204,8 +204,8 @@ pub fn offsets(ui: &mut egui::Ui, rows: &[Offset]) {
     }
 }
 
-/// What the file says about itself: the same three columns, the key in words rather
-/// than as a figure.
+/// What the file says about itself: the same three columns, with the key in proportional
+/// type.
 pub fn facts(ui: &mut egui::Ui, rows: &[Fact]) {
     for row in rows {
         three(ui, (row.key, false), &row.value, row.note);
@@ -320,8 +320,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .any(|word| word
-                    .starts_with("absent here because it is absent there: release samples")),
+                .any(|word| word.starts_with("not in this format: release samples")),
             "{painted:?}"
         );
         for row in &rows {
@@ -339,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn every_state_has_its_own_glyph_and_word() {
+    fn every_state_has_its_own_word() {
         let all = [
             State::Editable,
             State::ReadOnly,

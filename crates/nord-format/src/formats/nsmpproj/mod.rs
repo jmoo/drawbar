@@ -1,5 +1,5 @@
-//! Nord Sample Editor projects (`.nsmpproj`) — the editor's own save file,
-//! from which it generates an [`nsmp`](super::nsmp) instrument.
+//! Nord Sample Editor projects (`.nsmpproj`): the editor's save file, from which
+//! it generates an [`nsmp`](super::nsmp) instrument.
 //!
 //! A project is plain text: one `SMACEditorProject { … }` [`tree`] of
 //! `key = value` fields and nested blocks, which this module reads and writes
@@ -8,25 +8,25 @@
 //!
 //! The tree, from the root down:
 //!
-//! - `document` — counts of what follows.
-//! - `audio_file` × N — the WAV files, by id: path as the editor saw it
-//!   (relative to the project), sample rate.
-//! - `common_zone` × N — one per zone, **high to low**, each holding one
-//!   `common_stroke`: the stroke's global id, the audio file it plays, its
-//!   trim and loop points in frames.
-//! - `instrument` — the one instrument every specimen holds: its name, a
-//!   `samplib_attrs` block of the instrument-side defaults, EQ, an
-//!   `instrument_zone` × N echo of the zones, and one `map_info` whose
-//!   `map_zone` × N (high to low) carry each zone's root key, key range and
-//!   per-stroke gain, detune and velocity window, and whose 92 `note_info`
-//!   blocks cover MIDI notes 17–108.
+//! - `document`: counts of what follows.
+//! - `audio_file` × N: the WAV files by id, each with its path relative to the
+//!   project and its sample rate.
+//! - `common_zone` × N: one per zone, high to low, each holding one
+//!   `common_stroke` with the stroke's global id, the audio file it plays, and
+//!   its trim and loop points in frames.
+//! - `instrument`: the single instrument every specimen holds. It has a name, a
+//!   `samplib_attrs` block of instrument-side defaults, EQ, an
+//!   `instrument_zone` × N echo of the zones, and one `map_info`. The
+//!   `map_info` holds 92 `note_info` blocks covering MIDI notes 17–108, and
+//!   `map_zone` × N (high to low) carrying each zone's root key, key range, and
+//!   per-stroke gain, detune and velocity window.
 //!
 //! Every `*.size` field restates the count of the blocks after it. Zone ids
 //! start at 129 and rise with the root key; stroke global ids and audio-file ids
 //! are the same numbers, rising from 1 in the same order.
 //!
 //! Frame positions are stored as `%f` decimals, counted at [`PROJECT_RATE`]
-//! rather than at the file's own rate.
+//! whatever the audio file's own rate.
 
 pub mod tree;
 
@@ -42,9 +42,9 @@ pub const MAGIC: &[u8] = b"SMACEditorProject {";
 /// The extension the editor saves under; this crate's name for the format.
 pub const FORMAT: &str = "nsmpproj";
 
-/// The `m_fileFormatVersion` every specimen carries. Not gated on read: keys
-/// are named, so a different version cannot be misread — a view that needs a
-/// key the file lacks fails naming it.
+/// The `m_fileFormatVersion` every specimen carries. A read does not check it: keys
+/// are named, so a different version cannot be misread, and a view that needs a
+/// missing key fails with the key's name.
 pub const KNOWN_FILE_FORMAT_VERSION: u32 = 54;
 
 /// The lowest key every specimen maps: the bottom zone always reaches F0.
@@ -58,12 +58,12 @@ pub const HIGHEST_NOTE: u8 = 108;
 pub const FIRST_ZONE_ID: u32 = 129;
 
 /// The rate every frame position in a project counts at, whatever the file's own
-/// `m_sampleRate` says — a 0.1 s file stores `m_end = 4410` at 22 050 Hz and at
+/// `m_sampleRate` says: a 0.1 s file stores `m_end = 4410` at 22 050 Hz and at
 /// 96 000 Hz alike. Inferred from specimens; not confirmed on hardware.
 pub const PROJECT_RATE: u64 = 44_100;
 
-/// A frame count restated at [`PROJECT_RATE`], to the nearest whole frame — the ratio
-/// does not divide for every rate, and the fields hold frames.
+/// A frame count restated at [`PROJECT_RATE`], rounded to the nearest whole frame,
+/// since the ratio does not divide evenly for every rate.
 ///
 /// `None` where the file declares no rate, and where the rounding would overflow.
 pub fn project_frames(frames: u64, rate: u32) -> Option<u64> {
@@ -78,11 +78,11 @@ pub fn project_frames(frames: u64, rate: u32) -> Option<u64> {
 }
 
 /// Lowest secondary start the editor keeps, in frames. Below it a stroke's
-/// `m_startSecondary` is repaired on load, see [`repaired_secondary_start`].
+/// `m_startSecondary` is repaired on load; see [`repaired_secondary_start`].
 /// Inferred from specimens; not confirmed on hardware.
 pub const MIN_SECONDARY_START: f64 = 92.0;
 
-/// Lowest loop start the editor keeps, in frames, see [`repaired_loop_start`].
+/// Lowest loop start the editor keeps, in frames; see [`repaired_loop_start`].
 /// Inferred from specimens; not confirmed on hardware.
 pub const MIN_LOOP_START: f64 = 92.0;
 
@@ -107,9 +107,9 @@ pub fn default_secondary_start(end: f64) -> f64 {
 /// The secondary start the editor encodes from, given what the project states.
 ///
 /// On load the editor keeps `stated` when it lies between [`MIN_SECONDARY_START`] and
-/// a ceiling — half of `stop`, or the loop start when that is lower and the loop is
-/// switched on — and otherwise replaces it with half the ceiling, floored at
-/// [`MIN_SECONDARY_START`]. A 441-frame stroke stating 1 encodes from 110.25.
+/// a ceiling, and otherwise replaces it with half the ceiling, floored at
+/// [`MIN_SECONDARY_START`]. The ceiling is half of `stop`, or the loop start when the
+/// loop is on and its start is lower. A 441-frame stroke stating 1 encodes from 110.25.
 /// Every position is in the file's frames.
 /// Inferred from specimens; not confirmed on hardware.
 pub fn repaired_secondary_start(stated: f64, stop: f64, loop_start: Option<f64>) -> f64 {
@@ -132,15 +132,15 @@ pub struct Project {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFile {
     pub id: u32,
-    /// The path as the editor stored it — relative to the project's directory
-    /// in every specimen.
+    /// The path as the editor stored it, relative to the project's directory in
+    /// every specimen.
     pub path: String,
     pub sample_rate: u32,
 }
 
 /// One `common_stroke`: which file a zone plays and where in it.
 ///
-/// Positions are frames, see the module doc.
+/// Positions are in frames; see the module doc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     /// The `common_zone` this stroke sits in.
@@ -152,12 +152,12 @@ pub struct Stroke {
     pub end: f64,
     pub start: f64,
     /// `m_startSecondary`: the attack analysis the editor stores, in file frames. The
-    /// encoded stream resynchronises here, measured from [`start`](Stroke::start) —
-    /// after the repair in [`encoded_secondary_start`](Stroke::encoded_secondary_start).
+    /// encoded stream resynchronizes here, measured from [`start`](Stroke::start), after
+    /// the repair in [`encoded_secondary_start`](Stroke::encoded_secondary_start).
     pub start_secondary: f64,
     pub stop: f64,
     pub loop_enabled: bool,
-    /// `m_loopStart`, in file frames, as the project states it — the editor encodes
+    /// `m_loopStart`, in file frames, as the project states it. The editor encodes
     /// from [`encoded_loop_start`](Stroke::encoded_loop_start).
     pub loop_start: f64,
     /// `m_loopLengthLong`.
@@ -168,35 +168,35 @@ pub struct Stroke {
     /// `m_loopXFModeLong`. Mode 0 is the linear fade; what mode 1 does to the audio
     /// is not decoded.
     pub loop_crossfade_mode: u32,
-    /// `m_loopDecayEnabled`. Reaches the instrument nowhere.
+    /// `m_loopDecayEnabled`. Does not reach the instrument.
     pub loop_decay_enabled: bool,
     /// `m_loopDecay`. Wide stroke headers carry the amount; v2 does not.
     pub loop_decay: f64,
-    /// `m_loopDetune`. Reaches the instrument nowhere.
+    /// `m_loopDetune`. Does not reach the instrument.
     pub loop_detune: i32,
     /// `m_shortLoopEnabled`: the short loop starts where the long one does and runs
     /// for [`short_loop_length`](Stroke::short_loop_length) instead.
     pub short_loop_enabled: bool,
     /// `m_loopLengthShort`.
     pub short_loop_length: f64,
-    /// `m_loopXFadeShort` — the short loop's crossfade as a **percentage of
-    /// [`short_loop_length`](Stroke::short_loop_length)**, where the long loop's
-    /// [`loop_crossfade`](Stroke::loop_crossfade) is a frame count outright. Values above
-    /// 100 fade for longer than the loop lasts; the editor does not clamp them.
+    /// `m_loopXFadeShort`: the short loop's crossfade as a percentage of
+    /// [`short_loop_length`](Stroke::short_loop_length). ⚠️ The long loop's
+    /// [`loop_crossfade`](Stroke::loop_crossfade) is a frame count. Values above 100
+    /// fade for longer than the loop lasts; the editor does not clamp them.
     /// Inferred from specimens; not confirmed on hardware.
     pub short_loop_crossfade: u32,
-    /// `m_shortLoopUsesPitch`. Reaches the instrument nowhere.
+    /// `m_shortLoopUsesPitch`. Does not reach the instrument.
     pub short_loop_uses_pitch: bool,
 }
 
 impl Stroke {
-    /// The loop start the editor encodes this stroke from, in file frames — see
+    /// The loop start the editor encodes this stroke from, in file frames; see
     /// [`repaired_loop_start`].
     pub fn encoded_loop_start(&self) -> f64 {
         repaired_loop_start(self.loop_start)
     }
 
-    /// The secondary start the editor encodes this stroke from, in file frames — see
+    /// The secondary start the editor encodes this stroke from, in file frames; see
     /// [`repaired_secondary_start`].
     pub fn encoded_secondary_start(&self) -> f64 {
         repaired_secondary_start(
@@ -233,8 +233,8 @@ pub struct ZoneStroke {
 ///
 /// Inferred from specimens; not confirmed on hardware.
 ///
-/// Each value is carried verbatim: nothing observed distinguishes a flag from a depth,
-/// so a rewrite must not collapse one to 0 or 1.
+/// Each value is kept as stored. Nothing observed distinguishes a flag from a depth, so
+/// a rewrite must not collapse one to 0 or 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VelocityDefaults {
     /// `m_atkVelocityAmount`.
@@ -281,10 +281,10 @@ pub enum StrokeField {
     /// `m_loopXFadeShort`.
     ShortLoopCrossfade(u32),
     ShortLoopUsesPitch(bool),
-    /// `m_gain`, a linear factor — the editor writes 1 for untouched.
+    /// `m_gain`, a linear factor; the editor writes 1 for an untouched stroke.
     Gain(f64),
     /// `m_velocityMin`. Not checked against the window's other end: an
-    /// inverted window silences the stroke, which is a thing to store.
+    /// inverted window silences the stroke, which is a valid thing to store.
     VelocityMin(u8),
     /// `m_velocityMax`, under the same rule as [`StrokeField::VelocityMin`].
     VelocityMax(u8),
@@ -298,8 +298,8 @@ enum Block {
 }
 
 impl StrokeField {
-    /// One `field = value` in the vocabulary [`Stroke`] and [`ZoneStroke`]
-    /// spell, so a CLI, a UI and a script name a stroke's fields the same way.
+    /// Parse one `field = value` using the field names of [`Stroke`] and
+    /// [`ZoneStroke`], so a CLI, a UI and a script name a stroke's fields the same way.
     /// Flags take `on`/`off`, `yes`/`no`, `true`/`false` or `1`/`0`.
     pub fn parse(field: &str, value: &str) -> Result<StrokeField, ParseError> {
         use StrokeField::*;
@@ -364,11 +364,11 @@ impl StrokeField {
 /// recorded at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewZone {
-    /// The audio file's path, as the editor should find it — relative paths
-    /// resolve from the project's directory.
+    /// The audio file's path as the editor should find it. Relative paths resolve
+    /// from the project's directory.
     pub path: String,
     pub sample_rate: u32,
-    /// Frames in the file, at 44 100 Hz (see the module doc).
+    /// Frames in the file, counted at [`PROJECT_RATE`].
     pub frames: u64,
     pub root_key: u8,
 }
@@ -484,8 +484,8 @@ impl Project {
         self.root.get("m_fileFormatVersion")
     }
 
-    /// `(product, version)` — `("Nord Sample Editor", "v4.36_b1616")` from the
-    /// editor.
+    /// `(product, version)`, such as `("Nord Sample Editor", "v4.36_b1616")` from
+    /// the editor.
     pub fn created_by(&self) -> Result<(String, String), ParseError> {
         Ok((
             self.root.get("m_createdByProdName")?,
@@ -506,7 +506,7 @@ impl Project {
             .collect()
     }
 
-    /// Every `common_stroke`, in file order — zones high to low.
+    /// Every `common_stroke`, in file order: zones high to low.
     pub fn strokes(&self) -> Result<Vec<Stroke>, ParseError> {
         let mut out = Vec::new();
         for zone in self.root.blocks("common_zone") {
@@ -539,7 +539,7 @@ impl Project {
         Ok(out)
     }
 
-    /// The instrument block. Every specimen holds exactly one.
+    /// The instrument block. Every specimen holds one.
     fn instrument(&self) -> Result<&Node, ParseError> {
         self.root.require("instrument")
     }
@@ -551,13 +551,13 @@ impl Project {
             .ok_or_else(|| ParseError::AssertFail("project has no instrument block".into()))
     }
 
-    /// The instrument's name — what the generated `.nsmp` is called.
+    /// The instrument's name, which the generated `.nsmp` takes.
     pub fn name(&self) -> Result<String, ParseError> {
         self.instrument()?.get("m_name")
     }
 
-    /// `m_loopDecayEnabled` on the instrument, which is a different object from the
-    /// one on each stroke. Reaches the generated instrument nowhere.
+    /// `m_loopDecayEnabled` on the instrument, a separate field from the one on each
+    /// stroke. It does not reach the generated instrument.
     pub fn loop_decay_enabled(&self) -> Result<bool, ParseError> {
         flag(self.instrument()?, "m_loopDecayEnabled")
     }
@@ -578,8 +578,8 @@ impl Project {
         Ok(active)
     }
 
-    /// `map_info.m_gain` — the instrument's own playing gain, a linear factor on top
-    /// of every zone's own.
+    /// `map_info.m_gain`: the instrument's playing gain, a linear factor applied on
+    /// top of each zone's.
     pub fn map_gain(&self) -> Result<f64, ParseError> {
         self.instrument()?.require("map_info")?.get("m_gain")
     }
@@ -588,7 +588,7 @@ impl Project {
         self.instrument_mut()?.set_field("m_name", name)
     }
 
-    /// The instrument's zones, in file order — high to low.
+    /// The instrument's zones, in file order: high to low.
     pub fn zones(&self) -> Result<Vec<Zone>, ParseError> {
         let map = self.instrument()?.require("map_info")?;
         map.blocks("map_zone")
@@ -635,7 +635,7 @@ impl Project {
         self.map_zone_mut(zone_id)?.set_field("m_rootKey", key)
     }
 
-    /// Set a zone's key range. Nothing checks it against the neighbours: the
+    /// Set a zone's key range. Nothing checks it against the neighbors: the
     /// editor stores whatever it is given and repairs overlaps on load.
     pub fn set_key_range(&mut self, zone_id: u32, bottom: u8, top: u8) -> Result<(), ParseError> {
         if bottom > top {
@@ -644,8 +644,8 @@ impl Project {
                 bound: "a key range with its bottom at or below its top".into(),
             });
         }
-        // Both ends before either lands: a half-written range is a zone the
-        // editor plays over keys the caller never asked for.
+        // Check both ends before writing either: a half-written range would play
+        // the zone over keys the caller never asked for.
         let (bottom, top) = (note(bottom)?, note(top)?);
         let zone = self.map_zone_mut(zone_id)?;
         zone.set_field("m_btmNote", bottom)?;
@@ -694,7 +694,7 @@ impl Project {
         Ok(())
     }
 
-    /// The `common_stroke` and `map_stroke` a global id names.
+    /// The `common_stroke` or `map_stroke` a global id names, as `block` selects.
     fn stroke_mut(&mut self, global_id: u32, block: Block) -> Result<&mut Node, ParseError> {
         let want = global_id.to_string();
         let (zones, inner) = match block {
@@ -707,7 +707,7 @@ impl Project {
             .ok_or_else(|| ParseError::AssertFail(format!("no {inner} with global id {global_id}")))
     }
 
-    /// Move one field of one stroke, leaving every other byte where it was.
+    /// Set one field of one stroke, leaving every other byte unchanged.
     pub fn set_stroke_field(
         &mut self,
         global_id: u32,
@@ -725,22 +725,21 @@ impl Project {
             .set_field("m_fullName", path)
     }
 
-    /// A project laid out the way the editor lays one out after *Import
-    /// Auto…*: one zone per file, zone ids from [`FIRST_ZONE_ID`] rising with
-    /// the root key, key ranges from [`derive_top_notes`] down to
-    /// [`LOWEST_NOTE`], every other field at the value the editor writes for
-    /// an untouched import.
+    /// A project laid out as the editor lays one out after *Import Auto…*: one zone
+    /// per file, zone ids from [`FIRST_ZONE_ID`] rising with the root key, key ranges
+    /// from [`derive_top_notes`] down to [`LOWEST_NOTE`], and every other field at the
+    /// value the editor writes for an untouched import.
     ///
     /// `modified` is the Unix time stamped on every `m_modifyDate`.
     ///
     /// `m_crc` and `m_crcProj` carry the editor's checksum of the generated
-    /// instrument, whose algorithm is not derived, and are written as 0;
-    /// `m_startSecondary` is an analysis result within a percent of `end / 8`
-    /// on every specimen, and is written as exactly that.
+    /// instrument. Its algorithm is unknown, so both are written as 0.
+    /// `m_startSecondary` is an analysis result within a percent of `end / 8` on
+    /// every specimen, and is written as `end / 8`.
     /// Inferred from specimens; not confirmed on hardware.
     ///
-    /// Nord Sample Editor 3 opens the result — asking for the audio files if
-    /// they are not where the paths say — and repairs derived state on load.
+    /// Nord Sample Editor 3 opens the result, asks for the audio files if they are
+    /// not where the paths say, and repairs derived state on load.
     pub fn new(name: &str, zones: &[NewZone], modified: u32) -> Result<Project, ParseError> {
         if zones.is_empty() {
             return Err(ParseError::AssertFail(
@@ -935,11 +934,11 @@ fn active_eq_fields(node: &Node, scope: &str) -> Result<Vec<String>, ParseError>
 
 /// A `common_stroke` from frame 1 to the end of the file, with the loop points
 /// the editor derives for an untouched import: the loop starts halfway, runs to
-/// one frame short of the end, and cross-fades over 15% of its length.
+/// one frame short of the end, and crossfades over 15% of its length.
 ///
-/// Inferred from specimens; not confirmed on hardware. A few hold a loop start half
-/// a frame above `end / 2` — an analysis result, like `m_startSecondary`, that
-/// nothing here reproduces.
+/// Inferred from specimens; not confirmed on hardware. A few specimens hold a loop
+/// start half a frame above `end / 2`, an analysis result like `m_startSecondary`
+/// that this crate does not reproduce.
 fn common_stroke(global_id: u32, frames: u64, date: &str) -> Node {
     let end = frames as f64;
     // The editor writes `m_start = 1` for an untouched import; the encoded audio
@@ -1109,15 +1108,15 @@ const MAP_STROKE_DEFAULTS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    /// Every position in a project counts at the project's own rate, so a file
-    /// recorded at another one is restated rather than stored as it counted.
+    /// Positions count at the project rate, so a file recorded at another rate is
+    /// restated.
     #[test]
     fn a_frame_count_is_restated_at_the_project_rate() {
         assert_eq!(project_frames(4_410, 44_100), Some(4_410));
         assert_eq!(project_frames(2_205, 22_050), Some(4_410));
         assert_eq!(project_frames(9_600, 96_000), Some(4_410));
         assert_eq!(project_frames(1, 48_000), Some(1), "rounded, not floored");
-        assert_eq!(project_frames(1, 0), None, "a rateless file has no basis");
+        assert_eq!(project_frames(1, 0), None, "a file with no rate");
         assert_eq!(project_frames(u64::MAX, 44_100), None, "no wrapping");
     }
 
@@ -1200,7 +1199,7 @@ mod tests {
         let back = Project::parse(&text).unwrap();
         assert_eq!(back, project);
         assert_eq!(back.render(), text);
-        // The editor's one oddity: an empty value keeps its trailing space.
+        // An empty value keeps its trailing space, as the editor writes it.
         assert!(text.contains("      m_buffer = \n"));
     }
 
@@ -1220,7 +1219,7 @@ mod tests {
         assert_eq!((zones[0].bottom_note, zones[0].top_note), (62, 100));
         assert_eq!(project.audio_files().unwrap()[1].path, "moved/c4.wav");
 
-        // Five lines moved and nothing else.
+        // Five lines changed and nothing else.
         let changed = before
             .lines()
             .zip(after.lines())
@@ -1274,7 +1273,7 @@ mod tests {
             short_loop_crossfade: 0,
             short_loop_uses_pitch: true,
         };
-        // The repaired loop start is the ceiling the secondary start is repaired to.
+        // The repaired loop start sets the ceiling for the secondary start.
         assert_eq!(stroke(0.0).encoded_loop_start(), 92.0);
         assert_eq!(stroke(0.0).encoded_secondary_start(), 92.0);
         assert_eq!(stroke(8_000.0).encoded_secondary_start(), 5_512.5);
@@ -1345,7 +1344,7 @@ mod tests {
             .count();
         assert_eq!(changed, 5);
         assert_eq!(before.lines().count(), after.lines().count());
-        // Only the addressed stroke moved.
+        // Only the addressed stroke changed.
         assert!(!stroke(&project, 1).loop_enabled);
         assert_eq!(zone_stroke(&project, 3).gain, 1.0);
     }

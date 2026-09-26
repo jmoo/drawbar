@@ -1,4 +1,4 @@
-//! Nord Wave (`.nwp`, `.nwsy`) — container-verified, bodies unmapped.
+//! Nord Wave (`.nwp`, `.nwsy`): container-verified, bodies unmapped.
 //!
 //! ⚠️ The program tag is three characters plus a NUL: `nwp\0`.
 

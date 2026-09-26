@@ -10,10 +10,9 @@ the item opens the release page instead.
 
 **Help ▸ Welcome** shows what works today, instrument by instrument, three
 places to start (connect an instrument, open files, or read this guide) and the
-trademark disclaimer. In the browser it opens by itself the first time you ever
-run drawbar there.
-[What is supported](../getting-started/support.md) argues the same claims at
-length.
+trademark disclaimer. In the browser it opens by itself the first time you run
+drawbar there. [What is supported](../getting-started/support.md) covers the
+same claims in more detail.
 
 **Help ▸ Copy activity log** puts the whole log on the clipboard, for a bug
 report.
@@ -21,14 +20,13 @@ report.
 **Help ▸ About drawbar** opens the About box, which links to the source, this
 guide, the releases and the issue tracker.
 
-**This build** is what you are running: the version, the target, the browser
-and whether it offers USB when drawbar is in one, which instrument is
-connected, and how many files this computer is holding.
-**Copy diagnostics** puts those lines and the activity log's last 200 entries on
-the clipboard. Paste them into a bug report and the report says what you were
-running.
+**This build** lists what you are running: the version and target, the browser
+and whether it offers WebUSB when drawbar runs in one, the connected instrument,
+and how many files this computer holds. **Copy diagnostics** puts those lines and
+the activity log's last 200 entries on the clipboard. Paste them into a bug
+report so it says what you were running.
 
-**Licences** is every licence a copy of drawbar has to carry: drawbar's own, the
+**Licenses** is every license a copy of drawbar has to carry: drawbar's own, the
 bundled fonts and icons, the Stage field maps it decodes with, and the Rust
 crates compiled in. Click a row to read it and to reach the project it covers.
 The trademark disclaimer is at the foot of the box.

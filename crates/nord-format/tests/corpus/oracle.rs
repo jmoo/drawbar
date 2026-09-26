@@ -1,7 +1,7 @@
-//! Oracle-sidecar checking: `<specimen>.oracle.json` is the corpus's
-//! machine-readable record of what a differential capture pinned, and this is
-//! the reader the corpus README promises — a specimen joins the sweep by
-//! gaining a sidecar there, not by anyone adding a case here.
+//! Oracle-sidecar checking. `<specimen>.oracle.json` records what a differential
+//! capture established about its specimen, in machine-readable form. Adding a
+//! sidecar beside a specimen adds its checks to the sweep; no case is written
+//! here.
 
 use crate::lookup;
 use crate::sidecar::{expectation, sidecar_of, SPECIMEN_KEYS};
@@ -35,8 +35,8 @@ pub fn check_specimen(path: &Path, bytes: &[u8], entity: &Entity) -> Result<(), 
             fs::read(&other).map_err(|e| Failed::from(format!("same_body_as {sibling}: {e}")))?;
         if other_bytes != bytes {
             wrong.push(format!(
-                "no longer byte-identical to {sibling} — the corpus gained a capture that \
-                 moves something, so this specimen can now say more"
+                "not byte-identical to {sibling}; replace `same_body_as` with the fields \
+                 that differ"
             ));
         }
     }
@@ -86,7 +86,7 @@ fn as_str(v: &Value) -> &str {
     v.as_str().expect("a checked string")
 }
 
-/// `+5`, `5` and ` 5 ` are one value, and case never distinguishes two.
+/// `+5`, `5`, and ` 5 ` are one value, and case is ignored.
 fn normalize(s: &str) -> String {
     s.trim().trim_start_matches('+').to_ascii_lowercase()
 }
@@ -99,9 +99,9 @@ fn number(s: &str) -> Option<f64> {
     s.parse().ok()
 }
 
-/// A sidecar value matches if it equals any of the field's spellings, or —
-/// where both sides read as numbers — sits within `slack` of one (exactly on
-/// it, when no slack is given).
+/// A sidecar value matches if it equals any of the field's spellings or, when
+/// both read as numbers, is within `slack` of one. Without a slack, the numbers
+/// must be equal.
 fn matches(want: &str, spellings: &[String], slack: Option<f64>) -> bool {
     let want = normalize(want);
     if spellings.iter().any(|s| normalize(s) == want) {
@@ -136,13 +136,13 @@ fn check_trait(name: &str, entity: &Entity, wrong: &mut Vec<String>) {
             let main = organ.drawbars(OrganModel::B3, Preset::One);
             if bass != [0, 0] && [main[0], main[1]] == bass {
                 wrong.push(
-                    "bass drawbars also appear in the main block's shadow nibbles — \
+                    "bass drawbars also appear in the main block's shadow nibbles; \
                      the accessor may be reading the wrong place"
                         .into(),
                 );
             }
         }
-        // The zone key ranges were moved by hand, so they must *not* be the
+        // The zone key ranges were moved by hand, so they must differ from the
         // layout the root keys imply.
         "zone_top_notes_overridden" => {
             let Entity::Sample(Sample::V2(s)) = entity else {

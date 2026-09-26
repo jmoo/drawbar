@@ -1,14 +1,14 @@
-//! What the instrument says about itself.
+//! What the instrument reports about itself.
 
 use eframe::egui;
 
 use crate::device::Device;
 
-/// What the instrument said about itself, for the times that is the question.
+/// The facts the instrument reported at connect: the USB descriptors, and the endpoint-0
+/// identity the desktop transport can reach.
 ///
-/// Read-only and asked for once, at connect: the descriptors, and the endpoint-0
-/// identity the desktop transport can reach. Nothing here opens a session. The INFO
-/// panel in [`crate::inspector`] is where it is collapsed and kept.
+/// Read once and read-only; nothing here opens a session. Drawn under the collapsible
+/// info header in [`crate::inspector`].
 pub fn about(ui: &mut egui::Ui, device: &Device) {
     let Some(card) = device.state.card() else {
         return;
@@ -51,8 +51,8 @@ pub fn about(ui: &mut egui::Ui, device: &Device) {
     );
     ui.label(
         egui::RichText::new(
-            "The build and kind words are what the device answers at their \
-             requests; what they mean is not pinned down.",
+            "The build and kind words are the device's answers to those requests; \
+             their meaning is unknown.",
         )
         .small()
         .weak()

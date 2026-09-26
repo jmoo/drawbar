@@ -1,19 +1,19 @@
-//! Field-path lookup over a decoded [`Entity`] — the consumer side of the
-//! corpus's oracle-sidecar field paths.
+//! Field-path lookup over a decoded [`Entity`], for the field paths that oracle
+//! sidecars name.
 //!
 //! A path is either a registry field (`center_panel.transpose`), which any
-//! `#[bitbody]` format answers by declaration, or one of the documented
-//! accessor paths — the organ accessors, the part mix, the settings selection,
-//! a song's program list, a sample's zone layout — which are meaning rather
-//! than placement and are spelled here by hand.
+//! `#[bitbody]` format answers from its declaration, or an accessor path: the
+//! organ accessors, the part mix, the settings selection, a song's program list,
+//! or a sample's zone layout. Accessor paths are derived values with no single
+//! bit placement, so they are spelled here by hand.
 
 use nord_format::bank::Item;
 use nord_format::formats::ne5::{self, OrganModel, Preset};
 use nord_format::{Entity, Live, Program, Sample, Settings, Song};
 
-/// Every spelling `path` decodes to in `entity` — a sidecar value matching any
-/// of them matches the field. Errs on a path the entity cannot answer, which is
-/// a sidecar defect, not a mismatch.
+/// Every spelling of the value at `path` in `entity`. A sidecar value that
+/// matches any of them matches the field. An error means the entity has no such
+/// path, so the sidecar itself is wrong.
 pub fn lookup(entity: &Entity, path: &str) -> Result<Vec<String>, String> {
     match entity {
         Entity::Song(Song::Electro5(song)) => match path {
@@ -170,8 +170,7 @@ fn model(name: &str) -> Result<OrganModel, String> {
     }
 }
 
-/// The organ has two presets. Anything else is a sidecar defect, not a preset the
-/// accessor should fold onto one of them.
+/// The organ has two presets. Any other digit is a sidecar defect.
 fn preset(digit: &str) -> Result<Preset, String> {
     match digit {
         "1" => Ok(Preset::One),

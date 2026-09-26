@@ -1,9 +1,8 @@
-//! The keyboard tab: one instrument, with the folder switched inside it.
+//! The keyboard tab: the attached instrument, one folder at a time.
 //!
-//! Two shapes, because the instrument has two. A folder divided into banks of equal
-//! slots is a map of them; a folder whose items differ in size and in what they say is a
-//! list. Both draw the same slot, so a cell and a row answer the same gestures and offer
-//! the same menu.
+//! A folder divided into banks of equal slots is drawn as a map; a folder whose items
+//! differ in size and content is drawn as a list. Both draw the same slot, so a cell and
+//! a row respond to the same gestures and offer the same menu.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -24,40 +23,40 @@ use crate::strings::{place, shown};
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
-/// The bands over whatever the folder is drawn as.
+/// The heights of the bands above the folder.
 const HEADER: f32 = 28.0;
 const SWITCHER: f32 = 26.0;
 const BANKS: f32 = 24.0;
 
-/// A list's column heads, and a row under them.
+/// The heights of a list's column heads and of one row.
 const HEAD: f32 = 20.0;
 const ROW: f32 = 24.0;
 
-/// A slot in the map, and the grid they are laid out in.
+/// A map cell's size, and the gap between cells.
 const CELL: f32 = 42.0;
 const CELL_GAP: f32 = 4.0;
 
-/// How many cells the map itself lays across. A picker drawn somewhere narrower or
-/// wider asks [`grid`] for its own count.
+/// Cells per row in the map. A picker drawn narrower or wider passes its own count to
+/// [`grid`].
 pub const COLUMNS: usize = 5;
 
-/// The room a band keeps at each end, and the gap between its parts.
+/// A band's padding at each end, and the gap between its parts.
 const PAD: f32 = 8.0;
 const GAP: f32 = 6.0;
 
-/// A chip's own height and the room it keeps at each end.
+/// A chip's height and its padding at each end.
 const CHIP: f32 = 19.0;
 const CHIP_PAD: f32 = 6.0;
 
-/// The room a cell keeps inside its own border, and the gap between a chip's parts.
+/// A cell's padding inside its border, and the gap between a chip's parts.
 const INSET: f32 = 5.0;
 
-/// A glyph in a band, and the smaller one at the end of a row.
+/// The size of a glyph in a band, and of the smaller one at the end of a row.
 const GLYPH: f32 = 13.0;
 const SMALL: f32 = 11.0;
 
-/// The faces this view paints in. Painted rather than laid out, so the sizes are here
-/// rather than resolved from the named styles in [`crate::app`].
+/// Font sizes for this view. It paints its text directly, so the sizes are set here
+/// instead of taken from the named styles in [`crate::app`].
 const NAME: f32 = 12.0;
 const CELL_NAME: f32 = 11.0;
 const MONO: f32 = 10.5;
@@ -66,8 +65,8 @@ const ADDRESS: f32 = 9.5;
 /// The gap between two columns of a list.
 const LIST_GAP: f32 = 10.0;
 
-/// The list geometry every folder drawn as a list shares: an address, a name, a size,
-/// the one fact that folder carries, and the state at the end.
+/// The columns every list shares: address, name, size, the folder's own fact, and the
+/// state at the end.
 const LIST: [Track; 5] = [
     Track::Px(58.0),
     Track::Share(1.5),
@@ -76,11 +75,11 @@ const LIST: [Track; 5] = [
     Track::Px(20.0),
 ];
 
-/// The centre's view of the attached instrument.
+/// The center's view of the attached instrument.
 #[derive(Default)]
 pub struct Keyboard {
-    /// The bank each folder is showing, by the raw class number. A folder keeps the bank
-    /// it was left on while the switcher is somewhere else.
+    /// The bank each folder shows, by raw class number. A folder keeps its bank while
+    /// another folder is shown.
     banks: BTreeMap<u32, u32>,
 }
 
@@ -109,7 +108,7 @@ impl Keyboard {
             nothing(ui, "Nothing is attached.");
             return acts;
         }
-        // The bands and the body are flush: a folder's own lines are the only rules.
+        // The bands and the body are flush; the folder's own lines are the only rules.
         ui.spacing_mut().item_spacing.y = 0.0;
         let class = tabs.keyboard_class().unwrap_or(ObjectClass::Program);
         header(ui, device, class, &mut acts);
@@ -123,8 +122,8 @@ impl Keyboard {
         acts
     }
 
-    /// The bank a folder is showing: what was picked, while the folder still has it, and
-    /// otherwise the first bank read.
+    /// The bank a folder shows: the one picked, if the folder still has it, otherwise the
+    /// first bank read.
     fn bank(&self, class: ObjectClass, banks: &[u32]) -> Option<u32> {
         self.banks
             .get(&class.to_raw())
@@ -190,8 +189,8 @@ impl Keyboard {
     }
 }
 
-/// The grid of 42 px cells a bank of slots is laid out in, `columns` across, whoever is
-/// drawing them. `each` is handed one slot's index and the rect it sits in.
+/// Lay out a bank of slots as a grid of 42 px cells, `columns` across. `each` gets one
+/// slot's index and its rect.
 pub fn grid(
     ui: &mut egui::Ui,
     columns: usize,
@@ -223,14 +222,13 @@ pub fn grid(
     }
 }
 
-/// The width a grid of `columns` cells wants, for a caller laying out room for one.
+/// The width a grid of `columns` cells needs.
 pub fn grid_width(columns: usize) -> f32 {
     2.0 * PAD + CELL * columns as f32 + CELL_GAP * (columns - 1) as f32
 }
 
-// ---- the bands over every folder ---------------------------------------------------
-
-/// 28 px: what is attached, how stale what is on screen is, and the way to refresh it.
+/// The 28 px header: what is attached, how old the shown contents are, and a button to
+/// read them again.
 fn header(ui: &mut egui::Ui, device: &Device, class: ObjectClass, acts: &mut Vec<Act>) {
     let now = ui.input(|input| input.time);
     let said = freshness(device, class, now);
@@ -259,7 +257,7 @@ fn header(ui: &mut egui::Ui, device: &Device, class: ObjectClass, acts: &mut Vec
     });
 }
 
-/// The firmware, and how long ago the folder on show last answered.
+/// The firmware, and how long ago the shown folder was read.
 fn freshness(device: &Device, class: ObjectClass, now: f64) -> String {
     let mut said: Vec<String> = device.state.firmware().into_iter().collect();
     if let Some(at) = device.state.scan.read_at(class) {
@@ -268,7 +266,7 @@ fn freshness(device: &Device, class: ObjectClass, now: f64) -> String {
     said.join(" · ")
 }
 
-/// How long ago something was read, in the width the header has for it.
+/// How long ago something was read, short enough for the header.
 fn ago(seconds: f64) -> String {
     let seconds = seconds.max(0.0);
     match seconds < 60.0 {
@@ -277,10 +275,10 @@ fn ago(seconds: f64) -> String {
     }
 }
 
-/// 26 px: one chip per folder, the one on show wearing the selection.
+/// The 26 px switcher: one chip per folder, with the shown one highlighted.
 ///
-/// Switching is a switch and nothing more — every folder here has already been read, and
-/// asking the instrument again is what the header's own chip is for.
+/// Switching reads nothing. Every folder here has already been read, and the header's
+/// chip reads it again.
 fn switcher(ui: &mut egui::Ui, device: &Device, on: ObjectClass, acts: &mut Vec<Act>) {
     let classes = device.state.classes();
     let rooms: Vec<Option<String>> = classes
@@ -314,8 +312,8 @@ fn switcher(ui: &mut egui::Ui, device: &Device, on: ObjectClass, acts: &mut Vec<
     });
 }
 
-/// 24 px: the banks a folder divides into, and what the one on show holds. The bank the
-/// click asked for, if it asked for one.
+/// The 24 px bank row: the folder's banks, and what the shown one holds. Returns the
+/// bank clicked, if any.
 fn bank_row(ui: &mut egui::Ui, on: u32, banks: &[u32], said: &str) -> Option<u32> {
     let names: Vec<String> = banks.iter().map(u32::to_string).collect();
     let mut picked = None;
@@ -340,7 +338,7 @@ fn bank_row(ui: &mut egui::Ui, on: u32, banks: &[u32], said: &str) -> Option<u32
     picked
 }
 
-/// What a bank holds and what is on its way to it.
+/// What a bank holds and what is queued for it.
 pub fn sentence(held: usize, slots: usize, incoming: usize) -> String {
     let said = format!("{held} of {slots} slots hold something");
     match incoming {
@@ -349,9 +347,7 @@ pub fn sentence(held: usize, slots: usize, incoming: usize) -> String {
     }
 }
 
-// ---- the map ------------------------------------------------------------------------
-
-/// What a slot in the map is: what it holds, and what is about to happen to it.
+/// A map slot's state: what it holds, and what is about to happen to it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     Empty,
@@ -361,8 +357,8 @@ pub enum State {
 }
 
 impl State {
-    /// ⚠️ The panel wins. A slot the instrument is playing is the one thing on the map a
-    /// player has to be able to find, whatever else is true of it.
+    /// ⚠️ Loaded wins. A player must always be able to find the slot the instrument is
+    /// playing, whatever else is true of it.
     pub fn of(loaded: bool, incoming: bool, held: bool) -> State {
         if loaded {
             return State::Loaded;
@@ -376,7 +372,7 @@ impl State {
         }
     }
 
-    /// The border, and whether it is drawn as a dashed one.
+    /// The border color, and whether it is dashed.
     fn edge(self, visuals: &egui::Visuals) -> (egui::Color32, bool) {
         match self {
             State::Empty => (visuals.widgets.noninteractive.bg_stroke.color, true),
@@ -386,7 +382,7 @@ impl State {
         }
     }
 
-    /// The glyph at the top right, where the slot has anything to say.
+    /// The glyph at the top right, if the state has one.
     fn glyph(self, visuals: &egui::Visuals) -> Option<(Glyph, egui::Color32)> {
         match self {
             State::Incoming => Some((Glyph::ArrowDownToLine, warn(visuals))),
@@ -400,7 +396,7 @@ impl State {
 ///
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a label
 /// allocates a hover rect that wins the hit test over the cell, and the click lands on
-/// whichever word happens to be under it.
+/// whichever word is under the pointer.
 fn cell(
     ui: &mut egui::Ui,
     browser: &mut Browser,
@@ -428,8 +424,8 @@ fn cell(
     gestures(ui, browser, view, at, info, &response, acts);
 }
 
-/// A slot painted as a cell: the ground its state and its selection earn, the border,
-/// the address, and what it holds. Whatever senses it is the caller's.
+/// A slot painted as a cell: the background for its state and selection, the border,
+/// the address, and what it holds. The caller handles input.
 pub fn paint_cell(
     ui: &egui::Ui,
     rect: egui::Rect,
@@ -506,9 +502,7 @@ pub fn paint_cell(
     );
 }
 
-// ---- the lists ----------------------------------------------------------------------
-
-/// A folder whose items differ in size and in what they say.
+/// A folder whose items differ in size and content, drawn as a list.
 #[allow(clippy::too_many_arguments)]
 fn list(
     ui: &mut egui::Ui,
@@ -523,16 +517,16 @@ fn list(
     if banks.is_empty() {
         return nothing(ui, "Nothing read yet.");
     }
-    // A library partition fills in bytes rather than slots, so what it has left is what
-    // decides whether the next send lands.
+    // A library partition fills by bytes, not slots, so its free space decides whether
+    // the next send fits.
     if class.is_library() {
         egui::TopBottomPanel::bottom("keyboard_room")
             .resizable(false)
             .frame(egui::Frame::new())
             .show_inside(ui, |ui| footer(ui, class, device, queue, workspace));
     }
-    // Settings is one live object rather than a folder of them, so what a queued write
-    // would change to it is shown beside it rather than only in the dock.
+    // Settings is a single live object, so what a queued write would change is shown
+    // here as well as in the dock.
     if class == ObjectClass::Settings {
         if let Some(held) = waiting_in(queue, class) {
             egui::TopBottomPanel::bottom("keyboard_settings")
@@ -559,8 +553,8 @@ fn list(
         .map(|(at, _)| Item::Slot { class, at: *at })
         .collect();
 
-    // The head and every row start where a row of the tree starts, so the whole grid
-    // moves together and the scroll bar stays at the panel's own edge.
+    // The head and every row are inset like a tree row, so the grid moves as one and the
+    // scroll bar stays at the panel's edge.
     let room = ui.available_rect_before_wrap();
     let mut inset = ui.new_child(
         egui::UiBuilder::new()
@@ -596,8 +590,8 @@ fn list(
         });
 }
 
-/// The word over a folder's fourth column — the one fact its list carries that no other
-/// folder's does.
+/// The heading of a folder's fourth column, for the fact only that folder's list
+/// carries.
 fn column(class: ObjectClass) -> &'static str {
     match class {
         ObjectClass::SetList => "plays",
@@ -607,7 +601,7 @@ fn column(class: ObjectClass) -> &'static str {
     }
 }
 
-/// 20 px of column heads over a list.
+/// The 20 px column heads over a list.
 fn head(ui: &mut egui::Ui, class: ObjectClass, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let visuals = ui.visuals().clone();
@@ -659,8 +653,8 @@ fn row(
     if let Some(fill) = fill {
         painter.rect_filled(rect, 3.0, fill);
     }
-    // ⚠️ The loaded row carries the selection's fill, so every cell on it switches ink
-    // with it — the signal colours do not carry on that ground.
+    // ⚠️ The loaded row uses the selection fill, so every cell on it switches text color
+    // too: the signal colors are not legible on that fill.
     let lit = selected || state == State::Loaded;
     let ink = cell_ink(lit, visuals.text_color(), &visuals);
     let quiet = cell_ink(lit, visuals.weak_text_color(), &visuals);
@@ -705,7 +699,7 @@ fn row(
     gestures(ui, browser, view, at, info, &response, acts);
 }
 
-/// What each of a row's four written cells says.
+/// The text of a row's four text cells.
 fn cells(view: &View, at: Location, info: Option<&ProgramInfo>) -> [String; 4] {
     let name = info.map(|info| info.name.trim()).unwrap_or_default();
     [
@@ -720,7 +714,7 @@ fn cells(view: &View, at: Location, info: Option<&ProgramInfo>) -> [String; 4] {
     ]
 }
 
-/// The one fact a folder's list carries that the others do not.
+/// The fact only this folder's list carries.
 fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
     let Some(info) = info else {
         return String::new();
@@ -743,9 +737,9 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
 
 /// The four programs a set list plays.
 ///
-/// ⚠️ Only out of a decoded body — a copy kept on this computer, or a slot open as a
-/// view. A walk reports a slot's name, length and format and nothing about what is
-/// inside it, so a set list nothing here holds says nothing.
+/// ⚠️ Only from a decoded body: a copy kept on this computer, or a slot open as a view.
+/// A walk reports only a slot's name, length, and format, so a set list with no local
+/// copy shows nothing.
 fn plays(at: Location, workspace: &Workspace) -> Option<String> {
     let entity = workspace
         .entities()
@@ -768,10 +762,9 @@ fn plays(at: Location, workspace: &Workspace) -> Option<String> {
 
 /// The programs on this computer that play this sample.
 ///
-/// ⚠️ A program's file stores a bare library id and a walk reports a bare name, so the
-/// two meet only through a dependency list the instrument answered for that program's own
-/// slot. Nothing else this app reads can match them, and an unmatched sample says so
-/// rather than claiming nothing plays it.
+/// ⚠️ A program's file stores a bare library id and a walk reports a bare name, so they
+/// can be matched only through the dependency list the instrument gave for that
+/// program's slot. An unmatched sample shows as unknown, not as unused.
 fn played_by(name: &str, workspace: &Workspace, device: &Device) -> Option<String> {
     let played: Vec<&str> = workspace
         .entities()
@@ -787,7 +780,7 @@ fn played_by(name: &str, workspace: &Workspace, device: &Device) -> Option<Strin
     (!played.is_empty()).then(|| played.join(", "))
 }
 
-/// The samples footer: how full the partition is, and what is left in it.
+/// The library footer: how full the partition is, and how much space is left.
 fn footer(
     ui: &mut egui::Ui,
     class: ObjectClass,
@@ -823,14 +816,12 @@ fn footer(
         });
 }
 
-// ---- what every slot answers to -----------------------------------------------------
-
-/// The first entry waiting for anywhere in a folder.
+/// The first queued entry for any slot in a folder.
 fn waiting_in(queue: &Queue, class: ObjectClass) -> Option<&Queued> {
     queue.entries().iter().find(|held| held.class == class)
 }
 
-/// The whole of what a slot is, which is what a hover asks for.
+/// The full description of a slot, shown on hover.
 fn hint(view: &View, at: Location, info: Option<&ProgramInfo>, state: State) -> String {
     let where_ = place(view.class, at);
     let mut said = match info {
@@ -838,8 +829,8 @@ fn hint(view: &View, at: Location, info: Option<&ProgramInfo>, state: State) -> 
         None => format!("{where_} is empty"),
     };
     match state {
-        State::Loaded => said.push_str(" — on the instrument's panel now"),
-        State::Incoming => said.push_str(" — something is waiting to be written here"),
+        State::Loaded => said.push_str(", loaded on the instrument now"),
+        State::Incoming => said.push_str(", with a write to it waiting"),
         State::Empty | State::Held => {}
     }
     let fact = fourth(view, at, info);
@@ -849,8 +840,8 @@ fn hint(view: &View, at: Location, info: Option<&ProgramInfo>, state: State) -> 
     said
 }
 
-/// Everything a slot answers to, wherever it is drawn: it is dragged, it takes a drop,
-/// it is picked, it opens, and it offers the slot's own menu.
+/// The gestures every slot handles, as a cell or a row: drag, drop, select, open, and the
+/// slot's context menu.
 fn gestures(
     ui: &mut egui::Ui,
     browser: &mut Browser,
@@ -862,7 +853,7 @@ fn gestures(
 ) {
     let class = view.class;
     let item = Item::Slot { class, at };
-    // ⚠️ A partition this app cannot name is listed and nothing more.
+    // ⚠️ A partition this app cannot name is only listed.
     let fetchable = !read_only(class);
     let name = info
         .map(|info| info.name.trim())
@@ -896,8 +887,6 @@ fn gestures(
     }
 }
 
-// ---- the shared pieces --------------------------------------------------------------
-
 /// A full-width band: filled, padded at each end, laid out left to right.
 fn band<R>(
     ui: &mut egui::Ui,
@@ -921,7 +910,7 @@ fn band<R>(
     contents(&mut inner)
 }
 
-/// One chip: an optional glyph, a word, and an optional mono readout after it.
+/// One chip: an optional glyph, a word, and an optional monospace readout after it.
 fn chip(
     ui: &mut egui::Ui,
     glyph: Option<Glyph>,
@@ -992,7 +981,7 @@ fn chip(
     response
 }
 
-/// One cell of text, cut to `width` with an ellipsis and centred on `middle`.
+/// One cell of text, truncated to `width` with an ellipsis and centered on `middle`.
 fn cut(
     painter: &egui::Painter,
     left: f32,
@@ -1015,7 +1004,7 @@ fn cut(
     );
 }
 
-/// The line a folder shows where there is nothing to draw.
+/// The line a folder shows when there is nothing to draw.
 fn nothing(ui: &mut egui::Ui, said: &str) {
     ui.add_space(GAP);
     ui.horizontal(|ui| {
@@ -1041,16 +1030,16 @@ mod tests {
     use crate::workspace::{Fresh, Origin};
     use nord_usb::wire::Status;
 
-    /// A context dressed the way `DrawbarApp::new` dresses one: the named text styles a
-    /// band resolves are installed there, on both faces.
+    /// A context set up as `DrawbarApp::new` sets one up, with the named text styles a
+    /// band resolves installed in both themes.
     fn context() -> egui::Context {
         let ctx = egui::Context::default();
         ctx.all_styles_mut(crate::app::metrics);
         ctx
     }
 
-    /// An instrument answering for every folder the tab can be switched to, and a copy
-    /// of a set list, a settings object and a sample on this computer.
+    /// An instrument with every folder the tab can switch to, and local copies of a set
+    /// list and a settings object.
     #[allow(clippy::type_complexity)]
     fn bench() -> (Keyboard, Browser, Workspace, Device, Tabs, Queue, Log) {
         let ctx = context();
@@ -1080,8 +1069,8 @@ mod tests {
         });
         device.state.scan.heard(ObjectClass::Program, 0.0);
 
-        // A set list off the slot the instrument holds, so its own body says what it
-        // plays, and a settings write waiting, so the folder has a diff to draw.
+        // A set list read from an instrument slot, so its body says what it plays, and a
+        // queued settings write, so the folder has a diff to draw.
         for (kind, class, slot) in [
             (Fresh::SetList, ObjectClass::SetList, 0),
             (Fresh::Settings, ObjectClass::Settings, 0),
@@ -1135,7 +1124,7 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| {
-            // The frame the centre actually uses: panels own their own padding.
+            // The frame the center uses: panels handle their own padding.
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
                 .show(ctx, |ui| {
@@ -1154,13 +1143,12 @@ mod tests {
         });
     }
 
-    /// Every folder draws its own layout, at the width the centre has with both docks
-    /// open and at the width it has with none.
+    /// Each folder is drawn at the center's width with both docks open and with none.
     ///
-    /// Nothing checks pixels. What this catches is a layout that panics, an id that
-    /// collides, or a track a row paints past.
+    /// No pixels are checked. This catches a layout that panics, an id that collides, or
+    /// a row that paints past its track.
     #[test]
-    fn every_folder_paints_its_own_layout_at_every_width_the_centre_has() {
+    fn every_folder_paints_its_own_layout_at_every_width_the_center_has() {
         let ctx = context();
         let (mut keyboard, mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) =
             bench();
@@ -1188,15 +1176,14 @@ mod tests {
             assert_eq!(
                 tabs.keyboard_class(),
                 Some(class),
-                "{} stayed on show",
+                "{} stayed shown",
                 folder(class)
             );
         }
     }
 
-    /// ⚠️ Switching folders is a switch and nothing more. Every folder here has already
-    /// been read, and re-reading one on every click would put a session between the
-    /// player and the thing they are looking for.
+    /// ⚠️ Every folder here has already been read. Re-reading one on every click would
+    /// make the player wait on the instrument to see a folder.
     #[test]
     fn the_switcher_changes_the_folder_without_asking_the_instrument_for_anything() {
         let ctx = context();
@@ -1204,8 +1191,8 @@ mod tests {
             bench();
         tabs.show(Spot::Keyboard);
         tabs.keyboard_on(ObjectClass::SetList);
-        // What the queued settings write already asked for, so what is here afterwards
-        // is what the click added.
+        // Requests already made by the queued settings write, so any later ones came
+        // from the click.
         let asked = device.queued().len();
 
         // The first chip of the switcher is the first folder the instrument declares.
@@ -1249,7 +1236,6 @@ mod tests {
         );
     }
 
-    /// The bank's own line: what it holds out of what it could, and what is on its way.
     #[test]
     fn the_bank_sentence_counts_what_is_there_and_what_is_coming() {
         assert_eq!(sentence(12, 50, 0), "12 of 50 slots hold something");
@@ -1260,8 +1246,8 @@ mod tests {
         assert_eq!(sentence(0, 50, 0), "0 of 50 slots hold something");
     }
 
-    /// How stale the names on screen are, in seconds up to a minute and in minutes after
-    /// it — and never in the future, whatever the clock does between frames.
+    /// Seconds up to a minute, then minutes, and never negative if the clock steps back
+    /// between frames.
     #[test]
     fn the_header_says_how_long_ago_the_folder_answered() {
         assert_eq!(ago(0.0), "read 0 s ago");

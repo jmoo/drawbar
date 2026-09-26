@@ -1,7 +1,7 @@
-//! The human rendering of a decoded entity.
+//! The human-readable summary of a decoded entity.
 //!
-//! Everything here is *data*, so it goes to stdout: `nord inspect x.ne5p | grep transpose`
-//! has to work.
+//! Everything here is data, so it goes to stdout, and `nord inspect x.ne5p | grep
+//! transpose` works.
 
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5;
@@ -15,7 +15,7 @@ use nord_format::{Entity, Live, Program, Settings, Song};
 use crate::slot::shown_at;
 use crate::ui::Ui;
 
-/// The Stage 2/3 program category, or the `aux` word that names none.
+/// The Stage 2/3 program category, or the raw `aux` word when it names none.
 fn category(header: &nord_format::cbin::Header) -> String {
     match nord_format::components::ProgramCategory::of(header) {
         Some(category) => format!("{category:?}"),
@@ -31,8 +31,8 @@ fn yn(b: bool) -> &'static str {
     }
 }
 
-/// A library dependency id as hex: the one spelling every verb that prints an id
-/// uses, so an id read here can be matched against one `deps` reports.
+/// A library dependency id as hex. Every verb that prints an id uses this form, so an
+/// id shown here matches the one `deps` reports.
 pub(crate) fn dep_id(id: u32) -> String {
     match id {
         0 => "none".to_string(),
@@ -71,8 +71,8 @@ fn section(ui: &Ui, name: &str) {
 
 /// A drawbar position as a block whose height is how far the bar is pulled out.
 ///
-/// `0` is a dot rather than the shortest block: a registration is read by which bars are
-/// *out*, and an eighth-block reads as a small value instead of none.
+/// `0` is a dot, not the shortest block: a registration is read by which bars are out,
+/// and an eighth block would read as a small value.
 fn level(position: u8) -> char {
     const LEVELS: [char; 9] = ['·', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     LEVELS[(position as usize).min(8)]
@@ -82,10 +82,10 @@ fn digits(positions: &[u8]) -> String {
     positions.iter().map(u8::to_string).collect()
 }
 
-/// Nine drawbars as a chart, with the digits — the data — kept alongside it.
+/// Nine drawbars as a chart, with the digits alongside.
 ///
-/// ⚠️ Without unicode this must return exactly the digits and nothing else: a pipe
-/// carries them in that form.
+/// ⚠️ Without Unicode this must return only the digits, which is the form a pipe
+/// carries.
 fn drawbars(ui: &Ui, positions: &[u8]) -> String {
     let digits = digits(positions);
     if !ui.unicode() {
@@ -148,8 +148,8 @@ fn keyboard(ui: &Ui, p: &ne5::Program) {
         ));
     }
     ui.out(field(ui, 4, "split", split));
-    // The enable is a separate field from the value, so it is shown as the panel
-    // shows it — a light that is on or off, not a yes/no answer to "transpose".
+    // The enable is a separate field from the value, so it is shown the way the panel
+    // shows it: a light that is on or off.
     let transpose = format!("{:+}", p.center_panel.transpose.inner());
     ui.out(field(
         ui,
@@ -210,8 +210,7 @@ fn voices(ui: &Ui, p: &ne5::Program) {
             yn(sample.filter),
         ),
     ));
-    // The file stores only the ids. `nord program deps` reports the same ids for
-    // this program with names attached, which is the only way to resolve them.
+    // The file stores only ids. `nord program deps` on a slot resolves them to names.
     ui.out(field(
         ui,
         4,
@@ -419,8 +418,7 @@ fn organ(ui: &Ui, p: &ne5::Program) {
     }
 }
 
-/// The v3/v4 sample-instrument printout: identity and section inventory — the
-/// zone map is not decoded for this generation yet.
+/// The v3/v4 sample-instrument printout: identity, stroke count and zone map.
 fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
     ui.out(field(ui, 2, "type", "sample instrument (nsmp3/nsmp4)"));
     match (s.name(), s.sub_name()) {
@@ -444,8 +442,8 @@ fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
                     None => format!("..={}", z.top_note),
                 };
                 let mut says = format!("root {} (stroke {})", z.root_key, z.stroke_gid);
-                // Silent unless it is not the whole range: a narrow window is
-                // the difference between a zone that sounds and one that does not.
+                // Shown only when narrower than the full range, since the window
+                // decides whether a zone sounds at all.
                 if let Some(w) = z.velocity.filter(|w| *w != VelocityWindow::FULL) {
                     says.push_str(&format!(" velocity {}..={}", w.low, w.high));
                 }
@@ -537,7 +535,7 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
         Ok(name) => ui.out(field(ui, 2, "name", name)),
         Err(e) => ui.warn(format!("name unreadable: {e}")),
     }
-    // Content version, `format * 100 + revision`: 200 reads back as 2.0.
+    // Content version, `format * 100 + revision`: 200 reads as 2.00.
     let v = s.header.version;
     ui.out(field(ui, 2, "version", version_label(v)));
     let categories = s.categories();
@@ -689,8 +687,8 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 ));
             }
 
-            // Grouped and ordered by the instrument's own menus, which is not the order
-            // the fields sit in the file.
+            // Grouped and ordered by the instrument's menus, not by where the fields sit
+            // in the file.
             for (menu, fields) in s.by_menu() {
                 section(ui, menu.title());
                 for f in fields {
@@ -744,8 +742,8 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 "note",
                 ui.dim("use --raw to list contained programs/songs"),
             ));
-            // Chatter, not data: a partial read is something the operator should see,
-            // but a pipe consuming the summary should not.
+            // A skipped entry is a warning for the user, not data, so it goes to
+            // stderr.
             for (name, why) in b.skipped() {
                 ui.warn(format!("bundle entry skipped: {name}: {why}"));
             }
@@ -826,7 +824,7 @@ pub fn print(ui: &Ui, entity: &Entity) {
     }
 }
 
-/// The Stage 2 program-wide globals — the decoded slice of a mostly-raw body.
+/// The Stage 2 program-wide globals, the decoded part of a mostly raw body.
 fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>) {
     ui.out(field(ui, 2, "type", kind));
     let (bank, slot) = p.header.slot();
@@ -908,7 +906,7 @@ fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>
     ui.out(field(ui, 4, "note", ui.dim("panels and effects unmapped")));
 }
 
-/// `A+B` / `A` / `—` — which of a section's layers are switched on.
+/// Which of a section's layers are switched on: `A+B`, `A`, or `—` for none.
 fn layers(on: &[(&str, bool)]) -> String {
     let live: Vec<&str> = on.iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
     if live.is_empty() {
@@ -941,9 +939,8 @@ fn ns4_note(ui: &Ui) {
 
 /// The Stage 4 program-wide globals.
 ///
-/// Only the parameters that carry their own meaning are shown. The rest decode to
-/// the number the file stores, which reads as noise in a summary — `--raw` is
-/// where those belong until there is something to name them with.
+/// Only parameters with a known meaning are shown. The rest decode to the stored
+/// number, which is noise in a summary, so they are left to `--raw`.
 fn ns4_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns4::Program>) {
     ns4_head(ui, kind, &p.header);
 
@@ -1014,9 +1011,9 @@ fn ns4_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns4::Program>
     ns4_note(ui);
 }
 
-/// `off (stored -2)` vs `+3` — the enable bit means touched-at-least-once, so the
-/// stored value is shown either way. An out-of-table pattern (an untouched live
-/// buffer) reads as plain `off`.
+/// `+3`, or `off (stored -2)`: the enable bit means the value was touched at least
+/// once, so the stored value is shown either way. A pattern outside the table (an
+/// untouched live buffer) reads as plain `off`.
 fn transpose(enabled: bool, t: nord_format::components::StageTranspose) -> String {
     match (enabled, t.semitones()) {
         (true, Some(s)) => format!("{s:+}"),
@@ -1035,8 +1032,8 @@ fn raw_summary(ui: &Ui, entity: &Entity) {
 
     if let Some(f) = entity.raw() {
         let header = &f.header;
-        // A location word with its high bits set is not a bank/slot pair; show it
-        // the way a hex dump would rather than as an absurd bank number.
+        // A location word with its high bits set is not a bank/slot pair, so show it
+        // in hex instead of as an absurd bank number.
         if header.location & 0xff00_ff00 == 0 {
             let (bank, slot) = header.slot();
             ui.out(field(ui, 2, "location", shown_at(bank, slot)));

@@ -1,8 +1,8 @@
 # source: synthetic
 # note: driven by tests/ops.rs, which asserts the bare SESSION_CLOSE lands between
 #   the refused open and a successful retry. Every operation is wrapped in a
-#   session, so without that recovery the one frame that cures a 0x12 is
-#   unreachable through any command.
+#   session, so without that recovery no command could send the one frame that
+#   clears a 0x12.
 O 0000001200000006000000010000000006a1
 I 000000160000000600000001000000010000000044ec
 O 000000160000000c0000000a0000000400000004a218

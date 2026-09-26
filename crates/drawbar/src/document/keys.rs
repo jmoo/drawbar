@@ -1,13 +1,12 @@
 //! The key map: the keyboard, the lanes over it, and the geometry they share.
 //!
 //! One geometry serves both. The white keys share the width equally and the black keys
-//! hang between them, and a key's cell in a lane is that same key's cell on the
-//! keyboard — so a band edge, a size bar, a per-key bar and a root marker all sit over
-//! the key they name. Black cells are the narrow ones, and they overlap the whites they
-//! are drawn between, which is what a keyboard looks like.
+//! hang between them. A key's cell in a lane matches its cell on the keyboard, so a band
+//! edge, a size bar, a per-key bar, and a root marker all sit over the key they name.
+//! Black cells are narrow and overlap the white cells on either side, as on a keyboard.
 //!
-//! Nothing here scrolls, pins or holds state. A lane takes the width it is offered,
-//! paints what it was handed, and answers with what the pointer asked for.
+//! Nothing here scrolls, pins, or holds state. A lane takes the width it is given, paints
+//! what it is handed, and returns what the pointer asked for.
 
 use eframe::egui;
 use nord_format::note;
@@ -21,8 +20,8 @@ pub const AUDITION_VELOCITY: u8 = 90;
 
 /// The gap between two white keys.
 const WHITE_GAP: f32 = 1.0;
-/// How wide a black key is, and how far its left edge sits before the white boundary it
-/// hangs on — both in white keys.
+/// The width of a black key, and how far its left edge sits before the white boundary it
+/// hangs on, both in white-key units.
 const BLACK_W: f32 = 0.6;
 const BLACK_OFFSET: f32 = 0.3;
 
@@ -38,8 +37,8 @@ pub struct Span {
 }
 
 impl Span {
-    /// The ends in order, so a span handed over backwards still reads as the range
-    /// between them rather than panicking a clamp.
+    /// The ends in order, so a reversed span still reads as the range between them and
+    /// does not panic in a clamp.
     fn ends(self) -> (u8, u8) {
         (self.low.min(self.high), self.low.max(self.high))
     }
@@ -106,8 +105,8 @@ impl Span {
 
     /// The key `x` falls in, clamped to the span.
     ///
-    /// Black keys are drawn over the whites they hang between, so a black cell owns its
-    /// whole x range — a lane has no vertical dimension to tell them apart by.
+    /// Black keys are drawn over the white keys beside them, so a black cell owns its
+    /// whole x range: a lane has no vertical extent to tell them apart.
     pub fn note_at(self, rect: egui::Rect, x: f32) -> u8 {
         let (low, high) = self.ends();
         if x <= self.x_of(rect, low) {
@@ -122,8 +121,7 @@ impl Span {
         if let Some(note) = black {
             return note;
         }
-        // Between two white cells is the gap that separates them, which belongs to the
-        // key it was taken from.
+        // The gap between two white cells belongs to the key on its left.
         let unit = self.unit(rect);
         let index = match unit > 0.0 {
             true => ((x - rect.left()) / unit).floor(),
@@ -133,12 +131,12 @@ impl Span {
     }
 
     /// The middle of `note`'s cell, which is what a marker points at.
-    fn centre(self, rect: egui::Rect, note: u8) -> f32 {
+    fn center(self, rect: egui::Rect, note: u8) -> f32 {
         (self.x_of(rect, note) + self.x_after(rect, note)) / 2.0
     }
 }
 
-/// How far a played key is from the root that answers it.
+/// How far a played key is from the root that sounds it.
 pub fn shifted(note: u8, root: u8) -> String {
     format!("shifted {:+} st", note as i16 - root as i16)
 }
@@ -155,7 +153,7 @@ pub struct Struck {
 /// under the keyboard describe.
 ///
 /// ⚠️ `std::time::Instant::now()` traps on `wasm32-unknown-unknown`, so the clock is
-/// egui's own frame time in seconds — [`egui::InputState::time`], as [`crate::log`] uses.
+/// egui's frame time in seconds ([`egui::InputState::time`]), as in [`crate::log`].
 pub struct Audition {
     pub struck: Struck,
     pub finger: Finger,
@@ -183,8 +181,8 @@ impl Audition {
         }
     }
 
-    /// How long a click has left to be described, for the frame that puts it out. A
-    /// controller key goes out on its release, which asks for a frame of itself.
+    /// How long a click stays described, so a repaint can be scheduled to clear it. A
+    /// controller key clears on release, which brings its own frame.
     pub fn left(&self, now: f64) -> Option<f64> {
         match self.finger {
             Finger::Pointer => Some((Audition::HOLD - (now - self.started)).max(0.0)),
@@ -200,8 +198,8 @@ pub fn lit(audition: Option<&Audition>, down: &[u8]) -> Vec<u8> {
     lit
 }
 
-/// The dashes of an outline. egui draws dashes along a line, so a shape is its corners
-/// in order.
+/// A dashed outline through `corners` in order, since egui draws dashes only along a
+/// line.
 fn dashed(painter: &egui::Painter, corners: &[egui::Pos2], stroke: egui::Stroke) {
     const DASH: f32 = 3.0;
     for side in corners.windows(2) {
@@ -209,10 +207,10 @@ fn dashed(painter: &egui::Painter, corners: &[egui::Pos2], stroke: egui::Stroke)
     }
 }
 
-/// Diagonal lines across `rect`, for a stretch of keyboard nothing answers.
+/// Diagonal lines across `rect`, for a stretch of keyboard no zone plays.
 ///
-/// Clipped to `rect`, so the lines that reach past a corner stop at the edge rather than
-/// crossing whatever is drawn beside it.
+/// Clipped to `rect`, so lines that reach past a corner stop at the edge and do not cross
+/// whatever is drawn beside it.
 pub fn hatch(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32, alpha: f32) {
     const STEP: f32 = 5.0;
 
@@ -248,7 +246,7 @@ fn clipped(
     painter.layout_job(job)
 }
 
-/// A galley painted left-aligned, vertically centred on `middle`.
+/// A galley painted left-aligned, vertically centered on `middle`.
 fn write(painter: &egui::Painter, left: f32, middle: f32, galley: std::sync::Arc<egui::Galley>) {
     let top = middle - galley.size().y / 2.0;
     painter.galley(egui::pos2(left, top), galley, egui::Color32::PLACEHOLDER);
@@ -292,7 +290,7 @@ const CHIP_PAD: f32 = 3.0;
 /// A key worth pointing at: a zone's root, or a library's.
 pub struct Mark {
     pub note: u8,
-    /// The name beside the marker, where there is room for one to mean something.
+    /// The name beside the marker, where a name is useful.
     pub label: Option<String>,
 }
 
@@ -300,13 +298,13 @@ pub struct Mark {
 pub const KEYBOARD_H: f32 = 58.0;
 const BLACK_H: f32 = 35.0;
 const OCTAVE_TEXT: f32 = 8.0;
-/// How much of the key's own ink an octave label keeps.
+/// The opacity of an octave label relative to the key's ink.
 const OCTAVE_ALPHA: f32 = 0.7;
 const MARK_TOP: f32 = 2.0;
 const MARK_H: f32 = 4.0;
 const MARK_W: f32 = 6.0;
 
-/// The key `note` occupies: its cell, as deep as that kind of key is drawn.
+/// The rect of `note`'s key: its cell, as deep as that kind of key is drawn.
 fn key_rect(rect: egui::Rect, span: Span, note: u8) -> egui::Rect {
     let bottom = match is_black(note) {
         true => rect.top() + BLACK_H,
@@ -318,9 +316,8 @@ fn key_rect(rect: egui::Rect, span: Span, note: u8) -> egui::Rect {
     )
 }
 
-/// The keys of `span` in the order the keyboard paints them: the blacks last, so the
-/// white drawn on either side of a black key does not take back the half of the black
-/// key that hangs over it.
+/// The keys of `span` in paint order: black keys last, so a white key painted after a
+/// black key cannot cover the part of it that overlaps.
 fn layered(span: Span) -> impl Iterator<Item = u8> {
     let (low, high) = span.ends();
     (low..=high)
@@ -328,8 +325,8 @@ fn layered(span: Span) -> impl Iterator<Item = u8> {
         .chain((low..=high).filter(|note| is_black(*note)))
 }
 
-/// The key under `at`. Black keys are drawn over the whites, so they are tested first —
-/// on the keyboard a white key is still its own below the black keys' depth.
+/// The key under `at`. Black keys are drawn over the white keys, so they are tested
+/// first; below the black keys' depth, the white key gets the hit.
 fn key_at(rect: egui::Rect, span: Span, at: egui::Pos2) -> Option<u8> {
     if !rect.contains(at) {
         return None;
@@ -344,8 +341,8 @@ fn key_at(rect: egui::Rect, span: Span, at: egui::Pos2) -> Option<u8> {
 
 /// The keyboard, one clickable key per note in `span`.
 ///
-/// `lit` are the keys sounding, and `chip` the one key wearing the chip that says what
-/// it plays. Returns the key clicked, struck at [`AUDITION_VELOCITY`].
+/// `lit` are the keys sounding, and `chip` is the key that gets the chip saying what it
+/// plays. Returns the key clicked, struck at [`AUDITION_VELOCITY`].
 pub fn keyboard(
     ui: &mut egui::Ui,
     span: Span,
@@ -408,12 +405,12 @@ pub fn keyboard(
 /// How tall the line under the keyboard is, whatever it says.
 pub const LINE_H: f32 = 20.0;
 
-/// The line under the keyboard: whether the last struck key sounded, and the sentence
-/// saying what it did.
+/// The line under the keyboard: whether the last struck key sounded, and a sentence
+/// describing it.
 ///
-/// ⚠️ One row, drawn empty where no key is lit, and a sentence too long for it is cut
-/// short with the whole of it on hover. A line that grew with its sentence would move
-/// everything under it at every strike.
+/// ⚠️ Always one row, drawn empty when no key is lit. A sentence too long for it is
+/// truncated, with the full text on hover. A line that grew with its sentence would shift
+/// everything below it on every strike.
 pub fn line(ui: &mut egui::Ui, said: Option<(bool, &str)>) {
     const TEXT: f32 = 11.0;
     const GLYPH: f32 = 12.0;
@@ -460,8 +457,8 @@ pub fn line(ui: &mut egui::Ui, said: Option<(bool, &str)>) {
     }
 }
 
-/// A marker over one key: a triangle at the top of it, with its name over that where the
-/// caller gave one.
+/// A marker over one key: a triangle at its top, with the caller's label above it, if
+/// any.
 fn root_mark(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -469,13 +466,13 @@ fn root_mark(
     mark: &Mark,
     visuals: &egui::Visuals,
 ) {
-    let centre = span.centre(rect, mark.note);
+    let center = span.center(rect, mark.note);
     let accent = app::accent(visuals);
     let mut top = rect.top() + MARK_TOP;
     if let Some(label) = &mark.label {
         let named = chip(
             painter,
-            egui::pos2(centre, top),
+            egui::pos2(center, top),
             label,
             accent,
             visuals.text_color(),
@@ -484,9 +481,9 @@ fn root_mark(
     }
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(centre - MARK_W / 2.0, top),
-            egui::pos2(centre + MARK_W / 2.0, top),
-            egui::pos2(centre, top + MARK_H),
+            egui::pos2(center - MARK_W / 2.0, top),
+            egui::pos2(center + MARK_W / 2.0, top),
+            egui::pos2(center, top + MARK_H),
         ],
         accent,
         egui::Stroke::NONE,
@@ -502,17 +499,17 @@ fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8, said: &s
         egui::Order::Foreground,
         ui.id().with("audition"),
     ));
-    let centre = span.centre(rect, note);
+    let center = span.center(rect, note);
     chip(
         &painter,
-        egui::pos2(centre, rect.top() - CHIP_TEXT - 4.0),
+        egui::pos2(center, rect.top() - CHIP_TEXT - 4.0),
         said,
         app::good(ui.visuals()),
         ui.visuals().text_color(),
     );
 }
 
-/// One zone as the lane draws it: the keys it answers, and what it is called.
+/// One zone as the lane draws it: the keys it covers, and its name.
 pub struct Band {
     pub low: u8,
     pub top: u8,
@@ -522,8 +519,8 @@ pub struct Band {
 }
 
 /// Which ends of a band can be dragged. `TopOnly` is the v2 table, where a zone's low is
-/// derived from the zone below rather than stored; `Fixed` is a body whose zones cannot
-/// be written at all, where a handle that moved and snapped back would be a lie.
+/// derived from the zone below and not stored. `Fixed` is a body whose zones cannot be
+/// written, where a handle that moved and snapped back would mislead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edges {
     Fixed,
@@ -543,7 +540,7 @@ pub enum BandAct {
     /// A band was clicked.
     Pick(usize),
     /// A handle moved. `bounds` is every band's `(low, top)` after the clamp, in the
-    /// order the bands were given — with `Edges::TopOnly`, the band above has moved too.
+    /// order the bands were given. With `Edges::TopOnly`, the band above has moved too.
     Drag {
         zone: usize,
         edge: Edge,
@@ -559,7 +556,7 @@ const BAND_GAP: f32 = 6.0;
 const BAND_NAME: f32 = 10.0;
 const HANDLE_W: f32 = 10.0;
 const PILL: egui::Vec2 = egui::vec2(3.0, 11.0);
-/// How much of the hatch colour a gap keeps.
+/// The opacity of a gap's hatch.
 const HATCH_ALPHA: f32 = 0.55;
 
 /// The stretches of `span` no band covers, low to high.
@@ -584,25 +581,25 @@ pub fn gaps(bounds: &[(u8, u8)], span: Span) -> Vec<(u8, u8)> {
 /// How far a lane's rows may be dragged into each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Room {
-    /// Whether the row next along the keyboard gives up the keys this one takes. Where it
-    /// does not, an edge stops a key short of it and the rows may gap but never overlap.
+    /// Whether the neighboring row gives up the keys this one takes. If not, an edge
+    /// stops one key short of it, and the rows may leave a gap but never overlap.
     shared: bool,
-    /// The fewest keys a row may be left answering, its neighbour included.
+    /// The fewest keys a row or its neighbor may be left with.
     fewest: u8,
 }
 
-/// The fewest keys a band may be left answering. A band whose ends met would have its two
-/// handles on top of each other, and no way back off the one underneath.
+/// The fewest keys a band may be left with. A band whose ends met would stack its two
+/// handles, and the lower one could not be grabbed again.
 const BAND_KEYS: u8 = 2;
 
-/// Where a dragged edge lands, and what follows it.
+/// Where a dragged edge lands, and what moves with it.
 ///
-/// ⚠️ The neighbour is the row next along the keyboard, not the next index: a lane draws
-/// its rows in the file's order, which is not the keyboard's.
+/// ⚠️ The neighbor is the next row along the keyboard, not the next index: a lane draws
+/// its rows in file order, which is not keyboard order.
 ///
-/// An edge with nowhere left to land — the row is already down to [`Room::fewest`] keys,
-/// or its neighbour is — leaves every bound where it was rather than stepping onto the
-/// row beside it.
+/// An edge with nowhere to land, because the row or its neighbor is already down to
+/// [`Room::fewest`] keys, leaves every bound unchanged instead of stepping onto the next
+/// row.
 fn dragged(
     bounds: &[(u8, u8)],
     span: Span,
@@ -667,11 +664,11 @@ fn dragged(
     next
 }
 
-/// Where a dragged band edge lands, and what follows it.
+/// Where a dragged band edge lands, and what moves with it.
 ///
-/// A band keeps [`BAND_KEYS`] keys of its own and stops a key short of the band beside
-/// it. With [`Edges::TopOnly`] — the only shape that offers one handle rather than two —
-/// the band above's low follows the top it is derived from.
+/// A band keeps [`BAND_KEYS`] keys and stops one key short of the band beside it. With
+/// [`Edges::TopOnly`], the only shape with one handle per band, the band above's low
+/// follows the top it is derived from.
 fn clamped(
     bounds: &[(u8, u8)],
     span: Span,
@@ -689,8 +686,8 @@ fn clamped(
 
 /// The zone lane: one band per zone, the keys between them hatched.
 ///
-/// `selected` is the open row, `lit` the zone answering the auditioned key. The bands are
-/// drawn in the order they are given, which is the file's.
+/// `selected` is the open row, and `lit` the zone playing the auditioned key. Bands are
+/// drawn in the order given, which is file order.
 pub fn bands(
     ui: &mut egui::Ui,
     span: Span,
@@ -725,7 +722,7 @@ pub fn bands(
         );
         if response.hover_pos().is_some_and(|at| gap.contains(at)) {
             hint = Some(format!(
-                "{}–{} answers nothing — no zone covers those keys",
+                "No zone covers the keys {}–{}",
                 note::name(from),
                 note::name(to)
             ));
@@ -795,8 +792,8 @@ pub fn bands(
 
 /// Where a click on a lane landed.
 ///
-/// ⚠️ A handle sits over the row it belongs to and is the thing the click was for, so a
-/// click inside one is never a pick.
+/// ⚠️ A handle sits over its row, and a click on it belongs to the handle, so it is
+/// never a pick.
 fn picked_at(response: &egui::Response, grabs: &[egui::Rect]) -> Option<egui::Pos2> {
     response
         .clicked()
@@ -812,7 +809,7 @@ fn row_at(rect: egui::Rect, span: Span, bounds: &[(u8, u8)], x: f32) -> Option<u
         .position(|(low, top)| x >= span.x_of(rect, *low) && x < span.x_after(rect, *top))
 }
 
-/// The three states a band wears.
+/// The three looks a band can have.
 struct Look {
     fill: egui::Color32,
     stroke: egui::Color32,
@@ -840,10 +837,10 @@ fn look(visuals: &egui::Visuals, selected: bool, lit: bool) -> Look {
 }
 
 /// The movable ends of a lane: one pill per end, the chip that follows a drag, and the
-/// grab rects a click must not be read as a pick.
+/// grab rects where a click is not a pick.
 ///
-/// `moved` is where the lane puts its bounds when one end is dragged to a note, which
-/// is the one thing a zone lane and a root lane do differently.
+/// `moved` computes the lane's bounds when one end is dragged to a note. It is the only
+/// difference between a zone lane and a root lane.
 #[allow(clippy::too_many_arguments)]
 fn drag_edges(
     ui: &egui::Ui,
@@ -919,7 +916,8 @@ fn handle_rect(
     )
 }
 
-/// What a handle says it does. With [`Edges::TopOnly`] a top carries the low it derives.
+/// A handle's tooltip. With [`Edges::TopOnly`] a top handle also moves the low derived
+/// from it.
 fn drag_hint(band: &Band, edge: Edge, edges: Edges, index: usize) -> String {
     let (what, note) = match edge {
         Edge::Top => ("top", band.top),
@@ -930,13 +928,14 @@ fn drag_hint(band: &Band, edge: Edge, edges: Edges, index: usize) -> String {
         _ => "",
     };
     format!(
-        "Drag to move {}'s {what} note{follows} — now {}",
+        "Drag to move {}'s {what} note{follows} (now {})",
         band.name,
         note::name(note)
     )
 }
 
-/// One end of a band, as a pill to grab. Answers with the pointer while it is dragged.
+/// One end of a band, as a pill to grab. Returns the pointer position while it is
+/// dragged.
 fn handle(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -966,7 +965,7 @@ fn handle(
     }
 }
 
-/// One root as the size lane draws it: the keys it answers, and what it costs.
+/// One root as the size lane draws it: the keys it covers, and its size.
 pub struct SizeCell {
     pub low: u8,
     pub top: u8,
@@ -985,17 +984,17 @@ const BAR_REACH: f32 = 30.0;
 const CELL_ROW: f32 = 14.0;
 const CELL_NAME: f32 = 9.5;
 const CELL_MB: f32 = 9.0;
-/// How many keys a cell needs before its size is worth printing in it.
+/// How many keys a cell needs before its size is printed in it.
 const MB_KEYS: usize = 4;
-/// How much is kept before the reading counts as trimmed.
+/// How many megabytes a root must lose before its cell reads as trimmed.
 const TRIMMED: f32 = 0.05;
 
 /// Where a dragged root boundary lands.
 ///
-/// The two roots either side of a boundary share it, so what one gives up the other
-/// takes and neither is left without a key; the outer end of the lowest or the highest
-/// has no root to share with, and covers or uncovers keys instead. `bounds` may be in any
-/// order — the neighbour is the cell next along the keyboard, not the next index.
+/// The two roots on either side of a boundary share it: what one gives up the other
+/// takes, and neither is left without a key. The outer end of the lowest or highest root
+/// has no neighbor, so it covers or uncovers keys instead. `bounds` may be in any order;
+/// the neighbor is the next cell along the keyboard, not the next index.
 pub fn boundary(
     bounds: &[(u8, u8)],
     span: Span,
@@ -1010,21 +1009,21 @@ pub fn boundary(
     dragged(bounds, span, cell, edge, note, room)
 }
 
-/// What a root boundary says it does.
+/// A root boundary handle's tooltip.
 fn root_hint(cell: &SizeCell, edge: Edge) -> String {
     let (what, note) = match edge {
         Edge::Top => ("top", cell.top),
         Edge::Low => ("low", cell.low),
     };
     format!(
-        "Drag to move root {}'s {what} key — now {}",
+        "Drag to move root {}'s {what} key (now {})",
         cell.name,
         note::name(note)
     )
 }
 
-/// The size lane: one cell per root, its kept megabytes as a bar inside the ghost of
-/// what it holds untrimmed, and a handle at each end of the keys it answers.
+/// The size lane: one cell per root, with its kept megabytes as a bar inside a dashed
+/// outline of its untrimmed size, and a handle at each end of the keys it covers.
 pub fn size_cells(
     ui: &mut egui::Ui,
     span: Span,
@@ -1155,8 +1154,8 @@ fn cell_keys(cell: &SizeCell) -> usize {
     (cell.top.max(cell.low) - cell.low) as usize + 1
 }
 
-/// One zone as the velocity field draws it: the keys it answers, the velocities it
-/// answers them at, and what it is called.
+/// One zone as the velocity field draws it: the keys it covers, the velocities it plays
+/// them at, and its name.
 pub struct VelBlock {
     pub low: u8,
     pub top: u8,
@@ -1166,8 +1165,8 @@ pub struct VelBlock {
     pub hint: String,
 }
 
-/// Which velocity edges a block offers. `Fixed` is the wide generations' window: the
-/// format states it and nothing writes it.
+/// Which velocity edges a block offers. `Fixed` is the wide generations' window, which
+/// the format defines and nothing writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handles {
     Fixed,
@@ -1201,31 +1200,30 @@ const FIELD_H: f32 = 84.0;
 const AXIS_W: f32 = 22.0;
 const AXIS_GAP: f32 = 6.0;
 const AXIS_TEXT: f32 = 9.0;
-/// Where the field rules itself, as a share of its height.
+/// Where the field's grid lines sit, as a fraction of its height.
 const GRID: [f32; 2] = [0.5, 0.75];
 const BLOCK_NAME: f32 = 10.0;
 const BLOCK_PAD: f32 = 6.0;
 const BLOCK_TOP: f32 = 8.0;
-/// The smallest block a one-velocity window still reads as.
+/// The smallest size a block is drawn at, so a one-velocity window stays visible.
 const BLOCK_MIN_H: f32 = 2.0;
 const BLOCK_MIN_W: f32 = 3.0;
-/// A block's fill, at full strength and as the ghost of one nothing has picked.
+/// A block's fill opacity when selected, and when not.
 const BLOCK_ALPHA: f32 = 0.45;
 const QUIET_ALPHA: f32 = 0.08;
-/// The handle: the pill, and the room the pointer has to find it in.
+/// The handle: the pill, and the grab area around it.
 const PILL_H: f32 = 4.0;
 const GRAB_H: f32 = 10.0;
 const PILL_SHARE: f32 = 0.56;
 const PILL_MAX: f32 = 120.0;
-/// How much of the hatch colour a hole keeps.
+/// The opacity of a hole's hatch.
 const HOLE_ALPHA: f32 = 0.5;
 
-/// The key × velocity stretches no block covers, by the zone whose keys they leave
-/// silent.
+/// The key × velocity regions no block covers, by the zone whose keys they leave silent.
 ///
-/// A zone's keys are answered at a velocity by its own window or by any other block
-/// whose keys overlap it, so the holes are what is left of `1..=127` once those are
-/// laid over each other.
+/// A zone's keys play at a velocity if its own window covers it, or the window of any
+/// block whose keys overlap it does. The holes are what remains of `1..=127` after those
+/// windows are combined.
 pub fn velocity_holes(blocks: &[VelBlock]) -> Vec<(usize, u8, u8)> {
     let mut out = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
@@ -1252,15 +1250,15 @@ pub fn velocity_holes(blocks: &[VelBlock]) -> Vec<(usize, u8, u8)> {
     out
 }
 
-/// A window's ends in order, so one handed over inverted still reads as a range.
+/// A window's ends in order, so an inverted window still reads as a range.
 fn ordered(window: (u8, u8)) -> (u8, u8) {
     (window.0.min(window.1), window.0.max(window.1))
 }
 
-/// The velocity field: one rectangle per zone over the keys it answers, the key ×
-/// velocity stretches nothing answers hatched.
+/// The velocity field: one rectangle per zone over the keys it covers, with the key ×
+/// velocity regions nothing plays hatched.
 ///
-/// The axis is drawn here because it names this widget's own vertical scale.
+/// The axis is drawn here because it labels this widget's vertical scale.
 pub fn velocity(
     ui: &mut egui::Ui,
     span: Span,
@@ -1315,7 +1313,7 @@ pub fn velocity(
         hatch(&painter, hole, app::bad(&visuals), HOLE_ALPHA);
         if response.hover_pos().is_some_and(|at| hole.contains(at)) {
             hint = Some(format!(
-                "{}–{} answers nothing at velocity {from}–{to}",
+                "Nothing plays {}–{} at velocity {from}–{to}",
                 note::name(block.low),
                 note::name(block.top)
             ));
@@ -1452,8 +1450,8 @@ fn cell(rect: egui::Rect, span: Span, block: &VelBlock, window: (u8, u8)) -> egu
     )
 }
 
-/// Where a dragged velocity edge lands: neither end reaches the other, and the field's
-/// own ends stand for what is past them.
+/// Where a dragged velocity edge lands: neither end reaches the other, and a drag past
+/// the field's ends stops at them.
 fn vel_clamped(window: (u8, u8), edge: VelEdge, velocity: u8) -> (u8, u8) {
     let (low, high) = ordered(window);
     match edge {
@@ -1489,7 +1487,7 @@ fn vel_handle_rect(rect: egui::Rect, span: Span, block: &VelBlock, edge: VelEdge
     )
 }
 
-/// One end of a block, as a pill on a halo of the field's own ground.
+/// One end of a block, as a pill with a halo of the field's background.
 fn vel_handle(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -1517,7 +1515,7 @@ fn vel_handle(
     painter.rect_filled(pill, RADIUS, ink);
     let (low, high) = ordered(block.window);
     response.clone().on_hover_text(format!(
-        "Drag to move {}'s velocity {} — now {}",
+        "Drag to move {}'s velocity {} (now {})",
         block.name,
         match edge {
             VelEdge::Max => "max",
@@ -1574,16 +1572,15 @@ const LANE_H: f32 = 38.0;
 const LANE_ZERO: f32 = 18.0;
 /// How far a full value reaches from zero.
 const LANE_REACH: f32 = 16.0;
-/// Below this a value reads as nothing rather than as a small edit.
+/// Below this a value is drawn as zero, not as a small edit.
 const LANE_QUIET: f32 = 0.08;
 /// The steps a painted value snaps to across the whole lane.
 const SNAP: f32 = 20.0;
-/// The deadband around zero a painted value falls into.
+/// A painted value this close to zero snaps to zero.
 const DEADBAND: f32 = 0.06;
 
-/// One value per key, painted as bars either side of zero. A drag across the lane draws
-/// over them: the keys it touched and what it set them to come back, in the order they
-/// were painted.
+/// One value per key, drawn as bars on either side of zero. A drag across the lane paints
+/// over them and returns each key it touched with its new value, in paint order.
 pub fn lane(
     ui: &mut egui::Ui,
     span: Span,
@@ -1664,13 +1661,13 @@ fn snap(value: f32) -> f32 {
     }
 }
 
-/// Every key this frame's pointer positions painted, in the order they arrived. A drag
-/// off the end of the lane keeps painting the key it left by.
+/// Every key this frame's pointer positions painted, in arrival order. A drag off the end
+/// of the lane keeps painting the end key.
 fn strokes(ui: &egui::Ui, rect: egui::Rect, span: Span) -> Vec<(u8, f32)> {
     let mut out: Vec<(u8, f32)> = Vec::new();
     ui.input(|input| {
-        // ⚠️ A move from before this frame's press is the pointer on its way to the lane,
-        // not a stroke. A frame that presses nothing carries on the drag it is already in.
+        // ⚠️ A move before this frame's press is the pointer on its way to the lane, not a
+        // stroke. A frame with no press continues the drag already in progress.
         let opened = input.events.iter().rposition(|event| {
             matches!(
                 event,
@@ -1721,8 +1718,8 @@ mod tests {
         }
     }
 
-    /// A context dressed as the app dresses it: without the bold face bound, laying out
-    /// a band's name panics.
+    /// A context with the app's fonts: without the bold family, laying out a band's name
+    /// panics.
     fn dressed() -> egui::Context {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::app::fonts());
@@ -1730,8 +1727,8 @@ mod tests {
         ctx
     }
 
-    /// One frame of `body`, answering what it painted and what it gave back. The rect a
-    /// lane claims comes back with it, so the next frame can point at a key of it.
+    /// One frame of `body`, returning what it painted, the rect the widget claims, and
+    /// what `body` returned. The rect lets the next frame point at a key.
     fn frame<R>(
         ctx: &egui::Context,
         events: Vec<egui::Event>,
@@ -1758,7 +1755,7 @@ mod tests {
         (output, at, answer)
     }
 
-    /// What a frame painted over `rect`, innermost last.
+    /// The fills a frame painted at `rect`, in paint order.
     fn fills(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Color32> {
         fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Color32>) {
             match shape {
@@ -1820,9 +1817,8 @@ mod tests {
         ]
     }
 
-    /// The white keys share the width and the blacks hang between them, and the key
-    /// under a point is the key whose cell holds it — which is what every hit test in
-    /// the map rests on.
+    /// Every hit test in the map depends on this: the key under a point is the key whose
+    /// cell holds it.
     #[test]
     fn a_lane_gives_each_key_a_cell_and_reads_it_back() {
         assert_eq!(NSMP.keys(), 73);
@@ -1839,7 +1835,7 @@ mod tests {
                     false => unit - WHITE_GAP,
                 };
                 assert!((wide - wanted).abs() < 0.001, "{note} is {wide} wide");
-                assert_eq!(span.note_at(rect, span.centre(rect, note)), note);
+                assert_eq!(span.note_at(rect, span.center(rect, note)), note);
             }
             // The span starts at the left edge and the last white key ends at the right,
             // a gap short of it.
@@ -1870,8 +1866,8 @@ mod tests {
         found
     }
 
-    /// The one geometry: the cell a lane gives a key is the rect the keyboard paints it
-    /// at. Two of these that drift leave every band a key away from the key it names.
+    /// The lane and the keyboard share one geometry. If they drifted apart, every band
+    /// would sit off the key it names.
     #[test]
     fn a_keys_cell_is_the_key_the_keyboard_paints() {
         let ctx = dressed();
@@ -1901,12 +1897,10 @@ mod tests {
         }
     }
 
-    /// ⚠️ A black key belongs to the boundary between two white keys rather than to
-    /// either of them: C#4's centre is where C4's cell ends and D4's begins. The
-    /// keyboard paints it after both, or the white beside it takes back the half of the
-    /// black key that hangs over it.
+    /// ⚠️ C#4's center is where C4's cell ends and D4's begins. The keyboard paints it
+    /// after both, or the white key beside it would cover the part that overlaps.
     #[test]
-    fn a_black_key_is_centred_on_the_boundary_and_painted_over_the_whites_it_hangs_between() {
+    fn a_black_key_is_centered_on_the_boundary_and_painted_over_the_whites_it_hangs_between() {
         let ctx = dressed();
         for span in [NSMP, NPNO] {
             let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
@@ -1914,7 +1908,7 @@ mod tests {
             });
             let painted = key_shapes(&output, rect);
             for black in (span.low..=span.high).filter(|note| is_black(*note)) {
-                let off = span.centre(rect, black) - span.x_of(rect, black + 1);
+                let off = span.center(rect, black) - span.x_of(rect, black + 1);
                 assert!(
                     off.abs() < 0.001,
                     "{} sits {off} from the boundary between {} and {}",
@@ -1931,16 +1925,14 @@ mod tests {
                     .find(|drawn| drawn.intersects(cell));
                 assert!(
                     covered.is_none(),
-                    "{} is painted under {covered:?}, which takes back the half of it \
-                     that hangs over that key",
+                    "{} is painted under {covered:?}, which hides the part it overlaps",
                     note::name(black),
                 );
             }
         }
     }
 
-    /// A pointer past either end belongs to the key at that end rather than to no key:
-    /// a drag off the lane keeps painting the key it left by.
+    /// A drag off the lane keeps painting the end key.
     #[test]
     fn a_point_outside_the_span_clamps_to_the_end_it_is_past() {
         let rect = egui::Rect::from_min_size(egui::pos2(7.0, 3.0), egui::vec2(601.0, 19.0));
@@ -2026,8 +2018,7 @@ mod tests {
         assert_eq!(said, ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
     }
 
-    /// Clicking a key is how the map auditions, and a black key drawn over two whites is
-    /// the key that answers a click on it.
+    /// A click on a black key drawn over two white keys plays the black key.
     #[test]
     fn a_click_lands_on_the_key_under_it_black_keys_first() {
         let ctx = dressed();
@@ -2043,10 +2034,9 @@ mod tests {
         }
     }
 
-    /// A lit key is the one thing on the keyboard that is not its own colour, and the two
-    /// kinds of key light differently: a white one selects, a black one glows.
+    /// A lit white key takes the selection color, and a lit black key the accent.
     #[test]
-    fn every_lit_key_lights_and_the_others_keep_their_own_colour() {
+    fn every_lit_key_lights_and_the_others_keep_their_own_color() {
         let ctx = dressed();
         let visuals = ctx.style().visuals.clone();
         let (_, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
@@ -2069,8 +2059,8 @@ mod tests {
         }
     }
 
-    /// A root marker names the key it points at, and an unlabelled one is the triangle
-    /// alone — the piano lane marks 15 roots and cannot carry 15 names.
+    /// An unlabeled marker is only the triangle: the piano lane marks many roots and has
+    /// no room for all their names.
     #[test]
     fn a_root_marker_carries_its_name_only_when_it_was_given_one() {
         let ctx = dressed();
@@ -2109,10 +2099,8 @@ mod tests {
             .collect()
     }
 
-    /// The keys no zone answers are the ones the map hatches, and a map that covers
-    /// everything hatches nothing.
     #[test]
-    fn the_gaps_are_the_keys_no_zone_answers() {
+    fn the_gaps_are_the_keys_no_zone_covers() {
         assert_eq!(gaps(&[(61, 96), (41, 60), (24, 38)], NSMP), [(39, 40)]);
         assert!(gaps(&[(61, 96), (41, 60), (24, 40)], NSMP).is_empty());
         assert_eq!(gaps(&[(30, 90)], NSMP), [(24, 29), (91, 96)]);
@@ -2122,17 +2110,17 @@ mod tests {
     }
 
     /// v2 stores no low note: a zone's low is the key above the zone below's top, so
-    /// moving one top moves the neighbour's low with it and the two never overlap.
+    /// moving one top moves the neighbor's low with it and the two never overlap.
     #[test]
     fn a_derived_low_follows_the_top_it_is_derived_from() {
         let bounds = [(61, 96), (41, 60), (24, 40)];
         let moved = clamped(&bounds, NSMP, 1, Edge::Top, 55, Edges::TopOnly);
         assert_eq!(moved[1], (41, 55));
-        assert_eq!(moved[0], (56, 96), "the zone above starts a key higher");
+        assert_eq!(moved[0], (56, 96), "the zone above starts one key higher");
         assert_eq!(moved[2], bounds[2], "and nothing else moves");
 
-        // Upwards as well: the zone above gives up the keys this one takes, down to the
-        // last it can answer with.
+        // Upward too: the zone above gives up the keys this one takes, down to the
+        // fewest it may keep.
         let up = clamped(&bounds, NSMP, 1, Edge::Top, 70, Edges::TopOnly);
         assert_eq!((up[1], up[0]), ((41, 70), (71, 96)));
         assert_eq!(
@@ -2141,13 +2129,13 @@ mod tests {
             "the band above keeps the keys it needs to stay grabbable",
         );
 
-        // With both edges stored, the neighbour is left where it was and a gap opens.
+        // With both edges stored, the neighbor stays where it was and a gap opens.
         let apart = clamped(&bounds, NSMP, 1, Edge::Top, 55, Edges::Both);
         assert_eq!((apart[1], apart[0]), ((41, 55), (61, 96)));
     }
 
-    /// A band the drag would leave overlapping its neighbour does not move at all: the
-    /// keys either side of a band edge belong to one band or the other, never to both.
+    /// A band the drag would leave overlapping its neighbor does not move at all: the keys
+    /// on either side of a band edge belong to one band or the other, never to both.
     #[test]
     fn a_band_with_no_room_left_refuses_the_drag() {
         let bounds = [(61, 96), (60, 60)];
@@ -2159,23 +2147,23 @@ mod tests {
             clamped(&bounds, NSMP, 1, Edge::Top, 90, Edges::Both),
             bounds
         );
-        // It is the room that is gone, not the handle: the low still has keys below it.
+        // The top has no room left, but the low still has keys below it.
         assert_eq!(
             clamped(&bounds, NSMP, 1, Edge::Low, 30, Edges::Both)[1],
             (30, 60),
         );
 
-        // The neighbour is the band next along the keyboard, not the one before it in
-        // the file: a top dragged into it stops a key short either way.
+        // The neighbor is the next band along the keyboard, not the one before it in the
+        // file: a top dragged into it stops one key short.
         let jumbled = [(41, 55), (61, 96), (24, 40)];
         let moved = clamped(&jumbled, NSMP, 0, Edge::Top, 70, Edges::Both);
         assert_eq!(moved[0], (41, 60), "a key short of the band above's low");
         assert_eq!(moved[1], jumbled[1], "and the band above stays where it is");
     }
 
-    /// The clamps are what keeps zones from overlapping or turning inside out.
+    /// The clamps keep zones from overlapping or turning inside out.
     #[test]
-    fn a_handle_stops_short_of_its_neighbour_and_of_its_own_other_end() {
+    fn a_handle_stops_short_of_its_neighbor_and_of_its_own_other_end() {
         let bounds = [(61, 96), (41, 60), (24, 40)];
         let top = |note, edges| clamped(&bounds, NSMP, 1, Edge::Top, note, edges)[1].1;
         assert_eq!(
@@ -2188,7 +2176,7 @@ mod tests {
         assert_eq!(low(30), 41, "a key above the zone below's top");
         assert_eq!(low(90), 59, "a key below its own top");
 
-        // The ends of the span stand in for the neighbours the outermost zones lack.
+        // The ends of the span act as the neighbors the outermost zones lack.
         assert_eq!(
             clamped(&bounds, NSMP, 0, Edge::Top, 120, Edges::Both)[0].1,
             NSMP.high
@@ -2199,7 +2187,7 @@ mod tests {
         );
     }
 
-    /// Clicking a band opens its row; the handles at either end are not that click.
+    /// Clicking a band opens its row. With no handles, its ends pick it too.
     #[test]
     fn a_click_on_a_band_picks_it() {
         let ctx = dressed();
@@ -2214,8 +2202,8 @@ mod tests {
         let (_, _, act) = frame(&ctx, press(middle), BANDS_H, lane);
         assert_eq!(act, Some(BandAct::Pick(1)));
 
-        // With no edges to grab, the whole band answers a click — including the ends a
-        // handle would otherwise have taken.
+        // With no edges to grab, the whole band takes a click, including the ends a
+        // handle would otherwise cover.
         let fixed = |ui: &mut egui::Ui| bands(ui, NSMP, &zones, None, None, Edges::Fixed);
         let (_, rect, _) = frame(&ctx, Vec::new(), BANDS_H, fixed);
         let end = egui::pos2(
@@ -2225,7 +2213,7 @@ mod tests {
         let (_, _, act) = frame(&ctx, press(end), BANDS_H, fixed);
         assert_eq!(act, Some(BandAct::Pick(1)));
 
-        // The hatch over a gap answers nothing; it is not a zone to open.
+        // A click on the hatch over a gap picks nothing.
         let holed = bands_of(&[(61, 96), (41, 60)]);
         let lane = |ui: &mut egui::Ui| bands(ui, NSMP, &holed, None, None, Edges::Both);
         let (_, rect, _) = frame(&ctx, Vec::new(), BANDS_H, lane);
@@ -2246,8 +2234,8 @@ mod tests {
         }
     }
 
-    /// A cell narrower than four keys has no room for a size, and printing one there
-    /// leaves two numbers overlapping instead of a readable lane.
+    /// A cell narrower than four keys has no room for its size, and a number printed there
+    /// would overlap its neighbor's.
     #[test]
     fn a_cells_size_is_printed_only_where_it_fits() {
         let ctx = dressed();
@@ -2267,8 +2255,8 @@ mod tests {
         }
     }
 
-    /// A root that lost samples reads in warn ink, which is the whole point of the lane:
-    /// what the trim has already taken is visible without opening a row.
+    /// A trimmed root's size is in warn ink, so what the trim has taken is visible without
+    /// opening a row.
     #[test]
     fn a_trimmed_root_prints_its_size_in_warn_ink() {
         let ctx = dressed();
@@ -2304,9 +2292,6 @@ mod tests {
         assert_eq!(picked, Some(BandAct::Pick(1)));
     }
 
-    /// Two roots share the boundary between them, so keys one gives up the other takes
-    /// and neither is left without a key; the outer end of the lowest or the highest
-    /// covers or uncovers keys instead.
     #[test]
     fn a_dragged_root_boundary_moves_keys_from_one_root_to_the_next() {
         let span = Span { low: 48, high: 95 };
@@ -2319,7 +2304,7 @@ mod tests {
         let down = boundary(&bounds, span, 1, Edge::Low, 55);
         assert_eq!((down[0], down[1]), ((48, 54), (55, 71)));
 
-        // Neither root may be left without a key to answer.
+        // Neither root may be left without a key.
         assert_eq!(boundary(&bounds, span, 1, Edge::Top, 127)[2], (95, 95));
         assert_eq!(boundary(&bounds, span, 1, Edge::Low, 0)[0], (48, 48));
         assert_eq!(boundary(&bounds, span, 1, Edge::Low, 127)[1], (71, 71));
@@ -2342,10 +2327,10 @@ mod tests {
             .collect()
     }
 
-    /// A hole is a velocity no zone answers a key at. Two zones over the same keys
-    /// cover for each other, so the hole is what neither reaches.
+    /// A hole is a key and velocity no zone plays. Two zones over the same keys cover for
+    /// each other.
     #[test]
-    fn a_velocity_hole_is_what_no_block_over_those_keys_answers() {
+    fn a_velocity_hole_is_what_no_block_over_those_keys_covers() {
         let full = vel_blocks(&[(61, 96, (1, 127)), (24, 60, (1, 127))]);
         assert!(velocity_holes(&full).is_empty());
 
@@ -2360,7 +2345,7 @@ mod tests {
         let stacked = vel_blocks(&[(61, 96, (1, 64)), (61, 96, (65, 127))]);
         assert!(velocity_holes(&stacked).is_empty());
 
-        // Over other keys it covers nothing for them, so both keep their own hole.
+        // Over different keys, neither covers for the other, so each keeps its hole.
         let apart = vel_blocks(&[(61, 96, (1, 64)), (24, 60, (65, 127))]);
         assert_eq!(
             velocity_holes(&apart),
@@ -2369,7 +2354,7 @@ mod tests {
         );
     }
 
-    /// The clamps are what keeps a window from turning inside out.
+    /// The clamps keep a window from turning inside out.
     #[test]
     fn a_velocity_handle_stops_short_of_its_own_other_end() {
         assert_eq!(vel_clamped((1, 127), VelEdge::Max, 90), (1, 90));
@@ -2389,7 +2374,7 @@ mod tests {
         let blocks = vel_blocks(&[(61, 96, (1, 127)), (24, 60, (1, 64))]);
         let field = |ui: &mut egui::Ui| velocity(ui, NSMP, &blocks, None, Handles::Fixed);
         let (_, rect, act) = frame(&ctx, Vec::new(), FIELD_H, field);
-        assert_eq!(act, None, "nothing is picked unasked");
+        assert_eq!(act, None, "nothing is picked without a click");
 
         let lane = egui::Rect::from_min_max(
             egui::pos2(rect.left() + AXIS_W + AXIS_GAP, rect.top()),
@@ -2403,8 +2388,8 @@ mod tests {
         assert_eq!(act, Some(VelocityAct::Pick(1)));
     }
 
-    /// The field's top is the highest velocity and its bottom the lowest, which is the
-    /// only thing the axis labels mean.
+    /// The field's top is the highest velocity and its bottom the lowest, as the axis
+    /// labels say.
     #[test]
     fn the_field_reads_velocity_from_the_bottom_up() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 10.0), egui::vec2(200.0, FIELD_H));
@@ -2442,12 +2427,12 @@ mod tests {
         assert_eq!(Scale::Db(3.0).format(0.0), "+0.0 dB");
         assert_eq!(Scale::Cents(25).format(-0.48), "-12 c");
         assert_eq!(Scale::Cents(25).format(1.0), "+25 c");
-        // A value that rounds to nothing reads as nothing, never as a signed zero.
+        // A value that rounds to zero reads as +0, never as -0.
         assert_eq!(Scale::Cents(25).format(-0.001), "+0 c");
     }
 
-    /// Dragging across the lane is how a per-key table is filled in: every key the
-    /// pointer crossed this frame comes back with the value it was drawn at.
+    /// Every key the pointer crossed this frame comes back with the value it was painted
+    /// at.
     #[test]
     fn a_drag_across_the_lane_paints_the_keys_it_crossed() {
         let ctx = dressed();
@@ -2457,9 +2442,9 @@ mod tests {
         let lane_of = |ui: &mut egui::Ui| lane(ui, span, &values, &painted, Scale::Db(3.0));
 
         let (_, rect, drawn) = frame(&ctx, Vec::new(), LANE_H, lane_of);
-        assert!(drawn.is_empty(), "nothing is painted unasked");
+        assert!(drawn.is_empty(), "nothing is painted without a drag");
 
-        let at = |note: u8, y: f32| egui::pos2(span.centre(rect, note), y);
+        let at = |note: u8, y: f32| egui::pos2(span.center(rect, note), y);
         let start = at(60, rect.center().y);
         let events = vec![
             egui::Event::PointerMoved(start),
@@ -2502,8 +2487,8 @@ mod tests {
         assert_eq!(drawn, vec![(60, 0.0), (61, 0.5)]);
         frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
 
-        // Only the drawing button draws. A right-hand drag is somebody reaching for a
-        // menu, not an edit to every key it passes over.
+        // Only the primary button paints. A secondary drag is someone reaching for a
+        // menu, not an edit to every key it crosses.
         let events = vec![
             egui::Event::PointerMoved(start),
             egui::Event::PointerButton {
@@ -2518,8 +2503,8 @@ mod tests {
         assert!(drawn.is_empty(), "a secondary drag painted {drawn:?}");
     }
 
-    /// A hatch is the only thing in the map drawn out of lines, and the lines that reach
-    /// past a corner must stop at the edge rather than crossing the band beside it.
+    /// Lines that reach past a corner must stop at the edge and not cross the band beside
+    /// it.
     #[test]
     fn a_hatch_paints_no_further_than_the_rect_it_fills() {
         let ctx = dressed();

@@ -13,8 +13,8 @@ pub enum Target {
 /// Decide whether an argument names a file or a slot.
 ///
 /// A path that exists wins, so a file called `7:4` is still a file. Otherwise anything
-/// that parses as `BANK:SLOT` is one — which is what makes `nord program edit 7:4` work
-/// without a flag saying which kind of thing was meant.
+/// that parses as `BANK:SLOT` is a slot, so `nord program edit 7:4` needs no flag to say
+/// which was meant.
 pub fn target(s: &str) -> Result<Target, String> {
     let path = PathBuf::from(s);
     if path.exists() {
@@ -29,8 +29,8 @@ pub fn target(s: &str) -> Result<Target, String> {
 
 /// Parse a slot: `8:14` is bank 8, slot 14.
 ///
-/// `:` is canonical — it is what the Electro 5's display and Nord Sound Manager use, and
-/// the only spelling the help documents. `-` is accepted as well.
+/// `:` is canonical: the instrument's display and Nord Sound Manager use it, and the help
+/// documents only that form. `-` is accepted too.
 pub fn parse(s: &str) -> Result<Location, String> {
     let (b, l) = s
         .split_once([':', '-'])
@@ -53,17 +53,17 @@ pub fn shown(at: Location) -> String {
     shown_at(at.bank, at.slot)
 }
 
-/// The same labels for a zero-indexed pair read straight out of a file's header, which
-/// carries no [`Location`] to speak through.
+/// The same label for a zero-indexed pair read from a file's header, which has no
+/// [`Location`].
 pub fn shown_at(bank: impl Into<u64>, slot: impl Into<u64>) -> String {
     format!("bank {} slot {}", bank.into() + 1, slot.into() + 1)
 }
 
-/// The CLI's own noun for an object class — the word a recorded script's intent uses,
-/// and the word the sweep parses back.
+/// The CLI's noun for an object class: the word a recorded script's intent uses, and
+/// the word the sweep parses back.
 ///
-/// A class with no noun of its own is reached as `nord raw --class N`, and is spelled
-/// for the record as the number it is.
+/// A class with no noun of its own, reached as `nord raw --class N`, is written as
+/// `class-N`.
 pub fn noun(class: ObjectClass) -> String {
     match class {
         ObjectClass::Piano => "piano".into(),
@@ -78,7 +78,8 @@ pub fn noun(class: ObjectClass) -> String {
 
 /// The compact `BANK:SLOT` spelling, as the address is typed on the command line.
 ///
-/// For lists, where [`shown`]'s prose repeats on every row and pushes the columns apart.
+/// For lists, where [`shown`]'s longer form would repeat on every row and push the
+/// columns apart.
 pub fn addr(at: Location) -> String {
     format!("{}:{}", at.user_bank(), at.user_slot())
 }
@@ -87,7 +88,6 @@ pub fn addr(at: Location) -> String {
 mod tests {
     use super::*;
 
-    /// Both separators must land on the same zero-indexed wire location.
     #[test]
     fn both_slot_separators_parse_to_the_same_place() {
         let colon = parse("7:4").unwrap();
@@ -125,8 +125,6 @@ mod tests {
         assert_eq!(parse_all(&slots[..1]).unwrap().len(), 1);
     }
 
-    /// A path that exists is a file even if it would also parse as a slot; anything else
-    /// falls through to slot parsing.
     #[test]
     fn an_existing_path_wins_over_a_slot_reading() {
         let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
@@ -134,8 +132,6 @@ mod tests {
         assert!(matches!(target("7:4"), Ok(Target::Slot(_))));
     }
 
-    /// When neither reading works the error must name both, or the user is left
-    /// guessing which interpretation was even attempted.
     #[test]
     fn an_ambiguous_target_error_names_both_readings() {
         let err = target("no-such-file.ne5p").unwrap_err();

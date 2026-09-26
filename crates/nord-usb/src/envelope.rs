@@ -1,22 +1,22 @@
-//! Converting between the wire's entity **body** and an on-disk `CBIN` file.
+//! Conversion between the entity body on the wire and an on-disk `CBIN` file.
 //!
-//! The device transfers an entity body without its on-disk `CBIN` header. The
-//! format, schema version, slot, and body reported by the device determine that
-//! header; the container codec and checksum remain in `nord_format::cbin`.
+//! The device transfers an entity body without its `CBIN` header. The format tag,
+//! schema version, and slot reported by the device, plus the body, determine that
+//! header. The container codec and checksum live in `nord_format::cbin`.
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
 use nord_format::cbin::{self, Cbin, Header, RawBody};
 use std::io::Cursor;
 
-/// CRC-32/ISO-HDLC over a wire body — the same checksum the type-1 container
-/// carries, for comparing against the device's own `0x1e` report.
+/// CRC-32/ISO-HDLC over a wire body. The type-1 container carries the same checksum,
+/// and the device reports it in `0x1e` object info.
 pub fn crc32(data: &[u8]) -> u32 {
     nord_format::crc::crc32(data)
 }
 
-/// A wire slot as the header's `(bank, slot)` pair. Zero-indexed on both sides — one
-/// below the display.
+/// A wire slot as the header's `(bank, slot)` pair. Both are zero-indexed, one below
+/// the display.
 fn slot(at: Location) -> Result<(u16, u16)> {
     let bank = u16::try_from(at.bank)
         .map_err(|_| Error::InvalidArgument(format!("bank {} does not fit in CBIN", at.bank)))?;
@@ -42,8 +42,8 @@ pub fn tag(header: &Header) -> String {
 /// Wrap a wire body in a `CBIN` header, producing the bytes of a `.ne5p`-style file.
 ///
 /// `format` and `version` are the tag and schema version the device reported for the
-/// slot — both come from `0x1e` object info. `version` is per format tag, so passing a
-/// program's 4 for a set list writes a header `nord-format` will refuse to read.
+/// slot in `0x1e` object info. `version` is per format tag, so passing a program's 4
+/// for a set list writes a header `nord-format` will refuse to read.
 pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec<u8>> {
     if format.len() != 4 {
         return Err(Error::Envelope(format!(
@@ -61,13 +61,12 @@ pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec
     Ok(out.into_inner())
 }
 
-/// The inverse: take file bytes and hand back the container — the header the device
-/// implies, and the body the wire wants. The checksum is verified on the way.
+/// The inverse of [`wrap`]: split file bytes into the header and the body the wire
+/// carries. The checksum is verified.
 pub fn unwrap(file: &[u8]) -> Result<Cbin<RawBody>> {
     let read =
         cbin::read_raw(&mut Cursor::new(file)).map_err(|e| Error::Envelope(e.to_string()))?;
-    // The container is content with a header and nothing after it; the wire is not —
-    // the body is the whole payload of a write.
+    // A container may hold an empty body, but the body is the whole payload of a write.
     if read.body.0.is_empty() {
         return Err(Error::Envelope(
             "the file is a bare CBIN header with no body to send".into(),
@@ -101,8 +100,8 @@ mod tests {
         assert_eq!(built, file, "rebuilt header differs from the real file");
     }
 
-    /// The version is the device's to report, not ours to assume: a set list is 0 or 1
-    /// where a program is 4, and stamping a constant makes `nord-format` refuse the file.
+    /// A set list is version 0 or 1 where a program is 4, and a constant version makes
+    /// `nord-format` refuse the file.
     #[test]
     fn wrap_writes_the_version_it_is_given() {
         let body = hex(BODY);

@@ -1,13 +1,12 @@
-//! What the read path decodes, and how strictly a replay polices what is sent.
+//! What the read path decodes, and how strictly a replay checks what is sent.
 //!
-//! The exchanges live in `tests/scripts` and are replayed by `tests/replay`, which
-//! checks the bytes; these are the assertions about what those bytes *mean* — the
-//! counters a `STATUS` reply carries, the container a read rebuilds, the chunking a body
-//! larger than one request goes through — plus the two properties of the replay
-//! transport itself that only a deliberately wrong caller can show.
+//! The exchanges live in `tests/scripts`, and `tests/replay` checks their bytes. These
+//! tests assert what the bytes mean: the counters a `STATUS` reply carries, the
+//! container a read rebuilds, and the chunking of a body larger than one request. They
+//! also cover two properties of the replay transport that only a wrong caller can show.
 //!
-//! No hardware, no platform dependency: this runs anywhere the crate compiles,
-//! including under Wine, qemu and wasm.
+//! They need no hardware and run anywhere the crate compiles, including under Wine,
+//! qemu, and wasm.
 
 #![cfg(feature = "replay")]
 
@@ -22,7 +21,7 @@ use nord_usb::transport::ReplayTransport;
 use nord_usb::wire::ObjectClass;
 use nord_usb::Session;
 
-/// The program-class transaction NSM produced, as the sweep drives it.
+/// The program-class transaction Nord Sound Manager produced, as the sweep drives it.
 fn program_status() -> ReplayTransport {
     ReplayTransport::new(scripts::fixture("program/status_program.script").steps())
 }
@@ -41,8 +40,8 @@ fn status_decodes_the_counters_a_real_transaction_carried() {
     assert_eq!(got.count, 375);
     assert_eq!(got.free, 3525);
     assert_eq!(got.used, 52875);
-    // A slot class parks nothing: deleting a program returns its bytes to `free`
-    // directly, so both trailing words stay zero here.
+    // A slot class holds no dirty space: deleting a program returns its bytes to
+    // `free`, so both trailing words stay zero here.
     assert_eq!(got.dirty, 0);
     assert_eq!(got.spare, 0);
     assert_eq!(got.total(), 56400);
@@ -69,8 +68,8 @@ fn counters(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_be_bytes()).collect()
 }
 
-/// A reply that stops after the three counters every class reports still decodes; the
-/// words it does not carry read zero rather than failing the decode.
+/// A reply that stops after the three counters every class reports still decodes, with
+/// the missing words as zero.
 #[test]
 fn a_three_word_status_reply_reads_no_dirty_or_spare() {
     use nord_usb::wire::Status;
@@ -90,7 +89,7 @@ fn a_three_word_status_reply_reads_no_dirty_or_spare() {
 }
 
 /// One byte short of three words there is no whole `used` to report, so the reply is
-/// refused rather than decoded around a counter cut in half.
+/// refused.
 #[test]
 fn a_status_reply_short_of_three_words_is_refused() {
     use nord_usb::wire::Status;
@@ -140,8 +139,8 @@ fn an_exact_replay_rejects_a_frame_that_differs_from_the_script() {
     assert_eq!(
         t.position(),
         2,
-        "the HELLO exchange is in the script and the class it opens is not, so exactly \
-         the first two frames may be consumed"
+        "the HELLO exchange is in the script and the class it opens is not, so only the \
+         first two frames may be consumed"
     );
 }
 
@@ -161,8 +160,8 @@ fn lenient_mode_tolerates_differing_requests() {
 
 /// Fixed-size classes report slots; variable-size ones must not pretend to.
 ///
-/// Numbers are off a real Electro 5: adding one program moved used by exactly 141
-/// (53439 -> 53580) — 121 body + 16 name + 4 CRC — and 56400 / 141 is 400, the
+/// Numbers are from an Electro 5: adding one program moved `used` by 141
+/// (53439 -> 53580), which is 121 body + 16 name + 4 CRC, and 56400 / 141 is 400, the
 /// instrument's 8 banks x 50 slots.
 #[test]
 fn derives_slots_only_for_fixed_size_classes() {
@@ -190,7 +189,7 @@ fn derives_slots_only_for_fixed_size_classes() {
     assert_eq!(set_lists.bytes_per_item(), Some(38));
     assert_eq!(set_lists.slots(), Some(200));
 
-    // Pianos genuinely vary in size, so there is no per-item constant to report.
+    // Pianos vary in size, so there is no per-item constant.
     let pianos = Status {
         class: ObjectClass::Piano,
         count: 29,
@@ -214,12 +213,13 @@ fn derives_slots_only_for_fixed_size_classes() {
     assert_eq!(empty.slots(), None);
 }
 
-/// A library class's capacity is all four storage words, and only that sum holds still.
+/// A library class's capacity is the sum of all four storage words, which stays
+/// constant.
 ///
-/// Both readings are off the same Electro 5 sample partition: the four words sum to
+/// Both readings are from the same Electro 5 sample partition: the four words sum to
 /// 2048 either way, while `free + used` reads 1983 in one and 1936 in the other. A
-/// report built from those two makes the partition look like it is losing capacity
-/// every time something is deleted, because a delete parks its space in `dirty`.
+/// report built from those two would show the partition losing capacity with every
+/// delete, because a delete moves its space into `dirty`.
 #[test]
 fn a_library_capacity_is_all_four_words() {
     use nord_usb::wire::Status;
@@ -243,16 +243,14 @@ fn a_library_capacity_is_all_four_words() {
     assert_eq!(probed.total(), 2048);
     assert_eq!(rebooted.total(), 2048);
 
-    // What a write can actually reach — the point of decoding `dirty` at all. The
-    // rebooted partition reports zero free and is no less writable for it.
+    // What a write can reach. The rebooted partition reports zero free and is just as
+    // writable.
     assert_eq!(probed.available(), 111);
     assert_eq!(rebooted.available(), 111);
 }
 
-/// A per-item size is a property of the class, not of numbers that happen to divide.
-///
-/// Library content varies in size, so any exact division of its block counters is a
-/// coincidence — and acting on one would report a slot count the class does not have.
+/// Library content varies in size, so an exact division of its block counters is a
+/// coincidence, and acting on it would report a slot count the class does not have.
 #[test]
 fn a_library_class_reports_no_per_item_size_however_its_counters_divide() {
     use nord_usb::wire::Status;
@@ -276,11 +274,9 @@ fn a_library_class_reports_no_per_item_size_however_its_counters_divide() {
     assert_eq!(slot_class.slots(), Some(10));
 }
 
-/// The file a read rebuilds is a real `.ne5p`, not just the right bytes.
-///
-/// The replay compares reconstruction with the file saved for that slot; this checks it is
-/// a container whose header carries the format tag and the address the wire never
-/// transmits together.
+/// The replay compares a rebuilt file with the one saved for that slot. This checks
+/// that the saved file is a `.ne5p` container whose header carries the format tag and
+/// the address, which the wire never sends together.
 #[test]
 fn a_rebuilt_file_is_a_container_the_envelope_reads_back() {
     use nord_usb::envelope;
@@ -294,12 +290,11 @@ fn a_rebuilt_file_is_a_container_the_envelope_reads_back() {
 }
 
 /// A body larger than one `READ` arrives across several requests, and the offsets must
-/// advance by exactly what was asked for.
+/// advance by what was asked for.
 ///
-/// The framing is built rather than captured. The test checks three exchanges at offsets
-/// 0 / 32720 / 65440 with lengths 32720 / 32720 / 777, in that order, under an
-/// exact-match transport. A single whole-body request, a wrong offset, or a dropped
-/// final chunk all fail it.
+/// The framing is built, not captured: three exchanges at offsets 0 / 32720 / 65440
+/// with lengths 32720 / 32720 / 777, in that order, under an exact-match transport. A
+/// single whole-body request, a wrong offset, or a dropped final chunk fails it.
 #[test]
 fn a_large_body_is_read_in_chunks() {
     use nord_usb::wire::{cmd, ui};
@@ -381,8 +376,8 @@ fn a_large_body_is_read_in_chunks() {
     assert!(t.is_exhausted(), "did not consume the whole exchange");
 }
 
-/// The partition of a byte-granular class, so a write reserves nothing and is the
-/// transfer alone.
+/// The allocation unit of a byte-granular class, so a write reserves nothing and sends
+/// only the transfer.
 fn byte_granular_unit(class: ObjectClass) -> nord_usb::wire::AllocationUnit {
     let mut fields = 1u32.to_be_bytes().to_vec();
     fields.resize(29, 0);
@@ -396,14 +391,14 @@ fn byte_granular_unit(class: ObjectClass) -> nord_usb::wire::AllocationUnit {
     .unwrap()
 }
 
-/// A body larger than one `WRITE_DATA` leaves in several frames, of which only the last
-/// is acknowledged — the intermediate chunks are fire-and-forget, so a reply scripted for
-/// one would be read as the answer to a later request.
+/// A body larger than one `WRITE_DATA` leaves in several frames, and only the last is
+/// acknowledged. The device does not answer the others, so a reply scripted for one
+/// would be read as the answer to a later request.
 ///
-/// The framing is built rather than captured. The test checks three chunks at offsets
-/// 0 / 32720 / 65440 with lengths 32720 / 32720 / 777, in that order, under an
-/// exact-match transport. A whole-body single frame, a wrong offset, an acknowledged
-/// intermediate chunk, or a dropped tail all fail it.
+/// The framing is built, not captured: three chunks at offsets 0 / 32720 / 65440 with
+/// lengths 32720 / 32720 / 777, in that order, under an exact-match transport. A
+/// whole-body single frame, a wrong offset, an acknowledged intermediate chunk, or a
+/// dropped tail fails it.
 #[test]
 fn a_large_body_is_written_in_chunks() {
     use nord_usb::wire::{cmd, ui, Message, Service};

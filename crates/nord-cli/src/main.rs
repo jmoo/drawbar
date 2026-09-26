@@ -1,19 +1,20 @@
-//! `nord` — a thin CLI over [`nord_format`] and `nord_usb` to interact with
-//! your Clavia / Nord projects and files.
+//! `nord`, a command-line tool over [`nord_format`] and `nord_usb` for Clavia Nord
+//! files and instruments.
 //!
-//! > This is an unofficial, community project: **not affiliated with, endorsed
+//! > This is an unofficial community project: **not affiliated with, endorsed
 //! > by, or supported by Clavia DMI AB**. "Nord" and the instrument names are
 //! > Clavia's trademarks, used here only to identify which files this crate
 //! > reads.
 //!
-//! The nouns are the protocol's object classes: `nord program`, `nord sample`,
-//! `nord piano`, `nord setlist` and `nord live` are [`slot_action`] with the class
-//! fixed, `nord settings` carries the subset its singleton can answer (`get`,
-//! `info`, `edit`), and the hidden `nord raw --class N` is [`slot_action`] with the
-//! class given as a number.
-//! `inspect`/`verify`/`edit` dispatch on the format rather than on a class, so they
-//! sit at the top level — `edit` is how the formats with no noun of their own (the
-//! Stage bodies, the Sample Editor project) are edited.
+//! The nouns are the protocol's object classes. `nord program`, `nord sample`,
+//! `nord piano` and `nord setlist` are [`slot_action`] with the class fixed, plus verbs
+//! of their own. `nord live` and `nord settings` keep the verbs their class can answer,
+//! plus `edit`. The hidden `nord raw --class N` is [`slot_action`] with the class given
+//! as a number.
+//!
+//! `inspect`, `verify` and `edit` dispatch on the file format, so they sit at the top
+//! level. `edit` is how the formats with no noun of their own (the Stage bodies, the
+//! Sample Editor project) are edited.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own.
@@ -38,19 +39,24 @@ use std::process::ExitCode;
 use ui::{ColorChoice, Ui};
 
 #[derive(Parser)]
-#[command(name = "nord", about = "Inspect Clavia / Nord keyboard files", version)]
+#[command(
+    name = "nord",
+    about = "Inspect and edit Clavia Nord files and instruments",
+    version
+)]
 struct Cli {
-    /// When to color output. `auto` means "stdout is a terminal"; `NO_COLOR` in the
-    /// environment forces it off.
+    /// When to color output. `auto` colors only when stdout is a terminal and `NO_COLOR`
+    /// is not set.
     #[arg(long, global = true, value_name = "WHEN", value_enum, default_value_t)]
     color: ColorChoice,
 
-    /// Mirror every frame exchanged with the instrument into a replay script at PATH.
+    /// Record every frame exchanged with the instrument to a replay script at PATH.
     ///
-    /// The script is what `--replay` and the protocol tests read back. An operation that
-    /// transfers a body writes that body into it in full.
+    /// `device status --replay` and the protocol tests read the script back. A
+    /// transferred body is written to it in full.
     ///
-    /// Bulk traffic only: `device info` reads endpoint 0, which never reaches the script.
+    /// Only bulk traffic is recorded. `device info` and `device controls` use endpoint 0,
+    /// which never reaches the script.
     #[arg(long, global = true, value_name = "PATH")]
     record: Option<PathBuf>,
 
@@ -60,44 +66,45 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Parse Nord file(s) and print a summary of the decoded contents.
+    /// Decode Nord files and print a summary of each.
     Inspect {
-        /// Files to read (.ne5p program, .ne5l live slot, .ne5t song, .ne5s
-        /// settings, .npno piano, .nsmp sample, or a ZIP backup bundle).
+        /// Files to read, such as a program (.ne5p), live slot (.ne5l), set list
+        /// (.ne5t), settings (.ne5s), piano (.npno), sample (.nsmp), Sample Editor
+        /// project (.nsmpproj), or a ZIP backup bundle.
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
-        /// Dump the full `Debug` representation instead of the summary.
+        /// Print the full decoded structure (Rust `Debug` output) instead of the summary.
         #[arg(long)]
         raw: bool,
     },
 
-    /// Re-encode file(s) and check the result is byte-identical to the input.
+    /// Re-encode files and check that each matches its input byte for byte.
     ///
-    /// Checks `nord-format`'s central invariant: decoded values are read-only views over
-    /// a verbatim body, so a parse followed by a re-emit cannot drift.
+    /// A mismatch is reported with the offset of the first differing byte.
     Verify {
-        /// Files to round-trip. Bundles are archives, not re-emittable entities.
+        /// Files to round-trip. ZIP backup bundles cannot be re-encoded.
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },
 
-    /// Change fields inside any editable file, whatever format it holds.
+    /// Change fields in any editable file, whatever its format.
     ///
-    /// The file twin of the noun edits: where those speak to the Electro 5's
-    /// object classes, this dispatches on the file itself, so the formats with
-    /// no noun — Stage programs and presets, Sample Editor projects — are
-    /// editable too. `--fields` lists what the file offers.
+    /// This works out the format from the file itself, so it also edits formats that
+    /// have no command of their own: Stage programs and presets, and Sample Editor
+    /// projects. `--fields` lists what the file offers.
     Edit(file_edit::FileEditArgs),
 
-    /// The attached instrument itself: what is on the bus, and what it holds.
+    /// The connected instrument: what is attached, and what it holds.
     Device {
         #[command(subcommand)]
         action: DeviceAction,
     },
 
-    /// Programs on the instrument (object class 4). Slots are `BANK:SLOT`, as the
-    /// instrument displays them; the read-only verbs and `edit` take a file instead.
+    /// Programs on the instrument (object class 4), or `.ne5p` files.
+    ///
+    /// Slots are `BANK:SLOT`, as the instrument displays them. The read-only verbs and
+    /// `edit` also take a file.
     Program {
         #[command(subcommand)]
         action: ProgramAction,
@@ -109,7 +116,7 @@ enum Command {
         action: SetlistAction,
     },
 
-    /// The live buffer — the panel as it stands (object class 6), in slots 1:1 to 1:3.
+    /// Live slots 1:1 to 1:3, which hold the panel as it stands (object class 6).
     Live {
         #[command(subcommand)]
         action: LiveAction,
@@ -122,24 +129,23 @@ enum Command {
         action: SettingsAction,
     },
 
-    /// Sample instruments — the library on the instrument (object class 3), or
-    /// `.nsmp` files.
+    /// Sample instruments in the instrument's library (object class 3), or `.nsmp`
+    /// files.
     Sample {
         #[command(subcommand)]
         action: SampleAction,
     },
 
-    /// Piano libraries — the library on the instrument (object class 1), or
-    /// `.npno` files.
+    /// Piano libraries on the instrument (object class 1), or `.npno` files.
     Piano {
         #[command(subcommand)]
         action: PianoAction,
     },
 
-    /// The class-generic primitives, addressed by object-class number.
+    /// The slot verbs for any object class, given by number.
     ///
-    /// Every typed noun above is this with the class fixed. Use it for a class with no
-    /// noun of its own, or to address a class by number.
+    /// The other nouns are this command with the class fixed. Use it for a class with no
+    /// noun of its own.
     #[command(hide = true)]
     Raw {
         #[arg(long, global = true, value_name = "N", default_value_t = 4, help = class_help())]
@@ -152,12 +158,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DeviceAction {
-    /// Sweep the vendor control requests on endpoint 0 and print what answers. For RE.
+    /// Try each vendor control request on endpoint 0 and print the answers. For reverse
+    /// engineering.
     ///
-    /// Endpoint 0 is outside the bulk protocol: these are reads that cannot open,
-    /// desync, or wedge a session, and an unrecognised request stalls the endpoint
-    /// rather than doing anything. Reported externally to carry the model, firmware
-    /// version, build and maximum transfer size.
+    /// Endpoint 0 is outside the bulk protocol, so these reads cannot open, desynchronize
+    /// or wedge a session. An unrecognized request stalls the endpoint and has no other
+    /// effect. These requests are reported to carry the model, firmware version, build
+    /// and maximum transfer size.
     Controls {
         /// Lowest bRequest to try.
         #[arg(long, default_value_t = 0)]
@@ -167,11 +174,11 @@ enum DeviceAction {
         #[arg(long, default_value_t = 15)]
         to: u8,
 
-        /// Bytes to ask each request for. A control transfer's wLength is 16 bits.
+        /// Bytes to request from each. A control transfer's wLength is 16 bits.
         #[arg(long, default_value_t = 64)]
         len: u16,
 
-        /// Address the interface rather than the device.
+        /// Address the interface instead of the device.
         #[arg(long)]
         interface: bool,
 
@@ -184,13 +191,12 @@ enum DeviceAction {
         index: u16,
     },
 
-    /// Report what is stored on the instrument, per object class.
+    /// Report what the instrument stores, per object class.
     ///
-    /// Read-only: this sends one query per class and reads counters back. Nothing
-    /// on the instrument is modified.
+    /// Read-only: this sends one query per class and reads the counters back.
     Status {
-        /// Replay a recorded exchange instead of opening a device. Useful for
-        /// demos and for exercising the whole path without hardware.
+        /// Replay an exchange recorded with `--record` instead of opening a device, to
+        /// run the command without hardware.
         #[arg(long, value_name = "SCRIPT")]
         replay: Option<PathBuf>,
 
@@ -199,33 +205,32 @@ enum DeviceAction {
         json: bool,
     },
 
-    /// Identify the attached instrument, from its USB descriptors. Read-only, and opens
-    /// no transaction — the first thing to run when nothing else answers.
+    /// Identify the attached instrument from its USB descriptors. Read-only.
+    ///
+    /// This opens no session, so it is the first thing to run when nothing else answers.
     Info,
 
-    /// Clear a session an interrupted run left open on the instrument.
+    /// Clear a session that an interrupted run left open on the instrument.
     ///
-    /// Two faults look like a broken instrument and each is one frame to cure: an
-    /// abandoned UI session makes every slot read as empty — a wrong answer that looks
-    /// right — and an abandoned class session makes operations fail with status 0x12.
-    /// Safe to run on a healthy instrument.
+    /// An abandoned UI session makes every slot read as empty, with no error. An
+    /// abandoned class session makes operations fail with status 0x12. One frame clears
+    /// each, and this is safe to run on a healthy instrument.
     Recover,
 
     /// Report the instrument's storage layout: partitions, banks and slot capacity.
     ///
-    /// Read from the device rather than assumed, so it is correct for models this tool
-    /// has never seen. Partition indices are the object class numbers.
+    /// The layout is read from the instrument, so it is correct even for models this
+    /// tool has not seen. Partition indices are object class numbers.
     Geometry,
 
-    /// Deliberately wedge the instrument by abandoning a session. Test tool.
+    /// Wedge the instrument by abandoning a session, to test recovery.
     ///
-    /// Reproduces the abandoned session on purpose, so recovery can be tested against a
-    /// known wedge. Nothing stored is harmed, but every slot then reads as empty —
-    /// successfully, which is worse than an error — until `nord device recover` clears it.
+    /// Nothing stored is harmed, but every slot then reads as empty, with no error, until
+    /// `nord device recover` clears it.
     #[cfg(feature = "wedge")]
     #[command(hide = true)]
     Wedge {
-        /// Object class to open the doomed session on.
+        /// Object class to open the abandoned session on.
         #[arg(long, value_name = "N", default_value_t = 4)]
         class: u32,
 
@@ -235,24 +240,24 @@ enum DeviceAction {
     },
 }
 
-/// `nord program`: every class-generic verb, plus the one that only programs have.
+/// `nord program`: the slot verbs, plus `edit`.
 #[derive(Subcommand)]
 enum ProgramAction {
     #[command(flatten)]
     Slot(SlotAction),
 
-    /// Change fields inside a program, in a file or in a slot.
+    /// Change fields in a program, in a file or in a slot.
     ///
-    /// Field paths are `nord-format`'s own — `center_panel.transpose`,
+    /// Fields are named by path, such as `center_panel.transpose` or
     /// `effects_panel.fx1_rate`. `--fields` lists them.
     ///
-    /// With no target the program is a fresh default one, so `--fields` needs nothing to
-    /// read and `-o` writes a blank `.ne5p` to start from.
+    /// With no target, the edit starts from a default program: `--fields` needs no file,
+    /// and `-o` writes a new `.ne5p`.
     Edit(EditArgs),
 }
 
-/// `nord setlist`: every class-generic verb, plus the one that changes the four
-/// program slots a set list points at.
+/// `nord setlist`: the slot verbs, plus `edit` for the four program slots a set list
+/// points at.
 #[derive(Subcommand)]
 enum SetlistAction {
     #[command(flatten)]
@@ -262,69 +267,69 @@ enum SetlistAction {
     ///
     /// The four slots are `slot1` to `slot4`, each taking a program address as
     /// the instrument shows it: `--set slot1=2:5`. `--fields` lists them. With
-    /// no target the set list is a fresh default one, so `-o` writes a blank
-    /// `.ne5t` to start from.
+    /// no target, the edit starts from a default set list, and `-o` writes a new
+    /// `.ne5t`.
     Edit(EditArgs),
 }
 
-/// `nord sample`: every class-generic verb, plus the one that edits files.
+/// `nord sample`: the slot verbs, plus verbs that edit, decode, encode and build sample
+/// instruments.
 #[derive(Subcommand)]
 enum SampleAction {
     #[command(flatten)]
     Slot(SlotAction),
 
-    /// Change fields inside a sample instrument, in a file or in a slot.
+    /// Change fields in a sample instrument, in a file or in a slot.
     ///
-    /// A sample is mostly encoded audio; what is settable is what the format can
-    /// patch in place — the name, each zone's root key and top note, and its low
-    /// note on the generations that store one. `--fields` lists them.
+    /// The editable fields are those the format can patch in place: the name, each
+    /// zone's root key and top note, and its low note in the generations that store
+    /// one. `--fields` lists them.
     Edit(sample::EditArgs),
 
-    /// Decode an instrument's audio to WAV, one file per zone, from a file or a slot.
+    /// Decode a sample instrument's audio to WAV, one file per zone, from a file or a
+    /// slot.
     ///
-    /// The audio comes out on its own lattice — about 35 kHz — because the rate the
-    /// instrument plays it back at is a property of its interpolator, which is not
-    /// decoded. Anything the stream grammar cannot walk is reported as unsupported
-    /// with a reason, and the run ends in a coverage count. A slot is only read, so
-    /// this never needs `--yes`; its WAVs are named after the instrument.
+    /// The WAVs keep the stored sample rate, about 35 kHz. The rate the instrument plays
+    /// back at depends on its interpolator, which is not decoded. Audio the decoder
+    /// cannot read is reported as unsupported with a reason, and the run ends with a
+    /// count of what decoded. A slot is only read, so this never needs `--yes`, and its
+    /// WAVs are named after the instrument.
     Decode(sample::DecodeArgs),
 
     /// Build a one-zone sample instrument from a 44.1 kHz mono or stereo 16-bit WAV.
     ///
-    /// The v2 result is what Nord Sample Editor writes for the same input, byte for
-    /// byte, apart from a float residue in the resampling kernel that leaves the odd
-    /// audio field one count out and changes nothing the instrument plays; mono,
-    /// stereo and looped v2 encodes play on an Electro 5. The wide generations
-    /// reproduce the editor's renders but have never been played, so they need
-    /// `--unverified`.
+    /// The v2 output matches what Nord Sample Editor writes for the same input, byte for
+    /// byte, except that floating-point rounding in the resampler leaves an occasional
+    /// audio value off by one, which does not change what the instrument plays. Mono,
+    /// stereo and looped v2 encodes play on an Electro 5. The v3 and v4 outputs match
+    /// the editor's but have never been played, so they need `--unverified`.
     Encode(sample::EncodeArgs),
 
     /// Build a sample instrument from a Nord Sample Editor project.
     ///
     /// The project supplies the zones, their root keys, top notes and trim points,
-    /// and the WAVs they play — paths inside it resolve from the project's own
-    /// directory. Unsupported layer, detune, velocity and enabled EQ settings are
-    /// refused by name. Settings with no instrument representation are reported when
-    /// ignored. The same fidelity and `--unverified` notes as `encode` apply.
+    /// and the WAVs they play. Paths in the project are relative to its own directory.
+    /// Unsupported layer, detune, velocity and enabled EQ settings are refused by name.
+    /// Settings the instrument has no place for are ignored, with a note. The notes on
+    /// fidelity and `--unverified` under `encode` apply here too.
     Build(sample::BuildArgs),
 
-    /// Round-trip a sample instrument, in a file or a slot, and with `--deep` also
-    /// walk its audio stream. Reading a slot is all this does to the instrument.
+    /// Round-trip a sample instrument from a file or a slot, and with `--deep` also
+    /// check its encoded audio stream. A slot is only read.
     Verify(sample::VerifyArgs),
 
-    /// Sample Editor projects (`.nsmpproj`) — the save file the editor generates an
-    /// instrument from. `nord edit` changes one; this builds one.
+    /// Sample Editor projects (`.nsmpproj`), the files the editor builds instruments
+    /// from. `nord edit` changes one, and this creates one.
     Project {
         #[command(subcommand)]
         action: SampleProjectAction,
     },
 }
 
-/// `nord piano`: every class-generic verb, plus the ones that read and reshape a
-/// library file.
+/// `nord piano`: the slot verbs, plus verbs that read and reshape a library file.
 ///
-/// A library is tens of megabytes, so the file verbs take a file and nothing else:
-/// move one to or from the instrument with `get` and `put` first.
+/// A library is tens of megabytes, so these verbs take only a file. Move one to or from
+/// the instrument with `get` and `put`.
 #[derive(Subcommand)]
 enum PianoAction {
     #[command(flatten)]
@@ -342,21 +347,19 @@ enum PianoAction {
     /// with `--bank` and `--layer` when a key selects more than one.
     Decode(piano::DecodeArgs),
 
-    /// Change what a library says rather than what it holds: its name, a key's fine
-    /// tune, and which root a key plays.
+    /// Change a library's name, a key's fine tune, or which root a key plays.
     ///
-    /// Nothing here touches audio. A key can only be routed to a root the directory
-    /// actually records.
+    /// The audio is not touched. A key can only be routed to a root the library's
+    /// directory records.
     Edit(piano::EditArgs),
 
     /// Write a smaller library: without a bank, without the quieter velocity
     /// layers, or covering fewer keys.
     ///
-    /// The strokes that survive move byte for byte, so a trim is a re-lay rather
-    /// than a re-encode. Keys whose root loses every stroke are left playing
-    /// nothing, and the count is reported. Dropping a bank or a layer is
-    /// hardware-verified — the trimmed library loads and plays; narrowing the key
-    /// range is not.
+    /// The strokes that remain are copied byte for byte, with no re-encoding. Keys
+    /// whose root loses every stroke are left silent, and their count is reported.
+    /// Dropping a bank or a layer is confirmed on hardware: the trimmed library loads
+    /// and plays. Narrowing the key range is not confirmed on hardware.
     Trim(piano::TrimArgs),
 
     /// Cut a library in two at a key, writing both halves.
@@ -364,75 +367,74 @@ enum PianoAction {
 
     /// Build a piano library from a directory of WAVs.
     ///
-    /// The WAVs name the root, bank and layer they are. Any rate resamples onto the
-    /// lattice the instrument plays at.
+    /// Each WAV's name gives the root, bank and layer it holds. Any sample rate is
+    /// resampled to the rate the instrument plays at.
     ///
-    /// Everything the audio does not decide — the length marks, the decay
-    /// coefficients, the per-note tables, the playback parameters and the stream
-    /// version — comes from `--template`, out of its own stroke of the same bank and
-    /// nearest root. Without a template the library states neutral playback instead:
-    /// no decay applied over the recordings, each stroke trimmed by its own layer
-    /// value, and the damper limit `--kind` implies.
+    /// What the audio does not decide (the length marks, decay coefficients, per-note
+    /// tables, playback parameters and stream version) comes from `--template`, taken
+    /// from the template's stroke of the same bank and nearest root. Without a template,
+    /// the library uses neutral playback: no decay over the recordings, each stroke
+    /// trimmed by its own layer value, and the damper limit that `--kind` implies.
     ///
-    /// Every key up to one semitone above the highest root sounds, playing the
-    /// nearest root at or above it; keys past that are left uncovered. A key sounds
-    /// the largest layer value its root holds that is at most (127 − velocity)·31/127,
-    /// and a root's `l00`, `l01`, … spread over 0..27 so that each layer answers to
-    /// its own part of the velocity range.
+    /// Every key up to one semitone above the highest root sounds, playing the nearest
+    /// root at or above it. Keys past that are silent. A key plays the largest layer
+    /// value its root holds that is at most (127 − velocity)·31/127, and a root's `l00`,
+    /// `l01`, … spread over 0..27 so that each layer covers its own part of the velocity
+    /// range.
     ///
-    /// Hardware-verified: a library built this way loads and plays, mono and stereo,
-    /// on every key it covers, and one written without a template sounds like the same
-    /// audio built against one.
+    /// Confirmed on hardware: a library built this way loads and plays, mono and
+    /// stereo, on every key it covers, and one built without a template sounds the same
+    /// as the same audio built with one.
     Build(piano::BuildArgs),
 
-    /// Code a library's audio again from the frames it decodes to, and report how each
-    /// stroke's blocks came back.
+    /// Re-encode a library's audio from its decoded frames, and report how each
+    /// stroke's blocks compare.
     ///
-    /// A library this coder wrote comes back byte for byte. One it did not comes back
-    /// block for block apart from the attenuation each block declares, which is a
-    /// statistic the file's own encoder measured and the decode never reads — coded
-    /// again, such a library plays indistinguishably from the original. Each stroke
-    /// keeps its own root, bank and layer value.
+    /// A library this tool wrote comes back byte for byte. Any other library comes back
+    /// block for block, except for the attenuation each block declares: the original
+    /// encoder measured that value, and decoding never reads it. The re-encoded library
+    /// sounds the same as the original. Each stroke keeps its root, bank and layer
+    /// value.
     Rebuild(piano::RebuildArgs),
 
-    /// Rebuild each library from its parsed model and check the bytes come back
-    /// identical; with `--deep` also decode every stroke it holds.
+    /// Rebuild each library from its decoded model and check that the bytes match, and
+    /// with `--deep` also decode every stroke.
     ///
-    /// The rebuild recomputes the per-root counts, every audio offset, the
-    /// alignment gap and the container checksum, so an identical result says the
-    /// model accounts for the whole file. `--deep` adds the codec's own checks:
-    /// each block repeats the previous block's last frames bit-exactly, and the
-    /// frames a stroke owns come to the count its record states.
+    /// The rebuild recomputes the per-root counts, every audio offset, the alignment gap
+    /// and the container checksum, so a match shows the model accounts for the whole
+    /// file. `--deep` adds the codec's own checks: each block repeats the previous
+    /// block's last frames exactly, and each stroke decodes to the frame count its
+    /// record states.
     Verify(piano::VerifyArgs),
 }
 
 /// `nord sample project`: the editor's own save file, which no object class holds.
 #[derive(Subcommand)]
 enum SampleProjectAction {
-    /// Build a project from WAV files, one zone per `--zone WAV=NOTE`.
+    /// Create a project from WAV files, one zone per `--zone WAV=NOTE`.
     ///
-    /// Key ranges, zone ids and loop points are derived the way the editor derives
-    /// them for a fresh import. A WAV is stored by the path given, made relative to
-    /// the project's own directory when it lies under it, and at whatever rate it
-    /// carries — the frame counts a project holds are stated at 44.1 kHz regardless.
+    /// Key ranges, zone ids and loop points are set the way the editor sets them for a
+    /// new import. Each WAV is stored by the path given, made relative to the project's
+    /// directory when it is inside it. A WAV may have any sample rate, but the project
+    /// states its frame counts at 44.1 kHz.
     New(sample::ProjectNewArgs),
 }
 
-/// `nord live`: the verbs that mean anything for the live buffer.
+/// `nord live`: the verbs that apply to the live buffer.
 ///
-/// The live buffer is the panel as it stands, not a library — there is nothing to name,
-/// nothing to delete, and `select` is what the *other* classes do to it. What is left is
-/// the read-only subset, spelled exactly as [`SlotAction`] spells it, plus `edit`.
+/// The live buffer is the panel as it stands, so it has nothing to name or delete, and
+/// `select` on another class is what loads it. It keeps `get`, `info` and `deps` from
+/// [`SlotAction`], plus `edit`.
 #[derive(Subcommand)]
 enum LiveAction {
     #[command(flatten)]
     Slot(LiveSlotAction),
 
-    /// Change fields inside a live slot, in a `.ne5l` file or in a slot.
+    /// Change fields in a live slot, in a `.ne5l` file or on the instrument.
     ///
-    /// The live buffer is the program body under another tag, so the fields are exactly
-    /// `nord program edit`'s. Slots are 1:1 to 1:3, and the instrument overwrites one in
-    /// place, so nothing is deleted to make room.
+    /// A live slot holds a program body under another tag, so the fields are the same as
+    /// `nord program edit`'s. Slots are 1:1 to 1:3, and the instrument overwrites them
+    /// in place.
     Edit(EditArgs),
 }
 
@@ -442,7 +444,7 @@ enum SettingsAction {
     #[command(flatten)]
     Slot(SettingsSlotAction),
 
-    /// Change fields inside the global settings, in a `.ne5s` file or on the instrument.
+    /// Change fields in the global settings, in a `.ne5s` file or on the instrument.
     ///
     /// Fields are the menu settings plus the `startup_*` state the instrument restores
     /// at power-up; `--fields` lists them. The singleton is addressed as slot `1:1`, and
@@ -456,11 +458,11 @@ enum SettingsAction {
 /// Read-only actions for the settings singleton.
 #[derive(Subcommand)]
 enum SettingsSlotAction {
-    /// Read the settings off the instrument, or a `.ne5s` file. Read-only.
+    /// Read the settings from the instrument or a `.ne5s` file. Read-only.
     ///
-    /// Prints a summary by default; with `--out` writes the file instead.
+    /// Prints a summary, or with `--out` writes the file.
     Get {
-        /// The singleton, addressed as 1:1 — or a file.
+        /// 1:1 for the instrument's settings, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
 
@@ -469,16 +471,14 @@ enum SettingsSlotAction {
         #[arg(short, long, value_name = "FILE|DIR")]
         out: Option<PathBuf>,
 
-        /// Save the wire body verbatim instead of wrapping it in a CBIN header.
-        /// Needs `--out`.
+        /// Save the body as sent over USB, without a CBIN header. Needs `--out`.
         #[arg(long)]
         body: bool,
 
-        /// Read the singleton over and over, once per prompt, into the `--out`
-        /// directory.
+        /// Read the settings repeatedly, once per prompt, into the `--out` directory.
         ///
-        /// Change one menu setting on the instrument, say what you changed, and that
-        /// capture is filed under your answer; repeat until a blank line.
+        /// Change one menu setting on the instrument, then type what you changed, and the
+        /// capture is saved under that name. A blank line stops.
         #[arg(long, requires = "out")]
         sweep: bool,
     },
@@ -486,20 +486,20 @@ enum SettingsSlotAction {
     /// Report everything the instrument knows about the settings singleton, or a
     /// `.ne5s` file's header. Read-only.
     Info {
-        /// The singleton, addressed as 1:1 — or a file.
+        /// 1:1 for the instrument's settings, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 }
 
-/// The [`SlotAction`] verbs the live buffer keeps, spelled identically.
+/// The [`SlotAction`] verbs the live buffer keeps, with the same names and arguments.
 #[derive(Subcommand)]
 enum LiveSlotAction {
-    /// Read a live slot off the instrument, or a `.ne5l` file. Read-only.
+    /// Read a live slot from the instrument or a `.ne5l` file. Read-only.
     ///
-    /// Prints a summary by default; with `--out` writes the file instead.
+    /// Prints a summary, or with `--out` writes the file.
     Get {
-        /// Slot to read: 1:1, 1:2 or 1:3 — or a file.
+        /// Slot to read (1:1, 1:2 or 1:3), or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
 
@@ -508,15 +508,14 @@ enum LiveSlotAction {
         #[arg(short, long, value_name = "FILE|DIR")]
         out: Option<PathBuf>,
 
-        /// Save the wire body verbatim instead of wrapping it in a CBIN header.
-        /// Needs `--out`.
+        /// Save the body as sent over USB, without a CBIN header. Needs `--out`.
         #[arg(long)]
         body: bool,
 
-        /// Read the slot over and over, once per prompt, into the `--out` directory.
+        /// Read the slot repeatedly, once per prompt, into the `--out` directory.
         ///
-        /// The live slot is the panel itself, so this captures a change-one-knob corpus
-        /// without saving a program between steps.
+        /// The live slot is the panel itself, so each step can capture one change without
+        /// storing a program.
         #[arg(long, requires = "out")]
         sweep: bool,
     },
@@ -524,25 +523,25 @@ enum LiveSlotAction {
     /// Report everything the instrument knows about a live slot, or a `.ne5l` file's
     /// header. Read-only.
     Info {
-        /// Slot to describe: 1:1, 1:2 or 1:3 — or a file.
+        /// Slot to describe (1:1, 1:2 or 1:3), or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 
-    /// List the piano/sample library objects the live panel depends on. Read-only.
+    /// List the piano and sample library objects the live panel uses. Read-only.
     Deps {
-        /// Slot to inspect: 1:1, 1:2 or 1:3 — or a file.
+        /// Slot to inspect (1:1, 1:2 or 1:3), or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 }
 
-/// The verb vocabulary, identical for every object class.
+/// The verbs shared by every object class.
 #[derive(Subcommand)]
 enum SlotAction {
-    /// Read an object off the instrument, or from a file. Read-only.
+    /// Read an object from the instrument or a file. Read-only.
     ///
-    /// Prints a summary by default; with `--out` writes the file instead.
+    /// Prints a summary, or with `--out` writes the file.
     Get {
         /// Slot to read, e.g. 7:4, or a file to read with no instrument attached.
         #[arg(value_name = "FILE|BANK:SLOT")]
@@ -553,17 +552,17 @@ enum SlotAction {
         #[arg(short, long, value_name = "FILE|DIR")]
         out: Option<PathBuf>,
 
-        /// Save the wire body verbatim instead of wrapping it in a CBIN header. For
-        /// classes whose header layout is not yet known, where wrapping it would
-        /// fabricate a wrong file. On a file, strips the header instead. Needs `--out`.
+        /// Save the body as sent over USB, without a CBIN header. Use this for classes
+        /// whose header layout is unknown, where a header would be wrong. On a file,
+        /// strips the header. Needs `--out`.
         #[arg(long)]
         body: bool,
 
-        /// Read the slot over and over, once per prompt, into the `--out` directory.
+        /// Read the slot repeatedly, once per prompt, into the `--out` directory.
         ///
-        /// Change one thing on the instrument, say what you changed, and that capture is
-        /// filed under your answer; repeat until a blank line. For building the
-        /// one-field-at-a-time corpus used to locate fields.
+        /// Change one thing on the instrument, then type what you changed, and the capture
+        /// is saved under that name. A blank line stops. Comparing the captures shows
+        /// which bytes each control changes.
         #[arg(long, requires = "out")]
         sweep: bool,
     },
@@ -610,7 +609,7 @@ enum SlotAction {
         yes: bool,
     },
 
-    /// Duplicate an object into another slot (device-internal deep copy). Requires --yes.
+    /// Duplicate an object into another slot, copied on the instrument. Requires --yes.
     Duplicate {
         /// Source slot, e.g. 7:2.
         #[arg(value_name = "FROM")]
@@ -634,7 +633,8 @@ enum SlotAction {
         yes: bool,
     },
 
-    /// Load an object live on the instrument (double-click in NSM). Non-destructive.
+    /// Load an object on the instrument, as a double-click in Nord Sound Manager does.
+    /// Changes nothing stored.
     Select {
         /// Slot to load, e.g. 2:12.
         #[arg(value_name = "BANK:SLOT")]
@@ -644,47 +644,46 @@ enum SlotAction {
     /// Report everything the instrument knows about one slot, or a file's header.
     /// Read-only.
     ///
-    /// Shows the fields the CBIN header carries but the wire never transmits — format
-    /// tag, version, CRC-32 — plus the slot name, which no file stores at all.
+    /// Shows the CBIN header fields that a USB transfer leaves out (format tag, version,
+    /// CRC-32), plus the slot name, which files do not store.
     Info {
         /// Slot to describe, e.g. 7:4, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 
-    /// List the piano/sample library objects an entity depends on. Read-only.
+    /// List the piano and sample library objects an object depends on. Read-only.
     ///
-    /// A file yields the stored ids alone; the slot form asks the instrument, which
-    /// attaches the names.
+    /// A file gives only the stored ids. For a slot, the instrument also supplies the
+    /// names.
     Deps {
         /// Slot to inspect, e.g. 7:3, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 
-    /// Report which object the panel currently has loaded in this class. Read-only.
+    /// Report which object of this class the panel has loaded. Read-only.
     ///
-    /// The read half of `select`: it answers what the player is looking at, rather than
-    /// telling the instrument what to load.
+    /// The read side of `select`.
     Focus,
 
     /// List everything the instrument holds in this class. Read-only.
     ///
-    /// Walks the device's own slot cursor, so it reports what is actually stored rather
-    /// than probing every address: occupied slots are sparse, and their indices run past
-    /// the class's item count.
+    /// Walks the instrument's own slot cursor, so it visits only occupied slots. They
+    /// are sparse, and their indices run past the class's item count.
     List,
 
-    /// Send a raw command code and print whatever the device answers. For RE only.
+    /// Send a raw command code and print whatever the instrument answers. For reverse
+    /// engineering only.
     ///
-    /// Nothing about the reply is interpreted: the status word and payload are printed
-    /// as-is, because on an unknown command an error status is the finding. A command
-    /// the device ignores is reported as a timeout rather than hanging.
+    /// The reply is not interpreted: the status word and payload are printed as they
+    /// arrive, since for an unknown command an error status is itself the result. A
+    /// command the instrument ignores is reported as a timeout.
     ///
-    /// DANGER: these are bytes no capture has shown the device being sent. Unknown
-    /// commands can leave the instrument needing a power cycle, and anything
-    /// write-shaped will destroy whatever object it reaches. Read-shaped codes only,
-    /// and back up first.
+    /// DANGER: no capture has shown the instrument receiving these bytes. An unknown
+    /// command can leave the instrument needing a power cycle, and a command that writes
+    /// will destroy whatever object it reaches. Send only codes that read, and back up
+    /// first.
     Probe {
         /// Command code, decimal or 0x-prefixed, e.g. 0x20.
         #[arg(value_name = "OP", value_parser = parse_u32)]
@@ -698,16 +697,15 @@ enum SlotAction {
         #[arg(long, default_value_t = 5)]
         wait: u64,
 
-        /// Required. Probing is not a read-only operation in the sense the other
-        /// read verbs are — the device's response to an unknown code is unknown.
+        /// Required. A probe is not read-only: the instrument's response to an unknown
+        /// code is unknown.
         #[arg(long)]
         yes: bool,
 
-        /// Send with no session around it: no HELLO, no session open, no close.
+        /// Send with no session: no HELLO, no session open, no close.
         ///
-        /// The only way to reach a command when the session machinery itself is what
-        /// is broken — a wedged instrument refuses to open one, so every ordinary
-        /// probe fails before its command is sent.
+        /// A wedged instrument refuses to open a session, so an ordinary probe fails
+        /// before its command is sent. This is the only way to reach a command then.
         #[arg(long)]
         bare: bool,
 
@@ -721,8 +719,7 @@ enum SlotAction {
     },
 }
 
-/// Accept `0x2a` as readily as `42`: command codes are quoted in hex everywhere in the
-/// protocol notes, and retyping them in decimal invites transcription errors.
+/// Accepts `0x2a` as well as `42`, since command codes are usually written in hex.
 fn parse_u32(s: &str) -> Result<u32, String> {
     let s = s.trim();
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -734,10 +731,10 @@ fn parse_u32(s: &str) -> Result<u32, String> {
 
 #[derive(Args)]
 pub struct EditArgs {
-    /// A file (`.ne5p` under `nord program`, `.ne5l` under `nord live`, `.ne5s` under
-    /// `nord settings`), or a slot on the instrument (`7:4`). A slot makes this a
-    /// read-modify-write over USB, so it is a mutation and obeys `--yes`. Omit it to
-    /// start from a fresh default, which then needs `-o`.
+    /// A file (`.ne5p` for `nord program`, `.ne5t` for `nord setlist`, `.ne5l` for
+    /// `nord live`, `.ne5s` for `nord settings`) or a slot on the instrument (`7:4`).
+    /// Editing a slot reads it, changes it and writes it back over USB, so it needs
+    /// `--yes` or a confirmation. Omit it to start from a default, which then needs `-o`.
     #[arg(
         value_name = "FILE|BANK:SLOT",
         required_unless_present_any = ["fields", "out"],
@@ -870,7 +867,7 @@ impl From<LiveSlotAction> for SlotAction {
     }
 }
 
-/// `nord raw --class` help, naming every class [`ObjectClass::from_raw`] recognises.
+/// `nord raw --class` help, naming every class [`ObjectClass::from_raw`] recognizes.
 fn class_help() -> String {
     // Every class `from_raw` names has a one-byte code.
     let named: Vec<String> = (0..=u8::MAX.into())
@@ -962,10 +959,10 @@ fn inspect(ui: &Ui, files: &[PathBuf], raw: bool) -> Result<(), String> {
     }
 }
 
-/// Parse each file and re-emit it, checking the bytes come back identical.
+/// Decode each file and re-encode it, checking that the bytes match.
 ///
-/// Reports the offset of the first difference, which in a bit-packed format is usually
-/// enough to name the field on its own.
+/// Reports the offset of the first difference, which in a bit-packed format usually
+/// identifies the field.
 fn verify(ui: &Ui, files: &[PathBuf]) -> Result<(), String> {
     file::check_each(ui, files, "file(s) did not round-trip", |path| {
         let named = |e: &dyn std::fmt::Display| format!("error  {} ({e})", path.display());

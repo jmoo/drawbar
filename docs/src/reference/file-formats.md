@@ -25,15 +25,15 @@ byte map. There are three tiers:
 - **Structurally decoded**: the container and layout are understood, and the
   audio is decoded and encoded. Sample instruments in every layout, piano
   libraries, and Sample Editor projects.
-- **Container-verified**: recognised, checksummed and carried verbatim. Every
+- **Container-verified**: recognized, checksummed and kept byte for byte. Every
   other CBIN tag, the Lead SysEx banks, the `.cn3` library, and ZIP backup
   bundles behind the `bundle` feature.
 
-Text files are none of these tiers. `nord-format` does not read them at all: it
-is drawbar that calls a file it cannot decode a note when the bytes are words,
-and edits it as the text it is. A file that begins with the magic of a format
-`nord-format` decodes is never a note, so one that fails to decode keeps its
-error. See [Editing](../drawbar/editing.md).
+Text notes are outside these tiers, because `nord-format` does not read them.
+drawbar treats a file it cannot decode as a note when its bytes are UTF-8 text.
+A file that begins with the magic of a format `nord-format` decodes is never a
+note, so one that fails to decode keeps its error. See
+[Editing](../drawbar/editing.md#notes).
 
 Both generations of the `CBIN` container are read and written: the current one
 with a CRC-32 over the body, and the older one with a CRC-16 over the whole file.

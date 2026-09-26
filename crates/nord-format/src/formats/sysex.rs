@@ -1,7 +1,8 @@
-//! Raw SysEx dumps (`.syx`) — how the Lead 1, 2, 2X and 3 ship their banks.
+//! Raw SysEx dumps (`.syx`), the form in which the Lead 1, 2, 2X and 3 ship their
+//! banks.
 //!
-//! The dump is kept verbatim; only the envelope is read. Two envelope shapes
-//! exist, split down the model line:
+//! The dump is kept verbatim; only the envelope is read. There are two envelope
+//! shapes, one per model line:
 //!
 //! * Lead 1/2/2X messages open `F0 33 0F 04`
 //! * Lead 3 messages open `F0 33 {01,7F} 09`
@@ -9,8 +10,8 @@
 //! Inferred from specimens; not confirmed on hardware.
 //!
 //! `0x33` is Clavia's manufacturer id; the fourth byte is the discriminator (the
-//! third varies within the Lead 3 dumps). Message-level layout — parameter
-//! numbers, bank framing, any checksum — is unmapped.
+//! third varies within the Lead 3 dumps). The message layout (parameter numbers,
+//! bank framing, any checksum) is unmapped.
 
 use crate::error::{Error, ParseError};
 use std::io::{Read, Write};
@@ -23,7 +24,7 @@ const CLAVIA_ID: u8 = 0x33;
 /// Which Lead family wrote a dump, by its envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
-    /// Lead 1, 2 or 2X — the three are indistinguishable from the dump alone.
+    /// Lead 1, 2 or 2X; the dump alone cannot tell the three apart.
     Lead2Family,
     Lead3,
     Unknown,

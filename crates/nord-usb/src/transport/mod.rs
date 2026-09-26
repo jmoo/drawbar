@@ -1,8 +1,7 @@
 //! The bottom of the stack: moving bytes to and from the device.
 //!
 //! Everything above this trait is pure logic, so the whole protocol can be built and
-//! tested against committed captures with no hardware attached — the same property
-//! that makes [`nord_format`] trustworthy.
+//! tested against committed captures with no hardware attached.
 
 use crate::error::Result;
 
@@ -35,18 +34,19 @@ pub const VENDOR_ID: u16 = 0x0ffc;
 /// Nord Electro 5.
 pub const PRODUCT_ID_ELECTRO5: u16 = 0x0027;
 
-/// USB vendor-specific interface class. The protocol rides this; the instrument's
-/// other interface is USB-MIDI (audio class), which every backend must leave alone so
-/// CoreMIDI/ALSA keep working — and which the browser would refuse to claim anyway.
+/// USB vendor-specific interface class, which carries the protocol. The instrument's
+/// other interface is USB-MIDI (audio class). Every backend must leave it alone so
+/// CoreMIDI and ALSA keep working, and the browser refuses to claim it.
 pub const CLASS_VENDOR_SPECIFIC: u8 = 0xff;
 
-/// Vendor bulk IN endpoint (device → host). Settled across every corpus capture.
+/// Vendor bulk IN endpoint (device → host). The same in every corpus capture.
 pub const EP_IN: u8 = 0x82;
 /// Vendor bulk OUT endpoint (host → device).
 pub const EP_OUT: u8 = 0x03;
 
-/// The read buffer NSM posts. The device answers with ~32KB chunks; the size is the
-/// device's choice, not a USB constraint (the link is Full Speed, 64-byte packets).
+/// The read buffer Nord Sound Manager posts. The device answers in chunks of about
+/// 32 KB. The device chooses that size, not USB: the link is Full Speed with 64-byte
+/// packets.
 pub const READ_BUFFER: usize = 49152;
 
 /// Whether a frame of `written` bytes leaves the device waiting for the rest of a
@@ -54,12 +54,12 @@ pub const READ_BUFFER: usize = 49152;
 ///
 /// Confirmed on hardware.
 ///
-/// ⚠️ The firmware reads a message until a **short** packet ends it, so a frame that is
-/// a whole number of packets is never answered and the session stays open. A `RENAME`
-/// carrying a 34-character name is exactly 64 bytes on the full-speed link and gets no
-/// reply; at 33 characters, one byte shorter, the same command answers normally. It
-/// repeats at 128, and it is not particular to a command or a class — `BEGIN_WRITE` at
-/// 64 bytes hangs the same way on Live and Settings.
+/// ⚠️ The firmware reads a message until a short packet ends it, so a frame that is a
+/// whole number of packets is never answered and the session stays open. A `RENAME`
+/// carrying a 34-character name is 64 bytes on the full-speed link and gets no reply;
+/// with 33 characters the same command is answered. It repeats at 128 bytes and does
+/// not depend on the command or class: `BEGIN_WRITE` at 64 bytes hangs the same way on
+/// Live and Settings.
 ///
 /// A zero-length frame needs no terminator: it is one.
 #[cfg(any(feature = "nusb", all(feature = "web", target_arch = "wasm32"), test))]
@@ -69,32 +69,30 @@ pub(crate) fn needs_terminator(written: usize, packet: usize) -> bool {
 
 /// A bidirectional byte pipe to the device.
 ///
-/// # Why this shape
+/// # Design
 ///
-/// **No `Send` bounds.** WASM is single-threaded and `web-sys` types are `!Send`, so
-/// requiring `Send` futures — which `#[async_trait]` adds by default, and which
-/// `tokio::spawn` demands — would make the WebUSB backend impossible, and the
-/// requirement would infect every generic bound above this one. The
-/// `async_fn_in_trait` lint fires precisely because callers *cannot* add a `Send`
-/// bound here; that is the intent, so it is allowed deliberately. Desktop callers
-/// needing `Send` should bound on their own marker rather than changing this.
+/// **No `Send` bounds.** WASM is single-threaded and `web-sys` types are `!Send`.
+/// Requiring `Send` futures, as `#[async_trait]` does by default and `tokio::spawn`
+/// demands, would rule out the WebUSB backend and spread to every generic bound above
+/// this one. The `async_fn_in_trait` lint is allowed because callers cannot add a
+/// `Send` bound here. Desktop callers that need `Send` should bound on their own marker.
 ///
-/// **Separate directions, not request/response.** Several operations send multiple
-/// OUTs before any IN (`delete` is `O36 O26 I30`), so a `send_and_receive()` primitive
-/// would be a lie.
+/// **Separate directions.** Several operations send more than one OUT before any IN
+/// (`delete` is `O36 O26 I30`), so there is no request/response primitive.
 ///
-/// **Owned buffers.** WebUSB hands back an `ArrayBuffer`; a borrowed `&[u8]` return
-/// cannot be honored.
+/// **Owned buffers.** WebUSB returns an `ArrayBuffer`, so a borrowed `&[u8]` cannot be
+/// returned.
 ///
-/// **No timeout parameter.** WebUSB has no native transfer timeout — callers wrap.
+/// **No timeout parameter on `read` and `write`.** WebUSB has no native transfer
+/// timeout, so callers wrap.
 #[allow(async_fn_in_trait)]
 pub trait Transport {
     /// Write one message to the OUT endpoint.
     ///
-    /// ⚠️ The device reads a message until a **short** packet ends it, so a backend
-    /// that moves real packets must terminate a frame whose length is a whole multiple
-    /// of the endpoint's `wMaxPacketSize`. Leaving one unterminated does not fail: the
-    /// device simply never answers, and the session stays open.
+    /// ⚠️ The device reads a message until a short packet ends it, so a backend that
+    /// moves real packets must terminate a frame whose length is a whole multiple of the
+    /// endpoint's `wMaxPacketSize`. An unterminated frame does not fail: the device
+    /// never answers, and the session stays open.
     async fn write(&mut self, buf: &[u8]) -> Result<()>;
 
     /// Read one complete device message from the IN endpoint.
@@ -105,17 +103,16 @@ pub trait Transport {
 
     /// Read, giving up after `limit`. `Ok(None)` means nothing arrived in time.
     ///
-    /// For probing commands whose existence is unknown: a device that does not
-    /// recognise one may answer with an error status, or may say nothing at all, and
-    /// [`Self::read`] would wait forever on the second case. Killing a hung process
-    /// instead leaves the transaction open, which wedges the instrument until it is
-    /// power-cycled.
+    /// For probing commands that may not exist: a device that does not recognize one
+    /// may answer with an error status or say nothing, and [`Self::read`] would wait
+    /// forever in the second case. Killing the hung process instead leaves the
+    /// transaction open, which wedges the instrument until it is power-cycled.
     ///
-    /// The default implementation **has no timeout** — it defers to [`Self::read`] and
-    /// can only return `Ok(Some(_))`. Honoring the limit requires cancelling a transfer
-    /// already submitted to the OS, which is backend-specific; a backend that cannot do
-    /// that must not pretend to, because abandoning a submitted read desynchronises
-    /// every later request from its response.
+    /// The default implementation has no timeout. It defers to [`Self::read`] and can
+    /// only return `Ok(Some(_))`. Honoring the limit requires canceling a transfer
+    /// already submitted to the OS, which only a backend can do. A backend that cannot
+    /// must not pretend to, because abandoning a submitted read pairs every later
+    /// request with the wrong response.
     async fn read_timeout(
         &mut self,
         max: usize,
@@ -126,15 +123,12 @@ pub trait Transport {
 
     /// Write, giving up after `limit`. `Ok(false)` means the device never accepted it.
     ///
-    /// The other half of [`Self::read_timeout`], and not a symmetry for its own sake: a
-    /// device can stop accepting writes without stopping altogether. Sending it a frame
-    /// it cannot handle has been observed to stall the bulk endpoints while the
-    /// instrument otherwise plays normally and still answers on endpoint 0 — and in that
-    /// state [`Self::write`] blocks forever, so a read timeout is never reached and the
-    /// caller hangs with no way to report why.
+    /// A device can stop accepting writes without stopping altogether. A frame it cannot
+    /// handle has been observed to stall the bulk endpoints while the instrument still
+    /// plays and answers on endpoint 0. In that state [`Self::write`] blocks forever, a
+    /// read timeout is never reached, and the caller hangs with no way to report why.
     ///
-    /// Default is no timeout, for the same reason as [`Self::read_timeout`]: honoring one
-    /// means cancelling a submitted transfer, which only a backend can do.
+    /// The default has no timeout, for the same reason as [`Self::read_timeout`].
     async fn write_timeout(&mut self, buf: &[u8], _limit: std::time::Duration) -> Result<bool> {
         self.write(buf).await.map(|()| true)
     }

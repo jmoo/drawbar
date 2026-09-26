@@ -1,17 +1,15 @@
-//! Bench probe: does a class accept `BEGIN_WRITE` at all?
+//! Bench probe: does a class accept `BEGIN_WRITE`?
 //!
-//! Sends `BEGIN_WRITE` at an occupied slot with the complete identical-bytes write
-//! staged. A refusal is the finding (the status code is printed and the session
-//! closes cleanly); an acceptance is completed immediately with the bytes the slot
-//! already holds, so even a working write changes nothing. `put`'s delete-first
-//! composition is deliberately never used — that is the half with no proven undo on
-//! a singleton class.
+//! Sends `BEGIN_WRITE` at an occupied slot. A refusal prints its status code and the
+//! session closes cleanly. An acceptance is completed at once with the bytes the slot
+//! already holds, so even a working write changes nothing. The probe never deletes
+//! first, as `put` does, because a delete has no proven undo on a singleton class.
 //!
 //!     cargo run -p nord-usb --example write_probe --features blocking -- \
 //!         <class> <bank:slot> [send=<body-file>] [record.script]
 //!
-//! With `send=`, the staged write carries that file's bytes instead of the slot's
-//! own — the mutation test. The aftermath compare is then against the sent bytes.
+//! With `send=`, the write carries that file's bytes instead of the slot's own, as a
+//! mutation test, and the slot is then compared against the sent bytes.
 
 use std::time::Duration;
 
@@ -37,8 +35,7 @@ fn report(step: &str, reply: Option<&Message>) -> Option<u32> {
     }
 }
 
-/// `BANK:SLOT` in the panel's one-indexed numbering, as every other entry point spells
-/// an address.
+/// `BANK:SLOT` in the panel's one-indexed numbering, as the CLI spells an address.
 fn address(text: &str) -> Location {
     let (bank, slot) = text.split_once(':').expect("BANK:SLOT");
     let bank = bank.parse::<u32>().expect("bank");
@@ -98,7 +95,7 @@ fn main() {
             );
         }
 
-        // The probe. Args composed exactly as op::write does, name kept.
+        // The probe. Arguments are built as `op::write` builds them, keeping the name.
         let mut s = Session::open(&mut transport, class)
             .await
             .expect("open")
@@ -121,7 +118,7 @@ fn main() {
             .expect("transport during BEGIN_WRITE");
         match report("BEGIN_WRITE", reply.as_ref()) {
             Some(0) => {
-                println!("FINDING: BEGIN_WRITE ACCEPTED — completing with identical bytes");
+                println!("FINDING: BEGIN_WRITE ACCEPTED; completing with the staged bytes");
                 let data = op::write_data_args(at, 0, payload).expect("write data args");
                 let reply = s
                     .probe(Service::Program, 10, cmd::WRITE_DATA, &data, LIMIT)
@@ -139,11 +136,11 @@ fn main() {
             Some(code) => {
                 println!("FINDING: BEGIN_WRITE refused, device status {code:#x}");
             }
-            None => println!("FINDING: BEGIN_WRITE never answered (session may strand)"),
+            None => println!("FINDING: BEGIN_WRITE never answered (the session may stay open)"),
         }
         s.commit().await.expect("close after probe");
 
-        // Aftermath: the slot must hold exactly what it held before.
+        // Aftermath: read the slot back and compare.
         let mut s = Session::open(&mut transport, class).await.expect("reopen");
         let after = op::read_body(&mut s, at).await.expect("re-read");
         s.commit().await.expect("close");
@@ -153,9 +150,9 @@ fn main() {
             if after == *payload {
                 "IDENTICAL to what was sent (landed)"
             } else if after == before {
-                "unchanged — the write was ACCEPTED BUT IGNORED"
+                "unchanged: the write was ACCEPTED BUT IGNORED"
             } else {
-                "*** neither sent nor original — investigate ***"
+                "*** neither sent nor original; investigate ***"
             }
         );
     });

@@ -1,47 +1,46 @@
-//! The stroke codec: one zone's encoded audio back into samples.
+//! The stroke codec: decodes one zone's encoded audio into samples.
 //!
 //! A stroke payload is a fixed header followed by a stream of words. The words carry
-//! *fields* — the source resampled onto a uniform lattice of [`PITCH_DEN`] fields per
-//! [`PITCH_NUM`] input samples — quantised by truncation and one arithmetic shift the
-//! header records. Decoding is a walk, that shift, and one integration: a record may
-//! store the Nth backward difference of its fields rather than the fields themselves.
+//! fields: the source resampled onto a uniform lattice of [`PITCH_DEN`] fields per
+//! [`PITCH_NUM`] input samples, quantized by truncation and by one arithmetic shift
+//! the header records. Decoding walks the records, undoes that shift, and integrates
+//! the records that store differences.
 //!
-//! Three generations share this one codec, and every entry point takes the [`Layout`]
-//! saying which. Mostly what differs is *units* — word width, cell size, header size —
-//! and the lattice, the kernel, the quantiser and the grammar's bit layout do not move
-//! at all. The one behavioural difference is how a **stereo** stroke carries its two
-//! channels: v2 and v3 alternate fields, v4 alternates words.
+//! Three generations share this codec, and every entry point takes the [`Layout`]
+//! naming one. They differ mostly in units (word width, cell size, header size); the
+//! lattice, the kernel, the quantizer and the grammar's bit layout are shared. The one
+//! behavioral difference is how a stereo stroke carries its two channels: v2 and v3
+//! alternate fields, v4 alternates words.
 //!
-//! The lattice is absolute, so field 0 is the start of the source and the stream's
-//! own length gives the duration. The resampling kernel's DC gain is unity to within
-//! the source's own quantisation, which is why a field is already a sample in the
-//! source's 16-bit units and dequantising is a shift and nothing more.
+//! The lattice is absolute: field 0 is the start of the source, and the stream's
+//! length gives the duration. The resampling kernel's DC gain is unity to within the
+//! source's quantization, so a field is already a sample in the source's 16-bit units
+//! and dequantizing is only a shift.
 //!
-//! ⚠️ **The slack in front of a stream can hold stale words that look like records**,
-//! so where the chain begins comes from the header's [`Directory`] rather than from
-//! the first non-zero word. That is why a walk needs the stroke's offset in the body.
+//! ⚠️ The slack in front of a stream can hold stale words that look like records, so
+//! the chain's start comes from the header's [`Directory`], never from the first
+//! non-zero word. That is why a walk needs the stroke's offset in the body.
 //!
-//! A record may store the Nth backward difference of its fields rather than the
-//! fields themselves, so [`decode`] runs a predictor: `V(f) = e(f) − Σ(−1)^j
-//! C(N,j)·V(f−j)`, over a running history carried across every record boundary and
-//! through every skip. Nothing needs seeding — a stroke opens with a 1:1 ramp-in that
-//! settles on the content's own field value, and the history takes it from there.
-//! **A stereo stroke keeps one history per channel**; they are two signals sharing a
-//! header, and predicting one against the other's samples diverges.
+//! A record may store the Nth backward difference of its fields, so [`decode`] runs a
+//! predictor, `V(f) = e(f) − Σ(−1)^j C(N,j)·V(f−j)`, over a running history carried
+//! across every record boundary and through every skip. Nothing needs seeding: a
+//! stroke opens with a 1:1 ramp-in that settles on the content's opening value, and
+//! the history continues from there. A stereo stroke keeps one history per channel;
+//! the channels are two signals sharing a header, and predicting one from the other's
+//! samples diverges.
 //!
-//! ⚠️ **A record's fields are left-anchored**: they start at the first bit after the
-//! header word, and the alignment tail is at the *end* of the segment. Reading from
-//! the far end instead is invisible on content records, whose field counts leave no
-//! tail, and displaces every 1:1 record — the warmup and the resyncs — by a whole
-//! number of field slots, or rotates the values inside their width when the tail is
-//! not a multiple of it.
+//! ⚠️ A record's fields are left-anchored: they start at the first bit after the
+//! header word, and the alignment tail is at the end of the segment. Reading from the
+//! far end goes unnoticed on content records, whose field counts leave no tail, but it
+//! displaces every 1:1 record (the warmup and the resyncs) by a whole number of field
+//! slots, or rotates the values inside their width when the tail is not a multiple of
+//! it.
 //!
-//! For [`Layout::V2`], a decode of both our own encodes and vendor content matches
-//! the Electro 5's own playback of the same instrument, a transposed note plays as
-//! exact `2^(n/12)` resampling, and a stereo stroke's two streams reach the outputs
-//! in the order the de-interleave produces. Confirmed on hardware. The V3 and V4
-//! constants: Inferred from specimens; not confirmed on hardware. The Electro 5
-//! plays only v2.
+//! For [`Layout::V2`], decoding both this crate's encodes and vendor content matches
+//! the Electro 5's playback of the same instrument, a transposed note plays as exact
+//! `2^(n/12)` resampling, and a stereo stroke's two streams reach the outputs in the
+//! order the de-interleave produces. Confirmed on hardware. The Electro 5 plays only
+//! v2. The V3 and V4 constants: Inferred from specimens; not confirmed on hardware.
 
 use crate::formats::predictor;
 use std::fmt;
@@ -58,9 +57,9 @@ pub enum Layout {
     V4,
 }
 
-/// The content version at which the wide chain passes the generations this codec
-/// describes. A version at or above it has unknown stream units, so it is refused
-/// rather than decoded as [`Layout::V4`].
+/// The first content version past the generations this codec describes. A version
+/// at or above it has unknown stream units and is refused, not decoded as
+/// [`Layout::V4`].
 pub const V5_FROM_VERSION: u32 = 500;
 
 impl Layout {
@@ -114,9 +113,9 @@ impl Layout {
         }
     }
 
-    /// Fields one 1:1 record covers at most, per channel — RMAX. A run is split into
-    /// whole records of at least [`Layout::cell`] and at most this, which is what
-    /// makes the reachable run lengths come in windows with gaps between them.
+    /// Fields one 1:1 record covers at most, per channel (RMAX). A run is split into
+    /// whole records of at least [`Layout::cell`] fields and at most this many, so the
+    /// reachable run lengths come in windows with gaps between them.
     pub const fn rmax(self) -> usize {
         match self {
             Layout::V2 => 32,
@@ -138,7 +137,7 @@ impl Layout {
 /// Statistic A's mantissa: a 24-bit big-endian value in front of its exponent byte.
 pub(super) const MANTISSA_AT: usize = 9;
 
-/// Statistic A's exponent byte; [`shift`] recovers the quantiser scale from it.
+/// Statistic A's exponent byte; [`shift`] recovers the quantizer scale from it.
 pub(super) const STAT_A_EXP_AT: usize = 12;
 
 /// Statistic B: the content peak as a 24-bit big-endian value.
@@ -153,7 +152,7 @@ pub(super) const TAIL_FLOATS_AT: [usize; 2] = [57, 62];
 /// zone's gain scales the mantissa alone.
 const EXPONENT_BIAS: i32 = 22;
 
-/// Shifts beyond this are not a scale, they are a misread header.
+/// A shift beyond this is a misread header, not a scale.
 pub(crate) const SHIFT_LIMIT: i32 = 32;
 
 /// Word directory: `u16` big-endian at this offset, on a 9-byte stride.
@@ -164,9 +163,9 @@ pub(super) const SEEK_STRIDE: usize = 9;
 /// Openings use the first alias; terminators use the last in-range alias.
 pub const WRAP: usize = 1 << 16;
 
-/// Input samples per [`PITCH_DEN`] fields: field `f` samples the source at exactly
-/// `PITCH_NUM·f / PITCH_DEN`. The ratio is exact; `349/277` is its penultimate
-/// continued-fraction convergent and drifts one field per 17,501.
+/// Input samples per [`PITCH_DEN`] fields: field `f` samples the source at
+/// `PITCH_NUM·f / PITCH_DEN`. The ratio is exact; its penultimate continued-fraction
+/// convergent, `349/277`, drifts one field per 17,501.
 pub const PITCH_NUM: u32 = 22_050;
 /// Fields per [`PITCH_NUM`] input samples.
 pub const PITCH_DEN: u32 = 17_501;
@@ -191,9 +190,7 @@ const MAX_ORDER: usize = predictor::MAX_ORDER;
 pub enum Unsupported {
     /// Shorter than the fixed header, so there is no stream to walk.
     Short,
-    /// The directory's opening pointer names no word in the stroke. Where the chain
-    /// begins comes from the directory alone, because the slack in front of a stream
-    /// can hold stale words that look like records.
+    /// The directory's opening pointer names no word in the stroke.
     Directory {
         /// The opening pointer, as the header states it.
         pointer: u16,
@@ -204,7 +201,7 @@ pub enum Unsupported {
         /// ([`Layout::header_len`]).
         word: usize,
     },
-    /// A record whose fields run past the end of the stroke — some earlier record
+    /// A record whose fields run past the end of the stroke: some earlier record
     /// was read at the wrong size.
     Desync {
         /// Word index within the stream, counting from the end of the stroke header
@@ -259,7 +256,7 @@ impl fmt::Display for Unsupported {
                 write!(f, "the stream ends with {bytes} byte(s) of a partial word")
             }
             Unsupported::Shift { bits } => {
-                write!(f, "the header's {bits}-bit quantiser shift is invalid")
+                write!(f, "the header's {bits}-bit quantizer shift is invalid")
             }
             Unsupported::NoTerminator => {
                 write!(f, "the chain ran off the end with no terminator")
@@ -278,8 +275,8 @@ pub struct Record {
     pub at: usize,
     /// Lattice index of this record's first field.
     pub first_field: usize,
-    /// `false` for lattice content; `true` for the 1:1 regime — the warmup and the
-    /// resync. Both sit on the same lattice.
+    /// `false` for lattice content; `true` for the 1:1 regime (the warmup and the
+    /// resync). Both sit on the same lattice.
     pub one_to_one: bool,
     /// Bits per field, 1 to 16.
     pub width: u8,
@@ -310,19 +307,19 @@ pub struct Stream {
 /// Decoded audio for one zone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
-    /// One sample per field, at [`FIELD_RATE`], **interleaved by channel** — so on a
-    /// stereo zone this is `L R L R` and holds two samples per frame.
+    /// One sample per field at [`FIELD_RATE`], interleaved by channel: a stereo zone
+    /// holds `L R L R`, two samples per frame.
     pub samples: Vec<i16>,
     /// 1 or 2.
     pub channels: u16,
-    /// Fields clamped after dequantisation, commonly from kernel ringing.
+    /// Fields clamped after dequantization, commonly from kernel ringing.
     pub clipped: usize,
-    /// Fields reconstructed from differences rather than stated outright.
+    /// Fields reconstructed from differences.
     pub differenced: usize,
 }
 
 impl Audio {
-    /// Frames — samples per channel, which is what the duration is measured in.
+    /// Frames: samples per channel, the unit of duration.
     pub fn frames(&self) -> usize {
         self.samples.len() / usize::from(self.channels).max(1)
     }
@@ -343,9 +340,9 @@ pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
     })
 }
 
-/// Signed quantiser shift recovered from statistic A's exponent and [`peak`].
-/// Dequantising applies the shift alone: statistic A's mantissa carries the zone's
-/// gain, which the instrument applies at playback rather than the decoder.
+/// Signed quantizer shift recovered from statistic A's exponent and [`peak`].
+/// Dequantizing applies the shift alone: statistic A's mantissa carries the zone's
+/// gain, which the instrument applies at playback, not the decoder.
 pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
     let peak = peak(stroke, layout)?.unsigned_abs().max(1);
     let exponent = i32::from(*stroke.get(STAT_A_EXP_AT)?);
@@ -362,20 +359,20 @@ fn tail_float(stroke: &[u8], layout: Layout, at: usize) -> Option<f32> {
     Some(f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// The zone's playing gain in decibels, `None` on the narrow header, which has no
-/// such field — v2 keeps the same gain as a linear u24 in the zone record instead.
+/// The zone's playing gain in decibels. `None` on the narrow header, which has no
+/// such field; v2 keeps the gain as a linear u24 in the zone record.
 ///
-/// ⚠️ **Silence is `-inf` here**, which the linear field cannot express, and the
-/// value is neither clamped nor gridded: the editor writes `20·log10(g)` straight
-/// through, past +24 dB and below -40 dB alike.
+/// ⚠️ Silence is `-inf` here, which the linear field cannot express, and the value is
+/// neither clamped nor rounded to a grid: the editor writes `20·log10(g)` as
+/// computed, past +24 dB and below -40 dB alike.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 pub fn zone_gain_db(stroke: &[u8], layout: Layout) -> Option<f32> {
     tail_float(stroke, layout, TAIL_FLOATS_AT[0])
 }
 
-/// The stroke's loop decay amount, verbatim in the project's own units, `None` on the
-/// narrow header, which drops the field.
+/// The stroke's loop decay amount in the project's own units. `None` on the narrow
+/// header, which drops the field.
 ///
 /// ⚠️ It is stored whether or not the decay is switched on: nothing in the file says
 /// which, so a reader cannot tell an active decay from a default that was never used.
@@ -496,8 +493,8 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
     let mut i = first_record;
     while i < words {
         let raw = word(i);
-        // A wide word's top byte is not part of the record header, and no header has
-        // ever set it; a narrow word has no top byte to set.
+        // A wide word's top byte is not part of the record header, and no specimen
+        // sets it; a narrow word has no top byte.
         let over = raw >> 24;
         let v = raw & 0x00ff_ffff;
         let one_to_one = v >> 23 != 0;
@@ -849,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn an_opening_pointer_outside_the_stream_is_refused_rather_than_searched_for() {
+    fn an_opening_pointer_outside_the_stream_is_refused() {
         for layout in BOTH {
             let values = run(layout, 6);
             let mut s = stroke(layout, 1, 22, 2, &[block(layout, false, 4, 0, &values)]);
@@ -914,8 +911,8 @@ mod tests {
         v
     }
 
-    /// The exponent byte that spells a given shift for a given peak, which is what
-    /// the encoder writes: `A8 = 22 + s − bits(PEAK) + (PEAK a power of two)`.
+    /// The exponent byte the encoder writes for a given shift and peak:
+    /// `A8 = 22 + s − bits(PEAK) + (PEAK a power of two)`.
     fn exponent_for(peak: i32, shift: i32) -> u8 {
         let peak = peak.unsigned_abs().max(1);
         let bits = peak.ilog2() as i32 + 1;
@@ -931,7 +928,7 @@ mod tests {
                 let s = stroke(layout, peak, exponent_for(peak, want), 0, &[]);
                 assert_eq!(shift(&s, layout), Some(want), "{layout:?} peak {peak}");
             }
-            // A peak of zero reads as one rather than dividing by nothing.
+            // A peak of zero reads as one.
             let s = stroke(layout, 0, exponent_for(1, 5), 0, &[]);
             assert_eq!(shift(&s, layout), Some(5), "{layout:?}");
         }
@@ -950,8 +947,6 @@ mod tests {
         assert_eq!(peak(&silent, Layout::V2), Some(0xff_ffff));
     }
 
-    /// The wide header's two floats are the zone gain in decibels and the loop decay
-    /// amount; the narrow header has neither.
     #[test]
     fn the_wide_header_carries_a_zone_gain_and_a_loop_decay() {
         let mut s = stroke(Layout::V3, 1, 22, 0, &[]);
@@ -978,8 +973,8 @@ mod tests {
         }
     }
 
-    /// The order bits are not layout: a record with an order set covers exactly the
-    /// fields it counts, at the base the records before it left off.
+    /// The order bits do not affect layout: a record with an order covers the fields
+    /// it counts, starting where the records before it left off.
     #[test]
     fn an_order_moves_neither_the_length_nor_the_field_base() {
         for layout in BOTH {
@@ -1010,7 +1005,7 @@ mod tests {
             assert_eq!(walked.records.len(), 1, "{layout:?}");
             assert!(walked.records[0].mark, "{layout:?}");
             assert_eq!(walked.records[0].values, values);
-            // The bit below it has never been seen set, and stays a refusal.
+            // No specimen sets the reserved bit below it, so it is refused.
             let mut s = stroke(layout, 1, 22, 0, &[block(layout, true, 4, 0, &values)]);
             let head = layout.header_len();
             s[head + layout.word() - 3] |= 0x02;
@@ -1159,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn dequantising_shifts_by_the_headers_own_scale() {
+    fn dequantizing_shifts_by_the_headers_own_scale() {
         for layout in BOTH {
             let mut values = run(layout, 0);
             values[..2].copy_from_slice(&[100, -100]);
@@ -1175,7 +1170,7 @@ mod tests {
     }
 
     /// Content below the source's 16-bit LSB is shifted left by the encoder, so
-    /// dequantising it shifts back the other way.
+    /// dequantizing it shifts back the other way.
     #[test]
     fn a_negative_shift_scales_back_down() {
         for layout in BOTH {
@@ -1210,8 +1205,8 @@ mod tests {
         }
     }
 
-    /// Dense content merges whole runs into one record, and those counts need the
-    /// full width of the field — an eight-bit read frames them short and derails.
+    /// Dense content merges whole runs into one record, whose count needs the full
+    /// 14-bit field; an eight-bit read frames it short and derails.
     #[test]
     fn a_merged_run_carries_a_count_past_a_byte() {
         for layout in BOTH {
@@ -1224,8 +1219,6 @@ mod tests {
         }
     }
 
-    /// The slack in front of a stream can hold stale words, so the directory —
-    /// not the first non-zero word — is what says where the chain begins.
     #[test]
     fn the_walk_starts_where_the_directory_says_not_at_the_first_data() {
         for layout in BOTH {
@@ -1307,8 +1300,6 @@ mod tests {
         }
     }
 
-    /// A wide word's top byte is not part of the record header, and a word carrying
-    /// one is not a record.
     #[test]
     fn a_wide_word_with_a_top_byte_is_not_a_record() {
         let mut s = stroke(
@@ -1341,8 +1332,8 @@ mod tests {
         // its stream starts at word 344 and the pointers count on from there.
         assert_eq!(Directory::resolve(dir.first_record, 981, Layout::V2), 100);
         assert_eq!(Directory::resolve(dir.terminator, 981, Layout::V2), 418);
-        // A pointer below the base belongs to an earlier stroke, and lands past the
-        // wrap rather than before zero — which is why a caller range-checks.
+        // A pointer below the base belongs to an earlier stroke and lands past the
+        // wrap, not before zero, so a caller range-checks.
         assert_eq!(Directory::resolve(1, 981, Layout::V2), WRAP - 343);
         // A stroke far enough into a big instrument has a base past the wrap, and
         // its pointers count on from there modulo it.
@@ -1368,10 +1359,8 @@ mod tests {
         assert_eq!(Layout::from_version(420), Some(Layout::V4));
     }
 
-    /// A generation past the last one modelled has unknown stream units, so it is
-    /// refused rather than decoded as the newest one known.
     #[test]
-    fn a_content_version_past_the_last_modelled_generation_is_refused() {
+    fn a_content_version_past_the_last_modeled_generation_is_refused() {
         assert_eq!(
             Layout::from_version(V5_FROM_VERSION - 1),
             Some(Layout::V4),
@@ -1413,8 +1402,8 @@ mod tests {
             Directory::resolve_end(5_999, 0, Layout::V2, first + 1),
             first
         );
-        // Past it the terminator takes the last alias that still lands inside the
-        // stream, while resolve — what the opening pointer uses — stays at the first.
+        // Past it the terminator takes the last alias inside the stream, while
+        // `resolve`, which the opening pointer uses, stays at the first.
         for periods in 1..4 {
             let words = first + periods * WRAP + 1;
             assert_eq!(

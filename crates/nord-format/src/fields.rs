@@ -14,15 +14,15 @@ pub struct FieldValue {
     pub name: String,
     /// Where the bits sit, as `LO..=HI` over the declaring body's bytes.
     pub placement: &'static str,
-    /// The field's bits as they were *read*, shifted down to bit 0. Carries no type, so
-    /// it stays comparable across a retype.
+    /// The field's bits as they were read, shifted down to bit 0. Carries no type, so it
+    /// stays comparable across a retype.
     pub raw: u64,
-    /// The bits the field's current value would *write*.
+    /// The bits the field's current value would write.
     ///
-    /// Equal to [`raw`](Self::raw) on a panel decoded from bytes and not edited since —
-    /// decode and encode are inverses — so the two diverging is exactly the set of
+    /// Decode and encode are inverses, so this equals [`raw`](Self::raw) on a panel
+    /// decoded from bytes and not edited since; the fields where the two differ are the
     /// pending changes. A `Default`-built panel has all-zero raw bytes, so every default
-    /// that encodes non-zero reads as pending.
+    /// that encodes nonzero reads as pending.
     pub bits: u64,
     /// The decoded value's `Debug` rendering.
     pub value: String,
@@ -47,7 +47,8 @@ pub struct FieldSpec {
     pub placement: &'static str,
     /// Width of the field in bits.
     pub width: u32,
-    /// Every value the field's type accepts, rendered as `set_field` spells them. Empty for a field too wide to enumerate — see [`ENUMERABLE_BITS`].
+    /// Every value the field's type accepts, rendered as `set_field` spells them. Empty
+    /// for a field too wide to enumerate (see [`ENUMERABLE_BITS`]).
     pub legal: fn() -> Vec<String>,
     /// Which panel control this field is, from its type's
     /// [`CONTROL`](crate::bits::Packed::CONTROL).
@@ -58,9 +59,9 @@ impl FieldSpec {
     /// The full path of the parameter this field morphs, for a [`ControlKind::Morph`]
     /// that names one.
     ///
-    /// The kind carries the parent's *sibling name*, since that is all the declaring body
-    /// knows; the path is this field's path with its last segment replaced, so a nested
-    /// body's prefix rides along.
+    /// The kind carries only the parent's sibling name, which is all the declaring body
+    /// knows. The path is this field's path with its last segment replaced, so a nested
+    /// body's prefix is kept.
     pub fn morph_parent(&self) -> Option<String> {
         let ControlKind::Morph { of: Some(parent) } = self.control else {
             return None;
@@ -72,59 +73,54 @@ impl FieldSpec {
     }
 }
 
-/// What the panel puts under a reader's finger.
+/// The kind of panel control a field is.
 ///
-/// The registry already says where a field sits and which values it takes; this says what
-/// *kind* of thing it is, so a caller can choose a widget without a table of field names
-/// beside it. It comes from the field's type, so a field gets it right by being declared
-/// with the type that matches the control — a `bool` is a button, a [`Level`] is a knob.
+/// The registry says where a field sits and which values it takes; this says what kind of
+/// control it is, so a caller can choose a widget without a table of field names. It
+/// comes from the field's type: a `bool` is a button, and a [`Level`] is a knob.
 ///
 /// [`Level`]: crate::components::Level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlKind {
-    /// A two-state button. Its two states may have names — see the field's `legal` values.
+    /// A two-state button. Its two states may have names; see the field's `legal` values.
     Toggle,
     /// A selector over a fixed set of named values.
     Selector,
     /// A continuous knob or slider, reading in `unit`.
     Knob(Unit),
-    /// A knob whose musical zero is its centre, reading in `unit` either side.
+    /// A knob whose musical zero is its center, reading in `unit` on either side.
     Bipolar(Unit),
-    /// One or more drawbars, each `0..=8`, drawn as bars rather than numbers.
+    /// One or more drawbars, each `0..=8`, drawn as bars.
     Drawbar {
         /// How many bars the field holds, in register order. The Stage models give each
-        /// bar its own field and the Electro 5 packs a whole register into one, so this
-        /// is what tells a caller which it is holding.
+        /// bar its own field, and the Electro 5 packs a whole register into one.
         bars: u8,
-        /// Where the field's **first** bar sits in the register: 1 is the leftmost bar,
-        /// 9 the rightmost of a nine-bar manual. A whole register starts at 1 and a
-        /// single Stage bar carries its own position.
+        /// Where the field's first bar sits in the register: 1 is the leftmost bar, 9 the
+        /// rightmost of a nine-bar manual. A whole register starts at 1, and a single
+        /// Stage bar carries its own position.
         ///
-        /// ⚠️ A position, not a pitch. Which harmonic each position draws is the organ
-        /// model's business — the B3's 16'/5⅓'/8' series is not the Vox's or the
-        /// Farfisa's, and the same nine positions serve all of them here — so labelling
-        /// them is for a caller that knows which model the field belongs to.
+        /// ⚠️ A position, not a pitch. Which harmonic each position draws depends on the
+        /// organ model: the B3's 16'/5⅓'/8' series is not the Vox's or the Farfisa's,
+        /// and the same nine positions serve all of them. Only a caller that knows the
+        /// field's organ model can label them.
         ///
-        /// `None` where the declaration does not place the bar in a register at all: the
-        /// Electro 5's bass manual, whose two bars nothing establishes the position of.
+        /// `None` where the declaration does not place the bar in a register: the
+        /// Electro 5's bass manual, whose two bars have no established position.
         rank: Option<u8>,
         /// Bits one bar occupies.
         bits_per_bar: u8,
-        /// Which end of the field the first bar sits at. Only meaningful above one bar,
-        /// and the reason it is here: the Electro 5 packs its nine nibbles high-first
-        /// while the arpeggiator packs its steps low-first, so a caller reading one by
-        /// the other's convention draws the register mirrored.
+        /// Which end of the field the first bar sits at; only meaningful above one bar.
+        /// The Electro 5 packs its nine nibbles high-first.
         order: PackedOrder,
     },
-    /// The value a performance control morphs its parent parameter *to*. Belongs on that
-    /// parent's control, not on one of its own.
+    /// The value a performance control morphs its parent parameter to. It belongs on the
+    /// parent's control, not on a control of its own.
     Morph {
-        /// The parent parameter's field name, as a sibling of this field — the full path
-        /// is this field's path with its last segment replaced, which is what
-        /// [`FieldSpec::morph_parent`] does.
+        /// The parent parameter's field name, as a sibling of this field.
+        /// [`FieldSpec::morph_parent`] resolves the full path.
         ///
-        /// `None` where the body declares no parameter under the name this slot's own
-        /// name implies, so the slot stands alone until one is placed beside it.
+        /// `None` where the body declares no parameter under the name this slot's name
+        /// implies; the slot then stands alone.
         of: Option<&'static str>,
     },
     /// A per-step pattern grid: `steps` steps of `bits_per_step` bits, the first step at
@@ -138,17 +134,16 @@ pub enum ControlKind {
     Reference(Library),
     /// A signed shift, reading in `unit`.
     Shift(Unit),
-    /// An integer nothing has been claimed about — the default, and a standing invitation
-    /// to give the field a type that says more.
+    /// A plain integer: the default, for a field whose type says nothing more.
     Number,
 }
 
 impl ControlKind {
-    /// Name the parent a morph slot morphs — the sibling field, not a path.
+    /// Name the parent a morph slot morphs, as a sibling field name, not a path.
     ///
-    /// `#[bitbody]` applies this from the field's own name, and only where the body
-    /// really declares that sibling. Every other kind is returned unchanged, so a field
-    /// named like a morph slot but typed as something else keeps what its type said.
+    /// `#[bitbody]` applies this from the field's name, only where the body declares that
+    /// sibling. Every other kind is returned unchanged, so a field named like a morph
+    /// slot but typed as something else keeps its type's kind.
     pub const fn morphing(self, parent: &'static str) -> ControlKind {
         match self {
             ControlKind::Morph { .. } => ControlKind::Morph { of: Some(parent) },
@@ -158,9 +153,8 @@ impl ControlKind {
 
     /// Place a drawbar in its register: `rank` 1 is the leftmost bar.
     ///
-    /// Applied by `#[bitbody]` from a `…_N` field name, and ignored by every other kind
-    /// — a field whose name happens to end in a digit is not a drawbar unless its type
-    /// says so.
+    /// Applied by `#[bitbody]` from a `…_N` field name, and ignored by every other kind:
+    /// a field whose name ends in a digit is not a drawbar unless its type says so.
     pub const fn ranked(self, rank: u8) -> ControlKind {
         match self {
             ControlKind::Drawbar {
@@ -181,9 +175,9 @@ impl ControlKind {
 
 /// Which end of a field the first of its packed values sits at.
 ///
-/// Only a field holding several values in one slot needs it — a drawbar register, a
-/// pattern row — and such a field cannot be drawn without it: read from the wrong end,
-/// the register comes out mirrored and looks like a plausible registration.
+/// Only a field holding several values needs it (a drawbar register, a pattern row). Read
+/// from the wrong end, a register comes out mirrored and still looks like a plausible
+/// registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PackedOrder {
     /// The first value occupies the most significant bits.
@@ -192,13 +186,12 @@ pub enum PackedOrder {
     LowFirst,
 }
 
-/// One of the instrument's stored libraries — what a [`ControlKind::Reference`] id is an
-/// id *into*.
+/// One of the instrument's stored libraries: what a [`ControlKind::Reference`] id points
+/// into.
 ///
-/// A file carries the id alone, so nothing but this says which catalogue resolves it.
-/// Listed here are the libraries something in a decoded body actually refers to; the
-/// instruments hold others (the live slots, the settings singleton) that no reference
-/// points at, and they are not here.
+/// A file carries only the id, so this is the only record of which catalog resolves it.
+/// Only libraries that a decoded body refers to are listed. The instruments hold others
+/// (the live slots, the settings singleton) that no reference points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Library {
     /// Piano instruments (`.npno`).
@@ -214,9 +207,9 @@ pub enum Library {
 impl Library {
     /// The library's numeric code.
     ///
-    /// It exists because a const generic parameter cannot be an enum: a type that carries
-    /// its library — [`LibraryRefOf`](crate::components::LibraryRefOf) — carries this
-    /// instead and turns it back with [`from_code`](Self::from_code).
+    /// A const generic parameter cannot be an enum, so a type that carries its library,
+    /// such as [`LibraryRefOf`](crate::components::LibraryRefOf), carries this code and
+    /// turns it back with [`expect_code`](Self::expect_code).
     ///
     /// The numbers are the object-class codes the instruments use on the wire, and
     /// `nord-usb`'s `ObjectClass` takes its library codes from here, so a caller holding
@@ -230,7 +223,7 @@ impl Library {
         }
     }
 
-    /// The library a [`code`](Self::code) names, or `None` — most bytes name none.
+    /// The library a [`code`](Self::code) names, or `None`; most bytes name none.
     pub const fn from_code(code: u8) -> Option<Library> {
         match code {
             1 => Some(Library::Piano),
@@ -244,11 +237,11 @@ impl Library {
     /// The library a [`code`](Self::code) names, for the type-level parameter this
     /// vocabulary exists to carry.
     ///
-    /// ⚠️ Panics on a code naming none. That is a build failure only where the value is
-    /// *forced* at compile time, which the aliases in [`components`](crate::components)
-    /// are — a `LibraryRefOf<7>` nobody places compiles clean and fails when a field
-    /// declared with it asks for its control kind. Use [`from_code`](Self::from_code)
-    /// anywhere a code arrives at runtime.
+    /// ⚠️ Panics on a code that names no library. That is a build failure only where the
+    /// value is forced at compile time, as it is for the aliases in
+    /// [`components`](crate::components). A `LibraryRefOf<7>` that nobody places
+    /// compiles, and fails once a field declared with it asks for its control kind. Use
+    /// [`from_code`](Self::from_code) wherever a code arrives at runtime.
     pub const fn expect_code(code: u8) -> Library {
         match Library::from_code(code) {
             Some(library) => library,
@@ -256,7 +249,7 @@ impl Library {
         }
     }
 
-    /// The catalogue's name, singular, as a caller would put it in front of "id".
+    /// The catalog's name, singular, as a caller would put it before "id".
     pub fn label(&self) -> &'static str {
         match self {
             Library::Piano => "piano",
@@ -267,7 +260,7 @@ impl Library {
     }
 }
 
-/// What a control's reading is *in*.
+/// The unit a control reads in.
 ///
 /// ⚠️ Naming a unit is not a promise that the stored value converts to it. Several Nord
 /// knobs read in milliseconds or hertz over a curve no manual publishes; the unit says
@@ -282,11 +275,11 @@ pub enum Unit {
     Hertz,
     /// Beats per minute, quarter-note.
     Bpm,
-    /// A subdivision of the master clock — `1/8`, `1/4 T`.
+    /// A subdivision of the master clock, such as `1/8` or `1/4 T`.
     ClockDivision,
     Semitones,
     Octaves,
-    /// A stereo position, left through centre to right.
+    /// A stereo position, left through center to right.
     Pan,
     /// No unit: a count, an index, or a raw byte.
     None,
@@ -295,10 +288,9 @@ pub enum Unit {
 impl Unit {
     /// The unit's numeric code.
     ///
-    /// It exists for the same reason [`Library::code`] does: a const generic parameter
-    /// cannot be an enum, so a type that carries its unit —
-    /// [`BipolarOf`](crate::components::BipolarOf) — carries this and turns it back with
-    /// [`expect_code`](Self::expect_code).
+    /// A const generic parameter cannot be an enum, so a type that carries its unit, such
+    /// as [`BipolarOf`](crate::components::BipolarOf), carries this code and turns it
+    /// back with [`expect_code`](Self::expect_code).
     pub const fn code(self) -> u8 {
         match self {
             Unit::Panel10 => 0,
@@ -317,8 +309,9 @@ impl Unit {
     /// The unit a [`code`](Self::code) names, for the type-level parameter this
     /// vocabulary exists to carry.
     ///
-    /// ⚠️ Panics on a code naming none, which is a build failure where the value is
-    /// forced at compile time — as the aliases in [`components`](crate::components) are.
+    /// ⚠️ Panics on a code that names no unit. That is a build failure where the value
+    /// is forced at compile time, as it is for the aliases in
+    /// [`components`](crate::components).
     pub const fn expect_code(code: u8) -> Unit {
         match code {
             0 => Unit::Panel10,
@@ -335,10 +328,10 @@ impl Unit {
         }
     }
 
-    /// Whether a value in this unit can be *computed* from the stored one.
+    /// Whether a value in this unit can be computed from the stored one.
     ///
-    /// False for the units where the panel's curve is not published — a caller that wants
-    /// to label an axis may still use the unit, but must print the stored value.
+    /// False for units whose panel curve is not published. A caller may still label an
+    /// axis with the unit, but must print the stored value.
     pub fn describes_a_known_transform(&self) -> bool {
         matches!(
             self,
@@ -394,10 +387,10 @@ impl std::error::Error for FieldError {}
 /// The generated field registry behind an entity, where its body declares one.
 ///
 /// `#[bitbody]` generates these three methods on every body with public
-/// fields; this trait is the same surface behind one name, so a caller can
-/// list and set fields without naming the body type.
-/// [`Entity::registry`](crate::Entity::registry) is where one comes from —
-/// a body joins by being declared there, and every consumer sees it at once.
+/// fields; this trait puts them behind one name, so a caller can list and
+/// set fields without naming the body type.
+/// [`Entity::registry`](crate::Entity::registry) returns one. A body joins
+/// by being declared there, and every consumer then sees it.
 pub trait Registry {
     /// Every settable field, described under its full path.
     fn fields(&self) -> Vec<Field>;
@@ -421,8 +414,8 @@ pub struct Field {
     pub display: String,
 }
 
-/// Every value of `T` that fits a `LO..=HI` field, in stored order, asked of the type
-/// itself rather than kept in a second list beside it.
+/// Every value of `T` that fits a field `width` bits wide, in stored order, taken from
+/// the type itself.
 pub fn legal_values<T: Packed + Debug>(width: u32) -> Vec<String> {
     if width > ENUMERABLE_BITS {
         return Vec::new();
@@ -441,14 +434,13 @@ pub fn legal_values<T: Packed + Debug>(width: u32) -> Vec<String> {
 
 /// Parse a field's value out of the way the field prints it.
 ///
-/// **The rendering is the vocabulary**: this walks the field's own bit patterns and takes
-/// the one whose `Debug` matches, so a type gets string parsing from its `Debug` alone,
-/// and a value outside its range has no pattern to match and fails here rather than being
-/// clamped.
+/// This walks the field's own bit patterns and takes the one whose `Debug` matches, so a
+/// type gets string parsing from its `Debug` alone. A value outside its range has no
+/// pattern to match and fails here instead of being clamped.
 ///
-/// ⚠️ An unexplained value can therefore only be written by *naming* it as unexplained: a
-/// sparse enum renders an unrecognized `9` as `Unknown(9)`, so a bare `9` matches nothing
-/// and `Unknown(9)` is the only spelling.
+/// ⚠️ An unexplained value can only be written by its unexplained spelling: a sparse enum
+/// renders an unrecognized `9` as `Unknown(9)`, so a bare `9` matches nothing and
+/// `Unknown(9)` is the only spelling.
 pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, FieldError> {
     let wanted = normalize(given);
     // A truth word for a `bool` field: its `Debug` is `true`/`false`, which no numeric
@@ -503,9 +495,8 @@ fn stored_value(s: &str) -> Option<u64> {
 
 /// How a field of this width spells its current value back to a caller.
 ///
-/// Narrow fields are named — `Organ`, `-5`, `true` — and that name is what `--set` takes.
-/// A field too wide to enumerate has no name, so its stored bits are the spelling, and
-/// `raw` is exactly those bits.
+/// Narrow fields are named (`Organ`, `-5`, `true`), and that name is what `--set` takes.
+/// A field too wide to enumerate is spelled by its stored bits, which `raw` holds.
 pub fn settable_form(width: u32, debug: &str, raw: u64) -> String {
     if width <= ENUMERABLE_BITS {
         debug.to_string()
@@ -534,9 +525,9 @@ mod tests {
     use crate::components::MorphTarget;
     use crate::formats::ne5::{Level, Transpose};
 
-    /// A refinement carries what the declaration site knows and the type cannot. It is
-    /// keyed on the kind, so a field whose *name* looks like a morph slot or a drawbar
-    /// but whose type says otherwise keeps what its type said.
+    /// A refinement adds what the declaration site knows and the type cannot. A field
+    /// whose name looks like a morph slot or a drawbar, but whose type says otherwise,
+    /// keeps its type's kind.
     #[test]
     fn a_refinement_only_reaches_the_kind_it_is_for() {
         assert_eq!(
@@ -558,8 +549,6 @@ mod tests {
         assert_eq!(knob.ranked(2), knob);
     }
 
-    /// The kind names the parent as a sibling; the path is the field's own, one segment
-    /// swapped, so a nested body's prefix rides along.
     #[test]
     fn a_morph_slot_resolves_its_parents_full_path() {
         let spec = |name: &str| FieldSpec {
@@ -587,7 +576,7 @@ mod tests {
     fn a_value_is_parsed_out_of_the_way_it_prints() {
         let v: Transpose = parse_field(4, "-5").unwrap();
         assert_eq!(v.inner(), -5);
-        // The bias is the type's business, not the caller's: -5 stores as 1.
+        // The type applies the bias: -5 stores as 1.
         assert_eq!(<Transpose as Packed>::to_bits(&v), 1);
     }
 
@@ -639,7 +628,7 @@ mod tests {
         assert_eq!(levels.last().unwrap(), "127");
     }
 
-    /// The message has to name a way forward, or it is just a rejection.
+    /// The message names the values the field accepts.
     #[test]
     fn the_error_lists_a_short_value_set_and_ranges_a_long_one() {
         let short = FieldError::BadValue {

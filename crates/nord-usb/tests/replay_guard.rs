@@ -1,11 +1,10 @@
-//! The one test target that compiles under every feature set — the twin of
+//! A test target that compiles under every feature set, the counterpart of
 //! `nord-format/tests/corpus_guard.rs`.
 //!
-//! ⚠️ The corpus replays and the enumeration walks are `#![cfg(feature = "corpus")]`,
-//! and `corpus` implies `replay`. A `cargo test -p nord-usb` without it compiles them
-//! out and passes having replayed none of the recorded exchanges.
+//! ⚠️ The corpus replays and the enumeration walks only build with the `corpus` feature,
+//! which implies `replay`. Without it, `cargo test -p nord-usb` compiles them out and
+//! passes without replaying any recorded exchange.
 
-/// The corpus variable set with the gate off means no recorded exchange ran.
 #[test]
 fn the_corpus_gate_off_means_the_recorded_exchanges_are_unverified() {
     #[cfg(not(feature = "corpus"))]

@@ -1,14 +1,14 @@
-//! Presentation gating: color, unicode, and which stream a line belongs on.
+//! When to use color and Unicode, and which stream each line goes to.
 //!
-//! - **Data on stdout, chatter on stderr.** `nord program get 7:4 | grep transpose` must
-//!   see the summary and nothing else, so every progress line, warning and pre-flight
-//!   description goes to stderr.
-//! - **Color and unicode only on a TTY.** ⚠️ The cross-platform check compares the bytes
-//!   a Wine-hosted `nord.exe` and the native Linux binary print for the same input, and
-//!   an escape sequence or box-drawing character that survived a pipe would put that
-//!   comparison at the mercy of Wine's console codepage.
-//! - **A non-TTY is non-interactive.** Never read a stdin nobody is attached to, and
-//!   never auto-proceed because nobody is there to say no.
+//! - **Data on stdout, messages on stderr.** `nord program get 7:4 | grep transpose` must
+//!   see only the summary, so every progress line, warning and pre-flight description
+//!   goes to stderr.
+//! - **Color and Unicode only on a TTY.** ⚠️ The cross-platform check compares what
+//!   `nord.exe` under Wine and the native Linux binary print for the same input. An
+//!   escape sequence or box-drawing character in piped output would make that
+//!   comparison depend on Wine's console code page.
+//! - **Without a TTY, never prompt.** Do not read a stdin nobody is attached to, and do
+//!   not proceed just because nobody is there to say no.
 
 use std::fmt::Display;
 use std::io::{BufRead, IsTerminal, Write};
@@ -16,7 +16,7 @@ use std::io::{BufRead, IsTerminal, Write};
 /// When to emit ANSI color.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ColorChoice {
-    /// Color when stdout is a terminal and `NO_COLOR` is unset.
+    /// Color when stdout is a terminal, `NO_COLOR` is unset, and `TERM` is not `dumb`.
     #[default]
     Auto,
     Always,
@@ -37,8 +37,8 @@ impl Ui {
         let color = match choice {
             ColorChoice::Always => true,
             ColorChoice::Never => false,
-            // `NO_COLOR` is honored whatever its value; the convention is that the
-            // variable being present at all is the signal.
+            // `NO_COLOR` counts whatever its value: by convention, being set is the
+            // signal.
             ColorChoice::Auto => {
                 tty && std::env::var_os("NO_COLOR").is_none()
                     && std::env::var("TERM").as_deref() != Ok("dumb")
@@ -54,9 +54,8 @@ impl Ui {
         }
     }
 
-    /// What a redirected run gets: no color, no unicode, and no question anyone is
-    /// there to answer. A test asks for it by name rather than inheriting whatever
-    /// terminal it was started from.
+    /// What a redirected run gets: no color, no Unicode, and no prompts. Tests use it so
+    /// they do not depend on the terminal they were started from.
     #[cfg(test)]
     pub(crate) fn piped() -> Ui {
         Ui {
@@ -66,13 +65,12 @@ impl Ui {
         }
     }
 
-    /// Data. Goes to stdout, and is the only thing that does.
+    /// Data. The only output that goes to stdout.
     ///
-    /// ⚠️ Not `println!`, which **panics** when the reader goes away: `nord program edit
-    /// --fields | head` would print a Rust backtrace over the user's terminal. A closed
-    /// pipe ends the run silently instead — but not successfully: every mutation echoes
-    /// what it is about to change here *before* it writes, so exiting 0 would report an
-    /// edit that never happened.
+    /// ⚠️ Not `println!`, which panics when the reader goes away, so `nord program edit
+    /// --fields | head` would print a backtrace. A closed pipe ends the run silently but
+    /// with a failure status: every mutation prints what it will change here before it
+    /// writes, so exiting 0 would report an edit that never happened.
     pub fn out(&self, line: impl Display) {
         let mut stdout = std::io::stdout().lock();
         if let Err(e) = writeln!(stdout, "{line}") {
@@ -84,7 +82,7 @@ impl Ui {
         }
     }
 
-    /// Chatter — progress, pre-flight descriptions, anything a pipe should not see.
+    /// Progress, pre-flight descriptions, and anything else a pipe should not see.
     pub fn note(&self, line: impl Display) {
         eprintln!("{line}");
     }
@@ -104,20 +102,20 @@ impl Ui {
 
     /// Whether box-drawing and block glyphs may be used.
     ///
-    /// ⚠️ A caller that substitutes a glyph for data must keep the plain form carrying
-    /// that data too — a pipe has to stay as informative as the terminal.
+    /// ⚠️ A caller that draws data as a glyph must also print that data in the plain
+    /// form, so a pipe gets as much information as the terminal.
     pub fn unicode(&self) -> bool {
         self.unicode
     }
 
     /// A section heading inside a summary.
     ///
-    /// Color carries three meanings and no more: a heading, a dimmed label or inactive
-    /// value, and [`Ui::danger`] for something about to be destroyed.
+    /// Color has three meanings: a heading, a dimmed label or inactive value, and
+    /// [`Ui::danger`] for something about to be destroyed.
     ///
-    /// ⚠️ A heading and a danger are both red, separated only by weight. They stay
-    /// distinguishable by never sharing a stream — headings are data on stdout, dangers
-    /// are chatter on stderr immediately above a prompt.
+    /// ⚠️ A heading and a danger are both red and differ only in weight. They stay
+    /// distinct because they never share a stream: headings are data on stdout, and
+    /// dangers go to stderr just above a prompt.
     pub fn heading(&self, s: impl Display) -> String {
         self.style(s, BOLD_RED)
     }
@@ -142,13 +140,12 @@ impl Ui {
         }
     }
 
-    /// Settle a destructive action: `--yes` given, or the operator says so at a prompt.
+    /// Confirm a destructive action: `--yes` was given, or the user agrees at a prompt.
     ///
-    /// ⚠️ The caller must already have described what will be touched. This asks the
-    /// question; it does not state the stakes.
+    /// ⚠️ The caller must already have described what will change. This only asks.
     ///
-    /// Off a TTY a missing `--yes` is an error rather than a block on a stdin that may
-    /// never produce a line.
+    /// Without a TTY, a missing `--yes` is an error, so the run never waits on a stdin
+    /// that may never produce a line.
     pub fn confirm(&self, already: bool) -> Result<(), String> {
         if already {
             return Ok(());
@@ -172,22 +169,22 @@ impl Ui {
         }
     }
 
-    /// Ask for a line of free text, with `initial` already in the buffer and editable.
-    /// `None` is the operator saying they are done — an empty line, and only that.
+    /// Ask for a line of text, with `initial` already in the buffer to edit. `None`
+    /// means the user entered an empty line to finish.
     ///
-    /// ⚠️ This takes the terminal out of line mode to do its own editing, so unlike
-    /// [`Ui::note`] it must never run against a stream that is not a terminal. Off a TTY
-    /// it is an error rather than a wait on a stdin nobody is attached to.
+    /// ⚠️ This takes the terminal out of line mode to do its own editing, so it must
+    /// never run against a stream that is not a terminal. Without a TTY it returns an
+    /// error.
     ///
-    /// ⚠️ **Ctrl-C never arrives here.** The raw-mode reader raises `SIGINT` on itself,
-    /// so an interrupt at the prompt ends the *process*: a caller cannot run any cleanup
-    /// after one, and must leave nothing that needs undoing while this is waiting. Ctrl-D,
-    /// Ctrl-U and Esc are all read as nothing at all.
+    /// ⚠️ Ctrl-C never returns here. The raw-mode reader raises `SIGINT` on itself, so an
+    /// interrupt at the prompt ends the process. A caller cannot clean up after one, and
+    /// must leave nothing that needs undoing while this waits. Ctrl-D, Ctrl-U and Esc
+    /// are all read as nothing.
     pub fn ask(&self, question: &str, initial: &str) -> Result<Option<String>, String> {
         if !self.interactive {
             return Err(format!("{question:?} needs a terminal to ask on"));
         }
-        // Reads and echoes on stderr, which is where every other prompt here goes.
+        // Reads and echoes on stderr, like every other prompt.
         let answer = dialoguer::Input::<String>::new()
             .with_prompt(question)
             .with_initial_text(initial)
@@ -212,7 +209,6 @@ const YELLOW: &str = "33";
 mod tests {
     use super::*;
 
-    /// A `Ui` built for a pipe styles nothing, whatever it is asked to style.
     #[test]
     fn without_a_tty_nothing_is_decorated() {
         let ui = Ui {
@@ -241,8 +237,8 @@ mod tests {
         assert!(ui.unicode());
     }
 
-    /// The non-interactive refusal is the whole safety story for scripts, so it must not
-    /// depend on reaching a prompt.
+    /// Scripts rely on this refusal for safety, so it must not depend on reaching a
+    /// prompt.
     #[test]
     fn a_pipe_without_yes_is_refused_rather_than_asked() {
         let ui = Ui {
@@ -255,8 +251,8 @@ mod tests {
         assert!(err.contains("--yes"), "{err}");
     }
 
-    /// An open-ended question has no `--yes` to stand in for an answer, so off a TTY it
-    /// can only fail — never block waiting for a line.
+    /// An open question has no `--yes` to answer it, so without a TTY it must fail
+    /// instead of waiting for a line.
     #[test]
     fn a_pipe_is_never_asked_an_open_question() {
         let ui = Ui {

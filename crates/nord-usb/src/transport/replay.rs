@@ -1,42 +1,39 @@
 //! A [`Transport`] that replays a recorded exchange instead of touching hardware.
 //!
-//! The whole protocol layer can then be exercised anywhere — including under Wine,
-//! qemu and wasm — with no device attached. It also makes every operation assertable:
-//! [`ReplayTransport::sent`] hands back exactly what the operation put on the wire, so
-//! a test can compare that against a real capture.
+//! The protocol layer can then run anywhere, including under Wine, qemu, and wasm, with
+//! no device attached. [`ReplayTransport::sent`] returns what an operation put on the
+//! wire, so a test can compare it against a real capture.
 //!
-//! The script is a flat list of directed messages, in the order they occurred.
-//! `Out` entries are what the *host* sent, and are checked against what the code under
-//! test actually sends; `In` entries are fed back as device responses.
+//! The script is a flat list of directed messages in the order they occurred. `Out`
+//! entries are what the host sent, and are checked against what the code under test
+//! sends; `In` entries are fed back as device responses.
 //!
 //! # Script format
 //!
 //! A frame is `O <hex>` (host → device) or `I <hex>` (device → host), one per line, and
-//! may carry a trailing `# label` that is read as a comment. Every other `#` line is
-//! either prose or a machine-readable field, `# <key>: <value>` with the key in
-//! `[a-z_]+` — so a prose line whose first word is capitalised or hyphenated stays
-//! prose. An unknown lowercase key is an error rather than something to skip, so the
-//! vocabulary cannot drift.
+//! may carry a trailing `# label` comment. Every other `#` line is either prose or a
+//! field, `# <key>: <value>` with the key in `[a-z_]+`, so a prose line whose first
+//! word is capitalized or hyphenated stays prose. An unknown lowercase key is an error,
+//! so the vocabulary cannot drift.
 //!
-//! `source`, `device`, `trimmed` and `note` describe the file and must precede its first
-//! frame. `intent` and `expect` describe a **section**: `intent` opens one, which runs to
-//! the next `intent` or to the end of the file, so one recorded command that opened
+//! `source`, `device`, `trimmed`, and `note` describe the file and must precede its
+//! first frame. `intent` and `expect` describe a section. `intent` opens one, which
+//! runs to the next `intent` or the end of the file, so a recorded command that opened
 //! several transactions is one script of several sections, in order. `expect` names the
-//! outcome its own section must produce and defaults to `ok`; it may sit anywhere
-//! inside that section, because a recorder only learns the outcome once the frames are
-//! written.
+//! outcome its section must produce and defaults to `ok`. It may sit anywhere in that
+//! section, because a recorder only learns the outcome after the frames are written.
 
 use super::Transport;
 use crate::error::{Error, Result};
 
 pub use crate::error::ErrKind;
 
-/// Where a script's bytes came from — which is what says whether it is an oracle.
+/// Where a script's bytes came from, which says whether it is an oracle.
 ///
-/// Only [`Source::Nsm`] is one for an operation nothing has matched before: it is the
-/// vendor application's own traffic. [`Source::Nord`] is this project's, and is a
-/// regression baseline rather than a proof; [`Source::Synthetic`] was built by hand for
-/// a path no capture covers.
+/// Only [`Source::Nsm`], the vendor application's own traffic, is an oracle for an
+/// operation nothing has matched before. [`Source::Nord`] is this project's traffic, a
+/// regression baseline; [`Source::Synthetic`] was built by hand for a path no capture
+/// covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Nsm,
@@ -48,7 +45,7 @@ pub enum Source {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Header {
     pub source: Option<Source>,
-    /// Free text: model and firmware the capture was taken against.
+    /// Free text: the model and firmware the capture was taken from.
     pub device: Option<String>,
     /// What was left out of the capture, e.g. `ui-refresh`.
     pub trimmed: Option<String>,
@@ -67,9 +64,9 @@ pub enum Expect {
 #[derive(Debug, Clone, Default)]
 pub struct Section {
     /// `<class> <verb> <args…>`, in the CLI's own spellings. `None` means the section
-    /// declares nothing, and the frames are checkable but not drivable.
+    /// declares nothing, so its frames can be checked but not driven.
     pub intent: Option<String>,
-    /// What the section said to expect, if it said. Read through [`Section::expect`],
+    /// What the section says to expect, if anything. Read through [`Section::expect`],
     /// which supplies the default.
     expect: Option<Expect>,
     pub steps: Vec<Step>,
@@ -89,7 +86,7 @@ pub struct Script {
     pub sections: Vec<Section>,
 }
 
-/// The header keys a script may carry, reported verbatim when one is misspelled.
+/// The header keys a script may carry, listed when one is misspelled.
 pub const KEYS: &[&str] = &["intent", "expect", "source", "device", "trimmed", "note"];
 
 impl Source {
@@ -145,8 +142,8 @@ impl std::fmt::Display for Expect {
     }
 }
 
-/// A header field, or `None` for prose. The key must be `[a-z_]+`, which is what keeps
-/// an ordinary sentence containing a colon from being read as one.
+/// A header field, or `None` for prose. The key must be `[a-z_]+`, which keeps an
+/// ordinary sentence containing a colon from being read as a field.
 fn field(comment: &str) -> Option<(&str, &str)> {
     let (key, value) = comment.trim().split_once(':')?;
     let named = !key.is_empty() && key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
@@ -156,10 +153,10 @@ fn field(comment: &str) -> Option<(&str, &str)> {
 impl Script {
     /// Parse a script: header fields, sections, and frames.
     ///
-    /// Refuses rather than skips — an unknown key, a file-level field after the first
-    /// frame, an `expect` that follows the frames it judges, or a section with no frames
-    /// are all errors, so a header that does nothing cannot sit unnoticed in a tree the
-    /// sweep walks.
+    /// An unknown key, a file-level field after the first frame, a second `expect` in
+    /// one section, an `expect` without an intent, and a section with no frames are all
+    /// errors, so a header that does nothing cannot sit unnoticed in a tree the sweep
+    /// walks.
     pub fn parse(text: &str) -> Result<Self> {
         let fail =
             |n: usize, what: std::fmt::Arguments| Error::Replay(format!("line {}: {what}", n + 1));
@@ -255,8 +252,8 @@ impl Script {
                 }
             };
             let hex = hex.trim();
-            // ⚠️ The pairs below are byte slices: a multi-byte character would split
-            // across a char boundary and panic before `from_str_radix` ever saw it.
+            // ⚠️ The pairs below are byte slices: a multi-byte character would be split
+            // across a char boundary and panic before `from_str_radix` saw it.
             if !hex.is_ascii() {
                 return Err(fail(n, format_args!("non-hex byte")));
             }
@@ -321,10 +318,10 @@ pub struct Step {
 /// How strictly to police what the code under test transmits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strictness {
-    /// Every `Out` must match the script byte-for-byte. Use in tests.
+    /// Every `Out` must match the script byte for byte. Use in tests.
     Exact,
-    /// Ignore what is sent and just serve the next `In`. Useful for demos against a
-    /// capture whose addressing differs from what is being asked for.
+    /// Ignore what is sent and serve the next `In`. Useful for demos against a capture
+    /// whose addressing differs from what is being asked for.
     Lenient,
 }
 
@@ -401,12 +398,12 @@ impl Transport for ReplayTransport {
     }
 
     /// A bounded read answers `None` wherever the script has nothing for the device to
-    /// say — the end of it, or a frame the host sends next.
+    /// say: at the end, or where the host sends the next frame.
     ///
-    /// That is what a recording of a timed-out read looks like: the read produced no
-    /// frame, so none was written down. Without this, replaying an operation built on
-    /// bounded reads — [`crate::op::recover`] drains the stream that way — would fail on
-    /// the very silence it was recorded against.
+    /// That is how a recording of a timed-out read looks: the read produced no frame, so
+    /// none was written down. Without this, replaying an operation built on bounded
+    /// reads, such as [`crate::op::recover`], would fail on the silence it was recorded
+    /// against.
     async fn read_timeout(
         &mut self,
         max: usize,
@@ -448,7 +445,7 @@ mod tests {
     use super::*;
 
     /// The two lines every recording starts with are prose: the key of a field is
-    /// `[a-z_]+`, and `Format` is capitalised.
+    /// `[a-z_]+`, and `Format` is capitalized.
     #[test]
     fn a_bare_recording_parses_as_one_section_with_no_intent() {
         let script = Script::parse(
@@ -484,8 +481,6 @@ mod tests {
         );
     }
 
-    /// One recorded command opens several transactions, so a script is a sequence of
-    /// sections and each one accounts for the frames that follow it.
     #[test]
     fn each_intent_opens_a_section_over_the_frames_that_follow() {
         let script = Script::parse(
@@ -529,7 +524,7 @@ mod tests {
         assert_eq!(script.sections[2].expect(), Expect::Ok);
     }
 
-    /// A device refusal is only useful if the script can name *which* one, so the code
+    /// A device refusal is only useful if the script can name which one, so the code
     /// survives the round trip through the header.
     #[test]
     fn a_device_status_expectation_round_trips_its_code() {
@@ -596,8 +591,6 @@ mod tests {
         assert!(err.to_string().contains("before its first frame"), "{err}");
     }
 
-    /// A recorder only knows the outcome once the frames are written, so an `expect`
-    /// under them belongs to the section it closes, not to the next one.
     #[test]
     fn an_expect_below_its_frames_judges_the_section_it_closes() {
         let script = Script::parse(
@@ -622,11 +615,9 @@ mod tests {
         assert!(err.to_string().contains("already says"), "{err}");
     }
 
-    /// Every kind the recorder writes must read back as the error it names, or a script
-    /// would declare a failure the sweep then judges to be a different one. A failure
-    /// the vocabulary does not name is written as the nearest kind rather than left off,
-    /// where the script would claim the operation succeeded — so every variant round
-    /// trips, not only the ones with a spelling of their own.
+    /// Every kind the recorder writes must read back as the error it names, or the sweep
+    /// would judge a declared failure to be a different one. A failure the vocabulary
+    /// does not name is written as the nearest kind, so every variant round-trips.
     #[test]
     fn a_recorded_failure_reads_back_as_the_error_it_names() {
         let at = crate::wire::Location { bank: 1, slot: 2 };
@@ -689,8 +680,8 @@ mod tests {
         assert!(err.to_string().contains("no frames"), "{err}");
     }
 
-    /// A frame line is read two hex digits at a time, so a multi-byte character in one
-    /// must be refused rather than sliced through.
+    /// A frame line is read two hex digits at a time, so a multi-byte character must be
+    /// refused before it is sliced through.
     #[test]
     fn a_frame_carrying_a_non_ascii_character_is_refused() {
         let err = Script::parse("O aéa\n").unwrap_err();

@@ -4,10 +4,10 @@
 #
 # Runs as the drawbar-automerge GitHub App: a token is minted per run and dies
 # within the hour, the app has only Contents + Pull requests on this repo, and
-# it holds no ruleset bypass. Never use GITHUB_TOKEN here — a merge attributed
+# it holds no ruleset bypass. Never use GITHUB_TOKEN here. A merge attributed
 # to github-actions triggers no workflows, so ci.yml would not run on the
-# merged result and the release job would silently never publish it. App
-# events trigger workflows normally.
+# merged result and the release job would never publish it. App events
+# trigger workflows normally.
 #
 # Config: variable AUTOMERGE_APP_ID (the app's id) and secret
 # AUTOMERGE_APP_PRIVATE_KEY (its PEM), under Settings → Secrets and variables.

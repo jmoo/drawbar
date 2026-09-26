@@ -1,12 +1,12 @@
-//! The Electro 5 program as its panel is divided.
+//! The Electro 5 program, grouped as the panel groups it.
 //!
-//! The body keeps every organ model's registration and both parts' settings at once, so
-//! most of it is state rather than controls: what the instrument is *using* is decided by
-//! the part selectors and the organ model, and that is what the conditions here say.
+//! The body stores every organ model's registration and both parts' settings at once, so
+//! most fields hold state the instrument is not using. The part selectors and the organ
+//! model decide which state is in use, and the conditions here encode that.
 //!
-//! Reading order is the panel's, left to right: the keyboard section leads because its
-//! part pickers decide which engine sections mean anything, and a picker that brings a
-//! section back must never be inside the section it brings back.
+//! Groups follow the panel, left to right. The keyboard section comes first because its
+//! part pickers decide which engine sections apply. A picker that makes a section
+//! relevant must never be inside that section.
 
 use crate::panel::{Group, Match, Panel, Relevance, Selection};
 
@@ -20,7 +20,7 @@ macro_rules! preset {
     };
 }
 
-/// Either part playing `instrument` — the condition an engine section hangs on.
+/// Either part playing `instrument`: the condition for an engine section.
 macro_rules! part_plays {
     ($instrument:expr) => {
         Some(Relevance {
@@ -50,8 +50,7 @@ macro_rules! organ_is {
     };
 }
 
-/// One effect routed to a part. `Unknown` is how older firmware spelled *off* and
-/// presents as off, so it is not one of these.
+/// An effect routed to a part. `Unknown` behaves as off, so it does not count.
 /// Confirmed on hardware.
 macro_rules! routed {
     ($field:expr) => {
@@ -96,8 +95,8 @@ pub const PANEL: Panel = Panel {
                 "center_panel.split_point",
                 "center_panel.part_mix",
                 // ⚠️ Two fields, one control: the enable is sticky and an untouched
-                // program stores +1 rather than 0, so neither reads on its own. They are
-                // adjacent because a caller drawing them as one needs them together.
+                // program stores +1, so neither reads correctly alone. They are adjacent
+                // so a caller can draw them as one control.
                 "center_panel.transpose_enabled",
                 "center_panel.transpose",
                 "center_panel.gain",
@@ -107,8 +106,8 @@ pub const PANEL: Panel = Panel {
             title: "Organ",
             selected_by: None,
             when: part_plays!("Organ"),
-            // The model selector stays here rather than inside a model's cluster: it is
-            // what a reader changes to make another cluster relevant.
+            // The model selector stays outside the model clusters, because changing it
+            // makes another cluster relevant.
             members: &["center_panel.organ_type", "center_panel.drawbar_live"],
             groups: &[
                 Group {
@@ -126,9 +125,8 @@ pub const PANEL: Panel = Panel {
                             title: "Preset 1",
                             selected_by: preset!("organ_panel.b3_preset2_selected", "false"),
                             // b3+bass replaces this registration with the bass manual
-                            // below, and the nine nibbles it would draw hold stale
-                            // leftovers there — showing them asserts a registration that
-                            // plays nothing.
+                            // below, and the nine nibbles then hold stale values that do
+                            // not sound.
                             when: organ_is!("B3"),
                             members: &[
                                 "organ_panel.b3_preset1_drawbars",
@@ -140,10 +138,10 @@ pub const PANEL: Panel = Panel {
                         Group {
                             title: "Preset 1, bass manual",
                             selected_by: preset!("organ_panel.b3_preset2_selected", "false"),
-                            // ⚠️ Two live bars, outside the nine-nibble block. The vib
-                            // and percussion flags of preset 1 are in the group above,
-                            // so they read as not-relevant here; whether the bass manual
-                            // answers them is not established.
+                            // ⚠️ Two bars, stored outside the nine-nibble block. Preset
+                            // 1's vib and percussion flags are in the group above, so
+                            // they read as not relevant here. Whether the bass manual
+                            // responds to them is unknown.
                             when: organ_is!("B3Bass"),
                             members: &["organ_panel.b3_bass_bar1", "organ_panel.b3_bass_bar2"],
                             groups: &[],
@@ -225,10 +223,10 @@ pub const PANEL: Panel = Panel {
                 Group {
                     title: "Pipe",
                     selected_by: None,
-                    // No vibrato and no percussion the panel can reach: the bit the other
-                    // models use for preset-1 vib is set in nearly every real program,
-                    // and the vib button does not respond while pipe is selected.
-                    // Confirmed on hardware.
+                    // Pipe has no vibrato or percussion the panel can reach. The bit
+                    // other models use for preset-1 vib is set in nearly every real
+                    // program, but the vib button does not respond while Pipe is
+                    // selected. Confirmed on hardware.
                     when: organ_is!("Pipe"),
                     members: &["organ_panel.pipe_preset2_selected"],
                     groups: &[
@@ -292,8 +290,8 @@ pub const PANEL: Panel = Panel {
             title: "Effects",
             selected_by: None,
             when: None,
-            // The five routing switches, which are what turns each effect on. They stay
-            // out of the clusters they govern for the same reason the organ model does.
+            // The five routing switches turn each effect on. Like the organ model
+            // selector, they stay outside the clusters they govern.
             members: &[
                 "effects_panel.fx1",
                 "effects_panel.fx2",
@@ -332,7 +330,7 @@ pub const PANEL: Panel = Panel {
                     groups: &[Group {
                         title: "Rotary speaker",
                         selected_by: None,
-                        // Nested, so it needs both: the amp block routed to a part *and*
+                        // Nested, so it needs both the amp block routed to a part and
                         // the rotary chosen as its model.
                         when: Some(Relevance {
                             any_of: &[Match {
@@ -414,8 +412,7 @@ mod tests {
         group(title).is_relevant(fields)
     }
 
-    /// An engine section is relevant while a part is playing it, and the pickers that
-    /// bring one back are in a section that always is.
+    /// An engine section is relevant while a part plays it.
     #[test]
     fn a_section_follows_the_parts() {
         let fresh = program(&[]);
@@ -435,14 +432,14 @@ mod tests {
             ("center_panel.upper_part", "Piano"),
         ]);
         assert!(!relevant("Organ", &neither));
-        // The part pickers are in the section that never goes away.
+        // The part pickers are in a section that is always relevant.
         let keyboard = group("Keyboard & split").members;
         assert!(keyboard.contains(&"center_panel.lower_part"));
         assert!(keyboard.contains(&"center_panel.upper_part"));
     }
 
-    /// One model's registration means anything at a time, and the model selector is not
-    /// inside the cluster it selects.
+    /// Only one model's registration applies at a time, and the model selector is outside
+    /// the clusters it selects.
     #[test]
     fn only_the_selected_organ_is_relevant() {
         let b3 = program(&[("center_panel.organ_type", "B3")]);
@@ -456,16 +453,15 @@ mod tests {
         assert!(relevant("Vox", &vox));
         assert!(!relevant("B3", &vox));
 
-        // A selection the library cannot name matches nothing, so no model speaks for
-        // the state and every registration reads as what it is.
+        // An unnamed selection matches no model, so no model's registration is relevant.
         let unknown = program(&[("center_panel.organ_type", "unknown (6)")]);
         for model in ["B3", "Vox", "Farfisa", "Pipe"] {
             assert!(!relevant(model, &unknown), "{model}");
         }
     }
 
-    /// b3+bass: preset 1 is the bass manual's two bars, and the nine nibbles they shadow
-    /// hold stale leftovers, so that registration is not the one to draw.
+    /// In b3+bass, preset 1 is the bass manual's two bars, and the nine nibbles hold
+    /// stale values.
     #[test]
     fn b3_bass_replaces_the_first_registration() {
         let b3 = program(&[("center_panel.organ_type", "B3")]);
@@ -484,7 +480,7 @@ mod tests {
     }
 
     /// The rotary knobs need both the amp block routed to a part and the rotary chosen
-    /// as its model — a conjunction, which is what nesting is for.
+    /// as its model. Nesting expresses the conjunction.
     #[test]
     fn a_nested_group_needs_its_parent_too() {
         let rotary = program(&[
@@ -494,8 +490,8 @@ mod tests {
         assert!(relevant("Amp / compressor", &rotary));
         assert!(relevant("Rotary speaker", &rotary));
 
-        // The model alone: the nested group's own condition still holds, and the parent's
-        // does not — which is the caller's cue to stop descending.
+        // With the model alone, the nested group's condition holds but the parent's does
+        // not, which tells the caller to stop descending.
         let unrouted = program(&[("effects_panel.fx3_type", "Rotary")]);
         assert!(!relevant("Amp / compressor", &unrouted));
         assert!(relevant("Rotary speaker", &unrouted));
@@ -508,8 +504,7 @@ mod tests {
         assert!(!relevant("Rotary speaker", &amp));
     }
 
-    /// ⚠️ `Unknown` is how older firmware spelled *off* and presents as off, so it does
-    /// not make an effect relevant.
+    /// `Unknown` behaves as off, so it does not make an effect relevant.
     #[test]
     fn the_older_spelling_of_off_reads_as_off() {
         let off = program(&[("effects_panel.fx1", "Unknown")]);

@@ -1,11 +1,11 @@
 //! The frames a synthetic exchange is built from: one builder per shape, so a script
 //! written in one test target means the same thing in another.
 //!
-//! A response is named by the command it answers — the `+ 1` and the status word ahead
-//! of the payload are the protocol's, not the caller's.
+//! A response is named by the command it answers; the builder adds the `+ 1` and the
+//! status word ahead of the payload.
 //!
-//! ⚠️ A rustc-visible support module, not a test target — each test target that
-//! includes it compiles its own copy.
+//! ⚠️ A support module, not a test target: each test target that includes it
+//! compiles its own copy.
 #![allow(dead_code)]
 
 use nord_usb::transport::{Direction, Step};
@@ -96,7 +96,7 @@ pub fn session_open(class: ObjectClass) -> Vec<Step> {
     ]
 }
 
-/// Its close. A released session sends the same `GOODBYE` on its own.
+/// The transaction's close. A released session sends only the `GOODBYE` half.
 pub fn session_close() -> Vec<Step> {
     vec![
         request(cmd::SESSION_CLOSE, &[]),

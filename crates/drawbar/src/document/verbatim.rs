@@ -1,10 +1,8 @@
 //! The document for a body no registry describes.
 //!
-//! The container is read — format, version, checksum, where the body starts and how long
-//! it is — and the body itself is carried untouched. There is nothing to draw as a
-//! control and nothing that could be written differently, so the page says which of those
-//! two it is and states what the container does say. The bytes themselves are on the
-//! Advanced face.
+//! The container is read (format, version, checksum, and the body's range) and the body
+//! is carried untouched. With no fields to draw, the page says why and lists what the
+//! container states. The body's bytes are on the Advanced face.
 
 use eframe::egui;
 use nord_format::accept::Family;
@@ -19,8 +17,7 @@ use crate::room;
 use crate::strings::kind_word;
 use crate::workspace::LocalEntity;
 
-/// How many bytes of the body a dump row holds. The body itself is on the Advanced
-/// face, which is the one page that shows it.
+/// How many bytes of the body a dump row holds.
 const PER_ROW: usize = 16;
 
 const PAD: f32 = 12.0;
@@ -31,17 +28,15 @@ const BYTES_W: f32 = 350.0;
 const SENTENCE: f32 = 11.0;
 const COLUMN_MIN: f32 = 300.0;
 
-/// The one sentence this page exists to say.
-const WHY: &str = "No registry declares this model's fields yet, so there is nothing to draw \
-                   and nothing to write differently. The bytes are under Body bytes on the \
-                   Advanced face. The file can still be sent, copied, tagged and placed; \
-                   every byte goes up exactly as it came down.";
+/// Why the page has no controls.
+const WHY: &str = "No registry declares this model's fields yet, so there is nothing to edit. \
+                   The bytes are under Body bytes on the Advanced face. The file can still be \
+                   sent, copied, tagged and placed, and every byte is sent as it was received.";
 
-/// Where the body sits in the file: the range the container settled on the way in, so
-/// nothing is copied to show it and nothing works the range out a second time.
+/// The body's bytes, borrowed through the range the container recorded when the file was
+/// read.
 ///
-/// Bytes carrying no container the app could read have no body of their own to show, so
-/// the file is what it shows.
+/// Bytes with no readable container have no body range, so the whole file is shown.
 fn body(entity: &LocalEntity) -> &[u8] {
     let Some(container) = &entity.container else {
         return &entity.bytes;
@@ -59,7 +54,7 @@ fn generation(generation: Generation) -> &'static str {
     }
 }
 
-/// What the container says about itself, which is the whole of what is known.
+/// What the container says about itself, which is all that is known.
 fn stated(entity: &LocalEntity) -> Vec<Fact> {
     let kind = Kind::of(entity);
     let tag = entity.tag();
@@ -86,7 +81,7 @@ fn stated(entity: &LocalEntity) -> Vec<Fact> {
     rows.push(Fact {
         key: "Body",
         value: format!("{} · verbatim", room::measure(container.body_len())),
-        note: "kept byte for byte — no registry for this model",
+        note: "kept byte for byte; no registry for this model",
     });
     rows.push(Fact {
         key: "Version",
@@ -109,7 +104,7 @@ fn stated(entity: &LocalEntity) -> Vec<Fact> {
     rows
 }
 
-/// The whole page. `true` when the one action on it was clicked.
+/// The whole page. `true` when Save a copy was clicked.
 pub fn ui(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
     controls::heading(
         ui,
@@ -155,7 +150,7 @@ pub fn ui(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
     }
 }
 
-/// Why the page is empty, and the one thing to do about it.
+/// Why the page is empty, and the Save a copy action.
 fn sentence(ui: &mut egui::Ui) -> bool {
     let quiet = ui.visuals().weak_text_color();
     ui.vertical(|ui| {
@@ -230,7 +225,7 @@ fn hex(ui: &mut egui::Ui, body: &[u8], rows: std::ops::Range<usize>) {
     }
 }
 
-/// A byte as the dump prints it: itself where it is printable ASCII, a stop otherwise.
+/// A byte as the dump prints it: itself where it is printable ASCII, a period otherwise.
 fn readable(byte: u8) -> char {
     match byte {
         0x20..=0x7e => byte as char,
@@ -242,14 +237,10 @@ fn readable(byte: u8) -> char {
 mod tests {
     use super::*;
 
-    /// The body on the page is the container's own range, which is the same body the
-    /// wire carries.
-    ///
-    /// ⚠️ Bytes whose container could not be read have no body range at all, so the
-    /// page shows the file rather than a window worked out from a length it never
-    /// checked.
+    /// The page shows the same body the wire carries. Bytes whose container could not be
+    /// read have no body range, so the page shows the whole file.
     #[test]
-    fn the_body_shown_is_the_range_the_container_settled() {
+    fn the_body_shown_is_the_range_the_container_recorded() {
         let held = |name: &str, bytes: Vec<u8>| {
             let ctx = egui::Context::default();
             let mut workspace = crate::workspace::Workspace::new(ctx);
@@ -276,14 +267,11 @@ mod tests {
         let entity = workspace.get(id).expect("it is open");
         assert!(
             entity.container.is_none(),
-            "a file shorter than its own container is not one"
+            "a file cut short inside its container has no container"
         );
         assert_eq!(body(entity), entity.bytes.as_slice());
     }
 
-    /// ⚠️ The dump lays out only the rows it was asked for. A piano library is
-    /// hundreds of megabytes, and one galley per sixteen bytes of it is a frame that
-    /// never finishes.
     #[test]
     fn the_dump_lays_out_only_the_rows_it_was_asked_for() {
         let body: Vec<u8> = (0..64 * 1024).map(|byte| byte as u8).collect();
@@ -310,7 +298,6 @@ mod tests {
         assert_eq!(offsets, ["0640", "0650", "0660"], "{painted:?}");
     }
 
-    /// Non-printable bytes never reach the dump as characters of their own.
     #[test]
     fn the_ascii_column_prints_only_printable_bytes() {
         assert_eq!(readable(b'N'), 'N');

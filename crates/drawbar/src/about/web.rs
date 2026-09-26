@@ -1,15 +1,15 @@
-//! What the browser will say about itself, for the build lines.
+//! What the browser reports about itself, for the build lines.
 
 use wasm_bindgen::JsValue;
 
-/// How much of a user agent naming no known browser is kept. The string runs to a
+/// How many characters of an unrecognized user agent are kept. The string can run to a
 /// paragraph of version numbers, and the sheet has one line.
 const MOST: usize = 60;
 
 /// Whether this browser has WebUSB at all.
 ///
-/// ⚠️ Read off `navigator` rather than through `web_sys::Navigator::usb`, which answers
-/// with a `Usb` object whatever the browser supports.
+/// ⚠️ Read from `navigator` directly: `web_sys::Navigator::usb` returns a `Usb` object
+/// whatever the browser supports.
 pub fn has_usb() -> bool {
     let Some(navigator) = navigator() else {
         return false;
@@ -17,7 +17,7 @@ pub fn has_usb() -> bool {
     field(&navigator, "usb").is_some()
 }
 
-/// The browser and the system under it, as short as it can be said.
+/// The browser and operating system, as briefly as possible.
 pub fn agent() -> String {
     let Some(navigator) = navigator() else {
         return "unknown".to_string();
@@ -36,7 +36,7 @@ fn navigator() -> Option<JsValue> {
     Some(web_sys::window()?.navigator().into())
 }
 
-/// A property of a JavaScript object, where it holds something.
+/// A property of a JavaScript object, unless it is undefined or null.
 fn field(object: &JsValue, name: &str) -> Option<JsValue> {
     let held = js_sys::Reflect::get(object, &JsValue::from_str(name)).ok()?;
     (!held.is_undefined() && !held.is_null()).then_some(held)
@@ -50,8 +50,8 @@ fn branded(data: &JsValue) -> Option<String> {
         .iter()
         .filter_map(|entry| {
             let brand = field(&entry, "brand")?.as_string()?;
-            // Chromium pads the list with a brand nobody is, to catch code that reads
-            // the first entry: `Not)A;Brand`, punctuation and all.
+            // Chromium adds a fake brand such as `Not)A;Brand` to catch code that reads
+            // the first entry.
             if brand.contains("Not") && brand.contains("Brand") {
                 return None;
             }
@@ -61,7 +61,7 @@ fn branded(data: &JsValue) -> Option<String> {
             ))
         })
         .collect();
-    // Every Chromium browser lists Chromium beside itself, in a shuffled order.
+    // Every Chromium browser also lists Chromium, in a shuffled order.
     let named = brands
         .iter()
         .find(|brand| !brand.starts_with("Chromium"))
@@ -72,7 +72,7 @@ fn branded(data: &JsValue) -> Option<String> {
     }
 }
 
-/// `text` as far as [`MOST`], and an ellipsis where it went on.
+/// `text` cut to [`MOST`] characters, with an ellipsis if it was longer.
 fn cut(text: &str) -> String {
     match text.char_indices().nth(MOST) {
         None => text.to_string(),

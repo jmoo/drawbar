@@ -1,6 +1,6 @@
 //! A text note: an asset whose bytes are words, edited as the text they are.
 //!
-//! [`read`] is the one place that decides which bytes are a note.
+//! [`read`] alone decides which bytes are a note.
 
 use eframe::egui;
 use nord_format::util::FileType;
@@ -8,29 +8,28 @@ use nord_format::util::FileType;
 use super::controls::Sets;
 use crate::workspace::LocalEntity;
 
-/// The extension a new note is named with, which is what a reader and an export expect
-/// to see on one.
+/// The extension a new note is named with.
 pub const EXTENSION: &str = "txt";
 
 /// The most a note holds.
 ///
 /// ⚠️ The editor lays out every byte of a note every frame, and every edit re-reads the
-/// whole file. A set list is a few kilobytes; a larger file is a log or a dump, and it
-/// stays a record rather than becoming a box that stalls with each keystroke.
+/// whole file. A set list is a few kilobytes; a larger file is likely a log or a dump,
+/// and editing it would stall on every keystroke.
 pub const MAX_BYTES: usize = 256 * 1024;
 
-/// The one thing this document sets, under the name [`apply`] takes it by.
+/// The path of the note's text, the only field [`apply`] sets.
 const TEXT: &str = "text";
 
 const FONT: f32 = 12.5;
 
-const HINT: &str = "Set lists, cues, patch notes — whatever needs writing down.";
+const HINT: &str = "Set lists, cues, patch notes, anything worth writing down.";
 
 /// Why bytes are not a note.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotText {
-    /// They open the way a format this app decodes does, so a failed decode of them is
-    /// that format's error.
+    /// They begin with the magic of a format this app decodes, so a failed decode is that
+    /// format's error.
     Claimed(&'static str),
     TooLong(usize),
     NotUtf8,
@@ -54,7 +53,7 @@ impl std::fmt::Display for NotText {
     }
 }
 
-/// The words these bytes are, or why they are not a note.
+/// The text these bytes hold, or why they are not a note.
 ///
 /// UTF-8 of at most [`MAX_BYTES`], holding no control character but tab and the two
 /// line breaks, and not opening with the magic of a format `nord-format` decodes. An
@@ -86,7 +85,7 @@ fn written(c: char) -> bool {
 fn claimed(bytes: &[u8]) -> Option<&'static str> {
     let peeked = nord_format::util::peek(&mut std::io::Cursor::new(bytes)).ok()?;
     match peeked.file_type {
-        // Recognised, and decoded by nothing: words that open with `<` stay words.
+        // Recognized but decoded by nothing, so text that begins with `<` stays text.
         FileType::Xml => None,
         FileType::Cbin => Some("CBIN"),
         FileType::Cne3 => Some("CNE3"),
@@ -97,8 +96,8 @@ fn claimed(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// How many lines are written here, as an editor counts them: a file with nothing in it
-/// is one line, and the newline that ends the last line does not open another.
+/// The number of lines, as an editor counts them: an empty file is one line, and the
+/// newline that ends the last line does not start another.
 pub fn lines(words: &str) -> usize {
     words.lines().count().max(1)
 }
@@ -134,12 +133,11 @@ pub struct State {
 impl State {
     /// The whole page: one box, the size of the room under the header.
     ///
-    /// ⚠️ The box scrolls itself. It is the whole page, so the page has nothing left to
-    /// scroll, and a caret pushed past the bottom has to move the text rather than the
-    /// document around it.
+    /// ⚠️ The box scrolls itself. It fills the page, so a caret pushed past the bottom has
+    /// to scroll the text, not the document around it.
     pub fn ui(&mut self, ui: &mut egui::Ui, entity: &LocalEntity, sets: &mut Sets) {
-        // A refused edit leaves the buffer holding what the file does not, and this is
-        // what puts the file's words back.
+        // After a refused edit the buffer differs from the file; this restores the file's
+        // text.
         if self.text.as_bytes() != entity.bytes.as_slice() {
             match read(&entity.bytes) {
                 Ok(words) => words.clone_into(&mut self.text),
@@ -177,8 +175,8 @@ impl State {
     }
 }
 
-/// How many rows of `row` fill `room`, which is what makes the box the size of the room
-/// it is in. Never fewer than one: a window too short for a line still edits.
+/// How many rows of height `row` fit in `room`. Never fewer than one, so a window too
+/// short for a line still edits.
 fn rows(room: f32, row: f32) -> usize {
     match row > 0.0 {
         true => ((room / row).floor() as usize).max(1),
@@ -241,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_count_is_what_an_editor_would_call_one() {
+    fn lines_are_counted_as_an_editor_counts_them() {
         assert_eq!(lines(""), 1);
         assert_eq!(lines("one"), 1);
         assert_eq!(lines("one\n"), 1);
@@ -282,7 +280,11 @@ mod tests {
     #[test]
     fn the_box_fills_the_room_it_is_in() {
         assert_eq!(rows(300.0, 15.0), 20);
-        assert_eq!(rows(305.0, 15.0), 20, "a part row would overflow the page");
+        assert_eq!(
+            rows(305.0, 15.0),
+            20,
+            "a partial row would overflow the page"
+        );
         assert_eq!(rows(0.0, 15.0), 1);
         assert_eq!(rows(-10.0, 15.0), 1);
         assert_eq!(rows(300.0, 0.0), 1);

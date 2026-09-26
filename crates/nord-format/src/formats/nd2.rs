@@ -1,4 +1,4 @@
-//! Nord Drum 2 (`.nd2p`, `.nd2_bank`) — container-verified, bodies unmapped.
+//! Nord Drum 2 (`.nd2p`, `.nd2_bank`): container-verified, bodies unmapped.
 //!
 //! The device ships banks as plain ZIP archives (stored, no compression) of one
 //! `.nd2p` CBIN member per program. The member is what this module reads; the
@@ -7,11 +7,11 @@
 use super::raw::raw_format;
 
 raw_format!(
-    /// Programs (`.nd2p`) — usually met inside a `.nd2_bank` archive.
+    /// Programs (`.nd2p`), usually found inside a `.nd2_bank` archive.
     ///
-    /// The header's `aux` word holds `0x006d008f` — both u16 halves set, the
-    /// preset/library shape rather than a program category, unmapped and preserved
-    /// verbatim. Inferred from specimens; not confirmed on hardware.
+    /// The header's `aux` word holds `0x006d008f`: both u16 halves set, the
+    /// preset/library shape instead of a program category. It is unmapped and
+    /// preserved. Inferred from specimens; not confirmed on hardware.
     program,
     "nd2p",
     175

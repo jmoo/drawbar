@@ -1,8 +1,8 @@
-//! How much room a folder has, what is in it, and what the queue would put there.
+//! How much space a folder has, what is in it, and what the queue would add.
 //!
-//! Every figure here is the instrument's own: a [`Status`] entry counted in its
-//! partition's unit, and the [`AllocationUnit`] that says what one of those units is
-//! worth in bytes. No capacity constant lives in this app.
+//! Every figure here comes from the instrument: a [`Status`] entry counted in its
+//! partition's unit, and the [`AllocationUnit`] that gives that unit's size in bytes.
+//! This app holds no capacity constants.
 
 use eframe::egui;
 use nord_usb::wire::{AllocationUnit, Status};
@@ -16,7 +16,7 @@ use crate::workspace::Workspace;
 /// The trough's height, wherever a meter is drawn.
 pub const TROUGH: f32 = 5.0;
 
-/// The point past which a fill stops reading as room and starts reading as a warning.
+/// The fill fraction past which a meter shows a warning.
 const CROWDED: f32 = 0.9;
 
 /// How full one class's partition is, and what the queue would add to it.
@@ -40,7 +40,7 @@ impl Meter {
         }
     }
 
-    /// The share the queue would add, cut to whatever is left of the trough.
+    /// The share the queue would add, clamped to what is left of the trough.
     pub fn incoming(&self) -> f32 {
         match self.total {
             0 => 0.0,
@@ -48,28 +48,26 @@ impl Meter {
         }
     }
 
-    /// Whether the fill has passed the point where it is a warning rather than a figure.
+    /// Whether the fill has passed the warning point.
     pub fn crowded(&self) -> bool {
         self.filled() > CROWDED
     }
 }
 
-/// Whether a class's partition is one that fills: counted in bytes, or divided into
-/// more than one bank.
+/// Whether a class's partition can fill: counted in bytes, or divided into more than one
+/// bank.
 ///
-/// ⚠️ What is left is a single bank of fixed slots. Its meter would say what its own
-/// heading already says in figures, and a bar is a claim about room running out where
-/// nothing ever runs out but the count.
+/// ⚠️ Anything else is a single bank of fixed slots. Its heading already shows the count,
+/// and a bar would suggest space running out where only slots can.
 fn fills(class: ObjectClass, unit: Option<AllocationUnit>, banks: usize) -> bool {
     (class.is_library() && unit.is_some()) || banks > 1
 }
 
-/// What a class's partition holds and what is on its way to it, or nothing for a class
-/// whose counters have not been read or whose partition does not fill.
+/// What a class's partition holds and what is queued for it, or `None` for a class whose
+/// counters have not been read or whose partition cannot fill.
 ///
-/// ⚠️ A partition reporting a total of nothing has no meter either: nothing can be
-/// written there and nothing is counted, so a full-width empty trough would be a
-/// measurement of a thing that does not divide.
+/// ⚠️ A partition reporting a total of zero has no meter either: nothing can be written
+/// there, so an empty trough would misrepresent it.
 pub fn meter(
     class: ObjectClass,
     inventory: &[Status],
@@ -96,11 +94,11 @@ pub fn meter(
     })
 }
 
-/// What the queue would add to a class, in the unit that class's meter counts in.
+/// What the queue would add to a class, in the unit its meter counts.
 ///
-/// ⚠️ An entry that replaces what is in its slot adds nothing — the write frees what it
+/// ⚠️ An entry that replaces what is in its slot adds nothing: the write frees what it
 /// overwrites. A slot-addressed class counts the slots that would fill; a library counts
-/// the blocks its bodies occupy, which nothing can work out until the partition has
+/// the blocks its bodies would occupy, which cannot be computed until the partition has
 /// reported its allocation unit.
 fn incoming(
     class: ObjectClass,
@@ -123,8 +121,8 @@ fn incoming(
         .sum()
 }
 
-/// What is left in a class's partition, in bytes where the allocation unit says what a
-/// unit is worth and in bare units where nothing has.
+/// The free space in a class's partition: in bytes when the allocation unit is known,
+/// otherwise in bare units.
 pub fn free_space(
     class: ObjectClass,
     inventory: &[Status],
@@ -138,14 +136,14 @@ pub fn free_space(
             measure(free.saturating_mul(u64::from(unit.get()))),
             measure(total.saturating_mul(u64::from(unit.get()))),
         ),
-        None => format!("{free} of {total} free, in units this folder counts in"),
+        None => format!("{free} of {total} units free"),
     })
 }
 
-/// What is left in a class's partition, in bytes.
+/// The free space in a class's partition, in bytes.
 ///
-/// ⚠️ `None` until the partition has reported its allocation unit: free space is a
-/// count of units, and nothing turns one into bytes without it.
+/// ⚠️ `None` until the partition has reported its allocation unit: free space is a count
+/// of units, which cannot be converted to bytes without it.
 pub fn free_bytes(class: ObjectClass, device: &DeviceState) -> Option<u64> {
     let unit = device.allocation_unit(class)?;
     let status = device
@@ -155,7 +153,7 @@ pub fn free_bytes(class: ObjectClass, device: &DeviceState) -> Option<u64> {
     Some(status.available().saturating_mul(u64::from(unit.get())))
 }
 
-/// The one thing in the queue that most nearly does not fit, and whether it does.
+/// The largest item in the queue, and whether it fits in the free space.
 pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) -> Option<String> {
     let (name, bytes, class) = queue
         .entries()
@@ -171,13 +169,13 @@ pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) ->
         false => "it does not fit",
     };
     Some(format!(
-        "{name} is {} and {} is free — {verdict}.",
+        "{name} is {} and {} is free, so {verdict}.",
         measure(bytes),
         measure(free)
     ))
 }
 
-/// A size in the widest unit that leaves a figure worth reading.
+/// A size in the largest unit that keeps the figure readable.
 pub fn measure(bytes: u64) -> String {
     let (figure, unit) = scaled(bytes, bytes);
     format!("{figure} {unit}")
@@ -185,15 +183,15 @@ pub fn measure(bytes: u64) -> String {
 
 /// A part and the whole it is out of: `121/500 B`, `184.0/192.0 MB`.
 ///
-/// ⚠️ One unit for the pair, taken from the whole. A part given its own unit would read
-/// smaller than the total it sits under, and the two figures would no longer compare.
+/// ⚠️ One unit for both, chosen from the whole. A part in its own unit could not be
+/// compared with the whole at a glance.
 pub fn measure_out_of(part: u64, whole: u64) -> String {
     let (part, unit) = scaled(part, whole);
     let (whole, _) = scaled(whole, whole);
     format!("{part}/{whole} {unit}")
 }
 
-/// `bytes` written in the unit a size of `scale` deserves, and that unit's name.
+/// `bytes` in the unit suited to a size of `scale`, and that unit's name.
 fn scaled(bytes: u64, scale: u64) -> (String, &'static str) {
     const K: f64 = 1024.0;
     let held = bytes as f64;
@@ -207,10 +205,10 @@ fn scaled(bytes: u64, scale: u64) -> (String, &'static str) {
     (format!("{:.1}", held / (K * K)), "MB")
 }
 
-/// The trough, what the folder holds, and what the queue would add to it.
+/// The trough, what the folder holds, and what the queue would add.
 ///
-/// ⚠️ The bar takes the tone and the readout beside it keeps its own ink: accent on the
-/// panel measures 4.1:1, which carries as a bar and fails as 11 px text.
+/// ⚠️ The bar takes the status color and the readout beside it keeps the text color: the
+/// accent measures 4.1:1 against the panel, enough for a bar but not for 11 px text.
 pub fn bar(ui: &mut egui::Ui, meter: Meter) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), TROUGH),
@@ -269,8 +267,6 @@ mod tests {
         Location { bank: 0, slot }
     }
 
-    /// A slot-addressed folder counts items, and what is queued for a slot nothing holds
-    /// is a slot that would fill.
     #[test]
     fn a_slot_folder_meters_items_and_counts_only_what_would_fill_a_slot() {
         let ctx = egui::Context::default();
@@ -318,8 +314,6 @@ mod tests {
         assert!(!held.crowded());
     }
 
-    /// A library counts blocks of its partition's allocation unit, and until that unit
-    /// has arrived nothing can say how much of a block anything occupies.
     #[test]
     fn a_library_meters_blocks_and_has_no_meter_at_all_without_its_unit() {
         let ctx = egui::Context::default();
@@ -353,9 +347,6 @@ mod tests {
         assert!(known.crowded(), "1472 of 1536 is past nine tenths");
     }
 
-    /// ⚠️ A folder whose partition reports a total of nothing is not an empty folder:
-    /// nothing can be written there and nothing is counted, so it gets no meter rather
-    /// than an empty one.
     #[test]
     fn a_partition_that_counts_nothing_at_all_has_no_meter() {
         let ctx = egui::Context::default();
@@ -373,9 +364,6 @@ mod tests {
         assert!(drawn(ObjectClass::Program, None, 4).is_some());
     }
 
-    /// A meter is for a partition that can fill: one counted in bytes, or one divided
-    /// into more than one bank. A single bank of fixed slots has none — its heading
-    /// already says the count, and nothing there runs out but slots.
     #[test]
     fn only_a_partition_that_can_fill_gets_a_meter() {
         let ctx = egui::Context::default();
@@ -414,7 +402,6 @@ mod tests {
         assert!(!drawn(library, None), "nothing counts bytes without a unit");
     }
 
-    /// The queued segment never runs past the end of the trough, whatever is waiting.
     #[test]
     fn the_queued_segment_stops_at_the_end_of_the_trough() {
         let full = Meter {
@@ -424,7 +411,7 @@ mod tests {
         };
         assert_eq!(full.filled(), 0.95);
         assert!((full.filled() + full.incoming() - 1.0).abs() < f32::EPSILON);
-        // A class whose counters say nothing divides into nothing.
+        // A total of zero gives zero fractions.
         let unread = Meter {
             used: 0,
             total: 0,
@@ -433,8 +420,6 @@ mod tests {
         assert_eq!((unread.filled(), unread.incoming()), (0.0, 0.0));
     }
 
-    /// The sentence names the largest thing waiting, its size, the room left, and
-    /// whether one goes into the other — and says nothing at all with an empty queue.
     #[test]
     fn the_binding_constraint_is_the_largest_thing_waiting_against_the_room_left() {
         let ctx = egui::Context::default();
@@ -459,14 +444,14 @@ mod tests {
                 at(slot),
             );
         }
-        // Nothing says what a block is worth, so nothing says whether anything fits.
+        // Without the block size, whether anything fits is unknown.
         assert_eq!(constraint(&queue, &workspace, &device.state), None);
 
         // 64 blocks of 131 064 bytes is 8.0 MB, and 5 347 738 bytes is 5.1 MB.
         device.pretend_partitions(&crate::device::ELECTRO5);
         assert_eq!(
             constraint(&queue, &workspace, &device.state).as_deref(),
-            Some("Grand is 5.1 MB and 8.0 MB is free — it fits.")
+            Some("Grand is 5.1 MB and 8.0 MB is free, so it fits.")
         );
 
         device.state.inventory.clear();
@@ -475,15 +460,13 @@ mod tests {
             .is_some_and(|said| said.ends_with("it does not fit.")));
     }
 
-    /// What is left reads in bytes once the partition has said what a unit is worth, and
-    /// in the partition's own units before that.
     #[test]
     fn free_space_reads_in_bytes_only_once_the_allocation_unit_has_arrived() {
         let class = ObjectClass::Sample;
         let inventory = [status(class, 84, 64, 1472)];
         assert_eq!(
             free_space(class, &inventory, None).as_deref(),
-            Some("64 of 1536 free, in units this folder counts in")
+            Some("64 of 1536 units free")
         );
         assert_eq!(
             free_space(

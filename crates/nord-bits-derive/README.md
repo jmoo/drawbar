@@ -3,7 +3,7 @@
 The proc-macro behind [`nord-format`](https://crates.io/crates/nord-format):
 `#[bitbody(LEN)]` declares a bit-mapped binary structure once, leaf values at
 bit ranges and nested bodies at byte ranges, and generates the byte-array
-conversions both ways, preserving unclaimed bits verbatim through a re-encode.
+conversions both ways, leaving unclaimed bits untouched through a re-encode.
 
 **Do not depend on this crate directly.** The generated code names `nord-format`
 internals (`crate::bits`, `crate::cbin`, …), so the macro only expands correctly

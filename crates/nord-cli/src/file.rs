@@ -1,9 +1,9 @@
-//! The read-only verbs (`get`, `info`, `deps`) pointed at a file instead of a slot,
-//! and what every verb that checks a list of them shares.
+//! The read-only verbs (`get`, `info`, `deps`) on a file instead of a slot, and the
+//! helpers shared by every verb that checks a list of targets.
 //!
-//! Same verbs, no instrument: the object is the file's bytes. What a file does not
-//! carry — the slot name, the names behind dependency ids — is reported as living on
-//! the instrument rather than guessed at.
+//! The object is the file's bytes, and no instrument is needed. What a file does not
+//! hold (the slot name, the names behind dependency ids) is reported as held by the
+//! instrument, never guessed.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -41,8 +41,8 @@ const NAMED: [ObjectClass; 6] = [
 
 /// The noun that reads a tag's files, for steering a mismatch to the right command.
 ///
-/// [`tag`] read backwards: a class that names its files steers to its own noun, so a
-/// format cannot be claimed by a command that does not read it.
+/// The inverse of [`tag`], so a format is only ever steered to the command that reads
+/// it.
 pub(crate) fn noun(format: &str) -> Option<String> {
     NAMED
         .into_iter()
@@ -56,7 +56,7 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     match tag(class) {
         Some(want) if want != format => {
             let steer = match noun(format) {
-                Some(n) => format!(" — try `nord {n}`"),
+                Some(n) => format!("; try `nord {n}`"),
                 None => String::new(),
             };
             Err(format!(
@@ -72,8 +72,8 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
 /// Where a CBIN file of this generation keeps its checksum.
 ///
 /// ⚠️ A type-0 file holds body data at `0x18`, where a type-1 file holds its crc32, so
-/// the range follows the generation: read at the wrong one, a program's panel bytes
-/// report as a checksum and a real edit annotates as bookkeeping.
+/// the range follows the generation. With the wrong one, a program's panel bytes would
+/// print as a checksum, and a real edit would be labeled as a checksum change.
 ///
 /// This belongs in `cbin::Generation`, beside the rest of the layout it describes.
 pub(crate) fn checksum_range(generation: Generation, len: usize) -> Option<Range<usize>> {
@@ -83,10 +83,10 @@ pub(crate) fn checksum_range(generation: Generation, len: usize) -> Option<Range
     }
 }
 
-/// The stored checksum, with the label its generation spells it under.
+/// The stored checksum, with its generation's label.
 ///
-/// The one header fact the parsed [`Header`] does not carry: the value lives in the
-/// bytes, at [`checksum_range`]. `unwrap` verified it, so this reports what it checked.
+/// The parsed [`Header`] does not carry the value; it is in the bytes at
+/// [`checksum_range`]. `unwrap` already verified it, so this reports the checked value.
 fn crc(header: &Header, bytes: &[u8]) -> (&'static str, String) {
     let stored = checksum_range(header.generation, bytes.len()).and_then(|at| bytes.get(at));
     match (header.generation, stored) {
@@ -98,8 +98,8 @@ fn crc(header: &Header, bytes: &[u8]) -> (&'static str, String) {
             "crc32:",
             format!("{:#010x}", u32::from_le_bytes(b.try_into().unwrap())),
         ),
-        // The header parsed, so the file is longer than either range; a file too short
-        // to hold one says so rather than reporting a number it did not read.
+        // A parsed header implies a file longer than either range. A file too short to
+        // hold a checksum says so instead of printing a number it did not read.
         _ => ("crc:", "not in these bytes".to_string()),
     }
 }
@@ -131,7 +131,8 @@ pub fn get(
         }
         (true, None) => Err("--body writes a file; give -o a path".into()),
         (false, Some(_)) => Err(format!(
-            "{} is already a file; -o has nothing to save (--body extracts the wire body)",
+            "{} is already a file; -o has nothing to save (--body extracts the body without \
+             its CBIN header)",
             path.display()
         )),
         (false, None) => {
@@ -143,7 +144,7 @@ pub fn get(
     }
 }
 
-/// `info` on a file: the CBIN header, which is exactly what the wire never transmits.
+/// `info` on a file: the CBIN header, which USB transfers leave out.
 pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let file = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let read = nord_usb::envelope::unwrap(&file).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -161,8 +162,8 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let row = |label: &str, value: String| {
         ui.out(format!("  {}{value}", ui.dim(format!("{label:<11}"))));
     };
-    // Library files (samples) carry `0xffff:0xffff` where slot files keep bank/slot —
-    // a library object has no slot until an instrument gives it one.
+    // Library files (samples) hold `0xffff:0xffff` where slot files hold bank and slot,
+    // because a library object has no slot until an instrument gives it one.
     if (at.bank, at.slot) == (0xffff, 0xffff) {
         row(
             "location:",
@@ -204,15 +205,15 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
 
 /// `deps` on a file: the library ids a program body stores.
 ///
-/// Only ids — the names the wire's `DEPENDENCIES` reply attaches live on the
-/// instrument, so the slot form of the verb is what resolves them.
+/// Only ids: the names come from the instrument's `DEPENDENCIES` reply, so only the
+/// slot form of the verb resolves them.
 pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let entity = nord_format::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let format = entity_tag(&entity);
     check(path, format, class)?;
 
-    // The two bodies are byte-identical but sit in different slot spaces, so the ids
-    // are pulled out per variant rather than through one reference to the body.
+    // The two bodies are byte-identical but live in different slot spaces, so each
+    // variant is matched on its own.
     let (piano, sample) = match &entity {
         Entity::Program(Program::Electro5(p)) => (p.piano_panel.id.id(), p.sample_panel.id.id()),
         Entity::Live(Live::Electro5(l)) => (l.piano_panel.id.id(), l.sample_panel.id.id()),
@@ -247,7 +248,7 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
             crate::summary::dep_id(*id)
         ));
     }
-    ui.note(ui.dim("(ids only — the names live on the instrument; `deps BANK:SLOT` shows them)"));
+    ui.note(ui.dim("(ids only: the instrument holds the names, and `deps BANK:SLOT` shows them)"));
     Ok(())
 }
 
@@ -256,13 +257,13 @@ pub(crate) fn entity_tag(entity: &Entity) -> &'static str {
     entity.identity().format
 }
 
-/// Where two renderings of one object first disagree.
+/// Where two encodings of one object first differ.
 ///
-/// A round trip that comes back different is a field the model does not account for,
-/// and in a bit-packed body the offset usually names that field on its own.
+/// A round trip that comes back different has a field the model does not account for,
+/// and in a bit-packed body the offset usually identifies it.
 ///
-/// ⚠️ Only reached for two byte strings that differ, so one that is a prefix of the
-/// other differs in its length and nowhere else.
+/// ⚠️ Only called for two byte strings that differ, so when one is a prefix of the
+/// other, they differ only in length.
 pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> String {
     match a.iter().zip(b).position(|(x, y)| x != y) {
         Some(at) => format!("{at:#x}"),
@@ -270,11 +271,12 @@ pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> String {
     }
 }
 
-/// Check each target, print its verdict line, and fail with how many did not pass.
+/// Check each target, print its verdict line, and fail with a count of those that did
+/// not pass.
 ///
-/// The three `verify` verbs differ in what they check and in how a verdict reads; that
-/// a run which lost a target says so, and says how many of how many, is one contract —
-/// and the exit status is what a script reads.
+/// The three `verify` verbs check different things and word their verdicts differently,
+/// but share this contract: a run that loses a target says how many of how many failed,
+/// and exits with a failure status a script can read.
 pub(crate) fn check_each<T>(
     ui: &Ui,
     targets: &[T],
@@ -334,12 +336,12 @@ mod tests {
         assert_eq!(label, "crc16:");
         let stored = u16::from_le_bytes(bytes[bytes.len() - 2..].try_into().unwrap());
         assert_eq!(value, format!("{stored:#06x}"));
-        // 0x18 is the body's first byte here — the version echo, not a checksum.
+        // 0x18 is the body's first byte here: the version echo, not a checksum.
         assert_eq!(u16::from_be_bytes([bytes[0x18], bytes[0x19]]), 4);
     }
 
-    /// The offset is what names the field a round trip lost, so it has to be the first
-    /// byte that moved; bytes that only ran out have no offset to give.
+    /// The offset must be the first byte that differs, and strings that differ only in
+    /// length have no offset to give.
     #[test]
     fn a_round_trip_that_differs_says_where_it_first_did() {
         assert_eq!(first_difference(b"abcd", b"abed"), "0x2");
@@ -366,7 +368,6 @@ mod tests {
         );
     }
 
-    /// The mismatch error must steer to the noun that does read the file.
     #[test]
     fn a_wrong_class_is_steered_to_the_right_noun() {
         let err = check(Path::new("x.ne5t"), "ne5t", ObjectClass::Program).unwrap_err();

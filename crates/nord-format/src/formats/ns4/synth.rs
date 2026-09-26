@@ -1,10 +1,9 @@
 //! The Stage 4 synth preset body (`.ns4y`): 497 bytes.
 //!
-//! One synth section as a program stores it, moved down 327 bytes. The keyboard
-//! zone and the extern CC values ride along for every layer, though a preset has
-//! no use for them. Layers are 408 bits apart; layer A's zone is confirmed
-//! against the corpus (it varies exactly as B's and C's do), its extern CC block
-//! is placed by the stride alone, since no specimen sets any layer's.
+//! One synth section as a program stores it, 327 bytes earlier. Every layer keeps its
+//! keyboard zone and extern CC values, although a preset has no use for them. Layers are
+//! 408 bits apart. Layer A's zone varies across specimens as B's and C's do; its extern
+//! CC block is placed by the stride alone, since no specimen sets any layer's.
 
 use super::fx::FxChain;
 use super::synth_performance::SynthPerformance;
@@ -15,7 +14,7 @@ use crate::error::Error;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns4y";
-/// Stored ×100. The corpus holds 2.08; ns4decode was tested from 2.03.
+/// Stored ×100. Specimens reach 2.08; ns4decode was tested from 2.03.
 pub const KNOWN_VERSIONS: &[u32] = &[203, 204, 205, 206, 207, 208];
 pub const BODY_LEN: usize = 497;
 
@@ -23,8 +22,8 @@ pub const BODY_LEN: usize = 497;
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
-/// re-encode verbatim. Placements derived from ns4decode's published tables;
-/// values raw. Inferred from specimens; not confirmed on hardware.
+/// re-encode. Placements are derived from ns4decode's published tables, and values
+/// are raw. Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(497)]
 pub struct SynthPreset {
     #[bits(42..=42)]

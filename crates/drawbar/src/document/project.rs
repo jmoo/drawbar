@@ -1,13 +1,13 @@
 //! The Sample Editor project document.
 //!
-//! A `.nsmpproj` is the text file the editor saves and generates an `nsmp`
-//! from — the same object as an instrument, seen from the source side, so it
-//! wears the same key map, zone rows and velocity field. What is settable is
-//! what `nord-format` can edit in place: the instrument's name and velocity
-//! defaults, each zone's root key and key range, each stroke's trim, loop,
-//! gain and velocity window, and each audio file's path. Paths are the CLI's —
-//! `name`, `zone129.root_key`, `stroke1.loop_start`, `velocity.attack_amount`,
-//! `file1.path` — with zones and files addressed by their stored ids and a
+//! A `.nsmpproj` is the text file the editor saves and builds an `nsmp` from. It
+//! is the same object as an instrument, seen from the source side, so it has the
+//! same key map, zone rows, and velocity field. What can be set is what
+//! `nord-format` can edit in place: the instrument's name and velocity defaults,
+//! each zone's root key and key range, each stroke's trim, loop, gain, and
+//! velocity window, and each audio file's path. Paths match the CLI's (`name`,
+//! `zone129.root_key`, `stroke1.loop_start`, `velocity.attack_amount`,
+//! `file1.path`): zones and files are addressed by their stored ids, and a
 //! stroke by its global id.
 
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ pub struct Zone {
     pub bottom_note: u8,
     pub top_note: u8,
     pub enabled: bool,
-    /// The stroke this zone plays, where one of them is switched on.
+    /// The stroke this zone plays, if one is switched on.
     ///
     /// ⚠️ A zone plays one stroke: a project may hold more, but only the enabled one is
     /// written into an instrument, and a zone with none switched on plays nothing.
@@ -68,7 +68,7 @@ pub struct AudioFile {
     pub rate: u32,
 }
 
-/// One stroke, under the global id both blocks naming it use.
+/// One stroke, under the global id shared by both blocks that name it.
 #[derive(Clone, PartialEq)]
 pub struct Stroke {
     pub id: u32,
@@ -93,7 +93,7 @@ pub struct Snapshot {
     pub files: Vec<AudioFile>,
     pub strokes: Vec<Stroke>,
     pub velocity: VelocityDefaults,
-    /// What the editor that wrote the file calls itself.
+    /// The name and version of the program that wrote the file.
     pub created_by: (String, String),
     pub version: u32,
 }
@@ -218,11 +218,11 @@ fn indexed(part: &str, label: &str) -> Option<u32> {
     part.strip_prefix(label).and_then(|n| n.parse().ok())
 }
 
-/// A drag over one number, spelling the new value only once it has moved.
+/// A drag over one number, returning the new value only once it has changed.
 ///
-/// `decimals` caps what the drag can land on: egui aims at the roundest value within a
-/// pointer's width of where the drag reached, and at a fractional display scale that is
-/// a half — which a field holding a whole number refuses.
+/// `decimals` limits the values the drag can land on. egui picks the roundest value
+/// within a pointer's width of where the drag reached, and at a fractional display scale
+/// that can be a half, which a whole-number field refuses.
 fn drag<H: std::hash::Hash>(
     ui: &mut egui::Ui,
     id: (&str, H),
@@ -243,7 +243,7 @@ fn drag<H: std::hash::Hash>(
     (response.inner.changed() && moved != value).then(|| moved.to_string())
 }
 
-/// A frame position. Nothing in the format caps one: the editor repairs a
+/// A frame position. The format sets no upper bound: the editor repairs a
 /// position past the file's end on load.
 ///
 /// Inferred from specimens; not confirmed on hardware.
@@ -259,8 +259,8 @@ fn whole(ui: &mut egui::Ui, id: (&str, u32), value: f64, top: f64) -> Option<Str
 /// How far each end of the trim may be dragged: never past the other, because a zone
 /// whose trim-in is at or past its trim-out plays nothing and is refused at build.
 ///
-/// A trim a file already states inverted is still inside its own control, so it can be
-/// dragged back rather than left where nothing can reach it.
+/// A trim the file already stores inverted stays within its control's range, so it can
+/// be dragged back into order.
 fn trim_ends(start: f64, stop: f64) -> (RangeInclusive<f64>, RangeInclusive<f64>) {
     (
         0.0..=(stop - 1.0).max(start),
@@ -305,19 +305,19 @@ pub fn map(
         played,
     );
     for act in acts {
-        // A project has nothing to sound, so a struck key is a reading and never a write.
+        // A project has no audio to play, so a struck key only reads and never writes.
         if let MapAct::Bounds(bounds) = act {
             sets.extend(moved(&snapshot.zones, &bounds));
         }
     }
 }
 
-/// What a moved band writes. The map draws only the zones that answer, so its bands are
-/// those zones in their own order — a switched-off zone is neither drawn nor moved.
+/// What a moved band writes. The map draws only enabled zones, so its bands are those
+/// zones in order; a switched-off zone is neither drawn nor moved.
 fn moved(zones: &[Zone], bounds: &[(u8, u8)]) -> Sets {
     let mut sets = Sets::new();
-    let answering = zones.iter().filter(|zone| zone.enabled);
-    for (zone, (low, top)) in answering.zip(bounds) {
+    let enabled = zones.iter().filter(|zone| zone.enabled);
+    for (zone, (low, top)) in enabled.zip(bounds) {
         if *top != zone.top_note {
             sets.push((format!("zone{}.top_note", zone.id), note::name(*top)));
         }
@@ -330,8 +330,8 @@ fn moved(zones: &[Zone], bounds: &[(u8, u8)]) -> Sets {
 
 /// The zones as the map and the velocity field state them.
 ///
-/// A zone the project has switched off answers nothing, so it is not in the map at all:
-/// a band over keys nothing plays is the one thing the map must not draw.
+/// A switched-off zone plays nothing, so it is left out of the map: a band over keys
+/// nothing plays would mislead.
 fn map_zones(snapshot: &Snapshot) -> Vec<MapZone> {
     snapshot
         .zones
@@ -362,7 +362,7 @@ fn source<'a>(snapshot: &'a Snapshot, stroke: &Stroke) -> Option<&'a AudioFile> 
 
 /// The strokes, the velocity windows over them, and the instrument's own parameters.
 ///
-/// The name is the header's: every document's name is edited in the one place.
+/// The name is edited in the header, as for every document.
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut State,
@@ -397,7 +397,7 @@ pub fn ui(
                     .unwrap_or_default(),
                 hint: match zone.enabled {
                     true => format!("root {}", note::name(zone.root_key)),
-                    false => "switched off — it answers nothing".to_string(),
+                    false => "switched off, so it plays nothing".to_string(),
                 },
             }
         })
@@ -432,10 +432,10 @@ fn leaf(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-/// A stroke's trimmed length, in the seconds its own file's rate makes of it.
+/// A stroke's trimmed length in seconds, at its file's sample rate.
 ///
-/// A project's audio is on disk rather than in the file, so there are no bytes to
-/// measure — the trim is what a zone costs.
+/// A project's audio is on disk, not in the file, so there are no bytes to measure; the
+/// trim length is the zone's cost.
 fn length(snapshot: &Snapshot, stroke: &Stroke) -> String {
     let frames = stroke.stop - stroke.start;
     if frames < 0.0 {
@@ -529,8 +529,8 @@ fn fields(
         if let Some(file) = source(snapshot, stroke) {
             let held = paths.entry(file.id).or_insert_with(|| file.path.clone());
             sample::cell(ui, "Source file", 280.0, |ui| {
-                // ⚠️ Written when the box is left, which an Enter typed into it does:
-                // an Enter pressed anywhere else is not this box being finished with.
+                // ⚠️ Written when the box loses focus, which an Enter in it causes. An
+                // Enter pressed anywhere else does not finish this box.
                 let response = ui.add(egui::TextEdit::singleline(held).desired_width(270.0));
                 if response.lost_focus() && *held != file.path {
                     sets.push((format!("file{}.path", file.id), held.clone()));
@@ -540,8 +540,8 @@ fn fields(
     });
 }
 
-/// The key × velocity field: one window per zone, and every edge draggable, because a
-/// project is where a window is stated.
+/// The key × velocity field: one window per zone, and every edge draggable, because the
+/// project is where a window is stored.
 fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mut Sets) {
     let playing: Vec<(usize, &Zone, &Stroke)> = snapshot
         .zones
@@ -561,7 +561,7 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
             window: stroke.velocity,
             name: format!("Zone {}", zone.id),
             hint: format!(
-                "Zone {} answers {}–{} at velocity {}–{} · drag an edge to move the window",
+                "Zone {} plays {}–{} at velocity {}–{} · drag an edge to move the window",
                 zone.id,
                 note::name(zone.bottom_note),
                 note::name(zone.top_note),
@@ -573,7 +573,7 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mu
     let rows: Vec<usize> = playing.iter().map(|(row, _, _)| *row).collect();
     let asked = sample::velocity_field(
         ui,
-        "one window per zone — drag the top or bottom edge",
+        "one window per zone; drag the top or bottom edge",
         SPAN,
         &blocks,
         &rows,
@@ -607,7 +607,7 @@ fn parameters(ui: &mut egui::Ui, snapshot: &Snapshot, sets: &mut Sets) {
     controls::heading(
         ui,
         "Sound parameters",
-        "all samplib_attrs — the project is the source",
+        "all samplib_attrs; the project is the source",
         None,
     );
     ui.horizontal(|ui| {
@@ -638,7 +638,7 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     controls::heading(
         ui,
         "About this file",
-        "what the file says about itself — read here, never written differently",
+        "what the file says about itself, read here and written back unchanged",
         None,
     );
     let (product, version) = &snapshot.created_by;
@@ -678,9 +678,9 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     );
 }
 
-/// The nineteen capabilities of the instrument editor, as a project stands in them.
+/// The instrument editor's capabilities, as they apply to a project.
 ///
-/// A project is the source: what an instrument has baked in, this states outright.
+/// A project is the source: what an instrument has baked in, a project states directly.
 pub fn capabilities() -> Vec<Row> {
     let row = |name: &'static str, state: Cap, note: &'static str| Row { name, state, note };
     vec![
@@ -723,7 +723,7 @@ pub fn capabilities() -> Vec<Row> {
         row(
             "loop decay / detune",
             Cap::ReadOnly,
-            "m_loopDecay, which no control on this face writes — nord-cli does",
+            "m_loopDecay, which no control on this face writes; nord-cli does",
         ),
         row("release samples", Cap::Absent, "a piano library's bank 2"),
         row(
@@ -772,7 +772,7 @@ pub fn capabilities() -> Vec<Row> {
 
 /// Where each field the Basic face writes lands in the file.
 ///
-/// A project is text, so these are the keys `nord_format` writes rather than offsets.
+/// A project is text, so these are the keys `nord_format` writes, not byte offsets.
 pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
     vec![
         Offset {
@@ -812,8 +812,8 @@ mod tests {
         project_of(&[48, 72])
     }
 
-    /// A project of one zone per root key, each playing a WAV of its own — what the
-    /// editor writes for a new instrument.
+    /// A project with one zone per root key, each playing its own WAV, as the editor
+    /// writes for a new instrument.
     fn project_of(roots: &[u8]) -> Vec<u8> {
         let zones: Vec<NewZone> = roots
             .iter()
@@ -914,10 +914,9 @@ mod tests {
         assert!(err.is_err());
     }
 
-    /// The map draws the zones that answer keys, each with the window of the stroke it
-    /// plays — and a zone the project switched off is not one of them.
+    /// Each enabled zone is drawn with the velocity window of the stroke it plays.
     #[test]
-    fn the_map_shows_the_zones_that_answer_a_key() {
+    fn the_map_shows_the_zones_that_play_a_key() {
         let snapshot = read_back(&project_bytes());
         let zones = map_zones(&snapshot);
         assert_eq!(zones.len(), snapshot.zones.len());
@@ -930,8 +929,8 @@ mod tests {
         assert_eq!(SPAN.high, HIGHEST_NOTE);
     }
 
-    /// A context dressed as the app dresses it: the semibold family a band is set in is
-    /// not bound by default, and laying one out without it panics.
+    /// A context with the app's fonts: a band is set in the semibold family, which egui
+    /// does not bind by default, and laying one out without it panics.
     fn dressed() -> egui::Context {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::app::fonts());
@@ -1029,8 +1028,8 @@ mod tests {
         (said, sets)
     }
 
-    /// The highest place a word was painted: the velocity field stands above the rows,
-    /// and both name a zone the same way.
+    /// The topmost place a word was painted. The velocity field sits above the rows, and
+    /// both label a zone the same way.
     fn highest(said: &[(String, egui::Rect)], word: &str) -> egui::Rect {
         said.iter()
             .filter(|(text, _)| text == word)
@@ -1042,7 +1041,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{word} was never painted: {said:?}"))
     }
 
-    /// One frame of the velocity-min control on its own, and what it spelled.
+    /// One frame of the velocity-min control on its own, and the value it returned.
     fn velocity_box(ctx: &egui::Context, events: Vec<egui::Event>) -> Option<String> {
         let mut spelled = None;
         let input = egui::RawInput {
@@ -1062,9 +1061,8 @@ mod tests {
         spelled
     }
 
-    /// ⚠️ A velocity end is a `u8`: egui aims at the roundest value within a pointer's
-    /// width of where a drag reached, and at a fractional display scale that is a half
-    /// the field refuses. Every value the control spells has to be one the format takes.
+    /// ⚠️ A velocity end is a `u8`, so every value the control returns must be a whole
+    /// number the format takes.
     #[test]
     fn a_dragged_velocity_end_is_spelled_as_a_whole_number() {
         let ctx = dressed();
@@ -1104,8 +1102,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ A block is not a row either: the velocity field draws one block per zone that
-    /// answers, so a click on the last block must open the last row.
+    /// ⚠️ Blocks are not rows: the velocity field draws one block per enabled zone, so a
+    /// click on the last block must open the last row.
     #[test]
     fn clicking_a_velocity_block_opens_the_row_it_stands_for() {
         let ctx = dressed();
@@ -1123,14 +1121,13 @@ mod tests {
         assert_eq!(
             sample::selected(&state),
             Some(2),
-            "the second block stands on the third zone"
+            "the second block is the third zone"
         );
         assert!(sets.is_empty(), "a pick is not an edit");
     }
 
-    /// ⚠️ A band is not a row: the map draws only the zones that answer a key, so a
-    /// click on the last band must open the last row even with a zone switched off
-    /// between them.
+    /// ⚠️ Bands are not rows: the map draws only enabled zones, so a click on the last
+    /// band must open the last row even with a zone switched off between them.
     #[test]
     fn clicking_a_band_opens_the_row_it_stands_for() {
         let ctx = dressed();
@@ -1151,12 +1148,12 @@ mod tests {
         assert_eq!(
             sample::selected(&state),
             Some(2),
-            "the second band stands on the third zone"
+            "the second band is the third zone"
         );
         assert!(sets.is_empty(), "a pick is not an edit");
     }
 
-    /// A zone's row reads the file it plays and how long the trim leaves it.
+    /// A zone's row shows the file it plays and its trimmed length.
     #[test]
     fn a_row_reads_the_source_it_plays() {
         let snapshot = read_back(&project_bytes());
@@ -1196,9 +1193,8 @@ mod tests {
         sets
     }
 
-    /// ⚠️ The source box writes what it holds when it is left, and an Enter pressed
-    /// somewhere else is not that: a key landing in another control must not commit a
-    /// path nobody has finished typing.
+    /// ⚠️ The source box writes when it loses focus. An Enter pressed elsewhere must not
+    /// commit a path the user has not finished typing.
     #[test]
     fn a_half_typed_source_path_waits_for_the_box_to_be_left() {
         let ctx = dressed();
@@ -1226,8 +1222,8 @@ mod tests {
         );
     }
 
-    /// The same project with the one stroke of its first zone switched off, which the
-    /// format allows and nothing here writes.
+    /// The same project with its first zone's only stroke switched off. The format allows
+    /// this, but nothing here writes it.
     fn stroke_switched_off(bytes: &[u8]) -> Vec<u8> {
         const FLAG: &str = "m_isEnabled = 1";
         let text = String::from_utf8(bytes.to_vec()).expect("a project is text");
@@ -1238,9 +1234,8 @@ mod tests {
         out.into_bytes()
     }
 
-    /// ⚠️ Only the enabled stroke is written into an instrument, so a zone with none
-    /// switched on plays nothing: the row says so rather than reading a stroke that
-    /// would never be built.
+    /// ⚠️ The row says the zone has no stroke instead of showing one that would never be
+    /// built.
     #[test]
     fn a_zone_whose_stroke_is_switched_off_plays_nothing() {
         let snapshot = read_back(&stroke_switched_off(&project_bytes()));
@@ -1260,9 +1255,8 @@ mod tests {
         assert!(map_zones(&snapshot)[0].velocity.is_none());
     }
 
-    /// ⚠️ A zone whose trim-in is at or past its trim-out plays nothing, and the build
-    /// refuses it: neither end can be dragged onto the other, and a trim a file already
-    /// states inverted is named rather than read as a zone of no length.
+    /// ⚠️ Neither end can be dragged onto the other, and a trim the file already stores
+    /// inverted is labeled as such instead of read as a zero-length zone.
     #[test]
     fn an_inverted_trim_cannot_be_dragged_and_is_named_where_it_is_stated() {
         let (into, out) = trim_ends(0.0, 44100.0);
@@ -1272,7 +1266,7 @@ mod tests {
         let (into, out) = trim_ends(900.0, 100.0);
         assert!(
             into.contains(&900.0) && out.contains(&100.0),
-            "an inverted trim is still inside its own control, so it can be dragged back"
+            "an inverted trim stays within its control's range, so it can be dragged back"
         );
 
         let snapshot = read_back(&project_bytes());
@@ -1286,8 +1280,8 @@ mod tests {
         assert_eq!(length(&snapshot, &inverted), "inverted trim");
     }
 
-    /// A gain is read in the one unit both documents read it in, and a stroke turned
-    /// all the way down says so rather than reading as the floor of a logarithm.
+    /// Gain reads in decibels, and a stroke turned all the way down reads as silent
+    /// instead of as negative infinity.
     #[test]
     fn a_stroke_with_no_gain_reads_as_silence() {
         let snapshot = read_back(&project_bytes());
@@ -1307,8 +1301,8 @@ mod tests {
         assert!(facts.contains("silent"), "{facts}");
     }
 
-    /// A moved band writes both ends of the zone it moved, under the id the file gives
-    /// it — and a zone the project switched off is not a band at all.
+    /// A moved band writes the ends that changed, under the zone's stored id. A
+    /// switched-off zone has no band.
     #[test]
     fn a_moved_band_writes_the_zone_it_moved_by_id() {
         let mut snapshot = read_back(&project_bytes());
@@ -1327,14 +1321,14 @@ mod tests {
             [(format!("zone{first}.top_note"), note::name(held[0].1 + 1))]
         );
 
-        // A switched-off zone is skipped, so the bands line up with the zones that
-        // answer rather than with the rows.
+        // A switched-off zone is skipped, so the bands line up with the enabled zones,
+        // not with the rows.
         snapshot.zones[0].enabled = false;
-        let answering: Vec<(u8, u8)> = held[1..].to_vec();
-        assert!(moved(&snapshot.zones, &answering).is_empty());
+        let enabled: Vec<(u8, u8)> = held[1..].to_vec();
+        assert!(moved(&snapshot.zones, &enabled).is_empty());
         let second = snapshot.zones[1].id;
-        let mut wider = answering.clone();
-        wider[0] = (answering[0].0, answering[0].1 + 1);
+        let mut wider = enabled.clone();
+        wider[0] = (enabled[0].0, enabled[0].1 + 1);
         assert_eq!(
             moved(&snapshot.zones, &wider)[0].0,
             format!("zone{second}.top_note")
@@ -1342,7 +1336,7 @@ mod tests {
     }
 
     /// ⚠️ The capability table is a claim about this editor. Every row it calls
-    /// editable has to name a path [`set`] accepts.
+    /// editable must name a path [`set`] accepts.
     #[test]
     fn every_editable_capability_names_a_path_the_editor_accepts() {
         let bytes = project_bytes();
@@ -1362,7 +1356,7 @@ mod tests {
             let (_, path, value) = paths
                 .iter()
                 .find(|(name, _, _)| *name == row.name)
-                .unwrap_or_else(|| panic!("{} is editable and unlisted", row.name));
+                .unwrap_or_else(|| panic!("{} is editable but has no path here", row.name));
             assert!(
                 apply(&bytes, &[((*path).into(), (*value).into())]).is_ok(),
                 "{}: {path} is not a path the editor accepts",

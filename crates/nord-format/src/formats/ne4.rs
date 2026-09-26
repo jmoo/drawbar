@@ -1,11 +1,11 @@
-//! Electro 4 and Electro 4D (`.ne4p`, `.ne4l`, `.ne4s`) — container-verified,
+//! Electro 4 and Electro 4D (`.ne4p`, `.ne4l`, `.ne4s`): container-verified,
 //! bodies unmapped.
 //!
 //! As with the Electro 3 pair, the 4 and 4D factory exports are byte-identical.
 //!
-//! The program body is **the same layout as the Electro 3's `nepg`** — see that
-//! module for the measurement. Decode either and both follow. Inferred from
-//! specimens; not confirmed on hardware.
+//! The program body has the same layout as the Electro 3's `nepg`; see [`super::ne3`]
+//! for the measurement. Decoding either decodes both. Inferred from specimens; not
+//! confirmed on hardware.
 
 use super::raw::raw_format;
 
@@ -16,7 +16,7 @@ raw_format!(
     110
 );
 raw_format!(
-    /// Live slots (`.ne4l`) — same length as a program.
+    /// Live slots (`.ne4l`), the same length as a program.
     live,
     "ne4l",
     110

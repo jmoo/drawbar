@@ -1,8 +1,7 @@
 //! Real USB transport, via `nusb` (pure Rust: macOS/IOKit, Linux/usbfs, Windows/WinUSB).
 //!
-//! Enumeration lives here rather than in the portable core on purpose — WebUSB has no
-//! programmatic device listing at all (its `requestDevice()` needs a user gesture), so
-//! a cross-platform `list()` would be a lie.
+//! Enumeration lives here and not in the portable core because WebUSB has no
+//! programmatic device listing: its `requestDevice()` needs a user gesture.
 
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ pub use super::{PRODUCT_ID_ELECTRO5, VENDOR_ID};
 // Re-exported so callers can name a control recipient without depending on `nusb`.
 pub use nusb::transfer::Recipient;
 
-/// How long a cancelled transfer is given to come back before the transport is declared
+/// How long a canceled transfer is given to come back before the transport is declared
 /// out of step. Cancellation is local to the host controller, so this covers a stall,
 /// not a device round trip.
 const REAP_LIMIT: Duration = Duration::from_secs(2);
@@ -29,15 +28,14 @@ fn map_err<E: std::fmt::Display>(what: &str) -> impl FnOnce(E) -> Error + '_ {
 
 /// Why the device would not open.
 ///
-/// A missing udev rule fails *here* rather than at the interface claim: the usbfs node
-/// is not writable, so the device never opens and the claim is never reached. Naming the
-/// rule is the difference between a one-line fix and hunting a hardware fault, so the
-/// hint has to ride on this call to be seen at all.
+/// A missing udev rule fails here, before the interface claim: the usbfs node is not
+/// writable, so the device never opens. The hint naming the rule has to be attached to
+/// this error to be seen.
 fn open_error(e: std::io::Error) -> Error {
     let hint = if cfg!(target_os = "linux") && e.kind() == std::io::ErrorKind::PermissionDenied {
         format!(
-            " — no write access to the device node; what is usually missing is a udev rule \
-             granting it for vendor {VENDOR_ID:04x}"
+            "; no write access to the device node, usually because no udev rule grants it \
+             for vendor {VENDOR_ID:04x}"
         )
     } else {
         String::new()
@@ -55,16 +53,16 @@ pub fn list() -> Result<Vec<DeviceInfo>> {
 
 pub struct UsbTransport {
     interface: Interface,
-    /// `wMaxPacketSize` for [`EP_OUT`], read from the interface descriptor rather than
-    /// assumed: it decides which frames need a terminating zero-length packet, and it
-    /// is 64 only because this link is full speed.
+    /// `wMaxPacketSize` for [`EP_OUT`], read from the interface descriptor. It decides
+    /// which frames need a terminating zero-length packet, and it is 64 only because
+    /// this link is full speed.
     out_packet: usize,
-    /// What the device descriptor calls itself, where it reports one.
+    /// The product string from the device descriptor, if it has one.
     product: Option<String>,
     /// Set to mirror every frame into a replay script. `None` is the normal case.
     record: Option<Recorder>,
-    /// A persistent IN queue, one buffer submitted per read: the protocol is strictly
-    /// turn-taking, so at most one transfer is ever outstanding.
+    /// A persistent IN queue with one buffer submitted per read. The protocol takes
+    /// turns, so at most one transfer is outstanding.
     read_queue: Queue<RequestBuffer>,
 }
 
@@ -79,8 +77,8 @@ impl UsbTransport {
     }
 
     pub fn open(info: &DeviceInfo) -> Result<Self> {
-        // Claim the vendor-specific interface, discovered by class rather than
-        // hard-coded: the audio/MIDI interface must be left to the OS driver.
+        // Find the vendor-specific interface by class; the audio/MIDI interface must be
+        // left to the OS driver.
         let iface_num = info
             .interfaces()
             .find(|i| i.class() == CLASS_VENDOR_SPECIFIC)
@@ -93,8 +91,8 @@ impl UsbTransport {
 
         let device = info.open().map_err(open_error)?;
         let interface = device.claim_interface(iface_num).map_err(map_err(
-            "claiming the vendor interface (another application holding it — Nord Sound \
-             Manager, or a WebUSB page — will block this)",
+            "claiming the vendor interface (another application holding it, such as Nord \
+             Sound Manager or a WebUSB page, blocks this)",
         ))?;
 
         let out_packet = interface
@@ -121,7 +119,7 @@ impl UsbTransport {
         })
     }
 
-    /// End a frame the device would otherwise still be reading — see
+    /// End a frame the device would otherwise still be reading; see
     /// [`needs_terminator`].
     async fn terminate(&mut self, written: usize) -> Result<()> {
         if !needs_terminator(written, self.out_packet) {
@@ -145,26 +143,25 @@ impl UsbTransport {
         self.terminate(buf.len()).await
     }
 
-    /// What the device descriptor calls itself: the name an instrument is identified
-    /// by off the bus — `nord_format::accept::Family::from_product` reads it — and the
-    /// one this transport carries into a recording's header. `None` where the
-    /// descriptor reports none.
+    /// The product string from the device descriptor, or `None` if it has none. It
+    /// identifies the instrument (`nord_format::accept::Family::from_product` reads it)
+    /// and goes into a recording's header.
     pub fn product(&self) -> Option<&str> {
         self.product.as_deref()
     }
 
     /// Mirror every frame this transport carries into a replay script at `path`.
     ///
-    /// The script is written as it goes, so it stays useful even if the run ends badly.
+    /// The script is written as frames pass, so it stays useful even if the run fails.
     /// Recording an operation that moves a body writes that body out in full.
     pub fn recording_to(mut self, path: &std::path::Path) -> Result<Self> {
         self.record = Some(Recorder::create(path, self.describe().as_deref())?);
         Ok(self)
     }
 
-    /// Model and firmware for the script header, best effort: the model comes from the
-    /// descriptor, the rest from endpoint 0, and an instrument that will not answer
-    /// there is still worth recording.
+    /// Model and firmware for the script header, best effort. The model comes from the
+    /// descriptor and the rest from endpoint 0; an instrument that does not answer there
+    /// is still recorded.
     fn describe(&self) -> Option<String> {
         let product = self.product.as_deref()?;
         Some(match self.identity() {
@@ -192,13 +189,12 @@ impl UsbTransport {
         }
     }
 
-    /// Surface the first error the recorder hit, if it is recording, and resume
+    /// Report the first error the recorder hit, if it is recording, and resume
     /// recording.
     ///
-    /// ⚠️ Call once the transaction has closed, never inside one: a failed write is
-    /// deliberately not allowed to abort a live session part-way, and the script being
-    /// short is worth less than the instrument being left mid-transaction. Never calling
-    /// it loses the frames silently.
+    /// ⚠️ Call once the transaction has closed, never inside one. A failed script write
+    /// does not abort a live session, because a short script is better than an
+    /// instrument left mid-transaction. Never calling this loses frames silently.
     pub fn finish_recording(&mut self) -> Result<()> {
         match self.record.as_mut() {
             Some(r) => r.check(),
@@ -209,22 +205,20 @@ impl UsbTransport {
 
 /// What the device says about itself on endpoint 0, outside the bulk protocol.
 ///
-/// Read with no session open, so it answers even when the instrument is wedged — which
-/// makes it the one identification that still works when nothing else does.
+/// Read with no session open, so it answers even when the instrument is wedged and
+/// nothing else does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
-    /// Firmware version as the device reports it, in hundredths: `204` is 2.04. The
-    /// same value the USB descriptor carries as `bcdDevice`, which confirms the
-    /// scaling.
+    /// Firmware version in hundredths: `204` is 2.04. The USB descriptor carries the
+    /// same value as `bcdDevice`, which confirms the scaling.
     pub firmware: u16,
     /// Largest transfer the device will accept or produce, in bytes, framing included.
     ///
     /// [`crate::op`]'s read chunk is this minus the frame header and CRC.
     pub max_transfer: u32,
-    /// Reported at request `0x00`. Reads as a small constant; its meaning is not pinned
-    /// down, so it is carried verbatim rather than named something it might not be.
+    /// Reported at request `0x00`. Reads as a small constant of unknown meaning.
     pub kind: u16,
-    /// Reported at request `0x05`. Plausibly a build number, unconfirmed.
+    /// Reported at request `0x05`. Possibly a build number; unconfirmed.
     pub build: u16,
 }
 
@@ -262,18 +256,16 @@ impl UsbTransport {
         })
     }
 
-    /// One vendor control read on endpoint 0, outside the bulk protocol entirely.
+    /// One vendor control read on endpoint 0, outside the bulk protocol.
     ///
-    /// Separate from [`Transport`] on purpose: WebUSB can issue control transfers, but
-    /// nothing portable is built on this yet, and putting it in the trait would oblige
-    /// the replay backend to fake a channel no capture covers.
+    /// Not part of [`Transport`]: WebUSB can issue control transfers, but nothing
+    /// portable uses this, and the replay backend would have to fake a channel no
+    /// capture covers.
     ///
-    /// Returns the bytes the device sent, truncated to what it actually produced — a
-    /// device that recognises the request but has less to say than `len` is normal, and
-    /// an unrecognised request stalls the endpoint, which surfaces as an error rather
-    /// than as empty data.
+    /// Returns the bytes the device sent, which may be fewer than `len`. An
+    /// unrecognized request stalls the endpoint and surfaces as an error.
     ///
-    /// The timeout is the driver's own, so this cannot hang the way a bulk read can.
+    /// The driver enforces `timeout`, so this cannot hang the way a bulk read can.
     pub fn vendor_control_in(
         &self,
         recipient: Recipient,
@@ -303,8 +295,7 @@ impl UsbTransport {
 impl Transport for UsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         self.write_frame(buf).await?;
-        // The terminator is a packet, not a frame: recording it would put a length word
-        // in the script that no message has.
+        // The terminator is a packet, not a frame, so it is not recorded.
         if let Some(r) = self.record.as_mut() {
             r.out(buf);
         }
@@ -352,7 +343,7 @@ impl Transport for UsbTransport {
             Some(_) => Ok(None),
             // An unreaped cancellation leaves the response queue out of step.
             None => Err(Error::Transport(
-                "read timed out and the transfer could not be cancelled; \
+                "read timed out and the transfer could not be canceled; \
                  the connection is out of step and the instrument needs a power cycle"
                     .into(),
             )),
@@ -365,8 +356,6 @@ mod tests {
     use super::*;
     use std::io::{Error as IoError, ErrorKind};
 
-    /// The udev hint is the whole point of this branch, and the failure it explains is
-    /// the one every first run on Linux hits.
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "the hint is Linux-only")]
     fn permission_denied_names_the_udev_rule() {
@@ -375,8 +364,7 @@ mod tests {
         assert!(msg.contains("0ffc"), "{msg}");
     }
 
-    /// Every other failure is something else entirely — a rule would not fix a device
-    /// that has been unplugged, and saying so would send the reader the wrong way.
+    /// A udev rule would not fix an unplugged or busy device.
     #[test]
     fn other_failures_do_not_mention_udev() {
         for kind in [ErrorKind::NotFound, ErrorKind::ResourceBusy] {

@@ -1,7 +1,8 @@
-//! The facade: its session brackets, the geometry it reads once and keeps, and the two
-//! things that geometry sizes — the enumeration walk and a library write's cleaning pass.
+//! The `Device` facade: its session brackets, the geometry it reads once and keeps, and
+//! the two things that geometry sizes: the enumeration walk and a library write's
+//! cleaning pass.
 //!
-//! The exchanges are the claim, so every trial asserts its script was consumed exactly.
+//! The exchanges are the claim, so every trial asserts its script was fully consumed.
 
 #![cfg(feature = "replay")]
 
@@ -477,7 +478,7 @@ fn an_unbounded_walk_that_exhausts_the_host_budget_is_an_error() {
 
 /// The frame sequence follows hardware recordings; the multi-block body is synthetic.
 #[test]
-fn a_library_write_reserves_the_shortfall_it_is_short_by() {
+fn a_library_write_reserves_only_its_shortfall() {
     let at = Location { bank: 0, slot: 98 };
     let body = vec![0xa5; 250];
     let file = envelope::wrap("nsmp", at, 1, &body).unwrap();
@@ -510,7 +511,7 @@ fn a_library_write_reserves_the_shortfall_it_is_short_by() {
     steps.push(request(cmd::WRITE_PREPARE, &2u32.to_be_bytes()));
     steps.push(response(cmd::WRITE_PREPARE, &[]));
     steps.push(request(cmd::WRITE_PREPARE_2, &[]));
-    // requested, done, running: back to 0 is the pass reporting itself finished.
+    // requested, done, running: `running` back at 0 means the pass has finished.
     steps.push(response(cmd::WRITE_PREPARE_2, &words(&[2, 2, 0])));
     steps.push(notify(ui::percent(100)));
 
@@ -626,8 +627,8 @@ fn a_change_notification_reaches_the_caller_once() {
         .expect("the notification is drained, not mistaken for the reply");
     assert!(device.transport().is_exhausted());
 
-    assert!(device.take_changed(), "the notification did not reach out");
-    assert!(!device.take_changed(), "and it is not reported twice");
+    assert!(device.take_changed(), "the notification was lost");
+    assert!(!device.take_changed(), "the notification was repeated");
 }
 
 #[test]

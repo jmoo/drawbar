@@ -1,10 +1,8 @@
-# Every noun's verb list, pinned exactly — the first line is the top level.
-# surface.sh asserts each row against `nord <noun> --help`, so a rename shows
-# up as a failing check instead of a surprise, which is the mechanism that
-# makes a later compatibility promise enforceable.
+# Each noun's verb list, in `nord <noun> --help` order. The first line is the
+# top level. surface.sh checks every row, so renaming a command fails the check.
 #
-# piano, program, raw, sample and setlist share the slot verbs on purpose: they
-# are the same class of storage, addressed the same way.
+# piano, program, raw, sample and setlist share the slot verbs because they are
+# the same class of storage, addressed the same way.
 : inspect verify edit device program setlist live settings sample piano help
 device: controls status info recover geometry help
 live: get info deps edit help

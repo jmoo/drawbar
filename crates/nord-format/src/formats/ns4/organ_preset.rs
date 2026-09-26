@@ -1,9 +1,8 @@
 //! The Stage 4 organ preset body (`.ns4o`): 139 bytes.
 //!
-//! One organ section as a program stores it, moved down 45 bytes, keyboard zone
-//! included on both layers though a preset has no use for it — layer A's is
-//! confirmed against the corpus, where it varies as a zone does. The two layers
-//! still share one effects chain, so its fields carry no layer.
+//! One organ section as a program stores it, 45 bytes earlier. Both layers keep their
+//! keyboard zone, although a preset has no use for it; layer A's varies across specimens
+//! as a zone does. The two layers share one effects chain, so its fields carry no layer.
 
 use super::fx::FxChain;
 use super::organ_layers::OrganLayer;
@@ -13,7 +12,7 @@ use crate::error::Error;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns4o";
-/// Stored ×100. The corpus holds 2.05; ns4decode was tested on 2.01.
+/// Stored ×100. Specimens reach 2.05; ns4decode was tested on 2.01.
 pub const KNOWN_VERSIONS: &[u32] = &[201, 202, 203, 204, 205];
 pub const BODY_LEN: usize = 139;
 
@@ -21,8 +20,8 @@ pub const BODY_LEN: usize = 139;
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
-/// re-encode verbatim. Placements derived from ns4decode's published tables;
-/// values raw. Inferred from specimens; not confirmed on hardware.
+/// re-encode. Placements are derived from ns4decode's published tables, and values
+/// are raw. Inferred from specimens; not confirmed on hardware.
 #[nord_bits_derive::bitbody(139)]
 pub struct OrganPreset {
     #[bits(41..=41)]

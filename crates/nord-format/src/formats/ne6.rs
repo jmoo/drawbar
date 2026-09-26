@@ -1,4 +1,4 @@
-//! Electro 6 (`.ne6p`, `.ne6l`, `.ne6t`) — container-verified, bodies unmapped.
+//! Electro 6 (`.ne6p`, `.ne6l`, `.ne6t`): container-verified, bodies unmapped.
 
 use super::raw::raw_format;
 
@@ -9,7 +9,7 @@ raw_format!(
     211
 );
 raw_format!(
-    /// Live slots (`.ne6l`) — same length as a program.
+    /// Live slots (`.ne6l`), the same length as a program.
     live,
     "ne6l",
     211

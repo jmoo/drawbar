@@ -1,4 +1,4 @@
-//! Nord Drum 3P (`.nd3k`, `.nd3_kitbank`) — container-verified, bodies unmapped.
+//! Nord Drum 3P (`.nd3k`, `.nd3_kitbank`): container-verified, bodies unmapped.
 //!
 //! Same shape as the Drum 2: kit banks are stored ZIP archives of one `.nd3k`
 //! CBIN member per kit.
@@ -6,7 +6,7 @@
 use super::raw::raw_format;
 
 raw_format!(
-    /// Kits (`.nd3k`) — usually met inside a `.nd3_kitbank` archive.
+    /// Kits (`.nd3k`), usually found inside a `.nd3_kitbank` archive.
     kit,
     "nd3k",
     247

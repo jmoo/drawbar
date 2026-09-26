@@ -1,6 +1,6 @@
-//! Desktop MIDI in: one `midir` connection per input port the machine has.
+//! Desktop MIDI input: one `midir` connection per input port.
 //!
-//! A connection's callback runs on the driver's own thread, so it does the least it can:
+//! A connection's callback runs on the driver's thread, so it does as little as possible:
 //! decode, queue, and wake the window.
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -11,15 +11,15 @@ use midir::{Ignore, MidiInput, MidiInputConnection};
 
 use super::{Queue, State, Stream};
 
-/// The name this app gives itself in the machine's MIDI port list.
+/// The name this app gives itself in the system's MIDI port list.
 const CLIENT: &str = "drawbar";
 
-/// How long an open port list is trusted, in seconds. A controller plugged in is noticed
-/// on the first frame drawn after this, so hot-plug costs a look rather than a thread.
+/// How long a port list is trusted, in seconds. A newly connected controller is noticed
+/// on the first frame after this, so hot-plugging costs a poll, not a thread.
 const RESCAN: f64 = 1.0;
 
-/// One input port, open or refused. Its id is what the machine calls it, which is
-/// stable across a rescan where its name is not.
+/// One input port, open or refused. Its id is the system's identifier, which stays stable
+/// across a rescan when its name may not.
 struct Port {
     id: String,
     name: String,
@@ -31,11 +31,11 @@ struct Open {
     _connection: MidiInputConnection<()>,
 }
 
-/// One session of listening: the client the port list is read through, the queue the
-/// connections fill, and the window to wake when they do.
+/// One listening session: the client that reads the port list, the queue the connections
+/// fill, and the window to wake when they do.
 ///
-/// ⚠️ One client for every look at the list. On Linux a client is an ALSA sequencer
-/// client, and one made per look is a client that appears and vanishes every second.
+/// ⚠️ One client for every read of the list. On Linux a client is an ALSA sequencer
+/// client, and one per read would appear and vanish every second.
 struct Wire {
     listing: MidiInput,
     queue: Arc<Mutex<Queue>>,
@@ -47,12 +47,12 @@ struct Wire {
 #[derive(Default)]
 pub struct Ports {
     open: Vec<Open>,
-    /// Ports that would not open, which another program may be holding. Not tried again
-    /// until they leave the list, or listening starts over.
+    /// Ports that would not open, perhaps because another program holds them. Not
+    /// retried until they leave the list or listening restarts.
     refused: Vec<Port>,
     /// `None` while nothing is listening.
     wire: Option<Wire>,
-    /// When the machine's port list was last read, on egui's frame clock.
+    /// When the system's port list was last read, on egui's frame clock.
     scanned: f64,
     failed: Option<String>,
 }
@@ -117,8 +117,8 @@ impl Ports {
             .drain(at)
     }
 
-    /// Open every input port that is neither open nor refused, and let go of the ones
-    /// that have gone.
+    /// Open every input port that is neither open nor refused, and drop the ones that
+    /// have disappeared.
     fn scan(&mut self) {
         let Some(wire) = &self.wire else {
             return;
@@ -145,7 +145,7 @@ impl Ports {
                     port,
                     _connection: connection,
                 }),
-                // Gone between the list being read and the port being asked for.
+                // Removed between reading the list and opening the port.
                 Ok(None) => {}
                 Err(_) => self.refused.push(port),
             }
@@ -153,12 +153,12 @@ impl Ports {
     }
 }
 
-/// Connect to the port the machine calls `id`, through a client of its own: a `midir`
-/// connection consumes the client it is made from.
+/// Connect to the port with system id `id`, through a new client: a `midir` connection
+/// consumes the client it is made from.
 fn open(id: &str, wire: &Wire) -> Result<Option<MidiInputConnection<()>>, String> {
     let mut input = MidiInput::new(CLIENT).map_err(|e| e.to_string())?;
-    // System exclusive, timing and active sensing are not keys: a controller that sends
-    // active sensing three times a second has nothing to say to an audition.
+    // System exclusive, timing, and active sensing carry no notes, and a controller may
+    // send active sensing three times a second.
     input.ignore(Ignore::All);
     let Some(port) = input.find_port_by_id(id) else {
         return Ok(None);

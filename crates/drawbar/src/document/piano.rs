@@ -1,18 +1,18 @@
 //! The piano-library document.
 //!
-//! A `.npno` is hundreds of megabytes of recorded notes — one **stroke** per root note,
-//! bank and velocity layer — and what an editor of one is for is deciding which of them
-//! go on the instrument. So an edit here is not a field write: it is a **plan** over the
-//! bytes the asset was last saved as, and the working bytes are what [`rebuild`] makes
-//! of the two.
+//! A `.npno` is hundreds of megabytes of recorded notes, one stroke per root note, bank,
+//! and velocity layer. Editing one means deciding which strokes go on the instrument, so
+//! an edit here is not a field write. It is a plan over the bytes the asset was last
+//! saved as, and the working bytes are what that plan makes of them.
 //!
 //! ⚠️ An edit never makes those bytes. [`planned`] applies a plan over the borrowed
-//! baseline and is what a switch is checked against; [`materialise`] is the one whole-
-//! body copy, and it runs off the frame when the library is saved, sent or exported.
+//! baseline and is what a switch is checked against. [`materialize`] is the only
+//! whole-body copy, and it runs off the frame when the library is saved, sent, or
+//! exported.
 //!
-//! ⚠️ Nothing decodes to draw a frame. The facts the sections read — the roots, the
-//! layers, the banks and what each of them costs — are read out of the saved baseline
-//! once and kept; a stroke's audio is decoded only when someone asks to hear it.
+//! ⚠️ Nothing decodes to draw a frame. The facts the sections read (the roots, the
+//! layers, the banks, and what each costs) are read from the saved baseline once and
+//! kept. A stroke's audio is decoded only when someone asks to hear it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
@@ -72,8 +72,8 @@ fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
 /// The stretch of keyboard the map draws: a full piano, A0 to C8.
 const SPAN: Span = Span { low: 21, high: 108 };
 
-/// What the asset was last saved as, as far as anything here tells two baselines apart.
-/// A save moves both halves at once.
+/// The length and checksum of the bytes the asset was last saved as, which is enough to
+/// tell two baselines apart. A save changes both.
 type Mark = (usize, Option<u32>);
 
 fn mark(entity: &LocalEntity) -> Mark {
@@ -95,7 +95,7 @@ pub struct Plan {
     range: Option<RangeInclusive<u8>>,
     name: Option<String>,
     variant: Option<String>,
-    /// Retuned keys, in the file's own units — see [`FINE_TUNE_CENTS_PER_UNIT`].
+    /// Retuned keys, in the file's own units (see [`FINE_TUNE_CENTS_PER_UNIT`]).
     fine_tune: BTreeMap<u8, i8>,
     /// A gain over the whole library, in signed tenths of a decibel.
     gain: Option<i8>,
@@ -103,15 +103,15 @@ pub struct Plan {
     damper_top: Option<u8>,
     /// The kind of instrument the library files itself under.
     kind: Option<Kind>,
-    /// Decibels a stroke is attenuated by, keyed by `(root, bank code, layer value)` —
-    /// the stroke's place in the directory, which a drop moves.
+    /// Decibels a stroke is attenuated by, keyed by `(root, bank code, layer value)`
+    /// because a drop moves the stroke's index in the directory.
     trims: BTreeMap<(u8, u8, u8), u16>,
     /// The root a re-routed key plays, `None` where it plays nothing.
     key_roots: BTreeMap<u8, Option<u8>>,
 }
 
 impl Plan {
-    /// Whether it edits nothing at all. The baseline it stands against is not an edit.
+    /// Whether it edits nothing. The baseline it is measured against is not an edit.
     pub fn is_empty(&self) -> bool {
         let Plan {
             against: _,
@@ -208,8 +208,8 @@ impl Plan {
             && self.keeps_layer(root.note, cell.layer)
     }
 
-    /// Route `key` to a root, or to nothing, dropping an entry the baseline already
-    /// says so that an empty plan stays empty.
+    /// Route `key` to a root or to nothing. An entry that matches the baseline is
+    /// dropped, so an empty plan stays empty.
     fn route(&mut self, facts: &Facts, key: u8, root: Option<usize>) {
         let note = root.map(|index| facts.roots[index].note);
         match facts.answers(key).map(|index| facts.roots[index].note) == note {
@@ -220,8 +220,8 @@ impl Plan {
 
     /// Throw one layer's switch for every root.
     ///
-    /// ⚠️ It clears that layer's per-root exceptions. A master switch that left them
-    /// standing would say one thing and do another.
+    /// ⚠️ It clears that layer's per-root exceptions. A master switch that kept them
+    /// would not do what it shows.
     fn switch_layer(&mut self, layer: u8, keep: bool) {
         self.roots.retain(|(_, held), _| *held != layer);
         match keep {
@@ -230,11 +230,11 @@ impl Plan {
         };
     }
 
-    /// Take one root's exception to a layer's switch.
+    /// Record one root's exception to a layer's switch.
     ///
-    /// ⚠️ An exception that agrees with the switch is dropped rather than recorded: a
-    /// plan holding one reads as an edit, and every save and send would lay the library
-    /// out again for the bytes it already holds.
+    /// ⚠️ An exception that agrees with the switch is dropped, not recorded: a plan
+    /// holding one reads as an edit, and every save and send would lay the library out
+    /// again to make the bytes it already holds.
     fn except(&mut self, root: u8, layer: u8, keep: bool) {
         match keep == !self.layers.contains(&layer) {
             true => self.roots.remove(&(root, layer)),
@@ -249,7 +249,7 @@ impl Plan {
         };
     }
 
-    /// The keys `key` reads as retuned to, in file units.
+    /// The fine tune of `key` under the plan, in file units.
     fn tune(&self, facts: &Facts, key: u8) -> i8 {
         match self.fine_tune.get(&key) {
             Some(units) => *units,
@@ -259,11 +259,11 @@ impl Plan {
 }
 
 /// The library a plan makes of the baseline, with nothing copied: every stroke's audio
-/// is still borrowed out of `saved`.
+/// is still borrowed from `saved`.
 ///
-/// This is where a plan is checked — the format's own refusals, and the one this editor
-/// adds — so throwing a switch costs a walk of the stroke directory and no more. From
-/// the baseline every time, so a switch put back on puts its strokes back with it.
+/// This is where a plan is checked, against the format's own refusals and the one this
+/// editor adds, so throwing a switch costs one walk of the stroke directory. It starts
+/// from the baseline every time, so turning a switch back on restores its strokes.
 pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, String> {
     let mut library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
     if let Some(name) = &plan.name {
@@ -326,17 +326,17 @@ pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, St
 /// re-laid, the container's checksum recomputed.
 ///
 /// ⚠️ The whole body is copied here, and a vendor library is hundreds of megabytes. It
-/// is the one slow step, and [`State::start`] is what keeps it off the frame.
-pub fn materialise(library: &npno::Library<'_>) -> Result<Vec<u8>, String> {
+/// is the only slow step, and [`State::start`] keeps it off the frame.
+pub fn materialize(library: &npno::Library<'_>) -> Result<Vec<u8>, String> {
     let edited = library.to_piano().map_err(|e| e.to_string())?;
     nord_format::to_bytes(&Entity::Piano(edited)).map_err(|e| e.to_string())
 }
 
-/// The bytes a plan makes of the baseline: [`planned`] and then [`materialise`], which
+/// The bytes a plan makes of the baseline: [`planned`] and then [`materialize`], which
 /// the app itself keeps apart so that it checks a plan without laying one out.
 #[cfg(test)]
 pub fn rebuild(saved: &[u8], plan: &Plan) -> Result<Vec<u8>, String> {
-    materialise(&planned(saved, plan)?)
+    materialize(&planned(saved, plan)?)
 }
 
 /// One root note: the recording, and the keys the map sends to it.
@@ -345,14 +345,13 @@ struct Root {
     keys: Vec<u8>,
 }
 
-/// Ascending `keys` as the stretches they run in.
+/// Ascending `keys` as the contiguous runs they form.
 ///
-/// A root's keys are one run.
-///
+/// A root's keys form one run.
 /// Inferred from specimens; not confirmed on hardware.
 ///
 /// The key map can hold anything, so a root whose keys are not contiguous gets one cell
-/// per run rather than one cell over the keys between them.
+/// per run, not one cell spanning the keys between them.
 fn runs(keys: &[u8]) -> Vec<(u8, u8)> {
     let mut out: Vec<(u8, u8)> = Vec::new();
     for key in keys {
@@ -364,7 +363,7 @@ fn runs(keys: &[u8]) -> Vec<(u8, u8)> {
     out
 }
 
-/// The audio one root's layer of one bank owns. Every stroke lands in exactly one.
+/// The audio of one root's layer in one bank. Every stroke belongs to one cell.
 struct Cell {
     root: usize,
     layer: u8,
@@ -376,8 +375,8 @@ struct Cell {
 /// One stroke as the open root's row lists it.
 struct Strike {
     root: usize,
-    /// The record's own bank byte, which is the half of a trim's key [`Bank`] cannot
-    /// carry for a code the format does not name.
+    /// The record's bank byte. A trim is keyed by the byte because [`Bank`] cannot hold
+    /// a code the format does not name.
     bank: u8,
     layer: u8,
     /// The `+0x34` attenuation, in decibels.
@@ -393,7 +392,7 @@ struct Strike {
 ///
 /// Inferred from specimens; not confirmed on hardware.
 ///
-/// `None` where every entry of it is [`npno::LADDER_UNITY`], which applies nothing.
+/// `None` where every entry is [`npno::LADDER_UNITY`], which applies nothing.
 fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
     let held = 1.0 - f64::from(ladder[0]) / f64::from(npno::LADDER_UNITY);
     ladder
@@ -404,8 +403,8 @@ fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
 
 /// Everything the piano editor draws from, read once out of the saved baseline.
 ///
-/// ⚠️ The **baseline**, not the working bytes: the plan drops strokes, and every row has
-/// to go on offering what putting its switch back would restore.
+/// ⚠️ Read from the baseline, not the working bytes: the plan drops strokes, and every
+/// row must still offer what turning its switch back on would restore.
 struct Facts {
     name: String,
     variant: String,
@@ -417,7 +416,7 @@ struct Facts {
     roots: Vec<Root>,
     /// Where each root note sits in `roots`.
     of_note: BTreeMap<u8, usize>,
-    /// The layer values the directory holds, ascending — 0 the loudest.
+    /// The layer values the directory holds, ascending, with 0 the loudest.
     layers: Vec<u8>,
     /// The banks present, in [`Bank::ALL`] order.
     banks: Vec<Bank>,
@@ -532,7 +531,7 @@ impl Facts {
     }
 
     /// The layers as the sections list them, softest first, each with its rank among
-    /// the layers the file holds — rank 0 is the loudest.
+    /// the layers the file holds; rank 0 is the loudest.
     fn shown_layers(&self) -> Vec<(usize, u8)> {
         let count = self.layers.len();
         (0..count)
@@ -586,16 +585,16 @@ struct Cut {
     picked: Vec<String>,
 }
 
-/// How many switches the search walks. Every subset of them is tried, and a library
-/// with more layers than this offers its softest ones and its banks — the cheap cuts.
+/// How many switches the search walks. Every subset is tried, so a library with more
+/// switches than this offers only its banks and its softest layers, the cheap cuts.
 const CUT_ITEMS: usize = 12;
 
 /// The cheapest set of switches still on that would shed at least `over`.
 ///
 /// Cheapest by megabytes first, then by layers spent, then by switches thrown: a trim
-/// should cost the least audio, and of two that cost the same the one that keeps more
-/// of the velocity range. Nothing already off is offered, and nothing that would leave
-/// the library with no strokes at all.
+/// should cost the least audio and, of two that cost the same, keep more of the velocity
+/// range. Nothing already off is offered, and nothing that would leave the library with
+/// no strokes at all.
 fn cheapest_cut(facts: &Facts, plan: &Plan, over: u64) -> Option<Cut> {
     let items = droppable(facts, plan);
     let live = shed_bytes(facts, plan, |_| true);
@@ -668,8 +667,8 @@ fn listed(names: &[String]) -> String {
     }
 }
 
-/// What a layer is called, by its rank among the layers the file holds — rank 0 is the
-/// loudest. Three of them are the panel's own three words.
+/// What a layer is called, by its rank among the layers the file holds; rank 0 is the
+/// loudest. A library of three layers uses the panel's three words.
 fn layer_name(rank: usize, count: usize) -> String {
     match (count, rank) {
         (3, 0) => "Hard".to_string(),
@@ -681,8 +680,8 @@ fn layer_name(rank: usize, count: usize) -> String {
     }
 }
 
-/// The velocities each of a root's layer values is the one that sounds, in the order
-/// the values are given.
+/// The velocities at which each of a root's layer values sounds, in the order the
+/// values are given.
 ///
 /// A key sounds the largest value its root holds that is at most `(127 − v)·31/127`
 /// ([`npno::Stroke::layer`]), so between a louder value `a` and the next softer `b` the
@@ -709,7 +708,7 @@ fn span_text(span: &RangeInclusive<u8>) -> String {
     }
 }
 
-/// The letter a layer wears on a root's row.
+/// The letter a layer shows on a root's row.
 fn layer_short(rank: usize, count: usize) -> String {
     match (count, rank) {
         (3, 0) => "H".to_string(),
@@ -727,7 +726,7 @@ fn bank_name(bank: Bank) -> &'static str {
     }
 }
 
-/// What a bank is called on a stroke's line, a code the format does not name included.
+/// What a bank is called on a stroke's line, including a code the format does not name.
 fn bank_word(code: u8) -> String {
     match Bank::from_code(code) {
         Some(bank) => bank_name(bank).to_string(),
@@ -750,8 +749,8 @@ fn kind_word(kind: Kind) -> &'static str {
     }
 }
 
-/// What the panel calls the kind a library files itself under, a code the format does
-/// not name included.
+/// What the panel calls the kind a library files itself under, including a code the
+/// format does not name.
 fn kind_name(code: u8) -> String {
     match Kind::from_code(code) {
         Some(kind) => kind_word(kind).to_string(),
@@ -784,7 +783,7 @@ struct Played {
     channels: u16,
 }
 
-/// The one stroke a decode names: `(root, bank code, layer value)`.
+/// The stroke a decode names: `(root, bank code, layer value)`.
 type Pick = (u8, u8, u8);
 
 /// How many decoded strokes are kept. A vendor stroke is seconds of audio, so the cache
@@ -794,9 +793,9 @@ const KEPT_STROKES: usize = 8;
 /// The strokes decoded for an open row or a struck key, most recently used first, and
 /// the waveform of each root an open row has shown.
 ///
-/// ⚠️ Keyed by the asset's [`stamp`](LocalEntity::stamp) as well as its id, the way the
-/// sample editor's cache is: a trim re-lays the file, and what was decoded from what it
-/// held before came off another library.
+/// ⚠️ Keyed by the asset's [`stamp`](LocalEntity::stamp) as well as its id, like the
+/// sample editor's cache: a trim re-lays the file, and audio decoded from the old bytes
+/// came from another library.
 #[derive(Default)]
 struct Cache {
     of: Option<(u64, u64)>,
@@ -807,7 +806,7 @@ struct Cache {
     shapes: HashMap<u8, Drawn>,
     /// The plan the waveforms were last checked against.
     under: Plan,
-    /// The root an open row has already had a frame to say it is reading.
+    /// The root an open row has already spent one frame showing as being read.
     wanted: Option<u8>,
 }
 
@@ -828,8 +827,8 @@ impl Cache {
         }
     }
 
-    /// Drop the waveforms of the roots a moved plan leaves another loudest stroke. A
-    /// rename, a tune or a trim leaves every picture as it was.
+    /// Drop the waveform of each root whose loudest kept stroke a changed plan has
+    /// moved. A rename, a tune, or a trim leaves every waveform as it was.
     fn replan(&mut self, bytes: &[u8], plan: &Plan) {
         if self.under == *plan {
             return;
@@ -847,8 +846,8 @@ impl Cache {
         });
     }
 
-    /// Whether the row asking for `root` has already been drawn saying it is reading
-    /// it. The decode holds the frame it runs in, so the frame that asks first only
+    /// Whether the row asking for `root` has already been drawn showing that it is
+    /// reading. The decode blocks the frame it runs in, so the first frame that asks only
     /// paints.
     fn due(&mut self, root: u8) -> bool {
         let due = self.wanted == Some(root);
@@ -870,7 +869,7 @@ impl Cache {
             .and_then(|(stroke, played)| Some((*stroke, played.as_ref().ok()?)))
     }
 
-    /// Bring one stroke to the front, where it is held at all.
+    /// Move one stroke to the front, where it is held.
     fn touch(&mut self, stroke: Pick) -> Option<&Result<Played, String>> {
         let at = self.strokes.iter().position(|(held, _)| *held == stroke)?;
         let held = self.strokes.remove(at);
@@ -905,7 +904,7 @@ impl Cache {
     /// The decode itself: the audio the player takes and the WAV is written from.
     ///
     /// ⚠️ One stroke, whatever else the library holds: the audio of a whole root is more
-    /// than this app ever has a use for at once.
+    /// than this app ever needs at once.
     fn stroke(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
         let library = npno::Library::borrow(bytes).map_err(|e| e.to_string())?;
         let stroke = loudest(&library, plan, root)?;
@@ -926,9 +925,9 @@ impl Cache {
     }
 }
 
-/// The root's loudest stroke of [`Bank::Attack`] the plan keeps — the recording a key on
-/// it reaches for at the top of the velocity range, which is
-/// [`Stroke::layer`](npno::Stroke::layer)'s law. Confirmed on hardware.
+/// The root's loudest [`Bank::Attack`] stroke the plan keeps: the recording a key on it
+/// plays at the top of the velocity range, by [`Stroke::layer`](npno::Stroke::layer)'s
+/// law. Confirmed on hardware.
 fn loudest<'a>(
     library: &'a npno::Library<'a>,
     plan: &Plan,
@@ -959,8 +958,8 @@ fn picked(root: u8, stroke: &npno::Stroke<'_>) -> Pick {
     (root, Bank::Attack.code(), stroke.layer())
 }
 
-/// What a piano document's frame asked the app to do about one root's audio. Every one
-/// of them needs the root decoded, which is the whole of what the first asks for.
+/// What a piano document's frame asked the app to do about one root's audio. Every
+/// variant needs the root decoded, which is all that `Show` asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ask {
     /// Draw this root, because an open row is showing its waveform.
@@ -990,17 +989,17 @@ pub struct Sound<'a> {
     pub samples: &'a [i16],
     pub channels: u16,
     pub rate: u32,
-    /// What a WAV of it is called — the spelling `nord piano decode` writes.
+    /// The WAV's file name, spelled as `nord piano decode` writes it.
     pub name: String,
 }
 
 /// The row the map and the rows agree on, and what the keyboard is sounding. A tab
-/// switch resets all of it — but never the plan, which is the edit.
+/// switch resets all of it, but never the plan, which is the edit.
 #[derive(Default)]
 struct View {
     picked: Option<usize>,
     open_rows: BTreeSet<usize>,
-    /// A row to bring up under the map next frame, once it has a rect to scroll to.
+    /// A row to scroll into view under the map next frame, once it has a rect.
     reveal: Option<usize>,
     key_table: bool,
     audition: Option<Audition>,
@@ -1021,8 +1020,7 @@ struct Laying {
     job: work::Job<Result<Vec<u8>, String>>,
 }
 
-/// Where a document's plan stands between the switch being thrown and the bytes it
-/// makes.
+/// Where a document's plan stands between a switch being thrown and the bytes it makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Standing {
     /// The working bytes hold it.
@@ -1040,8 +1038,8 @@ type Held = (u64, Act);
 /// that have nothing left to wait for.
 pub struct Applied {
     pub id: u64,
-    /// `None` where the plan moved while the apply ran, and the bytes it made are of a
-    /// library nobody asked for any more.
+    /// `None` where the plan changed while the apply ran, so the bytes it made are of a
+    /// library nobody wants anymore.
     pub made: Option<Result<Vec<u8>, String>>,
     pub acts: Vec<Act>,
 }
@@ -1056,27 +1054,27 @@ pub struct State {
     /// The plan each document's working bytes were laid out from. A plan they already
     /// hold is not pending, and laying it again would copy the body for nothing.
     laid: HashMap<u64, Plan>,
-    /// The one apply in flight, and the acts held until it answers.
+    /// The apply in flight, and the acts held until it answers.
     job: Option<Laying>,
     held: Vec<Held>,
     open: Option<Open>,
     /// The plan as this frame's controls have left it, to be tried before it is kept.
     draft: Plan,
-    /// What the sections read off that plan, worked out when it moves.
+    /// What the sections read off that plan, recomputed when it changes.
     summary: Option<Summary>,
     view: View,
     audio: Cache,
-    /// What the attached instrument has free for pianos, read where the device is in
-    /// hand — the sections are drawn where it is not.
+    /// What the attached instrument has free for pianos. It is read in `begin`, where
+    /// the device is at hand, because the sections are drawn where it is not.
     free: Option<u64>,
 }
 
 impl State {
-    /// Read the baseline, take up the plan, and answer with what the header shows over
-    /// a piano library that the asset alone does not say.
+    /// Read the baseline, take up the plan, and return what the header shows for a
+    /// piano library beyond what the asset alone says.
     ///
-    /// [`Extras::default`] for anything that is no piano library, which is what leaves
-    /// the header's own rules running.
+    /// [`Extras::default`] for anything that is not a piano library, which leaves the
+    /// header's own rules in charge.
     pub fn begin(&mut self, id: u64, entity: &LocalEntity, device: &DeviceState) -> Extras {
         if !entity.entity.as_ref().is_some_and(is_piano) {
             self.open = None;
@@ -1098,8 +1096,8 @@ impl State {
             self.summary = None;
         }
         let plan = self.plans.entry(id).or_default();
-        // A save makes what was dropped gone for good: the rows show the file as it now
-        // is, and there is nothing left to put back.
+        // A save makes the drops permanent: the rows show the file as it now is, and
+        // there is nothing left to put back.
         if plan.against != baseline {
             *plan = Plan {
                 against: baseline,
@@ -1111,7 +1109,7 @@ impl State {
         self.audio.follow(id, entity.stamp);
         self.audio.replan(&entity.bytes, plan);
         self.free = room::free_bytes(ObjectClass::Piano, device);
-        self.summarise();
+        self.summarize();
         let standing = self.standing(id);
 
         let (Some(facts), Some(summary)) = (self.facts(), self.summary.as_ref()) else {
@@ -1120,9 +1118,9 @@ impl State {
         extras(facts, summary.kept, self.free, standing)
     }
 
-    /// Work the figures out again where the plan or the room it has to fit in has moved.
-    /// A frame that changed neither reads what the last one left.
-    fn summarise(&mut self) {
+    /// Recompute the figures where the plan or the free space it must fit in has
+    /// changed. A frame that changed neither reuses what the last one computed.
+    fn summarize(&mut self) {
         let State {
             open,
             draft,
@@ -1184,12 +1182,12 @@ impl State {
         Ok(())
     }
 
-    /// What this document's plan will save its name and its variant as, where it renames
-    /// them. The header's box holds what a save writes rather than what the bytes still
-    /// say, so that typing the stored name back clears the rename.
+    /// The name and variant this document's plan will save, where it renames them. The
+    /// header's box holds what a save writes, not what the bytes still say, so typing
+    /// the stored name back clears the rename.
     ///
-    /// ⚠️ Nothing over a plan standing against another baseline: a save makes what it
-    /// held gone, and [`State::begin`] is what starts the plan again.
+    /// ⚠️ Nothing for a plan against another baseline: a save discards that plan, and
+    /// [`State::begin`] starts a new one.
     pub fn renaming(&self, entity: &LocalEntity) -> (Option<String>, Option<String>) {
         let plan = self
             .plans
@@ -1201,7 +1199,7 @@ impl State {
         )
     }
 
-    /// The plan this frame left behind, where it is not the one in hand.
+    /// The plan this frame's controls left, where it differs from the one in hand.
     pub fn drafted(&self) -> Option<Plan> {
         let held = self
             .open
@@ -1244,7 +1242,7 @@ impl State {
         }
     }
 
-    /// Nothing is open any more: the selection, the open rows, the key table and the
+    /// Nothing is open anymore: the selection, the open rows, the key table, and the
     /// audition go. The plans stay, and so does an apply in flight.
     pub fn leave(&mut self) {
         self.view = View::default();
@@ -1252,15 +1250,14 @@ impl State {
         self.open = None;
     }
 
-    /// Whether a plan is being laid out, which is the one thing here that outlives a
-    /// frame.
+    /// Whether a plan is being laid out, the only work here that outlives a frame.
     pub fn applying(&self) -> bool {
         self.job.is_some()
     }
 
     /// Hold an act that must not run until the plan in hand has reached the bytes, and
-    /// start or join the apply that puts it there. Answers with the act where it is free
-    /// to run now.
+    /// start or join the apply that puts it there. Returns the act where it is free to
+    /// run now.
     pub fn hold(&mut self, ctx: &egui::Context, act: Act, workspace: &Workspace) -> Option<Act> {
         let Some(id) = waits_on(&act).filter(|id| self.pending(*id)) else {
             return Some(act);
@@ -1286,18 +1283,18 @@ impl State {
         let job = work::run(ctx, move |progress| {
             let library = planned(&saved, &laying)?;
             progress.say(format!("laying out {} strokes", library.strokes().len()));
-            materialise(&library)
+            materialize(&library)
         });
         self.job = Some(Laying { id, plan, job });
     }
 
     /// The apply that has answered, where one has.
     ///
-    /// ⚠️ An answer over a plan that has since moved, or over a document the workspace
-    /// no longer holds, is dropped rather than written: the bytes it made are of a
-    /// library nobody asked for any more. Whatever was waiting on that document waits on
-    /// the apply of the plan in hand instead — unless the plan has caught up with the
-    /// bytes on its own, or the document is gone, when there is nothing left to wait for.
+    /// ⚠️ An answer over a plan that has since changed, or over a document the workspace
+    /// no longer holds, is dropped, not written: its bytes are of a library nobody wants
+    /// anymore. Whatever was waiting on that document then waits on the apply of the plan
+    /// in hand, unless the plan has already reached the bytes or the document is gone,
+    /// when there is nothing left to wait for.
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
         let answer = self.job.as_ref()?.job.poll();
         self.finished(answer, ctx, workspace)
@@ -1345,7 +1342,7 @@ impl State {
     }
 
     /// The held acts with nothing left to wait for: their document's bytes hold its
-    /// plan, or there is no such document any more.
+    /// plan, or there is no such document anymore.
     fn freed(&mut self, workspace: &Workspace) -> Vec<Act> {
         let (free, waiting): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held)
             .into_iter()
@@ -1362,16 +1359,16 @@ impl State {
         self.start(ctx, *id, workspace);
     }
 
-    /// Decode one root's loudest kept attack stroke, once, and answer with the codec's
-    /// own words where it will not.
+    /// Decode one root's loudest kept attack stroke, once, returning the codec's own
+    /// error where it fails.
     pub fn decode(&mut self, entity: &LocalEntity, root: u8) -> Result<(), String> {
         let held = self.plans.get(&entity.id);
         self.audio
             .decode(&entity.bytes, held.unwrap_or(&Plan::default()), root)
     }
 
-    /// Whether an open row asking for `root` has had a frame to say it is reading it:
-    /// see [`Cache::due`].
+    /// Whether an open row asking for `root` has already spent a frame showing that it
+    /// is reading (see [`Cache::due`]).
     pub fn due(&mut self, root: u8) -> bool {
         self.audio.due(root)
     }
@@ -1389,14 +1386,14 @@ impl State {
     }
 }
 
-/// A typed half of the name field as the plan holds it: nothing where it is what the
-/// baseline already states, and a plan that renames nothing is no edit.
+/// A typed half of the name field as the plan holds it: `None` where it matches what
+/// the baseline states, so a plan that renames nothing is no edit.
 fn renamed(typed: &str, stored: Option<&str>) -> Option<String> {
     (stored != Some(typed)).then(|| typed.to_string())
 }
 
-/// The document an act must wait for, where it is one that would carry a document's
-/// bytes out of this app.
+/// The document an act must wait for, where the act would carry that document's bytes
+/// out of this app.
 fn waits_on(act: &Act) -> Option<u64> {
     match act {
         Act::SaveDoc(id) | Act::WriteBack(id) | Act::Export(id) | Act::Send { id, .. } => Some(*id),
@@ -1404,9 +1401,8 @@ fn waits_on(act: &Act) -> Option<u64> {
     }
 }
 
-/// What the header shows over a piano library: what it keeps of what it holds, the word
-/// for a library that has been trimmed, and its refusal to be queued when it will not
-/// fit.
+/// What the header shows for a piano library: how much of it the plan keeps, the word
+/// for a trimmed library, and a refusal to queue one that will not fit.
 fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Extras {
     let over = free
         .and_then(|free| kept.checked_sub(free))
@@ -1445,8 +1441,8 @@ fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Ex
     }
 }
 
-/// The one claim the header makes about a plan: what it does to the library, or that it
-/// is being laid out now.
+/// The state the header shows for a plan: what it does to the library, or that it is
+/// being laid out.
 fn claim(trimmed: bool, standing: Standing) -> Option<StateLine> {
     let words = match trimmed {
         true => "trimmed",
@@ -1471,7 +1467,8 @@ fn claim(trimmed: bool, standing: Standing) -> Option<StateLine> {
     }
 }
 
-/// The corner every rectangle here is drawn with, and the page's own margin.
+/// The corner radius of every rectangle here, the page's margin, and the gap between
+/// parts of a row.
 const RADIUS: f32 = 2.0;
 const PAD: f32 = 12.0;
 const GAP: f32 = 10.0;
@@ -1482,17 +1479,17 @@ const ROW: f32 = 26.0;
 const LANE: f32 = 20.0;
 const HEAD: f32 = 20.0;
 
-/// The words: a row's name, the note beside it, the mono figures, a caps label.
+/// Text sizes: a row's name, the note beside it, the mono figures, a caps label.
 const NAME: f32 = 11.5;
 const NOTE: f32 = 10.5;
 const MONO: f32 = 10.5;
 const MICRO: f32 = 9.5;
 
-/// A lamp's own box, which is what a cell has to leave room for.
+/// A lamp's box, which a cell must leave room for.
 const LAMP: egui::Vec2 = egui::vec2(30.0, 20.0);
 
-/// `text` laid out to at most `width` with an ellipsis where it did not fit, painted
-/// from `left` and centred on `middle`. Answers with how wide it came out.
+/// `text` laid out to at most `width`, with an ellipsis where it does not fit, painted
+/// from `left` and centered on `middle`. Returns its width.
 fn cell(
     painter: &egui::Painter,
     left: f32,
@@ -1515,8 +1512,8 @@ fn cell(
     wide
 }
 
-/// A figure ending at `right`, struck through where it is what a size *was*. Answers
-/// with the x it reached back to.
+/// A figure ending at `right`, struck through where it is a former size. Returns its
+/// left edge.
 fn figure(
     painter: &egui::Painter,
     right: f32,
@@ -1670,12 +1667,12 @@ fn gaps(covered: &[u8]) -> Vec<(u8, u8)> {
 
 /// What every section of a frame reads off the plan.
 ///
-/// ⚠️ Worked out when the plan or the instrument's free memory moves, never per frame:
-/// the walks here are over every key, every cell and — while the library does not fit —
-/// every subset of the switches still on.
+/// ⚠️ Recomputed when the plan or the instrument's free memory changes, never per
+/// frame: the walks here cover every key, every cell, and, while the library does not
+/// fit, every subset of the switches still on.
 struct Summary {
-    /// The plan and the free memory these figures are of, which is what
-    /// [`State::summarise`] checks before working any of them out again.
+    /// The plan and the free memory these figures were computed from, which
+    /// [`State::summarize`] checks before recomputing them.
     of: Plan,
     free: Option<u64>,
     /// Bytes the plan keeps of the file.
@@ -1779,9 +1776,9 @@ fn answered(runs: &[(u8, u8)]) -> String {
 /// A column `width` wide, laid out top down, claiming only the height its contents
 /// take.
 ///
-/// ⚠️ Not `allocate_ui` with a zero height: inside a horizontal layout that hands the
-/// child one row's worth of height, every row after the first overflows it — and egui
-/// answers an overflowing horizontal by growing the page sideways.
+/// ⚠️ Not `allocate_ui` with a zero height: inside a horizontal layout, that gives the
+/// child one row of height, every row after the first overflows it, and egui handles an
+/// overflowing horizontal layout by widening the page.
 fn column(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
     let height = ui.available_height();
     ui.allocate_ui_with_layout(
@@ -1798,6 +1795,7 @@ fn mb(bytes: u64) -> f32 {
 
 /// What the keyboard last played, as the line under it reads: whether it sounded, and
 /// the sentence.
+///
 /// A strike sounds the loudest kept attack layer however hard the key was played, so
 /// the line names no velocity.
 fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
@@ -1839,8 +1837,8 @@ fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
 }
 
 /// The damper limit over the keyboard: a marker at the boundary above the highest
-/// damped key, and the keys past it drawn quieter — they ring on at note-off. Nothing
-/// where every key is damped.
+/// damped key, and the keys past it, which ring on at note-off, drawn dimmer. Nothing
+/// is drawn where every key is damped.
 fn damper_mark(ui: &egui::Ui, rect: egui::Rect, top: u8) {
     if top >= ALL_KEYS_DAMPED || top >= SPAN.high {
         return;
@@ -1900,9 +1898,9 @@ impl State {
     /// The key map, pinned above the body: one cell per root over a clickable keyboard,
     /// and a line saying what the last key played.
     ///
-    /// A key `played` on a controller is answered exactly as a click on it.
+    /// A key `played` on a controller is answered the same as a click on it.
     pub fn map(&mut self, ui: &mut egui::Ui, played: &midi::Played) -> Vec<Ask> {
-        self.summarise();
+        self.summarize();
         let State {
             open,
             draft,
@@ -1994,7 +1992,7 @@ impl State {
             inner.next_widget_position(),
             egui::vec2(inner.available_width().max(1.0), keys::KEYBOARD_H),
         );
-        // The chip names no velocity, for the reason the line under it names none.
+        // The chip names no velocity, for the same reason the line under it names none.
         let chip = last.map(|struck| (struck.note, note::name(struck.note)));
         let clicked = keys::keyboard(
             &mut inner,
@@ -2047,9 +2045,8 @@ impl State {
 
 /// Answer a struck key: describe it, and sound the root that answers it where one does.
 ///
-/// Only a key that sounds is asked for. A root with nothing left to play would answer
-/// with the codec's refusal, and the line under the keyboard is where silence is
-/// explained.
+/// Only a key that sounds makes an ask. A root with nothing left to play would only get
+/// the codec's refusal, and the line under the keyboard explains the silence.
 fn strike(
     facts: &Facts,
     plan: &Plan,
@@ -2069,8 +2066,8 @@ fn strike(
     })
 }
 
-/// What throwing one switch row of the trim section does. The range is a switch of its
-/// own: no cut the constraint sentence names offers it.
+/// What throwing one switch row of the trim section does. The range is a separate
+/// switch because no cut the constraint sentence names includes it.
 #[derive(Clone, Copy)]
 enum Throw {
     Layer(u8),
@@ -2083,7 +2080,7 @@ struct Switch {
     on: bool,
     name: String,
     note: String,
-    /// Whether the note is a warning rather than a fact.
+    /// Whether the note is a warning.
     loud: bool,
     size: String,
     /// What the size was, where the plan has changed it.
@@ -2132,7 +2129,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
                 (true, _) => format!("on {on_roots} of {holds} roots"),
                 (false, 0) => "the loudest strokes".to_string(),
                 (false, rank) if rank + 1 == layers => {
-                    "the quietest layer — first thing a trim loses".to_string()
+                    "the quietest layer, the first thing a trim loses".to_string()
                 }
                 (false, _) => String::new(),
             },
@@ -2140,8 +2137,8 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
             size: room::measure(kept),
             was: (kept != held).then(|| room::measure(held)),
             hint: format!(
-                "layer index {layer} in the file — 0 is the loudest; a root holding \
-                 every layer sounds it at {}",
+                "layer index {layer} in the file, where 0 is the loudest; a root \
+                 holding every layer sounds it at {}",
                 span_text(&whole[rank].1)
             ),
             throws: Throw::Layer(layer),
@@ -2239,7 +2236,7 @@ fn switch_row(ui: &mut egui::Ui, index: usize, row: &Switch) -> Option<bool> {
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
     hairline(ui, rect);
     // ⚠️ Before the lamp: egui gives a click to the last widget registered over it, and
-    // a row-wide target added afterwards would swallow every throw of the switch.
+    // a row-wide target added afterward would swallow every click on the switch.
     ui.interact(
         rect,
         ui.id().with(("trim_row", index)),
@@ -2392,13 +2389,14 @@ fn meter(ui: &mut egui::Ui, facts: &Facts, plan: &Plan, summary: &Summary) {
     }));
 }
 
-/// The sentence under the meter: whether it fits, and what to throw if it does not.
+/// The sentence under the meter: whether it fits, and what to switch off if it does
+/// not.
 fn constraint(plan: &Plan, summary: &Summary) -> (String, bool) {
     let kept = summary.kept;
     let Some(free) = summary.free else {
         return (
-            "The instrument has not reported its free piano memory, so nothing here can \
-             say whether this fits."
+            "The instrument has not reported its free piano memory, so there is no way \
+             to tell whether this fits."
                 .to_string(),
             false,
         );
@@ -2420,7 +2418,7 @@ fn constraint(plan: &Plan, summary: &Summary) -> (String, bool) {
     );
     let rest = match &summary.cut {
         Some(cut) => format!(
-            "Dropping {} sheds {} — the cheapest cut left that fits.",
+            "Dropping {} sheds {}, the cheapest cut left that fits.",
             listed(&cut.picked),
             room::measure(cut.shed)
         ),
@@ -2429,8 +2427,9 @@ fn constraint(plan: &Plan, summary: &Summary) -> (String, bool) {
              on this instrument."
                 .to_string()
         }
-        None => "Everything droppable is off — narrowing the key range is the only cut left."
-            .to_string(),
+        None => {
+            "Everything droppable is off; narrowing the key range is the only cut left.".to_string()
+        }
     };
     (format!("{head} {rest}"), true)
 }
@@ -2483,8 +2482,8 @@ fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
         field(
             ui,
             "Kind",
-            "0x18; the instrument files the library under it — it changes nothing the \
-             library sounds like, and picking one only defaults the damper limit",
+            "0x18: the instrument files the library under it. It does not change the \
+             sound; picking one only sets the default damper limit",
             |ui| {
                 let held = plan.kind.map_or(facts.kind, |kind| kind.code());
                 let mut picked = Kind::from_code(held);
@@ -2509,7 +2508,7 @@ fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
 }
 
 /// The damper limit as one control: a key, or `none` for a limit past the last key,
-/// which damps every one of them.
+/// which damps every key.
 fn damper_picker(ui: &mut egui::Ui, top: u8) -> Option<u8> {
     let mut value = f64::from(top.min(ALL_KEYS_DAMPED));
     let response = ui.push_id("piano_damper", |ui| {
@@ -2531,7 +2530,7 @@ fn damper_picker(ui: &mut egui::Ui, top: u8) -> Option<u8> {
     (response.inner.changed() && picked != top).then_some(picked)
 }
 
-/// One lane per layer: the switch that speaks for every root, and one segment per root
+/// One lane per layer: the switch that applies to every root, and one segment per root
 /// so a per-root exception shows where it is.
 fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize>) {
     const LEFT: f32 = 88.0;
@@ -2764,9 +2763,9 @@ fn root_layer_bytes(facts: &Facts, root: usize, layer: u8) -> u64 {
         .sum()
 }
 
-/// The ink every cell of a row wears.
+/// The ink for every cell of a row.
 ///
-/// ⚠️ A selected row is one colour throughout, warn text included: a row lit by the
+/// ⚠️ A selected row is one color throughout, warn text included: a row lit by the
 /// selection fill and carrying a warning in warn ink reads as two rows.
 struct RowInk {
     text: egui::Color32,
@@ -2798,8 +2797,8 @@ fn row_ink(visuals: &egui::Visuals, picked: bool, in_range: bool) -> RowInk {
 /// above it.
 const ROW_LAMPS: usize = 6;
 
-/// How far the trim control reaches, in decibels. A stroke recording more than this is
-/// shown as the file states it.
+/// How far the trim control reaches, in decibels. A stroke trimmed further than this
+/// still shows the value the file states.
 const TRIM_REACH: u16 = 48;
 
 /// One row per root: what it answers, which of its layers it keeps, what it costs, and
@@ -3081,7 +3080,7 @@ fn open_row(
                     ui,
                     "Fine tune",
                     &format!("{cents:+.1} c"),
-                    "the per-key lane below is what edits it",
+                    "edit it with the per-key lane below",
                 );
             });
             ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
@@ -3125,7 +3124,7 @@ fn open_row(
                     );
                     let set = match held > TRIM_REACH {
                         true => set.on_hover_text(format!(
-                            "+0x34 in the stroke record, 1 dB a unit — it holds {held} dB, \
+                            "+0x34 in the stroke record, 1 dB a unit. It holds {held} dB, \
                              past the {TRIM_REACH} dB this control sets"
                         )),
                         false => set.on_hover_text("+0x34 in the stroke record, 1 dB a unit"),
@@ -3172,9 +3171,9 @@ fn open_row(
     asked
 }
 
-/// The waveform of an open root's loudest kept stroke. An open row shows one, so the
-/// decode is asked for rather than offered, and the cache keeping a refusal keeps that
-/// to once per stroke.
+/// The waveform of an open root's loudest kept stroke. An open row shows one, so opening
+/// it asks for the decode, and because the cache remembers a refusal it asks once per
+/// stroke.
 fn wave(ui: &mut egui::Ui, audio: &Cache, root: u8, playing: bool) -> Option<Ask> {
     match audio.shape(root) {
         Some(Ok(envelope)) => {
@@ -3190,7 +3189,7 @@ fn wave(ui: &mut egui::Ui, audio: &Cache, root: u8, playing: bool) -> Option<Ask
             None
         }
         None => {
-            // The decode lands after this frame, and nothing else would bring the one
+            // The decode lands after this frame, and nothing else would request the frame
             // that draws it.
             ui.ctx().request_repaint();
             sample::reading(ui, "reading the stroke…");
@@ -3199,13 +3198,13 @@ fn wave(ui: &mut egui::Ui, audio: &Cache, root: u8, playing: bool) -> Option<Ask
     }
 }
 
-/// What the lane draws a key's tune at, where full deflection is [`TUNE_CENTS`].
+/// The tune, in cents, that the lane draws at full deflection.
 const TUNE_CENTS: i32 = 25;
 
-/// A tune in file units as the lane's own reach, and back again.
+/// A tune in file units as a fraction of the lane's reach, and back.
 ///
-/// The file stores units and the lane shows cents, so the two conversions are the one
-/// place that knows which is which.
+/// The file stores units and the lane shows cents, so these two conversions are the
+/// only place that knows which is which.
 fn reach(units: i8) -> f32 {
     f32::from(units) * FINE_TUNE_CENTS_PER_UNIT / TUNE_CENTS as f32
 }
@@ -3356,7 +3355,7 @@ impl State {
     /// The Basic face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
     pub fn ui(&mut self, ui: &mut egui::Ui, sounding: &[u8]) -> Option<Ask> {
-        self.summarise();
+        self.summarize();
         let id = self.open.as_ref()?.id;
         let saying =
             self.job
@@ -3450,8 +3449,8 @@ impl State {
         controls::heading(
             ui,
             "Velocity layers",
-            "the switch speaks for every root; a segment is one root — click it to drop \
-             that layer there only",
+            "the switch applies to every root; a segment is one root, and clicking it \
+             drops that layer for that root only",
             None,
         );
         ui.horizontal_top(|ui| {
@@ -3496,7 +3495,7 @@ impl State {
         controls::heading(
             ui,
             "About this file",
-            "what the file says about itself — read here, never written differently",
+            "what the file says about itself, read here and written back unchanged",
             None,
         );
         let rows = [
@@ -3504,7 +3503,7 @@ impl State {
             (
                 "Stream version",
                 format!("{:#05x}", facts.stream),
-                "what decides the capability struct",
+                "which decides the capability struct",
             ),
             ("Size", room::measure(facts.total), "before any trim"),
             (
@@ -3576,9 +3575,9 @@ impl State {
             icon(ui, Glyph::CircleCheck, 12.0, app::good(ui.visuals()));
             ui.label(
                 egui::RichText::new(
-                    "Byte-exact: the stroke directory and audio stay verbatim; a trim \
-                     re-lays the directory and every audio offset, and the container \
-                     recomputes its checksum.",
+                    "Byte-exact: the stroke directory and audio are written back \
+                     unchanged. A trim re-lays the directory and every audio offset, and \
+                     the container recomputes its checksum.",
                 )
                 .size(11.0)
                 .color(ui.visuals().weak_text_color()),
@@ -3597,7 +3596,7 @@ impl State {
     }
 }
 
-/// What a piano library holds, in the state this editor puts each of them in.
+/// What a piano library holds, and how far this editor can change each part.
 const CAPABILITIES: &[Row] = &[
     Row {
         name: "name",
@@ -3637,7 +3636,7 @@ const CAPABILITIES: &[Row] = &[
     Row {
         name: "loop points / crossfade",
         state: Cap::ReadOnly,
-        note: "marks in the stroke record, carried verbatim; meaning open",
+        note: "marks in the stroke record, carried unchanged; meaning unknown",
     },
     Row {
         name: "loop decay / detune",
@@ -3647,12 +3646,12 @@ const CAPABILITIES: &[Row] = &[
     Row {
         name: "release samples",
         state: Cap::Editable,
-        note: "bank 2 — drop or keep",
+        note: "bank 2: drop or keep",
     },
     Row {
         name: "pedal resonance samples",
         state: Cap::Editable,
-        note: "bank 1 — Small out of Medium",
+        note: "bank 1: what the Small library leaves out",
     },
     Row {
         name: "sound parameters",
@@ -3667,7 +3666,7 @@ const CAPABILITIES: &[Row] = &[
     Row {
         name: "replace / add a stroke",
         state: Cap::Editable,
-        note: "File › New › piano library builds one from WAVs; a template is optional",
+        note: "File › New › Piano library… builds one from WAVs; a template is optional",
     },
     Row {
         name: "cut / move / drop strokes",
@@ -3702,7 +3701,7 @@ fn offsets() -> Vec<Offset> {
         Offset {
             at: "body 0x04".to_string(),
             holds: "u16".to_string(),
-            note: "stream version — the offsets below are pinned to it",
+            note: "stream version; the offsets below are pinned to it",
         },
         Offset {
             at: "body 0x1c".to_string(),
@@ -3762,8 +3761,8 @@ mod tests {
     /// one of them also carrying a pedal-resonance and a release stroke, and a map that
     /// answers every key from A0 to C8.
     ///
-    /// The blocks per stroke differ, so every figure the sections print is a figure
-    /// something could get wrong.
+    /// Each stroke has a different block count, so a figure read from the wrong stroke
+    /// comes out wrong.
     fn built() -> Build {
         let mut takes = Vec::new();
         for (index, root) in ROOTS.into_iter().enumerate() {
@@ -3816,8 +3815,8 @@ mod tests {
         assert_eq!(rebuild(&saved, &plan()).unwrap(), saved);
     }
 
-    /// The release bank is its own set of strokes: dropping it takes exactly those and
-    /// leaves every key still answering the root it did.
+    /// The release bank is its own set of strokes: dropping it removes only those and
+    /// leaves every key answering the root it did.
     #[test]
     fn dropping_the_release_bank_takes_its_strokes_and_uncovers_no_key() {
         let saved = bytes();
@@ -3848,8 +3847,8 @@ mod tests {
         );
     }
 
-    /// A per-root exception is the one selection no named transform expresses: it takes
-    /// one layer off one root and leaves every other stroke where it was.
+    /// A per-root exception, which no named transform expresses, takes one layer off one
+    /// root and leaves every other stroke where it was.
     #[test]
     fn a_per_root_layer_drop_leaves_every_other_stroke_where_it_was() {
         let saved = bytes();
@@ -3930,9 +3929,8 @@ mod tests {
         }
     }
 
-    /// The switches speak for every root, so throwing one has to clear the exceptions
-    /// that root made — a switch that left them standing would say one thing and do
-    /// another.
+    /// A master switch applies to every root, so throwing it clears that layer's
+    /// per-root exceptions.
     #[test]
     fn a_master_switch_clears_the_per_root_exceptions_of_its_layer() {
         let mut plan = plan();
@@ -3943,16 +3941,16 @@ mod tests {
         plan.switch_layer(LAYERS[0], false);
         assert!(
             !plan.keeps_layer(48, LAYERS[0]),
-            "the switch speaks for every root"
+            "the switch applies to every root"
         );
         plan.switch_layer(LAYERS[0], true);
         assert!(
             plan.keeps_layer(60, LAYERS[0]),
-            "and putting it back clears the exception it spoke over"
+            "turning it back on does not restore the cleared exception"
         );
         assert!(
             !plan.keeps_layer(60, LAYERS[1]),
-            "another layer's exception is not this switch's business"
+            "another layer's exception is untouched"
         );
     }
 
@@ -3968,8 +3966,8 @@ mod tests {
         plan.except(ROOTS[1], LAYERS[0], true);
         assert!(plan.is_empty(), "{plan:?}");
 
-        // Under a switch that is off it is the other way about: keeping the layer is
-        // the exception, and dropping it again says only what the switch says.
+        // Under a switch that is off it is the other way around: keeping the layer is
+        // the exception, and dropping it again only repeats the switch.
         plan.switch_layer(LAYERS[0], false);
         plan.except(ROOTS[1], LAYERS[0], false);
         assert!(plan.roots.is_empty(), "the switch already drops it");
@@ -3978,7 +3976,7 @@ mod tests {
     }
 
     /// Dropping a root takes the layers it records whose switch is still on, and the
-    /// master switches speak over every exception it left.
+    /// master switches override every exception it left.
     #[test]
     fn dropping_a_root_excepts_only_the_layers_its_switch_still_keeps() {
         let facts = facts();
@@ -4081,7 +4079,7 @@ mod tests {
         routed.key_roots.insert(60, Some(ROOTS[0]));
         assert_eq!(moved(&saved, &routed), (whole, vec![KEY_MAP_AT + 60]));
 
-        // The trim is a u16 in the record of the stroke it names — the first of them,
+        // The trim is a u16 in the record of the stroke it names: the first record,
         // which is the lowest root's loudest attack.
         let mut trimmed = plan();
         trimmed
@@ -4131,7 +4129,7 @@ mod tests {
         assert!(refused.contains("root 100"), "{refused}");
 
         // A route to a root a later drop takes away is not refused: the drop uncovers
-        // the key, which is what dropping a root has always done.
+        // the key, as dropping a root does.
         let mut dropped = plan.clone();
         dropped.key_roots.insert(60, Some(ROOTS[0]));
         for layer in LAYERS {
@@ -4296,7 +4294,7 @@ mod tests {
     }
 
     #[test]
-    fn a_list_of_switches_reads_as_a_sentence_names_them() {
+    fn a_list_of_switches_reads_as_a_sentence_would_name_them() {
         let one = vec!["release samples".to_string()];
         assert_eq!(listed(&one), "release samples");
         let two = vec!["soft layer".to_string(), "release samples".to_string()];
@@ -4336,7 +4334,7 @@ mod tests {
     }
 
     /// The file stores units and the lane shows cents, so the conversion has to come
-    /// back to the unit it started at — including at the ends of an `i8`.
+    /// back to the unit it started at, including at the ends of an `i8`.
     #[test]
     fn a_fine_tune_reads_in_cents_and_writes_back_the_unit_it_came_from() {
         for held in [0i8, 1, -1, 27, -27, 35, -35] {
@@ -4358,7 +4356,7 @@ mod tests {
         let mut plan = plan();
         plan.fine_tune.insert(60, -4);
         assert_eq!(plan.tune(&facts, 60), -4);
-        assert_eq!(plan.tune(&facts, 61), 0, "and no neighbour moved");
+        assert_eq!(plan.tune(&facts, 61), 0, "and no neighbor moved");
 
         let made = rebuild(&saved, &plan).unwrap();
         let entity = nord_format::from_stream(&mut Cursor::new(&made)).unwrap();
@@ -4432,7 +4430,7 @@ mod tests {
         let held = extras(&facts, kept, Some(free), Standing::Laid);
         let loud = held.loud.expect("it will not fit");
         assert_eq!(loud.tone, Tone::Blocked);
-        assert_eq!(loud.send, None, "a blocked action asks for nothing");
+        assert_eq!(loud.send, None, "a blocked action queues nothing");
         assert_eq!(
             loud.label,
             format!("No room · {} over", room::measure(kept - free))
@@ -4455,9 +4453,9 @@ mod tests {
             .contains("not reported"));
     }
 
-    /// A plan that has not reached the bytes yet is still an edit, and the header claims
-    /// it in the editor's own word — and says what it is doing while the library is
-    /// being laid out.
+    /// A plan that has not reached the bytes yet is still an edit, and the header marks
+    /// it in the editor's own word. While the library is being laid out, the header says
+    /// so.
     #[test]
     fn the_header_claims_a_plan_the_bytes_do_not_hold_yet() {
         let facts = facts();
@@ -4499,8 +4497,8 @@ mod tests {
         assert_eq!(loud.send, None);
     }
 
-    /// The sentence under the meter says whether it fits, what to throw when it does
-    /// not, and says nothing it cannot know.
+    /// The sentence under the meter says whether it fits, what to switch off when it
+    /// does not, and nothing it cannot know.
     #[test]
     fn the_constraint_sentence_names_the_cut_or_says_it_cannot_tell() {
         let facts = facts();
@@ -4573,8 +4571,7 @@ mod tests {
         assert_eq!(coverage(&gaps[..1]), "1 silent range");
     }
 
-    /// A root's keys are one run in every specimen, and a map that splits them gets one
-    /// cell per run rather than one cell over the keys between.
+    /// A map that splits a root's keys gets one cell per run.
     #[test]
     fn a_roots_keys_read_as_the_stretches_they_run_in() {
         assert_eq!(runs(&[58, 59, 60, 61]), [(58, 61)]);
@@ -4694,8 +4691,8 @@ mod tests {
 
         fn of(saved: Vec<u8>, free: u64) -> Editor {
             let ctx = egui::Context::default();
-            // Dressed the way the app dresses it: without the bold face bound, laying
-            // out a root's name panics mid-frame.
+            // Set up as the app sets it up: without the bold face bound, laying out a
+            // root's name panics mid-frame.
             ctx.set_fonts(crate::app::fonts());
             ctx.all_styles_mut(crate::app::metrics);
             let mut workspace = Workspace::new(ctx.clone());
@@ -4810,7 +4807,7 @@ mod tests {
                     egui::Shape::Rect(drawn) if drawn.rect.height() == keys::KEYBOARD_H => {
                         painted.whites.push(drawn.rect)
                     }
-                    // A lamp is the one thing drawn at its own fixed width; it is painted
+                    // A lamp is the only shape drawn at this fixed width. It is painted
                     // filled and then stroked, so the pair is deduplicated after the walk.
                     egui::Shape::Rect(drawn) if drawn.rect.width() == LAMP.x => {
                         painted.lamps.push(drawn.rect)
@@ -4948,15 +4945,15 @@ mod tests {
         );
     }
 
-    /// Clicking a root's cell in the map opens that root's row, which is where its own
-    /// facts and actions are.
+    /// Clicking a root's cell in the map opens that root's row, with its facts and
+    /// actions.
     #[test]
     fn a_size_cell_click_opens_that_roots_row() {
         let mut editor = Editor::new(facts().total * 2);
         let laid = editor.frame(Vec::new());
         assert!(!laid.said("ANSWERS FROM"), "no row is open yet");
 
-        // The size lane sits directly above the keyboard, a hair inside its own rect.
+        // The size lane sits directly above the keyboard, just inside its own rect.
         let keyboard = laid.whites[0];
         let at = egui::pos2(laid.white(72).x, keyboard.top() - 10.0);
         editor.frame(press(at));
@@ -4967,7 +4964,7 @@ mod tests {
     }
 
     /// A lamp on a root's row takes that layer off that root alone, and leaves the row
-    /// under it closed — the row-wide click target must not swallow the switch.
+    /// under it closed: the row-wide click target must not swallow the switch.
     #[test]
     fn a_lamp_on_a_roots_row_drops_that_layer_there_alone() {
         let mut editor = Editor::new(facts().total * 2);
@@ -5021,9 +5018,8 @@ mod tests {
         assert!(some.said("damper"), "{:?}", some.words);
     }
 
-    /// ⚠️ Throwing a switch copies nothing: the working bytes are the ones the library
-    /// was saved as until something has to carry them. The plan is the whole of the
-    /// edit, and the header is what claims it.
+    /// Throwing a switch copies nothing: the working bytes stay as saved until something
+    /// has to carry them. The plan is the whole edit, and the header shows it.
     #[test]
     fn a_switch_thrown_leaves_the_bytes_alone_and_the_header_says_so() {
         let mut editor = Editor::new(facts().total * 2);
@@ -5048,7 +5044,7 @@ mod tests {
     }
 
     /// The name box holds what a save will write, so typing the stored name back into
-    /// it clears the rename rather than leaving one standing over bytes that hold it.
+    /// it clears the rename.
     #[test]
     fn a_name_typed_back_to_the_stored_one_clears_the_rename() {
         let mut editor = Editor::new(facts().total * 2);
@@ -5079,7 +5075,7 @@ mod tests {
     /// A stored trim past what this editor's control reaches is shown as the file holds
     /// it. Pulling it back to the bound would retrim a stroke nobody touched.
     #[test]
-    fn a_stored_trim_above_the_controls_reach_is_shown_rather_than_re_planned() {
+    fn a_stored_trim_above_the_controls_reach_is_shown_and_not_replanned() {
         let mut held = plan();
         let stroke = (ROOTS[2], Bank::Attack.code(), LAYERS[0]);
         held.trims.insert(stroke, TRIM_REACH + 12);
@@ -5129,7 +5125,7 @@ mod tests {
         );
         assert!(
             matches!(applied.acts.as_slice(), [Act::SaveDoc(id)] if *id == editor.id),
-            "and the save is let go the moment it is laid",
+            "and the save is let go once the plan is laid out",
         );
         assert!(
             !editor.state.pending(editor.id),
@@ -5157,8 +5153,8 @@ mod tests {
         assert!(editor.state.job.is_none(), "and nothing is left running");
     }
 
-    /// ⚠️ An answer over a plan that has moved is of a library nobody asked for. It is
-    /// dropped, and the apply starts again from the plan in hand.
+    /// An answer over a plan that has since changed is dropped, and the apply starts
+    /// again from the plan in hand.
     #[test]
     fn a_plan_changed_during_an_apply_starts_it_again() {
         let mut editor = Editor::new(facts().total * 2);
@@ -5208,14 +5204,14 @@ mod tests {
         assert!(!editor.state.pending(editor.id), "the edit is undone");
 
         let applied = editor.awaited();
-        assert!(applied.made.is_none(), "the bytes it made are of nothing");
+        assert!(applied.made.is_none(), "the bytes it made are discarded");
         assert_eq!(applied.acts.len(), 1, "and the save is let go regardless");
         assert!(editor.state.job.is_none(), "with nothing left to lay out");
     }
 
-    /// ⚠️ The figures the sections read are of the library they were worked out from.
-    /// Two documents can stand on the same plan — the empty one — and the second must
-    /// not be drawn from the first's.
+    /// ⚠️ The figures the sections read belong to the library they were computed from.
+    /// Two documents can share a plan (the empty one), and the second must not be drawn
+    /// from the first's figures.
     #[test]
     fn opening_another_document_reads_the_figures_of_its_own_library() {
         let mut editor = Editor::new(facts().total * 2);
@@ -5324,7 +5320,7 @@ mod tests {
     /// A library whose audio the codec can read: the same three roots of three attack
     /// layers, each a short tone.
     ///
-    /// ⚠️ [`synthetic::Build`] fills its audio spans rather than coding them, and
+    /// ⚠️ [`synthetic::Build`] fills its audio spans without coding them, and
     /// [`npno::codec::decode`] refuses that, so a test about hearing a stroke has to
     /// code its own.
     fn coded() -> Vec<u8> {
@@ -5352,7 +5348,7 @@ mod tests {
             &recordings,
         )
         .expect("the encoder codes the takes");
-        materialise(&library).expect("it lays out")
+        materialize(&library).expect("it lays out")
     }
 
     /// Every decode is one stroke: the loudest attack layer of that root the plan keeps,
@@ -5422,7 +5418,7 @@ mod tests {
 
     /// An open row draws the waveform of the root's loudest kept stroke and asks for
     /// the decode itself, once. An edit that leaves the root that stroke keeps the
-    /// picture; one that takes the stroke away asks for the next.
+    /// waveform; one that removes the stroke asks for the next.
     #[test]
     fn an_open_root_asks_for_its_waveform_once_and_again_when_its_stroke_changes() {
         let mut editor = Editor::of(coded(), u64::from(u32::MAX));
@@ -5447,7 +5443,7 @@ mod tests {
         assert_eq!(drawn.len(), sample::COLUMNS);
         assert!(
             editor.frame(Vec::new()).asked.is_empty(),
-            "the picture is drawn from the cache rather than asked for again",
+            "the waveform is drawn from the cache, not asked for again",
         );
 
         editor.driven(Vec::new(), |plan| {
@@ -5473,8 +5469,8 @@ mod tests {
         );
     }
 
-    /// A click on an open row's action is what the frame answers while the row is
-    /// still waiting on its waveform.
+    /// A click on an open row's action wins over the row's pending request for its
+    /// waveform.
     #[test]
     fn an_open_rows_action_goes_before_its_request_for_a_waveform() {
         let mut editor = Editor::of(coded(), u64::from(u32::MAX));

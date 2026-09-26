@@ -46,7 +46,7 @@ pub enum Flow {
     Continue,
     /// The operator asked for it back.
     Released,
-    /// The byte pipe failed, so there is nothing on the other end of it any more.
+    /// The transport failed, so nothing is on the other end anymore.
     Lost,
 }
 
@@ -57,9 +57,9 @@ fn hung_up(e: &Error) -> bool {
 
 /// Report the classes the instrument declares, from its own partition table.
 ///
-/// The first thing a connection does, because nothing above this can ask for a class
-/// before it knows the instrument has one. The table is read once and kept, so every
-/// later operation is answered out of what this read.
+/// The first thing a connection does, because nothing can ask for a class before it
+/// knows the instrument has one. The table is read once and kept, and later operations
+/// answer from it.
 pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow {
     let rows = match device.geometry().await {
         Ok(geometry) => geometry
@@ -100,9 +100,9 @@ fn spoil(gone: &mut bool, at: Option<Location>) -> impl FnOnce(Error) -> String 
 ///
 /// Emits exactly one [`DeviceEvent::Started`] and one [`DeviceEvent::Finished`], so the
 /// UI's in-flight marker cannot be left set by an operation that failed halfway, and at
-/// most one [`DeviceEvent::OpOk`] or [`DeviceEvent::OpFailed`]: each is one outcome of
-/// one command, and a second would be put against a second entry of the send queue.
-/// Steps within a command speak through [`DeviceEvent::Note`].
+/// most one [`DeviceEvent::OpOk`] or [`DeviceEvent::OpFailed`]: each is the outcome of one
+/// command, and a second would be recorded against another entry of the send queue.
+/// Steps within a command report through [`DeviceEvent::Note`].
 pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Emit) -> Flow {
     if matches!(cmd, DeviceCmd::Disconnect) {
         return Flow::Released;
@@ -222,7 +222,7 @@ async fn execute<T: Transport>(
             let note = put_one(device, class, at, &name, bytes.clone(), emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
-            // Nothing is owed to the instrument until this session has closed.
+            // Reported as sent only once its session has closed.
             emit.send(DeviceEvent::Sent {
                 id,
                 class,
@@ -238,8 +238,8 @@ async fn execute<T: Transport>(
             select(device, class, at)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
-            // `select` is what puts the panel on a slot, so this is the answer a
-            // `FOCUS` read would give, without walking the class for it.
+            // `select` puts the panel on the slot, so this is the answer a `FOCUS` read
+            // would give, without walking the class.
             emit.send(DeviceEvent::Focus {
                 class,
                 at: Some(at),
@@ -287,8 +287,8 @@ async fn execute<T: Transport>(
     }
 }
 
-/// Replace a slot inside the caller's session. The address is the caller's to check
-/// against the geometry first; this one sends frames.
+/// Replace a slot inside the caller's session. The caller checks the address against
+/// the geometry first; this sends frames.
 ///
 /// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
 async fn put<T: Transport>(
@@ -373,8 +373,8 @@ async fn put<T: Transport>(
                     });
                     Err(format!(
                         "{e} (restoring failed as well: {restore}); {}, and its former \
-                         contents are now in the local list as a rescued entity — \
-                         put it back",
+                         contents are in the local list as a rescued entity. Put it \
+                         back.",
                         aftermath(class, at)
                     ))
                 }
@@ -400,7 +400,7 @@ fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
 }
 
 /// Strip the format suffix from a local label, preserving the operator's text.
-/// Returns `None` rather than sending a blank name.
+/// Returns `None` for a blank name.
 fn slot_label(name: &str) -> Option<String> {
     // Application bound; the instrument's maximum is unknown.
     const LONGEST: usize = 64;
@@ -465,7 +465,7 @@ async fn send_all<T: Transport>(
             class.label()
         ))),
         Some(why) => Err(format!(
-            "{why} — {done} of {total} were written; the rest are still waiting"
+            "{why}. {done} of {total} were written; the rest are still waiting"
         )),
     }
 }
@@ -545,13 +545,12 @@ const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 /// Host safety limit for one complete class scan, not an instrument capacity.
 const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
-/// Scan the capacity the instrument declares for this bank, or to the device boundary
+/// Scan the slots the instrument declares for this bank, or up to the device boundary
 /// where it declared the unbounded sentinel.
 ///
-/// The capacity comes from the [`Device`]'s own geometry rather than from the UI's cache
-/// of it: a rescan after a mutation runs before the class has necessarily been walked,
-/// and walking a bounded bank as if it were open costs one `INFO` per address up to the
-/// host budget.
+/// The capacity comes from the [`Device`]'s geometry, not the UI's cache: a rescan after
+/// a mutation can run before the class has been walked, and walking a bounded bank as if
+/// it were open costs one `INFO` per address up to the host limit.
 async fn scan_bank<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -953,8 +952,8 @@ async fn delete<T: Transport>(
 
 /// Unix seconds, for the timestamp word `BEGIN_WRITE` carries.
 ///
-/// ⚠️ `SystemTime::now()` traps on `wasm32-unknown-unknown`, so the browser's own clock
-/// is what the web build reads.
+/// ⚠️ `SystemTime::now()` traps on `wasm32-unknown-unknown`, so the web build reads the
+/// browser's clock.
 #[cfg(not(target_arch = "wasm32"))]
 fn unix_now() -> Result<u32, Error> {
     let elapsed = std::time::SystemTime::now()
@@ -977,7 +976,7 @@ fn unix_now() -> Result<u32, Error> {
     Ok(seconds as u32)
 }
 
-/// Name a fetched entity after its slot.
+/// Name a fetched entity after the name its slot reports.
 fn entity_name(info: &ProgramInfo) -> String {
     let name = info.name.trim();
     match name.is_empty() {
@@ -1021,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_keeps_the_slots_name_verbatim() {
+    fn a_read_keeps_the_slots_name() {
         let info = ProgramInfo {
             location: Location { bank: 6, slot: 3 },
             body_len: 121,
@@ -1045,7 +1044,7 @@ mod tests {
         assert_eq!(
             label(".ne5p").as_deref(),
             Some(".ne5p"),
-            "a tag and nothing"
+            "a bare tag is kept as the name"
         );
     }
 
@@ -1083,9 +1082,9 @@ mod tests {
         assert_eq!(slot_label("Big strings").as_deref(), Some("Big strings"));
     }
 
-    /// A cursor hit outside a bounded bank is refused rather than widening it: the bank
-    /// would then report slots the instrument says it does not have. An unbounded bank
-    /// has no capacity to contradict, so it is shaped through its last item.
+    /// A cursor hit past a bounded bank's capacity is refused: widening the bank would
+    /// report slots the instrument says it does not have. An unbounded bank has no
+    /// capacity to contradict, so it is shaped through its last item.
     #[test]
     fn a_cursor_hit_past_a_declared_capacity_is_refused() {
         let at = Location { bank: 0, slot: 7 };
@@ -1148,7 +1147,7 @@ mod wire_tests {
         refuses_every_write: bool,
     }
 
-    /// The Electro 5's own division, which is what an unremarkable Puppet stands for.
+    /// The Electro 5's bank division, which a default Puppet uses.
     const EIGHT_BANKS: [(&str, u32); 8] = [
         ("Bank 1", 50),
         ("Bank 2", 50),
@@ -1218,8 +1217,8 @@ mod wire_tests {
             self
         }
 
-        /// Refuses the restore as well, which is what leaves an occupant with nowhere
-        /// to go but the local list.
+        /// Refuses the restore as well, which leaves the occupant nowhere to go but the
+        /// local list.
         fn refusing_every_write(mut self) -> Puppet {
             self.refuses_every_write = true;
             self
@@ -1251,14 +1250,14 @@ mod wire_tests {
                     Some((4, Vec::new()))
                 }
                 cmd::PARTITIONS => Some((0, partition_table())),
-                // Five words in the order `nord_usb::wire::Status` decodes them, whose
-                // doc carries both this shape and the zero `dirty`/`spare` a class
-                // outside the libraries reports.
+                // Five words in the order `nord_usb::wire::Status` decodes them. Its doc
+                // describes this shape and the zero `dirty` and `spare` that classes
+                // outside the libraries report.
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
                     let total: u32 = self.banks.iter().map(|(_, slots)| slots).sum();
-                    // One unit per item, so `Status::slots()` answers the bank capacity
-                    // total rather than a coincidence of the division.
+                    // One unit per item, so `Status::slots()` returns the total bank
+                    // capacity.
                     Some((0, words(&[count, total.saturating_sub(count), count, 0, 0])))
                 }
                 cmd::BANKS if !self.reports_geometry => Some((2, Vec::new())),
@@ -1459,7 +1458,7 @@ mod wire_tests {
     }
 
     /// A read of a slot the instrument reports empty is an answer, not a fault: the
-    /// queue needs to hear *empty* to stop waiting on it.
+    /// queue needs to hear that the slot is empty to stop waiting on it.
     #[test]
     fn a_read_of_an_empty_slot_is_forwarded_as_vacant() {
         let at = Location { bank: 0, slot: 3 };
@@ -1520,7 +1519,6 @@ mod wire_tests {
         }
     }
 
-    /// A select reports the slot it left the panel on.
     #[test]
     fn a_select_reports_where_it_left_the_panel() {
         let at = Location { bank: 6, slot: 3 };
@@ -1636,7 +1634,7 @@ mod wire_tests {
                 bytes: a_program(),
             },
         );
-        assert!(flow == Flow::Continue, "it said no, it did not go away");
+        assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
         let rescued: Vec<&str> = said
@@ -1655,8 +1653,7 @@ mod wire_tests {
         );
     }
 
-    /// A batch lands once. Every item reports its own line to the log, but the sentence
-    /// that says the send is done belongs to the whole of it.
+    /// Every item logs its own line, but the batch reports success once.
     #[test]
     fn a_batch_succeeds_once_however_many_items_it_carries() {
         let bytes = a_program();
@@ -1690,7 +1687,7 @@ mod wire_tests {
             .iter()
             .filter(|event| matches!(event, DeviceEvent::Sent { .. }))
             .count();
-        assert_eq!(sent, 2, "each item is owed no longer");
+        assert_eq!(sent, 2, "each item was reported sent");
     }
 
     #[test]
@@ -1798,8 +1795,7 @@ mod wire_tests {
             ["Africa-Split", "Squabble-B"],
             "one name per item"
         );
-        // One geometry read and one destructive session around the pair, which is what
-        // a batch is for.
+        // One session for the geometry read and one destructive session around the pair.
         let opens = device
             .commands()
             .into_iter()
@@ -1861,8 +1857,8 @@ mod wire_tests {
     }
 
     /// The failures reported for one command. `run` emits one; a second means a step
-    /// inside the command reported its own, which the send queue would put against the
-    /// next entry waiting.
+    /// inside the command reported its own, which the send queue would record against
+    /// the next waiting entry.
     fn failures(said: &[DeviceEvent]) -> Vec<&str> {
         said.iter()
             .filter_map(|event| match event {
@@ -1972,9 +1968,8 @@ mod wire_tests {
         assert_eq!(counted(&device, cmd::INFO), 80);
     }
 
-    /// The instrument's own partition table is what says which classes exist, and every
-    /// row of it is one — the ones this app has no name for included, so a folder the
-    /// crate cannot name is still listed rather than dropped.
+    /// The partition table says which classes exist. Every row is announced, including
+    /// classes this app has no name for, so an unnamed folder is still listed.
     #[test]
     fn a_connection_announces_the_classes_the_instrument_declares() {
         let mut puppet = Puppet::stocked(&[("Bank 1", 50)], &[]);
@@ -2001,7 +1996,7 @@ mod wire_tests {
             (0..8).map(ObjectClass::from_raw).collect::<Vec<_>>(),
             "the table's index is the class code"
         );
-        assert_eq!(rows[4].name, "Partition 4", "the device's own word");
+        assert_eq!(rows[4].name, "Partition 4", "the device's name");
         // The libraries count blocks of net bytes; every other partition counts bytes.
         assert_eq!(
             rows.iter()
@@ -2081,7 +2076,7 @@ mod wire_tests {
         assert_eq!(
             scanned(events),
             vec![(1, vec![None, Some("Africa Split".to_string()), None, None])],
-            "the declared four slots, not a walk to the host budget"
+            "the declared four slots, not a walk to the host limit"
         );
         assert_eq!(counted(&device, cmd::INFO), 4);
     }
@@ -2181,7 +2176,7 @@ mod wire_tests {
 
         let mut sparse = Puppet::stocked(&banks, &full[..2]);
         drive(&mut sparse, scan(ObjectClass::Program));
-        assert!(counted(&sparse, cmd::NEXT_SLOT) > 0, "the cursor earned it");
+        assert!(counted(&sparse, cmd::NEXT_SLOT) > 0, "the cursor was used");
         assert!(counted(&sparse, cmd::INFO) < 100);
     }
 
@@ -2232,7 +2227,7 @@ mod wire_tests {
                 bytes: a_program(),
             },
         );
-        assert!(flow == Flow::Continue, "it said no, it did not go away");
+        assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let why = refused(events);
         assert!(why.contains("bank 7 does not exist"), "{why}");

@@ -1,22 +1,21 @@
-//! The `sty` section — the instrument's default sound preset.
+//! The `sty` section: the instrument's default sound preset.
 //!
-//! Three schemas, one role. `sty` holds the preset the instrument loads with:
-//! filter, envelope and velocity response, and at v4 a three-band EQ. It is not
-//! a structural descriptor — a zone's layers, strokes and key range are all in
-//! `map`, and `sty` is byte-identical across stack depth.
+//! `sty` holds the preset the instrument loads with, in one of three schemas:
+//! filter, envelope and velocity response, and at v4 a three-band EQ. It describes
+//! no structure. A zone's layers, strokes and key range are all in `map`, and `sty`
+//! is byte-identical across stack depth.
 //!
-//! No byte of one schema is a function of any byte of another over the vendor
-//! pool's instruments that appear in more than one generation, so no value here
-//! translates between generations. One *offset* does: the dynamics enable is at
-//! `+3` in both v2 and v4, the single field the rewrite left where it was. v3
-//! puts it at `+4` and scales it onto the block's 0..127 grid.
+//! Across vendor instruments that appear in more than one generation, no byte of
+//! one schema is a function of any byte of another, so no value here translates
+//! between generations. One offset is shared: the dynamics enable is at `+3` in
+//! both v2 and v4. v3 puts it at `+4` and scales it to the block's 0..127 range.
 //!
-//! What a project reaches differs by schema. v2 exposes the category's velocity
-//! response, because the editor's loader installs a preset chosen by the
-//! instrument's category and the encoder writes it through; the wide schemas
-//! ignore the category entirely and hold a constant block plus the dynamics
-//! group. The EQ is read-only in every schema: the editor bakes both the zone
-//! and the instrument EQ into the audio and leaves [`StyV4::eq`] zero.
+//! What a project can set differs by schema. In v2 it reaches the category's
+//! velocity response, because the editor's loader installs a preset chosen by the
+//! instrument's category and the encoder writes it out. The wide schemas ignore
+//! the category and hold a constant block plus the dynamics group. The EQ is
+//! read-only: the editor bakes both the zone and the instrument EQ into the audio
+//! and leaves [`StyV4::eq`] zero.
 //!
 //! Inferred from specimens; not confirmed on hardware.
 
@@ -28,8 +27,7 @@ pub const VERSION_V2: u8 = 5;
 /// Schema version of a v3 `sty` section.
 pub const VERSION_V3: u32 = 7;
 
-/// Schema version of a v4 `sty` section — both [`V4_LEN`] and [`V4_LEN_LONG`]
-/// carry it.
+/// Schema version of a v4 `sty` section, at both [`V4_LEN`] and [`V4_LEN_LONG`].
 pub const VERSION_V4: u32 = 17;
 
 pub const V2_LEN: usize = 9;
@@ -40,14 +38,14 @@ pub const V4_LEN: usize = 92;
 
 /// The v4 payload with its trailing three scalar triples, on body versions 414
 /// and 420. ⚠️ Both widths carry section version [`VERSION_V4`], and body
-/// version 412 occurs at each — so a reader must size `sty` from the section
-/// length and never from its version.
+/// version 412 occurs at each, so a reader must size `sty` from the section
+/// length, never from a version.
 pub const V4_LEN_LONG: usize = 108;
 
 /// Within a v2 payload: whether the category's dynamics curve is enabled.
 const V2_DYNAMICS_ENABLE: usize = 3;
 
-/// Within a v2 payload: how far velocity moves level, quantised to
+/// Within a v2 payload: how far velocity moves level, quantized to
 /// [`VELOCITY_LEVELS`].
 const V2_VELOCITY_TO_AMPLITUDE: usize = 4;
 
@@ -69,14 +67,13 @@ pub fn velocity_level(depth: u8) -> Option<u8> {
     }
 }
 
-/// The v2 preset: nine enum-quantised bytes.
+/// The v2 preset: nine enum-quantized bytes.
 ///
 /// The dynamics enable comes straight from the project. The two velocity depths
-/// come from the preset the loader installs for the instrument's category,
-/// which is the only route a project has to them — setting the fields directly
-/// is undone on load. The remaining bytes are readable from the vendor pool and
-/// not reachable at all: they hold the same value whatever the category and
-/// whatever `samplib_attrs` says.
+/// come from the preset the loader installs for the instrument's category, and a
+/// project reaches them only that way: setting the fields directly is undone on
+/// load. The remaining bytes are out of a project's reach; they hold the same
+/// value whatever the category and whatever `samplib_attrs` says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyV2 {
     pub raw: [u8; V2_LEN],
@@ -110,8 +107,8 @@ impl StyV2 {
     }
 }
 
-/// Within a v3 payload: the dynamics enable, on the block's 0..127 scale rather
-/// than the flag v2 and v4 keep.
+/// Within a v3 payload: the dynamics enable, on the block's 0..127 scale where v2
+/// and v4 keep a flag.
 const V3_DYNAMICS_ENABLE: usize = 4;
 
 /// Within a v3 payload: the dynamics response, one value where v4 holds one per
@@ -144,8 +141,8 @@ impl StyV3 {
         self.raw[V3_DYNAMICS_ENABLE] != 0
     }
 
-    /// Which dynamics curve the instrument loads with. Unlike v4 this schema
-    /// offers no sentinel for "none", so the value is returned as it stands.
+    /// Which dynamics curve the instrument loads with. Unlike v4, this schema has
+    /// no sentinel for "none", so the value is returned as stored.
     pub fn dynamics_curve(&self) -> u8 {
         self.raw[V3_DYNAMICS_CURVE]
     }
@@ -160,8 +157,8 @@ impl StyV3 {
     }
 }
 
-/// Within a v4 payload: whether the category's dynamics curve is enabled — the
-/// same offset the v2 schema puts it at, and the only byte the two share.
+/// Within a v4 payload: whether the category's dynamics curve is enabled. v2 uses
+/// the same offset, the only one the two schemas share.
 const V4_DYNAMICS_ENABLE: usize = 3;
 
 /// Within a v4 payload: which dynamics curve, or [`DYNAMICS_CURVE_NONE`].
@@ -170,8 +167,8 @@ const V4_DYNAMICS_ENABLE: usize = 3;
 /// at both of that field's legal values whenever the dynamics enable is on.
 const V4_DYNAMICS_CURVE: usize = 4;
 
-/// The value [`V4_DYNAMICS_CURVE`] holds when no curve is selected. Reads 6
-/// exactly when the response triple sits at 127.
+/// The value [`V4_DYNAMICS_CURVE`] holds when no curve is selected. It reads 6
+/// exactly when the response triple is 127.
 /// Inferred from specimens; not confirmed on hardware.
 pub const DYNAMICS_CURVE_NONE: u8 = 6;
 
@@ -180,11 +177,11 @@ const V4_DYNAMICS_RESPONSE: usize = 85;
 
 /// One band of the v4 preset's EQ.
 ///
-/// Gain and Q are held in whole tens across the pool; the divisor each uses is
-/// not established, so both are the stored integers.
+/// Gain and Q are multiples of ten across the pool. Their divisors are unknown, so
+/// both are the stored integers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EqBand {
-    /// Centre frequency in Hz.
+    /// Center frequency in Hz.
     pub frequency: u16,
     pub gain: i32,
     pub q: i32,
@@ -205,18 +202,17 @@ pub const EQ_BANDS: usize = 3;
 const _: () = assert!(EQ_AT + (EQ_BANDS - 1) * EQ_BAND_STRIDE + EQ_BAND_BODY <= V4_LEN);
 const _: () = assert!(V4_DYNAMICS_RESPONSE + 3 <= V4_LEN);
 
-/// The v4 preset: a block of 0..127 scalars, each control stored three times —
-/// once per dynamics layer — behind an enable byte valued 0 or 127, plus
-/// [`EQ_BANDS`] EQ bands.
+/// The v4 preset: a block of 0..127 scalars, each control stored three times (once
+/// per dynamics layer) behind an enable byte valued 0 or 127, plus [`EQ_BANDS`] EQ
+/// bands.
 ///
-/// The dynamics group and the EQ are named; the remaining scalars are
-/// preserved verbatim. A project reaches the dynamics group and nothing else:
-/// enabling the category's dynamics moves [`StyV4::dynamics_enabled`],
-/// [`StyV4::dynamics_curve`] and [`StyV4::dynamics_response`] together, while
-/// the whole `samplib_attrs` block, the instrument's category and both EQs
-/// leave every byte alone. ⚠️ The EQs because the encoder bakes them into the
-/// audio instead, which is why [`StyV4::eq`] reads zero on everything this
-/// project can render and only vendor content fills it in.
+/// The dynamics group and the EQ are named; the remaining scalars are kept as
+/// stored. A project reaches only the dynamics group: enabling the category's
+/// dynamics moves [`StyV4::dynamics_enabled`], [`StyV4::dynamics_curve`] and
+/// [`StyV4::dynamics_response`] together, while the `samplib_attrs` block, the
+/// instrument's category and both EQs leave every byte alone. ⚠️ The encoder bakes
+/// the EQs into the audio, so [`StyV4::eq`] reads zero on everything a project can
+/// render; only vendor content fills it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyV4 {
     pub raw: Vec<u8>,
@@ -241,8 +237,8 @@ impl StyV4 {
     }
 
     /// Which dynamics curve the instrument loads with, `None` where none is
-    /// selected. ⚠️ A project cannot choose between the curves the pool holds
-    /// — the enable alone drives this byte off its sentinel.
+    /// selected. ⚠️ A project cannot choose between the curves the pool holds;
+    /// the enable alone moves this byte off its sentinel.
     pub fn dynamics_curve(&self) -> Option<u8> {
         match self.raw[V4_DYNAMICS_CURVE] {
             DYNAMICS_CURVE_NONE => None,
@@ -250,13 +246,12 @@ impl StyV4 {
         }
     }
 
-    /// The dynamics response, one 0..127 value per layer, in the order the pool
-    /// holds them non-decreasing.
+    /// The dynamics response, one 0..127 value per layer, in the order that is
+    /// non-decreasing across the pool.
     ///
-    /// Pinned to 127 in all three positions exactly while
-    /// [`StyV4::dynamics_curve`] is `None`. ⚠️ The block's other triples sit
-    /// behind enable bytes that only approximate the same relationship, so this
-    /// is the one that is measured rather than assumed.
+    /// All three are 127 exactly when [`StyV4::dynamics_curve`] is `None`. ⚠️ The
+    /// block's other triples sit behind enable bytes that only approximately follow
+    /// the same rule; this triple is the one whose rule is measured.
     pub fn dynamics_response(&self) -> [u8; 3] {
         std::array::from_fn(|i| self.raw[V4_DYNAMICS_RESPONSE + i])
     }
@@ -341,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn a_velocity_depth_quantises_onto_three_levels() {
+    fn a_velocity_depth_quantizes_onto_three_levels() {
         assert_eq!(
             [0, 1, 2, 3].map(velocity_level),
             [Some(0), Some(1), Some(1), Some(VELOCITY_LEVELS - 1)]
@@ -369,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_wide_version_is_refused_rather_than_guessed() {
+    fn an_unknown_wide_version_is_refused() {
         assert!(Sty::parse_wide(VERSION_V3 + 1, &[0; V3_LEN]).is_err());
     }
 
