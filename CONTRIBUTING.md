@@ -86,6 +86,14 @@ Do not trade byte-exact round trips for a tidier object model. An edit should
 change only the bytes owned by the edited field. Unknown schema versions are
 refused rather than decoded on a guess.
 
+## Language
+
+Write American English everywhere a person reads: comments, documentation, UI
+text, messages, test names, and identifiers (`color`, `center`, `license`,
+`quantize`). Quote third-party text as its authors wrote it, including license
+notices and proper names such as the Ubuntu Font Licence. Change generated text
+through its generator.
+
 ## Comments are liabilities
 
 A comment consumes attention, can become false, and can stop the reader from
@@ -192,9 +200,10 @@ need editing; stale text is a bug.
   where to learn more. Each package has its own tagline, not the repository's.
   README links to `docs/` are relative paths, so they hold on GitHub and
   crates.io.
-- Be concise and plain. Short sentences, no em dashes, no "not X but Y", no
-  lists padded to three, no marketing words. If a page can lose a paragraph
-  without losing a fact a reader needs, lose it.
+- Be concise and plain. Prefer short sentences. Use an em dash sparingly, when it
+  makes an interruption or aside easier to read. No "not X but Y", no lists
+  padded to three, no marketing words. If a page can lose a paragraph without
+  losing a fact a reader needs, lose it.
 - Links to the running app point at https://drawbar.app/.
 
 ## Tooling and checks
