@@ -2005,10 +2005,10 @@ mod tests {
         let mut file = vec![0u8; 45];
         file[0..4].copy_from_slice(b"CBIN");
         file[4..8].copy_from_slice(&1u32.to_le_bytes());
-        file[8..12].copy_from_slice(b"ne5p");
+        file[8..12].copy_from_slice(b"ne5t");
         let at = Location { bank: 6, slot: 49 };
         // Wire is zero-indexed, the instrument's labels are not.
-        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
+        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5t");
     }
 
     #[test]
