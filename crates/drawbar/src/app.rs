@@ -732,7 +732,9 @@ mod tests {
                 ..Default::default()
             };
             let output = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.open_document(ui, id, &mut acts));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.open_document(ui, id, &Played::default(), &mut acts)
+                });
             });
             (output, acts)
         };
