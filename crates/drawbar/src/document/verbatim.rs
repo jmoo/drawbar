@@ -61,7 +61,7 @@ fn generation(generation: Generation) -> &'static str {
 
 /// What the container says about itself, which is the whole of what is known.
 fn stated(entity: &LocalEntity) -> Vec<Fact> {
-    let kind = Kind::of(entity.entity.as_ref());
+    let kind = Kind::of(entity);
     let tag = entity.tag();
     let mut rows = vec![
         Fact {

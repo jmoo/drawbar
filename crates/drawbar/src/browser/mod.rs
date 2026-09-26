@@ -301,7 +301,7 @@ impl Browser {
                 let entity = workspace.get(id)?;
                 Some(Held {
                     what: item,
-                    kind: Kind::of(entity.entity.as_ref()),
+                    kind: Kind::of(entity),
                     filed: self.folders.holding(id),
                     fits: crate::device::fit(device, entity).allowed(),
                 })
