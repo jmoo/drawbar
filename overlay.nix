@@ -399,6 +399,8 @@ let
             --replace-fail @version@ "${manifests.drawbar.version}" \
             --replace-fail @wasmBytes@ "$(stat -c %s "$out/pkg/$wasm")"
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
+          # The demo sounds the welcome sheet fetches, beside the app that reads them.
+          cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2

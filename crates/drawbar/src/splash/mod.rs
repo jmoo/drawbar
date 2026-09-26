@@ -17,7 +17,6 @@ use crate::browser::Act;
 use crate::icon::{sized, Glyph};
 use crate::panel::caps;
 use crate::sheet::{self, GAP};
-use crate::shell::GUIDE;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -190,13 +189,13 @@ const RISK_REST: &str =
     " This is alpha — treat what is in drawbar as a working copy, not an archive.";
 
 /// The three ways in, in the order the sheet offers them.
-const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Guide];
+const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Demo];
 
 #[derive(Clone, Copy)]
 enum Start {
     Connect,
     Open,
-    Guide,
+    Demo,
 }
 
 /// How one [`Start`] reads on the sheet.
@@ -227,11 +226,11 @@ impl Start {
                 hint: "",
                 lead: false,
             },
-            Start::Guide => Card {
-                glyph: Glyph::BookOpen,
-                label: "Read the guide",
-                sub: "",
-                hint: "",
+            Start::Demo => Card {
+                glyph: Glyph::AudioWaveform,
+                label: "Get the demo sounds",
+                sub: "A tine piano and a pad, in a Demo sounds folder on this computer.",
+                hint: "From drawbar.app; anything already here is not added again",
                 lead: false,
             },
         }
@@ -506,7 +505,7 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
                 match start {
                     Start::Connect => wanted = Some(Wanted::Act(Act::Connect)),
                     Start::Open => wanted = Some(Wanted::Act(Act::OpenFiles)),
-                    Start::Guide => ui.ctx().open_url(egui::OpenUrl::new_tab(GUIDE)),
+                    Start::Demo => wanted = Some(Wanted::Act(Act::FetchDemos)),
                 }
             }
         });
