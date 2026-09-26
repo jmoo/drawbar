@@ -134,7 +134,7 @@ impl Ports {
 /// the user activation the browser requires.
 fn request() -> Result<Promise, JsValue> {
     if !Ports::supported() {
-        return Err(JsValue::from_str(super::UNSUPPORTED));
+        return Err(JsValue::from_str(super::NO_MIDI));
     }
     web_sys::window()
         .ok_or_else(|| JsValue::from_str("no window"))?

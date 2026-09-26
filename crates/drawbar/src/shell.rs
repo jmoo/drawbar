@@ -16,6 +16,7 @@ use crate::device::{occupancy, NO_USB_BRIEF};
 use crate::filter::Filter;
 use crate::icon::{icon, sized, Glyph};
 use crate::log::Level;
+use crate::midi::NO_MIDI_BRIEF;
 use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK, GAP, GLYPH, PAD};
 use crate::strings::folder;
 use crate::tabs::Spot;
@@ -354,6 +355,13 @@ pub(crate) const BROWSERS: &str = "docs/getting-started/install.html#in-the-brow
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const BROWSERS: &str =
     "https://drawbar.app/docs/getting-started/install.html#in-the-browser";
+
+/// The guide's word on which browsers can hear a MIDI controller, under [`GUIDE`].
+#[cfg(target_arch = "wasm32")]
+const MIDI_BROWSERS: &str = "docs/getting-started/support.html#midi-controllers";
+#[cfg(not(target_arch = "wasm32"))]
+const MIDI_BROWSERS: &str =
+    "https://drawbar.app/docs/getting-started/support.html#midi-controllers";
 
 /// The key text beside a menu label — a window's, never a tab's.
 fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
@@ -853,13 +861,17 @@ impl DrawbarApp {
     /// ⚠️ Started from the click itself. A browser tab may only ask the reader for MIDI
     /// access while the click's user activation is live.
     fn midi_item(&mut self, ui: &mut egui::Ui) {
+        if !crate::midi::supported() {
+            if item(ui, NO_MIDI_BRIEF, None) {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(MIDI_BROWSERS));
+            }
+            return;
+        }
         let on = self.midi.on();
-        let button = check(ui, "Listen to MIDI controllers", on, None);
-        let picked = ui
-            .add_enabled(crate::midi::supported(), button)
-            .on_disabled_hover_text(crate::midi::UNSUPPORTED)
-            .clicked();
-        if !picked {
+        if !ui
+            .add(check(ui, "Listen to MIDI controllers", on, None))
+            .clicked()
+        {
             return;
         }
         ui.close();
