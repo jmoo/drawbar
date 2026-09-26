@@ -1,4 +1,4 @@
-//! Desktop sound: a `rodio` player over the default output.
+//! Desktop sound: a `rodio` player for each voice, mixed onto the default output.
 //!
 //! The device is opened on the first play and kept, because opening one takes long
 //! enough to be heard as a gap and an app that has never played anything should not
@@ -27,16 +27,18 @@ fn clocked(rate: f32) -> NonZero<u32> {
 }
 
 #[derive(Default)]
-pub struct Sound {
+pub struct Output {
     device: Option<MixerDeviceSink>,
-    player: Option<rodio::Player>,
 }
 
-impl Sound {
-    pub fn play(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<(), String> {
+/// One stroke sounding on the mixer.
+///
+/// ⚠️ Dropping it stops it: a `rodio` player that is not detached stops on drop.
+pub struct Voice(rodio::Player);
+
+impl Output {
+    pub fn play(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<Voice, String> {
         let channels = NonZero::new(channels).ok_or("this zone declares no channels")?;
-        // One voice: whatever is sounding gives way rather than mixing with this.
-        self.stop();
         let device = match &self.device {
             Some(device) => device,
             None => self
@@ -47,18 +49,13 @@ impl Sound {
         // rodio mixes in f32; the codec's own units are the 16-bit ones it decoded to.
         let source: Vec<f32> = samples.iter().map(|s| f32::from(*s) / 32768.0).collect();
         player.append(SamplesBuffer::new(channels, clocked(rate), source));
-        self.player = Some(player);
-        Ok(())
+        Ok(Voice(player))
     }
+}
 
-    pub fn stop(&mut self) {
-        if let Some(player) = self.player.take() {
-            player.stop();
-        }
-    }
-
+impl Voice {
     pub fn finished(&self) -> bool {
-        self.player.as_ref().is_none_or(rodio::Player::empty)
+        self.0.empty()
     }
 }
 

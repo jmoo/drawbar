@@ -13,6 +13,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::Device;
 use crate::fields;
 use crate::log::Log;
+use crate::midi::Played;
 use crate::queue::Queue;
 use crate::strings;
 use crate::tags::Tags;
@@ -150,11 +151,14 @@ pub struct SendBack {
     pub at: Location,
 }
 
-/// The rest of the window a document reads: what is waiting to be sent, and what this
-/// computer's list labels things with.
+/// The rest of the window a document reads: what is waiting to be sent, what this
+/// computer's list labels things with, and what a MIDI controller played since the last
+/// frame.
 pub struct Around<'a> {
     pub queue: &'a Queue,
     pub tags: &'a Tags,
+    /// Its keys strike the key map, where this face of this document shows one.
+    pub played: &'a Played,
 }
 
 /// What a document's frame asked the app for.
@@ -180,31 +184,6 @@ enum Asked {
     Open(crate::browser::Item),
     /// The Advanced link under a section the instrument is not using.
     Advanced,
-}
-
-/// Whether an ask is a row's own request to draw its audio rather than an act of the
-/// operator's.
-trait Unasked {
-    fn unasked(&self) -> bool;
-}
-
-impl Unasked for Asked {
-    fn unasked(&self) -> bool {
-        match self {
-            Asked::Zone(ask) => ask.unasked(),
-            Asked::Root(ask) => ask.unasked(),
-            Asked::Encode | Asked::Export | Asked::Open(_) | Asked::Advanced => false,
-        }
-    }
-}
-
-/// The one of two asks a frame answers: the operator's act before a row's own request,
-/// which the row makes again next frame. Otherwise the first.
-fn prefer<T: Unasked>(first: Option<T>, then: Option<T>) -> Option<T> {
-    match (first, then) {
-        (Some(first), Some(then)) if first.unasked() && !then.unasked() => Some(then),
-        (first, then) => first.or(then),
-    }
 }
 
 /// What one open document keeps between frames.
@@ -288,7 +267,7 @@ pub struct Document {
     advanced: Advanced,
     /// The audio of the zones open rows have shown, dropped when their strokes change.
     audio: sample::Cache,
-    /// Which zone is sounding, and the one backend that makes it sound.
+    /// Which zones are sounding, and the one backend that makes them sound.
     player: crate::audio::Player,
     /// The piano library's plan, the facts it is a plan over, and its decoded strokes.
     ///
@@ -308,6 +287,7 @@ impl Document {
         log: &mut Log,
         around: &Around<'_>,
     ) -> Wants {
+        let played = around.played;
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
@@ -335,12 +315,13 @@ impl Document {
         if let Some(open) = &mut self.open {
             sample::follow(&mut open.sample, id, &entity.saved);
         }
-        self.player.settle();
-        if let Some(left) = self.piano.settle(ui.input(|input| input.time)) {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        // A release is heard whatever face is showing: the key it lets go of may have
+        // been struck on another.
+        for key in &played.released {
+            self.player.release(*key);
         }
-        if self.player.playing().is_some() {
+        self.player.settle();
+        if self.player.sounding().next().is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -408,7 +389,7 @@ impl Document {
         };
         let mut details = None;
         let mut typed = false;
-        let mut asked = None;
+        let mut asked = Vec::new();
         let mut lookup = piano_lookup(entity, registry.as_deref(), device);
         // A `Ui` of its own rather than a `Frame`: the margin is the same, and the
         // salted id keeps the body's scroll state answering to one name whatever the
@@ -429,7 +410,7 @@ impl Document {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
             }
             if face == Face::Basic {
-                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets);
+                asked = self.pinned(ui, asset, doc.as_ref(), &mut sets, played);
             }
             egui::ScrollArea::vertical()
                 .id_salt(SCROLL)
@@ -450,7 +431,7 @@ impl Document {
                                 },
                                 &mut sets,
                             );
-                            asked = prefer(asked.take(), from_body);
+                            asked.extend(from_body);
                         }
                         // What the file says about itself, the record of the bytes
                         // it is, then the body itself — the longest of the three last.
@@ -476,14 +457,15 @@ impl Document {
                 device.send(cmd, log);
             }
         }
-        match asked {
-            Some(Asked::Open(item)) => wants.open = Some(item),
-            Some(Asked::Advanced) => {
-                self.views.insert(id, Face::Advanced);
+        for asked in asked {
+            match asked {
+                Asked::Open(item) => wants.open = Some(item),
+                Asked::Advanced => {
+                    self.views.insert(id, Face::Advanced);
+                }
+                Asked::Export => self.export(ui.ctx(), id, workspace),
+                asked => self.answer(id, asked, workspace, log),
             }
-            Some(Asked::Export) => self.export(ui.ctx(), id, workspace),
-            Some(asked) => self.answer(id, asked, workspace, log),
-            None => {}
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
             match lookup.asked {
@@ -668,11 +650,14 @@ impl Document {
         }
     }
 
-    /// The root the speakers are on, where it is this document's.
-    fn sounding_root(&self) -> Option<u8> {
-        let (id, root) = self.player.playing()?;
-        (Some(id) == self.opened()).then_some(())?;
-        u8::try_from(root).ok()
+    /// The roots sounding, where they are this document's.
+    fn sounding_roots(&self) -> Vec<u8> {
+        let opened = self.opened();
+        self.player
+            .sounding()
+            .filter(|(id, _)| Some(*id) == opened)
+            .filter_map(|(_, root)| u8::try_from(root).ok())
+            .collect()
     }
 
     /// Nothing is open any more.
@@ -708,8 +693,8 @@ impl Document {
                 setlist::ui(ui, &mut open.list, asset.entity, seen, sets).map(Asked::Open)
             }
             Shape::Piano => {
-                let sounding = self.sounding_root();
-                self.piano.ui(ui, sounding).map(Asked::Root)
+                let sounding = self.sounding_roots();
+                self.piano.ui(ui, &sounding).map(Asked::Root)
             }
             Shape::Fields => {
                 let open = self.open.as_mut()?;
@@ -753,12 +738,11 @@ impl Document {
                 return None;
             }
         };
-        let sounding = self.player.playing();
         let target = self.opened();
         let sounds: Vec<sample::Sound> = (0..snapshot.zones.len())
             .map(|index| sample::Sound {
                 decoded: self.audio.get(index),
-                playing: sounding == target.map(|id| (id, index)),
+                playing: target.is_some_and(|id| self.player.sounds((id, index))),
             })
             .collect();
         let open = self.open.as_mut()?;
@@ -837,28 +821,44 @@ impl Document {
         asset: Asset<'_>,
         doc: Option<&field::Doc<'_>>,
         sets: &mut Sets,
-    ) -> Option<Asked> {
+        played: &Played,
+    ) -> Vec<Asked> {
+        if asset.shape == Shape::Piano {
+            return self
+                .piano
+                .map(ui, played)
+                .into_iter()
+                .map(Asked::Root)
+                .collect();
+        }
+        let (Some(open), Some(decoded)) = (self.open.as_mut(), asset.decoded()) else {
+            return Vec::new();
+        };
         match asset.shape {
             Shape::Fields => {
-                field::nav(ui, &mut self.open.as_mut()?.fields, doc?);
-                None
-            }
-            Shape::Piano => self.piano.map(ui).map(Asked::Root),
-            Shape::Sample => match sample::snapshot(asset.decoded()?)? {
-                Ok(snapshot) => {
-                    let open = self.open.as_mut()?;
-                    sample::map(ui, &mut open.sample, &snapshot, sets).map(Asked::Zone)
+                if let Some(doc) = doc {
+                    field::nav(ui, &mut open.fields, doc);
                 }
-                Err(_) => None,
-            },
+            }
+            Shape::Sample => {
+                if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
+                    let asks = sample::map(ui, &mut open.sample, &snapshot, sets, played);
+                    return asks.into_iter().map(Asked::Zone).collect();
+                }
+            }
             Shape::Project => {
-                if let Some(Ok(snapshot)) = project::snapshot(asset.decoded()?) {
-                    project::map(ui, &mut self.open.as_mut()?.sample, &snapshot, sets);
+                if let Some(Ok(snapshot)) = project::snapshot(decoded) {
+                    project::map(ui, &mut open.sample, &snapshot, sets, played);
                 }
-                None
             }
-            Shape::SetList | Shape::Text | Shape::Verbatim | Shape::Wav | Shape::Undecoded => None,
+            Shape::Piano
+            | Shape::SetList
+            | Shape::Text
+            | Shape::Verbatim
+            | Shape::Wav
+            | Shape::Undecoded => {}
         }
+        Vec::new()
     }
 
     /// Do what the Basic view asked for, now that nothing is borrowing the asset.
@@ -872,7 +872,11 @@ impl Document {
                     self.audio.decode(decoded, zone);
                 }
             }
-            Asked::Zone(sample::Ask::Strike { zone, semitones }) => {
+            Asked::Zone(sample::Ask::Strike {
+                zone,
+                semitones,
+                finger,
+            }) => {
                 if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
                     self.audio.decode(decoded, zone);
                 }
@@ -881,6 +885,7 @@ impl Document {
                 };
                 let rate = crate::audio::rate(semitones);
                 if let Err(why) = self.player.strike(
+                    finger,
                     (id, zone),
                     &decoded.audio.samples,
                     decoded.audio.channels,
@@ -893,8 +898,8 @@ impl Document {
             Asked::Zone(sample::Ask::Play(zone)) => {
                 // ⚠️ An edit drops the decode of a zone that goes on sounding, so
                 // stopping the one that is sounding cannot wait on audio in hand.
-                if self.player.playing() == Some((id, zone)) {
-                    self.player.stop();
+                if self.player.sounds((id, zone)) {
+                    self.player.silence((id, zone));
                 } else if let Some(Ok(decoded)) = self.audio.get(zone) {
                     if let Err(why) = self.player.toggle(
                         (id, zone),
@@ -967,12 +972,17 @@ impl Document {
                     log.trouble("This computer would not play that root.");
                 }
             }
-            piano::Ask::Strike { semitones, .. } => {
+            piano::Ask::Strike {
+                semitones, finger, ..
+            } => {
                 let rate = crate::audio::rate(semitones);
-                if let Err(why) =
-                    self.player
-                        .strike((id, usize::from(root)), sound.samples, sound.channels, rate)
-                {
+                if let Err(why) = self.player.strike(
+                    finger,
+                    (id, usize::from(root)),
+                    sound.samples,
+                    sound.channels,
+                    rate,
+                ) {
                     log.error(why);
                     log.trouble("This computer would not play that root.");
                 }
@@ -1514,6 +1524,7 @@ mod tests {
                         &Around {
                             queue: &self.queue,
                             tags: &self.tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -1542,6 +1553,7 @@ mod tests {
                         &Around {
                             queue: &self.queue,
                             tags: &self.tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -2369,6 +2381,7 @@ mod tests {
                         &Around {
                             queue: &queue,
                             tags: &tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -2563,6 +2576,7 @@ mod tests {
                         &Around {
                             queue: &queue,
                             tags: &tags,
+                            played: &Played::default(),
                         },
                     );
                 });
@@ -3156,33 +3170,6 @@ mod tests {
             .as_ref()
             .expect("the zone decodes");
         assert!(std::ptr::eq(before, after), "the zone was decoded again");
-    }
-
-    /// A struck key or a clicked control goes before an open row's own request for its
-    /// waveform, which the row makes again the next frame.
-    #[test]
-    fn an_act_goes_before_a_rows_request_for_its_waveform() {
-        let struck = sample::Ask::Strike {
-            zone: 1,
-            semitones: 2,
-        };
-        let asked = prefer(
-            Some(Asked::Zone(struck)),
-            Some(Asked::Zone(sample::Ask::Decode(0))),
-        );
-        assert!(matches!(asked, Some(Asked::Zone(ask)) if ask == struck));
-
-        let asked = prefer(
-            Some(Asked::Root(piano::Ask::Show(60))),
-            Some(Asked::Root(piano::Ask::Play(48))),
-        );
-        assert!(matches!(asked, Some(Asked::Root(piano::Ask::Play(48)))));
-
-        let asked = prefer(
-            Some(Asked::Zone(sample::Ask::Decode(0))),
-            Some(Asked::Zone(sample::Ask::Decode(1))),
-        );
-        assert!(matches!(asked, Some(Asked::Zone(sample::Ask::Decode(0)))));
     }
 
     /// ⚠️ A zone index belongs to the instrument it was opened on. Leaving the tab

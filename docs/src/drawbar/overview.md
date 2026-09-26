@@ -39,6 +39,27 @@ Folders group sounds on this computer; the instrument never sees them. Tags labe
 sounds without moving them, and a sound can carry several. Both come from a row's
 menu or the **New** menu. Removing a folder or a tag deletes no sounds.
 
+## MIDI controllers
+
+**Instrument ▸ Listen to MIDI controllers** turns on every MIDI input this
+computer has. [What is supported](../getting-started/support.md#midi-controllers)
+says which browsers can. While it is on, the top right of the window names the
+controller you are playing, or how many there are, with a green light. The light
+is yellow while the browser asks for access, when there is no input, or when
+another program is holding one. It is red when listening failed. Hover it for the details, and the activity log says why a
+failure happened.
+
+The keys play the key map of the sample or piano open in front, as clicks on it
+would. Hold a chord and each key sounds until you let it go. Up to sixteen keys
+sound at once, and a seventeenth stops the oldest. A click on the keyboard sounds
+one key at a time. With the Library or the Keyboard tab in front, played keys are
+ignored.
+
+Nothing is sent to your instrument: a controller plays drawbar's own audition.
+The desktop app listens again the next time it opens. The browser asks for access
+each visit, so turn it on again there. If another program is using a controller,
+close that program and turn listening off and on again.
+
 ## Theme
 
 The button at the top right cycles between following your system, light, and

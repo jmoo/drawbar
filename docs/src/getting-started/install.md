@@ -6,7 +6,8 @@ Open [drawbar.app](https://drawbar.app/). Nothing to install, and your files sta
 in the browser's own storage.
 
 Only Chrome and Edge can connect to an instrument, because Firefox and Safari do
-not support WebUSB. Files work in any browser.
+not support WebUSB. Files work in any browser. Which browsers can play the key
+maps from a MIDI controller is on [What is supported](support.md#midi-controllers).
 
 Close Nord Sound Manager before connecting. It keeps the USB connection to
 itself, so nothing else can reach the instrument while it is running.

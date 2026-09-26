@@ -26,14 +26,16 @@ use nord_usb::ObjectClass;
 
 use super::capability::{self, Offset, Row, State as Cap};
 use super::controls::{self, Sets};
-use super::keys::{self, Audition, Scale, SizeCell, Span};
+use super::keys::{self, Audition, Scale, SizeCell, Span, Struck};
 use super::sample;
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
+use crate::audio::Finger;
 use crate::browser::Act;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
+use crate::midi;
 use crate::room;
 use crate::work;
 use crate::workspace::{LocalEntity, Workspace};
@@ -963,12 +965,14 @@ fn picked(root: u8, stroke: &npno::Stroke<'_>) -> Pick {
 pub enum Ask {
     /// Draw this root, because an open row is showing its waveform.
     Show(u8),
-    /// Start this root, or stop it if it is the one sounding.
+    /// Start this root, or stop it where it is sounding.
     Play(u8),
-    /// Sound this root for a struck key, `semitones` from the root it was recorded at.
+    /// Sound this root for a struck key, `semitones` from the root it was recorded at,
+    /// on `finger`'s voice.
     Strike {
         root: u8,
         semitones: i16,
+        finger: Finger,
     },
     Save(u8),
 }
@@ -978,12 +982,6 @@ impl Ask {
         match self {
             Ask::Show(root) | Ask::Play(root) | Ask::Save(root) | Ask::Strike { root, .. } => root,
         }
-    }
-}
-
-impl super::Unasked for Ask {
-    fn unasked(&self) -> bool {
-        matches!(self, Ask::Show(_))
     }
 }
 
@@ -1800,6 +1798,8 @@ fn mb(bytes: u64) -> f32 {
 
 /// What the keyboard last played, as the line under it reads: whether it sounded, and
 /// the sentence.
+/// A strike sounds the loudest kept attack layer however hard the key was played, so
+/// the line names no velocity.
 fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
     let silent = |why: &str| (false, format!("{} — {why}", note::name(key)));
     let answers = plan
@@ -1823,9 +1823,8 @@ fn status(facts: &Facts, plan: &Plan, key: u8) -> (bool, String) {
         .filter(|layer| plan.keeps_layer(root.note, *layer))
         .collect();
     let said = format!(
-        "{} at vel {} → root {} · {}",
+        "{} → root {} · {}",
         note::name(key),
-        keys::AUDITION_VELOCITY,
         note::name(root.note),
         keys::shifted(key, root.note),
     );
@@ -1900,7 +1899,9 @@ fn coverage(gaps: &[(u8, u8)]) -> String {
 impl State {
     /// The key map, pinned above the body: one cell per root over a clickable keyboard,
     /// and a line saying what the last key played.
-    pub fn map(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
+    ///
+    /// A key `played` on a controller is answered exactly as a click on it.
+    pub fn map(&mut self, ui: &mut egui::Ui, played: &midi::Played) -> Vec<Ask> {
         self.summarise();
         let State {
             open,
@@ -1909,14 +1910,36 @@ impl State {
             summary,
             ..
         } = self;
-        let facts = match &open.as_ref()?.facts {
+        let Some(open) = open else {
+            return Vec::new();
+        };
+        let facts = match &open.facts {
             Ok(facts) => facts,
             Err(why) => {
                 ui.label(egui::RichText::new(why).color(app::bad(ui.visuals())));
-                return None;
+                return Vec::new();
             }
         };
-        let summary = summary.as_ref()?;
+        let Some(summary) = summary else {
+            return Vec::new();
+        };
+        let now = ui.input(|input| input.time);
+        if view
+            .audition
+            .as_ref()
+            .is_some_and(|held| !held.live(now, &played.down))
+        {
+            view.audition = None;
+        }
+        let mut asks: Vec<Ask> = played
+            .struck
+            .iter()
+            .filter(|struck| SPAN.contains(struck.note))
+            .filter_map(|struck| {
+                let finger = Finger::Key(struck.note);
+                strike(facts, draft, view, *struck, finger, now)
+            })
+            .collect();
 
         let ink = match summary.silent.is_empty() {
             true => app::good(ui.visuals()),
@@ -1935,8 +1958,8 @@ impl State {
             Some((&reading, ink)),
         );
 
-        let lit = view.audition.as_ref().map(|struck| struck.note);
-        let answering = lit.and_then(|note| draft.answers(facts, note));
+        let last = view.audition.as_ref().map(|held| held.struck);
+        let answering = last.and_then(|struck| draft.answers(facts, struck.note));
         let of_root = &summary.of_root;
         let marks: Vec<keys::Mark> = facts
             .roots
@@ -1971,39 +1994,25 @@ impl State {
             inner.next_widget_position(),
             egui::vec2(inner.available_width().max(1.0), keys::KEYBOARD_H),
         );
-        let struck = keys::keyboard(&mut inner, SPAN, lit, &marks);
+        // The chip names no velocity, for the reason the line under it names none.
+        let chip = last.map(|struck| (struck.note, note::name(struck.note)));
+        let clicked = keys::keyboard(
+            &mut inner,
+            SPAN,
+            &keys::lit(view.audition.as_ref(), &played.down),
+            chip.as_ref().map(|(note, said)| (*note, said.as_str())),
+            &marks,
+        );
         damper_mark(
             &inner,
             keyboard,
             draft.damper_top.unwrap_or(facts.damper_top),
         );
-        let room = inner.available_rect_before_wrap().width();
-        let (line, _) = inner.allocate_exact_size(egui::vec2(room, LANE), egui::Sense::hover());
-        if let Some(note) = lit {
-            let (good, said) = status(facts, draft, note);
-            let (glyph, ink) = match good {
-                true => (Glyph::AudioLines, app::good(inner.visuals())),
-                false => (Glyph::CircleAlert, app::warn(inner.visuals())),
-            };
-            painted(
-                &inner,
-                glyph,
-                egui::Rect::from_center_size(
-                    egui::pos2(line.left() + 6.0, line.center().y),
-                    egui::Vec2::splat(12.0),
-                ),
-                ink,
-            );
-            cell(
-                inner.painter(),
-                line.left() + 19.0,
-                line.center().y,
-                line.width() - 19.0,
-                &said,
-                egui::FontId::proportional(11.0),
-                inner.visuals().weak_text_color(),
-            );
-        }
+        let said = last.map(|struck| status(facts, draft, struck.note));
+        keys::line(
+            &mut inner,
+            said.as_ref().map(|(good, said)| (*good, said.as_str())),
+        );
         let drawn = inner.min_rect();
         ui.advance_cursor_after_rect(drawn);
         hairline(ui, drawn.expand2(egui::vec2(0.0, 4.0)));
@@ -2025,31 +2034,39 @@ impl State {
             }
             None => {}
         }
-        let note = struck?;
-        view.audition = Some(Audition::new(note, ui.input(|input| input.time)));
-        // Only a key that sounds is asked for. A root with nothing left to play would
-        // answer with the codec's refusal, and the line under the keyboard is where
-        // silence is explained.
-        let (sounds, _) = status(facts, draft, note);
-        let root = draft.answers(facts, note).filter(|_| sounds)?;
-        let root = facts.roots[root].note;
-        Some(Ask::Strike {
-            root,
-            semitones: i16::from(note) - i16::from(root),
-        })
-    }
-
-    /// Let go of an audition whose hold is up, and answer with how long a live one has
-    /// left — the caller asks for the frame that will clear it.
-    pub fn settle(&mut self, now: f64) -> Option<f64> {
-        let struck = self.view.audition.as_ref()?;
-        let left = Audition::HOLD - (now - struck.started);
-        if left <= 0.0 {
-            self.view.audition = None;
-            return None;
+        if let Some(struck) = clicked {
+            asks.extend(strike(facts, draft, view, struck, Finger::Pointer, now));
         }
-        Some(left)
+        if let Some(left) = view.audition.as_ref().and_then(|held| held.left(now)) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
+        asks
     }
+}
+
+/// Answer a struck key: describe it, and sound the root that answers it where one does.
+///
+/// Only a key that sounds is asked for. A root with nothing left to play would answer
+/// with the codec's refusal, and the line under the keyboard is where silence is
+/// explained.
+fn strike(
+    facts: &Facts,
+    plan: &Plan,
+    view: &mut View,
+    struck: Struck,
+    finger: Finger,
+    now: f64,
+) -> Option<Ask> {
+    view.audition = Some(Audition::new(struck, finger, now));
+    let (sounds, _) = status(facts, plan, struck.note);
+    let root = plan.answers(facts, struck.note).filter(|_| sounds)?;
+    let root = facts.roots[root].note;
+    Some(Ask::Strike {
+        root,
+        semitones: i16::from(struck.note) - i16::from(root),
+        finger,
+    })
 }
 
 /// What throwing one switch row of the trim section does. The range is a switch of its
@@ -2794,7 +2811,7 @@ fn roots(
     summary: &Summary,
     view: &mut View,
     audio: &Cache,
-    sounding: Option<u8>,
+    sounding: &[u8],
 ) -> Option<Ask> {
     const COL_A: f32 = 56.0;
     const SIZE_W: f32 = 74.0;
@@ -3029,7 +3046,7 @@ fn open_row(
     index: usize,
     runs: &[(u8, u8)],
     audio: &Cache,
-    sounding: Option<u8>,
+    sounding: &[u8],
 ) -> Option<Opened> {
     let mut asked = None;
     let root = &facts.roots[index];
@@ -3134,7 +3151,7 @@ fn open_row(
             }
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             ui.horizontal_wrapped(|ui| {
-                let playing = sounding == Some(root.note);
+                let playing = sounding.contains(&root.note);
                 let (glyph, label) = match playing {
                     true => (Glyph::X, "Stop"),
                     false => (Glyph::AudioLines, "Audition"),
@@ -3149,7 +3166,7 @@ fn open_row(
                     asked = Some(Opened::Drop);
                 }
             });
-            let shown = wave(ui, audio, root.note, sounding == Some(root.note));
+            let shown = wave(ui, audio, root.note, sounding.contains(&root.note));
             asked = asked.take().or(shown.map(Opened::Audio));
         });
     asked
@@ -3338,7 +3355,7 @@ fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
 impl State {
     /// The Basic face under the key map: what is kept, which layers, which roots, and
     /// the per-key tune.
-    pub fn ui(&mut self, ui: &mut egui::Ui, sounding: Option<u8>) -> Option<Ask> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, sounding: &[u8]) -> Option<Ask> {
         self.summarise();
         let id = self.open.as_ref()?.id;
         let saying =
@@ -4512,13 +4529,7 @@ mod tests {
         let mut plan = plan();
         let (good, said) = status(&facts, &plan, 61);
         assert!(good);
-        assert_eq!(
-            said,
-            format!(
-                "C#4 at vel {} → root C4 · shifted +1 st",
-                keys::AUDITION_VELOCITY
-            )
-        );
+        assert_eq!(said, "C#4 → root C4 · shifted +1 st");
 
         // With the loudest layer of that root dropped, the next kept one plays.
         plan.roots.insert((60, LAYERS[0]), false);
@@ -4639,6 +4650,8 @@ mod tests {
         log: Log,
         state: State,
         id: u64,
+        /// What a MIDI controller plays in each frame from here on.
+        played: midi::Played,
     }
 
     /// What one frame put on screen, and what it asked for.
@@ -4651,7 +4664,7 @@ mod tests {
         /// Every lamp, in the order they were drawn: the trim switches, then one per
         /// lane, then the ones on each root's row.
         lamps: Vec<egui::Rect>,
-        asked: Option<Ask>,
+        asked: Vec<Ask>,
     }
 
     impl Painted {
@@ -4700,6 +4713,7 @@ mod tests {
                 log,
                 state: State::default(),
                 id,
+                played: midi::Played::default(),
             }
         }
 
@@ -4756,7 +4770,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let mut asked = None;
+            let mut asked = Vec::new();
             let mut edit = Some(edit);
             let output = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -4765,8 +4779,8 @@ mod tests {
                     if let Some(edit) = edit.take() {
                         edit(&mut self.state.draft);
                     }
-                    let pinned = self.state.map(ui);
-                    asked = super::super::prefer(pinned, self.state.ui(ui, None));
+                    asked = self.state.map(ui, &self.played);
+                    asked.extend(self.state.ui(ui, &[]));
                 });
             });
             // What [`Document::replan`] does with the plan a frame left behind: try it
@@ -4867,18 +4881,70 @@ mod tests {
         let struck = editor.frame(press(at));
         assert_eq!(
             struck.asked,
-            Some(Ask::Strike {
+            [Ask::Strike {
                 root: 60,
-                semitones: 2
-            }),
+                semitones: 2,
+                finger: Finger::Pointer,
+            }],
             "root C4 answers D4, two semitones up"
         );
 
         let after = editor.frame(Vec::new());
         assert!(
-            after.said("D4 at vel 90 → root C4 · shifted +2 st"),
+            after.said("D4 → root C4 · shifted +2 st"),
             "{:?}",
             after.words
+        );
+    }
+
+    #[test]
+    fn a_played_chord_asks_for_the_roots_clicks_on_it_would() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.frame(Vec::new());
+
+        let struck = |note, velocity| Struck { note, velocity };
+        editor.played = midi::Played {
+            struck: vec![struck(60, 118), struck(62, 20)],
+            released: Vec::new(),
+            down: vec![60, 62],
+        };
+        let chord = editor.frame(Vec::new());
+        assert_eq!(
+            chord.asked,
+            [
+                Ask::Strike {
+                    root: 60,
+                    semitones: 0,
+                    finger: Finger::Key(60),
+                },
+                Ask::Strike {
+                    root: 60,
+                    semitones: 2,
+                    finger: Finger::Key(62),
+                },
+            ]
+        );
+
+        editor.played.struck.clear();
+        let held = editor.frame(Vec::new());
+        assert!(held.asked.is_empty(), "a held key strikes once");
+        assert!(
+            held.said("D4 → root C4 · shifted +2 st"),
+            "the line describes the last key struck: {:?}",
+            held.words
+        );
+        assert!(
+            !held.words.iter().any(|word| word.contains("vel")),
+            "a piano strike plays its loudest kept layer whatever the velocity: {:?}",
+            held.words
+        );
+
+        editor.played.down = vec![60];
+        let let_go = editor.frame(Vec::new());
+        assert!(
+            !let_go.said("D4 → root C4 · shifted +2 st"),
+            "a key let go is no longer described: {:?}",
+            let_go.words
         );
     }
 
@@ -5365,7 +5431,7 @@ mod tests {
         editor.state.view.open_rows.insert(0);
         assert_eq!(
             editor.frame(Vec::new()).asked,
-            Some(Ask::Show(ROOTS[0])),
+            [Ask::Show(ROOTS[0])],
             "the open row asks for its own stroke",
         );
 
@@ -5380,7 +5446,7 @@ mod tests {
             .expect("the stroke decoded");
         assert_eq!(drawn.len(), sample::COLUMNS);
         assert!(
-            editor.frame(Vec::new()).asked.is_none(),
+            editor.frame(Vec::new()).asked.is_empty(),
             "the picture is drawn from the cache rather than asked for again",
         );
 
@@ -5392,7 +5458,7 @@ mod tests {
         });
         let kept = editor.frame(Vec::new());
         assert!(
-            kept.asked.is_none() && !kept.said("reading the stroke…"),
+            kept.asked.is_empty() && !kept.said("reading the stroke…"),
             "a rename, a retune and a trim leave the stroke it was drawn from: {:?}",
             kept.asked,
         );
@@ -5402,7 +5468,7 @@ mod tests {
         });
         assert_eq!(
             editor.frame(Vec::new()).asked,
-            Some(Ask::Show(ROOTS[0])),
+            [Ask::Show(ROOTS[0])],
             "the loudest layer it was drawn from is gone",
         );
     }
@@ -5417,10 +5483,10 @@ mod tests {
         editor.state.view.open_rows.insert(0);
         let waiting = editor.frame(Vec::new());
         assert!(waiting.said("reading the stroke…"), "{:?}", waiting.words);
-        assert_eq!(waiting.asked, Some(Ask::Show(ROOTS[0])));
+        assert_eq!(waiting.asked, [Ask::Show(ROOTS[0])]);
 
         let clicked = editor.frame(press(waiting.at("Audition").center()));
-        assert_eq!(clicked.asked, Some(Ask::Play(ROOTS[0])));
+        assert_eq!(clicked.asked, [Ask::Play(ROOTS[0])]);
     }
 
     /// Checking a plan and laying it out are the same edit: the body the borrowed

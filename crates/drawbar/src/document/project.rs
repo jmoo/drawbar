@@ -27,6 +27,7 @@ use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
 use crate::app;
+use crate::midi::Played;
 
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {
@@ -286,21 +287,28 @@ const SPAN: keys::Span = keys::Span {
 };
 
 /// The pinned key map over a project's zones.
-pub fn map(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot, sets: &mut Sets) {
+pub fn map(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    snapshot: &Snapshot,
+    sets: &mut Sets,
+    played: &Played,
+) {
     let zones = map_zones(snapshot);
-    let Some(act) = sample::key_map(
+    let acts = sample::key_map(
         ui,
         state,
         &zones,
         SPAN,
         keys::Edges::Both,
         Sounds::NotUntilBuilt,
-    ) else {
-        return;
-    };
-    // A project has nothing to sound, so a struck key is a reading and never a write.
-    if let MapAct::Bounds(bounds) = act {
-        sets.extend(moved(&snapshot.zones, &bounds));
+        played,
+    );
+    for act in acts {
+        // A project has nothing to sound, so a struck key is a reading and never a write.
+        if let MapAct::Bounds(bounds) = act {
+            sets.extend(moved(&snapshot.zones, &bounds));
+        }
     }
 }
 
@@ -951,7 +959,7 @@ mod tests {
         let output = ctx.run(input, |ctx| {
             ctx.style_mut(crate::app::metrics);
             egui::CentralPanel::default().show(ctx, |ui| {
-                map(ui, state, snapshot, &mut sets);
+                map(ui, state, snapshot, &mut sets, &Played::default());
             });
         });
         let mut said = Vec::new();

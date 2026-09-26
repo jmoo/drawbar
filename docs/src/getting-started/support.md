@@ -22,6 +22,13 @@ works on the Electro 5 from macOS, Linux and the browser. Windows builds pass th
 protocol tests but have not been run against an instrument. No other instrument
 has been connected, so USB support for other models cannot be guaranteed.
 
+## MIDI controllers
+
+The sample and piano key maps can be played from a MIDI controller. The desktop
+app listens on every MIDI input the computer has. In the browser, Chrome, Edge
+and Firefox can hear a controller. Safari cannot, so drawbar greys out the menu
+item there. Firefox asks you to allow MIDI access for the site first.
+
 ## What "tested" means
 
 Every file drawbar writes is read back and checked to be identical, byte for

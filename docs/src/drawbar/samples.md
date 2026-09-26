@@ -11,8 +11,11 @@ keys nothing answers are hatched. Drag a band's edge to move it. The older v2
 layout stores only each zone's top note, so dragging one moves its neighbour too.
 The v3 and v4 layouts let you pull zones apart and leave keys silent.
 
-Click a key to hear it. The line under the keyboard says which zone answered and
-by how much it was shifted, or why the key is silent.
+Click a key to hear it, or play the keys on a
+[MIDI controller](overview.md#midi-controllers). The line under the keyboard says
+which zone answered the last key and by how much it was shifted, or why the key
+is silent. A played key sounds at the velocity you played it, which is the
+velocity a zone's window is tested against.
 
 ## Zones
 

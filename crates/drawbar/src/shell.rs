@@ -386,6 +386,65 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
+/// How the title bar reads MIDI in: a few words, the lamp beside them, and the whole of
+/// it on hover. Nothing while it is off.
+///
+/// ⚠️ A failure is named and no more. Its own words are the browser's or the driver's,
+/// and they are in the activity log.
+fn midi_reading(
+    state: &crate::midi::State,
+    visuals: &egui::Visuals,
+) -> Option<(String, egui::Color32, String)> {
+    use crate::midi::State;
+
+    match state {
+        State::Off => None,
+        State::Asking => Some((
+            "MIDI".to_string(),
+            crate::app::warn(visuals),
+            "Asking this browser for access to MIDI controllers.".to_string(),
+        )),
+        State::Failed(_) => Some((
+            "MIDI failed".to_string(),
+            crate::app::bad(visuals),
+            "drawbar could not listen to MIDI controllers. The activity log says why.".to_string(),
+        )),
+        State::On { ports, refused } => Some(listening(ports, refused, visuals)),
+    }
+}
+
+/// What listening has found: the ports open, and the ones that would not open.
+fn listening(
+    ports: &[String],
+    refused: &[String],
+    visuals: &egui::Visuals,
+) -> (String, egui::Color32, String) {
+    let label = match ports {
+        [] if refused.is_empty() => "No MIDI input".to_string(),
+        [] => "MIDI input busy".to_string(),
+        [one] => one.clone(),
+        many => format!("{} MIDI inputs", many.len()),
+    };
+    let lamp = match (ports.is_empty(), refused.is_empty()) {
+        (false, true) => crate::app::good(visuals),
+        (true, _) | (false, false) => crate::app::warn(visuals),
+    };
+    let heard = match ports.is_empty() {
+        true => {
+            "Listening, but no MIDI input is open. A controller plugged in is heard.".to_string()
+        }
+        false => format!("Listening to {}.", ports.join(", ")),
+    };
+    let busy = match refused.is_empty() {
+        true => String::new(),
+        false => format!(
+            " Could not open {}; another program may be using it.",
+            refused.join(", ")
+        ),
+    };
+    (label, lamp, format!("{heard}{busy}"))
+}
+
 /// What a click on one of the bottom dock's page titles asks for.
 ///
 /// ⚠️ The title of the page already showing shuts the dock. It is the only way out that
@@ -410,20 +469,30 @@ pub fn marked(
     on: bool,
     shortcut: Option<egui::KeyboardShortcut>,
 ) -> bool {
-    let tint = match on {
-        true => accent(ui.visuals()),
-        false => egui::Color32::TRANSPARENT,
-    };
-    let mut button = egui::Button::image_and_text(sized(Glyph::Check, CHECK, tint), label)
-        .image_tint_follows_text_color(false);
-    if let Some(shortcut) = shortcut {
-        button = button.shortcut_text(keyed(ui.ctx(), shortcut));
-    }
-    let clicked = ui.add(button).clicked();
+    let clicked = ui.add(check(ui, label, on, shortcut)).clicked();
     if clicked {
         ui.close();
     }
     clicked
+}
+
+/// The button behind [`marked`], for an item that is sometimes offered disabled.
+fn check<'a>(
+    ui: &egui::Ui,
+    label: &'a str,
+    on: bool,
+    shortcut: Option<egui::KeyboardShortcut>,
+) -> egui::Button<'a> {
+    let tint = match on {
+        true => accent(ui.visuals()),
+        false => egui::Color32::TRANSPARENT,
+    };
+    let button = egui::Button::image_and_text(sized(Glyph::Check, CHECK, tint), label)
+        .image_tint_follows_text_color(false);
+    match shortcut {
+        Some(shortcut) => button.shortcut_text(keyed(ui.ctx(), shortcut)),
+        None => button,
+    }
 }
 
 /// One of the toolbar's labelled actions.
@@ -525,6 +594,7 @@ impl DrawbarApp {
                         flat(ui);
                         self.theme_chip(ui, frame);
                         self.instrument_chip(ui);
+                        self.midi_chip(ui);
                     });
                 });
             });
@@ -550,6 +620,25 @@ impl DrawbarApp {
                 );
                 crate::app::dot(ui, lit, 9.0).on_hover_text("attached");
             });
+    }
+
+    /// The MIDI controllers listened to, and whether they answer: the whole of it on
+    /// hover. Nothing while MIDI is off.
+    fn midi_chip(&self, ui: &mut egui::Ui) {
+        let Some((label, lamp, detail)) = midi_reading(&self.midi.state(), ui.visuals()) else {
+            return;
+        };
+        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(6, 2))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                icon(ui, Glyph::Piano, GLYPH, ink);
+                ui.label(egui::RichText::new(label).text_style(ui_text()).color(ink));
+                crate::app::dot(ui, lamp, 9.0);
+            })
+            .response
+            .on_hover_text(detail);
     }
 
     fn theme_chip(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -748,9 +837,37 @@ impl DrawbarApp {
         });
     }
 
+    /// The instrument, and then the MIDI controllers that play drawbar's own audition.
+    fn instrument_menu(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        self.usb_items(ui, acts);
+        ui.separator();
+        self.midi_item(ui);
+    }
+
+    /// Listening to MIDI controllers, on or off, for the whole app.
+    ///
+    /// ⚠️ Started from the click itself. A browser tab may only ask the reader for MIDI
+    /// access while the click's user activation is live.
+    fn midi_item(&mut self, ui: &mut egui::Ui) {
+        let on = self.midi.on();
+        let button = check(ui, "Listen to MIDI controllers", on, None);
+        let picked = ui
+            .add_enabled(crate::midi::supported(), button)
+            .on_disabled_hover_text(crate::midi::UNSUPPORTED)
+            .clicked();
+        if !picked {
+            return;
+        }
+        ui.close();
+        match on {
+            true => self.midi.stop(),
+            false => self.midi.listen(ui.ctx()),
+        }
+    }
+
     /// ⚠️ Nothing but Connect… until one answers. Every other item here acts on an
     /// instrument, and the send queue is only ever owed to one.
-    fn instrument_menu(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+    fn usb_items(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         if !self.attached() {
             if item(ui, "Connect…", None) {
                 acts.push(Act::Connect);
@@ -1849,5 +1966,56 @@ mod tests {
         shell.restore(&store);
         assert!(!shell.inspector_open);
         assert!(shell.browser_open, "a field nobody wrote keeps its default");
+    }
+
+    #[test]
+    fn the_title_bar_names_the_controllers_heard_and_the_ports_that_would_not_open() {
+        let visuals = egui::Visuals::dark();
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            midi_reading(&crate::midi::State::Off, &visuals).is_none(),
+            "nothing while MIDI is off"
+        );
+
+        let (label, lamp, detail) = listening(&names(&["Launchkey"]), &[], &visuals);
+        assert_eq!(
+            (label.as_str(), detail.as_str()),
+            ("Launchkey", "Listening to Launchkey.")
+        );
+        assert_eq!(lamp, crate::app::good(&visuals));
+
+        let (label, lamp, detail) = listening(
+            &names(&["Launchkey", "Pads"]),
+            &names(&["Keystation"]),
+            &visuals,
+        );
+        assert_eq!(label, "2 MIDI inputs");
+        assert_eq!(
+            detail,
+            "Listening to Launchkey, Pads. Could not open Keystation; another program may \
+             be using it."
+        );
+        assert_eq!(lamp, crate::app::warn(&visuals));
+
+        let (label, lamp, _) = listening(&[], &[], &visuals);
+        assert_eq!(label, "No MIDI input");
+        assert_eq!(lamp, crate::app::warn(&visuals));
+    }
+
+    #[test]
+    fn a_failure_to_listen_is_named_and_its_cause_left_to_the_log() {
+        let visuals = egui::Visuals::dark();
+        let raw = "TypeError: getObject(arg0).requestMIDIAccess is not a function";
+        let (label, lamp, detail) =
+            midi_reading(&crate::midi::State::Failed(raw.to_string()), &visuals)
+                .expect("a failure is shown");
+        assert_eq!(label, "MIDI failed");
+        assert_eq!(lamp, crate::app::bad(&visuals));
+        assert!(!detail.contains("TypeError"), "{detail}");
     }
 }
