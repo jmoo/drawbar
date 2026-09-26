@@ -7,6 +7,7 @@ pub mod about;
 pub mod app;
 pub mod audio;
 pub mod browser;
+pub mod demo;
 pub mod device;
 pub mod document;
 pub mod drawbar_widget;
