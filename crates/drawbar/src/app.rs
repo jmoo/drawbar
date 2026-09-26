@@ -12,6 +12,7 @@ use crate::document::Document;
 use crate::keyboard::Keyboard;
 use crate::library::Library;
 use crate::log::Log;
+use crate::midi::{Midi, Played};
 use crate::queue::Queue;
 use crate::shell::Shell;
 use crate::tabs::{Spot, Tabs};
@@ -165,6 +166,8 @@ pub struct DrawbarApp {
     pub(crate) document: Document,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
+    /// The MIDI controllers listened to, whichever tab is in front.
+    pub(crate) midi: Midi,
     pub(crate) splash: crate::splash::Splash,
     /// The About box while it is showing. Not kept between sessions.
     pub(crate) about: Option<crate::about::About>,
@@ -206,6 +209,7 @@ impl DrawbarApp {
             document: Document::default(),
             log: Log::default(),
             theme,
+            midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
             saved: 0,
@@ -216,6 +220,8 @@ impl DrawbarApp {
             crate::store::load(storage, &mut app.workspace, &mut app.log);
             app.browser.restore(storage);
             app.shell.restore(storage);
+            #[cfg(not(target_arch = "wasm32"))]
+            app.midi.restore(storage, &cc.egui_ctx);
             // Both stores are read; only now does the grouping know what survived.
             app.browser.settle(&app.workspace);
         }
@@ -338,6 +344,8 @@ impl eframe::App for DrawbarApp {
         // moves on every frame of a drag, and the whole store is rewritten each time.
         self.browser.keep(storage);
         self.shell.keep(storage);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.midi.keep(storage);
         self.saved = self.workspace.revision();
     }
 
@@ -377,6 +385,10 @@ impl eframe::App for DrawbarApp {
         // copy of that edit and must survive.
         self.workspace
             .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
+        self.midi.report(&mut self.log);
+        // ⚠️ Taken every frame, whatever is in front: keys played over the library or the
+        // keyboard are dropped rather than left to sound when a document comes forward.
+        let played = self.midi.played(ctx.input(|input| input.time));
         self.take_dropped_files(ctx);
         drop_hint(ctx);
         // Raised by a New pick of WAVs, and answered before anything else this frame
@@ -402,7 +414,7 @@ impl eframe::App for DrawbarApp {
         self.bottom_dock(ctx, &mut acts);
         self.browser_dock(ctx, &mut acts);
         self.inspector_dock(ctx, &mut acts);
-        self.centre(ctx, &mut acts);
+        self.centre(ctx, &played, &mut acts);
 
         // ⚠️ Between the panels and the acts they asked for: a piano library's plan is
         // not in its bytes yet, and whatever would carry those bytes waits here until it
@@ -430,7 +442,10 @@ impl eframe::App for DrawbarApp {
 
 impl DrawbarApp {
     /// The tab strip, and whatever the tab in front is a view of.
-    fn centre(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
+    ///
+    /// Keys `played` on a MIDI controller strike the key map of the document in front,
+    /// and nothing else.
+    fn centre(&mut self, ctx: &egui::Context, played: &Played, acts: &mut Vec<browser::Act>) {
         let fill = ctx.style().visuals.panel_fill;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(fill))
@@ -460,17 +475,24 @@ impl DrawbarApp {
                             &self.tabs,
                         ));
                     }
-                    Some(Spot::Document(id)) => self.open_document(ui, id, acts),
+                    Some(Spot::Document(id)) => self.open_document(ui, id, played, acts),
                 }
             });
     }
 
     /// A document owns its own room: the header is full bleed and the body inside it
     /// keeps the margin.
-    fn open_document(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<browser::Act>) {
+    fn open_document(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: u64,
+        played: &Played,
+        acts: &mut Vec<browser::Act>,
+    ) {
         let around = crate::document::Around {
             queue: &self.queue,
             tags: self.browser.tags(),
+            played,
         };
         let wants = self.document.ui(
             ui,

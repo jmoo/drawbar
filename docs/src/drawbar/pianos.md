@@ -19,8 +19,9 @@ and **Revert** drops it.
 
 Each root has a cell over the keys it answers, showing the megabytes it keeps.
 Drag the boundary between two roots to move keys, and the outer ends to cover or
-uncover keys. Click a key to hear which root answers it. Keys above the damper
-limit are shaded.
+uncover keys. Click a key to hear which root answers it, or play the keys on a
+[MIDI controller](overview.md#midi-controllers). A key sounds the loudest layer
+the plan keeps, however hard you play it. Keys above the damper limit are shaded.
 
 ## Trim to fit
 

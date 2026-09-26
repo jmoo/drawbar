@@ -131,6 +131,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 crates: &[
                     "cgl 0.3.2",
                     "core-foundation 0.9.4",
+                    "core-foundation 0.10.1",
                     "core-foundation-sys 0.8.7",
                     "core-graphics 0.23.2",
                     "core-graphics-types 0.1.3",
@@ -241,6 +242,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2015 Jonas Klesy",
+                crates: &[
+                    "coremidi-sys 3.2.1",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2015 Patrick Reisert and the RtMidi contributors",
+                crates: &[
+                    "midir 0.11.0",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2015 Steven Allen",
                 crates: &[
                     "tempfile 3.27.0",
@@ -304,6 +317,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 notice: "Copyright (c) 2016 Amanieu d'Antras",
                 crates: &[
                     "hashbrown 0.17.1",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2016 Christian Perez-Llamas",
+                crates: &[
+                    "coremidi 0.9.2",
                 ],
             },
             Holder {
@@ -1034,6 +1053,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("alsa", "0.11.0"),
     ("alsa-sys", "0.4.0"),
     ("android-activity", "0.6.1"),
+    ("android-build", "0.1.4"),
     ("android-properties", "0.2.2"),
     ("anstream", "1.0.0"),
     ("anstyle", "1.0.14"),
@@ -1093,10 +1113,13 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("concurrent-queue", "2.5.0"),
     ("console", "0.16.4"),
     ("core-foundation", "0.9.4"),
+    ("core-foundation", "0.10.1"),
     ("core-foundation-sys", "0.8.7"),
     ("core-graphics", "0.23.2"),
     ("core-graphics-types", "0.1.3"),
     ("coreaudio-rs", "0.14.2"),
+    ("coremidi", "0.9.2"),
+    ("coremidi-sys", "3.2.1"),
     ("cpal", "0.17.3"),
     ("crc32fast", "1.5.0"),
     ("crcxx", "0.3.1"),
@@ -1111,6 +1134,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("dispatch2", "0.3.1"),
     ("displaydoc", "0.2.7"),
     ("dlib", "0.5.3"),
+    ("dlopen2", "0.9.0"),
     ("document-features", "0.2.12"),
     ("downcast-rs", "1.2.1"),
     ("dpi", "0.1.2"),
@@ -1160,6 +1184,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("getrandom", "0.3.4"),
     ("getrandom", "0.4.3"),
     ("gl_generator", "0.14.0"),
+    ("glob", "0.3.4"),
     ("glow", "0.16.0"),
     ("glutin", "0.32.3"),
     ("glutin-winit", "0.5.0"),
@@ -1189,9 +1214,11 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("io-kit-sys", "0.4.1"),
     ("is_terminal_polyfill", "1.70.2"),
     ("itoa", "1.0.18"),
+    ("java-locator", "0.1.9"),
     ("jni", "0.21.1"),
     ("jni", "0.22.4"),
     ("jni-macros", "0.22.4"),
+    ("jni-min-helper", "0.3.4"),
     ("jni-sys", "0.3.1"),
     ("jni-sys", "0.4.1"),
     ("jni-sys-macros", "0.4.1"),
@@ -1200,6 +1227,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("khronos_api", "3.1.0"),
     ("kurbo", "0.11.3"),
     ("libc", "0.2.189"),
+    ("libloading", "0.7.4"),
     ("libloading", "0.8.9"),
     ("libm", "0.2.16"),
     ("libredox", "0.1.19"),
@@ -1215,6 +1243,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("memchr", "2.8.3"),
     ("memmap2", "0.9.11"),
     ("memoffset", "0.9.1"),
+    ("midir", "0.11.0"),
     ("miniz_oxide", "0.8.9"),
     ("moxcms", "0.8.1"),
     ("naga", "25.0.1"),
@@ -1282,6 +1311,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("ppv-lite86", "0.2.21"),
     ("proc-macro-crate", "3.5.0"),
     ("proc-macro2", "1.0.107"),
+    ("process_path", "0.1.4"),
     ("profiling", "1.0.18"),
     ("pxfm", "0.1.30"),
     ("quick-error", "2.0.1"),

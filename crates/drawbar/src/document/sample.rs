@@ -28,7 +28,9 @@ use super::header::{Body, Cell};
 use super::keys;
 use super::table::{self, Width, NAME_TEXT, PAD};
 use crate::app;
+use crate::audio::Finger;
 use crate::icon::{icon, Glyph};
+use crate::midi::Played;
 use crate::room;
 use crate::workspace::Baseline;
 
@@ -379,20 +381,15 @@ fn bottom(zones: &[Zone], index: usize) -> Option<u8> {
 pub enum Ask {
     /// Decode this zone, because an open row is drawing its waveform.
     Decode(usize),
-    /// Start it, or stop it if it is the one sounding.
+    /// Start it, or stop it where it is sounding.
     Play(usize),
     Save(usize),
-    /// Sound this zone at the pitch a struck key asks of it.
+    /// Sound this zone at the pitch a struck key asks of it, on `finger`'s voice.
     Strike {
         zone: usize,
         semitones: i16,
+        finger: Finger,
     },
-}
-
-impl super::Unasked for Ask {
-    fn unasked(&self) -> bool {
-        matches!(self, Ask::Decode(_))
-    }
 }
 
 /// Decoded zone audio, kept only while the strokes it came from are the current ones.
@@ -646,8 +643,12 @@ pub enum MapAct {
     /// A handle moved: every band's `(low, top)` after the clamp, in the order given.
     Bounds(Vec<(u8, u8)>),
     /// A key was struck and a zone answers it, `semitones` from its root. `zone` is the
-    /// row it stands on — see [`MapZone::row`].
-    Struck { zone: usize, semitones: i16 },
+    /// row it stands on — see [`MapZone::row`]. `finger` is as [`Ask::Strike`] has it.
+    Struck {
+        zone: usize,
+        semitones: i16,
+        finger: Finger,
+    },
 }
 
 /// The keyboard an instrument's zones are laid out over.
@@ -668,7 +669,9 @@ fn span(zones: &[MapZone], default: keys::Span) -> keys::Span {
 /// struck key did.
 ///
 /// Both instrument kinds draw this one map. `edges` is what the format lets a pointer
-/// move — [`keys::Edges::TopOnly`] where a zone's low is derived from the zone below.
+/// move — [`keys::Edges::TopOnly`] where a zone's low is derived from the zone below. A
+/// key `played` on a controller is answered exactly as a click on it, where the map has
+/// that key.
 pub fn key_map(
     ui: &mut egui::Ui,
     state: &mut State,
@@ -676,13 +679,27 @@ pub fn key_map(
     default: keys::Span,
     edges: keys::Edges,
     sounds: Sounds,
-) -> Option<MapAct> {
+    played: &Played,
+) -> Vec<MapAct> {
     let now = ui.input(|input| input.time);
-    if state.audition.as_ref().is_some_and(|held| !held.live(now)) {
+    if state
+        .audition
+        .as_ref()
+        .is_some_and(|held| !held.live(now, &played.down))
+    {
         state.audition = None;
         state.answer = None;
     }
     let span = span(zones, default);
+    let mut acts: Vec<MapAct> = played
+        .struck
+        .iter()
+        .filter(|struck| span.contains(struck.note))
+        .filter_map(|struck| {
+            let finger = Finger::Key(struck.note);
+            strike(state, zones, *struck, finger, sounds, now)
+        })
+        .collect();
     let bounds: Vec<(u8, u8)> = zones.iter().map(|zone| (zone.low, zone.top)).collect();
     let silent = keys::gaps(&bounds, span);
     let visuals = ui.visuals().clone();
@@ -712,7 +729,6 @@ pub fn key_map(
         Some((&reading, ink)),
     );
 
-    let mut act = None;
     let lane: Vec<keys::Band> = zones
         .iter()
         .map(|zone| keys::Band {
@@ -742,7 +758,7 @@ pub fn key_map(
         edges,
     ) {
         Some(keys::BandAct::Pick(band)) => state.pick(zones[band].row, true),
-        Some(keys::BandAct::Drag { bounds, .. }) => act = Some(MapAct::Bounds(bounds)),
+        Some(keys::BandAct::Drag { bounds, .. }) => acts.push(MapAct::Bounds(bounds)),
         None => {}
     }
 
@@ -753,46 +769,76 @@ pub fn key_map(
             label: Some(note::name(zone.root)),
         })
         .collect();
-    let struck = keys::keyboard(
+    let chip = state.audition.as_ref().map(|held| {
+        let keys::Struck { note, velocity } = held.struck;
+        (note, format!("{} · vel {velocity}", note::name(note)))
+    });
+    let clicked = keys::keyboard(
         ui,
         span,
-        state.audition.as_ref().map(|held| held.note),
+        &keys::lit(state.audition.as_ref(), &played.down),
+        chip.as_ref().map(|(note, said)| (*note, said.as_str())),
         &marks,
     );
-    if let Some(note) = struck {
-        state.audition = Some(keys::Audition::new(note, now));
-        let answer = answered(zones, note, sounds);
-        if let (true, Some(row)) = (answer.sounded, answer.zone) {
-            act = Some(MapAct::Struck {
-                zone: row,
-                semitones: answer.semitones,
-            });
-        }
-        state.answer = Some(answer);
+    if let Some(struck) = clicked {
+        acts.extend(strike(state, zones, struck, Finger::Pointer, sounds, now));
     }
-    if let Some(held) = &state.audition {
-        let left = keys::Audition::HOLD - (now - held.started);
+    if let Some(left) = state.audition.as_ref().and_then(|held| held.left(now)) {
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_secs_f64(left.max(0.0)));
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
     }
-    if let Some(answer) = &state.answer {
-        status(ui, &answer.words, answer.sounded);
-    }
+    ui.horizontal(|ui| {
+        ui.add_space(PAD);
+        let said = state.answer.as_ref();
+        keys::line(
+            ui,
+            said.map(|answer| (answer.sounded, answer.words.as_str())),
+        );
+    });
     ui.add_space(8.0);
+    acts
+}
+
+/// Answer a struck key: describe it, and sound the zone that answers it where one does.
+fn strike(
+    state: &mut State,
+    zones: &[MapZone],
+    struck: keys::Struck,
+    finger: Finger,
+    sounds: Sounds,
+    now: f64,
+) -> Option<MapAct> {
+    state.audition = Some(keys::Audition::new(struck, finger, now));
+    let answer = answered(zones, struck, sounds);
+    let act = match (answer.sounded, answer.zone) {
+        (true, Some(zone)) => Some(MapAct::Struck {
+            zone,
+            semitones: answer.semitones,
+            finger,
+        }),
+        (false, _) | (true, None) => None,
+    };
+    state.answer = Some(answer);
     act
 }
 
-/// What striking `note` at [`keys::AUDITION_VELOCITY`] does, and the sentence that says
-/// so.
+/// What a struck key does, and the sentence that says so.
 ///
-/// A key outside every zone is silent, and so is one inside a zone whose velocity
-/// window the struck velocity is outside.
-fn answered(zones: &[MapZone], note: u8, sounds: Sounds) -> Answer {
-    let velocity = keys::AUDITION_VELOCITY;
-    let Some(zone) = zones
-        .iter()
-        .find(|zone| note >= zone.low && note <= zone.top)
-    else {
+/// The zone that answers is the one whose keys and velocity window both hold the
+/// strike. A key outside every zone is silent, and so is one whose zones all answer at
+/// other velocities.
+fn answered(zones: &[MapZone], struck: keys::Struck, sounds: Sounds) -> Answer {
+    let keys::Struck { note, velocity } = struck;
+    let covering = || {
+        zones
+            .iter()
+            .filter(|zone| note >= zone.low && note <= zone.top)
+    };
+    let heard = covering().find(|zone| {
+        zone.velocity
+            .is_none_or(|(low, high)| (low..=high).contains(&velocity))
+    });
+    let Some(zone) = heard.or_else(|| covering().next()) else {
         return Answer {
             zone: None,
             semitones: 0,
@@ -826,33 +872,14 @@ fn answered(zones: &[MapZone], note: u8, sounds: Sounds) -> Answer {
     }
 }
 
-/// The one sentence under the keyboard: what the struck key did.
-fn status(ui: &mut egui::Ui, words: &str, sounded: bool) {
-    const TEXT: f32 = 11.0;
-    const GLYPH: f32 = 12.0;
-    ui.horizontal(|ui| {
-        ui.add_space(PAD);
-        ui.spacing_mut().item_spacing.x = 7.0;
-        let (glyph, ink) = match sounded {
-            true => (Glyph::AudioLines, app::good(ui.visuals())),
-            false => (Glyph::CircleAlert, app::warn(ui.visuals())),
-        };
-        icon(ui, glyph, GLYPH, ink);
-        ui.label(
-            egui::RichText::new(words)
-                .size(TEXT)
-                .color(ui.visuals().weak_text_color()),
-        );
-    });
-}
-
 /// The map over a sample instrument. The sets are the bands a drag moved.
 pub fn map(
     ui: &mut egui::Ui,
     state: &mut State,
     snapshot: &Snapshot,
     sets: &mut Sets,
-) -> Option<Ask> {
+    played: &Played,
+) -> Vec<Ask> {
     let zones = map_zones(snapshot);
     let stated = snapshot.zones.iter().all(|zone| zone.low_note.is_some());
     let edges = match (snapshot.zones_editable, stated) {
@@ -860,15 +887,26 @@ pub fn map(
         (true, true) => keys::Edges::Both,
         (true, false) => keys::Edges::TopOnly,
     };
-    match key_map(ui, state, &zones, NSMP_SPAN, edges, Sounds::Now)? {
-        MapAct::Struck { zone, semitones } => Some(Ask::Strike { zone, semitones }),
-        MapAct::Bounds(bounds) => {
-            if snapshot.zones_editable {
-                sets.extend(moved(&snapshot.zones, &bounds));
+    let mut asks = Vec::new();
+    for act in key_map(ui, state, &zones, NSMP_SPAN, edges, Sounds::Now, played) {
+        match act {
+            MapAct::Struck {
+                zone,
+                semitones,
+                finger,
+            } => asks.push(Ask::Strike {
+                zone,
+                semitones,
+                finger,
+            }),
+            MapAct::Bounds(bounds) => {
+                if snapshot.zones_editable {
+                    sets.extend(moved(&snapshot.zones, &bounds));
+                }
             }
-            None
         }
     }
+    asks
 }
 
 /// What a moved band writes: the ends that changed, and only the ones the record
@@ -2560,7 +2598,7 @@ mod tests {
             },
         ];
 
-        let heard = answered(&zones, 84, Sounds::Now);
+        let heard = answered(&zones, clicked(84), Sounds::Now);
         assert_eq!(heard.zone, Some(0));
         assert!(heard.sounded);
         assert_eq!(
@@ -2568,13 +2606,13 @@ mod tests {
             "C6 at vel 90 → Zone 1 · root C5 · shifted +12 st"
         );
 
-        let silent = answered(&zones, 50, Sounds::Now);
+        let silent = answered(&zones, clicked(50), Sounds::Now);
         assert_eq!(silent.zone, None);
         assert!(!silent.sounded);
         assert_eq!(silent.words, "D3 — no zone answers this key; silence.");
 
         // Inside the zone but outside the window it answers at.
-        let quiet = answered(&zones, 24, Sounds::Now);
+        let quiet = answered(&zones, clicked(24), Sounds::Now);
         assert_eq!(quiet.zone, Some(1));
         assert!(!quiet.sounded);
         assert!(
@@ -2584,6 +2622,33 @@ mod tests {
             "{}",
             quiet.words
         );
+    }
+
+    #[test]
+    fn a_key_split_by_velocity_is_answered_by_the_zone_whose_window_holds_it() {
+        let layer = |row: usize, velocity: (u8, u8)| MapZone {
+            row,
+            low: 48,
+            top: 72,
+            root: 60,
+            name: format!("Zone {}", row + 1),
+            velocity: Some(velocity),
+        };
+        let zones = [layer(0, (1, 64)), layer(1, (65, 127))];
+        let at = |velocity| answered(&zones, keys::Struck { note: 60, velocity }, Sounds::Now);
+        assert_eq!((at(40).zone, at(40).sounded), (Some(0), true));
+        assert_eq!((at(100).zone, at(100).sounded), (Some(1), true));
+
+        let gap = [layer(0, (1, 64)), layer(1, (80, 127))];
+        let quiet = answered(
+            &gap,
+            keys::Struck {
+                note: 60,
+                velocity: 70,
+            },
+            Sounds::Now,
+        );
+        assert_eq!((quiet.zone, quiet.sounded), (Some(0), false));
     }
 
     /// The map shows every zone, including one that reaches past the six octaves it
@@ -2620,16 +2685,25 @@ mod tests {
         ctx
     }
 
+    /// `note` as a click on the keyboard strikes it.
+    fn clicked(note: u8) -> keys::Struck {
+        keys::Struck {
+            note,
+            velocity: keys::AUDITION_VELOCITY,
+        }
+    }
+
     /// One frame of the pinned map over `snapshot`: what it painted, what it wrote, and
-    /// what it asked for.
+    /// what it asked for. `played` is what a controller played that frame.
     fn mapped(
         ctx: &egui::Context,
         state: &mut State,
         snapshot: &Snapshot,
         events: Vec<egui::Event>,
-    ) -> (Vec<(String, egui::Rect)>, Sets, Option<Ask>) {
+        played: &Played,
+    ) -> (Vec<(String, egui::Rect)>, Sets, Vec<Ask>) {
         let mut sets = Sets::new();
-        let mut ask = None;
+        let mut ask = Vec::new();
         let input = egui::RawInput {
             events,
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2641,7 +2715,7 @@ mod tests {
         let output = ctx.run(input, |ctx| {
             ctx.style_mut(crate::app::metrics);
             egui::CentralPanel::default().show(ctx, |ui| {
-                ask = map(ui, state, snapshot, &mut sets);
+                ask = map(ui, state, snapshot, &mut sets, played);
             });
         });
         let mut said = Vec::new();
@@ -2851,8 +2925,8 @@ mod tests {
         );
 
         let mut state = State::default();
-        let (said, sets, ask) = mapped(&ctx, &mut state, &snapshot, Vec::new());
-        assert!(ask.is_none(), "nothing sounds unasked");
+        let (said, sets, ask) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &Played::default());
+        assert!(ask.is_empty(), "nothing sounds unasked");
         assert!(sets.is_empty());
         assert!(
             said.iter()
@@ -2861,13 +2935,20 @@ mod tests {
         );
 
         let middle_c = lowest(&said, "C4").center();
-        let (said, sets, ask) = mapped(&ctx, &mut state, &snapshot, press(middle_c));
+        let (said, sets, ask) = mapped(
+            &ctx,
+            &mut state,
+            &snapshot,
+            press(middle_c),
+            &Played::default(),
+        );
         assert_eq!(
             ask,
-            Some(Ask::Strike {
+            [Ask::Strike {
                 zone: 0,
-                semitones: 0
-            })
+                semitones: 0,
+                finger: Finger::Pointer,
+            }]
         );
         assert!(sets.is_empty(), "a struck key is never an edit");
         assert!(
@@ -2878,13 +2959,155 @@ mod tests {
 
         // A key past the zone's top: the sentence says silence, and nothing is asked.
         let above = lowest(&said, "C7").center();
-        let (said, _, ask) = mapped(&ctx, &mut state, &snapshot, press(above));
-        assert_eq!(ask, None);
+        let (said, _, ask) = mapped(
+            &ctx,
+            &mut state,
+            &snapshot,
+            press(above),
+            &Played::default(),
+        );
+        assert!(ask.is_empty());
         assert!(
             said.iter()
                 .any(|(text, _)| text == "C7 — no zone answers this key; silence."),
             "{said:?}"
         );
+    }
+
+    /// Where the words under the key map were painted, and where the first thing
+    /// under the map was: one frame of a narrow map over `zones`, with `events`.
+    fn under_map(
+        ctx: &egui::Context,
+        state: &mut State,
+        zones: &[MapZone],
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, egui::Rect) {
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(360.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let mut below = egui::Rect::NOTHING;
+        let output = ctx.run(input, |ctx| {
+            ctx.style_mut(crate::app::metrics);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                key_map(
+                    ui,
+                    state,
+                    zones,
+                    NSMP_SPAN,
+                    keys::Edges::Fixed,
+                    Sounds::Now,
+                    &Played::default(),
+                );
+                below = ui.label("under the map").rect;
+            });
+        });
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        (said, below)
+    }
+
+    #[test]
+    fn a_struck_key_moves_nothing_under_the_key_map() {
+        let ctx = dressed();
+        let zones = [MapZone {
+            row: 0,
+            low: NSMP_SPAN.low,
+            top: NSMP_SPAN.high,
+            root: 60,
+            name: "a zone whose name runs well past the width of the line under the map".into(),
+            velocity: None,
+        }];
+        let mut state = State::default();
+        let (said, quiet) = under_map(&ctx, &mut state, &zones, Vec::new());
+        let middle_c = lowest(&said, "C4").center();
+        under_map(&ctx, &mut state, &zones, press(middle_c));
+        let (said, struck) = under_map(&ctx, &mut state, &zones, Vec::new());
+
+        let line = said
+            .iter()
+            .find(|(text, _)| text.starts_with("C4 at vel"))
+            .unwrap_or_else(|| panic!("the struck key is not described: {said:?}"));
+        assert!(
+            line.1.height() <= keys::LINE_H && line.1.right() <= 360.0,
+            "the sentence is cut to one row: {line:?}"
+        );
+        assert_eq!(struck, quiet, "what is under the map stays where it was");
+    }
+
+    #[test]
+    fn a_played_chord_strikes_the_zones_clicks_on_it_would() {
+        let ctx = dressed();
+        let snapshot = v2_snapshot();
+        let mut state = State::default();
+        let struck = |note, velocity| keys::Struck { note, velocity };
+        let mut played = Played {
+            struck: vec![struck(60, 23), struck(64, 30)],
+            released: Vec::new(),
+            down: vec![60, 64],
+        };
+
+        let (said, sets, ask) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &played);
+        assert_eq!(
+            ask,
+            [
+                Ask::Strike {
+                    zone: 0,
+                    semitones: 0,
+                    finger: Finger::Key(60),
+                },
+                Ask::Strike {
+                    zone: 0,
+                    semitones: 4,
+                    finger: Finger::Key(64),
+                },
+            ]
+        );
+        assert!(sets.is_empty(), "a played key is never an edit");
+        assert!(
+            said.iter()
+                .any(|(text, _)| text == "E4 at vel 30 → Zone 1 · root C4 · shifted +4 st"),
+            "the line describes the last key struck: {said:?}"
+        );
+
+        played.struck.clear();
+        let (said, _, ask) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &played);
+        assert!(ask.is_empty(), "a held key strikes once");
+        assert!(
+            said.iter().any(|(text, _)| text == "E4 · vel 30"),
+            "the lit key's chip names the velocity that chose the zone: {said:?}"
+        );
+
+        played.down = vec![60];
+        mapped(&ctx, &mut state, &snapshot, Vec::new(), &played);
+        assert!(
+            state.audition.is_none() && state.answer.is_none(),
+            "a key let go is no longer described"
+        );
+    }
+
+    #[test]
+    fn a_played_key_outside_the_map_strikes_nothing() {
+        let ctx = dressed();
+        let snapshot = v2_snapshot();
+        let mut state = State::default();
+        let played = Played {
+            struck: vec![keys::Struck {
+                note: NSMP_SPAN.high + 1,
+                velocity: 64,
+            }],
+            released: Vec::new(),
+            down: vec![NSMP_SPAN.high + 1],
+        };
+        let (_, _, ask) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &played);
+        assert!(ask.is_empty());
+        assert!(state.audition.is_none(), "nothing on the map is described");
     }
 
     /// A moved band writes the ends the record states, and nothing that did not move.
@@ -2922,14 +3145,20 @@ mod tests {
         let ctx = dressed();
         let snapshot = v2_snapshot();
         let mut state = State::default();
-        let (said, _, _) = mapped(&ctx, &mut state, &snapshot, Vec::new());
+        let (said, _, _) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &Played::default());
         assert_eq!(selected(&state), None);
 
         let band = lowest(&said, "C1–C6");
-        let (_, sets, ask) = mapped(&ctx, &mut state, &snapshot, press(band.center()));
+        let (_, sets, ask) = mapped(
+            &ctx,
+            &mut state,
+            &snapshot,
+            press(band.center()),
+            &Played::default(),
+        );
         assert_eq!(selected(&state), Some(0));
         assert_eq!(state.reveal, Some(0));
-        assert!(sets.is_empty() && ask.is_none(), "a pick is not an edit");
+        assert!(sets.is_empty() && ask.is_empty(), "a pick is not an edit");
     }
 
     /// A two-zone v3 body, hand-built to the layout `map` v14 stores: a per-key table

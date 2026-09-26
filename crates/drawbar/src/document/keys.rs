@@ -13,6 +13,8 @@ use eframe::egui;
 use nord_format::note;
 
 use crate::app;
+use crate::audio::Finger;
+use crate::icon::{painted, Glyph};
 
 /// The velocity a click on the keyboard plays at.
 pub const AUDITION_VELOCITY: u8 = 90;
@@ -141,26 +143,61 @@ pub fn shifted(note: u8, root: u8) -> String {
     format!("shifted {:+} st", note as i16 - root as i16)
 }
 
-/// What the keyboard is sounding, and since when.
+/// A key struck, and how hard. A click on the keyboard strikes at
+/// [`AUDITION_VELOCITY`]; anything else carries the velocity it was played at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Struck {
+    pub note: u8,
+    pub velocity: u8,
+}
+
+/// The last key struck, what struck it, and since when: the key the chip and the line
+/// under the keyboard describe.
 ///
 /// ⚠️ `std::time::Instant::now()` traps on `wasm32-unknown-unknown`, so the clock is
 /// egui's own frame time in seconds — [`egui::InputState::time`], as [`crate::log`] uses.
 pub struct Audition {
-    pub note: u8,
+    pub struck: Struck,
+    pub finger: Finger,
     pub started: f64,
 }
 
 impl Audition {
-    /// How long a struck key stays lit, in seconds.
+    /// How long a clicked key stays lit, in seconds.
     pub const HOLD: f64 = 2.2;
 
-    pub fn new(note: u8, now: f64) -> Audition {
-        Audition { note, started: now }
+    pub fn new(struck: Struck, finger: Finger, now: f64) -> Audition {
+        Audition {
+            struck,
+            finger,
+            started: now,
+        }
     }
 
-    pub fn live(&self, now: f64) -> bool {
-        now - self.started < Audition::HOLD
+    /// Whether it is still described: a click for [`Self::HOLD`], and a controller key
+    /// for as long as it is among the keys held `down`.
+    pub fn live(&self, now: f64, down: &[u8]) -> bool {
+        match self.finger {
+            Finger::Pointer => now - self.started < Audition::HOLD,
+            Finger::Key(key) => down.contains(&key),
+        }
     }
+
+    /// How long a click has left to be described, for the frame that puts it out. A
+    /// controller key goes out on its release, which asks for a frame of itself.
+    pub fn left(&self, now: f64) -> Option<f64> {
+        match self.finger {
+            Finger::Pointer => Some((Audition::HOLD - (now - self.started)).max(0.0)),
+            Finger::Key(_) => None,
+        }
+    }
+}
+
+/// The keys to light: every key held `down`, and the last key struck.
+pub fn lit(audition: Option<&Audition>, down: &[u8]) -> Vec<u8> {
+    let mut lit = down.to_vec();
+    lit.extend(audition.map(|held| held.struck.note));
+    lit
 }
 
 /// The dashes of an outline. egui draws dashes along a line, so a shape is its corners
@@ -307,10 +344,15 @@ fn key_at(rect: egui::Rect, span: Span, at: egui::Pos2) -> Option<u8> {
 
 /// The keyboard, one clickable key per note in `span`.
 ///
-/// `lit` is the note being auditioned: its key stays lit and wears the chip saying what
-/// is playing. Returns the key that was clicked, which the caller plays at
-/// [`AUDITION_VELOCITY`].
-pub fn keyboard(ui: &mut egui::Ui, span: Span, lit: Option<u8>, marks: &[Mark]) -> Option<u8> {
+/// `lit` are the keys sounding, and `chip` the one key wearing the chip that says what
+/// it plays. Returns the key clicked, struck at [`AUDITION_VELOCITY`].
+pub fn keyboard(
+    ui: &mut egui::Ui,
+    span: Span,
+    lit: &[u8],
+    chip: Option<(u8, &str)>,
+    marks: &[Mark],
+) -> Option<Struck> {
     let width = ui.available_width().max(1.0);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, KEYBOARD_H), egui::Sense::click());
@@ -321,7 +363,7 @@ pub fn keyboard(ui: &mut egui::Ui, span: Span, lit: Option<u8>, marks: &[Mark]) 
     for note in layered(span) {
         let key = key_rect(rect, span, note);
         let black = is_black(note);
-        let fill = match (black, lit == Some(note) || hovered == Some(note)) {
+        let fill = match (black, lit.contains(&note) || hovered == Some(note)) {
             (true, false) => app::stop_black(&visuals),
             (true, true) => app::accent(&visuals),
             (false, false) => app::stop_white(&visuals),
@@ -342,8 +384,8 @@ pub fn keyboard(ui: &mut egui::Ui, span: Span, lit: Option<u8>, marks: &[Mark]) 
     for mark in marks {
         root_mark(&painter, rect, span, mark, &visuals);
     }
-    if let Some(note) = lit {
-        audition_chip(ui, rect, span, note);
+    if let Some((note, said)) = chip {
+        audition_chip(ui, rect, span, note, said);
     }
 
     let response = match hovered {
@@ -353,11 +395,68 @@ pub fn keyboard(ui: &mut egui::Ui, span: Span, lit: Option<u8>, marks: &[Mark]) 
         )),
         None => response,
     };
-    match response.clicked() {
-        true => response
-            .interact_pointer_pos()
-            .and_then(|at| key_at(rect, span, at)),
-        false => None,
+    if !response.clicked() {
+        return None;
+    }
+    let note = key_at(rect, span, response.interact_pointer_pos()?)?;
+    Some(Struck {
+        note,
+        velocity: AUDITION_VELOCITY,
+    })
+}
+
+/// How tall the line under the keyboard is, whatever it says.
+pub const LINE_H: f32 = 20.0;
+
+/// The line under the keyboard: whether the last struck key sounded, and the sentence
+/// saying what it did.
+///
+/// ⚠️ One row, drawn empty where no key is lit, and a sentence too long for it is cut
+/// short with the whole of it on hover. A line that grew with its sentence would move
+/// everything under it at every strike.
+pub fn line(ui: &mut egui::Ui, said: Option<(bool, &str)>) {
+    const TEXT: f32 = 11.0;
+    const GLYPH: f32 = 12.0;
+    const INDENT: f32 = 19.0;
+
+    let room = ui.available_width().max(INDENT);
+    let (line, response) = ui.allocate_exact_size(egui::vec2(room, LINE_H), egui::Sense::hover());
+    let Some((sounded, words)) = said else {
+        return;
+    };
+    let (glyph, ink) = match sounded {
+        true => (Glyph::AudioLines, app::good(ui.visuals())),
+        false => (Glyph::CircleAlert, app::warn(ui.visuals())),
+    };
+    painted(
+        ui,
+        glyph,
+        egui::Rect::from_center_size(
+            egui::pos2(line.left() + GLYPH / 2.0, line.center().y),
+            egui::Vec2::splat(GLYPH),
+        ),
+        ink,
+    );
+    let text = ui.visuals().weak_text_color();
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        words,
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(TEXT), text),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(line.width() - INDENT);
+    let galley = ui.painter().layout_job(job);
+    let cut = galley.elided;
+    ui.painter().galley(
+        egui::pos2(
+            line.left() + INDENT,
+            line.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        text,
+    );
+    if cut {
+        response.on_hover_text(words);
     }
 }
 
@@ -398,7 +497,7 @@ fn root_mark(
 ///
 /// ⚠️ Painted on a foreground layer above the keyboard: the key map's own rect ends at
 /// the keys, and a chip inside it would cover the root marks.
-fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
+fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8, said: &str) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         ui.id().with("audition"),
@@ -407,7 +506,7 @@ fn audition_chip(ui: &egui::Ui, rect: egui::Rect, span: Span, note: u8) {
     chip(
         &painter,
         egui::pos2(centre, rect.top() - CHIP_TEXT - 4.0),
-        &format!("{} · vel {AUDITION_VELOCITY}", note::name(note)),
+        said,
         app::good(ui.visuals()),
         ui.visuals().text_color(),
     );
@@ -1614,6 +1713,14 @@ mod tests {
 
     const SCREEN: egui::Vec2 = egui::vec2(600.0, 240.0);
 
+    /// `note` as a click on the keyboard strikes it.
+    fn clicked(note: u8) -> Struck {
+        Struck {
+            note,
+            velocity: AUDITION_VELOCITY,
+        }
+    }
+
     /// A context dressed as the app dresses it: without the bold face bound, laying out
     /// a band's name panics.
     fn dressed() -> egui::Context {
@@ -1770,7 +1877,7 @@ mod tests {
         let ctx = dressed();
         for span in [NSMP, NPNO] {
             let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-                keyboard(ui, span, None, &[])
+                keyboard(ui, span, &[], None, &[])
             });
             let painted = key_shapes(&output, rect);
             assert_eq!(painted.len(), span.keys(), "one rect per key");
@@ -1803,7 +1910,7 @@ mod tests {
         let ctx = dressed();
         for span in [NSMP, NPNO] {
             let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-                keyboard(ui, span, None, &[])
+                keyboard(ui, span, &[], None, &[])
             });
             let painted = key_shapes(&output, rect);
             for black in (span.low..=span.high).filter(|note| is_black(*note)) {
@@ -1867,11 +1974,33 @@ mod tests {
     }
 
     #[test]
-    fn an_audition_is_spent_once_its_hold_is_up() {
-        let struck = Audition::new(60, 10.0);
-        assert!(struck.live(10.0));
-        assert!(struck.live(10.0 + Audition::HOLD / 2.0));
-        assert!(!struck.live(11.0 + Audition::HOLD));
+    fn a_clicked_key_is_described_until_its_hold_is_up() {
+        let struck = Audition::new(clicked(60), Finger::Pointer, 0.0);
+        assert!(struck.live(0.0, &[]));
+        assert!(struck.live(Audition::HOLD / 2.0, &[]));
+        assert!(
+            !struck.live(Audition::HOLD, &[60]),
+            "a held key is not the click"
+        );
+        assert_eq!(
+            struck.left(Audition::HOLD / 2.0),
+            Some(Audition::HOLD / 2.0)
+        );
+    }
+
+    #[test]
+    fn a_played_key_is_described_until_it_is_let_go() {
+        let struck = Audition::new(clicked(60), Finger::Key(60), 10.0);
+        assert!(struck.live(10.0 + Audition::HOLD * 10.0, &[48, 60]));
+        assert!(!struck.live(10.0, &[48]));
+        assert_eq!(struck.left(10.0), None);
+    }
+
+    #[test]
+    fn every_key_held_lights_with_the_last_key_struck() {
+        let struck = Audition::new(clicked(72), Finger::Pointer, 0.0);
+        assert_eq!(lit(Some(&struck), &[60, 64]), [60, 64, 72]);
+        assert_eq!(lit(None, &[60, 64]), [60, 64]);
     }
 
     /// The two spans the editors draw are a six-octave sample map and a full piano, and
@@ -1891,7 +2020,7 @@ mod tests {
     fn the_keyboard_labels_every_c_and_nothing_else() {
         let ctx = dressed();
         let (output, _, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-            keyboard(ui, NSMP, None, &[])
+            keyboard(ui, NSMP, &[], None, &[])
         });
         let said: Vec<String> = words(&output).into_iter().map(|(text, _)| text).collect();
         assert_eq!(said, ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
@@ -1903,33 +2032,33 @@ mod tests {
     fn a_click_lands_on_the_key_under_it_black_keys_first() {
         let ctx = dressed();
         let (_, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-            keyboard(ui, NSMP, None, &[])
+            keyboard(ui, NSMP, &[], None, &[])
         });
         for note in [60u8, 61, NSMP.low, NSMP.high] {
             let at = key_rect(rect, NSMP, note).center();
-            let (_, _, clicked) = frame(&ctx, press(at), KEYBOARD_H, |ui| {
-                keyboard(ui, NSMP, None, &[])
+            let (_, _, struck) = frame(&ctx, press(at), KEYBOARD_H, |ui| {
+                keyboard(ui, NSMP, &[], None, &[])
             });
-            assert_eq!(clicked, Some(note), "at {at:?}");
+            assert_eq!(struck, Some(clicked(note)), "at {at:?}");
         }
     }
 
     /// A lit key is the one thing on the keyboard that is not its own colour, and the two
     /// kinds of key light differently: a white one selects, a black one glows.
     #[test]
-    fn the_auditioned_key_lights_and_the_others_keep_their_own_colour() {
+    fn every_lit_key_lights_and_the_others_keep_their_own_colour() {
         let ctx = dressed();
         let visuals = ctx.style().visuals.clone();
         let (_, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-            keyboard(ui, NSMP, None, &[])
+            keyboard(ui, NSMP, &[], None, &[])
+        });
+        let (output, _, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
+            keyboard(ui, NSMP, &[60, 61], Some((61, "lit")), &[])
         });
         for (note, lit) in [
             (60u8, visuals.selection.bg_fill),
             (61, crate::app::accent(&visuals)),
         ] {
-            let (output, _, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-                keyboard(ui, NSMP, Some(note), &[])
-            });
             assert_eq!(fills(&output, key_rect(rect, NSMP, note)), vec![lit]);
             let quiet = key_rect(rect, NSMP, note + 12);
             let own = match is_black(note) {
@@ -1956,7 +2085,7 @@ mod tests {
             },
         ];
         let (output, _, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
-            keyboard(ui, NSMP, None, &marks)
+            keyboard(ui, NSMP, &[], None, &marks)
         });
         let said: Vec<String> = words(&output).into_iter().map(|(text, _)| text).collect();
         assert_eq!(

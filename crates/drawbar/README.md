@@ -18,7 +18,7 @@ cargo install drawbar
 - Edit a program on a panel laid out like the instrument's, or any field in a
   table.
 - Trim a piano library until it fits, build a sample instrument from WAVs, and
-  listen to either before you send it.
+  listen to either from the screen or a MIDI controller before you send it.
 - Queue your changes and send them in one go, with a review of what each one
   replaces.
 - Keep a text note beside the sounds for the set list and the cues.
