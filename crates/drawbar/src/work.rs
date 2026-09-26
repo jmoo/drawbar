@@ -1,15 +1,15 @@
-//! Work that outlives the frame that asked for it: coding a piano library, or laying
-//! one out again from a plan.
+//! Work that outlives the frame that started it: encoding a piano library, or laying one
+//! out again from a plan.
 //!
-//! ⚠️ wasm has one thread. There the work runs where it is asked for and the frame
-//! waits on it; the caller sees the same [`Job`] either way and polls it the same way.
+//! ⚠️ wasm has one thread, so there the work runs inline and the frame waits for it. The
+//! caller gets the same [`Job`] either way and polls it the same way.
 
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-/// The last thing a job said about where it is.
+/// The latest progress message from a job.
 #[derive(Clone, Default)]
 pub struct Progress(Arc<Mutex<String>>);
 
@@ -25,7 +25,7 @@ impl Progress {
     }
 }
 
-/// Where a job is when it is asked.
+/// A job's state when polled.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Answer<T> {
     Running,
@@ -35,7 +35,7 @@ pub enum Answer<T> {
     Died,
 }
 
-/// One piece of work in flight, answering once.
+/// One piece of work in progress, which answers once.
 pub struct Job<T> {
     rx: Receiver<T>,
     progress: Progress,
@@ -44,9 +44,9 @@ pub struct Job<T> {
 impl<T> Job<T> {
     /// Whether the answer is here, still coming, or never coming.
     ///
-    /// ⚠️ A job answers once, and the worker goes with its answer. Take the answer and
-    /// drop the job: polling the same job again says [`Answer::Died`], which is the
-    /// truth about the worker and not about the answer already in hand.
+    /// ⚠️ A job answers once, and the worker exits after answering. Take the answer and
+    /// drop the job: polling it again returns [`Answer::Died`], which describes the
+    /// worker, not the answer already taken.
     pub fn poll(&self) -> Answer<T> {
         match self.rx.try_recv() {
             Ok(answer) => Answer::Answered(answer),
@@ -59,7 +59,7 @@ impl<T> Job<T> {
         self.progress.said()
     }
 
-    /// [`Self::poll`], blocking until the worker answers or goes: never
+    /// [`Self::poll`], blocking until the worker answers or exits, so never
     /// [`Answer::Running`].
     #[cfg(test)]
     pub fn wait(&self) -> Answer<T> {
@@ -70,7 +70,7 @@ impl<T> Job<T> {
     }
 }
 
-/// Start `work`, and ask for a repaint when it answers.
+/// Start `work`, and request a repaint when it answers.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run<T: Send + 'static>(
     ctx: &egui::Context,

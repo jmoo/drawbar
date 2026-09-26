@@ -1,15 +1,14 @@
-//! One registry body as a document: the sections it reads in, the cell every field is
-//! drawn as, and the morph lens over the lot.
+//! One registry body as a document: its sections, the cell each field is drawn as, and
+//! the morph lens over all of them.
 //!
-//! The division is `nord_format::panel`'s where the library authors one, the app's own
-//! menu order for a settings body, and the registry's own path prefixes for a body
-//! nothing has laid out. The cell is one renderer per [`ControlKind`], so a field the
-//! library learns arrives here already drawn rather than waiting for a table here to
-//! name it.
+//! Sections come from `nord_format::panel` where the library defines a layout, from the
+//! app's menu order for a settings body, and from the registry's path prefixes for any
+//! other body. Each [`ControlKind`] has one cell renderer, so a field the library adds is
+//! drawn here without a table naming it.
 //!
-//! Nothing here clamps: a moved control hands back the spelling `set_field` takes, the
+//! Nothing here clamps: a moved control returns the spelling `set_field` takes, the
 //! document applies every set of the frame to a fresh decode, and a refused value leaves
-//! the file untouched with the library's own words on screen.
+//! the file untouched with the library's message on screen.
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,7 +24,7 @@ use crate::icon::{icon, Glyph};
 use crate::workspace::LocalEntity;
 use crate::{drawbar_widget, knob, led, strings};
 
-/// The two halves of the Electro 5 transpose control — see [`transpose`].
+/// The two halves of the Electro 5 transpose control. See [`transpose`].
 const TRANSPOSE_ENABLED: &str = "center_panel.transpose_enabled";
 const TRANSPOSE: &str = "center_panel.transpose";
 
@@ -39,17 +38,17 @@ const CHIP: f32 = 20.0;
 const CHIP_TEXT: f32 = 11.0;
 const COUNT_TEXT: f32 = 9.5;
 
-/// The stepped counter a signed offset is set with: its square buttons, the room its
-/// number keeps between them, and the size both are set in.
+/// The stepped counter for a signed offset: its square buttons, the width of the number
+/// between them, and their text size.
 const NUDGE: f32 = 17.0;
 const COUNTER: f32 = 22.0;
 const COUNTER_TEXT: f32 = 11.0;
 
-/// The reading beside a knob, and the caption that stands where there is none.
+/// The text size of the reading beside a knob, or of the caption shown in its place.
 const READING: f32 = 10.0;
 
-/// How long a legal-value list stays a menu for an unclassified field. Past it a
-/// contiguous run turns instead.
+/// The longest legal-value list drawn as a menu for an unclassified field. A longer
+/// contiguous run is drawn as a knob.
 const MENU_MAX: usize = 12;
 
 /// The performance controls a morph slot may belong to: the suffix the declaration binds
@@ -62,24 +61,24 @@ const SLOTS: [(&str, &str, &str); 3] = [
     ("_ctrl_pedal", "Control pedal", "P"),
 ];
 
-/// What the field document holds that is not an edit: which morph lens is on, where the
-/// reader is, and the box a wide field is being typed into.
+/// What the field document keeps that is not an edit: the morph lens, the section in
+/// view, the saved decode, and the paths the working copy changes.
 ///
-/// ⚠️ An edit is never here. Every set lands on the working copy in the frame it is
-/// made, so leaving the tab drops all of this and none of that.
+/// ⚠️ An edit is never kept here. Every set lands on the working copy in the frame it is
+/// made, so leaving the tab drops this state and keeps every edit.
 #[derive(Default)]
 pub struct State {
     /// The morph slot every morphed control is showing, or the panel's own values.
     lens: Option<usize>,
-    /// The section the reader is in, and the one a nav chip asked to be taken to.
+    /// The section in view, and the one a nav chip asked to scroll to.
     active: Option<String>,
     jump: Option<String>,
     /// Where each section's top was painted, and the top of the region they scroll in.
-    /// Read a frame later, which is what lets a chip track the scroll.
+    /// Read a frame later, which lets the active chip follow the scroll.
     tops: Vec<(String, f32)>,
     view_top: f32,
     /// The decode of the bytes this document was last saved as, and the paths whose
-    /// value the working copy spells differently — see [`crate::fields::changed`].
+    /// value the working copy spells differently. See [`crate::fields::changed`].
     settled: Vec<Field>,
     pending: Vec<String>,
     /// The bytes `settled` and `pending` were read from.
@@ -87,10 +86,10 @@ pub struct State {
 }
 
 impl State {
-    /// Read the saved bytes and the working ones, where they have moved since last time.
+    /// Decode the saved and working bytes again if either changed since the last call.
     ///
-    /// ⚠️ Both decodes walk the whole body, so they happen when the bytes change and not
-    /// per frame: a Stage 4 declares eight hundred fields.
+    /// ⚠️ Both decodes walk the whole body, so they run when the bytes change and not per
+    /// frame. A Stage 4 body declares hundreds of fields.
     pub fn follow(&mut self, entity: &LocalEntity) {
         let read = (entity.id, entity.stamp, entity.saved.crc32);
         if self.read == Some(read) {
@@ -106,7 +105,7 @@ impl State {
         &self.pending
     }
 
-    /// The saved bytes' fields, which are what the Advanced table reads as raw.
+    /// The saved bytes' fields, which the Advanced table reads its raw values from.
     pub fn settled(&self) -> &[Field] {
         &self.settled
     }
@@ -118,14 +117,14 @@ impl State {
     }
 }
 
-/// How a body arrived at its sections.
+/// Where a body's sections come from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
     /// The library's own layout for this body.
     Authored { exhaustive: bool },
-    /// The app's menu order, for the settings body the library lays out nowhere.
+    /// The app's menu order, for the settings body, which the library has no layout for.
     Menus,
-    /// The registry's own path prefixes, for a body nothing has laid out.
+    /// The registry's path prefixes, for a body with no layout.
     Flat,
 }
 
@@ -139,8 +138,8 @@ pub struct Doc<'a> {
     shape: Shape,
     /// Every field a section draws, so the Advanced table can flag the rest.
     shown: HashSet<&'a str>,
-    /// The selectors that pick between stored alternatives. Each is the head of the
-    /// cards it picks between, so none of them is also a cell.
+    /// The selectors that pick between stored alternatives. Each heads the cards it
+    /// picks between, so none is also drawn as a cell.
     picks: HashSet<&'a str>,
     /// Each parameter's morph slots, by the parameter's path.
     morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
@@ -150,12 +149,12 @@ pub struct Doc<'a> {
 
 /// One section of the document, and the cards under it.
 struct Sect<'a> {
-    /// What a nav chip scrolls to, which two sections of the same name must not share.
+    /// The id a nav chip scrolls to, unique even when two sections share a title.
     key: String,
     title: String,
     fields: Vec<&'a Field>,
     nested: Vec<Sect<'a>>,
-    /// The selection that makes this one of several stored alternatives play.
+    /// The selection that makes this stored alternative the one that plays.
     pick: Option<&'a Selection>,
     selected: bool,
     /// The titles of the groups under this one the instrument is not using.
@@ -169,12 +168,12 @@ struct Part<'a> {
     morphs: [Option<&'a Field>; SLOTS.len()],
 }
 
-/// What one cell of a section stands for.
+/// What one cell of a section shows.
 enum Cell<'a> {
     One(Part<'a>),
     /// Nine single-bar drawbar fields, ranked 1..=9 under one prefix, as one register.
     Register(Vec<Part<'a>>),
-    /// The Electro 5 transpose lamp and amount, which neither reads without the other.
+    /// The Electro 5 transpose lamp and amount, which make sense only together.
     Transpose,
 }
 
@@ -202,8 +201,8 @@ pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
 }
 
 impl Doc<'_> {
-    /// Whether the Basic face draws this path at all, the morph slots a lens puts under a
-    /// parameter's own control included.
+    /// Whether the Basic face draws this path, counting the morph slots a lens shows
+    /// under their parameter's control.
     pub fn shows(&self, path: &str) -> bool {
         self.shown.contains(path)
     }
@@ -217,8 +216,8 @@ impl Doc<'_> {
         (self.fields, self.slots)
     }
 
-    /// How many fields no group named, and how many of those the strings table names —
-    /// which is all the "Also stored" section holds.
+    /// How many fields no group placed, and how many of those the strings table names.
+    /// The named ones are what the "Also stored" section holds.
     pub fn unplaced(&self) -> (usize, usize) {
         let named = self
             .leftovers
@@ -229,11 +228,11 @@ impl Doc<'_> {
     }
 }
 
-/// Each parameter's three morph slots, found through the declaration rather than by
-/// matching names.
+/// Each parameter's three morph slots. A slot's parameter comes from its declaration,
+/// not from its name.
 ///
-/// ⚠️ Indexed rather than searched: a Stage body declares three hundred slots among
-/// nine hundred fields, and this is rebuilt every frame.
+/// ⚠️ Built through an index instead of a search per slot: a Stage body declares
+/// hundreds of slots, and this runs every frame.
 fn slots_of(fields: &[Field]) -> HashMap<&str, [Option<&Field>; SLOTS.len()]> {
     let at: HashMap<&str, &Field> = fields
         .iter()
@@ -255,7 +254,7 @@ fn slots_of(fields: &[Field]) -> HashMap<&str, [Option<&Field>; SLOTS.len()]> {
     out
 }
 
-/// Which performance control a slot belongs to, off the suffix the declaration binds on.
+/// Which performance control a slot belongs to, from the suffix the declaration binds on.
 fn which_slot(path: &str) -> Option<usize> {
     let leaf = path.rsplit('.').next().unwrap_or(path);
     SLOTS
@@ -320,9 +319,8 @@ fn authored<'a>(
 
 /// The groups under a section, with the third level flattened onto the second.
 ///
-/// Nesting has no depth limit and a card inside a card inside a card reads as an
-/// indent rather than as a division, so a grandchild becomes a sibling called
-/// `Parent · Child`.
+/// Nesting has no depth limit, and a card three levels deep reads as mere indentation,
+/// so a grandchild becomes a sibling titled `Parent · Child`.
 fn hoist<'a>(
     groups: &[Placed<'a>],
     under: Option<&str>,
@@ -354,10 +352,10 @@ fn hoist<'a>(
     }
 }
 
-/// The settings body, in the order the instrument's own menus run.
+/// The settings body, in the order of the instrument's menus.
 ///
-/// ⚠️ The library lays out no settings body, so the division is this app's own table —
-/// see `strings::FIELDS`.
+/// ⚠️ The library has no layout for the settings body, so the sections come from this
+/// app's table in `strings::FIELDS`.
 fn menus<'a>(
     fields: &'a [Field],
     morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
@@ -386,9 +384,8 @@ fn menus<'a>(
     }
 }
 
-/// Any other registry-backed body: its own path prefixes as sections, because nothing
-/// here knows how that instrument's panel is divided but the registry does say which
-/// fields belong together.
+/// Any other registry-backed body, sectioned by path prefix. Nothing here knows how that
+/// instrument's panel is divided, but the registry groups fields that belong together.
 fn flat<'a>(
     fields: &'a [Field],
     morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
@@ -426,7 +423,7 @@ fn plain_sect<'a>(key: String, title: &str, rows: Vec<&'a Field>) -> Sect<'a> {
 
 /// One titled run of a field list.
 struct Group<'a> {
-    /// What these fields share, which is not what their title is unique by.
+    /// The path prefix these fields share, which identifies the group; titles can repeat.
     key: String,
     title: String,
     rows: Vec<&'a Field>,
@@ -435,10 +432,10 @@ struct Group<'a> {
 /// The sections a field list falls into.
 ///
 /// A nested body's fields are contiguous and share a dotted prefix, which is the
-/// division the registry itself makes. A prefix too long to read in one run is divided
-/// again on the leading word of each field's own name — the Stage bodies spell their
-/// sections there (`slot_a.organ_preset_1_drawbar_1`) — and a word that recurs later
-/// joins the division it opened rather than starting a second one.
+/// registry's own division. A prefix with too many fields to read in one run is divided
+/// again on the leading word of each field's name, where the Stage bodies spell their
+/// sections (`slot_a.organ_preset_1_drawbar_1`). A word that recurs later joins the group
+/// it started instead of starting a second one.
 fn prefixes(fields: &[Field]) -> Vec<Group<'_>> {
     let mut out: Vec<Group> = Vec::new();
     for field in fields {
@@ -458,8 +455,8 @@ fn prefixes(fields: &[Field]) -> Vec<Group<'_>> {
     out.into_iter().flat_map(divide).collect()
 }
 
-/// How many fields a section may hold before it is divided again on each field's own
-/// leading word.
+/// How many fields a section may hold before it is divided again on each field's leading
+/// word.
 const SPLIT_ABOVE: usize = 128;
 
 fn divide(group: Group<'_>) -> Vec<Group<'_>> {
@@ -486,8 +483,8 @@ fn divide(group: Group<'_>) -> Vec<Group<'_>> {
     out
 }
 
-/// How many registry fields a section stands for: its own, the morph slots riding on
-/// them, and everything under it.
+/// How many registry fields a section covers: its own, their morph slots, and everything
+/// nested under it.
 fn count(section: &mut Sect<'_>, morphs: &HashMap<&str, [Option<&Field>; SLOTS.len()]>) {
     let mut total = section.fields.len();
     for field in &section.fields {
@@ -502,8 +499,8 @@ fn count(section: &mut Sect<'_>, morphs: &HashMap<&str, [Option<&Field>; SLOTS.l
     section.count = total;
 }
 
-/// The selectors that pick between a section's stored alternatives, however deep the
-/// layout nested them before they were flattened onto one row.
+/// The selectors that pick between a section's stored alternatives, however deeply the
+/// layout nested them before they were flattened.
 fn selectors<'a>(section: &Sect<'a>) -> Vec<&'a str> {
     let mut out: Vec<&str> = section
         .pick
@@ -516,10 +513,10 @@ fn selectors<'a>(section: &Sect<'a>) -> Vec<&'a str> {
     out
 }
 
-/// The morph slots the drawn parameters carry.
+/// The morph slots of the drawn parameters.
 ///
-/// ⚠️ A slot is no section's own field — the library's layout leaves it to the parameter
-/// it moves — so the face that drew the parameter is the face that draws the slot, under
+/// ⚠️ No section lists a slot as its own field; the library's layout leaves it to the
+/// parameter it moves. The face that draws a parameter therefore draws its slots, under
 /// the lens.
 fn lensed<'a>(
     morphs: &HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
@@ -556,7 +553,7 @@ fn paths<'a>(section: &Sect<'a>) -> Vec<&'a str> {
 /// The row above the scroll region: one chip per section, and the morph lens where the
 /// body has morph slots.
 ///
-/// ⚠️ Every chip is in the one wrapping flow, the lens included.
+/// ⚠️ Every chip, the lens included, is in one wrapping flow.
 pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
     if doc.sections.is_empty() {
         return;
@@ -595,7 +592,7 @@ pub fn nav(ui: &mut egui::Ui, state: &mut State, doc: &Doc<'_>) {
                 .iter()
                 .map(|(_, chip)| gap + chip.width())
                 .sum::<f32>();
-        // One unit in the flow, so the caption never ends a row its chips do not.
+        // Allocated as one unit, so the caption never ends a row without its chips.
         ui.allocate_ui_with_layout(
             egui::vec2(width, CHIP),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -728,7 +725,7 @@ pub fn body(
     to_advanced
 }
 
-/// The section whose top is the last one above the region's own top.
+/// The last section whose top is above the scroll region's top.
 fn active(state: &State) -> Option<String> {
     state
         .tops
@@ -738,7 +735,7 @@ fn active(state: &State) -> Option<String> {
         .map(|(key, _)| key.clone())
 }
 
-/// The strip that says the panel values are not what is on screen.
+/// The banner that says the screen shows morph targets instead of panel values.
 fn banner(ui: &mut egui::Ui, state: &mut State) {
     let Some(slot) = state.lens else { return };
     let visuals = ui.visuals().clone();
@@ -752,9 +749,9 @@ fn banner(ui: &mut egui::Ui, state: &mut State) {
                 icon(ui, Glyph::ScanEye, 13.0, app::accent(&visuals));
                 ui.label(
                     egui::RichText::new(format!(
-                        "Showing {} targets. A lit outline is a control with a morph stored, a \
-                         grey one is neutral, and editing here writes the morph slot rather than \
-                         the panel value.",
+                        "Showing {} targets. A lit outline marks a control with a morph \
+                         stored, a gray one is neutral, and editing here writes the morph \
+                         slot, not the panel value.",
                         SLOTS[slot].1.to_lowercase()
                     ))
                     .font(egui::FontId::proportional(CHIP_TEXT))
@@ -775,8 +772,9 @@ fn banner(ui: &mut egui::Ui, state: &mut State) {
         .hline(rect.x_range(), rect.bottom() - 0.5, rule);
 }
 
-/// One section: its own controls, the cards under it, the alternatives beside each
-/// other, and the line that says what is stored and idle.
+/// One section: its controls, the cards under it, the stored alternatives side by side,
+/// and the line naming what is stored but idle. Returns whether its Advanced link was
+/// clicked.
 fn drew(
     ui: &mut egui::Ui,
     ctx: &Ctx,
@@ -823,11 +821,10 @@ fn drew(
     idle_line(ui, &section.idle)
 }
 
-/// The stored alternatives, side by side: one is playing and the other is kept.
+/// The stored alternatives, side by side: one is playing and the others are kept.
 ///
-/// ⚠️ Both stay on screen. The selector that picks between them is the head of each
-/// card, and drawing only the one in use would put the switch inside the thing it
-/// switches.
+/// ⚠️ All stay on screen. The selector that picks between them heads each card, so
+/// drawing only the one in use would hide the switch to the others.
 fn side_by_side(
     ui: &mut egui::Ui,
     ctx: &Ctx,
@@ -851,8 +848,8 @@ fn side_by_side(
                 .corner_radius(RADIUS)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    // The cards stand side by side, so each one stacks its own head over
-                    // its own controls rather than inheriting the row they sit in.
+                    // The cards sit side by side, so each stacks its heading over its
+                    // controls instead of inheriting the row's layout.
                     ui.vertical(|ui| {
                         if alternative.pick.is_some() {
                             picked |=
@@ -875,18 +872,18 @@ fn side_by_side(
     });
 }
 
-/// Whether a click landed anywhere in `card`, whichever of its own controls took it.
+/// Whether a click landed anywhere in `card`, whichever of its controls took it.
 ///
-/// ⚠️ The click is read off the pointer rather than claimed as a widget of its own:
-/// a card-sized target over the controls would swallow every drawbar in it, and one
-/// under them would hear only the clicks that missed. Pulling a drawbar of the stored
-/// registration is a click on that card, and picks it.
+/// ⚠️ The click is read from the pointer, not claimed by a widget: a card-sized widget
+/// over the controls would swallow every drawbar click, and one under them would see only
+/// the clicks that missed. Pulling a drawbar of the stored registration counts as a click
+/// on its card, and selects it.
 fn clicked_in(ui: &egui::Ui, card: egui::Rect) -> bool {
     ui.rect_contains_pointer(card) && ui.input(|input| input.pointer.primary_clicked())
 }
 
-/// A card's own head. With `playing` it is the selector as well, and returns whether it
-/// was clicked.
+/// A card's heading. With `playing` it is also the selector; returns whether it was
+/// clicked.
 fn card_title(ui: &mut egui::Ui, title: &str, playing: Option<bool>) -> bool {
     let visuals = ui.visuals().clone();
     let mut clicked = false;
@@ -930,7 +927,7 @@ fn card_title(ui: &mut egui::Ui, title: &str, playing: Option<bool>) -> bool {
                         )
                         .sense(egui::Sense::click()),
                     )
-                    .on_hover_text("the other stays stored, it is simply not the one playing")
+                    .on_hover_text("the other stays stored; it is just not playing")
                     .clicked();
             }
             None => {}
@@ -940,7 +937,8 @@ fn card_title(ui: &mut egui::Ui, title: &str, playing: Option<bool>) -> bool {
     clicked
 }
 
-/// The one line a section ends with when something under it is stored and idle.
+/// The line a section ends with when something under it is stored but idle. Returns
+/// whether its Advanced link was clicked.
 fn idle_line(ui: &mut egui::Ui, idle: &[&'static str]) -> bool {
     if idle.is_empty() {
         return false;
@@ -953,7 +951,7 @@ fn idle_line(ui: &mut egui::Ui, idle: &[&'static str]) -> bool {
         icon(ui, Glyph::EyeOff, 11.0, quiet);
         ui.label(
             egui::RichText::new(format!(
-                "{} {} stored but not in use for the state this file holds — kept, not cleared.",
+                "{} {} stored but not in use for the state this file holds. Kept, not cleared.",
                 listed(idle),
                 match idle.len() {
                     1 => "is",
@@ -1002,8 +1000,8 @@ fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
             icon(ui, Glyph::CircleAlert, 11.0, quiet);
             ui.label(
                 egui::RichText::new(format!(
-                    "{unplaced} fields the layout does not place — under Advanced, and under \
-                     {} once the strings table names them.",
+                    "{unplaced} fields the layout does not place. They are under Advanced, \
+                     and under {} once the strings table names them.",
                     strings::Section::Other.title()
                 ))
                 .font(egui::FontId::proportional(READING))
@@ -1047,10 +1045,10 @@ fn clustered<'a>(rows: &[&'a Field], doc: &Doc<'a>) -> Vec<Cell<'a>> {
     let mut parts: Vec<Part<'a>> = Vec::new();
     let mut transposed = false;
     for field in rows {
-        // ⚠️ The selector that picks one of several stored alternatives is the head of
-        // each alternative's own card. Drawn here as well it would be two controls for
-        // one switch — and the layout keeps it in the group *above* the ones it picks
-        // between, so it reaches a strip that has no alternatives of its own.
+        // ⚠️ The selector that picks one of several stored alternatives heads each
+        // alternative's card. Drawn here too, it would be two controls for one switch.
+        // The layout keeps it in the group above the ones it picks between, so it would
+        // also appear in a strip that has no alternatives of its own.
         if doc.picks.contains(field.path.as_str()) {
             continue;
         }
@@ -1058,8 +1056,8 @@ fn clustered<'a>(rows: &[&'a Field], doc: &Doc<'a>) -> Vec<Cell<'a>> {
             transposed = true;
             continue;
         }
-        // A slot whose parameter is in this body rides on that parameter; one with no
-        // parameter beside it stands as its own cell rather than disappearing.
+        // A slot whose parameter is in this body is drawn with that parameter. A slot
+        // with no parameter here gets its own cell so it does not disappear.
         if field
             .spec
             .morph_parent()
@@ -1107,7 +1105,7 @@ fn merged(parts: Vec<Part<'_>>) -> Vec<Cell<'_>> {
     out
 }
 
-/// Whether a bar carries on the register the run has opened.
+/// Whether a bar continues the register the run started.
 fn fitting(run: &[Part<'_>], field: &Field) -> bool {
     let Some((stem, rank)) = ranked(field) else {
         return false;
@@ -1137,11 +1135,11 @@ fn ranked(field: &Field) -> Option<(&str, u8)> {
     Some((stem, rank))
 }
 
-/// The morph target a lens puts under a parameter's own control, or nothing where the
-/// lens is off or the parameter has no target for it.
+/// The morph slot a lens shows under a parameter's control, or `None` when the lens is
+/// off or the parameter has no slot for it.
 ///
-/// ⚠️ It is what the cell **writes** as well as what it reads: an edit made under a lens
-/// goes to the morph slot, never to the panel value beside it.
+/// ⚠️ The cell writes this field as well as reading it: an edit made under a lens goes
+/// to the morph slot, never to the panel value.
 fn shown<'a>(part: &Part<'a>, lens: Option<usize>) -> Option<&'a Field> {
     lens.and_then(|slot| part.morphs[slot])
 }
@@ -1192,7 +1190,7 @@ fn one(
     }
 }
 
-/// The lit or grey ring round a control the lens is showing a target for.
+/// The lit or gray ring around a control the lens shows a target for.
 fn outline(ui: &egui::Ui, rect: egui::Rect, neutral: bool) {
     let ink = match neutral {
         true => app::unlit(ui.visuals()),
@@ -1206,13 +1204,13 @@ fn outline(ui: &egui::Ui, rect: egui::Rect, neutral: bool) {
     );
 }
 
-/// The name over a control: the app's word for it, or the prettified path in mono where
-/// the table has no word yet.
+/// The name over a control: the app's label for it, or the prettified path in monospace
+/// where the table has no label yet.
 fn caption(ui: &mut egui::Ui, field: &Field, edited: bool) {
     named_caption(ui, &field.path, edited, note(field));
 }
 
-/// The same caption over a path, for the register nine fields are drawn as.
+/// The same caption for a bare path, used by the register that draws nine fields.
 fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
     let known = strings::known(path);
     let quiet = app::caption(ui.visuals());
@@ -1237,7 +1235,7 @@ fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
         .response;
     let mut hint = path.to_string();
     if !known {
-        hint.push_str(" — no label yet; showing the prettified path");
+        hint.push_str(": no label yet, showing the prettified path");
     }
     if !note.is_empty() {
         hint.push_str(" · ");
@@ -1246,15 +1244,14 @@ fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
     response.on_hover_text(hint);
 }
 
-/// What a kind is worth saying beside its own control, and nothing where it is not.
+/// A note on the encoding for a control's tooltip, or an empty string.
 ///
-/// Each line is a fact the library states about the encoding, not a description of the
-/// widget.
+/// Each note is a fact about the encoding, not a description of the widget.
 fn note(field: &Field) -> &'static str {
     match field.spec.control {
         // Inferred from specimens; not confirmed on hardware.
         ControlKind::Bipolar(_) => {
-            "centre is the slot midpoint — accurate at the ends, approximate between"
+            "center is the slot midpoint: accurate at the ends, approximate between"
         }
         // Inferred from specimens; not confirmed on hardware.
         ControlKind::Pattern { .. } => "step order inferred",
@@ -1295,11 +1292,11 @@ fn dots(ui: &mut egui::Ui, morphs: &[Option<&Field>; SLOTS.len()]) {
     });
 }
 
-/// The value a morph slot of this width holds when nothing morphs its parent.
+/// The value a morph slot of this width holds when it does not morph its parameter.
 ///
-/// ⚠️ The morph encoding is not established, and a `Field` carries the stored number
-/// rather than the library's own answer — so the midpoint is read back off the library's
-/// constant for the slot's width rather than restated here.
+/// ⚠️ The morph encoding is not established, and a `Field` carries only the stored
+/// number, so the midpoint comes from the library's constant for the slot's width
+/// instead of being restated here.
 /// Inferred from specimens; not confirmed on hardware.
 fn neutral(width: u32) -> Option<u64> {
     use nord_format::components::MorphOf;
@@ -1320,7 +1317,7 @@ fn is_neutral(slot: &Field) -> bool {
     word(&slot.value) == neutral(slot.spec.width)
 }
 
-/// How wide a cell is, which is as wide as what stands in it.
+/// The width of a cell, set by the control it holds.
 fn width(field: &Field, legal: &[String]) -> f32 {
     match field.spec.control {
         ControlKind::Toggle => 84.0,
@@ -1342,8 +1339,8 @@ fn width(field: &Field, legal: &[String]) -> f32 {
 /// The control alone, without its name. Returns the spelling `set_field` takes when it
 /// has been moved.
 ///
-/// ⚠️ Exhaustive over [`ControlKind`], so a kind the library adds is a compile error
-/// here rather than a field that silently loses its widget.
+/// ⚠️ Exhaustive over [`ControlKind`], so a kind the library adds fails to compile here
+/// until it has a widget.
 fn control(
     ui: &mut egui::Ui,
     field: &Field,
@@ -1360,8 +1357,8 @@ fn control(
             order,
         } => pattern(ui, field, steps, bits_per_step, order),
         ControlKind::Reference(library) => reference(ui, field, library, named),
-        // Above the enumerable ceiling a field lists nothing to offer, so its stored
-        // bits are the only spelling there is.
+        // A field too wide to enumerate lists no legal values, so its stored bits are the
+        // only spelling.
         _ if legal.is_empty() => wide(ui, field),
         ControlKind::Toggle => toggle(ui, field, legal),
         ControlKind::Selector => selector(ui, field, legal),
@@ -1372,10 +1369,10 @@ fn control(
     }
 }
 
-/// A lamp and the word for the state it is in.
+/// A lamp and the word for its state.
 ///
-/// The two states may be named rather than spelled `true`/`false`, and what is written
-/// back is whichever of the two the field itself lists.
+/// The two states may have names other than `true` and `false`; the value written back
+/// is whichever of the two the field lists.
 fn toggle(ui: &mut egui::Ui, field: &Field, legal: &[String]) -> Option<String> {
     let named = match legal {
         [off, on] if off != "false" || on != "true" => Some((off.as_str(), on.as_str())),
@@ -1408,9 +1405,9 @@ fn selector(ui: &mut egui::Ui, field: &Field, legal: &[String]) -> Option<String
     let mut picked = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        if strings::unrecognised(&field.value).is_some() {
+        if strings::unrecognized(&field.value).is_some() {
             icon(ui, Glyph::CircleHelp, 11.0, app::warn(ui.visuals()))
-                .on_hover_text("the panel cannot produce this position, and the file holds it");
+                .on_hover_text("the file holds a position the panel cannot produce");
         }
         egui::ComboBox::from_id_salt(&field.path)
             .selected_text(
@@ -1445,9 +1442,9 @@ fn offered(path: &str, legal: &[String], current: &str) -> Vec<String> {
 
 /// Whether a value is one a player would pick.
 ///
-/// `Routing::Unknown` is a named variant rather than an unrecognised position, but it is
-/// how older firmware spelled *off* and it presents as off. Two entries both meaning off
-/// are not offered together.
+/// `Routing::Unknown` is a named variant, not an unrecognized position, but older
+/// firmware used it for off and it presents as off. Two entries that both mean off are
+/// not offered together.
 /// Confirmed on hardware.
 fn offerable(path: &str, value: &str) -> bool {
     !(value == "Unknown"
@@ -1457,17 +1454,17 @@ fn offerable(path: &str, value: &str) -> bool {
         ))
 }
 
-/// A knob, and beside it whatever reading the unit actually supports.
+/// A knob, and beside it whatever reading the unit supports.
 ///
 /// ⚠️ A unit is a label, not a promise of conversion. Where the panel's curve is not
-/// published the knob prints the stored byte and the caption names the scale — nothing
+/// published, the knob prints the stored byte and the caption names the scale. Nothing
 /// here invents a reading the file does not support.
 fn turned(
     ui: &mut egui::Ui,
     field: &Field,
     legal: &[String],
     unit: Unit,
-    centred: bool,
+    centered: bool,
     rows: &[&Field],
 ) -> Option<String> {
     let Some((min, max)) = contiguous(legal) else {
@@ -1475,23 +1472,23 @@ fn turned(
     };
     let value: i64 = field.value.trim_start_matches('+').parse().ok()?;
     let mut moved = None;
-    // The panel reading stands beside the dial and the stored number under it: one is
-    // what the operator is setting, the other what the file holds.
+    // The panel reading goes beside the dial and the stored number under it: the first
+    // is what the user sets, the second what the file holds.
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let dial = ui
             .scope(|ui| moved = knob::ui(ui, &field.path, value, min, max))
             .response;
-        if centred {
+        if centered {
             detent(ui, dial.rect);
         }
-        // What was typed may be no number at all, and the field is what refuses it;
-        // until it does, the reading stands on the value the file holds.
+        // What was typed may not be a number, and the field refuses it later; until
+        // then the reading shows the value the file holds.
         let shown = moved
             .as_deref()
             .and_then(|spelled| spelled.parse().ok())
             .unwrap_or(value);
-        match reading(unit, centred, shown, min, max) {
+        match reading(unit, centered, shown, min, max) {
             Some(text) => {
                 ui.label(
                     egui::RichText::new(text)
@@ -1511,7 +1508,7 @@ fn turned(
                         Some(sibling) => drawn.on_hover_text(sibling),
                         None => drawn.on_hover_text(
                             "the panel's curve for this unit is not published, so the stored \
-                             value is what is shown",
+                             value is shown",
                         ),
                     };
                 }
@@ -1521,11 +1518,11 @@ fn turned(
     moved
 }
 
-/// The mark at twelve o'clock on a knob whose musical zero is its centre.
+/// The mark at twelve o'clock on a knob whose musical zero is its center.
 ///
 /// ⚠️ The knob's sweep is symmetrical about straight up, so the slot's midpoint is
-/// already where the tick goes — the lit arc still fills from the bottom stop, because
-/// the stored range runs `0..=127` and nothing in it is negative.
+/// already where the tick goes. The lit arc still fills from the bottom stop, because the
+/// stored range runs `0..=127` and nothing in it is negative.
 fn detent(ui: &egui::Ui, dial: egui::Rect) {
     let top = egui::pos2(dial.center().x, dial.top());
     ui.painter().line_segment(
@@ -1535,11 +1532,11 @@ fn detent(ui: &egui::Ui, dial: egui::Rect) {
 }
 
 /// The panel reading beside a knob, where the unit supports one.
-fn reading(unit: Unit, centred: bool, value: i64, min: i64, max: i64) -> Option<String> {
-    if centred {
-        // The slot midpoint, which is where the library takes centre to be.
-        let centre = (min + max + 1) / 2;
-        return Some(format!("{:+}", value - centre));
+fn reading(unit: Unit, centered: bool, value: i64, min: i64, max: i64) -> Option<String> {
+    if centered {
+        // The slot midpoint, which the library treats as center.
+        let center = (min + max + 1) / 2;
+        return Some(format!("{:+}", value - center));
     }
     match (unit.describes_a_known_transform(), unit) {
         (true, Unit::Panel10) if max > min => Some(format!(
@@ -1562,7 +1559,7 @@ fn scale(unit: Unit) -> Option<&'static str> {
     }
 }
 
-/// The sibling flag a clocked rate reads against, where the body declares one.
+/// The sibling flag that decides how a clocked rate reads, where the body declares one.
 ///
 /// ⚠️ Neither field is a reading on its own: the same slot reads in hertz or as a
 /// subdivision depending on the flag beside it.
@@ -1581,7 +1578,7 @@ fn clocked(field: &Field, rows: &[&Field]) -> Option<String> {
     ))
 }
 
-/// A signed offset, stepped one at a time and stopped at the ends of its own travel.
+/// A signed offset, stepped by one and stopped at the ends of its range.
 fn shift(ui: &mut egui::Ui, field: &Field, legal: &[String], unit: Unit) -> Option<String> {
     let Some((min, max)) = contiguous(legal) else {
         return plain(ui, field, legal);
@@ -1616,11 +1613,10 @@ fn nudge(ui: &mut egui::Ui, sign: &str, within: bool) -> bool {
     .clicked()
 }
 
-/// Where a counter stands: its own inset box, with the unit it counts in beside the
-/// number.
+/// A counter's value: an inset box with the unit beside the number.
 ///
-/// The box holds a fixed width for the number, so stepping one does not walk the buttons
-/// either side of it across the panel.
+/// The number has a fixed width, so stepping it does not shift the buttons on either
+/// side.
 fn counted(ui: &mut egui::Ui, value: i64, unit: &str) {
     let spelled = match value {
         0 => "0".to_string(),
@@ -1661,8 +1657,9 @@ fn bar(ui: &mut egui::Ui, field: &Field, rank: Option<u8>) -> Option<String> {
 
 /// A whole register in one field.
 ///
-/// ⚠️ Read from the wrong end a register comes out mirrored and looks like a plausible
-/// registration, so the packing order is asked of the field rather than assumed.
+/// ⚠️ Read from the wrong end, a register comes out mirrored and still looks like a
+/// plausible registration, so the packing order comes from the field instead of being
+/// assumed.
 fn packed(ui: &mut egui::Ui, field: &Field, order: PackedOrder) -> Option<String> {
     let bits = drawbar_widget::parse(&field.value)?;
     let stored = drawbar_widget::bars(bits);
@@ -1706,9 +1703,9 @@ fn bars(
 /// only the bars that moved are written.
 fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets: &mut Sets) {
     if let Some(slot) = state.lens {
-        // The targets keep the register's own order, so the bars stay side by side under
-        // every lens — even where a slot is wider than the bar it morphs and has no
-        // drawbar of its own to be drawn as.
+        // The targets keep the register's order, so the bars stay side by side under
+        // every lens, even where a slot is wider than the bar it morphs and cannot be
+        // drawn as a drawbar.
         for (nth, part) in run.iter().enumerate() {
             let Some(target) = part.morphs[slot] else {
                 continue;
@@ -1766,8 +1763,8 @@ fn register(ui: &mut egui::Ui, ctx: &Ctx, state: &State, run: &[Part<'_>], sets:
     });
 }
 
-/// What a moved register writes: the bars that landed somewhere else, and no others. A
-/// bar nobody touched is a field that must not be written.
+/// What a moved register writes: only the bars whose position changed. An untouched
+/// bar's field must not be written.
 fn bar_sets(
     run: &[Part<'_>],
     was: &[u8; drawbar_widget::BARS],
@@ -1781,11 +1778,11 @@ fn bar_sets(
         .collect()
 }
 
-/// The bits one step of a pattern owns: how far up the stored word they sit, and the mask
-/// that takes them. `None` for a step the declared width cannot address.
+/// The bits one step of a pattern owns: their shift within the stored word, and their
+/// mask. `None` for a step the declared width cannot address.
 ///
 /// ⚠️ [`PackedOrder::HighFirst`] numbers the steps down from the top of the word, so step
-/// 0 is the highest bits rather than the lowest.
+/// 0 is the highest bits.
 fn step_bits(step: usize, steps: u8, bits_per_step: u8, order: PackedOrder) -> Option<(u32, u64)> {
     let last = usize::from(steps).checked_sub(1)?;
     if step > last {
@@ -1801,8 +1798,8 @@ fn step_bits(step: usize, steps: u8, bits_per_step: u8, order: PackedOrder) -> O
     (shift.checked_add(width)? <= u64::BITS).then_some((shift, mask))
 }
 
-/// The stored word after a click on one step: that step's own bits move on to the next
-/// value they can hold, wrapping at the top, and no other bit moves.
+/// The stored word after a click on one step: that step's bits advance to the next value,
+/// wrapping at the top, and no other bit changes.
 fn stepped(
     stored: u64,
     step: usize,
@@ -1815,7 +1812,7 @@ fn stepped(
     Some((stored & !(mask << shift)) | (next << shift))
 }
 
-/// A per-step grid. A click moves one step on to the next value it can hold.
+/// A per-step grid. A click advances one step to its next value.
 fn pattern(
     ui: &mut egui::Ui,
     field: &Field,
@@ -1901,9 +1898,9 @@ fn plain(ui: &mut egui::Ui, field: &Field, legal: &[String]) -> Option<String> {
 
 /// A field too wide to enumerate: its stored bits, typed as they are spelled.
 fn wide(ui: &mut egui::Ui, field: &Field) -> Option<String> {
-    // ⚠️ Half a value is not a value the format would take, so the box commits when it
-    // is done rather than per keystroke — and what has been typed waits under the
-    // field's own id until then.
+    // ⚠️ A half-typed value is not one the format would take, so the box commits when
+    // editing ends, not per keystroke. Until then the typed text is kept under the
+    // field's id.
     let id = ui.id().with(("wide", field.path.as_str()));
     let held: Option<String> = ui.data(|data| data.get_temp(id));
     let mut text = held.clone().unwrap_or_else(|| field.value.clone());
@@ -1913,8 +1910,8 @@ fn wide(ui: &mut egui::Ui, field: &Field) -> Option<String> {
             .desired_width(150.0)
             .font(egui::FontId::monospace(11.0)),
     );
-    // ⚠️ Escape takes the focus away in the frame it is pressed, so it is read before the
-    // box is: an unfocused box is one that was left, and leaving commits.
+    // ⚠️ Escape removes focus in the frame it is pressed, so it is checked before the
+    // focus test: an unfocused box counts as left, and leaving commits.
     if response.ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.data_mut(|data| data.remove::<String>(id));
         return None;
@@ -1929,13 +1926,13 @@ fn wide(ui: &mut egui::Ui, field: &Field) -> Option<String> {
     (text.trim() != field.value).then(|| text.trim().to_string())
 }
 
-/// The Electro 5 transpose control: a lamp and a number, written together the way the
-/// panel's own button writes them.
+/// The Electro 5 transpose control: a lamp and a number, written together as the panel's
+/// button writes them.
 ///
-/// ⚠️ Neither field reads on its own. `transpose_enabled` is sticky — the instrument
-/// sets it the first time transposition is touched and never clears it — and an
-/// untouched program stores `+1` in the value rather than `0`. The instrument ignores the
-/// amount while the lamp is dark, and moving the amount is what lights it.
+/// ⚠️ Neither field makes sense alone. `transpose_enabled` is sticky: the instrument sets
+/// it the first time transposition is touched and never clears it. An untouched program
+/// stores `+1` as the amount, not `0`. The instrument ignores the amount while the lamp
+/// is dark, and moving the amount lights it.
 /// Confirmed on hardware.
 fn transpose(ui: &mut egui::Ui, ctx: &Ctx, state: &State, rows: &[&Field], sets: &mut Sets) {
     let held = |path: &str| rows.iter().find(|field| field.path == path);
@@ -1967,7 +1964,7 @@ fn transpose(ui: &mut egui::Ui, ctx: &Ctx, state: &State, rows: &[&Field], sets:
     .response
     .on_hover_text("two fields, one control: the lamp and the semitones move together");
 
-    // Moving the semitones turns the light on, which is what the panel does.
+    // Moving the semitones turns the lamp on, as the panel does.
     let (on, semitones) = match (switched, moved) {
         (_, Some(want)) => (true, want),
         (Some(want_on), None) => (want_on, semitones.to_string()),
@@ -2002,7 +1999,7 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
         ),
         Shape::Flat => (
             "flat, registry order".to_string(),
-            "nothing knows how this panel is divided".to_string(),
+            "no layout says how this panel is divided".to_string(),
         ),
     };
     vec![
@@ -2027,10 +2024,10 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
     ]
 }
 
-/// What a field's kind is called in the Advanced table's own column.
+/// The name of a field's kind in the Advanced table's Control column.
 ///
-/// ⚠️ Exhaustive over [`ControlKind`], so a kind the library adds is named here rather
-/// than falling into a catch-all that says nothing.
+/// ⚠️ Exhaustive over [`ControlKind`], so a kind the library adds fails to compile here
+/// until it is named.
 pub fn kind_word(field: &Field) -> String {
     match field.spec.control {
         ControlKind::Toggle => "toggle".to_string(),
@@ -2077,7 +2074,8 @@ fn word(value: &str) -> Option<u64> {
 /// The range a legal-value list covers, when every value is an integer and none is
 /// missing.
 ///
-/// ⚠️ A gapped set is not travel: a knob over it would stop on values the field refuses.
+/// ⚠️ A set with gaps cannot be a knob's range: the knob would stop on values the field
+/// refuses.
 fn contiguous(legal: &[String]) -> Option<(i64, i64)> {
     let mut values = Vec::with_capacity(legal.len());
     for value in legal {
@@ -2105,20 +2103,18 @@ mod tests {
         (bytes, fields)
     }
 
-    /// A gapped legal set is not travel: a knob over it would stop on values the field
-    /// refuses.
     #[test]
-    fn only_a_gapless_run_of_integers_is_travel() {
+    fn only_a_gapless_run_of_integers_is_a_range() {
         let full: Vec<String> = (0..128).map(|n| n.to_string()).collect();
         assert_eq!(contiguous(&full), Some((0, 127)));
         assert_eq!(contiguous(&["0".into(), "1".into(), "9".into()]), None);
         assert_eq!(contiguous(&["Organ".into(), "Piano".into()]), None);
-        // A run of one value has no travel.
+        // A run of one value is not a range.
         assert_eq!(contiguous(&["3".into()]), None);
     }
 
-    /// A Panel10 knob reads in the panel's own `0..10`; a unit whose curve is not
-    /// published has no reading at all and names its scale instead.
+    /// A Panel10 knob reads on the panel's `0..10` scale; a unit whose curve is not
+    /// published has no reading and names its scale instead.
     #[test]
     fn a_reading_appears_only_where_the_unit_supports_one() {
         assert_eq!(
@@ -2136,8 +2132,8 @@ mod tests {
         assert_eq!(scale(Unit::Panel10), None);
     }
 
-    /// A morph slot's neutral value comes off the library's own constant for its width,
-    /// so a slot beside a drawbar and one beside a knob are not read by one number.
+    /// A morph slot's neutral value comes from the library's constant for its width, so
+    /// slots of different widths have different neutral values.
     #[test]
     fn a_morph_slots_neutral_follows_the_width_the_library_declares() {
         assert_eq!(neutral(8), Some(127));
@@ -2146,7 +2142,7 @@ mod tests {
         assert_eq!(neutral(9), None);
     }
 
-    /// The sentence a section's idle line is built out of.
+    /// The list a section's idle line is built from.
     #[test]
     fn the_idle_line_names_what_is_stored_and_not_played() {
         assert_eq!(listed(&["Vox"]), "Vox");
@@ -2154,11 +2150,10 @@ mod tests {
         assert_eq!(listed(&["Vox", "Farfisa", "Pipe"]), "Vox, Farfisa and Pipe");
     }
 
-    /// ⚠️ Both spellings of a drawbar carry the one kind: the Electro 5 packs a whole
-    /// registration into one field and the Stage 4 gives each bar its own nibble. The
-    /// kind's bar count is what separates them.
+    /// The Electro 5 packs a whole registration into one field, and the Stage 4 gives
+    /// each bar its own nibble. Both share one kind.
     #[test]
-    fn a_drawbar_is_a_register_or_a_bar_by_what_its_kind_counts() {
+    fn a_drawbar_kinds_bar_count_separates_a_register_from_a_single_bar() {
         let (_, electro5) = electro5();
         let packed = electro5
             .iter()
@@ -2178,8 +2173,8 @@ mod tests {
         assert_eq!(ranked(bar).map(|(_, rank)| rank), Some(1));
     }
 
-    /// Nine ranked bars under one prefix are one register; anything short of nine stays
-    /// nine cells rather than drawing a register that is not there.
+    /// Nine ranked bars under one prefix are one register; fewer than nine stay
+    /// separate cells.
     #[test]
     fn nine_ranked_bars_merge_into_one_register() {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2209,8 +2204,8 @@ mod tests {
         assert!(short.iter().all(|cell| matches!(cell, Cell::One(_))));
     }
 
-    /// A morph target is the value its parameter is driven to, so it rides on that
-    /// parameter and is never a cell of its own.
+    /// A morph target is the value its parameter is driven to, so it is drawn with that
+    /// parameter and never as a cell of its own.
     #[test]
     fn a_morph_slot_is_drawn_on_the_parameter_it_moves() {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2233,8 +2228,8 @@ mod tests {
         assert!(!morphs.contains_key("organ_a_volume_wheel"));
     }
 
-    /// A slot whose parameter the body does not declare has nothing to ride on, so it
-    /// keeps a cell rather than disappearing.
+    /// A slot whose parameter the body does not declare gets its own cell so it does not
+    /// disappear.
     #[test]
     fn a_slot_with_no_parameter_beside_it_still_gets_a_cell() {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2259,7 +2254,7 @@ mod tests {
         assert_eq!(built.len(), 1);
     }
 
-    /// An unrecognised position is offered, because the file holds it and that spelling
+    /// An unrecognized position is offered, because the file holds it and that spelling
     /// is the only way to put it back. Two spellings of off are not offered together.
     #[test]
     fn a_picker_offers_every_position_but_a_second_spelling_of_off() {
@@ -2288,8 +2283,8 @@ mod tests {
         assert!(offerable("some_other_field", "Unknown"));
     }
 
-    /// Every control the Electro 5 view offers comes off the library's layout, and a
-    /// group the instrument is not using is named rather than silently absent.
+    /// Every control the Electro 5 view offers comes from the library's layout, and a
+    /// group the instrument is not using is named as idle.
     #[test]
     fn the_electro5_document_is_the_librarys_layout() {
         let (bytes, fields) = electro5();
@@ -2304,8 +2299,8 @@ mod tests {
             .collect();
         assert!(titles.contains(&"Keyboard & split"), "{titles:?}");
         assert!(titles.contains(&"Organ"), "{titles:?}");
-        // A fresh program plays organ on both parts, so piano is state rather than
-        // controls — named as idle, never simply gone.
+        // A fresh program plays organ on both parts, so the Piano group is idle: named,
+        // never simply missing.
         assert!(!titles.contains(&"Piano"), "{titles:?}");
         assert!(doc.idle.contains(&"Piano"), "{:?}", doc.idle);
         let (unplaced, named) = doc.unplaced();
@@ -2313,8 +2308,8 @@ mod tests {
         assert!(named <= unplaced, "{named} named of {unplaced} unplaced");
     }
 
-    /// The "Also stored" section holds the unplaced fields the strings table names, so
-    /// the count beside the layout is those rather than every unplaced field.
+    /// The "Also stored" section holds the unplaced fields the strings table names, and
+    /// no others.
     #[test]
     fn the_layout_line_counts_what_also_stored_will_hold() {
         let (bytes, fields) = electro5();
@@ -2331,8 +2326,8 @@ mod tests {
         assert!(named < unplaced, "{named} of {unplaced} are named");
     }
 
-    /// The transpose pair is one control, which needs both halves in the same group —
-    /// the layout is what puts them there.
+    /// The transpose pair is one control, so the layout must put both halves in the same
+    /// group.
     #[test]
     fn the_transpose_pair_stays_in_one_group() {
         let (_, fields) = electro5();
@@ -2351,8 +2346,8 @@ mod tests {
         assert!(paths.contains(&TRANSPOSE));
     }
 
-    /// A Stage 4 program has a layout as well, and every one of its sections is open —
-    /// nothing folds above a field count.
+    /// A Stage 4 program has a layout too, and every section is open; nothing folds
+    /// above a field count.
     #[test]
     fn a_stage4_program_opens_every_section_it_has() {
         let bytes = Fresh::Stage4Program.bytes().unwrap();
@@ -2368,13 +2363,12 @@ mod tests {
         assert!(ns4::program::PANEL.resolve(&fields).sections.len() > 1);
     }
 
-    /// ⚠️ A stored alternative is picked by a click anywhere in its card, not by the
-    /// label alone: an operator who reaches for its drawbars has said which registration
-    /// they mean, and a card that answered only its own title would take the pull and go
-    /// on playing the other one.
+    /// ⚠️ A user who pulls a drawbar in a stored alternative has chosen that
+    /// registration. A card that answered only its title would take the pull and keep
+    /// playing the other one.
     #[test]
     fn a_click_anywhere_in_a_stored_alternative_picks_it() {
-        /// The stroked card of the alternative that is not the one playing.
+        /// The outlined card of the alternative that is not playing.
         fn kept_card(output: &egui::FullOutput, stroke: egui::Color32) -> Option<egui::Rect> {
             fn walk(shape: &egui::Shape, stroke: egui::Color32, found: &mut Vec<egui::Rect>) {
                 match shape {
@@ -2431,8 +2425,8 @@ mod tests {
         let state = State::default();
         let mut sets = Sets::new();
         let mut body = egui::Rect::NOTHING;
-        // The first pass lays the cards out; the second clicks the middle of the one
-        // that is kept, which is a control of its own rather than its title.
+        // The first pass lays out the cards; the second clicks the middle of the kept
+        // card, which lands on one of its controls, not on its title.
         for pass in 0..2 {
             let mut piano = lookup();
             sets.clear();
@@ -2457,7 +2451,7 @@ mod tests {
                 });
             });
             if pass == 0 {
-                body = kept_card(&output, quiet).expect("the kept card is stroked");
+                body = kept_card(&output, quiet).expect("an outlined kept card");
             }
         }
         assert!(
@@ -2467,7 +2461,7 @@ mod tests {
         );
     }
 
-    /// Which kind a field is, for a sweep that has to see every one of them drawn.
+    /// A name for each control kind, so the sweep can check that every kind was drawn.
     fn kind_key(field: &Field) -> &'static str {
         match field.spec.control {
             ControlKind::Toggle => "toggle",
@@ -2495,7 +2489,7 @@ mod tests {
         }
     }
 
-    /// A whole click at one point: the pointer arrives, presses and lets go.
+    /// A full click at one point: the pointer moves there, presses, and releases.
     fn click(at: egui::Pos2) -> Vec<egui::Event> {
         let button = |pressed| egui::Event::PointerButton {
             pos: at,
@@ -2506,7 +2500,7 @@ mod tests {
         vec![egui::Event::PointerMoved(at), button(true), button(false)]
     }
 
-    /// How many filled circles of one colour a frame painted.
+    /// How many filled circles of one color a frame painted.
     fn circles(output: &egui::FullOutput, ink: egui::Color32) -> usize {
         fn count(shape: &egui::Shape, ink: egui::Color32) -> usize {
             match shape {
@@ -2560,9 +2554,8 @@ mod tests {
             .sum()
     }
 
-    /// ⚠️ Every kind the library declares has a renderer, and every renderer paints. A
-    /// kind that fell through would be a control the operator never sees at all — the
-    /// field would still be in the file, and nothing on screen would say so.
+    /// ⚠️ A kind that fell through would be a control the user never sees: the field
+    /// would still be in the file, and nothing on screen would say so.
     #[test]
     fn every_control_kind_the_registry_declares_paints_a_control() {
         let (_, electro5) = electro5();
@@ -2596,8 +2589,8 @@ mod tests {
             ],
         );
 
-        // A field too wide to enumerate is the eleventh shape: a box its stored bits are
-        // typed into, and there is nothing else it could be.
+        // A field too wide to enumerate is drawn as a box its stored bits are typed
+        // into.
         let wide = stage2
             .iter()
             .find(|field| {
@@ -2609,8 +2602,6 @@ mod tests {
         assert!(drawn(wide) > 0);
     }
 
-    /// A morph lens puts the target under the parameter's own control, and an edit made
-    /// there writes the slot rather than the panel value beside it.
     #[test]
     fn an_edit_under_the_lens_writes_the_morph_slot() {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2624,7 +2615,7 @@ mod tests {
         };
         assert!(
             shown(&part, None).is_none(),
-            "the panel writes the panel value"
+            "with no lens, the cell writes the panel value"
         );
         assert_eq!(
             shown(&part, Some(0)).map(|field| field.path.as_str()),
@@ -2635,7 +2626,7 @@ mod tests {
             Some("organ_a_volume_ctrl_pedal"),
         );
 
-        // A parameter nothing morphs keeps its own control, dimmed rather than swapped.
+        // A parameter with no morph keeps its own control, dimmed instead of swapped.
         let bare = Part {
             field: fields
                 .iter()
@@ -2646,8 +2637,6 @@ mod tests {
         assert!(shown(&bare, Some(0)).is_none());
     }
 
-    /// ⚠️ Read from the wrong end a register comes out mirrored, and mirrored looks like
-    /// a plausible registration — so the packing order is asked of the field.
     #[test]
     fn a_packed_register_is_read_from_the_end_its_field_names() {
         let stored = drawbar_widget::bars(0x8_8880_0000);
@@ -2669,13 +2658,12 @@ mod tests {
         ));
     }
 
-    /// A morph slot is drawn under the parameter it moves rather than beside it, so a
-    /// face that places the parameter draws the slot too — the Advanced table must not
-    /// flag a slot the lens draws as a field the Basic face hides.
+    /// A face that places a parameter draws its slots too, so the Advanced table must not
+    /// flag a slot the lens draws as hidden from Basic.
     #[test]
     fn a_slot_is_shown_where_the_parameter_it_moves_is_placed() {
-        // The layout draws the sections the program is using, so the organ has to be
-        // playing for its parameters — and the slots riding on them — to be placed.
+        // The layout draws only the sections the program uses, so the organ must be
+        // playing for its parameters and their slots to be placed.
         let playing = [
             ("organ_section_enabled".to_string(), "true".to_string()),
             ("organ_a_layer_enabled".to_string(), "true".to_string()),
@@ -2699,15 +2687,15 @@ mod tests {
             ridden += 1;
             assert!(
                 doc.shows(&field.path),
-                "{} rides on {parent}, which is drawn",
+                "{} belongs to {parent}, which is drawn",
                 field.path,
             );
         }
-        assert!(ridden > 20, "{ridden} slots ride on a drawn parameter");
+        assert!(ridden > 20, "{ridden} slots belong to a drawn parameter");
     }
 
-    /// Under a lens the cell writes the morph slot, so the edited dot beside the name is
-    /// the slot's. The parameter it hangs on may be untouched.
+    /// Under a lens the cell writes the morph slot, so the edited dot beside the name
+    /// shows the slot's state, whatever the parameter's.
     #[test]
     fn the_edited_dot_follows_the_field_the_cell_writes() {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2752,12 +2740,11 @@ mod tests {
         assert_eq!(
             dots("organ_a_volume", None),
             1,
-            "off the lens, the parameter"
+            "with no lens, the parameter's"
         );
     }
 
-    /// The three ways out of the box a wide field is typed into. Enter and leaving both
-    /// mean it, and Escape means the file keeps what it had.
+    /// Enter and leaving the box both commit; Escape leaves the file as it was.
     #[test]
     fn a_wide_field_commits_on_enter_or_blur_and_drops_what_escape_typed() {
         const TYPED: &str = "0xfeed";
@@ -2777,7 +2764,8 @@ mod tests {
             ctx.set_fonts(crate::app::fonts());
             let mut got = None;
             let mut held = false;
-            // The first frame opens the box; the second delivers the way out of it.
+            // The first frame opens the box; the second sends the key or click that
+            // leaves it.
             for events in [Vec::new(), events] {
                 let input = egui::RawInput {
                     events,
@@ -2811,7 +2799,7 @@ mod tests {
         assert_eq!(
             exit(field, true, Vec::new()),
             (None, true),
-            "half a value waits in the box",
+            "a half-typed value stays in the box",
         );
         assert_eq!(
             exit(field, true, key(egui::Key::Enter)),
@@ -2829,8 +2817,6 @@ mod tests {
         );
     }
 
-    /// A lamp writes the field's own word for the state it was switched to: two states
-    /// may be named rather than spelled `true`/`false`.
     #[test]
     fn a_lamp_writes_the_spelling_its_field_lists() {
         let (stage4, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2876,8 +2862,6 @@ mod tests {
         assert_eq!(switched(&plain), Some(other));
     }
 
-    /// A click on one step moves that step's own bits and no others: a pattern edit must
-    /// not disturb the steps beside it.
     #[test]
     fn a_click_on_a_step_moves_only_that_steps_bits() {
         for step in 0..8 {
@@ -2887,22 +2871,21 @@ mod tests {
         // HighFirst numbers the steps down from the top of the word.
         assert_eq!(stepped(0, 0, 8, 2, PackedOrder::HighFirst), Some(1 << 14));
         assert_eq!(stepped(0, 7, 8, 2, PackedOrder::HighFirst), Some(1));
-        // A step at the top of its range wraps to nothing, and takes nothing with it.
+        // A step at the top of its range wraps to zero and leaves its neighbors alone.
         let three = 0b11;
         assert_eq!(
             stepped((three << 2) | three, 1, 8, 2, PackedOrder::LowFirst),
             Some(three),
         );
-        // A step outside the pattern, and a width no stored word can hold, address
-        // nothing rather than some other step's bits.
+        // A step outside the pattern, or a width no stored word can hold, addresses no
+        // bits, never another step's.
         assert_eq!(stepped(0, 8, 8, 2, PackedOrder::LowFirst), None);
         assert_eq!(stepped(0, 8, 8, 2, PackedOrder::HighFirst), None);
         assert_eq!(stepped(0, 4, 8, 16, PackedOrder::LowFirst), None);
         assert_eq!(stepped(0, 0, 8, 65, PackedOrder::LowFirst), None);
     }
 
-    /// A register is nine fields and a moved bar is one of them: the eight beside it are
-    /// not rewritten with what they already hold.
+    /// A register is nine fields; moving one bar does not rewrite the other eight.
     #[test]
     fn a_register_writes_only_the_bars_that_moved() {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
@@ -2927,8 +2910,7 @@ mod tests {
         assert!(bar_sets(&run, &was, &was).is_empty());
     }
 
-    /// A stored word is read the way its field spells it, and a spelling that is no
-    /// number at all is refused rather than read as zero.
+    /// A spelling that is not a number is refused, not read as zero.
     #[test]
     fn a_stored_word_is_refused_unless_it_spells_a_number() {
         assert_eq!(word("0x1f"), Some(31));
@@ -2940,8 +2922,7 @@ mod tests {
         assert_eq!(word("-1"), None);
     }
 
-    /// The transpose knob turns as far as the amount field says it may, which is the
-    /// panel's own half-step either side of nothing.
+    /// The range comes from the amount field: six semitones either side of zero.
     #[test]
     fn the_transpose_knob_turns_as_far_as_its_field_allows() {
         let (_, fields) = electro5();
@@ -2952,8 +2933,7 @@ mod tests {
         assert_eq!(contiguous(&(amount.spec.legal)()), Some((-6, 6)));
     }
 
-    /// A body with no layout falls into the sections its paths name, and every field
-    /// lands in exactly one of them.
+    /// Every field lands in exactly one section.
     #[test]
     fn a_body_with_no_layout_falls_into_the_sections_its_paths_name() {
         let titles = |bytes: Vec<u8>| -> Vec<String> {

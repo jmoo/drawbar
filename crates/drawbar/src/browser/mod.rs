@@ -1,15 +1,14 @@
-//! The browser dock: one tree over the places a sound can live, the kinds there are,
-//! and the tags on the list.
+//! The browser dock: one tree with three sections, for the places a sound can be, the
+//! kinds of sound, and the tags on the local list.
 //!
-//! Nothing here touches the instrument. Rendering reads the caches and answers with a
-//! list of [`Act`]s, which [`apply`] then runs against the workspace, the device and the
-//! tabs — so a row can be drawn while the thing it stands for is about to change.
+//! Nothing here touches the instrument. Drawing reads the caches and returns a list of
+//! [`Act`]s, which [`apply`] then runs against the workspace, the device and the tabs. A
+//! row can therefore be drawn while the thing it stands for is about to change.
 //!
-//! This file holds the state every row shares — what is picked, the in-place rename, the
-//! one modal, which branches are open. The tree itself is `tree`, the drag vocabulary is
-//! `drag`, the row it is painted from is `row`, and the grouping and labelling of the
-//! local list live outside the browser entirely, in [`crate::folders`] and
-//! [`crate::tags`].
+//! This file holds the state rows share: the selection, the in-place rename, the
+//! confirmation modal, and which branches are open. The tree is drawn in `tree`, the drag
+//! rules are in `drag`, and a single row is drawn in `row`. Folders and tags for the
+//! local list live outside the browser, in [`crate::folders`] and [`crate::tags`].
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -51,19 +50,19 @@ use tree::{Branch, Sections};
 struct Rename {
     what: Item,
     text: String,
-    /// The first frame, in which the field takes focus and selects what is in it.
+    /// True on the first frame, when the field takes focus and selects its text.
     fresh: bool,
 }
 
-/// A click on a row: which row, and the run a ⇧-click may fill.
+/// A click on a row, and the list a ⇧-click extends across.
 struct Click<'a> {
     item: Item,
     /// The rows of the list this one sits in, in the order they are drawn.
     list: &'a [Item],
 }
 
-/// A question that has to be answered before something is lost, and everything the
-/// answer commits to. One question covers a whole checked set.
+/// A confirmation asked before something is lost, and the acts a yes runs. One question
+/// covers a whole checked set.
 struct Ask {
     title: String,
     note: Option<String>,
@@ -71,10 +70,10 @@ struct Ask {
     acts: Vec<Act>,
 }
 
-/// What Enter does to an in-place rename: nothing, or a new name.
+/// The new name Enter commits from an in-place rename, if any.
 ///
-/// A blank field is not a name and an unchanged one is not a rename, so both leave the
-/// asset alone rather than sending an operation that would do nothing.
+/// A blank or unchanged field returns `None`, so no operation is sent that would do
+/// nothing.
 pub fn renamed(original: &str, typed: &str) -> Option<String> {
     let typed = typed.trim();
     match typed.is_empty() || typed == original.trim() {
@@ -83,8 +82,7 @@ pub fn renamed(original: &str, typed: &str) -> Option<String> {
     }
 }
 
-/// What a verdict runs, or nothing at all for a refusal — which [`Browser::land`] reports
-/// rather than runs.
+/// The act a verdict runs. `None` for a refusal, which [`Browser::land`] reports instead.
 fn act_of(verdict: Landing) -> Option<Act> {
     Some(match verdict {
         Landing::Copy { class, at } => Act::Copy { class, at },
@@ -107,8 +105,8 @@ pub struct Browser {
     tags: Tags,
     /// Which of the three sections are showing.
     sections: Sections,
-    /// The branches of the tree that are open. The two places are, so a panel that has
-    /// never been touched shows what is in them.
+    /// The open branches of the tree. Both places start open, so a new panel shows what
+    /// is in them.
     open: BTreeSet<Branch>,
     /// A slot to scroll to and select, once the branches holding it have been drawn.
     jump: Option<(ObjectClass, Location)>,
@@ -130,7 +128,7 @@ impl Default for Browser {
 }
 
 impl Browser {
-    /// Put the grouping and the labelling back where they were left.
+    /// Restore the folders and tags from storage.
     pub fn restore(&mut self, storage: &dyn eframe::Storage) {
         self.folders = storage
             .get_string(folders::KEY)
@@ -142,8 +140,8 @@ impl Browser {
             .unwrap_or_default();
     }
 
-    /// Reconcile the grouping and the labelling with the list that came back beside
-    /// them. Call once, after every store has been read.
+    /// Drop folder and tag memberships of assets the restored list does not hold. Call
+    /// once, after every store has been read.
     pub fn settle(&mut self, workspace: &Workspace) {
         self.folders.forget_missing(workspace);
         self.tags.forget_missing(workspace);
@@ -170,45 +168,43 @@ impl Browser {
         acts
     }
 
-    /// What is picked. One selection, so a row picked in the library table is the row
-    /// the tree shows picked.
+    /// The selection, which the library table and the tree share.
     pub fn picked(&self) -> &Selection {
         &self.selection
     }
 
-    /// How the list on this computer is labelled, for the views that show a count of it.
+    /// The tags on this computer's list, for the views that count them.
     pub fn tags(&self) -> &Tags {
         &self.tags
     }
 
-    /// A click on a row drawn somewhere other than the tree: the same three gestures
-    /// over the same set.
+    /// A click on a row drawn outside the tree, with the same gestures on the same
+    /// selection.
     pub fn pick(&mut self, ui: &egui::Ui, item: Item, list: &[Item]) {
         self.clicked(ui, Click { item, list });
     }
 
-    /// Escape lets go of everything picked, wherever its rows were drawn.
+    /// Escape clears the selection, wherever its rows were drawn.
     ///
     /// ⚠️ Called whether or not the browser dock is open: the library's table shows the
-    /// same selection, and a set nothing draws is one nothing can put down.
+    /// same selection, and a selection nothing draws could never be cleared.
     ///
-    /// An open rename keeps Escape for itself. That is how a name being typed is taken
-    /// back, and the row it is being typed on stays picked.
+    /// During a rename, Escape cancels the rename and the row stays selected.
     pub fn let_go(&mut self, ctx: &egui::Context) {
         if self.rename.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.selection.clear();
         }
     }
 
-    /// Let go of everything picked, because a click landed past the last row.
+    /// Clear the selection, because a click landed below the last row.
     pub fn unpick(&mut self) {
         self.selection.clear();
     }
 
-    /// A click on a row's own box: that row in or out of what is checked.
+    /// A click on a row's checkbox, which toggles that row.
     ///
-    /// ⚠️ A box is a checkbox, so a plain click on it is the ⌘ gesture. A click on the
-    /// row itself still means what [`gesture`] says it means.
+    /// ⚠️ A plain click on the checkbox acts as the ⌘ gesture. A click on the row itself
+    /// follows [`gesture`].
     pub fn check(&mut self, item: Item) {
         self.rename = None;
         self.selection.toggle(item);
@@ -219,13 +215,13 @@ impl Browser {
         self.selection.only(item);
     }
 
-    /// Whether this row is the only one picked, which is what F2 renames.
+    /// Whether this row is the only one selected, which is what F2 renames.
     fn sole_is(&self, item: Item) -> bool {
         self.selection.sole() == Some(item)
     }
 
-    /// Take back an armed rename, because the row it belongs to is about to stop
-    /// existing and no row will be drawn to close it.
+    /// Cancel an open rename of `what` and drop it from the selection, because its row is
+    /// about to go away and will not be drawn to close the editor.
     fn forget_rename(&mut self, what: Item) {
         if self.rename.as_ref().is_some_and(|r| r.what == what) {
             self.rename = None;
@@ -242,11 +238,11 @@ impl Browser {
         });
     }
 
-    /// What a click on a row does, and the list it can be extended across.
+    /// Apply a click on a row to the selection.
     ///
-    /// ⚠️ No click arms the rename editor. One armed by a second click on a picked row
-    /// sits there with the whole name selected, so the next keystroke — one meant for
-    /// the document, or a stray one — replaces it. Renaming is F2 and the row's menu.
+    /// ⚠️ No click opens the rename editor. An editor opened by a second click on a
+    /// selected row would wait with the whole name selected, and the next keystroke, even
+    /// one meant for the document, would replace it. Renaming is F2 and the row's menu.
     fn clicked(&mut self, ui: &egui::Ui, click: Click) {
         self.rename = None;
         match gesture(&ui.input(|input| input.modifiers)) {
@@ -284,12 +280,11 @@ impl Browser {
         }
     }
 
-    /// What the drag rules need to know about a row, or nothing for a row that is never
-    /// dragged — wherever the row was drawn, the tree or the library's table.
+    /// What the drag rules need to know about a row, drawn in the tree or the library's
+    /// table. `None` for a row that is never dragged.
     ///
-    /// ⚠️ Neither a slot of a partition this app cannot name nor one the scan found
-    /// vacant is something a drag can pick up and copy back: neither holds anything this
-    /// app could ask the instrument for.
+    /// ⚠️ A drag cannot carry a slot of a partition this app cannot name, or a slot the
+    /// scan found empty. Neither holds anything this app could ask the instrument for.
     pub(crate) fn held(
         &self,
         item: Item,
@@ -307,7 +302,7 @@ impl Browser {
                 })
             }
             Item::Folder(_) | Item::Tag(_) => None,
-            // What is already on the instrument fits it by having got there.
+            // What is already on the instrument fits it.
             Item::Slot { class, at } => {
                 (!read_only(class) && device.slot(class, at).flatten().is_some()).then_some(Held {
                     what: item,
@@ -321,9 +316,9 @@ impl Browser {
 
     /// The in-place editor, prefilled and selected.
     ///
-    /// ⚠️ **Only Enter renames.** Clicking away cancels. An editor that commits on blur
-    /// turns a stray keystroke into a rename nobody asked for, and the name is the only
-    /// record of what an object is — files store no name of their own.
+    /// ⚠️ Only Enter renames; clicking away cancels. Committing on blur would turn a
+    /// stray keystroke into an unwanted rename, and the name is the only record of what
+    /// an object is, because the files do not store their own names.
     fn rename_row(&mut self, ui: &mut egui::Ui, indent: f32, original: &str) -> Option<String> {
         let rename = self.rename.as_mut()?;
         let output = ui
@@ -359,10 +354,10 @@ impl Browser {
         entered.then(|| renamed(original, &typed)).flatten()
     }
 
-    /// Take a drop, if this is somewhere the dragged thing can land.
+    /// Take a drop, if the dragged row can land here.
     ///
-    /// A target that would refuse does not light up; dropping on it anyway says why in
-    /// the status strip rather than silently doing nothing.
+    /// A target that would refuse is not highlighted. Dropping on it anyway reports why
+    /// in the status strip.
     pub(crate) fn drop_zone(
         &mut self,
         ui: &egui::Ui,
@@ -386,13 +381,13 @@ impl Browser {
         self.land(&carried, onto, acts);
     }
 
-    /// Run the drop, for the pressed row and for everything it carried, which follows it
-    /// only where the verdict [`Landing::repeats`].
+    /// Run the drop for the pressed row, and for the rest of what it carries when the
+    /// verdict [`Landing::repeats`].
     fn land(&mut self, carried: &Arc<Carried>, onto: Onto, acts: &mut Vec<Act>) {
         let verdict = landing(&carried.head, onto);
         if let Landing::No(why) = verdict {
             return acts.push(Act::Refused(format!(
-                "“{}” cannot go there — {why}.",
+                "“{}” cannot go there: {why}.",
                 carried.name
             )));
         }
@@ -445,8 +440,8 @@ impl Browser {
         }
     }
 
-    /// The one question a write asks: everything the batch would write, and what each of
-    /// it would replace. An entry the instrument has already refused is not one of them.
+    /// The confirmation for a batch write: every entry it would write, and what each
+    /// would replace. Entries the instrument has already refused are left out.
     fn ask_send(
         &mut self,
         workspace: &Workspace,
@@ -467,8 +462,8 @@ impl Browser {
                     warnings.push(warning);
                 }
             }
-            // What is known about the slot, which for a bank nothing has read is that
-            // nothing has read it.
+            // What is known about the slot; for an unread bank, that it has not been
+            // read.
             lines.push(format!(
                 "“{}” → {}",
                 entity.name,
@@ -492,7 +487,7 @@ impl Browser {
         });
     }
 
-    /// Raise what a write back to one slot carries, where it carries anything.
+    /// Ask before a write back to one slot, showing the note that write carries.
     fn ask_write(&mut self, name: &str, at: String, note: String, act: Act) {
         self.ask = Some(Ask {
             title: format!("Save “{name}” to {at}?"),
@@ -502,7 +497,7 @@ impl Browser {
         });
     }
 
-    /// Raise the one Finder-style question a drop can need: the destination is taken.
+    /// Ask, as Finder does, before a drop replaces what is in the destination.
     fn ask_replace(
         &mut self,
         occupant: &str,
@@ -524,13 +519,12 @@ impl Browser {
         });
     }
 
-    /// One of the things that can be asked of everything checked, drawn the same in the
-    /// library's footer and in a checked row's own menu.
+    /// One bulk action on the checked set, drawn the same in the library's footer and in
+    /// a checked row's menu.
     ///
-    /// A dead control is one the checked set gives nothing to do, and the hover over it
-    /// says which of the two reasons that is: nothing of the right sort is checked, or
-    /// the attached instrument refuses every one that is. Deleting asks first, once, for
-    /// the whole set.
+    /// The control is disabled when it has nothing to act on, and its hover says why:
+    /// nothing of the right kind is checked, or the attached instrument refuses all of
+    /// it. Delete asks first, once for the whole set.
     pub(crate) fn bulk_item(
         &mut self,
         ui: &mut egui::Ui,
@@ -550,8 +544,8 @@ impl Browser {
             return;
         }
         let wanted = bulk(action, checked, state);
-        // ⚠️ Only a queue asks the instrument's opinion. Everything else here happens on
-        // this computer, where a file that is another instrument's is still a file.
+        // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
+        // this computer, where another instrument's file is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
         let label = match &fits {
             Some(fits) => fits.label(),
@@ -578,8 +572,8 @@ impl Browser {
         ui.close();
     }
 
-    /// Ask once before a whole checked set is deleted, naming what each half of it
-    /// costs: a slot is emptied on the instrument, a local only leaves the list.
+    /// Ask once before a checked set is deleted, saying what happens to each part: a slot
+    /// is emptied on the instrument, and a local file only leaves the list.
     fn ask_discard(&mut self, checked: &[Item], acts: Vec<Act>) {
         let slots = checked
             .iter()
@@ -615,8 +609,7 @@ mod tests {
     use crate::tabs::Tabs;
     use crate::workspace::Fresh;
 
-    /// Paint the tree headlessly. What this catches is a layout that panics or an id
-    /// that collides, neither of which a unit test on the rules would see.
+    /// Paint the tree headlessly, to catch a layout that panics or an id that collides.
     fn paint(with_device: bool) {
         use crate::workspace::{Fresh, Origin};
 
@@ -631,8 +624,8 @@ mod tests {
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
             workspace.create(kind, &mut log).unwrap();
         }
-        // A folder with something in it, one with nothing, and a view of a slot: three
-        // row shapes the list has no other way of reaching.
+        // A folder with something in it, an empty folder, and a view of a slot: row
+        // shapes the list has no other way to reach.
         let full = browser.folders.make().unwrap();
         browser.folders.make().unwrap();
         let filed = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -693,8 +686,7 @@ mod tests {
         }
     }
 
-    /// A store that answers for one key at a time, which is what the two things the
-    /// browser keeps need it to be.
+    /// An in-memory store for the folders and tags the browser keeps.
     #[derive(Default)]
     struct Fake(std::collections::HashMap<String, String>);
 
@@ -718,8 +710,7 @@ mod tests {
         paint(true);
     }
 
-    /// A drag from a row inside the selection brings the rest of it, and one from a row
-    /// outside brings only itself — the pressed row is what a drag is about.
+    /// A drag from an unselected row carries only that row.
     #[test]
     fn a_drag_from_a_picked_row_carries_the_whole_selection() {
         let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
@@ -743,13 +734,16 @@ mod tests {
             .held(Item::Local(apart), &workspace, &device.state)
             .expect("a local is dragged");
         let alone = browser.carrying(outside, "Squabble B", &workspace, &device.state);
-        assert!(alone.rest.is_empty(), "a row nobody picked carries itself");
+        assert!(
+            alone.rest.is_empty(),
+            "an unselected row carries only itself"
+        );
         assert_eq!(alone.name, "Squabble B", "and says only its own name");
     }
 
-    /// ⚠️ A slot the walk found vacant holds nothing to pick up. Carried with the rest of
-    /// a selection it would become a copy the instrument is asked for, and a read of what
-    /// is not there costs a round trip that can only end in an error.
+    /// ⚠️ A slot the scan found empty holds nothing to carry. Carried with a selection,
+    /// it would become a read of nothing from the instrument, a round trip that can only
+    /// fail.
     #[test]
     fn an_empty_slot_is_not_something_a_drag_carries() {
         let (mut browser, workspace, mut device, _tabs, _queue, _log) = bench();
@@ -774,9 +768,9 @@ mod tests {
         assert_eq!(carried.name, "Africa Split", "and the ghost counts nothing");
     }
 
-    /// ⚠️ The rest of the selection follows only where the drop is one act repeated.
-    /// Filing three assets is three filings; sending three into one slot would write
-    /// them over each other, so a single destination takes the pressed row alone.
+    /// ⚠️ The rest of the selection follows only when the drop repeats one act. Filing
+    /// three assets is three filings, but sending three to one slot would overwrite each
+    /// in turn, so a single destination takes only the pressed row.
     #[test]
     fn a_drop_of_many_repeats_only_where_one_destination_does_not() {
         let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
@@ -794,7 +788,7 @@ mod tests {
 
         let mut filed = Vec::new();
         browser.land(&carried, Onto::Group(folder), &mut filed);
-        assert_eq!(filed.len(), 3, "every picked asset goes into the folder");
+        assert_eq!(filed.len(), 3, "every selected asset goes into the folder");
         assert!(filed.iter().all(|act| matches!(
             act,
             Act::File {
@@ -816,9 +810,9 @@ mod tests {
         assert!(matches!(sent[0], Act::Send { id, .. } if id == ids[0]));
     }
 
-    /// ⚠️ A row drawn inside a folder is that folder's drop target, not the loose list's.
-    /// Otherwise letting a filed asset go where it was pressed, or on one of its own
-    /// siblings, would take it out of the folder it is in.
+    /// ⚠️ A row inside a folder is a drop target for that folder. Otherwise, releasing a
+    /// filed asset where it was pressed, or on a sibling, would take it out of its
+    /// folder.
     #[test]
     fn a_drop_onto_a_row_inside_a_folder_never_unfiles_it() {
         let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
@@ -836,19 +830,19 @@ mod tests {
             !onto_sibling
                 .iter()
                 .any(|act| matches!(act, Act::File { folder: None, .. })),
-            "a member row stands for its folder, so a drop on it is no way out of one"
+            "a drop on a row inside the folder keeps the asset in the folder"
         );
 
         let mut onto_loose = Vec::new();
         browser.land(&carried, tree::onto_list(None), &mut onto_loose);
         assert!(
             matches!(onto_loose.as_slice(), [Act::File { folder: None, .. }]),
-            "and the loose rows beside the folder are the way out"
+            "a drop on a loose row takes the asset out of the folder"
         );
     }
 
-    /// ⚠️ F2 renames the row that is the only one picked. A rename typed while several
-    /// are picked reads as a rename of all of them, and only one would take it.
+    /// ⚠️ F2 renames only a row selected alone. A rename typed while several are selected
+    /// would look like it applies to all of them, and only one would change.
     #[test]
     fn f2_renames_only_while_its_row_is_the_only_one_picked() {
         let (mut browser, _workspace, _device, _tabs, _queue, _log) = bench();
@@ -857,7 +851,7 @@ mod tests {
         assert!(browser.sole_is(row));
 
         browser.selection.toggle(Item::Local(2));
-        assert!(!browser.sole_is(row), "two rows picked");
+        assert!(!browser.sole_is(row), "two rows selected");
         browser.selection.plain(Item::Local(2));
         assert!(
             browser.sole_is(row),
@@ -865,10 +859,7 @@ mod tests {
         );
     }
 
-    /// Escape lets go of everything, whether or not the browser dock is open to show it.
-    ///
-    /// ⚠️ Not while a name is being typed: Escape is how a rename is taken back, and a
-    /// half-typed name is not a reason to drop the selection with it.
+    /// ⚠️ Escape during a rename cancels only the rename, and the selection stays.
     #[test]
     fn escape_lets_go_of_the_selection_unless_a_name_is_being_typed() {
         let ctx = context();
@@ -889,7 +880,7 @@ mod tests {
         assert_eq!(
             browser.picked().items().count(),
             1,
-            "the editor's Escape is not the selection's"
+            "Escape in the editor cancels only the rename"
         );
 
         browser.rename = None;
@@ -897,12 +888,9 @@ mod tests {
         assert_eq!(browser.picked().items().count(), 0);
     }
 
-    /// The gesture end to end: open the editor, type, press Enter, and the new name comes
-    /// back as an act.
-    ///
-    /// What this catches is a rename that has stopped committing at all — the unit tests
-    /// on [`renamed`] cannot see the field it is fed from, and the field's own idea of
-    /// "the operator pressed Enter" is the part that is easy to get wrong.
+    /// End to end: open the editor, type, press Enter, and the new name comes back as an
+    /// act. The tests of [`renamed`] cannot see the text field, and detecting Enter on it
+    /// is the part that is easy to get wrong.
     #[test]
     fn typing_a_name_and_pressing_enter_renames_the_row() {
         use crate::workspace::Fresh;
@@ -922,8 +910,8 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::default(),
         };
-        // The editor opens on the first frame and takes the focus; the second types over
-        // what it opened with, selected; the third commits.
+        // Frame one opens the editor, focused with the name selected; frame two types
+        // over the name; frame three commits.
         let frames: [Vec<egui::Event>; 3] = [
             Vec::new(),
             vec![egui::Event::Text("LA Grand".into())],
@@ -948,10 +936,9 @@ mod tests {
             });
         }
         assert_eq!(named.as_deref(), Some("LA Grand"));
-        assert!(browser.rename.is_none(), "and the editor is done with");
+        assert!(browser.rename.is_none(), "and the editor closes");
     }
 
-    /// Enter on an untouched field, or on an empty one, leaves the asset alone.
     #[test]
     fn a_rename_that_changes_nothing_is_not_a_rename() {
         assert_eq!(renamed("Africa Split", "Africa Split"), None);
@@ -960,7 +947,6 @@ mod tests {
         assert_eq!(renamed("Africa Split", ""), None);
     }
 
-    /// What is typed is what the asset is called, with the spaces around it dropped.
     #[test]
     fn a_rename_takes_the_typed_name_trimmed() {
         assert_eq!(renamed("Africa Split", "LA Grand"), Some("LA Grand".into()));
@@ -970,9 +956,9 @@ mod tests {
         );
     }
 
-    /// The two stores are read separately and only the asset one decides what survived —
-    /// anything too big to keep, or dropped for want of room, would otherwise leave its
-    /// membership behind to accumulate for as long as the app is installed.
+    /// The folder store is read separately from the asset store, which decides what
+    /// survived. An asset too big to keep, or dropped for lack of room, would otherwise
+    /// leave its membership behind for as long as the app is installed.
     #[test]
     fn a_grouping_forgets_the_assets_the_list_came_back_without() {
         let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
@@ -989,8 +975,8 @@ mod tests {
         assert_eq!(browser.folders.all().len(), 1, "the folder itself stays");
     }
 
-    /// Two assets picked and saved as a gig wear that tag next session, and the third
-    /// does not. An asset the list came back without leaves no membership behind.
+    /// Two assets selected and saved as a gig have that tag next session, and the third
+    /// does not. An asset missing from the restored list leaves no membership behind.
     #[test]
     fn a_tag_put_on_a_multi_selection_comes_back_next_session() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1029,9 +1015,9 @@ mod tests {
         assert_eq!(after.tags.count(tag), 1, "the one still on the list");
     }
 
-    /// ⚠️ A view is the only copy of what it holds and the store skips it, so a tag on
-    /// one would go with its tab. Tagging keeps it on this computer first, and the log
-    /// says that is what happened.
+    /// ⚠️ A view is the only copy of its bytes and the store skips it, so a tag on a view
+    /// would be lost with its tab. Tagging keeps it on this computer first, and the log
+    /// says so.
     #[test]
     fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
         use crate::workspace::Origin;
@@ -1065,19 +1051,18 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        assert!(!workspace.is_view(id), "it is on this computer now");
+        assert!(!workspace.is_view(id), "it is kept on this computer");
         assert!(browser.tags.worn(id).contains(&tag));
         let said = log.transcript();
         assert!(said.contains("kept on this computer first"), "{said}");
     }
 
-    /// The warning reaches the modal a batch raises, once per format however many items
-    /// carry it — and it goes above the list of destinations, which is what the eye
-    /// slides past.
+    /// The warning appears in the batch's modal once per format, however many items carry
+    /// it, and above the list of destinations, which readers skim.
     ///
-    /// The instrument names a model the acceptance table does not know, which is what
-    /// leaves the comparison against the folder's own formats as the only thing to go
-    /// on — a family it does know would refuse these outright.
+    /// The instrument reports a model the acceptance table does not know, so the only
+    /// check left is against the folder's own formats. A known family would refuse these
+    /// files outright.
     #[test]
     fn the_modal_says_when_a_batch_is_of_another_model() {
         use crate::workspace::Origin;

@@ -2,17 +2,16 @@
 //!
 //! A sample is mostly encoded audio, so what is settable is what the format can patch in
 //! place without touching a stroke: the name, each zone's root key and boundaries, and
-//! the v2 keyboard map's per-key gain and detune. Every generation edits. Where a
+//! the v2 keyboard map's per-key gain and detune. Every generation is editable. Where a
 //! container also describes the keyboard note by note, that description is recomputed
 //! from the zones as they move.
 //!
 //! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
-//! so **nothing here decodes to draw a frame**. A zone's audio is decoded once, when a
-//! row that shows it is opened, and kept in a [`Cache`] while its stroke is unchanged.
+//! so nothing here decodes to draw a frame. A zone's audio is decoded once, when a row
+//! that shows it is opened, and kept in a [`Cache`] while its stroke is unchanged.
 //!
-//! The chrome the project editor shares — the key map, the zone rows, the cells of an
-//! open row — lives here rather than being written twice: an `.nsmpproj` is the same
-//! object seen from the source side.
+//! The project editor shares the key map, the zone rows, and the cells of an open row,
+//! which live here because an `.nsmpproj` is the same object seen from the source side.
 
 use std::io::Cursor;
 
@@ -56,11 +55,10 @@ pub struct Zone {
     /// The bottom of the range where the file states one outright. The v2 table does
     /// not, so there it is worked out from the zone below.
     pub low_note: Option<u8>,
-    /// The zone record's own linear gain, where the generation carries one —
-    /// [`zone::GAIN_UNITY`] is 1.0. Nothing here writes it.
+    /// The zone record's own linear gain, where the generation carries one.
+    /// [`zone::GAIN_UNITY`] is 1.0. Read-only.
     pub gain: Option<u32>,
-    /// The velocity window the record states, where the layout has one. Nothing here
-    /// writes it either.
+    /// The velocity window the record states, where the layout has one. Read-only.
     pub velocity: Option<(u8, u8)>,
     /// The stroke stream this zone plays, in bytes.
     pub bytes: usize,
@@ -71,10 +69,10 @@ pub struct Zone {
 pub struct Snapshot {
     pub name: String,
     pub max_name_len: usize,
-    /// The v3/v4 second name — what follows the `_` in the vendor's filenames. Empty
-    /// on a v2 instrument, which has one name.
+    /// The v3/v4 second name, which follows the `_` in the vendor's filenames. Empty on
+    /// a v2 instrument, which has one name.
     pub sub_name: String,
-    /// `v2`, `v3` or `v4`, taken from the content version rather than the filename.
+    /// `v2`, `v3` or `v4`, taken from the content version, not the filename.
     pub generation: &'static str,
     pub categories: Vec<String>,
     pub zones: Vec<Zone>,
@@ -84,10 +82,10 @@ pub struct Snapshot {
     pub key_table: Option<KeyTable>,
     /// Bytes per zone record on this body's own chain, for the Advanced face.
     pub record_len: usize,
-    /// What the `sty` preset states. Read only: it is the preset the loader installs
-    /// for the instrument's category.
+    /// What the `sty` preset states. Read-only: it is the preset the loader installs for
+    /// the instrument's category.
     pub sound: Vec<(&'static str, String)>,
-    /// The content version, which is what decides the generation.
+    /// The content version, which decides the generation.
     pub version: u32,
 }
 
@@ -128,7 +126,7 @@ fn read(sample: &Sample) -> Result<Snapshot, String> {
     })
 }
 
-/// What one generation's own sections state, in one read of them.
+/// What one generation's own sections state, read once.
 struct Told {
     /// Empty on the narrow chain, which has one name.
     sub_name: String,
@@ -155,8 +153,8 @@ fn told(sample: &Sample) -> Result<Told, String> {
             sub_name: String::new(),
             categories: body.categories(),
             key_table: body.key_table().ok(),
-            // A `map` version with no zone layout is a body whose zones did not read at
-            // all, and the error the zone read gives is the one worth showing.
+            // A `map` version with no zone layout means the zones did not read either,
+            // and the zone read's error is the one to show.
             record_len: body
                 .chain()
                 .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
@@ -395,22 +393,22 @@ pub enum Ask {
 /// Decoded zone audio, kept only while the strokes it came from are the current ones.
 ///
 /// ⚠️ Keyed by the asset's [`stamp`](crate::workspace::LocalEntity::stamp) as well as
-/// its id: bytes put under the asset from elsewhere may hold other strokes, and audio
-/// decoded from what it held before is audio from another instrument. The editor's own
-/// sets are carried across instead: see [`Cache::carry`].
+/// its id: bytes replaced from elsewhere may hold other strokes, and audio decoded from
+/// the old bytes belongs to another instrument. The editor's own sets keep the cache:
+/// see [`Cache::carry`].
 #[derive(Default)]
 pub struct Cache {
     of: Option<(u64, u64)>,
     /// Most recently decoded or heard first, at most [`KEPT_ZONES`].
     zones: Vec<Held>,
-    /// The zone an open row has already had a frame to say it is reading.
+    /// The zone an open row has already spent one frame showing as being read.
     wanted: Option<usize>,
 }
 
 struct Held {
     zone: usize,
-    /// Where the stroke sat in the body and how long it was, which is what an in-place
-    /// set could have moved.
+    /// The stroke's offset in the body and its length, which an in-place set could
+    /// move.
     placed: Option<(usize, usize)>,
     decoded: Result<Decoded, String>,
 }
@@ -446,7 +444,7 @@ impl Cache {
     /// `entity` now holds at `to`.
     ///
     /// ⚠️ Only for [`apply`]'s sets, which patch in place without touching a stroke. A
-    /// zone whose stroke the set moved is dropped all the same.
+    /// zone whose stroke the set moved is still dropped.
     pub fn carry(&mut self, id: u64, (from, to): (u64, u64), entity: &Entity) {
         if self.of != Some((id, from)) {
             return;
@@ -463,8 +461,8 @@ impl Cache {
             .map(|held| &held.decoded)
     }
 
-    /// Whether the row asking for `zone` has already been drawn saying it is reading
-    /// it. The decode holds the frame it runs in, so the frame that asks first only
+    /// Whether the row asking for `zone` has already been drawn showing that it is
+    /// reading. The decode blocks the frame it runs in, so the first frame that asks only
     /// paints.
     pub fn due(&mut self, zone: usize) -> bool {
         let due = self.wanted == Some(zone);
@@ -511,9 +509,8 @@ fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
 /// The min and max of each of `columns` equal slices of the audio, scaled to
 /// `-1.0..=1.0`.
 ///
-/// Frames rather than samples, so a stereo zone draws one envelope over both channels
-/// instead of two half-width ones. A column with no frames in it — more columns than
-/// frames — is flat, which is what a zone shorter than the widget should look like.
+/// Sliced by frame, so a stereo zone draws one envelope over both channels. With more
+/// columns than frames, each column still takes at least one frame.
 pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32)> {
     let channels = usize::from(channels).max(1);
     let frames = samples.len() / channels;
@@ -537,8 +534,7 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
 }
 
 /// Which zone is open, what was last struck, and the map the paints are measured
-/// against. Nothing here is an edit: an edit is on the working copy the moment it is
-/// made.
+/// against. Nothing here is an edit: an edit goes to the working copy when it is made.
 ///
 /// ⚠️ Reset when the document changes: a row index belongs to the instrument it was
 /// opened on.
@@ -562,8 +558,8 @@ pub struct State {
 /// The saved bytes a painted key is told apart from, and the keyboard map they hold.
 ///
 /// ⚠️ Keyed by what was saved as well as by which asset: saving moves the baseline
-/// without giving the asset new bytes, and a map read before that is one every stored
-/// value now reads as painted against.
+/// without giving the asset new bytes, and against a map read before the save every
+/// stored value would read as painted.
 struct Saved {
     of: (u64, Option<u32>, usize),
     /// `None` is a body that carries no map.
@@ -601,13 +597,13 @@ impl State {
     }
 }
 
-/// The row the editor has selected — for a widget whose own order is not the row order.
+/// The row the editor has selected, for a widget whose order differs from the row order.
 pub fn selected(state: &State) -> Option<usize> {
     state.selected
 }
 
-/// Select a row and bring it up under the map, which is what a pick outside the row
-/// list means.
+/// Select a row and bring it into view under the map, as a pick from outside the row
+/// list does.
 pub fn pick_row(state: &mut State, row: usize) {
     state.pick(row, true);
 }
@@ -629,9 +625,9 @@ pub struct MapZone {
 
 /// Whether a struck key can be heard here.
 ///
-/// A project's audio is not decoded: it is built into an instrument first, and the codec
-/// that would do it is not understood — so the map says what answers the key and that
-/// nothing will come out.
+/// A project's audio is not decoded: it must be built into an instrument first, and the
+/// codec for that is not understood. The map says which zone answers the key and that
+/// nothing will sound.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sounds {
     Now,
@@ -643,7 +639,7 @@ pub enum MapAct {
     /// A handle moved: every band's `(low, top)` after the clamp, in the order given.
     Bounds(Vec<(u8, u8)>),
     /// A key was struck and a zone answers it, `semitones` from its root. `zone` is the
-    /// row it stands on — see [`MapZone::row`]. `finger` is as [`Ask::Strike`] has it.
+    /// row it stands on (see [`MapZone::row`]). `finger` is as in [`Ask::Strike`].
     Struck {
         zone: usize,
         semitones: i16,
@@ -653,7 +649,7 @@ pub enum MapAct {
 
 /// The keyboard an instrument's zones are laid out over.
 ///
-/// The format states no limit — a note is a byte — so this is the six octaves the
+/// The format states no limit (a note is a byte), so this is the six octaves the
 /// editor's own map covers, widened where a zone reaches past it.
 const NSMP_SPAN: keys::Span = keys::Span { low: 24, high: 96 };
 
@@ -668,9 +664,9 @@ fn span(zones: &[MapZone], default: keys::Span) -> keys::Span {
 /// The pinned key map: the zone bands, the keyboard under them, and what the last
 /// struck key did.
 ///
-/// Both instrument kinds draw this one map. `edges` is what the format lets a pointer
-/// move — [`keys::Edges::TopOnly`] where a zone's low is derived from the zone below. A
-/// key `played` on a controller is answered exactly as a click on it, where the map has
+/// Both instrument kinds draw this map. `edges` is what the format lets a pointer move:
+/// [`keys::Edges::TopOnly`] where a zone's low is derived from the zone below. A key
+/// `played` on a controller is answered the same as a click on it, where the map has
 /// that key.
 pub fn key_map(
     ui: &mut egui::Ui,
@@ -719,7 +715,7 @@ pub fn key_map(
         match edges {
             keys::Edges::Fixed => "these zones cannot be written; click a key to hear one",
             keys::Edges::TopOnly => {
-                "v2 derives each low from the zone below — drag a top; click a key to hear it"
+                "v2 derives each low from the zone below: drag a top, or click a key to hear it"
             }
             keys::Edges::Both => {
                 "drag either edge; pull zones apart to leave keys silent, never to \
@@ -745,8 +741,8 @@ pub fn key_map(
             ),
         })
         .collect();
-    // A band is not a row, so both the highlight going in and the pick coming out are
-    // translated — see [`MapZone::row`].
+    // A band index is not a row index, so the highlight going in and the pick coming out
+    // are both translated (see `MapZone::row`).
     let band_of =
         |row: Option<usize>| row.and_then(|row| zones.iter().position(|zone| zone.row == row));
     match keys::bands(
@@ -910,7 +906,7 @@ pub fn map(
 }
 
 /// What a moved band writes: the ends that changed, and only the ones the record
-/// states — a v2 low is derived from the zone below and follows the top that moved it.
+/// states. A v2 low is derived from the zone below and follows the top that moved it.
 fn moved(zones: &[Zone], bounds: &[(u8, u8)]) -> Sets {
     let mut sets = Sets::new();
     for (index, (low, top)) in bounds.iter().enumerate() {
@@ -959,7 +955,7 @@ const ROW_H: f32 = 26.0;
 const MARK: f32 = 6.0;
 /// How far an open row's body is indented, measured from the page's edge.
 const INDENT: f32 = 68.0;
-/// Which of the five columns holds the size, which is the one set right to left.
+/// The column that holds the size, the only one aligned right.
 const SIZE_COLUMN: usize = 3;
 const ROW_MONO: f32 = 11.0;
 const FACTS_TEXT: f32 = 11.0;
@@ -967,7 +963,7 @@ const SIZE_TEXT: f32 = 10.5;
 const CHEVRON: f32 = 12.0;
 
 /// The five columns of the row grid: the name, what the zone answers, what it is made
-/// of, its size, and the chevron's own.
+/// of, its size, and the chevron.
 const GRID: [Width; 5] = [
     Width::Fixed(56.0),
     Width::Share(1.1),
@@ -1018,8 +1014,8 @@ pub fn rows(
             painter.rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
         }
         painter.hline(rect.x_range(), rect.bottom() - 0.5, hairline);
-        // ⚠️ Every cell of a selected row takes the selection's own ink: the track
-        // colour behind it is not readable text.
+        // ⚠️ Every cell of a selected row takes the selection's ink: other ink is not
+        // readable on the selection fill.
         let ink = match picked {
             true => visuals.selection.stroke.color,
             false => visuals.weak_text_color(),
@@ -1147,9 +1143,9 @@ pub fn cell(ui: &mut egui::Ui, label: &str, width: f32, body: impl FnOnce(&mut e
     });
 }
 
-/// A cell whose value the file states and nothing here writes.
+/// A read-only cell for a value the file states.
 ///
-/// It asks for the room its own words need: a read cell has no control to size it by.
+/// It sizes itself to its own text, since it has no control to size it by.
 pub fn read_cell(ui: &mut egui::Ui, label: &str, value: &str, note: &str) {
     let laid = |text: &str, font: egui::FontId| {
         ui.fonts(|fonts| {
@@ -1255,7 +1251,7 @@ pub fn ui(
             ui.label(
                 egui::RichText::new(
                     "This instrument's keyboard map cannot be read, so its zones are \
-                     shown rather than changed. The name is still yours to set.",
+                     read-only. You can still set the name.",
                 )
                 .size(FACTS_TEXT)
                 .color(app::caption(ui.visuals())),
@@ -1349,7 +1345,7 @@ pub fn ui(
         controls::heading(
             ui,
             "Sound parameters",
-            "the loader's preset for this category, read only",
+            "the loader's preset for this category, read-only",
             None,
         );
         ui.horizontal_wrapped(|ui| {
@@ -1368,7 +1364,7 @@ pub fn ui(
 /// The key × velocity field, on the generations whose records state a window.
 ///
 /// Read-only: `nord-format` has no setter for a wide zone's window, and every shipped
-/// instrument answers the whole of it. Clicking a block still opens its row.
+/// instrument answers the full window. Clicking a block still opens its row.
 fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
     let stated: Vec<(usize, &Zone)> = snapshot
         .zones
@@ -1391,8 +1387,7 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
                 window,
                 name: format!("Zone {}", row + 1),
                 hint: format!(
-                    "Zone {} answers at velocity {}–{} · the record states it and nothing \
-                     here writes it",
+                    "Zone {} answers at velocity {}–{} · stated by the record, read-only",
                     row + 1,
                     window.0,
                     window.1
@@ -1429,8 +1424,8 @@ pub(super) enum VelocityAsk {
 /// cover, and the field itself.
 ///
 /// `rows` names the row each block stands for, one per block, and `selected` is the row
-/// to highlight — the blocks are the zones that state a window, which on neither
-/// document is every row.
+/// to highlight. The blocks are the zones that state a window, which on either document
+/// may be fewer than the rows.
 pub(super) fn velocity_field(
     ui: &mut egui::Ui,
     note: &str,
@@ -1488,8 +1483,7 @@ fn facts_of(zone: &Zone, sound: Option<&Sound>) -> String {
     parts.join(" · ")
 }
 
-/// A gain reading, with the silence a zero field means spelled out rather than as an
-/// infinity.
+/// A gain reading, with a zero field shown as `silent` in place of an infinity.
 pub(super) fn decibels(db: f64) -> String {
     match db.is_finite() {
         true => format!("{db:+.1} dB"),
@@ -1499,8 +1493,8 @@ pub(super) fn decibels(db: f64) -> String {
 
 /// The envelope of an open zone, and the actions over it.
 ///
-/// An open row shows its waveform, so the decode is asked for rather than offered. The
-/// [`Cache`] remembers a refusal like a success, which is what keeps that to one ask.
+/// An open row shows its waveform, so opening it asks for the decode. The [`Cache`]
+/// remembers a refusal like a success, which keeps that to one ask.
 fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
     let mut ask = None;
     ui.horizontal_wrapped(|ui| {
@@ -1515,8 +1509,8 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
             }
             (false, None) => {
                 ask = Some(Ask::Decode(index));
-                // The decode lands after this frame, and nothing else would bring the
-                // one that draws it.
+                // The decode lands after this frame, and nothing else would request the
+                // frame that draws it.
                 ui.ctx().request_repaint();
             }
             (false, Some(Err(why))) => {
@@ -1559,9 +1553,9 @@ const DETUNE_FULL: i32 = 25;
 
 /// The two per-key lanes and the table under them.
 ///
-/// A drag across a lane paints values over the ones the file holds; a key reads as
+/// A drag across a lane paints values over the ones the file holds. A key reads as
 /// painted when its record differs from the one the asset was last saved with, so the
-/// count and the accent bars survive a frame.
+/// count and the accent bars last beyond the drag.
 fn per_key(
     ui: &mut egui::Ui,
     state: &mut State,
@@ -1791,8 +1785,8 @@ fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
 /// Read the map the asset was last saved with, once per set of saved bytes.
 ///
 /// ⚠️ Paint marks are the difference between what is held and what was saved, so the
-/// baseline has to be the saved bytes rather than the working copy: measured against
-/// itself, nothing is ever painted.
+/// baseline must be the saved bytes, not the working copy. Measured against itself,
+/// nothing would ever read as painted.
 pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
     let of = (id, saved.crc32, saved.bytes.len());
     if state.baseline.as_ref().is_some_and(|held| held.of == of) {
@@ -1812,8 +1806,8 @@ pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
 /// The identity cell an instrument puts on the header: what the file states about
 /// itself that the strip cannot carry.
 ///
-/// Both are read-only because neither has a setter: the `cat` section and the wide
-/// chain's second name are shown as the file holds them.
+/// The `cat` section and the wide chain's second name are both read-only, because
+/// neither has a setter.
 pub fn stated(entity: &Entity) -> Option<Cell> {
     match sample(entity)? {
         Sample::V2(body) => {
@@ -1848,7 +1842,7 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     controls::heading(
         ui,
         "About this file",
-        "what the file says about itself — read here, never written differently",
+        "what the file says about itself, read here and written back unchanged",
         None,
     );
     let mut rows = vec![
@@ -1899,13 +1893,13 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
     super::capability::facts(ui, &rows);
 }
 
-/// The nineteen capabilities of the instrument editor, as this generation stands in
-/// them.
+/// The nineteen capabilities of the instrument editor, and where this generation stands
+/// on each.
 ///
 /// `Editable` is a field a control on the Basic face writes or an act it performs,
-/// `ReadOnly` a field the format states and nothing here writes, `Absent` a field the
-/// format does not have at all. The table is checked against the paths [`set`] accepts —
-/// see the tests.
+/// `ReadOnly` a field the format states that this app does not write, and `Absent` a
+/// field the format does not have. The tests check the table against the paths [`set`]
+/// accepts.
 pub fn capabilities(generation: &str) -> Vec<Row> {
     let v2 = generation == "v2";
     let row = |name: &'static str, state: Cap, note: &'static str| Row { name, state, note };
@@ -1988,7 +1982,7 @@ pub fn capabilities(generation: &str) -> Vec<Row> {
             Cap::Absent,
             match v2 {
                 true => "dropped by v2",
-                false => "in the stroke header, which is written back verbatim",
+                false => "in the stroke header, which is written back unchanged",
             },
         ),
         row("release samples", Cap::Absent, "a piano library's bank 2"),
@@ -2044,7 +2038,7 @@ pub fn capabilities(generation: &str) -> Vec<Row> {
 
 /// Where each field the Basic face reads or writes lands in the file.
 ///
-/// Every figure is one of `nord_format`'s own declarations rather than a measurement.
+/// Every figure is one of `nord_format`'s own declarations, not a measurement.
 pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
     let mut rows = vec![Offset {
         at: format!("map+{}", zone::COUNT_AT),
@@ -2082,9 +2076,9 @@ const WAVE_HEIGHT: f32 = 44.0;
 
 /// Draw an envelope across whatever width is left.
 ///
-/// Painted from the theme's own colours rather than fixed ones: the trough is the panel's
-/// extreme fill, the wave is the instrument's red while it is sounding and the body text
-/// colour when it is not, so both themes stay legible.
+/// Painted from the theme's colors so both themes stay legible: the trough is the
+/// panel's extreme fill, and the wave is the accent while it is sounding and the body
+/// text color when it is not.
 pub fn waveform(ui: &mut egui::Ui, envelope: &[(f32, f32)], playing: bool) {
     let rect = wave_ground(ui);
     let visuals = ui.visuals();
@@ -2098,7 +2092,7 @@ pub fn waveform(ui: &mut egui::Ui, envelope: &[(f32, f32)], playing: bool) {
         false => visuals.text_color(),
     };
     // The envelope has a fixed column count and the panel does not, so a column is as
-    // wide as its share of the rect — never thinner than the pixel it has to cover.
+    // wide as its share of the rect, and never thinner than one pixel.
     let column = (rect.width() / envelope.len() as f32).max(1.0);
     let half = rect.height() / 2.0 - 1.0;
     for (i, (low, high)) in envelope.iter().enumerate() {
@@ -2116,7 +2110,8 @@ pub fn waveform(ui: &mut egui::Ui, envelope: &[(f32, f32)], playing: bool) {
     }
 }
 
-/// The room a waveform takes, holding what is being read until the decode lands.
+/// The space a waveform takes, captioned with what is being read until the decode
+/// lands.
 pub fn reading(ui: &mut egui::Ui, caption: &str) {
     let rect = wave_ground(ui);
     ui.painter().text(
@@ -2186,7 +2181,7 @@ mod tests {
         assert_eq!(range(&zones, 0), "C5 up to C7");
         assert_eq!(range(&zones, 1), "up to B4");
 
-        // A file that states its own bottom is believed rather than derived.
+        // A bottom the file states is used as stated.
         let stated = vec![zone(60, 71, Some(48))];
         assert_eq!(range(&stated, 0), "C3 up to B4");
     }
@@ -2208,7 +2203,7 @@ mod tests {
         // Fewer frames than columns: every column still gets a pair, and none is empty.
         let short = [1000i16, -1000];
         assert_eq!(envelope(&short, 1, 8).len(), 8);
-        // Degenerate asks answer with nothing rather than an empty span or a divide.
+        // No columns or no frames give an empty envelope, with nothing divided by zero.
         assert!(envelope(&mono, 1, 0).is_empty());
         assert!(envelope(&[], 1, 4).is_empty());
     }
@@ -2237,9 +2232,7 @@ mod tests {
         );
     }
 
-    /// Each generation's zone record states its own thing, and one read of the body
-    /// brings back whichever it is: the narrow record's gain, the wide record's
-    /// velocity window.
+    /// The narrow record states a gain, and the wide record a velocity window.
     #[test]
     fn a_zone_carries_what_its_own_generation_states() {
         let narrow = v2_snapshot();
@@ -2266,7 +2259,7 @@ mod tests {
     }
 
     /// One second of 44.1 kHz mono, and the one-zone v2 instrument the encoder makes
-    /// of it — the only instrument this app can build from nothing.
+    /// of it. This is the only instrument this app can build from nothing.
     fn v2_bytes() -> Vec<u8> {
         let samples: Vec<i16> = (0..codec::SOURCE_RATE as usize)
             .map(|i| ((i as f64 / 40.0).sin() * 12_000.0) as i16)
@@ -2355,19 +2348,22 @@ mod tests {
         let after = table_of(&edited);
 
         assert_eq!(after.key(60).unwrap().gain(), gain_units(1.5).unwrap());
-        assert_eq!(after.key(60).unwrap().detune(), 0, "the other half stands");
+        assert_eq!(
+            after.key(60).unwrap().detune(),
+            0,
+            "the other half is unchanged"
+        );
         assert_eq!(after.key(61).unwrap().detune(), detune_units(-12.0));
         assert_eq!(
             after.key(61).unwrap().gain(),
             keymap::GAIN_UNITY,
-            "the other half stands"
+            "the other half is unchanged"
         );
         assert_eq!(after.instrument, before.instrument);
         assert_eq!(after.adjusted().collect::<Vec<_>>(), [60, 61]);
 
-        // Byte isolation: the container's own checksum word, and one three-byte half of
-        // each record — the gain of key 60 and the detune of key 61. Nothing else in
-        // the file moved, the other half of each record included.
+        // Byte isolation: only the container's checksum word and one three-byte half of
+        // each record change, the gain of key 60 and the detune of key 61.
         assert_eq!(bytes.len(), edited.len());
         let moved = runs(&bytes, &edited);
         assert_eq!(moved.len(), 3, "{moved:?}");
@@ -2401,9 +2397,8 @@ mod tests {
         assert_eq!(key.detune(), detune_units(50.0));
     }
 
-    /// ⚠️ Zones are numbered from 1, the way the panel numbers them: a path outside
-    /// what the file holds is refused, and the refusal speaks that numbering rather
-    /// than the format crate's own.
+    /// Zones are numbered from 1, as the panel numbers them, and a refusal uses that
+    /// numbering.
     #[test]
     fn unknown_zone_paths_are_refused() {
         let bytes = v2_bytes();
@@ -2447,27 +2442,26 @@ mod tests {
                 "{path} = {value}"
             );
         }
-        // The wide chain has no map to write, and says so rather than writing one.
+        // The wide chain has no map to write, so a key edit is refused.
         let wide = nord_format::to_bytes(&Entity::Sample(Sample::V3(v3_sample(300)))).unwrap();
         assert!(apply(&wide, &[("key60.gain".into(), "+1.5 dB".into())]).is_err());
     }
 
-    /// Every path in [`EDITS`], which is what the capability table's editable rows are
-    /// checked against.
+    /// The capability rows this editor may call editable, each with a path [`apply`]
+    /// must accept, or `None` for an act.
     const EDITS: [(&str, Option<&str>); 6] = [
         ("name", Some("name")),
         ("key zones: root / top / low", Some("zone1.top_note")),
         ("per-key table", Some("key60.gain")),
-        // The two the Basic face performs as acts rather than field writes.
+        // Acts the Basic face performs, which write no field.
         ("decode / audition", None),
         ("write to the instrument", None),
-        // Named here so the wide generations' table is covered by the same check.
+        // No generation calls this editable; the check below keeps it read-only.
         ("velocity layers", None),
     ];
 
-    /// ⚠️ The capability table is a claim about this editor, not a wish list. Every row
-    /// it calls editable has to name something the editor can actually write, or be one
-    /// of the acts named in [`EDITS`].
+    /// A row called editable must name a path the editor writes, or an act in
+    /// [`EDITS`].
     #[test]
     fn every_editable_capability_names_a_path_the_editor_accepts() {
         let bytes = v2_bytes();
@@ -2493,8 +2487,8 @@ mod tests {
                 );
             }
         }
-        // A row the table calls editable on the wide generations but not on v2 is only
-        // ever listed as an act: nothing here writes a velocity window.
+        // Nothing here writes a velocity window, so the wide generations list it as
+        // read-only.
         assert!(capabilities("v3")
             .iter()
             .all(|row| row.name != "velocity layers" || row.state == Cap::ReadOnly));
@@ -2530,7 +2524,6 @@ mod tests {
         }
     }
 
-    /// Every offset the Advanced face prints is one of the format's own declarations.
     #[test]
     fn the_offsets_are_the_formats_own_declarations() {
         let entity = nord_format::from_stream(&mut Cursor::new(&v2_bytes())).unwrap();
@@ -2554,8 +2547,8 @@ mod tests {
         assert_eq!(offsets(&wide).len(), 2);
     }
 
-    /// Picking from the map opens a row and asks for it; clicking an open, selected row
-    /// closes it again. An edit is never what a pick changes.
+    /// Picking from the map opens a row and scrolls to it; clicking an open, selected
+    /// row closes it.
     #[test]
     fn picking_a_zone_opens_its_row_and_clicking_it_again_closes_it() {
         let mut state = State::default();
@@ -2569,7 +2562,7 @@ mod tests {
         assert!(!state.open, "the same row closes");
         assert_eq!(state.reveal, None);
 
-        // Another row opens rather than toggling the one that was open.
+        // Clicking another row opens it.
         state.pick(0, false);
         assert_eq!((state.selected, state.open), (Some(0), true));
         state.pick(1, false);
@@ -2651,8 +2644,8 @@ mod tests {
         assert_eq!((quiet.zone, quiet.sounded), (Some(0), false));
     }
 
-    /// The map shows every zone, including one that reaches past the six octaves it
-    /// opens on — a band off the end of the span is a band over the wrong key.
+    /// The map shows every zone, including one that reaches past its default six
+    /// octaves. A band off the end of the span would be drawn over the wrong key.
     #[test]
     fn the_span_widens_to_hold_every_zone() {
         let inside = [MapZone {
@@ -2676,8 +2669,8 @@ mod tests {
         assert_eq!(span(&past, NSMP_SPAN), keys::Span { low: 17, high: 108 });
     }
 
-    /// A context dressed as the app dresses it: the semibold family a band and a row
-    /// are set in is not bound by default, and laying one out without it panics.
+    /// A context with the app's fonts and visuals. Bands and rows are set in a semibold
+    /// family that egui does not bind by default, and laying one out without it panics.
     fn dressed() -> egui::Context {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::app::fonts());
@@ -2736,8 +2729,8 @@ mod tests {
         }
     }
 
-    /// The lowest place a word was painted — the keyboard's own octave labels sit at
-    /// the bottom of the key they name, under everything else that spells a note.
+    /// The lowest place a word was painted. The keyboard's octave labels sit at the
+    /// bottom of the key they name, below any other text that spells a note.
     fn lowest(said: &[(String, egui::Rect)], word: &str) -> egui::Rect {
         said.iter()
             .filter(|(text, _)| text == word)
@@ -2796,9 +2789,8 @@ mod tests {
         (said.into_iter().map(|(text, _)| text).collect(), sets)
     }
 
-    /// The wide generations state a velocity window per zone, so the field is drawn —
-    /// read only, because nothing here writes one. A v2 record holds no window at all,
-    /// and gets no section for it.
+    /// The wide generations state a velocity window per zone, so the read-only field is
+    /// drawn. A v2 record holds no window and gets no section for it.
     #[test]
     fn the_velocity_field_is_drawn_only_where_a_window_is_stated() {
         let ctx = dressed();
@@ -2854,9 +2846,8 @@ mod tests {
         (said, ask)
     }
 
-    /// ⚠️ Every edit drops the decoded audio and the zone that was sounding goes on
-    /// sounding: the control that stops it has to stand with nothing decoded, or the
-    /// sound has nothing on screen to stop it.
+    /// An edit drops the decoded audio while the zone goes on sounding, so Stop must
+    /// show with nothing decoded.
     #[test]
     fn a_sounding_zone_is_stopped_from_the_row_with_nothing_decoded() {
         let ctx = dressed();
@@ -2874,8 +2865,7 @@ mod tests {
         let (_, ask) = actions(&ctx, &sounding, press(stop.center()));
         assert_eq!(ask, Some(Ask::Play(0)));
 
-        // Silent and undecoded, the row asks for the decode itself: an open row shows
-        // its waveform rather than offering to read one.
+        // Silent and undecoded, an open row asks for the decode itself.
         let quiet = Sound {
             decoded: None,
             playing: false,
@@ -2884,9 +2874,8 @@ mod tests {
         assert_eq!(ask, Some(Ask::Decode(0)));
     }
 
-    /// ⚠️ A paint mark is the difference between what is held and what was saved, and
-    /// saving moves the baseline without giving the asset new bytes: measured against
-    /// the bytes before the save, an edit that is now stored goes on reading as painted.
+    /// Saving moves the baseline without giving the asset new bytes, and an edit that
+    /// is now saved stops reading as painted.
     #[test]
     fn saving_an_edit_clears_the_paint_marks() {
         let ctx = dressed();
@@ -2907,7 +2896,7 @@ mod tests {
         let (said, _) = bodied(&ctx, &mut state, &snapshot);
         assert!(
             !said.iter().any(|text| text.contains("edited")),
-            "saved, and nothing is painted any more: {said:?}"
+            "saved, so nothing is painted anymore: {said:?}"
         );
     }
 
@@ -3112,8 +3101,8 @@ mod tests {
 
     /// A moved band writes the ends the record states, and nothing that did not move.
     ///
-    /// ⚠️ A v2 low is derived from the zone below rather than stored, so a drag that
-    /// moves one must not write it: the setter refuses, and the whole apply is lost.
+    /// ⚠️ A v2 low is derived from the zone below, not stored, so a drag that moves one
+    /// must not write it: the setter refuses, and the whole apply is lost.
     #[test]
     fn a_moved_band_writes_only_the_ends_that_moved_and_are_stored() {
         let tiled = [zone(72, 96, None), zone(60, 60, None)];
@@ -3138,8 +3127,7 @@ mod tests {
         );
     }
 
-    /// Clicking a band picks its zone and asks for the row to be brought up under the
-    /// map, which is the one thing the map does to the body.
+    /// Clicking a band selects its zone and brings its row into view under the map.
     #[test]
     fn a_click_on_a_band_opens_its_row() {
         let ctx = dressed();

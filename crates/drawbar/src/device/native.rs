@@ -1,8 +1,8 @@
 //! Desktop link: `nusb` enumeration, and a thread that owns the transport.
 //!
-//! The worker is a plain thread blocking on its command channel. Nothing about the
-//! protocol is concurrent — one transaction at a time — so a thread that runs one
-//! command to completion and then waits is the whole scheduler.
+//! The worker is a plain thread blocking on its command channel. The protocol runs one
+//! transaction at a time, so a thread that runs each command to completion is the whole
+//! scheduler.
 
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
@@ -23,7 +23,7 @@ pub struct Link {
     events: Sender<DeviceEvent>,
     /// `None` while disconnected. Dropping it is what ends the worker thread.
     commands: Option<Sender<DeviceCmd>>,
-    /// The running worker, kept so the way out can wait for the session it is inside.
+    /// The running worker, kept so quitting can wait for its session to close.
     worker: Option<JoinHandle<()>>,
 }
 
@@ -65,8 +65,8 @@ impl Link {
                     }
                 }
             }
-            // Dropping the device drops its transport, releasing the claimed interface,
-            // which is what lets Nord Sound Manager and nord-cli have it back.
+            // Dropping the device drops its transport and releases the claimed interface,
+            // so Nord Sound Manager and nord-cli can claim it.
             drop(device);
             emit.send(DeviceEvent::Disconnected {
                 lost: flow == Flow::Lost,
@@ -84,9 +84,9 @@ impl Link {
 
     /// Wait for the worker to finish what it is doing, up to `wait`.
     ///
-    /// ⚠️ Bounded, and the handle is dropped either way: an instrument that has stopped
-    /// answering must not hold the window open. The session is closed by the worker
-    /// itself, so this waits for it rather than doing anything to the transport.
+    /// ⚠️ Bounded, and the handle is dropped either way, so an instrument that has stopped
+    /// answering cannot hold the window open. The worker closes the session itself; this
+    /// only waits.
     pub fn join(&mut self, wait: Duration) {
         let Some(worker) = self.worker.take() else {
             return;
@@ -109,14 +109,14 @@ impl Link {
 
 /// The first attached Clavia, with the descriptor facts the card shows.
 ///
-/// The vendor-interface search is [`UsbTransport::open`]'s own, run again here for the
-/// interface number the card reports; the transport is what claims it.
+/// This repeats [`UsbTransport::open`]'s vendor-interface search to get the interface
+/// number the card reports; the transport claims the interface.
 fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     let devices = usb::list().map_err(|e| e.to_string())?;
     let info = devices
         .into_iter()
         .next()
-        .ok_or("no Clavia device found — is the instrument awake and on a data cable?")?;
+        .ok_or("no Clavia device found. Is the instrument awake and on a data cable?")?;
 
     let Some(interface) = info
         .interfaces()
@@ -130,8 +130,8 @@ fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     let interface = interface.interface_number();
 
     let transport = UsbTransport::open(&info).map_err(|e| e.to_string())?;
-    // Endpoint 0 is outside sessions; failure here hides identity details but does not
-    // make the bulk transport unusable.
+    // Endpoint 0 is outside sessions. A failure here loses the identity details but
+    // leaves the bulk transport usable.
     let identity = transport.identity().ok();
 
     let card = DeviceCard {
@@ -157,8 +157,6 @@ fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
 mod tests {
     use super::*;
 
-    /// ⚠️ The exit waits for the worker to close its session, but only so long: an
-    /// instrument that has stopped answering must not hold the window open.
     #[test]
     fn waiting_for_the_worker_is_bounded() {
         let mut link = Link::new(egui::Context::default(), mpsc::channel().0);
@@ -171,7 +169,7 @@ mod tests {
         let started = Instant::now();
         link.join(wait);
         assert!(started.elapsed() < wait * 10, "{:?}", started.elapsed());
-        assert!(link.worker.is_none(), "and the handle is let go either way");
+        assert!(link.worker.is_none(), "the handle is dropped either way");
         drop(stop);
     }
 }

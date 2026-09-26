@@ -1,8 +1,8 @@
-//! About drawbar: what it is, where it lives, what this build is, the licenses of what is
-//! compiled into it, and whose trademarks the names in it are.
+//! About drawbar: what it is, where the project lives, what this build is, the licenses
+//! of everything compiled into it, and the trademark disclaimer.
 //!
-//! The same box on every target. The licenses are compiled in, so a binary handed to
-//! someone carries the text of the terms it is under.
+//! The box is the same on every target. The license texts are compiled in, so every copy
+//! of the binary carries the terms it is distributed under.
 
 use eframe::egui;
 
@@ -76,8 +76,8 @@ struct Text {
     text: &'static str,
 }
 
-/// drawbar first, then the published field maps its format placements derive from, then
-/// the bundled material by what it covers, alphabetically.
+/// drawbar first, then the published field maps its Stage decoding is derived from, then
+/// the bundled material, alphabetically by what it covers.
 const NOTICES: &[Notice] = &[
     Notice {
         covers: "drawbar",
@@ -85,8 +85,8 @@ const NOTICES: &[Notice] = &[
         page: REPO,
         source: None,
         license: "BSD 3-Clause",
-        // A copy of `crates/LICENSE`: a packaged crate cannot reach outside its own root,
-        // and a test keeps the two the same.
+        // A copy of `crates/LICENSE`, because a packaged crate cannot reach outside its
+        // own root. A test keeps the two identical.
         text: include_str!("../assets/LICENSE"),
     },
     Notice {
@@ -148,60 +148,60 @@ const NOTICES: &[Notice] = &[
 ];
 
 /// What the reader is told the build lines are for.
-const WHY: &str = "paste this into a bug report and we know what you were running";
+const WHY: &str = "paste this into a bug report so we know what you were running";
 
-/// What a crate group says over the crates whose license file names nobody.
+/// The caption over crates whose license file names no copyright holder.
 const UNATTRIBUTED: &str = "no copyright line in the license file";
 
-/// What Copy diagnostics says it takes, on hover.
+/// The hover text of Copy diagnostics.
 const COPIES: &str = "Copies the lines below, plus the activity log's last 200 entries";
 
 /// The widest the sheet is drawn.
 const WIDE: f32 = 760.0;
 
-/// The height the sheet needs around its scrolling middle — masthead, links and foot — so
-/// an open license scrolls inside the middle rather than pushing Close off-screen.
+/// The height the sheet needs around its scrolling middle (masthead, links and foot), so
+/// an open license scrolls inside the middle and Close stays on screen.
 const AROUND: f32 = 300.0;
 
-/// The middle is never shorter than this, however short the window.
+/// The shortest the scrolling middle gets, however short the window.
 const FEWEST: f32 = 140.0;
 
-/// The room above the masthead. Every other edge is [`sheet::PAD`] or the foot's own.
+/// The space above the masthead. Every other edge is [`sheet::PAD`] or the foot's own.
 const TOP: f32 = 18.0;
 
-/// 10 px: the widest hard-wrapped text is 78 columns, and this is the size that fits them
-/// in [`WIDE`] without wrapping them a second time. Texts with longer lines wrap to it.
+/// 10 px fits the widest hard-wrapped text, 78 columns, in [`WIDE`] without wrapping it a
+/// second time. Texts with longer lines wrap to the sheet.
 const MONO: f32 = 10.0;
 
-/// A build line: the key's column, the row it sits on, and the room between two columns
-/// of them.
+/// A build line's key column width and row height, and the gutter between two columns
+/// of build lines.
 const KEY: f32 = 92.0;
 const LINE: f32 = 22.0;
 const GUTTER: f32 = 24.0;
 
-/// The least room one column of build lines is given; two of them side by side need
-/// twice this and a [`GUTTER`].
+/// The least width of one column of build lines; two columns side by side need twice this
+/// plus a [`GUTTER`].
 const COLUMN: f32 = 330.0;
 
-/// The room the foot's Close button is left at the right of the disclaimer.
+/// The width the foot reserves for Close, right of the disclaimer.
 const CLOSE: f32 = 90.0;
 
-/// A license row, and the chevron that opens it.
+/// The height of a license row, and the size of the chevron that opens it.
 const ROW: f32 = 26.0;
 const CHEVRON: f32 = 12.0;
 
 /// How long the button says "Copied", in seconds.
 const SAID: f64 = 1.6;
 
-/// The most log entries [`diagnostics`] carries.
+/// The most log entries [`diagnostics`] includes.
 const ENTRIES: usize = 200;
 
-/// The release a version's notes were published on.
+/// The release page of a version.
 pub fn release_page(version: &str) -> String {
     format!("{RELEASES}/tag/drawbar-v{version}")
 }
 
-/// One line of what this build is: what it is called, what it says, and the aside after it.
+/// One build line: its key, its value, and an optional note after it.
 struct Line {
     key: &'static str,
     value: String,
@@ -218,7 +218,7 @@ impl Line {
     }
 }
 
-/// What this build is: read when the box opens, not while it is drawn.
+/// What this build is, read once when the box opens.
 struct Build {
     lines: Vec<Line>,
 }
@@ -249,11 +249,11 @@ fn target() -> Line {
 fn usb(device: &DeviceState) -> Line {
     let instrument = device.product().unwrap_or("no instrument connected");
     match web::has_usb() {
-        true => Line::new("Web USB", "available", instrument),
+        true => Line::new("WebUSB", "available", instrument),
         false => Line::new(
-            "Web USB",
+            "WebUSB",
             "unavailable",
-            "Chrome or Edge connect an instrument",
+            "Chrome or Edge can connect an instrument",
         ),
     }
 }
@@ -268,8 +268,8 @@ fn usb(device: &DeviceState) -> Line {
     }
 }
 
-/// How many files this computer is holding. Their bytes are not counted: nothing in the
-/// store tracks how much room they take.
+/// How many files this computer holds. Their total size is not shown, because the store
+/// does not track it.
 fn files(workspace: &Workspace) -> Line {
     let key = match cfg!(target_arch = "wasm32") {
         true => "Local storage",
@@ -350,8 +350,8 @@ impl About {
             .scope(|ui| sheet::heading(ui, "This build", Some(WHY)))
             .response
             .rect;
-        // A child over the heading's band, claiming no room of its own: the button sits
-        // on a line whose place is known only once that line has been drawn.
+        // A child ui over the heading's band that claims no space: the button goes on the
+        // heading's line, whose position is known only after the heading is drawn.
         let band = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), head.y_range());
         let mut beside = ui.new_child(
             egui::UiBuilder::new()
@@ -371,7 +371,7 @@ impl About {
             None => (Glyph::Clipboard, "Copy diagnostics"),
         };
         if let Some(since) = since {
-            // egui repaints on demand, and an idle window would leave "Copied" standing
+            // egui repaints on demand, so an idle window would keep showing "Copied"
             // until something else asked for a frame.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs_f64(SAID - since));
@@ -419,7 +419,7 @@ fn columns(room: f32) -> usize {
     }
 }
 
-/// The build lines, two columns wide where the sheet has the room and one where it has not.
+/// The build lines, in two columns when the sheet is wide enough and in one otherwise.
 fn grid(ui: &mut egui::Ui, lines: &[Line]) {
     let room = ui.available_width();
     let columns = columns(room);
@@ -434,7 +434,7 @@ fn grid(ui: &mut egui::Ui, lines: &[Line]) {
     }
 }
 
-/// One build line, on a ruled row: its key, what it says, and the aside after it.
+/// One build line on a ruled row: its key, value and note.
 fn cell(ui: &mut egui::Ui, line: &Line, width: f32) {
     let row = egui::vec2(width, LINE);
     let laid = egui::Layout::left_to_right(egui::Align::Center);
@@ -461,7 +461,7 @@ fn cell(ui: &mut egui::Ui, line: &Line, width: f32) {
     ui.painter().hline(rect.x_range(), rect.bottom(), hairline);
 }
 
-/// How much there is to read: the notices, and the crates behind them.
+/// The count beside the Licenses heading: notices and crates.
 fn inventory() -> String {
     let crates: usize = crates::GROUPS.iter().map(Group::count).sum();
     format!("{} entries · {crates} crates", NOTICES.len())
@@ -494,7 +494,7 @@ fn licenses(ui: &mut egui::Ui) {
     }
 }
 
-/// Where a project lives, as a link that reads as its address.
+/// A link to a project's page, labeled with its address.
 fn page(ui: &mut egui::Ui, url: &str) {
     let shown = url.strip_prefix("https://").unwrap_or(url);
     sheet::glyph_link(ui, Glyph::ArrowUpRight, shown, url);
@@ -530,7 +530,8 @@ fn packages(ui: &mut egui::Ui, crates: &[&str]) {
     });
 }
 
-/// Collapsed, what a license covers, whose it is and its name; open, the terms in a box.
+/// A license row. Collapsed, it shows what the license covers, the holder and the license
+/// name; open, it adds the terms in a box.
 fn row(
     ui: &mut egui::Ui,
     covers: &str,
@@ -557,8 +558,8 @@ fn row(
     });
 }
 
-/// The row itself: a chevron that says which way it goes, what it covers, whose it is, and
-/// the license at the right.
+/// The clickable row: a chevron showing whether it is open, what the license covers, the
+/// holder, and the license name at the right.
 fn header(
     ui: &mut egui::Ui,
     covers: &str,
@@ -580,7 +581,7 @@ fn header(
             ui.add(egui::Label::new(
                 egui::RichText::new(covers).size(11.5).strong(),
             ));
-            // The license name is never cut, so the holder takes what it leaves.
+            // The license name is never truncated; the holder gets the width left over.
             let named = egui::FontId::monospace(10.5);
             let width = ui
                 .fonts(|fonts| fonts.layout_no_wrap(license.to_string(), named.clone(), ink))
@@ -615,7 +616,7 @@ fn header(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A license text, under what it applies to where that needs saying.
+/// A license text, under a caption saying what it applies to, when there is one.
 fn terms(ui: &mut egui::Ui, applies_to: Option<&str>, text: &str) {
     if let Some(applies_to) = applies_to {
         ui.label(egui::RichText::new(applies_to).small().weak());
@@ -696,7 +697,7 @@ mod tests {
         ctx
     }
 
-    /// Draw the sheet in a window of `size`, and answer with the room it took.
+    /// Draw the sheet in a window of `size`, and return the rect it took.
     fn drawn_at(ctx: &egui::Context, size: egui::Vec2) -> egui::Rect {
         let mut about = About {
             build: build(),
@@ -704,7 +705,7 @@ mod tests {
         };
         let log = Log::default();
         let mut rect = egui::Rect::ZERO;
-        // Twice: a scrolling middle knows what it holds only once it has held it.
+        // Twice, because a scroll area sizes itself from the previous frame's content.
         for _ in 0..2 {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
@@ -723,7 +724,6 @@ mod tests {
         rect
     }
 
-    /// The shell refuses a window smaller than this, so the box has to fit one.
     #[test]
     fn the_sheet_fits_the_smallest_window_the_shell_allows() {
         let least = crate::shell::LEAST;
@@ -738,7 +738,6 @@ mod tests {
         );
     }
 
-    /// Two columns of build lines need room the smallest window does not have.
     #[test]
     fn the_build_lines_stand_in_two_columns_only_where_the_sheet_is_wide() {
         let ctx = headless();
@@ -749,8 +748,9 @@ mod tests {
         assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 2);
     }
 
-    /// A holder is a copyright line, and every name in it is one the license text
-    /// carries — unless the text names nobody and the holder came off the font itself.
+    /// A holder is a copyright line, and the license text carries every name in it. The
+    /// exception is a text with no copyright line, whose holder comes from the font
+    /// itself.
     #[test]
     fn every_notice_names_a_copyright_holder_its_license_agrees_with() {
         for notice in NOTICES {

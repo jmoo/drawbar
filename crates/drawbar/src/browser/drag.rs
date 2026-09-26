@@ -1,7 +1,7 @@
-//! What a drag is: the thing being carried, where it may land, and what landing means.
+//! Drag and drop: what is carried, where it may land, and what landing does.
 //!
-//! Pure rules over the two places a sound can live — nothing here draws a row or touches
-//! the instrument, so the whole vocabulary is testable without a frame.
+//! Pure rules over the two places a sound can be. Apart from [`ghost`], nothing here
+//! draws or touches the instrument, so the rules are testable without a frame.
 
 use eframe::egui;
 use nord_format::accept::Family;
@@ -13,10 +13,10 @@ use crate::icon::Glyph;
 use crate::strings::folder;
 use crate::workspace::{LocalEntity, Workspace};
 
-/// What an asset is, which is what decides the folder it belongs in.
+/// What an asset is, which decides the folder it belongs in.
 ///
-/// One per family of [`Entity`], so a file that decoded is never called a file. The
-/// declaration order is [`Kind::ALL`]'s, which is the order any set of kinds is listed
+/// Every decoded [`Entity`] has a kind of its own, so a decoded file is never called just
+/// a file. Declaration order matches [`Kind::ALL`], the order any set of kinds is listed
 /// in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -30,20 +30,20 @@ pub enum Kind {
     Synth,
     OrganPreset,
     PianoPreset,
-    /// A Lead performance — the multi-slot layer above that family's programs.
+    /// A Lead performance: the multi-slot layer above that family's programs.
     Performance,
-    /// A Lead SysEx bank: the dump itself, or the MIDI file carrying one. The two are
-    /// one thing under two containers.
+    /// A Lead SysEx bank: the dump itself, or the MIDI file carrying one. The content is
+    /// the same in either container.
     LeadBank,
-    /// An Electro 2 sample library — a whole library rather than one instrument, which
-    /// is why it is not a [`Kind::Sample`].
+    /// An Electro 2 sample library. It holds a whole library, not one instrument, so it
+    /// is not a [`Kind::Sample`].
     SampleLibrary,
     /// A C2 pipe-organ library.
     PipeLibrary,
     /// An archive of objects: a bundle, a backup, or a Drum-family bank.
     Bundle,
-    /// A Nord Sample Editor project (`.nsmpproj`) — a text file that generates a sample,
-    /// and the one kind with no folder on the instrument to send it to.
+    /// A Nord Sample Editor project (`.nsmpproj`): a text file that generates a sample.
+    /// No instrument has a folder for it.
     Project,
     /// A text note. No instrument holds one, so it has no folder and nothing sends it.
     Text,
@@ -51,10 +51,10 @@ pub enum Kind {
     Other,
 }
 
-/// The kinds the instrument has a folder for, each under the class that folder is.
+/// The kinds the instrument has a folder for, each with that folder's class.
 ///
-/// One table, read forwards by [`Kind::home`] and backwards by [`Kind::from_class`], so
-/// a class and its kind cannot drift apart.
+/// [`Kind::home`] reads the table forward and [`Kind::from_class`] backward, so a class
+/// and its kind cannot drift apart.
 const HOMES: [(Kind, ObjectClass); 6] = [
     (Kind::Program, ObjectClass::Program),
     (Kind::SetList, ObjectClass::SetList),
@@ -65,7 +65,7 @@ const HOMES: [(Kind, ObjectClass); 6] = [
 ];
 
 impl Kind {
-    /// Every kind, in the order anything showing a set of them shows them.
+    /// Every kind, in the order any list of kinds uses.
     pub const ALL: [Kind; 17] = [
         Kind::Program,
         Kind::SetList,
@@ -86,11 +86,14 @@ impl Kind {
         Kind::Other,
     ];
 
-    /// What an asset is. ⚠️ Exhaustive over [`Entity`], so a family the library adds is
-    /// a compile error here rather than another nameless row.
+    /// What an asset is.
     ///
-    /// Bytes that decoded into nothing are a note where
-    /// [`is_text`](crate::document::text::is_text) said so when they landed.
+    /// ⚠️ Exhaustive over [`Entity`], so a family the library adds is a compile error
+    /// here and never a nameless row.
+    ///
+    /// Bytes that did not decode are a note when
+    /// [`is_text`](crate::document::text::is_text) said so on arrival, and
+    /// [`Kind::Other`] otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         let Some(decoded) = entity.entity.as_ref() else {
             return match entity.is_text {
@@ -155,7 +158,7 @@ impl Kind {
         }
     }
 
-    /// What the tree calls a whole kind of thing.
+    /// The plural name the tree shows for this kind.
     pub fn plural(self) -> &'static str {
         match self.home() {
             Some(class) => folder(class),
@@ -175,8 +178,7 @@ impl Kind {
         }
     }
 
-    /// The one glyph this kind wears — in the rail, the table, a tab, the queue and the
-    /// slot map alike.
+    /// This kind's glyph, used in the rail, the table, a tab, the queue and the slot map.
     pub fn glyph(self) -> Glyph {
         match self {
             Kind::Program => Glyph::Disc3,
@@ -200,12 +202,11 @@ impl Kind {
     }
 }
 
-/// The kinds that exist here: what the list on this computer holds, and what the
-/// attached instrument has a folder for, in [`Kind::ALL`] order.
+/// The kinds present: what the list on this computer holds and what the attached
+/// instrument has a folder for, in [`Kind::ALL`] order.
 ///
-/// The union of the two places, because a kind is a way of narrowing what the library
-/// shows and the library shows both. A row for a kind neither place holds narrows to
-/// nothing.
+/// The union of both places, because a kind narrows what the library shows, and the
+/// library shows both.
 pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
     let here: Vec<Kind> = workspace
         .listed()
@@ -218,10 +219,8 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect()
 }
 
-/// The family to put in front of an asset's kind word, or nothing where the word alone
-/// says what the asset is.
-///
-/// One answer for the tree and for the library's table, which draw the same word.
+/// The family to put before an asset's kind word, or `None` when the word alone is
+/// clear. Shared by the tree and the library's table, which draw the same word.
 pub fn qualifier(
     entity: &LocalEntity,
     kept: &[Family],
@@ -233,11 +232,11 @@ pub fn qualifier(
         .flatten()
 }
 
-/// Whether a kind's word needs the family in front of it to say what it is.
+/// Whether a kind's word needs the family before it.
 ///
-/// True where the word alone would not settle it: the kept assets are from more than one
-/// family, or the asset is not the attached instrument's own. With one family on this
-/// computer and that instrument attached, `program` can only mean one thing.
+/// True when the kept assets span more than one family, or the asset is not from the
+/// attached instrument's family. With one family on this computer and that instrument
+/// attached, `program` can mean only one thing.
 fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>) -> bool {
     if kept.len() > 1 {
         return true;
@@ -245,10 +244,10 @@ fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>)
     matches!((asset, instrument), (Some(asset), Some(held)) if asset != held)
 }
 
-/// The families the assets on this computer are from, in [`Family::ALL`] order.
+/// The families of the assets on this computer, in [`Family::ALL`] order.
 ///
-/// Files that name no family — the shared library formats, the carriers, bytes that did
-/// not decode — are not one, so a list of samples spans no families at all.
+/// Files that name no family (the shared library formats, the carriers, bytes that did
+/// not decode) add none, so a list of samples spans no families.
 pub fn families_present(workspace: &Workspace) -> Vec<Family> {
     let here: Vec<Family> = workspace
         .listed()
@@ -264,15 +263,15 @@ pub fn families_present(workspace: &Workspace) -> Vec<Family> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
     Local(u64),
-    /// A grouping of local assets. Only a rename and a selection reach it; a folder is
-    /// never dragged and never sent anywhere as a thing of its own.
+    /// A folder of local assets. It can be renamed and selected, but it is never dragged
+    /// or sent.
     Folder(u64),
     Slot {
         class: ObjectClass,
         at: Location,
     },
-    /// A label on the local list. Like a folder it is renamed rather than dragged, and
-    /// unlike a folder an asset wears as many as it is given.
+    /// A label on the local list. Like a folder, it is renamed and never dragged; unlike
+    /// folders, an asset can have any number of tags.
     Tag(u64),
 }
 
@@ -285,8 +284,8 @@ impl Item {
         }
     }
 
-    /// Locals, then folders, then slots by class and address, then tags — the order a
-    /// selection is walked in, and the order it comes back from the store in.
+    /// Locals, then folders, then slots by class and address, then tags: the order a
+    /// selection iterates in.
     fn key(self) -> (u8, u32, u32, u64) {
         match self {
             Item::Local(id) => (0, 0, 0, id),
@@ -314,23 +313,22 @@ impl PartialOrd for Item {
 pub struct Held {
     pub what: Item,
     pub kind: Kind,
-    /// The folder it is in, for a local asset. What makes dragging one out of a folder
-    /// mean something.
+    /// The folder a local asset is in, which lets a drag take it out of the folder.
     pub filed: Option<u64>,
     /// Whether the attached instrument takes this asset's format, from
     /// [`crate::device::fit`]. Anything already on the instrument fits it.
     pub fits: bool,
 }
 
-/// What is under the pointer while a drag is in progress.
+/// What a drag in progress carries.
 ///
-/// ⚠️ `head` is the row the pointer went down on and `rest` is the selection it brought
-/// with it. The verdict is [`landing`] on the head alone; `rest` follows only where that
-/// verdict [`Landing::repeats`].
+/// ⚠️ `head` is the row the pointer was pressed on, and `rest` is the selection it
+/// brought along. The verdict is [`landing`] on the head alone; `rest` follows only when
+/// that verdict [`Landing::repeats`].
 #[derive(Clone)]
 pub struct Carried {
     pub head: Held,
-    /// What the ghost says: the pressed row, and how many came with it.
+    /// The ghost's text: the pressed row's name, and how many came with it.
     pub name: String,
     pub rest: Vec<Held>,
 }
@@ -354,14 +352,11 @@ pub enum Onto {
     },
 }
 
-/// What a drop would do and everything running it names, or the plain reason it would do
-/// nothing.
-///
-/// The verdict carries the whole of what it decided, so nothing downstream re-derives it
-/// from the drag it came from.
+/// What a drop would do, with everything needed to run it, or the reason it would do
+/// nothing. Nothing downstream re-derives the verdict from the drag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Landing {
-    /// Device to this computer: a copy comes back.
+    /// Instrument to this computer: a copy comes back.
     Copy {
         class: ObjectClass,
         at: Location,
@@ -395,10 +390,10 @@ impl Landing {
         !matches!(self, Landing::No(_))
     }
 
-    /// Whether everything else the drag carries follows the pressed row.
+    /// Whether the rest of what the drag carries follows the pressed row.
     ///
-    /// ⚠️ A send and a rearrange name **one** destination, and handing several rows to one
-    /// slot would write them over each other; those take the pressed row alone.
+    /// ⚠️ A send and a rearrange name one destination, and several rows sent to one slot
+    /// would overwrite each other, so those take only the pressed row.
     pub(super) fn repeats(self) -> bool {
         matches!(
             self,
@@ -406,7 +401,7 @@ impl Landing {
         )
     }
 
-    /// Whether two verdicts are the same kind of thing, whatever each of them names.
+    /// Whether two verdicts are the same variant, whatever each names.
     pub(super) fn same(self, other: Landing) -> bool {
         std::mem::discriminant(&self) == std::mem::discriminant(&other)
     }
@@ -415,10 +410,10 @@ impl Landing {
 /// Whether a drag can end where the pointer is, and what it would mean if it did.
 pub fn landing(carried: &Held, onto: Onto) -> Landing {
     match (carried.what, onto) {
-        // A folder or a tag is a way of seeing the list, not a row that moves.
+        // A folder or a tag groups the list; it is not a row that moves.
         (Item::Folder(_) | Item::Tag(_), _) => Landing::No("that is a list, not a sound"),
-        // The loose part of the list is a target only for something that is in a folder,
-        // which is how one comes back out of one.
+        // The loose part of the list takes a drop only from something in a folder, which
+        // takes it out of the folder.
         (Item::Local(id), Onto::Computer) => match carried.filed {
             Some(_) => Landing::Unfile { id },
             None => Landing::No("it is already on this computer"),
@@ -427,13 +422,13 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
             true => Landing::No("it is already in that folder"),
             false => Landing::File { id, folder },
         },
-        // The copy would have to land somewhere before it could be filed, and it lands
-        // when the instrument answers rather than when the pointer is let go.
+        // A copy lands when the instrument answers, after the pointer is released, so
+        // there is nothing yet to file.
         (Item::Slot { .. }, Onto::Group(_)) => {
             Landing::No("copy it to this computer first, then drag it into the folder")
         }
-        // A folder this app cannot name is the home of no kind, so the kind check is
-        // also what keeps a drop out of one.
+        // A folder this app cannot name is no kind's home, so the kind check also keeps
+        // drops out of it.
         (Item::Local(id), Onto::Slot { class, at }) => {
             if carried.kind.home() != Some(class) {
                 Landing::No("that folder holds a different kind of thing")
@@ -454,7 +449,7 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
             if from != class {
                 Landing::No("things only move within their own folder")
             } else if read_only(class) {
-                Landing::No("nothing here knows what that folder holds")
+                Landing::No("drawbar does not know what that folder holds")
             } else if was == at {
                 Landing::No("it is already there")
             } else {
@@ -500,7 +495,6 @@ mod tests {
     use crate::browser::bench::{local, onto, slot, CARRIED};
     use crate::strings::folder;
 
-    /// The two crossings the browser exists for.
     #[test]
     fn a_drag_between_the_two_places_copies_one_way_and_sends_the_other() {
         assert_eq!(
@@ -520,7 +514,7 @@ mod tests {
         );
     }
 
-    /// An empty slot is a target like any other — that is the whole reason it is a row.
+    /// An empty slot is a drop target, which is why it is drawn as a row.
     #[test]
     fn an_empty_slot_is_a_target() {
         assert_eq!(
@@ -533,8 +527,8 @@ mod tests {
         );
     }
 
-    /// A drop of something the attached instrument does not take produces no landing —
-    /// the target does not light and the drop says why.
+    /// A drop of something the attached instrument does not take is refused: the target
+    /// is not highlighted, and the drop says why.
     #[test]
     fn a_drop_of_what_the_instrument_refuses_lands_nowhere() {
         let refused = Held {
@@ -555,8 +549,6 @@ mod tests {
         );
     }
 
-    /// A kind's word carries the family only where the word alone would not settle whose
-    /// files these are.
     #[test]
     fn the_family_is_named_only_where_it_says_something_the_kind_does_not() {
         let e5 = Some(Family::Electro5);
@@ -581,7 +573,7 @@ mod tests {
         );
     }
 
-    /// A folder holds one kind of thing, and the instrument is not asked to sort it out.
+    /// Each folder on the instrument holds one kind.
     #[test]
     fn a_thing_cannot_be_dropped_into_a_folder_for_another_kind() {
         for kind in [Kind::SetList, Kind::Sample, Kind::Other] {
@@ -589,9 +581,9 @@ mod tests {
         }
     }
 
-    /// Every folder this app can name takes a drop — the two libraries and the buffer
-    /// classes alike. A partition it cannot name is the home of no kind, so nothing
-    /// carries into one.
+    /// Every folder this app can name takes a drop, the two libraries and the buffer
+    /// classes included. A partition it cannot name is no kind's home, so nothing drops
+    /// into it.
     #[test]
     fn a_drop_lands_in_every_folder_this_app_can_name() {
         for class in [
@@ -646,8 +638,7 @@ mod tests {
         assert!(!landing(&local(Kind::Program), Onto::Computer).allowed());
     }
 
-    /// A refusal carries the words the status strip will show, so there is always
-    /// something to say.
+    /// Every refusal carries a reason for the status strip.
     #[test]
     fn every_refusal_explains_itself() {
         let cases = [
@@ -670,9 +661,9 @@ mod tests {
         }
     }
 
-    /// A folder is a way of seeing the local list. Something on this computer goes into
-    /// one and comes back out of one; nothing off the instrument does either, because
-    /// the copy lands when the instrument answers rather than when the pointer is let go.
+    /// An asset on this computer can be filed into a folder and taken out again. A slot
+    /// cannot be dropped into one, because its copy lands when the instrument answers,
+    /// after the pointer is released.
     #[test]
     fn a_folder_takes_what_is_already_on_this_computer_and_nothing_else() {
         let filed = |folder| Held {
@@ -702,8 +693,6 @@ mod tests {
         }
     }
 
-    /// A folder is never the thing being dragged: it is where the list is cut, not a row
-    /// that moves.
     #[test]
     fn a_folder_is_not_something_that_is_dragged() {
         let carried = Held {
@@ -721,8 +710,8 @@ mod tests {
         }
     }
 
-    /// A folder holds exactly the kind named after it, and a kind the instrument has no
-    /// folder for belongs nowhere on it.
+    /// Each instrument folder holds the kind named after it, and a kind with no folder
+    /// has no home on the instrument.
     #[test]
     fn every_kind_knows_the_folder_it_belongs_in() {
         let homed: Vec<Kind> = HOMES.iter().map(|(kind, _)| *kind).collect();
@@ -736,8 +725,8 @@ mod tests {
         assert_eq!(Kind::from_class(ObjectClass::Unknown(9)), Kind::Other);
     }
 
-    /// One glyph per kind. Two kinds wearing the same one would read as one kind in the
-    /// rail, the table, a tab, the queue and the slot map at once.
+    /// Two kinds with one glyph would read as one kind in the rail, the table, a tab, the
+    /// queue and the slot map.
     #[test]
     fn no_two_kinds_wear_the_same_glyph() {
         let mut seen: Vec<Glyph> = Vec::new();

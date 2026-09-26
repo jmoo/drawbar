@@ -2,13 +2,13 @@
 //! changed since the version last read.
 //!
 //! The notes are GitHub's release body for `drawbar-v<version>`, which
-//! `scripts/release.bash` writes in a fixed shape. [`classify`] reads that shape back so
-//! the sheet can paint it without a markdown parser, and anything it does not recognise
-//! stays the plain line it was.
+//! `scripts/release.bash` writes in a fixed shape. [`classify`] reads that shape so the
+//! sheet can draw it without a Markdown parser. A line it does not recognize stays plain
+//! text.
 //!
-//! Both sheets are painted here, on every target, because Help opens the welcome in a
-//! window as well as in a tab. Only the rule that opens one unasked and the fetch behind
-//! the notes are the browser's.
+//! Both sheets are drawn here on every target, because Help opens the welcome on the
+//! desktop as well as in the browser. Only the browser opens a sheet unasked and fetches
+//! the notes.
 
 use eframe::egui;
 
@@ -31,32 +31,32 @@ pub use web::Splash;
 
 pub(crate) use crate::sheet::VERSION;
 
-/// The most each sheet is allowed to be wide.
+/// The widest each sheet may be.
 const WELCOME_WIDTH: f32 = 940.0;
 const NEWS_WIDTH: f32 = 700.0;
 
-/// The room a sheet keeps for its foot, so a short window scrolls the middle rather than
-/// pushing the one button that dismisses it off screen.
+/// The height a sheet reserves for its foot, so a short window scrolls the middle and
+/// keeps the dismiss button on screen.
 const AROUND: f32 = 96.0;
 
-/// The middle is never shorter than this, however short the window.
+/// The shortest the scrolling middle gets, however short the window.
 const FEWEST: f32 = 120.0;
 
-/// The room the welcome's foot keeps for its one button, at the right of the disclaimer.
-const LET_IN: f32 = 200.0;
+/// The width the welcome's foot reserves for its button, right of the disclaimer.
+const DISMISS: f32 = 200.0;
 
 /// Which sheet a session opens on, given the version whose sheet was last dismissed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Opening {
     /// Nobody has run drawbar here before.
     Welcome,
-    /// A version was read, and it is not the one running.
+    /// The version last read is not the one running.
     News,
     Nothing,
 }
 
-/// The opening rule: a first run is welcomed, an update says what changed, and a version
-/// already read opens on the app itself.
+/// A first run opens on the welcome, an update on what changed, and a version already
+/// read on the app itself.
 pub fn opening(seen: Option<&str>) -> Opening {
     match seen {
         None => Opening::Welcome,
@@ -73,16 +73,16 @@ pub enum Wanted {
     Act(Act),
 }
 
-/// How far one column's claim has been borne out.
+/// How far one column's claim holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
     Yes,
-    /// Implemented, or implemented in part, but not borne out on an instrument.
+    /// Partly implemented, or implemented but not confirmed on an instrument.
     Partly,
     No,
 }
 
-/// One column of a [`Row`], and what it claims in the words the pointer shows.
+/// One column of a [`Row`], with the hover text that states its claim.
 pub struct Claim {
     pub mark: Mark,
     pub hint: &'static str,
@@ -92,8 +92,7 @@ const fn claim(mark: Mark, hint: &'static str) -> Claim {
     Claim { mark, hint }
 }
 
-/// One line of [`SUPPORT`]: what the files are, the four columns, and what the row means
-/// in a sentence.
+/// One row of [`SUPPORT`]: the files, the four columns, and a one-sentence note.
 pub struct Row {
     pub instrument: &'static str,
     pub kinds: &'static str,
@@ -105,8 +104,8 @@ pub struct Row {
 /// The columns [`Row::marks`] answers.
 pub const COLUMNS: [&str; 4] = ["Read", "Edit", "Send", "Tested"];
 
-/// What works today. Every claim here is one `docs/src/getting-started/support.md` makes:
-/// that page is where a claim is argued, and this is where it is shown.
+/// What works today. Every claim here must match `docs/src/getting-started/support.md`,
+/// which gives the detail.
 pub const SUPPORT: &[Row] = &[
     Row {
         instrument: "Nord Electro 5",
@@ -152,10 +151,10 @@ pub const SUPPORT: &[Row] = &[
     },
     Row {
         instrument: "Nord Stage 2 · 3 · 4",
-        kinds: "programs · presets",
+        kinds: "programs · live · presets",
         marks: [
-            claim(Mark::Yes, "Views programs and presets"),
-            claim(Mark::Yes, "Edits programs and presets"),
+            claim(Mark::Yes, "Views programs, live slots and presets"),
+            claim(Mark::Yes, "Edits programs, live slots and presets"),
             claim(
                 Mark::No,
                 "No Stage has been connected, so USB support cannot be guaranteed",
@@ -166,13 +165,13 @@ pub const SUPPORT: &[Row] = &[
     },
     Row {
         instrument: "Every other Nord",
-        kinds: "any file it recognises",
+        kinds: "any file it recognizes",
         marks: [
             claim(
                 Mark::Partly,
-                "Recognised and kept byte for byte, without decoding what is inside",
+                "Recognized and kept byte for byte, without decoding what is inside",
             ),
-            claim(Mark::No, "Nothing is decoded for these models yet"),
+            claim(Mark::No, "drawbar does not decode files from these models"),
             claim(
                 Mark::No,
                 "No other instrument has been connected, so USB support cannot be \
@@ -180,16 +179,15 @@ pub const SUPPORT: &[Row] = &[
             ),
             claim(Mark::No, "Not tested on an instrument"),
         ],
-        note: "Recognised and kept byte for byte, without editing.",
+        note: "Recognized and kept byte for byte, without editing.",
     },
 ];
 
-/// The lead of the risk box, in bold, and the rest of it.
+/// The risk box: a bold lead, then the rest.
 const RISK_LEAD: &str = "Keep your own backups.";
-const RISK_REST: &str =
-    " This is alpha — treat what is in drawbar as a working copy, not an archive.";
+const RISK_REST: &str = " drawbar is alpha software. Treat what it holds as a working copy.";
 
-/// The three ways in, in the order the sheet offers them.
+/// The start cards, in the order the sheet shows them.
 const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Guide];
 
 #[derive(Clone, Copy)]
@@ -205,7 +203,7 @@ struct Card {
     label: &'static str,
     sub: &'static str,
     hint: &'static str,
-    /// The tested path, drawn in the accent.
+    /// Drawn in the accent color, for the tested path.
     lead: bool,
 }
 
@@ -217,7 +215,7 @@ impl Start {
                 label: "Connect an instrument…",
                 sub: "See every slot, pull sounds off to keep or edit, and put them back \
                       where you want them.",
-                hint: "Electro 5 over USB is the tested path",
+                hint: "USB has been tested only with the Electro 5",
                 lead: true,
             },
             Start::Open => Card {
@@ -268,10 +266,10 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
         });
     sheet::foot(
         ui,
-        |ui| sheet::disclaimer(ui, LET_IN),
+        |ui| sheet::disclaimer(ui, DISMISS),
         |ui| {
-            let done = sheet::primary(ui, Some(Glyph::Check), "I understand — let me in")
-                .on_hover_text("You can read all of this again from the Help menu")
+            let done = sheet::primary(ui, Some(Glyph::Check), "I understand")
+                .on_hover_text("Help ▸ Welcome shows this again")
                 .clicked();
             if done && wanted.is_none() {
                 wanted = Some(Wanted::Done);
@@ -284,7 +282,7 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
     }
 }
 
-/// What this build is, before anything it can do.
+/// The alpha warning above the support table.
 fn risk(ui: &mut egui::Ui) {
     let tint = warn(ui.visuals());
     let ink = ui.visuals().strong_text_color();
@@ -319,22 +317,21 @@ fn risk(ui: &mut egui::Ui) {
         });
 }
 
-/// The room a cell keeps from the table's edge, and the room between two columns.
+/// A cell's padding from the table's edge, and the gap between two columns.
 const CELL: f32 = 12.0;
 const COLGAP: f32 = 10.0;
 
-/// The three mark columns, and the wider one that says whether a row was tried on
-/// hardware.
+/// The width of the Read, Edit and Send columns, and of the wider Tested column.
 const DOT: f32 = 52.0;
 const TESTED: f32 = 82.0;
 
-/// The mark itself.
+/// The diameter of a mark.
 const MARK: f32 = 9.0;
 
-/// Neither prose column is squeezed past this, whatever the window does.
+/// The narrowest either prose column gets, whatever the window width.
 const LEAST_PROSE: f32 = 88.0;
 
-/// The instrument column and the note column, at the room the table has left for them.
+/// The widths of the instrument and note columns, sharing what the fixed columns leave.
 fn prose(full: f32) -> (f32, f32) {
     let fixed = DOT * 3.0 + TESTED + COLGAP * 5.0 + CELL * 2.0;
     let free = (full - fixed).max(2.0 * LEAST_PROSE);
@@ -364,7 +361,7 @@ fn support(ui: &mut egui::Ui) {
         });
 }
 
-/// The column heads, in MICRO-caps over the cells they name.
+/// The column heads, uppercased.
 fn head(ui: &mut egui::Ui, widths: (f32, f32)) {
     let ink = caption(ui.visuals());
     ui.horizontal_top(|ui| {
@@ -421,24 +418,24 @@ fn rule(ui: &mut egui::Ui, hairline: egui::Stroke) {
 /// One column of a row: `width` wide, its content laid out by `layout`.
 fn cell(ui: &mut egui::Ui, width: f32, layout: egui::Layout, add: impl FnOnce(&mut egui::Ui)) {
     ui.allocate_ui_with_layout(egui::vec2(width, 0.0), layout, |ui| {
-        // ⚠️ A column narrower than the one asked for: an allocated ui gives its parent
-        // only the room its contents took, and the rest of the row would slide into it.
+        // ⚠️ Without this, an allocated ui reports only the width its contents took, and
+        // the rest of the row slides left into the gap.
         ui.set_min_width(width);
         add(ui);
     });
 }
 
-/// A column that reads down from its left edge, which is most of them.
+/// A left-aligned column.
 fn down() -> egui::Layout {
     egui::Layout::top_down(egui::Align::LEFT)
 }
 
-/// A column whose one mark sits in the middle of it.
+/// A centered column, for a single mark.
 fn middle() -> egui::Layout {
     egui::Layout::top_down(egui::Align::Center)
 }
 
-/// A claim that holds is a lit dot; one that does not is the ring where a dot would be.
+/// Yes and partly are filled dots; no is an empty ring.
 fn mark(ui: &mut egui::Ui, mark: Mark) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(MARK), egui::Sense::hover());
     let (fill, ring) = match mark {
@@ -459,9 +456,9 @@ fn legend(ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 16.0;
         for (shown, label) in [
-            (Mark::Yes, "works here"),
-            (Mark::Partly, "partly, or unverified"),
-            (Mark::No, "not yet"),
+            (Mark::Yes, "yes"),
+            (Mark::Partly, "partly, or not confirmed"),
+            (Mark::No, "no"),
         ] {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -472,14 +469,13 @@ fn legend(ui: &mut egui::Ui) {
     });
 }
 
-/// The least room a start card is given, the room between two of them, and the room
-/// inside one.
+/// A start card's least width, the gap between two cards, and the padding inside one.
 const CARD_LEAST: f32 = 210.0;
 const CARD_GAP: f32 = 10.0;
 const CARD_PAD: egui::Vec2 = egui::vec2(13.0, 11.0);
 const CARD_STROKE: f32 = 1.0;
 
-/// A card's title and its sub-line.
+/// The text sizes of a card's title and sub-line.
 const CARD_TITLE: f32 = 12.0;
 const CARD_SUB: f32 = 10.5;
 
@@ -488,8 +484,9 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
     let full = ui.available_width();
     let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, STARTS.len());
     let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
-    // Every card stands as tall as the tallest one's content needs, so a card without a
-    // sub-line matches its neighbours in any row. A change of need asks for the frame again.
+    // Every card is as tall as the tallest card's content, so a card without a sub-line
+    // matches its neighbors. When that height changes, the frame is discarded and
+    // redrawn.
     let told = ui.id().with("starts");
     let height: f32 = ui.data(|data| data.get_temp(told)).unwrap_or(0.0);
     let mut tallest: f32 = 0.0;
@@ -519,7 +516,7 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
     wanted
 }
 
-/// One card's response, whichever row it landed in.
+/// The id of a card's response, the same whichever row the card lands in.
 fn card_id(label: &str) -> egui::Id {
     egui::Id::new(("start card", label))
 }
@@ -600,7 +597,7 @@ fn escaped(ui: &egui::Ui) -> bool {
     ui.input(|input| input.key_pressed(egui::Key::Escape))
 }
 
-/// The release notes, as far as they have been read.
+/// The release notes, and how far fetching them has gone.
 pub enum Notes {
     /// Nobody has asked for them yet.
     Unasked,
@@ -613,7 +610,7 @@ pub enum Notes {
     Unavailable,
 }
 
-/// What a release body's heading says the section under it is.
+/// The kind of change a release-notes heading introduces.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Change<'a> {
     Breaking,
@@ -621,13 +618,13 @@ pub enum Change<'a> {
     Fixed,
     Faster,
     Other,
-    /// A heading `scripts/release.bash` does not write: kept as it reads.
+    /// A heading `scripts/release.bash` does not write, shown as written.
     Unknown(&'a str),
 }
 
 impl<'a> Change<'a> {
-    /// Read a heading, spelt either way: [`plain`] takes the variation selector out of a
-    /// fetched body, and a body read from anywhere else still carries it.
+    /// Read a heading with or without the emoji variation selector: [`plain`] strips it
+    /// from a fetched body, and a body from anywhere else still carries it.
     pub fn read(heading: &'a str) -> Change<'a> {
         match heading.trim() {
             "\u{26a0} Breaking changes" | "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
@@ -651,7 +648,7 @@ impl<'a> Change<'a> {
         }
     }
 
-    /// The mark every row of this section wears.
+    /// The glyph and color every row of this section wears.
     fn badge(self, visuals: &egui::Visuals) -> (Glyph, egui::Color32) {
         match self {
             Change::Breaking => (Glyph::TriangleAlert, warn(visuals)),
@@ -682,7 +679,8 @@ fn sections(body: &str) -> Vec<Section<'_>> {
                 change: Some(Change::read(heading)),
                 lines: Vec::new(),
             }),
-            // The compare link is the foot's, and a blank line is the markdown's own air.
+            // The compare link goes in the foot, and a blank line is only Markdown
+            // spacing.
             Line::Changelog(_) | Line::Blank => {}
             line => {
                 if let Some(section) = sections.last_mut() {
@@ -703,8 +701,7 @@ fn changelog(body: &str) -> Option<&str> {
     })
 }
 
-/// How many changes a section holds, in the words the aside reads. `None` for a section
-/// of prose alone, which has no changes to count.
+/// The change count shown beside a section's title. `None` for a section with no items.
 fn tally(count: usize, breaking: bool) -> Option<String> {
     const WORDS: [&str; 9] = [
         "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -751,7 +748,7 @@ fn news_body(ui: &mut egui::Ui, notes: &Notes) -> bool {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.add(sized(Glyph::HardDriveDownload, 12.0, quiet));
                 ui.label(
-                    egui::RichText::new("Still alpha — keep your own backups.")
+                    egui::RichText::new("drawbar is alpha software. Keep your own backups.")
                         .size(10.5)
                         .weak(),
                 );
@@ -839,10 +836,10 @@ fn section_head(ui: &mut egui::Ui, change: Option<Change<'_>>, lines: &[Line<'_>
     ui.add_space(GAP * 1.5);
 }
 
-/// The column an item's pull request and commit sit in.
+/// The width of the column holding an item's pull request and commit.
 const REF: f32 = 88.0;
 
-/// The column its glyph sits in.
+/// The width of the column holding its glyph.
 const BADGE: f32 = 14.0;
 
 fn change_row(ui: &mut egui::Ui, change: Option<Change<'_>>, line: Line<'_>) {
@@ -884,8 +881,8 @@ fn change_row(ui: &mut egui::Ui, change: Option<Change<'_>>, line: Line<'_>) {
     ui.add_space(GAP);
 }
 
-/// `#NN · sha`, the sha standing for the commit it links to. Laid right to left, so the
-/// column ends flush however much of it there is.
+/// `#NN · sha`, the sha linking to its commit. Laid out right to left, so the column
+/// stays flush right however much of it there is.
 fn reference(ui: &mut egui::Ui, pr: Option<&str>, commit: Option<Commit<'_>>) {
     let mono = egui::FontId::monospace(10.0);
     ui.spacing_mut().item_spacing.x = 4.0;
@@ -907,7 +904,7 @@ fn reference(ui: &mut egui::Ui, pr: Option<&str>, commit: Option<Commit<'_>>) {
     }
 }
 
-/// One line of the notes, in the terms the modal paints.
+/// One line of the release notes, classified for drawing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Line<'a> {
     Blank,
@@ -933,8 +930,8 @@ pub struct Commit<'a> {
 
 /// A release body with the emoji variation selector taken out.
 ///
-/// ⚠️ No bundled font has a glyph for U+FE0F, and a missing one renders as an empty box
-/// — so `### ⚠️ Breaking changes` would read as a warning sign beside a blank tile.
+/// ⚠️ No bundled font has a glyph for U+FE0F, and a missing glyph renders as an empty
+/// box, so `### ⚠️ Breaking changes` would show a blank tile beside the warning sign.
 pub fn plain(body: &str) -> String {
     body.replace('\u{fe0f}', "")
 }
@@ -965,9 +962,8 @@ pub fn classify(line: &str) -> Line<'_> {
     }
 }
 
-/// A URL is offered as a link only when it is `https`.
-///
-/// The body is fetched text, and every URL `scripts/release.bash` writes is an https one.
+/// `url`, when it is `https`. Only these are offered as links: the body is fetched text,
+/// and `scripts/release.bash` writes only https URLs.
 fn https(url: &str) -> Option<&str> {
     match url
         .strip_prefix("https://")
@@ -1013,7 +1009,7 @@ pub fn split_pr(text: &str) -> (&str, Option<&str>) {
     };
     let number = &rest[at + OPEN.len()..];
     match !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
-        // From the `#`, so the column reads as the reference GitHub shows.
+        // Keep the `#`, as GitHub writes the reference.
         true => (&rest[..at], Some(&rest[at + OPEN.len() - 1..])),
         false => (text, None),
     }
@@ -1056,7 +1052,7 @@ mod tests {
         ctx
     }
 
-    /// Every word painted in a frame, with the box it was painted in.
+    /// Every text painted in a frame, with its bounds.
     fn painted(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
         fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
             match shape {
@@ -1087,7 +1083,7 @@ mod tests {
         painted(&ctx.run(input, add))
     }
 
-    /// Where a word landed, or nothing when it was never painted.
+    /// The bounds of a painted text, or `None` when it was never painted.
     fn box_of(said: &[(String, egui::Rect)], word: &str) -> Option<egui::Rect> {
         said.iter()
             .find(|(text, _)| text == word)
@@ -1182,8 +1178,7 @@ mod tests {
         );
     }
 
-    /// Neither the note nor a hover text is blank: a mark nobody can read is a claim
-    /// nobody can check.
+    /// A mark without hover text makes a claim nobody can check.
     #[test]
     fn every_supported_row_says_what_each_mark_claims() {
         assert!(!SUPPORT.is_empty());
@@ -1200,13 +1195,13 @@ mod tests {
         }
     }
 
-    /// The shell refuses a smaller screen than this, so both sheets have to lay out in it
-    /// with the one button that dismisses them still on it.
+    /// The shell refuses a smaller screen than this, so both sheets must fit in it with
+    /// their dismiss button on screen.
     #[test]
     fn the_welcome_sheet_keeps_its_button_on_the_smallest_screen_the_shell_allows() {
         let ctx = headless();
         let size = crate::shell::LEAST;
-        // Twice: the first frame is what the second lays itself out against.
+        // Twice, because the second frame lays out against the first.
         let _ = drawn_at(&ctx, size, |ctx| {
             welcome(ctx);
         });
@@ -1215,7 +1210,7 @@ mod tests {
         });
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let button = box_of(&said, "I understand — let me in")
+        let button = box_of(&said, "I understand")
             .unwrap_or_else(|| panic!("the button was never painted: {said:?}"));
         assert!(
             screen.contains_rect(button.expand(6.0)),
@@ -1388,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn every_line_of_a_published_release_body_is_recognised() {
+    fn every_line_of_a_published_release_body_is_recognized() {
         let read: Vec<Line<'_>> = RELEASED.lines().map(classify).collect();
         assert_eq!(
             read,

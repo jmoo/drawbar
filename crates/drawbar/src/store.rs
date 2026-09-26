@@ -1,10 +1,10 @@
 //! "This computer", kept across restarts.
 //!
-//! eframe hands over one string store — localStorage in a browser tab, a ron file on the
-//! desktop — so an asset is written as a line: its id, where it came from, what it is
-//! called, the bytes it was last saved as in base64, and, where it holds something else,
-//! those bytes too. It is read back through the same decode-and-verify any file gets,
-//! because bytes off a store deserve no more trust than bytes off a disk.
+//! eframe provides one string store (localStorage in a browser, a RON file on the
+//! desktop), so each asset is written as a line: its id, its origin, its name, its last
+//! saved bytes in base64, and its current bytes too when they differ. It is read back
+//! through the same decode-and-verify as any file, because bytes from a store deserve no
+//! more trust than bytes from a disk.
 
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 
@@ -16,13 +16,13 @@ use nord_usb::{Location, ObjectClass};
 const KEY: &str = "drawbar.this_computer";
 const VERSION: &str = "drawbar 2";
 
-/// How many fields a line holds, which is the whole of what a version decides.
+/// How many fields a line holds, which is all a version decides.
 #[derive(Clone, Copy)]
 enum Shape {
-    /// `drawbar 1`: id, origin, name, bytes. The bytes are both what the asset holds
-    /// and what it was last saved as, because that version knew of no other.
+    /// `drawbar 1`: id, origin, name, bytes. The bytes are both the asset's current and
+    /// its saved bytes, because that version stored no other.
     Four,
-    /// `drawbar 2`: those, and — where an edit is unsaved — the bytes it holds instead.
+    /// `drawbar 2`: those, plus the current bytes when an edit is unsaved.
     Five,
 }
 
@@ -30,8 +30,8 @@ impl Shape {
     /// The shape a version line asks for, or `None` for a version this build does not
     /// know.
     ///
-    /// ⚠️ An unknown version is not read, and the next [`save`] overwrites it — so
-    /// running an older build discards a store a newer one wrote.
+    /// ⚠️ An unknown version is not read, and the next [`save`] overwrites it, so running
+    /// an older build discards a store a newer one wrote.
     fn of(version: &str) -> Option<Shape> {
         match version {
             "drawbar 1" => Some(Shape::Four),
@@ -43,31 +43,28 @@ impl Shape {
 
 /// The largest asset worth keeping.
 ///
-/// ⚠️ A browser gives an origin about 5 MiB for everything it stores, and base64 costs a
-/// third on top. A sample runs to megabytes on its own, so one would fill the store and
-/// take every program with it.
+/// ⚠️ A browser gives an origin about 5 MiB of storage, and base64 adds a third. A sample
+/// alone can run to megabytes, so one would fill the store and crowd out every program.
 pub(crate) const MAX_ENTITY: usize = 1024 * 1024;
 
-/// What the whole store may take.
+/// The most the whole store may hold.
 ///
-/// ⚠️ Writing past the quota is refused by the browser and reported nowhere the app can
-/// see — `Storage::set_string` cannot fail as far as its caller knows. So the budget is
-/// kept here, below the quota, and what does not fit is said out loud rather than lost
-/// quietly.
+/// ⚠️ The browser refuses a write past the quota without telling the app:
+/// `Storage::set_string` cannot report failure. So the budget is enforced here, below the
+/// quota, and whatever does not fit is reported instead of silently lost.
 const BUDGET: usize = 3 * 1024 * 1024;
 
 /// What a write of the list could not keep.
 ///
-/// ⚠️ Answered rather than said out loud: eframe writes the list every few seconds, and
-/// a save that announced its own losses would overwrite the status line and fill the log
-/// for as long as the asset sat there. [`Left::report`] is the announcement, and the
-/// caller makes it only when what is left out changes — see
-/// [`crate::app::DrawbarApp::keep_up`].
+/// ⚠️ Returned, not logged: eframe writes the list every few seconds, and a save that
+/// reported its own losses would overwrite the status line and fill the log for as long
+/// as the asset remained. The caller calls [`Left::report`] only when what is left out
+/// changes.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Left {
-    /// Over [`MAX_ENTITY`] on its own.
+    /// Larger than [`MAX_ENTITY`].
     skipped: usize,
-    /// Inside the limit, but past what [`BUDGET`] had left.
+    /// Within that limit, but past what [`BUDGET`] had left.
     dropped: usize,
 }
 
@@ -76,28 +73,30 @@ impl Left {
         match (self.skipped, self.dropped) {
             (0, 0) => {}
             (skipped, 0) => log.say(plural(skipped, "too big to keep between sessions")),
-            (0, dropped) => {
-                log.trouble(plural(dropped, "left out — there is no room to keep them"))
-            }
+            (0, dropped) => log.trouble(plural(
+                dropped,
+                "not kept between sessions: there is no room left",
+            )),
             (skipped, dropped) => log.trouble(plural(
                 skipped + dropped,
-                "not kept between sessions — too big, or no room left",
+                "not kept between sessions: too big, or no room left",
             )),
         }
     }
 }
 
-/// Write the list. Called by eframe periodically and on the way out.
+/// Write the list. Called by eframe periodically and at exit.
 ///
-/// ⚠️ A view of a slot is written only when it holds changes. An untouched view is the
-/// instrument's own copy looked at in place, and persisting it would hand the operator a
-/// local copy they never asked to keep; an edited one is the **only** copy there is, and
-/// quitting with its tab open must not be how it goes.
+/// ⚠️ A view of a slot is written only when it is unsaved or queued. An untouched view
+/// shows the instrument's own copy, and persisting it would give the user a local copy
+/// they never asked for. An edited view is the only copy of its edit, and quitting with
+/// its tab open must not lose it.
 ///
 /// ⚠️ On wasm every call base64-encodes the whole list on the only thread. Callers
 /// must rate-limit writes because dragging mutates the list every frame.
 ///
-/// What is written comes back kept — see [`load`]; what is not is [`Left`].
+/// What is written comes back as kept assets (see [`load`]); what is not is returned as
+/// [`Left`].
 pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, queue: &Queue) -> Left {
     let mut out = format!("{VERSION}\n{}\n", workspace.next_id());
     let mut skipped = 0;
@@ -110,8 +109,8 @@ pub fn save(storage: &mut dyn eframe::Storage, workspace: &Workspace, queue: &Qu
             skipped += 1;
             continue;
         }
-        // The baseline is what the asset is; the tail is what it holds instead, and only
-        // an unsaved asset has one.
+        // The baseline is the saved bytes; only an unsaved asset has a tail, holding its
+        // current bytes.
         let unsaved = match entity.is_unsaved() {
             true => format!("\t{}", BASE64_STANDARD.encode(&entity.bytes)),
             false => String::new(),
@@ -140,11 +139,10 @@ fn plural(n: usize, tail: &str) -> String {
     }
 }
 
-/// Read the list back, decoding and re-checking every asset on the way in.
+/// Read the list back, decoding and verifying every asset.
 ///
-/// Everything restored is on this computer. A view is a document with a tab over it and
-/// a slot under it, and at startup there is neither — so an edited view [`save`] kept
-/// comes back as the local asset it had already become in all but name.
+/// Everything restored is on this computer. A view needs a tab and a slot, and at startup
+/// there is no tab, so a view that [`save`] kept comes back as a local asset.
 pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut Log) {
     let Some(text) = storage.get_string(KEY) else {
         return;
@@ -164,8 +162,8 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
         }
     }
     let read = restored.len();
-    // A line the list itself refuses — an id with no room for the next, or one already
-    // standing — is as unreadable as one that would not parse.
+    // A line the workspace refuses (an id that leaves no room for the next, or one
+    // already in use) counts as unreadable too.
     let refused = workspace.restore(restored, next_id, log);
     let count = read.saturating_sub(refused);
     let unreadable = unreadable + refused;
@@ -241,8 +239,8 @@ fn location(bank: &str, slot: &str) -> Option<Location> {
     })
 }
 
-/// Tabs separate the fields and newlines separate the lines, so a name holding either
-/// would be a name that ate the rest of the store.
+/// Tabs separate fields and newlines separate lines, so an unescaped name holding either
+/// would corrupt the rest of the store.
 pub(crate) fn escape(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('\t', "\\t")
@@ -294,8 +292,7 @@ impl eframe::Storage for Fake {
 mod tests {
     use super::*;
 
-    /// Every origin survives the round trip, so a restored asset still knows where it
-    /// came from and can still be sent back there.
+    /// A restored asset still knows where it came from, so it can be sent back there.
     #[test]
     fn an_origin_round_trips() {
         let at = Location { bank: 6, slot: 3 };
@@ -314,7 +311,6 @@ mod tests {
         }
     }
 
-    /// A name holding a separator would otherwise swallow the rest of the line.
     #[test]
     fn a_name_holding_a_separator_survives() {
         for name in ["plain", "with\ttab", "with\nnewline", "back\\slash", "\\t"] {
@@ -338,8 +334,6 @@ mod tests {
         )
     }
 
-    /// What was on this computer is on it again, with its name, where it came from and
-    /// its bytes — and it is re-checked on the way in.
     #[test]
     fn the_list_comes_back_as_it_was() {
         use crate::workspace::Fresh;
@@ -390,10 +384,6 @@ mod tests {
         );
     }
 
-    /// ⚠️ A view is the only copy of what it holds, so quitting with an edited one open
-    /// must not be how it goes. An untouched view is the instrument's own bytes and is
-    /// not written; an edited one is, and comes back as an asset on this computer,
-    /// because at startup there is no tab to view it from.
     #[test]
     fn an_edited_view_survives_a_session_and_an_untouched_one_does_not() {
         use crate::workspace::Fresh;
@@ -442,18 +432,16 @@ mod tests {
         let restored: Vec<u64> = after.listed().map(|e| e.id).collect();
         assert_eq!(restored, vec![edited, owed]);
         assert_eq!(after.get(edited).unwrap().name, "view-0.ne5p");
-        // Restored is kept: there is no tab at startup, so nothing views anything.
+        // Restored assets are kept, not views: there is no tab at startup.
         assert!(!after.is_view(edited) && !after.is_view(owed));
-        // And the slot it came off is still recorded, so it can still go back.
+        // Its source slot is still recorded, so it can be sent back.
         assert_eq!(
             after.get(owed).unwrap().origin.slot(),
             Some((ObjectClass::Program, at(1)))
         );
     }
 
-    /// An asset holding an edit nothing has saved comes back holding it, and still
-    /// knowing what it was saved as — so the revert offered in one session is the same
-    /// revert in the next.
+    /// Revert works the same in the next session.
     #[test]
     fn an_unsaved_edit_and_the_baseline_under_it_both_survive() {
         use crate::workspace::Fresh;
@@ -472,13 +460,12 @@ mod tests {
 
         let restored = after.get(id).expect("kept its id");
         assert_eq!(restored.bytes, edited, "it holds the edit");
-        assert_eq!(restored.saved.bytes, saved, "and what it was saved as");
+        assert_eq!(restored.saved.bytes, saved, "it keeps its saved baseline");
         assert!(restored.is_unsaved());
         after.revert(id, &mut log);
         assert_eq!(after.get(id).unwrap().bytes, saved);
     }
 
-    /// A saved asset writes one set of bytes, not two.
     #[test]
     fn a_saved_asset_has_no_unsaved_tail() {
         use crate::workspace::Fresh;
@@ -492,8 +479,6 @@ mod tests {
         assert_eq!(line.split('\t').count(), 4);
     }
 
-    /// Something too big to keep is left out and said out loud, rather than filling the
-    /// store and taking everything else with it.
     #[test]
     fn an_oversized_asset_is_left_out_and_reported() {
         use crate::workspace::Origin;
@@ -516,7 +501,6 @@ mod tests {
         assert!(after.entities().is_empty());
     }
 
-    /// A store written by another build is left alone rather than half-read.
     #[test]
     fn a_store_from_another_build_is_not_guessed_at() {
         let mut store = Fake::default();
@@ -526,7 +510,6 @@ mod tests {
         assert!(after.entities().is_empty());
     }
 
-    /// A line that is not a line is dropped, not guessed at.
     #[test]
     fn a_damaged_line_is_refused() {
         let read = |line| entry(line, Shape::Five);
@@ -548,13 +531,12 @@ mod tests {
         assert!(read("7\tnonesuch\tname\tZm9v").is_none(), "no such origin");
         assert!(read("7\tfresh\tname\t!!!").is_none(), "not base64");
         assert!(read("7\tfresh\tname\tZm9v").is_some());
-        // A version-1 line is four fields, and a fifth is a line this is not.
+        // A version-1 line has four fields; a fifth makes it invalid.
         assert!(entry("7\tfresh\tname\tZm9v", Shape::Four).is_some());
         assert!(entry("7\tfresh\tname\tZm9v\tYmFy", Shape::Four).is_none());
     }
 
-    /// The last id there is leaves no room for the next one, so the line is refused
-    /// rather than taken — a store says what the next id is, and there would not be one.
+    /// The largest id leaves no next id, so the line is refused.
     #[test]
     fn a_line_whose_id_leaves_no_room_for_the_next_is_refused() {
         let mut store = Fake::default();
@@ -575,9 +557,8 @@ mod tests {
         assert!(log.iter().any(|entry| entry.text.contains("did not read")));
     }
 
-    /// An id names one asset. Two lines claiming the same one are two assets nothing
-    /// could tell apart afterwards — a tab, a send or a removal would reach whichever
-    /// came first — so the second is refused.
+    /// Two lines with one id would be two assets nothing could tell apart (a tab, a send,
+    /// or a removal would reach whichever came first), so the second is refused.
     #[test]
     fn a_second_line_under_an_id_already_restored_is_refused() {
         let line = format!(
@@ -599,8 +580,7 @@ mod tests {
         );
     }
 
-    /// A list the version before this one wrote is read rather than thrown away: its
-    /// four fields are an asset holding exactly what it was last saved as.
+    /// A version-1 line is an asset holding what it was last saved as.
     #[test]
     fn a_version_1_store_comes_back_kept_and_saved() {
         use crate::workspace::Fresh;

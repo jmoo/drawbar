@@ -1,8 +1,5 @@
-//! What the browser asks for, and the running of it.
-//!
-//! Rendering answers with [`Act`]s rather than acting, so a row can be drawn while the
-//! thing it stands for is about to change. [`apply`] is where they meet the workspace,
-//! the device and the tabs.
+//! What the browser asks for, and [`apply`], which runs it against the workspace, the
+//! device and the tabs.
 
 use nord_usb::{Location, ObjectClass};
 
@@ -26,10 +23,10 @@ pub enum Act {
     Disconnect,
     OpenFiles,
     New(Fresh),
-    /// Pick the WAVs a new project or instrument is laid out from. What they make is
-    /// made once the dialog has each file's root key — see [`crate::newproject`].
+    /// Pick the WAVs a new project or instrument is built from. It is built once the
+    /// dialog has each file's root key; see [`crate::newproject`].
     NewFromWavs(Making),
-    /// Read the whole instrument again — every class, its geometry and its focus.
+    /// Read the whole instrument again: every class, its geometry and its focus.
     Resync,
     ReadAgain(ObjectClass),
     Open(Item),
@@ -47,22 +44,22 @@ pub enum Act {
         ids: Vec<u64>,
         tag: u64,
     },
-    /// A tag with nothing on it yet, its name waiting to be typed.
+    /// A new, empty tag, with its rename editor open.
     NewTag(String),
     RenameTag {
         id: u64,
         name: String,
     },
     RemoveTag(u64),
-    /// What is picked, under a new tag, and nothing more.
+    /// Put the selected assets on this computer under a new tag.
     SaveAsGig,
     /// Put an asset in a folder, or out of the one it is in.
     File {
         id: u64,
         folder: Option<u64>,
     },
-    /// Queue every one of these assets for the slot it came off. One with none is
-    /// skipped, and the log says how many were.
+    /// Queue each of these assets for the slot [`bound_for`] gives it. The log says which
+    /// were not queued, and why.
     SendChecked(Vec<u64>),
     Copy {
         class: ObjectClass,
@@ -87,15 +84,15 @@ pub enum Act {
     },
     /// Stop waiting to send this one. Nothing is deleted.
     Unqueue(u64),
-    /// Stop waiting to send any of it. A queue is a plan, so emptying it asks nothing.
+    /// Empty the queue. Nothing is deleted, so it asks nothing.
     ClearQueue,
-    /// Write everything in the queue, grouped by folder. Already agreed to.
+    /// Write everything in the queue, grouped by folder. Already confirmed.
     SendAll,
-    /// Queue every asset the instrument no longer agrees with, each for its own slot.
+    /// Queue every asset [`crate::queue::changed`] finds, each for its own slot.
     QueueChanged,
-    /// Put the "send everything waiting" question, which `SendAll` is the answer to.
+    /// Ask before sending everything waiting; a yes runs `SendAll`.
     AskSendAll,
-    /// The same as a Send, already agreed to. Nothing asks twice.
+    /// A Send already confirmed, so it does not ask again.
     Replace {
         id: u64,
         class: ObjectClass,
@@ -132,25 +129,24 @@ pub enum Act {
     Remove(u64),
     /// Hand the open document's bytes to the user as a file.
     Export(u64),
-    /// ⌘S over the open document: what saving means for whichever kind of document it
-    /// is — see [`save_doc`].
+    /// ⌘S on the open document; [`save_doc`] says what saving means for each kind.
     SaveDoc(u64),
-    /// The write back to a slot a [`Act::SaveDoc`] over a view asks about, agreed to.
+    /// The write back to a slot that [`Act::SaveDoc`] on a view asked about, confirmed.
     WriteBack(u64),
-    /// Back to the bytes it was last saved as.
+    /// Revert to the bytes it was last saved as.
     Revert(u64),
-    /// Bring a view of the centre forward.
+    /// Bring one of the center's tabs forward.
     ShowTab(Spot),
-    /// The keyboard tab, switched to one class.
+    /// Show the keyboard tab, switched to one class.
     ShowClass(ObjectClass),
     /// Turn one of the library's filters on or off.
     Narrow(Narrow),
-    /// Shut whatever the centre is on.
+    /// Close the tab the center is showing.
     CloseTab,
     ToggleDock(Dock),
     /// Open the bottom dock on one of its pages.
     ShowPage(Page),
-    /// The whole activity log onto the clipboard.
+    /// Copy the whole activity log to the clipboard.
     CopyLog,
     /// Ask the window to close. Never reached on the web, where the tab is the window.
     Quit,
@@ -158,8 +154,8 @@ pub enum Act {
     Refused(String),
 }
 
-/// What can be asked of everything checked at once, in the order both the library's
-/// footer and a checked row's menu offer it.
+/// The bulk actions on the checked set, in the order the library's footer and a checked
+/// row's menu offer them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bulk {
     Queue,
@@ -188,7 +184,7 @@ impl Bulk {
         }
     }
 
-    /// Why the control is dead, which is what a hover over it says.
+    /// Why the control is disabled, shown on hover.
     pub fn nothing(self) -> &'static str {
         match self {
             Bulk::Queue | Bulk::Export | Bulk::Tag => "nothing checked is on this computer",
@@ -198,22 +194,21 @@ impl Bulk {
     }
 }
 
-/// What the attached instrument makes of a checked set: how many of it it would take,
-/// and the sentence it refuses the rest with.
+/// How much of a checked set the attached instrument would take, and why it refuses the
+/// rest.
 ///
-/// ⚠️ Only what is on this computer is counted. A slot is on the instrument by having
-/// got there, and nothing here would write it back.
+/// ⚠️ Only what is on this computer is counted. A slot is already on the instrument, and
+/// nothing here would write it back.
 pub struct Fits {
     pub takes: usize,
     pub of: usize,
-    /// Why the ones it will not take are refused — the first refusal's own words, which
-    /// is the one a hover over a dead control shows.
+    /// The first refusal's reason, which the hover over a disabled control shows.
     pub why: Option<String>,
 }
 
 impl Fits {
-    /// What the Queue control is labelled with: its own words, or the count once the
-    /// instrument has refused some of the set.
+    /// The Queue control's label: the usual one, or a count once the instrument refuses
+    /// some of the set.
     pub fn label(&self) -> String {
         match self.takes < self.of {
             true => format!("Queue {} of {}", self.takes, self.of),
@@ -222,7 +217,7 @@ impl Fits {
     }
 }
 
-/// What the instrument makes of a checked set, from [`fit`] over each of its locals.
+/// How much of a checked set the instrument takes, from [`fit`] on each local asset.
 pub fn fits(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Fits {
     let mut held = Fits {
         takes: 0,
@@ -245,10 +240,9 @@ pub fn fits(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Fit
     held
 }
 
-/// What one of those asks for over everything checked.
+/// The acts one bulk action runs over the checked set.
 ///
-/// [`Bulk::Tag`] answers with the ids a tag would hang on rather than with acts: which
-/// tag is picked from a menu of its own, and only then is there an act.
+/// [`Bulk::Tag`] returns none: the tag is picked from its own menu, which makes the act.
 pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
     match action {
         Bulk::Queue => match checked
@@ -263,7 +257,7 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
         Bulk::Copy => checked
             .iter()
             .filter_map(|item| match item {
-                // A slot the scan found vacant holds nothing to ask the instrument for.
+                // A slot the scan found empty holds nothing to ask the instrument for.
                 Item::Slot { class, at } => state.slot(*class, *at).flatten().map(|_| Act::Copy {
                     class: *class,
                     at: *at,
@@ -282,8 +276,8 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
             .iter()
             .filter_map(|item| match item {
                 Item::Local(id) => Some(Act::Remove(*id)),
-                // A slot the scan found vacant holds nothing to delete, and asking costs
-                // a round trip that can only end in an error.
+                // A slot the scan found empty holds nothing to delete, and asking would
+                // cost a round trip that can only fail.
                 Item::Slot { class, at } => {
                     state.slot(*class, *at).flatten().map(|_| Act::DeleteSlot {
                         class: *class,
@@ -361,8 +355,8 @@ pub fn apply(
                 }
             }
             Act::NewTag(wanted) => match browser.tags.make(&wanted) {
-                // ⚠️ Edit the unique name chosen by `make`, not the generic seed it
-                // started from: two tags of one name are one row twice.
+                // ⚠️ Edit the unique name chosen by `make`, not its generic seed: two
+                // tags with one name would show as one row twice.
                 Some(id) => {
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
@@ -374,14 +368,14 @@ pub fn apply(
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Tag(id));
                 browser.tags.remove(id);
-                // ⚠️ And a tag nobody can see must stop narrowing the library from nowhere.
+                // ⚠️ A removed tag must also stop filtering the library.
                 shell.filter.forget_tag(id);
             }
             Act::SaveAsGig => {
                 let ids = browser.selection.locals();
                 match ids.is_empty() {
                     true => {
-                        log.say("Nothing on this computer is picked, so there is no gig to save.")
+                        log.say("Nothing on this computer is selected, so there is no gig to save.")
                     }
                     false => match browser.tags.make("New gig") {
                         Some(tag) => {
@@ -501,9 +495,9 @@ pub fn apply(
 
 /// Put a tag on every one of these assets.
 ///
-/// ⚠️ Membership is by workspace id and a view has none that survives a session — the
-/// store skips it and nothing lists it, so the tag would go with the tab. A view is
-/// kept first, the way [`Act::Keep`] keeps one, and the log says that is what happened.
+/// ⚠️ Membership is by workspace id, and a view's id does not survive the session: the
+/// store skips views and nothing lists them, so the tag would be lost with the tab. A
+/// view is kept first, as [`Act::Keep`] does, and the log says so.
 fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids: &[u64], tag: u64) {
     let views: Vec<u64> = ids
         .iter()
@@ -515,12 +509,8 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
     }
     if !views.is_empty() {
         log.say(match views.len() {
-            1 => {
-                "A tag needs somewhere to hang, so it was kept on this computer first.".to_string()
-            }
-            n => format!(
-                "A tag needs somewhere to hang, so {n} views were kept on this computer first."
-            ),
+            1 => "The view was kept on this computer first, so its tag lasts.".to_string(),
+            n => format!("{n} views were kept on this computer first, so their tags last."),
         });
     }
     for id in ids {
@@ -530,12 +520,12 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
 
 /// Drain the queue, one command per folder.
 ///
-/// The one write path there is: same refusal, same grouping, same per-item flow. What
-/// is written leaves the queue when its [`crate::device::DeviceEvent::Sent`] lands, so a
-/// batch that stops halfway leaves the rest of the queue where it was.
+/// Every queued write goes through here, with the same refusal, grouping and per-item
+/// flow. An entry leaves the queue when its [`crate::device::DeviceEvent::Sent`] arrives,
+/// so a batch that stops halfway leaves the rest of the queue in place.
 fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
-    // ⚠️ The instrument attached now need not be the one each entry was queued against:
-    // the queue survives a disconnection, and the next instrument is asked afresh.
+    // ⚠️ The instrument attached now may not be the one each entry was queued against:
+    // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
     let batch = grouped(queue, workspace);
     // Validate the whole batch before the first delete-then-write.
@@ -554,9 +544,8 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     }
 }
 
-/// What is waiting, gathered per folder in the order the queue holds it.
-///
-/// A session belongs to a folder, so a folder is the unit a batch is cut into.
+/// What will be written, grouped by folder in queue order. A session belongs to a
+/// folder, so a batch is split by folder.
 fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
     let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
     for held in will_write(queue) {
@@ -577,14 +566,14 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoi
     by_class
 }
 
-/// What a batch would write: everything waiting that the instrument attached now has not
-/// already refused. An entry carrying a refusal is left where it is, so nothing that
-/// counts or names a write may count or name one of those.
+/// What a batch would write: every waiting entry the attached instrument has not
+/// refused. A refused entry stays in the queue, so nothing that counts or names the write
+/// may include it.
 pub(super) fn will_write(queue: &Queue) -> impl Iterator<Item = &Queued> {
     queue.entries().iter().filter(|held| held.failure.is_none())
 }
 
-/// Warn when an outgoing tag differs from every scanned resident tag.
+/// Warn when an outgoing format tag differs from every format tag read in the folder.
 /// An unreadable tag or unscanned folder yields no warning; this never refuses a write.
 pub fn foreign_format(outgoing: &str, resident: &[String]) -> Option<String> {
     let outgoing = outgoing.trim();
@@ -607,9 +596,8 @@ pub fn foreign_format(outgoing: &str, resident: &[String]) -> Option<String> {
     ))
 }
 
-/// Everything worth reading before a write into `class` lands: what the attached
-/// instrument makes of the asset's format, and what the class itself disturbs beyond
-/// the slot.
+/// The warnings for a write into `class`: what the attached instrument makes of the
+/// asset's format, and what a write to the class disturbs beyond the slot.
 pub(super) fn write_warnings(
     state: &DeviceState,
     class: ObjectClass,
@@ -623,14 +611,14 @@ pub(super) fn write_warnings(
     .flatten()
 }
 
-/// The same set as one note, for the dialog that asks about a single slot.
+/// The same warnings as one note, for the dialog about a single slot.
 fn write_note(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> Option<String> {
     let note: Vec<String> = write_warnings(state, class, entity).collect();
     (!note.is_empty()).then(|| note.join("\n\n"))
 }
 
-/// Where an asset would be written back to, if anywhere: the slot holding its bytes,
-/// then the slot it came off, and only where this app will write into that class at all.
+/// The slot an asset would be written back to: its [`LocalEntity::spot`], when this app
+/// writes to that class.
 pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
     let (class, at) = entity.spot()?;
     (!read_only(class)).then_some((class, at))
@@ -640,7 +628,7 @@ pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum Bound {
     At(ObjectClass, Location),
-    /// Its folder is on the instrument, and no slot of it has been read and found free.
+    /// Its folder is on the instrument, but no slot there has been read and found empty.
     Full(ObjectClass),
     /// The attached instrument does not take this format, and this is why.
     Refused(String),
@@ -649,10 +637,10 @@ pub(super) enum Bound {
     Nowhere,
 }
 
-/// The slot an asset is owed to, and otherwise the first free slot of its own folder
-/// that nothing is already waiting for.
+/// The slot an asset belongs to ([`owed`]), or else the first free slot of its folder
+/// that nothing in the queue is waiting for.
 ///
-/// ⚠️ Free means read and found empty. A folder no walk has reached offers nothing, for
+/// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
 pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
     if let Fit::Refuses(why) = fit(state, entity) {
@@ -672,14 +660,14 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
     }
 }
 
-/// Queue a set of assets, each for wherever it is bound, and say what would not go.
+/// Queue a set of assets, each for the slot [`bound_for`] gives, and say what was not
+/// queued.
 ///
-/// Destinations are handed out one at a time and each entry joins the queue before the
-/// next is placed, so a set of unlinked assets walks down the free slots in address
-/// order rather than piling onto the first of them.
+/// Each entry joins the queue before the next is placed, so unlinked assets fill the
+/// free slots in address order instead of all landing on the first.
 ///
-/// A folder with no room refuses by name: what a set of them comes to is a fact about
-/// the instrument, and dropping the entry without a word would read as a bug.
+/// A folder with no free slot is named in the log; dropping the entry silently would
+/// look like a bug.
 fn queue_all(
     workspace: &Workspace,
     device: &mut Device,
@@ -724,25 +712,23 @@ fn queue_all(
     }
     if nowhere > 0 {
         log.say(match nowhere {
-            1 => "1 of them belongs in no folder the instrument has, so it is waiting for \
-                  nowhere."
+            1 => "1 of them belongs in no folder the instrument has, so it was not queued."
                 .to_string(),
             n => format!(
-                "{n} of them belong in no folder the instrument has, so they are waiting for \
-                 nowhere."
+                "{n} of them belong in no folder the instrument has, so they were not queued."
             ),
         });
     }
 }
 
-/// What ⌘S means for whichever kind of document this is.
+/// What ⌘S does for each kind of document.
 ///
-/// A **view** is the instrument's own copy looked at in place, so saving it is the write
-/// itself: the put runs at once, and the baseline moves when the instrument says the
-/// bytes landed. Anything **on this computer** is already kept, so saving it settles its
-/// baseline — and, where it stands for a slot, queues it for that slot.
+/// A view is the instrument's own copy, opened in place, so saving it writes it back at
+/// once. Its baseline moves when the instrument confirms the write. Anything on this
+/// computer is already kept, so saving it moves its baseline and, if it belongs to a
+/// slot, queues it for that slot.
 ///
-/// `ask` is false once the question a write carries has been answered.
+/// `ask` is false once the user has confirmed the write's warnings.
 #[allow(clippy::too_many_arguments)]
 fn save_doc(
     browser: &mut Browser,
@@ -762,8 +748,7 @@ fn save_doc(
         workspace.mark_saved(id);
         let waiting = queue.entry(id).map(|held| (held.class, held.at));
         match spot {
-            // Already waiting for that slot: the plan is what it was, so what this
-            // gesture did is settle the bytes.
+            // Already waiting for that slot, so the save only moved the baseline.
             Some(spot) if waiting == Some(spot) => {
                 log.say(format!("“{name}” is saved on this computer."))
             }
@@ -774,8 +759,8 @@ fn save_doc(
     }
     let Some((class, at)) = owed(entity) else {
         return log.say(format!(
-            "“{}” came off nowhere this app writes to, so there is nothing to save it \
-             into.",
+            "“{}” did not come from a slot this app writes to, so there is nowhere to \
+             save it.",
             entity.name
         ));
     };
@@ -805,12 +790,11 @@ fn save_doc(
 
 /// Queue a local asset for a slot.
 ///
-/// `ask` is false once the question has been answered, which is what keeps the answer
-/// from raising it again.
+/// `ask` is false once the user has answered, so the answer does not ask again.
 ///
-/// ⚠️ It asks only where the write both carries a warning — a foreign format, a settings
-/// write reloading the panel — and replaces an occupant. Every other warning is raised by
-/// [`Act::AskSendAll`], which is the one question before anything is written.
+/// ⚠️ It asks only when the write both carries a warning (a foreign format, or a settings
+/// write that reloads the panel) and replaces an occupant. Every other warning waits for
+/// [`Act::AskSendAll`], the confirmation before anything is written.
 #[allow(clippy::too_many_arguments)]
 fn send(
     browser: &mut Browser,
@@ -837,8 +821,8 @@ fn send(
         return;
     }
     let note = write_note(&device.state, class, entity);
-    // The same evidence the entry it is about to become carries: a bank nothing has read
-    // holds nothing to name.
+    // The same evidence the queue entry will carry: an unread bank has no occupant to
+    // name.
     let holds = Occupancy::of(&device.state, class, at);
     match (ask, note, holds.occupant()) {
         (true, Some(note), Some(occupant)) => browser.ask_replace(
@@ -863,7 +847,7 @@ mod tests {
         Location { bank: 6, slot }
     }
 
-    /// One program's bytes, with nothing left in the list to show for them.
+    /// The bytes of a new program, removed from the list again.
     fn program(workspace: &mut Workspace, log: &mut Log) -> Vec<u8> {
         let id = workspace.create(Fresh::Program, log).unwrap();
         let bytes = workspace.get(id).unwrap().bytes.clone();
@@ -871,8 +855,7 @@ mod tests {
         bytes
     }
 
-    /// A fixture checked set: two assets on this computer, one of them off a slot, and
-    /// two slots on the instrument.
+    /// A checked set: two assets on this computer and two slots on the instrument.
     fn checked() -> Vec<Item> {
         vec![
             Item::Local(1),
@@ -888,9 +871,8 @@ mod tests {
         ]
     }
 
-    /// ⌘S over a **view** is the write itself: the instrument's own copy, looked at in
-    /// place, goes back to the slot it came off at once. Nothing joins the queue, which
-    /// is for what this computer is owed to send.
+    /// ⌘S on a view writes it back to its slot at once. Nothing joins the queue, which
+    /// holds only what this computer has to send.
     #[test]
     fn saving_a_view_writes_it_back_to_its_slot_and_queues_nothing() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -921,7 +903,7 @@ mod tests {
             &mut log,
         );
 
-        assert!(queue.is_empty(), "a write back is not a debt");
+        assert!(queue.is_empty(), "a write back does not join the queue");
         let put = device.queued().front().expect("a put was asked for");
         assert!(
             matches!(put, DeviceCmd::Put { id: sent, class, at: to, .. }
@@ -941,8 +923,6 @@ mod tests {
         assert!(!workspace.get(id).unwrap().is_unsaved());
     }
 
-    /// ⌘S over something **on this computer** keeps what is here — it is already kept —
-    /// and, where it stands for a slot, asks for that slot.
     #[test]
     fn saving_a_kept_asset_settles_its_baseline_and_queues_it_where_it_stands() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -990,12 +970,12 @@ mod tests {
         assert_eq!(
             queue.ids(),
             vec![linked],
-            "only the one that stands for a slot"
+            "only the one that belongs to a slot"
         );
         assert_eq!(queue.entry(linked).map(|held| held.at), Some(at(3)));
 
-        // Saving it again asks the instrument nothing further: it is already waiting for
-        // that slot, and a save still says what it did.
+        // Saving it again reads nothing from the instrument, because it is already
+        // waiting for that slot, and the log still says what the save did.
         let reads = device.queued().len();
         log.clear();
         apply(
@@ -1018,9 +998,8 @@ mod tests {
         );
     }
 
-    /// Each of the things offered over a checked set asks only about the half of it that
-    /// half is about: queueing and exporting reach this computer's, copying reaches the
-    /// instrument's, and deleting reaches all of it.
+    /// Queueing and exporting act on this computer's rows, copying on the instrument's,
+    /// and deleting on all of them.
     #[test]
     fn each_action_over_a_checked_set_asks_only_about_the_rows_it_is_for() {
         let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
@@ -1032,7 +1011,7 @@ mod tests {
         let queued = bulk(Bulk::Queue, &checked, state);
         assert!(
             matches!(queued.as_slice(), [Act::SendChecked(ids)] if *ids == vec![1, 2]),
-            "one queueing, over this computer's rows"
+            "one queue act, for this computer's rows"
         );
         assert_eq!(bulk(Bulk::Copy, &checked, state).len(), 2, "one per slot");
         assert!(bulk(Bulk::Copy, &checked, state)
@@ -1060,11 +1039,10 @@ mod tests {
         ));
     }
 
-    /// A control the checked set gives nothing to do is a control that is offered dead,
-    /// which is what an empty answer says.
+    /// An empty answer disables the control.
     ///
-    /// ⚠️ A slot the walk found vacant is one of those: asking the instrument for what is
-    /// not there costs a round trip that can only end in an error.
+    /// ⚠️ A slot the scan found empty has nothing to act on: asking the instrument for it
+    /// costs a round trip that can only fail.
     #[test]
     fn an_action_with_nothing_to_act_on_asks_for_nothing() {
         let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
@@ -1093,9 +1071,9 @@ mod tests {
         );
     }
 
-    /// Queueing a checked set puts each of them where it is bound: the slot it is owed
-    /// to, the first free slot of its own folder for one that came off none, and nowhere
-    /// at all for bytes that belong in no folder the instrument has.
+    /// Each asset goes to the slot it came from, or to the first free slot of its folder
+    /// if it came from none. Bytes that belong in no folder the instrument has are not
+    /// queued.
     #[test]
     fn queueing_a_checked_set_puts_each_of_them_where_it_is_bound() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1155,15 +1133,15 @@ mod tests {
         );
     }
 
-    /// A set of assets that came off no slot lands on distinct free slots in address
-    /// order — the gaps a walk found, skipping what is already waiting — and the one
-    /// past the last free slot is refused by folder rather than dropped.
+    /// Assets that came from no slot take distinct free slots in address order, skipping
+    /// slots the queue already holds. The asset past the last free slot is refused, and
+    /// the log names its folder.
     #[test]
     fn a_queued_set_walks_down_the_free_slots_and_names_the_folder_that_runs_out() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let class = ObjectClass::Program;
         device.pretend_partitions(&crate::device::ELECTRO5);
-        // Four gaps among the residents, and one of them is already spoken for.
+        // Four empty slots, one of them already taken by the queue.
         device.pretend_scanned(class, 7, &["", "Africa Split", "", "", "Squabble B", ""]);
 
         let bytes = program(&mut workspace, &mut log);
@@ -1214,7 +1192,7 @@ mod tests {
         assert_eq!(
             landed,
             vec![(ids[0], 2), (ids[1], 0), (ids[2], 3), (ids[3], 5)],
-            "each takes the next free slot, and 7:3 was already waiting"
+            "each takes the next free slot, and the queue already held 7:3"
         );
         assert!(!queue.holds(ids[4]), "the free slots ran out before it");
         let said = log.transcript();
@@ -1224,8 +1202,7 @@ mod tests {
         );
     }
 
-    /// A mixed set queues what the instrument takes, leaves out what it does not, and
-    /// says how much of the set that was.
+    /// The log says how much of the set fit.
     #[test]
     fn queueing_a_mixed_set_queues_only_what_the_instrument_takes() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1266,8 +1243,8 @@ mod tests {
         assert!(said.contains("1 of 2 fit the Nord Electro 5"), "{said}");
         assert!(said.contains("Stage 4"), "{said}");
 
-        // And the control offering it says as much before it is clicked: the count in
-        // its label, and the instrument's own refusal for the one it would leave out.
+        // The control says the same before it is clicked: the count in its label, and the
+        // instrument's refusal for the one it leaves out.
         let checked = [Item::Local(mine), Item::Local(stage)];
         let held = fits(&checked, &workspace, &device.state);
         assert_eq!(held.label(), "Queue 1 of 2");
@@ -1276,21 +1253,21 @@ mod tests {
             .as_deref()
             .is_some_and(|why| why.contains("Stage 4")));
 
-        // Nothing it takes: dead, and the hover is the instrument's reason rather than
-        // the checked set's.
+        // Nothing it takes: the control is disabled, and the hover gives the instrument's
+        // reason.
         let refused = fits(&[Item::Local(stage)], &workspace, &device.state);
         assert_eq!(refused.takes, 0);
         assert_eq!(refused.label(), "Queue 0 of 1");
         assert!(refused.why.is_some());
 
-        // Everything it takes: its own words, and no reason to show.
+        // Everything it takes: the usual label, and no reason.
         let taken = fits(&[Item::Local(mine)], &workspace, &device.state);
         assert_eq!(taken.label(), Bulk::Queue.label());
         assert_eq!(taken.why, None);
     }
 
-    /// ⚠️ A refused asset never gets an entry, however it was aimed: the queue is what a
-    /// send walks, so a foreign body in it would reach a delete-then-write.
+    /// ⚠️ A refused asset never gets a queue entry, however it was aimed: a send writes
+    /// the queue, so a foreign file in it would reach a delete-then-write.
     #[test]
     fn a_slot_named_outright_still_refuses_what_the_instrument_does_not_take() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1318,9 +1295,8 @@ mod tests {
         assert!(said.contains("cannot go to"), "{said}");
     }
 
-    /// A row already waiting, dropped on another slot, is re-targeted rather than
-    /// duplicated: the drop means the same Send it means from any other row, and one
-    /// asset has one entry wherever it was dragged from.
+    /// A drop means the same Send from any row, and one asset has one queue entry
+    /// wherever it was dragged from.
     #[test]
     fn dropping_something_already_waiting_onto_a_slot_moves_its_entry() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1347,7 +1323,7 @@ mod tests {
         send(vec![Act::SendChecked(vec![id])], &mut device, &mut queue);
         assert_eq!(queue.entry(id).map(|held| held.at), Some(at(0)));
 
-        // What the queue row carries, landing where the keyboard's cells are.
+        // What a queue row carries, dropped on a keyboard cell.
         let carried = crate::browser::Held {
             what: Item::Local(id),
             kind: crate::browser::Kind::Program,
@@ -1377,9 +1353,8 @@ mod tests {
         assert_eq!(queue.entry(id).map(|held| held.at), Some(at(3)));
     }
 
-    /// ⚠️ Nothing turns it away by name. It carries no object class, so `bound_for` —
-    /// the one question asked of everything checked — answers `Nowhere`, the same answer
-    /// every other homeless kind gets.
+    /// Nothing refuses a note by name. It has no object class, so `bound_for` returns
+    /// `Nowhere`, as for any other kind with no folder.
     #[test]
     fn a_note_is_never_queued_because_it_belongs_in_no_folder() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1407,7 +1382,7 @@ mod tests {
         assert_eq!(
             queue.ids(),
             vec![program],
-            "the program is bound for a free slot and the note is bound for nowhere"
+            "the program takes a free slot and the note is not queued"
         );
         assert_eq!(
             bound_for(workspace.get(note).unwrap(), &device.state, &queue),
@@ -1415,8 +1390,8 @@ mod tests {
         );
     }
 
-    /// One entry leaves the queue on its own, and the whole queue empties — and neither
-    /// takes anything off this computer with it.
+    /// Neither removing one entry nor clearing the queue deletes anything from this
+    /// computer.
     #[test]
     fn an_entry_leaves_the_queue_alone_and_the_queue_empties_without_deleting_anything() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1463,12 +1438,12 @@ mod tests {
         assert_eq!(
             workspace.listed().count(),
             3,
-            "a queue is a plan, so emptying it deletes nothing"
+            "emptying the queue deletes nothing"
         );
     }
 
-    /// Queueing brings the plan into view: whatever put something in the queue leaves
-    /// the bottom dock open on the queue page, however shut it was.
+    /// Whatever puts something in the queue opens the bottom dock on the queue page, even
+    /// when the dock was closed.
     #[test]
     fn queueing_opens_the_dock_on_the_queue_page() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1508,8 +1483,8 @@ mod tests {
         assert_eq!(shell.page, Page::Queue);
     }
 
-    /// A folder every read slot of which is taken refuses the entry by name. Dropping it
-    /// without a word would read as a bug, and putting it somewhere occupied would be
+    /// When every read slot of a folder is taken, the log names the folder. Dropping the
+    /// entry silently would look like a bug, and putting it in an occupied slot would be
     /// this app choosing what to overwrite.
     #[test]
     fn queueing_into_a_folder_with_no_free_slot_refuses_and_names_it() {
@@ -1544,8 +1519,8 @@ mod tests {
         );
     }
 
-    /// A batch is one command per folder, because a session belongs to a folder, and it
-    /// goes out in the order the queue holds it.
+    /// A session belongs to a folder, so a batch is one command per folder, in queue
+    /// order.
     #[test]
     fn a_batch_is_grouped_into_one_command_per_folder() {
         let (_browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
@@ -1586,8 +1561,8 @@ mod tests {
         assert_eq!(slots, vec![0, 1], "in the order the queue holds them");
     }
 
-    /// A send queues; the write happens when the queue is drained, and it names the
-    /// asset each item came from so the debt it pays is that one's.
+    /// A send queues; the write happens when the queue is drained, and each item names
+    /// the asset it came from, so the right queue entry is cleared.
     #[test]
     fn a_send_queues_and_the_drain_names_the_asset_it_writes() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1625,7 +1600,7 @@ mod tests {
             &mut device,
             &mut queue,
         );
-        assert_eq!(queue.ids(), vec![id], "queued rather than written");
+        assert_eq!(queue.ids(), vec![id], "queued, and nothing written yet");
         assert!(
             device.queued().is_empty(),
             "an empty slot carrying no warning asks nothing"
@@ -1642,17 +1617,17 @@ mod tests {
             }
             other => panic!("{}", other.label()),
         }
-        assert_eq!(queue.ids(), vec![id], "still owed until the write lands");
+        assert_eq!(queue.ids(), vec![id], "still queued until the write lands");
     }
 
-    /// The question before a write says what is known about each slot it is about to
-    /// land in, and a bank nothing has read is not an empty one. It says that and the
-    /// warnings, and nothing over them.
+    /// The confirmation says what is known about each destination slot, and an unread
+    /// bank is not reported as empty. With no warnings, nothing comes before the
+    /// destinations.
     #[test]
     fn the_send_question_says_what_is_known_about_each_slot() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
         let class = ObjectClass::Program;
-        // Bank 7 was walked: 7:1 holds something and 7:2 is empty. Nothing has read 8.
+        // Bank 7 was scanned: 7:1 holds something and 7:2 is empty. Bank 8 was not read.
         device.pretend_scanned(class, 7, &["Africa Split", ""]);
         let bytes = program(&mut workspace, &mut log);
         for (bank, slot) in [(6, 0), (6, 1), (7, 0)] {
@@ -1702,9 +1677,9 @@ mod tests {
         );
     }
 
-    /// ⚠️ The question counts and names what the batch would write. An entry the
-    /// instrument attached now has already refused keeps its place in the queue and is
-    /// not written, so a question naming it promises a write nobody is about to make.
+    /// ⚠️ The confirmation counts and names what the batch would write. An entry the
+    /// attached instrument has refused stays in the queue and is not written, so naming
+    /// it would promise a write that will not happen.
     #[test]
     fn the_send_question_leaves_out_what_the_batch_would_skip() {
         use crate::device::DeviceEvent;
@@ -1769,9 +1744,9 @@ mod tests {
         );
     }
 
-    /// The queue outlives the instrument it was built against. What the one attached now
-    /// refuses is not written, keeps its place with the reason against it, and does not
-    /// stop the rest of the batch.
+    /// The queue outlives the instrument it was built for. An entry the attached
+    /// instrument refuses is not written, stays in the queue with the reason, and does
+    /// not stop the rest of the batch.
     #[test]
     fn a_send_re_checks_every_entry_against_the_instrument_attached_now() {
         use crate::device::DeviceEvent;
@@ -1809,8 +1784,8 @@ mod tests {
         );
         assert_eq!(queue.ids(), vec![electro, made]);
 
-        // The instrument declares itself, and the queue page says so before anyone has
-        // pressed Send.
+        // The instrument reports its partitions, and the queue marks the refusal before
+        // Send is pressed.
         device.pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
             class,
             name: "Program".into(),
@@ -1863,8 +1838,8 @@ mod tests {
         );
     }
 
-    /// The queue goes out in the order it was built, one command per folder, and what
-    /// a stopped batch did not write is still waiting with the reason against it.
+    /// What a stopped batch did not write stays in the queue, with the reason on the
+    /// entry it stopped at.
     #[test]
     fn a_batch_that_stops_leaves_the_rest_of_the_queue_waiting() {
         use crate::device::DeviceEvent;
@@ -1929,8 +1904,8 @@ mod tests {
             1,
         );
 
-        // ⚠️ One command runs at a time, so the reads of those slots have to finish
-        // before the batch is what the instrument is doing.
+        // ⚠️ One command runs at a time, so the slot reads must finish before the batch
+        // runs.
         let waiting = |device: &Device| {
             device
                 .queued()
@@ -1957,7 +1932,11 @@ mod tests {
         ));
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
-        assert_eq!(queue.ids(), ids[1..], "what was not written is still owed");
+        assert_eq!(
+            queue.ids(),
+            ids[1..],
+            "what was not written is still queued"
+        );
         let stopped = queue.entry(ids[1]).expect("the one it stopped on");
         assert!(
             stopped
@@ -1971,8 +1950,8 @@ mod tests {
         assert!(log.transcript().contains("7:2"), "the log names the slot");
     }
 
-    /// Sending a folder queues everything in it that came off a slot, and nothing that
-    /// has nowhere to go back to.
+    /// Queueing a folder's members queues everything that came from a slot. With nothing
+    /// attached, a new program has no free slot to go to.
     #[test]
     fn a_folder_queues_only_what_can_go_back_to_a_slot() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -1996,7 +1975,7 @@ mod tests {
             );
             browser.folders.file(id, Some(folder));
         }
-        // Never off an instrument, and nothing is attached to offer it a free slot.
+        // Never on an instrument, and nothing is attached to offer it a free slot.
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(fresh, Some(folder));
 
@@ -2026,11 +2005,11 @@ mod tests {
                 ObjectClass::Piano
             ]
         );
-        assert!(!queue.holds(fresh), "it is bound for nowhere");
+        assert!(!queue.holds(fresh), "it has no slot to go to");
     }
 
-    /// A double-click on a slot opens a view: a tab and a document, and no new row in
-    /// the list. Keeping it is what puts it there.
+    /// A double-click on a slot opens a view: a tab and a document, with no new row in
+    /// the list. Keeping the view adds the row.
     #[test]
     fn opening_a_slot_does_not_put_it_on_this_computer() {
         use crate::device::DeviceEvent;
@@ -2053,8 +2032,7 @@ mod tests {
         let id = tabs.active().expect("a view opens in a tab");
         assert!(workspace.is_view(id));
         assert_eq!(workspace.listed().count(), 0, "nothing joined the list");
-        // It is still a working copy in every other way: it knows the slot it came off,
-        // so Send back works from it.
+        // It still knows the slot it came from, so it can be sent back.
         assert_eq!(
             workspace.get(id).unwrap().origin.slot(),
             Some((ObjectClass::Program, at))
@@ -2074,10 +2052,9 @@ mod tests {
         assert_eq!(workspace.listed().count(), 1);
     }
 
-    /// ⚠️ The editor opens on the name the folder actually has. Prefilling it with the
-    /// name `make` starts from, beside a folder already called that, is one Enter away
-    /// from two folders of one name — which is what `make` picked a different one to
-    /// avoid.
+    /// ⚠️ The editor opens on the folder's actual name. Prefilled with the generic name
+    /// `make` starts from, one Enter beside a folder already called that would make two
+    /// folders with one name, which `make` avoided.
     #[test]
     fn a_new_folder_opens_its_editor_on_the_name_it_was_given() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -2092,9 +2069,9 @@ mod tests {
                 &mut queue,
                 &mut log,
             );
-            let rename = browser.rename.as_ref().expect("the editor is armed");
+            let rename = browser.rename.as_ref().expect("the editor is open");
             let Item::Folder(id) = rename.what else {
-                panic!("it is armed on the folder");
+                panic!("it is open on the folder");
             };
             (id, rename.text.clone())
         };
@@ -2107,8 +2084,8 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// A folder that goes while its name is being typed takes the editor with it: no row
-    /// will be drawn to close it, and the next folder to take its id would inherit it.
+    /// Removing a folder during its rename closes the editor: no row will be drawn to
+    /// close it, and the next folder to reuse the id would inherit it.
     #[test]
     fn removing_a_folder_mid_rename_takes_the_editor_with_it() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -2126,28 +2103,28 @@ mod tests {
         };
         act(&mut browser, Act::NewFolder);
         let Some(Item::Folder(id)) = browser.rename.as_ref().map(|r| r.what) else {
-            panic!("a new folder arms its editor");
+            panic!("a new folder opens its editor");
         };
 
         act(&mut browser, Act::RemoveFolder(id));
         assert!(browser.rename.is_none(), "the editor went with it");
         assert!(browser.selection.sole().is_none());
 
-        // And the id `make` hands out again is a folder with no editor waiting on it.
+        // The id `make` hands out again has no editor left open on it.
         act(&mut browser, Act::NewFolder);
         let Some(Item::Folder(again)) = browser.rename.as_ref().map(|r| r.what) else {
-            panic!("the new one arms its own");
+            panic!("the new one opens its own");
         };
-        assert_eq!(again, id, "the id came back round");
+        assert_eq!(again, id, "the id was reused");
         assert_eq!(
             browser.rename.as_ref().map(|r| r.text.as_str()),
             Some("New folder")
         );
     }
 
-    /// An asset that leaves the list while its name is being typed takes the editor and
-    /// its place in the selection with it: no row will be drawn to close either, and the
-    /// next asset to take its id would inherit both.
+    /// Removing an asset during its rename closes the editor and drops it from the
+    /// selection: no row will be drawn to close either, and the next asset to reuse the
+    /// id would inherit both.
     #[test]
     fn removing_an_asset_mid_rename_takes_the_editor_with_it() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
@@ -2169,13 +2146,13 @@ mod tests {
         assert!(browser.rename.is_none(), "the editor went with it");
         assert!(
             !browser.selection.holds(Item::Local(id)),
-            "and nothing is picked that no row stands for"
+            "and the selection holds no removed row"
         );
     }
 
-    /// ⚠️ One view per slot. A second read of a slot already being viewed would be two
-    /// working copies of one place — edited apart, both owed back to it, and both queued
-    /// into one batch, where the last written wins.
+    /// ⚠️ One view per slot. A second read of a slot already viewed would make two
+    /// working copies of one place, edited separately and both queued back to it in one
+    /// batch, where the last written wins.
     #[test]
     fn opening_a_slot_that_is_already_open_activates_its_tab() {
         use crate::device::DeviceEvent;
@@ -2223,16 +2200,12 @@ mod tests {
             &mut queue,
             &mut log,
         );
-        assert_eq!(
-            device.queued().len(),
-            1,
-            "a slot with no view open is read, as it must be"
-        );
+        assert_eq!(device.queued().len(), 1, "a slot with no open view is read");
     }
 
-    /// ⚠️ A file the instrument turns out not to want costs the occupant of the slot —
-    /// and the New menu makes another model's program one click away. It warns; it does
-    /// not refuse, because nothing here has watched an instrument refuse one.
+    /// ⚠️ Sending a file the instrument does not want costs the slot's occupant, and the
+    /// New menu makes another model's program one click away. This warns and does not
+    /// refuse, because no instrument has been seen to refuse such a file.
     #[test]
     fn a_file_of_another_model_is_warned_about_and_not_refused() {
         let held =
@@ -2249,8 +2222,8 @@ mod tests {
         assert_eq!(foreign_format(" ne5p ", &held(&["NE5P "])), None);
         assert_eq!(foreign_format("ne5p", &held(&["ne5p", "ne5l"])), None);
 
-        // Not known is not the same as does not match: an unscanned folder says nothing,
-        // and neither does a file whose own tag could not be read.
+        // An unscanned folder raises nothing, and neither does a file whose own format
+        // tag could not be read.
         assert_eq!(foreign_format("ns4p", &[]), None);
         assert_eq!(
             foreign_format("?", &held(&["ne5p"])),
@@ -2260,7 +2233,6 @@ mod tests {
         assert_eq!(foreign_format("", &held(&["ne5p"])), None);
     }
 
-    /// One button for the whole column, and it asks for every folder.
     #[test]
     fn a_sync_reads_every_folder_again() {
         let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();

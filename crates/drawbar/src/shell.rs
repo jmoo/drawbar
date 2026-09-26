@@ -1,11 +1,11 @@
-//! The dock shell: the regions the window is cut into, what is collapsed, and the
-//! menus, toolbar and status bar that sit around the centre.
+//! The dock shell: the regions the window is divided into, which of them are collapsed,
+//! and the menus, toolbar, and status bar around the center.
 //!
-//! Panels claim space in the order [`crate::app::DrawbarApp::update`] adds them. The
-//! three open docks resize by dragging the edge they show the centre, between the least
-//! each is worth opening to and whatever leaves the centre [`CENTRE_WIDE`] by
-//! [`CENTRE_TALL`]; a collapsed rail is [`SHUT`] and does not. Each contents pads
-//! itself, so a panel header can bleed to both edges.
+//! Panels claim space in the order `DrawbarApp::update` adds them. Each of the three
+//! open docks resizes by dragging the edge facing the center, between its minimum open
+//! size and whatever leaves the center [`CENTER_WIDE`] by [`CENTER_TALL`]. A collapsed
+//! rail is [`SHUT`] wide and does not resize. Each panel's contents pad themselves, so a
+//! panel header can reach both edges.
 
 use eframe::egui;
 use nord_usb::ObjectClass;
@@ -20,39 +20,39 @@ use crate::panel::{caps, chevron, dock_header, flat, strip, DOCK, GAP, GLYPH, PA
 use crate::strings::folder;
 use crate::tabs::Spot;
 
-/// The window's own bar: the mark, the menus, the instrument, the theme.
+/// The title bar: the logo, the menus, the instrument, and the theme.
 pub const TITLEBAR: f32 = 30.0;
 
 /// The bar of actions under it.
 pub const TOOLBAR: f32 = 32.0;
 
-/// One line of plain words at the foot of the window.
+/// The status line at the bottom of the window.
 pub const STATUS: f32 = 22.0;
 
-/// The bottom dock's body, under its header, and the least it is worth opening to.
+/// The bottom dock's body height under its header, and its minimum open height.
 pub const DOCK_BODY: f32 = 184.0;
 const BODY_LEAST: f32 = 120.0;
 
-/// The side docks open, shut, and the least either is worth opening to.
+/// The side docks' open and collapsed widths, and the minimum open width of either.
 pub const BROWSER: f32 = 232.0;
 pub const INSPECTOR: f32 = 244.0;
 pub const SHUT: f32 = 30.0;
 const SIDE_LEAST: f32 = 180.0;
 
-/// What the centre keeps however far a dock is dragged. The most a dock may be dragged
-/// to is whatever leaves this, so it is read off the room left rather than stored.
-const CENTRE_WIDE: f32 = 300.0;
-const CENTRE_TALL: f32 = 200.0;
+/// The room the center keeps however far a dock is dragged. A dock's maximum size is
+/// whatever leaves this much, so it is computed from the room left each frame and not
+/// stored.
+const CENTER_WIDE: f32 = 300.0;
+const CENTER_TALL: f32 = 200.0;
 
-/// The least room the whole shell lays out in: the three docks at the least each opens
-/// to, around a centre that still keeps [`CENTRE_WIDE`] by [`CENTRE_TALL`].
+/// The smallest screen the shell lays out in: the three docks at their minimum open
+/// sizes, around a center that still keeps [`CENTER_WIDE`] by [`CENTER_TALL`].
 ///
-/// A window is held above this by its own minimum size; a browser tab is any size the
-/// device is, so the web build shows [`too_small_notice`] instead of a shell that cannot
-/// fit.
+/// A native window's minimum size keeps it above this. A browser tab can be any size, so
+/// the web build shows [`too_small_notice`] instead of a shell that cannot fit.
 pub const LEAST: egui::Vec2 = egui::vec2(
-    SIDE_LEAST + CENTRE_WIDE + SIDE_LEAST,
-    TITLEBAR + TOOLBAR + STATUS + DOCK + BODY_LEAST + CENTRE_TALL,
+    SIDE_LEAST + CENTER_WIDE + SIDE_LEAST,
+    TITLEBAR + TOOLBAR + STATUS + DOCK + BODY_LEAST + CENTER_TALL,
 );
 
 /// What that notice says, and what `index.html` says before the module has loaded.
@@ -65,21 +65,21 @@ const TOO_SMALL_WHY: &str = "It is a desktop application: its panels need more r
 const CHECK: f32 = 12.0;
 const BUTTON: f32 = 22.0;
 
-/// The omnibox's least width. Below this it is a box nobody can read a name in.
+/// The omnibox's minimum width. Any narrower and it cannot show a readable name.
 const OMNIBOX: f32 = 300.0;
 
-/// The omnibox's own widget id.
+/// The omnibox's fixed widget id.
 ///
-/// ⚠️ The controls before it come and go with the instrument. An id counted off its
-/// neighbours would change under it as one attaches, and the box would lose the focus
-/// and the cursor mid-word.
+/// ⚠️ The controls before it come and go with the instrument. An id derived from its
+/// position would change when one attaches, and the box would lose focus and the cursor
+/// mid-word.
 const SEARCH: &str = "omnibox";
 
-/// The least width a drop-down takes, whatever is in it.
+/// The minimum width of a drop-down menu.
 ///
-/// ⚠️ A menu sizes itself to its widest item, so without this each one is as wide as
-/// whatever happens to be enabled — and the longest item, "Inspector panel" with ⌥⌘I,
-/// leaves its key text against its label. This is that item with a gap between the two.
+/// ⚠️ A menu sizes itself to its widest item, so without this its width depends on which
+/// items are enabled, and the longest item, "Inspector panel" with ⌥⌘I, puts its key
+/// text right against its label. This fits that item with a gap between the two.
 const MENU: f32 = 240.0;
 
 /// Which dock a toggle is about.
@@ -119,21 +119,19 @@ pub struct Shell {
     pub browser_open: bool,
     pub inspector_open: bool,
     pub dock_open: bool,
-    /// The two panels under the right dock's INSTRUMENT header, each collapsed on its
-    /// own. SELECTION is flat and has none.
+    /// The two panels under the right dock's INSTRUMENT header, each collapsed
+    /// separately. SELECTION cannot collapse.
     pub room_open: bool,
     pub info_open: bool,
-    /// How far each dock was last dragged. A side dock's is its width, the bottom
-    /// dock's is its body under [`DOCK`].
+    /// Each dock's last dragged size: a side dock's width, and the bottom dock's body
+    /// height under its [`DOCK`] header.
     pub browser_width: f32,
     pub inspector_width: f32,
     pub dock_body: f32,
     pub page: Page,
-    /// What has been typed into the omnibox: the name the library's table is narrowed
-    /// by.
+    /// The text in the omnibox, which filters the library's table by name.
     pub omnibox: String,
-    /// What else the library is narrowed to, as the tree's kind, tag and place rows ask
-    /// for it.
+    /// The library's other filters, set by the tree's kind, tag, and place rows.
     pub filter: Filter,
 }
 
@@ -178,16 +176,16 @@ impl Shell {
         }
     }
 
-    /// Open the bottom dock on a page, which is what asking for either page means.
+    /// Open the bottom dock on a page. Asking for a page always opens the dock.
     pub fn show_page(&mut self, page: Page) {
         self.dock_open = true;
         self.page = page;
     }
 
-    /// Put the docks back where they were left.
+    /// Restore the docks as they were left.
     ///
-    /// ⚠️ A version this build does not know is refused rather than guessed at: half a
-    /// layout is a window nobody arranged.
+    /// ⚠️ An unknown version is refused, not guessed at: half a layout is a window nobody
+    /// arranged.
     pub fn restore(&mut self, storage: &dyn eframe::Storage) {
         let Some(text) = storage.get_string(Shell::KEY) else {
             return;
@@ -259,9 +257,9 @@ impl Shell {
     }
 }
 
-/// A size the last session left. One this build would not have laid out — under the
-/// least the dock opens to, or not a number at all — is not a size, so the default
-/// stands. The most is the screen's, and egui clamps to it every frame.
+/// A size the last session left. A value this build would not have laid out (below the
+/// dock's minimum, or not a number) is ignored and the default stands. egui clamps the
+/// maximum to the screen every frame.
 fn size(text: &str, least: f32, default: f32) -> f32 {
     match text.parse::<f32>() {
         Ok(size) if size.is_finite() && size >= least => size,
@@ -269,7 +267,7 @@ fn size(text: &str, least: f32, default: f32) -> f32 {
     }
 }
 
-/// Which of a region's edges faces the centre.
+/// Which of a region's edges faces the center.
 enum Side {
     Top,
     Bottom,
@@ -277,7 +275,7 @@ enum Side {
     Right,
 }
 
-/// The 1 px border a region shows the centre, drawn just inside its own rect.
+/// The 1 px border on a region's side facing the center, drawn just inside its rect.
 fn edge(ui: &egui::Ui, side: Side) {
     let rect = ui.max_rect();
     let stroke = egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
@@ -290,7 +288,7 @@ fn edge(ui: &egui::Ui, side: Side) {
     };
 }
 
-/// A panel frame that paints its fill and claims no margin of its own.
+/// A panel frame that paints its fill and has no margin.
 fn bare(fill: egui::Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
@@ -341,14 +339,14 @@ const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 
 /// The user guide, published beside the browser build.
 ///
-/// Relative in a tab, so the guide is the one on whichever host is serving the app; a
-/// window has no page to be relative to and reaches for the published one.
+/// Relative in a browser tab, so the guide comes from whichever host serves the app. A
+/// native window has no page to be relative to and uses the published guide.
 #[cfg(target_arch = "wasm32")]
 pub(crate) const GUIDE: &str = "docs/";
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const GUIDE: &str = "https://drawbar.app/docs/";
 
-/// The key text beside a menu label — a window's, never a tab's.
+/// The key text beside a menu label, shown only in a native window.
 fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
     match WINDOWED {
         true => ctx.format_shortcut(&shortcut),
@@ -356,16 +354,16 @@ fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
     }
 }
 
-/// Whether a frame of the omnibox has to bring the library forward.
+/// Whether an omnibox frame must bring the library forward.
 ///
-/// Any change to what is typed does. The box narrows the library's table and nothing
-/// else, so a search run behind a document tab is a search nobody can see — including
-/// the first keystroke into an empty box.
+/// Any change to the text does, including the first keystroke into an empty box. The box
+/// filters only the library's table, so a search behind a document tab would be
+/// invisible.
 fn searched(before: &str, after: &str) -> bool {
     before != after
 }
 
-/// One of the title bar's drop-downs, no narrower than [`MENU`] however little is in it.
+/// One of the title bar's drop-down menus, at least [`MENU`] wide.
 fn drop_down(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
     ui.menu_button(title, |ui| {
         ui.set_min_width(MENU);
@@ -386,11 +384,11 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
-/// How the title bar reads MIDI in: a few words, the lamp beside them, and the whole of
-/// it on hover. Nothing while it is off.
+/// The title bar's MIDI input status: a short label, the lamp beside it, and the details
+/// on hover. `None` while MIDI is off.
 ///
-/// ⚠️ A failure is named and no more. Its own words are the browser's or the driver's,
-/// and they are in the activity log.
+/// ⚠️ A failure is only named here. Its message comes from the browser or the driver,
+/// and it goes to the activity log.
 fn midi_reading(
     state: &crate::midi::State,
     visuals: &egui::Visuals,
@@ -430,9 +428,8 @@ fn listening(
         (true, _) | (false, false) => crate::app::warn(visuals),
     };
     let heard = match ports.is_empty() {
-        true => {
-            "Listening, but no MIDI input is open. A controller plugged in is heard.".to_string()
-        }
+        true => "Listening, but no MIDI input is open. A controller is heard once plugged in."
+            .to_string(),
         false => format!("Listening to {}.", ports.join(", ")),
     };
     let busy = match refused.is_empty() {
@@ -445,11 +442,10 @@ fn listening(
     (label, lamp, format!("{heard}{busy}"))
 }
 
-/// What a click on one of the bottom dock's page titles asks for.
+/// What a click on one of the bottom dock's page titles does.
 ///
-/// ⚠️ The title of the page already showing shuts the dock. It is the only way out that
-/// is on the dock itself, and a title that answered a click by doing nothing reads as
-/// broken.
+/// ⚠️ Clicking the title of the page already showing collapses the dock. The collapse
+/// triangle is a small target, and a title that ignored a click would look broken.
 fn page_click(page: Page, showing: bool) -> Act {
     match showing {
         true => Act::ToggleDock(Dock::Bottom),
@@ -457,12 +453,11 @@ fn page_click(page: Page, showing: bool) -> Act {
     }
 }
 
-/// A menu item that also says whether what it names is on.
+/// A menu item with a check mark showing whether what it names is on.
 ///
-/// ⚠️ A check at the left rather than a selected button or a `selectable_label`: both
-/// fill the row with `selection.bg_fill`, which is the instrument's red and reads as a
-/// warning across a menu of ordinary items. **Every** checkable item in the app wears
-/// this, wherever its menu is drawn.
+/// ⚠️ A check at the left, not a selected button or a `selectable_label`: both fill the
+/// row with `selection.bg_fill`, the instrument's red, which reads as a warning in a menu
+/// of ordinary items. **Every** checkable menu item in the app uses this.
 pub fn marked(
     ui: &mut egui::Ui,
     label: &str,
@@ -495,10 +490,10 @@ fn check<'a>(
     }
 }
 
-/// One of the toolbar's labelled actions.
+/// One of the toolbar's labeled actions.
 ///
-/// ⚠️ An accented action carries the accent in its glyph alone: accent on panel measures
-/// 4.1:1, which fails as 11 px text.
+/// ⚠️ An accented action shows the accent in its glyph only: accent on the panel color
+/// measures 4.1:1 contrast, which fails for 11 px text.
 fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, accented: bool) -> egui::Response {
     ui.scope(|ui| {
         flat(ui);
@@ -521,8 +516,8 @@ fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, accented: bool) -> egui:
     .inner
 }
 
-/// The New menu behind a glyph. The tool bar's and the tab strip's are one button, so
-/// what New offers is one list reached two ways.
+/// The New menu behind a glyph button. The toolbar and the tab strip share this button,
+/// so New offers one list from both places.
 pub(crate) fn new_button(ui: &mut egui::Ui, glyph: Glyph, ink: egui::Color32, acts: &mut Vec<Act>) {
     ui.scope(|ui| {
         flat(ui);
@@ -532,8 +527,8 @@ pub(crate) fn new_button(ui: &mut egui::Ui, glyph: Glyph, ink: egui::Color32, ac
     });
 }
 
-/// A 24 × 22 button carrying one glyph. `on` is a toggle whose dock is open, which is
-/// the one state that fills without the pointer on it.
+/// A 24 × 22 button with one glyph. `on` marks a toggle whose dock is open, the only
+/// state that is filled without the pointer over it.
 fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, on: bool, hint: &str) -> egui::Response {
     ui.scope(|ui| {
         flat(ui);
@@ -560,15 +555,14 @@ fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, on: bool, hint: &str) -> egui::
 impl DrawbarApp {
     /// Whether an instrument is answering.
     ///
-    /// ⚠️ The single gate on everything that only means something with one attached: the
-    /// Read and Send actions, the send queue, the inspector's INSTRUMENT group, and the
-    /// menu items naming any of them. A control for an instrument that is not there is a
-    /// control that can only disappoint.
+    /// ⚠️ The single gate on everything that needs an attached instrument: the Read and
+    /// Send actions, the send queue, the inspector's INSTRUMENT group, and the menu items
+    /// for them. A control for an absent instrument could only fail.
     pub(crate) fn attached(&self) -> bool {
         self.device.state.connected()
     }
 
-    /// 30 px: the mark, the menu bar, the instrument, the theme.
+    /// The title bar: the logo, the menus, the instrument, and the theme.
     pub(crate) fn titlebar(
         &mut self,
         ctx: &egui::Context,
@@ -622,7 +616,7 @@ impl DrawbarApp {
             });
     }
 
-    /// The MIDI controllers listened to, and whether they answer: the whole of it on
+    /// The MIDI controllers being listened to and whether they answer, with details on
     /// hover. Nothing while MIDI is off.
     fn midi_chip(&self, ui: &mut egui::Ui) {
         let Some((label, lamp, detail)) = midi_reading(&self.midi.state(), ui.visuals()) else {
@@ -666,7 +660,7 @@ impl DrawbarApp {
         }
     }
 
-    /// Hold the theme, and write it where the next session reads it.
+    /// Apply the theme, and store it for the next session.
     fn pick_theme(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, theme: ThemeChoice) {
         self.theme = theme;
         ctx.set_theme(theme.preference());
@@ -676,7 +670,7 @@ impl DrawbarApp {
         }
     }
 
-    /// Every key a menu item binds, answered whether or not a menu is open.
+    /// Handle every key a menu item binds, whether or not a menu is open.
     fn shortcuts(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let hit = |shortcut: &egui::KeyboardShortcut| {
             ui.input_mut(|input| input.consume_shortcut(shortcut))
@@ -698,9 +692,9 @@ impl DrawbarApp {
         if hit(&key::DOCK) {
             acts.push(Act::ToggleDock(Dock::Bottom));
         }
-        // ⚠️ Consumed whether or not one is attached, and before ⌘S below. egui matches a
-        // shortcut's modifiers logically, so an unconsumed ⌘⇧S goes on to match ⌘S — and
-        // saving is what asking for the queue would have done instead.
+        // ⚠️ Consumed whether or not an instrument is attached, and before ⌘S below. egui
+        // matches a shortcut's modifiers logically, so an unconsumed ⌘⇧S would go on to
+        // match ⌘S and save instead of showing the queue.
         if hit(&key::QUEUE) && self.attached() {
             acts.push(Act::ShowPage(Page::Queue));
         }
@@ -793,8 +787,8 @@ impl DrawbarApp {
         }
     }
 
-    /// ⚠️ No Library item. The library is always open and always the first tab, so the
-    /// menu would offer a view that is one click away and can never be missing.
+    /// ⚠️ No Library item. The library is always open as the first tab, so an item for it
+    /// would add nothing.
     fn view_menu(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
         let showing = self.tabs.showing();
         if self.attached()
@@ -837,17 +831,17 @@ impl DrawbarApp {
         });
     }
 
-    /// The instrument, and then the MIDI controllers that play drawbar's own audition.
+    /// The instrument items, then the MIDI controllers that play drawbar's audition.
     fn instrument_menu(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         self.usb_items(ui, acts);
         ui.separator();
         self.midi_item(ui);
     }
 
-    /// Listening to MIDI controllers, on or off, for the whole app.
+    /// The item that turns listening to MIDI controllers on or off for the whole app.
     ///
-    /// ⚠️ Started from the click itself. A browser tab may only ask the reader for MIDI
-    /// access while the click's user activation is live.
+    /// ⚠️ Listening starts inside the click handler. A browser tab may ask the user for
+    /// MIDI access only while the click's user activation is live.
     fn midi_item(&mut self, ui: &mut egui::Ui) {
         let on = self.midi.on();
         let button = check(ui, "Listen to MIDI controllers", on, None);
@@ -865,8 +859,8 @@ impl DrawbarApp {
         }
     }
 
-    /// ⚠️ Nothing but Connect… until one answers. Every other item here acts on an
-    /// instrument, and the send queue is only ever owed to one.
+    /// ⚠️ Only Connect… until an instrument answers. Every other item here acts on an
+    /// instrument, and the send queue always belongs to one.
     fn usb_items(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         if !self.attached() {
             if item(ui, "Connect…", None) {
@@ -909,15 +903,15 @@ impl DrawbarApp {
         }
     }
 
-    /// The class the open document belongs to, for the menu that offers to read it
-    /// again. Nothing on this computer came off a slot means nothing to name.
+    /// The class of the slot the open document came off, for the menu item that reads
+    /// that folder again. A document that did not come off a slot has none.
     fn open_class(&self) -> Option<ObjectClass> {
         let id = self.tabs.active()?;
         let (class, _) = self.workspace.get(id)?.origin.slot()?;
         Some(class)
     }
 
-    /// 32 px: three groups of actions, the omnibox, and the three dock toggles.
+    /// The toolbar: three groups of actions, the omnibox, and the three dock toggles.
     pub(crate) fn toolbar(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let fill = ctx.style().visuals.panel_fill;
         egui::TopBottomPanel::top("toolbar")
@@ -957,8 +951,8 @@ impl DrawbarApp {
             });
     }
 
-    /// Read, and what is owed. Both act on an instrument, so neither is drawn without
-    /// one, and the rule that would separate them from the omnibox goes with them.
+    /// Read and Send, and the rule separating them from the omnibox. Both actions act on
+    /// an instrument, so none of the three is drawn without one.
     fn instrument_actions(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         if !self.attached() {
             return;
@@ -974,8 +968,7 @@ impl DrawbarApp {
         if action(ui, Glyph::Upload, &label, waiting > 0).clicked() && waiting > 0 {
             acts.push(Act::AskSendAll);
         }
-        // A saved edit does not queue itself, so what a send would walk past is offered
-        // here.
+        // Offer to queue saved changes that a send would otherwise skip.
         let offer = crate::queue::offer(&self.workspace, &self.device.state, &self.queue);
         if let Some((label, hint)) = offer {
             if action(ui, Glyph::Plus, &label, false)
@@ -988,7 +981,7 @@ impl DrawbarApp {
         rule(ui, 16.0);
     }
 
-    /// The name search the library's table is narrowed by.
+    /// The name search that filters the library's table.
     fn omnibox(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         // Three toggles at 24, their gaps, and the padding they keep from the edge.
         const TOGGLES: f32 = 3.0 * 24.0 + 3.0 * GAP + PAD;
@@ -1003,8 +996,8 @@ impl DrawbarApp {
                 egui::TextEdit::singleline(&mut self.shell.omnibox)
                     .id(egui::Id::new(SEARCH))
                     .background_color(paper)
-                    // What is typed and the hint under it share one line down the middle
-                    // of a box a third taller than the text in it.
+                    // Center the text and the hint vertically in a box taller than the
+                    // text.
                     .vertical_align(egui::Align::Center)
                     .hint_text(egui::RichText::new("Search…").text_style(ui_text())),
             );
@@ -1014,7 +1007,7 @@ impl DrawbarApp {
         }
     }
 
-    /// 22 px: what just happened, and how much room is left.
+    /// The status bar: what just happened, and how much room is left on the instrument.
     pub(crate) fn status_bar(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let fill = ctx.style().visuals.panel_fill;
         egui::TopBottomPanel::bottom("status")
@@ -1079,7 +1072,7 @@ impl DrawbarApp {
             .resizable(false)
             .exact_height(DOCK)
             .frame(bare(fill));
-        let most = (ctx.available_rect().height() - CENTRE_TALL).max(DOCK + BODY_LEAST);
+        let most = (ctx.available_rect().height() - CENTER_TALL).max(DOCK + BODY_LEAST);
         let full = egui::TopBottomPanel::bottom("dock")
             .resizable(true)
             .default_height(DOCK + self.shell.dock_body)
@@ -1102,8 +1095,8 @@ impl DrawbarApp {
         }
     }
 
-    /// The dock's own header. [`panel_header`]'s geometry, with two titles to pick
-    /// between rather than one.
+    /// The bottom dock's header: [`crate::panel::dock_header`]'s geometry, with two page
+    /// titles to pick from.
     fn dock_header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let waiting = self.queue.len();
         let pages: &[Page] = match self.attached() {
@@ -1154,8 +1147,8 @@ impl DrawbarApp {
         }
     }
 
-    /// Which page the bottom dock is on. Nothing is owed to an instrument that is not
-    /// there, so with none attached the log is the only page there is.
+    /// Which page the bottom dock shows. With no instrument attached there is no queue,
+    /// so the log is the only page.
     fn page(&self) -> Page {
         match self.attached() {
             true => self.shell.page,
@@ -1163,7 +1156,7 @@ impl DrawbarApp {
         }
     }
 
-    /// Everything owed to the instrument, and what each of it runs into.
+    /// The send queue page.
     fn queue_page(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         crate::queue::page(
             ui,
@@ -1187,7 +1180,7 @@ impl DrawbarApp {
             .exact_width(SHUT)
             .frame(bare(fill));
         let most =
-            (ctx.available_rect().width() - self.inspector_room() - CENTRE_WIDE).max(SIDE_LEAST);
+            (ctx.available_rect().width() - self.inspector_room() - CENTER_WIDE).max(SIDE_LEAST);
         let full = egui::SidePanel::left("browser")
             .resizable(true)
             .default_width(self.shell.browser_width)
@@ -1216,8 +1209,8 @@ impl DrawbarApp {
         }
     }
 
-    /// What the inspector will claim once the browser has taken its own: the browser's
-    /// most is read before that dock is added, so it has to be asked for.
+    /// The width the inspector will take. The browser's maximum is computed before the
+    /// inspector is added, so it must be asked for here.
     fn inspector_room(&self) -> f32 {
         match self.shell.inspector_open {
             true => self.shell.inspector_width,
@@ -1225,7 +1218,7 @@ impl DrawbarApp {
         }
     }
 
-    /// The inspector dock: what is picked, and — while one is attached — the instrument.
+    /// The inspector dock: the selection, and the instrument while one is attached.
     pub(crate) fn inspector_dock(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let open = self.shell.inspector_open;
         let fill = ctx.style().visuals.panel_fill;
@@ -1233,7 +1226,7 @@ impl DrawbarApp {
             .resizable(false)
             .exact_width(SHUT)
             .frame(bare(fill));
-        let most = (ctx.available_rect().width() - CENTRE_WIDE).max(SIDE_LEAST);
+        let most = (ctx.available_rect().width() - CENTER_WIDE).max(SIDE_LEAST);
         let full = egui::SidePanel::right("inspector")
             .resizable(true)
             .default_width(self.shell.inspector_width)
@@ -1263,21 +1256,21 @@ impl DrawbarApp {
     }
 }
 
-/// Claim the whole of the panel being drawn.
+/// Claim the whole panel being drawn.
 ///
-/// ⚠️ egui remembers a resizable panel's size as the size of what was put into it, so a
-/// dock holding less than it shows would come back the least it is allowed to be.
+/// ⚠️ egui remembers a resizable panel's size as the size of its contents, so a dock
+/// holding less than it shows would shrink to its minimum.
 fn claim(ui: &mut egui::Ui) {
     ui.set_min_size(ui.max_rect().size());
 }
 
-/// Where a dock ended up this frame. A collapsed dock draws under another id, so what
-/// this answers is the size it will open back to.
+/// Where a dock ended up this frame. A collapsed dock draws under another id, so this
+/// returns the size it will reopen at.
 fn laid_out(ctx: &egui::Context, id: &str) -> Option<egui::Rect> {
     egui::containers::panel::PanelState::load(ctx, egui::Id::new(id)).map(|state| state.rect)
 }
 
-/// A shut side dock: the width of one glyph, and the glyph that opens it again.
+/// A collapsed side dock: one glyph wide, with the glyph that reopens it.
 fn reopen(ui: &mut egui::Ui, glyph: Glyph, hint: &str) -> egui::Response {
     let ink = ui.visuals().widgets.inactive.fg_stroke.color;
     let rect = ui.max_rect();
@@ -1322,7 +1315,7 @@ mod tests {
     use crate::store::Fake;
     use eframe::{App, Storage};
 
-    /// The window the design is drawn to, and the smallest this shell claims to hold.
+    /// The window size the design is drawn for.
     const SCREEN: egui::Vec2 = egui::vec2(900.0, 540.0);
 
     /// The regions, in the order they claim space.
@@ -1341,15 +1334,15 @@ mod tests {
         DrawbarApp::new(&cc)
     }
 
-    /// An instrument answering, which is what the full layout needs to draw.
+    /// Attach an instrument, which the full layout needs.
     fn attach(app: &mut DrawbarApp) {
         app.device
             .pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
     }
 
-    /// What one frame at 900 × 540 laid out and what it wrote.
+    /// What one frame laid out and painted.
     struct Painted {
-        centre: egui::Rect,
+        center: egui::Rect,
         panels: Vec<(String, egui::Rect)>,
         /// Every string the frame painted, headers and button labels included.
         words: Vec<String>,
@@ -1368,8 +1361,8 @@ mod tests {
         }
     }
 
-    /// One frame at 900 × 540, answering with the centre's rect, every panel's, and the
-    /// text the frame put on screen.
+    /// One frame at 900 × 540: the center's rect, every panel's rect, and the text
+    /// painted.
     fn drawn(ctx: &egui::Context, app: &mut DrawbarApp) -> Painted {
         drawn_at(ctx, app, SCREEN)
     }
@@ -1392,11 +1385,11 @@ mod tests {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
             ..Default::default()
         };
-        let mut centre = egui::Rect::NOTHING;
+        let mut center = egui::Rect::NOTHING;
         let output = ctx.run(input, |ctx| {
             app.update(ctx, &mut frame);
             // Panels shrink this as they are added; the central panel does not.
-            centre = ctx.available_rect();
+            center = ctx.available_rect();
         });
         let panels = REGIONS
             .iter()
@@ -1406,33 +1399,36 @@ mod tests {
             })
             .collect();
         Painted {
-            centre,
+            center,
             panels,
             words: crate::tabs::words(&output),
         }
     }
 
-    /// The gate is the screen and the metrics alone: what the reader has shut, and what
-    /// the device calls itself, do not make room the shell does not have.
+    /// The gate depends only on the screen size and the layout metrics: collapsed docks
+    /// and the kind of device do not make room the shell does not have.
     #[test]
     fn a_screen_short_of_the_least_room_is_gated_in_either_dimension_alone() {
-        assert!(!too_small(LEAST), "the least the shell lays out in");
-        assert!(!too_small(SCREEN), "the window the design is drawn to");
+        assert!(
+            !too_small(LEAST),
+            "the smallest screen the shell lays out in"
+        );
+        assert!(!too_small(SCREEN), "the window the design is drawn for");
         assert!(
             too_small(LEAST - egui::vec2(1.0, 0.0)),
             "a point too narrow"
         );
         assert!(too_small(LEAST - egui::vec2(0.0, 1.0)), "a point too short");
-        // A phone, either way up, and a canvas with no room at all.
+        // A phone in either orientation, and an empty canvas.
         assert!(too_small(egui::vec2(390.0, 844.0)));
         assert!(too_small(egui::vec2(844.0, 390.0)));
         assert!(too_small(egui::Vec2::ZERO));
     }
 
-    /// What [`LEAST`] claims: at exactly that size the three docks and the bars still
-    /// fit, and the centre keeps the room no dock may take from it.
+    /// At [`LEAST`], the three docks and the bars fit, and the center keeps the room no
+    /// dock may take from it.
     #[test]
-    fn at_the_least_room_it_claims_every_region_fits_and_the_centre_keeps_its_own() {
+    fn at_the_least_room_it_claims_every_region_fits_and_the_center_keeps_its_own() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
@@ -1448,14 +1444,13 @@ mod tests {
                 "{id} is outside the window: {rect:?}"
             );
         }
-        let centre = painted.centre;
-        assert!(centre.width() >= CENTRE_WIDE, "the centre: {centre:?}");
-        assert!(centre.height() >= CENTRE_TALL, "the centre: {centre:?}");
+        let center = painted.center;
+        assert!(center.width() >= CENTER_WIDE, "the center: {center:?}");
+        assert!(center.height() >= CENTER_TALL, "the center: {center:?}");
     }
 
-    /// ⚠️ The page has to answer a phone before the module that would answer has
-    /// loaded, so the threshold and the words are written a second time in `index.html`.
-    /// A CSS pixel is the point the shell lays itself out in.
+    /// ⚠️ The page must turn a phone away before the module has loaded, so `index.html`
+    /// repeats the threshold and the words. The shell's layout points are CSS pixels.
     #[test]
     fn the_page_gates_where_the_shell_does_and_says_the_same_thing() {
         let page = include_str!("../index.html");
@@ -1489,8 +1484,7 @@ mod tests {
         assert!(favicon.contains(&dark), "favicon.svg lacks `{dark}`");
     }
 
-    /// The notice is the whole of what a gated frame draws: what is wrong, and the
-    /// guide to read while the reader finds a bigger screen.
+    /// A gated frame draws only the notice: what is wrong, and a link to the guide.
     #[test]
     fn the_notice_says_what_is_wrong_and_offers_the_guide() {
         let ctx = egui::Context::default();
@@ -1509,18 +1503,18 @@ mod tests {
         assert!(said.iter().any(|word| word == "User guide"), "{said:?}");
     }
 
-    /// Every fixed region fits inside the window the design is drawn to, and the centre
+    /// Every fixed region fits inside the window the design is drawn for, and the center
     /// still has room left after all of them have taken theirs.
     #[test]
-    fn at_900_by_540_every_region_fits_and_the_centre_survives() {
+    fn at_900_by_540_every_region_fits_and_the_center_survives() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
         attach(&mut app);
-        // Twice: the first frame is what the second lays itself out against.
+        // Twice: the second frame lays out against the first.
         let _ = drawn(&ctx, &mut app);
         let painted = drawn(&ctx, &mut app);
-        let (centre, panels) = (painted.centre, &painted.panels);
+        let (center, panels) = (painted.center, &painted.panels);
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN);
         assert_eq!(panels.len(), REGIONS.len(), "every region drew: {panels:?}");
@@ -1537,16 +1531,16 @@ mod tests {
         assert_eq!(at("dock").height(), DOCK + DOCK_BODY);
         assert_eq!(at("browser").width(), BROWSER);
         assert_eq!(at("inspector").width(), INSPECTOR);
-        // The dock's header is its top [`DOCK`], inside the window with the rest.
+        // The dock's header is its top [`DOCK`] points, inside the window.
         let header = at("dock").split_top_bottom_at_y(at("dock").top() + DOCK).0;
         assert!(screen.contains_rect(header), "the dock header: {header:?}");
 
-        assert!(centre.width() > 0.0, "the centre: {centre:?}");
-        assert!(centre.height() > 0.0, "the centre: {centre:?}");
+        assert!(center.width() > 0.0, "the center: {center:?}");
+        assert!(center.height() > 0.0, "the center: {center:?}");
     }
 
-    /// Flipping the theme moves colours and nothing else: the metrics live on the style
-    /// both faces share, so every region lands in the same place.
+    /// Switching the theme changes only colors: the metrics live on the style both themes
+    /// share, so every region stays in place.
     #[test]
     fn flipping_the_theme_leaves_every_region_where_it_was() {
         let ctx = egui::Context::default();
@@ -1562,14 +1556,14 @@ mod tests {
         let _ = drawn(&ctx, &mut app);
         let light = drawn(&ctx, &mut app);
 
-        assert_eq!(dark.centre, light.centre);
+        assert_eq!(dark.center, light.center);
         assert_eq!(dark.panels, light.panels);
     }
 
-    /// The toolbar's offer to queue what changed is the changed set itself: it says how
-    /// many there are, and with none it is not drawn at all.
+    /// The toolbar's Queue button counts the changed set, and is not drawn when nothing
+    /// has changed.
     #[test]
-    fn the_queue_button_offers_exactly_what_a_send_would_walk_past() {
+    fn the_queue_button_offers_what_a_send_would_skip() {
         use nord_usb::Location;
 
         let class = ObjectClass::Program;
@@ -1623,14 +1617,14 @@ mod tests {
         );
         let _ = drawn(&ctx, &mut app);
         let painted = drawn(&ctx, &mut app);
-        assert!(!painted.wrote("Queue 1"), "the gap is closed");
-        assert!(painted.wrote("Send 1"), "and what closed it is waiting");
+        assert!(!painted.wrote("Queue 1"), "nothing is left to offer");
+        assert!(painted.wrote("Send 1"), "and the change is waiting");
     }
 
-    /// ⚠️ With nothing attached there is nothing to read from, nothing to send to and no
-    /// room to report. Every control that acts on an instrument is absent rather than
-    /// dead — the inspector's INSTRUMENT group with them — while SELECTION, which is
-    /// about what is picked here, stays whatever is on the bus.
+    /// ⚠️ With nothing attached there is nothing to read, nothing to send to, and no room
+    /// to report. Every control that acts on an instrument, including the inspector's
+    /// INSTRUMENT group, is hidden, not disabled. SELECTION, which is about what is selected
+    /// here, stays either way.
     #[test]
     fn no_instrument_means_no_instrument_controls() {
         const ONLY_WITH_ONE: [&str; 6] =
@@ -1649,7 +1643,7 @@ mod tests {
                 "{control} is painted with none attached"
             );
         }
-        assert!(alone.wrote("ACTIVITY LOG"), "the log is the one page left");
+        assert!(alone.wrote("ACTIVITY LOG"), "the log is the only page left");
         assert!(alone.wrote("SELECTION"), "the inspector still answers");
         assert!(alone.region("inspector").is_some(), "{:?}", alone.panels);
 
@@ -1683,8 +1677,8 @@ mod tests {
         assert!(!searched("", ""));
     }
 
-    /// ⚠️ The omnibox narrows the library's table and nothing else. Typing into it with a
-    /// document in front would otherwise search where nobody can see the result.
+    /// ⚠️ The omnibox filters only the library's table, so typing into it with a document
+    /// in front must bring the library forward.
     #[test]
     fn typing_a_search_with_a_document_in_front_brings_the_library_forward() {
         let ctx = egui::Context::default();
@@ -1707,17 +1701,15 @@ mod tests {
         assert_eq!(app.shell.omnibox, "afr");
         assert_eq!(app.tabs.showing(), Some(Spot::Library));
 
-        // And the frame after it, which typed nothing, leaves the tab where the user put
-        // it.
+        // The next frame types nothing and leaves the tab where the user put it.
         app.tabs.show(Spot::Document(id));
         let _ = drawn(&ctx, &mut app);
         assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
     }
 
     /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
-    /// a ⌘⇧S nothing consumed goes on to match ⌘S. The gesture that asks to review the
-    /// send queue would then mark the open document saved instead, taking the revert it
-    /// still had with it.
+    /// an unconsumed ⌘⇧S goes on to match ⌘S. Asking to review the send queue would then
+    /// mark the open document saved and lose its revert.
     #[test]
     fn the_send_queue_shortcut_never_falls_through_to_save() {
         let ctx = egui::Context::default();
@@ -1758,9 +1750,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ ⌘R is the browser tab's own reload. A frame that leaves it unconsumed reloads
-    /// the page out from under whatever is open, so the gesture is taken whether or not
-    /// there is an instrument to read again.
+    /// ⚠️ ⌘R is the browser tab's reload. Left unconsumed, it reloads the page out from
+    /// under whatever is open, so it is consumed whether or not an instrument is attached.
     #[test]
     fn the_read_everything_shortcut_is_taken_with_nothing_attached() {
         let ctx = egui::Context::default();
@@ -1816,15 +1807,14 @@ mod tests {
             shell.toggle(dock);
             assert_eq!(shell.open(dock), !was, "{dock:?}");
         }
-        // Asking for a page is asking to read it, which means opening the dock too.
+        // Asking for a page opens the dock too.
         shell.dock_open = false;
         shell.show_page(Page::Log);
         assert!(shell.dock_open && shell.page == Page::Log);
     }
 
-    /// ⚠️ The title of the page already showing is the way back out of the dock. A title
-    /// that answered a click by doing nothing reads as broken, and the collapse triangle
-    /// is 8 px of the header.
+    /// ⚠️ Clicking the title of the page already showing collapses the dock. A title that
+    /// ignored a click would look broken, and the collapse triangle is only 8 px of the header.
     #[test]
     fn the_title_of_the_page_showing_shuts_the_dock() {
         assert!(matches!(
@@ -1861,7 +1851,10 @@ mod tests {
         assert!(!after.browser_open);
         assert!(after.inspector_open);
         assert!(after.dock_open);
-        assert!(!after.room_open, "a shut inspector panel comes back shut");
+        assert!(
+            !after.room_open,
+            "a collapsed inspector panel comes back collapsed"
+        );
         assert!(after.info_open, "and an open one comes back open");
         assert_eq!(after.browser_width, 301.0);
         assert_eq!(after.inspector_width, 199.0);
@@ -1870,8 +1863,8 @@ mod tests {
         assert!(after.omnibox.is_empty(), "a search is not a layout");
     }
 
-    /// A stored size this build would never have laid out is not a size, so the dock
-    /// opens to the width the design gives it rather than to a sliver or to nonsense.
+    /// A stored size this build would never have laid out is ignored, so the dock opens
+    /// at its default size, not as a sliver or at a nonsense size.
     #[test]
     fn a_size_outside_what_a_dock_opens_to_comes_back_as_the_default() {
         let mut store = Fake::default();
@@ -1884,15 +1877,15 @@ mod tests {
         );
         let mut shell = Shell::default();
         shell.restore(&store);
-        assert_eq!(shell.browser_width, BROWSER, "under the least it opens to");
+        assert_eq!(shell.browser_width, BROWSER, "below its minimum");
         assert_eq!(shell.inspector_width, INSPECTOR, "not a number");
         assert_eq!(shell.dock_body, DOCK_BODY, "not a size");
     }
 
-    /// However far a dock was dragged last session, the centre keeps its own room: the
-    /// most a dock may claim is read off the window every frame.
+    /// However far a dock was dragged last session, the center keeps its room: a dock's
+    /// maximum is computed from the window every frame.
     #[test]
-    fn docks_wider_than_the_window_still_leave_the_centre_its_room() {
+    fn docks_wider_than_the_window_still_leave_the_center_its_room() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         app.shell.dock_open = true;
@@ -1904,21 +1897,21 @@ mod tests {
         let painted = drawn(&ctx, &mut app);
 
         assert!(
-            painted.centre.width() >= CENTRE_WIDE,
-            "the centre: {:?}",
-            painted.centre
+            painted.center.width() >= CENTER_WIDE,
+            "the center: {:?}",
+            painted.center
         );
         assert!(
-            painted.centre.height() >= CENTRE_TALL,
-            "the centre: {:?}",
-            painted.centre
+            painted.center.height() >= CENTER_TALL,
+            "the center: {:?}",
+            painted.center
         );
         assert!(app.shell.browser_width >= SIDE_LEAST);
         assert!(app.shell.dock_body >= BODY_LEAST);
     }
 
-    /// A dock keeps the size it was left at across a frame, so what is written out is
-    /// what the window actually showed rather than the design's default.
+    /// A dock keeps the size it was left at across frames, so the stored size is what
+    /// the window showed, not the design's default.
     #[test]
     fn a_dock_drawn_narrower_writes_the_size_it_was_drawn_at() {
         let ctx = egui::Context::default();
@@ -1936,7 +1929,7 @@ mod tests {
         assert_eq!(app.shell.dock_body, 130.0);
     }
 
-    /// A version nobody wrote is a layout nobody can explain, so the defaults stand.
+    /// An unknown version is not read, so the defaults stand.
     #[test]
     fn an_unknown_version_leaves_the_default_layout() {
         let mut store = Fake::default();

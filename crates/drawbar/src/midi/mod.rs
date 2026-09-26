@@ -1,16 +1,16 @@
-//! MIDI in: a controller's keys, read as clicks on the key map in front.
+//! MIDI input: a controller's keys, played as clicks on the front key map.
 //!
-//! Listening is the app's, not a document's: it is started and stopped from the
-//! Instrument menu, and whichever key map is showing answers the keys.
+//! Listening belongs to the app, not to a document: it is started and stopped from the
+//! Instrument menu, and whichever key map is showing responds to the keys.
 //!
 //! ⚠️ Input only. Nothing here opens an output port or sends a byte. A controller plays
-//! this app's own audition and reaches no instrument: what is written to a Nord goes
-//! over USB, from [`crate::device`], on the operator's word.
+//! this app's own audition and reaches no instrument: writes to a Nord go over USB, from
+//! [`crate::device`], when the user asks for them.
 //!
-//! The backend is the only part that differs between targets: `midir` on the desktop and
-//! Web MIDI in a browser tab. Each opens every input port it can, decodes each port's
-//! bytes where they arrive, and leaves note messages in a queue the frame drains — there
-//! is no thread to drain it on in a browser tab, and nothing here may block one.
+//! Only the backend differs between targets: `midir` on the desktop and Web MIDI in a
+//! browser. Each opens every input port it can, decodes each port's bytes as they
+//! arrive, and leaves note messages in a queue that each frame drains. A browser tab has
+//! no thread to drain it on, and nothing here may block one.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -31,49 +31,48 @@ use crate::log::Log;
 
 /// What the Instrument menu says where the browser has no Web MIDI.
 pub const UNSUPPORTED: &str =
-    "This browser cannot use MIDI controllers; use Chrome, Edge or Firefox.";
+    "This browser cannot use MIDI controllers; use Chrome, Edge, or Firefox.";
 
-/// How many note messages wait for a frame to take them. A full queue lets go of its
-/// oldest.
+/// How many note messages can wait for a frame. A full queue drops its oldest.
 const QUEUE: usize = 64;
 
 /// How long a strike may wait for a frame and still sound, in seconds.
 ///
-/// A hidden tab or a minimised window draws nothing while the controller goes on
-/// sending, and a key struck then is over by the time a frame could answer it.
+/// A hidden tab or a minimized window draws nothing while the controller keeps sending,
+/// and a key struck then is over by the time a frame could play it.
 const STALE: f64 = 0.5;
 
 /// One note message, whichever port carried it.
 ///
-/// ⚠️ A note-on at velocity zero is a note-off — the running-status spelling of one —
-/// so [`Note::On`] never holds a zero velocity.
+/// ⚠️ A note-on at velocity zero is a note-off (the running-status form of one), so
+/// [`Note::On`] never holds a zero velocity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Note {
     On(Struck),
     Off(u8),
 }
 
-/// What the keys played since the last frame ask for, and the keys held now.
+/// The keys played since the last frame, and the keys held now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Played {
     /// Every key struck, oldest first. A key struck twice is here once, at its last.
     pub struck: Vec<Struck>,
-    /// Every key let go, oldest first, less a key's release after its own strike.
+    /// Every key released, oldest first, except a release after the key's own strike.
     pub released: Vec<u8>,
     /// Every key held down, lowest first.
     pub down: Vec<u8>,
 }
 
-/// Where MIDI in stands, as one value.
+/// The state of MIDI input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// Nothing is listening.
     Off,
-    /// Access has been asked for and the answer has not come back.
+    /// Access has been requested, and the answer has not come back.
     Asking,
-    /// Listening on `ports`, named as the machine names them. `refused` are the ports
-    /// that would not open, which another program may be holding. Both empty is a
-    /// machine with no controller on it.
+    /// Listening on `ports`, named as the system names them. `refused` lists the ports
+    /// that would not open, perhaps because another program holds them. Both empty means
+    /// no controller is connected.
     On {
         ports: Vec<String>,
         refused: Vec<String>,
@@ -82,8 +81,8 @@ pub enum State {
     Failed(String),
 }
 
-/// Every input port this app is listening to, the note messages they have sent, and the
-/// keys held down on them.
+/// Every input port this app listens to, the note messages they have sent, and the keys
+/// held down on them.
 #[derive(Default)]
 pub struct Midi {
     ports: Ports,
@@ -100,8 +99,8 @@ pub fn supported() -> bool {
 impl Midi {
     /// Start listening on every input port the machine has.
     ///
-    /// ⚠️ In a browser tab this asks the reader for permission, which the page may only
-    /// do while a click's user activation is live: call it from the click itself.
+    /// ⚠️ In a browser this asks the user for permission, which the page may do only
+    /// while a click's user activation is live: call it from the click itself.
     pub fn listen(&mut self, ctx: &egui::Context) {
         self.ports.listen(ctx);
     }
@@ -120,8 +119,8 @@ impl Midi {
         self.state() != State::Off
     }
 
-    /// What the keys played since the last frame ask for. `now` is egui's frame clock,
-    /// which is what a backend that has to look for new ports measures against.
+    /// The keys played since the last frame. `now` is egui's frame clock, which a
+    /// backend that polls for new ports measures against.
     pub fn played(&mut self, now: f64) -> Played {
         played(&self.ports.drain(now), &mut self.down)
     }
@@ -144,8 +143,8 @@ impl Midi {
 /// Where the desktop app keeps whether it was listening, so the next session listens
 /// too.
 ///
-/// ⚠️ Not kept in a browser tab, which asks the reader for access and may only do that
-/// from a click: a tab starts with MIDI off.
+/// ⚠️ Not kept in a browser, which must ask the user for access from a click, so a tab
+/// starts with MIDI off.
 #[cfg(not(target_arch = "wasm32"))]
 const KEY: &str = "drawbar.midi";
 
@@ -167,13 +166,13 @@ impl Midi {
     }
 }
 
-/// What a frame's worth of note messages asks for, with `down` the keys held before it
-/// and after.
+/// What one frame's note messages play. `down` holds the keys held before the frame and
+/// is updated to those held after it.
 ///
-/// Every key struck sounds, each on a voice of its own. A key struck and let go inside
-/// one frame still sounds: the queue is not the keyboard's own timing, and a key that
-/// came and went unheard is a key that did nothing. A release before a key's strike is
-/// passed on, and lets go of whatever that key sounded in an earlier frame.
+/// Every key struck sounds, each on its own voice. A key struck and released within one
+/// frame still sounds: the queue does not keep the keyboard's timing, and a key that came
+/// and went unheard would do nothing. A release before a key's strike is passed on, and
+/// stops whatever that key sounded in an earlier frame.
 fn played(notes: &[Note], down: &mut BTreeSet<u8>) -> Played {
     let mut played = Played::default();
     for note in notes {
@@ -197,8 +196,8 @@ fn played(notes: &[Note], down: &mut BTreeSet<u8>) -> Played {
 
 /// Note messages waiting for a frame, each with the time it arrived.
 ///
-/// ⚠️ An arrival time and the `now` it is drained at must be read off one clock, in
-/// seconds. Each backend names its own.
+/// ⚠️ Arrival times and the `now` passed to [`Queue::drain`] must come from one clock,
+/// in seconds. Each backend chooses its own.
 #[derive(Default)]
 struct Queue {
     notes: VecDeque<(f64, Note)>,
@@ -212,8 +211,8 @@ impl Queue {
         self.notes.push_back((at, note));
     }
 
-    /// Every message waiting, less the strikes older than [`STALE`]. A release is never
-    /// too old: the key it lets go may still own the voice.
+    /// Every waiting message except strikes older than [`STALE`]. A release is never too
+    /// old: its key may still hold a voice.
     fn drain(&mut self, now: f64) -> Vec<Note> {
         self.notes
             .drain(..)
@@ -225,24 +224,23 @@ impl Queue {
 
 /// One port's bytes, decoded a message at a time.
 ///
-/// ⚠️ Running status belongs to the stream that carries it: a data byte's meaning is the
-/// last channel status seen **on that port**, so one of these belongs to each port
-/// rather than to the app.
+/// ⚠️ Running status is per stream: a data byte's meaning depends on the last channel
+/// status seen on that port, so each port has its own `Stream`.
 #[derive(Default)]
 struct Stream {
-    /// The channel status in force, which a data byte belongs to. `None` after anything
-    /// that ends running status, and until the first status byte of all.
+    /// The channel status in effect for data bytes. `None` after anything that ends
+    /// running status, and before the first status byte.
     status: Option<u8>,
     first: u8,
     have: usize,
 }
 
 impl Stream {
-    /// Decode `bytes`, handing each note message to `note` as it completes.
+    /// Decode `bytes`, passing each note message to `note` as it completes.
     ///
     /// A message may be split across calls, and several may arrive in one. Both data
-    /// bytes are below 0x80 by the time they are read, so the note and velocity handed
-    /// on are 7-bit values whatever the port sent.
+    /// bytes are below 0x80 by the time they are read, so the note and velocity passed
+    /// on are always 7-bit values.
     fn feed(&mut self, bytes: &[u8], mut note: impl FnMut(Note)) {
         for byte in bytes {
             if let Some(message) = self.take(*byte) {
@@ -253,11 +251,11 @@ impl Stream {
 
     fn take(&mut self, byte: u8) -> Option<Note> {
         match byte {
-            // System real time interleaves anywhere, including between the bytes of a
-            // message, and carries nothing of its own.
+            // System real-time bytes can appear anywhere, even inside a message, and
+            // carry no note data.
             0xF8..=0xFF => None,
-            // System common ends running status. Its own data bytes, and a system
-            // exclusive dump's, then belong to no status and are dropped.
+            // System common ends running status. Its data bytes, and those of a system
+            // exclusive dump, then have no status and are dropped.
             0xF0..=0xF7 => {
                 self.status = None;
                 self.have = 0;
@@ -324,7 +322,7 @@ mod tests {
         assert_eq!(notes(&[0x90, 0x3C, 0x64]), [on(60, 100)]);
         assert_eq!(notes(&[0x80, 0x3C, 0x40]), [Note::Off(60)]);
         assert_eq!(notes(&[0x90, 0x3C, 0x00]), [Note::Off(60)]);
-        // The channel is not the app's business: every one of the sixteen plays.
+        // The channel is ignored: all sixteen play.
         assert_eq!(notes(&[0x9F, 0x45, 0x01]), [on(69, 1)]);
     }
 
@@ -375,7 +373,7 @@ mod tests {
         );
     }
 
-    /// What `notes` ask for, played on a controller with no key held before them.
+    /// What `notes` play on a controller with no key held before them.
     fn frame(notes: &[Note]) -> Played {
         played(notes, &mut BTreeSet::new())
     }
@@ -417,7 +415,7 @@ mod tests {
                 down: Vec::new(),
             }
         );
-        // A release before the strike lets go of what the key sounded before.
+        // A release before the strike stops what the key sounded earlier.
         assert_eq!(
             frame(&[Note::Off(60), on(60, 30)]),
             Played {
@@ -448,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_queue_lets_go_of_its_oldest_message() {
+    fn a_full_queue_drops_its_oldest_message() {
         let mut queue = Queue::default();
         let keys = 0..u8::try_from(QUEUE + 2).expect("the queue is under 256");
         for key in keys.clone() {

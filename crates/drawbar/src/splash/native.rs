@@ -1,4 +1,4 @@
-//! The welcome sheet in a window: no version to remember, and no notes to fetch.
+//! The welcome sheet on the desktop, which remembers no version and fetches no notes.
 
 use eframe::egui;
 
@@ -10,7 +10,7 @@ pub struct Splash {
 }
 
 impl Splash {
-    /// A window opens on the app itself; the welcome is Help's to ask for.
+    /// The desktop app opens without a sheet; Help opens the welcome.
     pub fn new(_ctx: &egui::Context) -> Splash {
         Splash { showing: false }
     }
@@ -19,7 +19,7 @@ impl Splash {
         self.showing = true;
     }
 
-    /// Draw the sheet while it is up, and hand on whatever the reader asked for.
+    /// Draw the sheet while it is up, and return whatever the reader asked for.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Act> {
         if !self.showing {
             return None;

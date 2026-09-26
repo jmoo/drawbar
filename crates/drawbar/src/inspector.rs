@@ -1,14 +1,13 @@
-//! The right dock: what is picked, and — while one is attached — the instrument.
+//! The right dock: the selection, and the instrument while one is attached.
 //!
-//! Two dock headers rather than a dock header and two groups. SELECTION heads the dock
-//! itself and answers about the rows the browser has picked, whatever is on the bus; it
-//! is flat, because a fact, a tag and a dependency are three lines about one selection
-//! rather than three panels. INSTRUMENT heads what an attached instrument has to say,
-//! so it is absent without one, and ROOM and INFO under it collapse on their own and are
-//! kept between sessions beside the docks.
+//! The dock has two headers. SELECTION describes the rows selected in the browser,
+//! whether or not an instrument is connected. It is flat, because a fact, a tag, and a
+//! dependency are lines about one selection, not separate panels. INSTRUMENT holds what
+//! an attached instrument reports, so it is absent without one. ROOM and INFO under it
+//! collapse independently, and their state is kept between sessions with the docks.
 //!
-//! Nothing here reads anything the rest of the app has not already been told — a panel
-//! with nothing behind it says so rather than filling itself in.
+//! Nothing here asks for data the rest of the app does not already have; a panel with no
+//! data says so.
 
 use eframe::egui;
 
@@ -28,21 +27,21 @@ use crate::strings::{kind_word, place};
 use crate::tags::Tags;
 use crate::workspace::Workspace;
 
-/// The room a panel's body keeps at each end, and the gap between its parts.
+/// A panel body's padding at each end, and the gap between its parts.
 const PAD: i8 = 8;
 const GAP: f32 = 6.0;
 
-/// A glyph in a line, and the smaller one a tag's chip wears.
+/// The size of a glyph in a line, and of the smaller one on a tag chip.
 const GLYPH: f32 = 12.0;
 const TAG: f32 = 11.0;
 
-/// The mono readout beside a meter, and the words under one.
+/// The size of monospace readouts: a meter's figures, a slot label, an id.
 const MONO: f32 = 10.5;
 
-/// The column a fact's own word takes, so the values under each other line up.
+/// The width of a fact's label column, so the values line up.
 const FACT: f32 = 52.0;
 
-/// The dock's two headers, in the order the design stacks them.
+/// The dock's two headers, top to bottom.
 pub fn ui(
     ui: &mut egui::Ui,
     shell: &mut Shell,
@@ -68,8 +67,8 @@ pub fn ui(
     acts
 }
 
-/// What is picked: what it is, what it is labelled with, and what it plays — one run of
-/// lines under one header.
+/// The selection: what it is, how it is tagged, and what it plays, as lines under one
+/// header.
 fn selection(
     ui: &mut egui::Ui,
     browser: &Browser,
@@ -80,7 +79,7 @@ fn selection(
     let mut acts = Vec::new();
     let picked = browser.picked().items().count();
     if picked == 0 {
-        body(ui, |ui| faint(ui, "Nothing is picked."));
+        body(ui, |ui| faint(ui, "Nothing is selected."));
         return acts;
     }
     let rows: Vec<Row> = browser
@@ -93,8 +92,8 @@ fn selection(
         about_selection(ui, picked, &rows, workspace, device)
     });
     tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
-    // Only a slot the instrument has been asked about has a dependency list, so the
-    // lines are absent rather than empty for everything else.
+    // Only a slot the instrument has been asked about has a dependency list; for
+    // everything else the lines are absent.
     let answered = needs(&slots(browser), device);
     if !answered.is_empty() {
         dependencies(ui, &answered, device);
@@ -102,19 +101,18 @@ fn selection(
     acts
 }
 
-/// One line of the FACTS panel: what it is, what it says, and the whole of it where the
-/// short form leaves something out.
+/// One line about a single picked asset: its label, its value, and the full text when
+/// the value is shortened.
 pub struct Fact {
     pub what: &'static str,
     pub said: String,
     pub hint: Option<String>,
 }
 
-/// What the panel says about the one asset that is picked.
+/// The facts about the single picked asset.
 ///
-/// The row is the table's own, so a fact here is the fact the table shows. `fit` is
-/// what the attached instrument makes of it, and it is worth a line only where it
-/// refuses: everything else is either silence or the row's own kind.
+/// The row is the library table's own, so these facts match the table. `fit` is the
+/// attached instrument's verdict on the asset, which gets a line only when it refuses.
 pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
     let mut said = vec![
         Fact {
@@ -148,21 +146,21 @@ pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
     said
 }
 
-/// What the panel says about a selection of several: how many were picked, and what of
-/// them the two things worth acting on hold.
+/// The summary of a multiple selection: how many rows are picked, how many are unsaved,
+/// and how many are on the keyboard.
 ///
-/// ⚠️ `picked` counts the rows the browser holds; the other two count the assets among
-/// them, which a folder or a tag row is not.
+/// ⚠️ `picked` counts the rows the browser holds; the other two count only assets, which
+/// excludes folder and tag rows.
 pub fn tally(picked: usize, rows: &[Row]) -> String {
     let unsaved = rows.iter().filter(|row| row.unsaved).count();
     let keyboard = rows
         .iter()
         .filter(|row| matches!(row.where_, Where::Both(_) | Where::Keyboard))
         .count();
-    format!("{picked} picked, {unsaved} unsaved, {keyboard} on the keyboard")
+    format!("{picked} selected, {unsaved} unsaved, {keyboard} on the keyboard")
 }
 
-/// The FACTS panel: one picked row read out, or a count of the several that are.
+/// The facts about one picked row, or a summary of several.
 fn about_selection(
     ui: &mut egui::Ui,
     picked: usize,
@@ -188,10 +186,10 @@ fn about_selection(
     }
 }
 
-/// One fact: its own word in a fixed column, and the whole of what it says beside it.
+/// One fact: its label in a fixed column and its full value beside it.
 ///
-/// ⚠️ The value wraps rather than truncating. A refusal, a where sentence and a name are
-/// each as long as they are, and half of one is not a fact.
+/// ⚠️ The value wraps instead of truncating. A refusal, a location sentence, or a name
+/// can be any length, and a truncated one is misleading.
 fn fact_line(ui: &mut egui::Ui, fact: Fact) {
     ui.horizontal(|ui| {
         ui.add_sized(
@@ -207,7 +205,7 @@ fn fact_line(ui: &mut egui::Ui, fact: Fact) {
     });
 }
 
-/// A line the panel says about the selection as a whole rather than about a field.
+/// A line about the selection as a whole.
 fn void(ui: &mut egui::Ui, said: String) {
     ui.label(egui::RichText::new(said).text_style(ui_text()));
 }
@@ -224,7 +222,7 @@ fn slots(browser: &Browser) -> Vec<(ObjectClass, Location)> {
         .collect()
 }
 
-/// One meter per folder the instrument has counted, and the one sentence saying what the
+/// One meter per folder the instrument has counted, and a sentence on the limit the
 /// queue runs into.
 fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: &Queue) {
     body(ui, |ui| {
@@ -248,8 +246,8 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
                     egui::RichText::new(device.state.folder_name(class)).text_style(ui_text()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // ⚠️ The bar takes the tone and the readout keeps its own ink: the
-                    // signal colours do not carry as 10 px figures on the panel.
+                    // ⚠️ The bar takes the status color and the readout stays in the text
+                    // color: the signal colors are not legible as 10 px figures.
                     if let Some(said) = occupancy(class, &device.state.inventory, unit) {
                         ui.label(egui::RichText::new(said).monospace().size(MONO).weak());
                     }
@@ -259,7 +257,7 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
             ui.add_space(GAP);
         }
         if drawn == 0 {
-            return faint(ui, "Nothing has counted what is on the instrument.");
+            return faint(ui, "The instrument's contents have not been counted.");
         }
         if let Some(said) = room::constraint(queue, workspace, &device.state) {
             ui.label(egui::RichText::new(said).text_style(ui_text()).weak());
@@ -267,13 +265,12 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
     });
 }
 
-/// The dependency list the instrument gave for `at`, where that is the slot it was last
-/// asked about and it named something.
+/// The dependency list the instrument gave for `slot`, if it is the slot last asked
+/// about and the list is not empty.
 ///
 /// ⚠️ `DEPENDENCIES` answers for one slot at a time and the cache holds the last answer,
-/// so this speaks for the slot that was asked about — that class at that address — and
-/// for no other. A selection nothing has asked about has no answer, which is not the
-/// same as needing nothing.
+/// so it applies only to that class at that address. A slot nobody asked about has no
+/// answer, which is not the same as needing nothing.
 fn answer(device: &Device, slot: (ObjectClass, Location)) -> Option<&[Dependency]> {
     if device.state.detail.at != Some(slot) {
         return None;
@@ -282,8 +279,8 @@ fn answer(device: &Device, slot: (ObjectClass, Location)) -> Option<&[Dependency
     (!deps.is_empty()).then_some(deps)
 }
 
-/// The picked slots the instrument has answered about — what the panel would have to
-/// say, and so whether there is a panel at all.
+/// The picked slots the instrument has answered about. The panel appears only when there
+/// is at least one.
 fn needs(picked: &[(ObjectClass, Location)], device: &Device) -> Vec<(ObjectClass, Location)> {
     picked
         .iter()
@@ -313,8 +310,8 @@ fn dependencies(ui: &mut egui::Ui, answered: &[(ObjectClass, Location)], device:
     });
 }
 
-/// One library a slot names: the name the instrument gave it, or the bare id nothing has
-/// resolved.
+/// One library a slot needs: the name the instrument gave it, or its bare id when that
+/// is all there is.
 fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     ui.horizontal(|ui| {
         let quiet = ui.visuals().weak_text_color();
@@ -347,16 +344,15 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     });
 }
 
-/// The tags the selection wears, as chips: solid where the whole of it wears one and
-/// hollow where only some does. A click takes a solid one off all of it and puts a
-/// hollow one on all of it.
+/// The selection's tags, as chips: solid when every picked asset has the tag and hollow
+/// when only some do. Clicking a solid chip removes its tag from all of them; clicking a
+/// hollow one adds it to all.
 ///
-/// ⚠️ Only a **kept** asset can wear one — a tag hangs on a workspace id, and a slot has
-/// none — so this is over what of the selection is on this computer.
+/// ⚠️ Only a kept asset can have a tag: a tag attaches to a workspace id, and a slot has
+/// none. So this covers only the part of the selection on this computer.
 ///
-/// ⚠️ Toggling only. A tag is made in the browser's own TAGS section, which is where the
-/// list of them lives and where one is renamed and removed, and put on something new
-/// from the row's own Tag menu.
+/// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's TAGS
+/// section, and added to something new from the row's Tag menu.
 fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
     let wearing = wearing(picked, worn);
     if wearing.is_empty() {
@@ -374,8 +370,8 @@ fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
                 let clicked = ui
                     .interact(drawn.rect, drawn.id.with(id), egui::Sense::click())
                     .on_hover_text(match on_all {
-                        true => "on everything picked — click to take it off all of it",
-                        false => "on some of what is picked — click to put it on all of it",
+                        true => "on everything selected; click to remove it from all",
+                        false => "on some of what is selected; click to add it to all",
                     })
                     .clicked();
                 if clicked {
@@ -390,11 +386,11 @@ fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
     });
 }
 
-/// The tags something picked wears, and whether each is on every one of it.
+/// The tags any picked asset has, and whether each is on all of them.
 ///
-/// ⚠️ Worn tags only, in the list's own order. A tag nothing picked wears is not a state
-/// of this selection — the whole list of them is the tree's, and putting a new one on is
-/// the row's own Tag menu.
+/// ⚠️ Only tags in use, in list order. A tag nothing picked has is not part of this
+/// selection's state: the full list belongs to the tree, and adding a new tag belongs to
+/// the row's Tag menu.
 fn wearing<'a>(picked: &[u64], worn: &'a Tags) -> Vec<(u64, &'a str, bool)> {
     worn.all()
         .iter()
@@ -420,7 +416,7 @@ fn body<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-/// The line a panel shows where there is nothing to say.
+/// The line a panel shows when it has nothing to say.
 fn faint(ui: &mut egui::Ui, said: &str) {
     ui.label(
         egui::RichText::new(said)
@@ -445,8 +441,8 @@ mod tests {
         ctx
     }
 
-    /// An instrument that has counted a library, holds a program, and has been asked what
-    /// one of its slots plays — one library it named and one it did not.
+    /// An instrument that has counted a library, holds a program, and has answered which
+    /// libraries one slot needs: one named and one not.
     fn attached(ctx: &egui::Context) -> (Device, Location) {
         let at = Location { bank: 6, slot: 0 };
         let mut device = Device::new(ctx.clone());
@@ -483,11 +479,11 @@ mod tests {
         (device, at)
     }
 
-    /// Draw the whole inspector over `picked`, and the two panels that take a selection
-    /// of their own.
+    /// Draw the whole inspector over `picked`, plus the two panels that take their own
+    /// selection.
     ///
-    /// Nothing checks pixels. What this catches is a layout that panics or an id that
-    /// collides, neither of which a test on the rules would see.
+    /// No pixels are checked. This catches a layout that panics or an id that collides,
+    /// which the rule tests would miss.
     fn paint(
         shell: &mut Shell,
         device: &Device,
@@ -520,8 +516,6 @@ mod tests {
         said
     }
 
-    /// SELECTION heads the dock whatever is on the bus; INSTRUMENT is only there while
-    /// one is attached, because everything under it is something an instrument said.
     #[test]
     fn instrument_is_headed_only_while_one_is_attached() {
         let ctx = context();
@@ -545,7 +539,7 @@ mod tests {
             assert!(held.iter().any(|word| word == header), "{header}: {held:?}");
         }
 
-        // Shut, each panel under INSTRUMENT draws its header and nothing under it.
+        // Collapsed panels under INSTRUMENT draw only their headers.
         let mut shut = Shell {
             room_open: false,
             info_open: false,
@@ -554,8 +548,6 @@ mod tests {
         paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
     }
 
-    /// The facts about one picked asset are the ones its library row already carries,
-    /// so the panel and the table cannot disagree.
     #[test]
     fn the_facts_of_one_picked_asset_are_its_rows_own() {
         use nord_format::accept::Family;
@@ -590,11 +582,10 @@ mod tests {
         assert_eq!(
             said[2].hint.as_deref(),
             Some(Where::Both(Some(false)).sentence()),
-            "the short word carries the whole of it"
+            "the hover gives the full sentence"
         );
 
-        // The one thing the panel says that the row does not know: what the attached
-        // instrument makes of it, and only where that is a refusal.
+        // The only fact not taken from the row is the instrument's refusal.
         let why = "This is a Stage 4 file and the instrument is a Nord Electro 5D.";
         let refused = facts(&row, &Fit::Refuses(why.into()));
         assert_eq!(refused.len(), said.len() + 1);
@@ -607,8 +598,6 @@ mod tests {
         );
     }
 
-    /// ⚠️ A refusal is a sentence, and a sentence the dock cannot fit on one line is laid
-    /// out on more of them rather than cut off at the panel's edge.
     #[test]
     fn a_fact_too_long_for_the_dock_wraps_rather_than_truncating() {
         let ctx = context();
@@ -642,8 +631,6 @@ mod tests {
         );
     }
 
-    /// Several picked is a count rather than a reading-out, and the two counts are the
-    /// two that decide what can be done with the set.
     #[test]
     fn a_selection_of_several_says_how_many_and_what_of_them() {
         let row = |name: &str, unsaved: bool, where_: Where| Row {
@@ -663,17 +650,14 @@ mod tests {
             row("edited", true, Where::Both(Some(false))),
             row("read off a slot", false, Where::Keyboard),
         ];
-        assert_eq!(tally(3, &rows), "3 picked, 1 unsaved, 2 on the keyboard");
+        assert_eq!(tally(3, &rows), "3 selected, 1 unsaved, 2 on the keyboard");
 
-        // A folder is picked and is no asset, so it is counted as picked and as nothing
-        // else.
-        assert_eq!(tally(1, &[]), "1 picked, 0 unsaved, 0 on the keyboard");
+        // A picked folder is not an asset, so it counts only as picked.
+        assert_eq!(tally(1, &[]), "1 selected, 0 unsaved, 0 on the keyboard");
     }
 
-    /// ⚠️ A dependency list answers for the slot it was asked about — that class at that
-    /// address — and for no other, so a selection elsewhere is *not asked* rather than
-    /// *needs nothing*. Every class is addressed in the same banks and slots, so the
-    /// sample at a program's own address must not be shown the program's list.
+    /// ⚠️ Every class is addressed by the same banks and slots, so the sample at a
+    /// program's address must not show the program's list.
     #[test]
     fn a_selection_the_instrument_was_not_asked_about_shows_nothing() {
         let ctx = context();
@@ -692,7 +676,7 @@ mod tests {
             needs(&[(ObjectClass::Program, elsewhere)], &device).is_empty(),
             "a program nothing has asked about"
         );
-        // And the dependency whose name came back blank has nothing but its id to show.
+        // A dependency returned with a blank name has only its id to show.
         assert_eq!(
             device
                 .state
@@ -701,9 +685,6 @@ mod tests {
         );
     }
 
-    /// The selection wears chips rather than the whole list: only the tags something
-    /// picked wears, solid where every picked asset wears one and hollow where some do.
-    /// A selection wearing none is a section that paints nothing where they would be.
     #[test]
     fn the_selections_tags_are_chips_and_nothing_at_all_where_there_are_none() {
         let ctx = context();
@@ -719,10 +700,7 @@ mod tests {
             [(both, "Sunday", true), (some, "Loud", false)]
         );
         assert!(wearing(&[], &labels).is_empty(), "nothing picked");
-        assert!(
-            wearing(&[9], &labels).is_empty(),
-            "picked, and wearing none"
-        );
+        assert!(wearing(&[9], &labels).is_empty(), "picked, with no tags");
 
         let painted = |picked: &[u64]| {
             let output = ctx.run(egui::RawInput::default(), |ctx| {
@@ -739,8 +717,6 @@ mod tests {
         assert!(painted(&[9]).is_empty(), "{:?}", painted(&[9]));
     }
 
-    /// A tag goes on everything picked and comes off it again, which is the whole of what
-    /// the panel asks for.
     #[test]
     fn a_tag_goes_on_the_whole_selection_and_comes_off_it_again() {
         let ctx = context();

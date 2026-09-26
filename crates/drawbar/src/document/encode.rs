@@ -1,13 +1,13 @@
 //! A WAV that landed in the workspace, and the instrument that can be made from it.
 //!
-//! Nothing decodes a WAV, so one opened here has no document of its own — it is bytes
-//! with an error beside them. What it does have is a use: `nord_format`'s sample encoder
-//! builds a one-zone instrument out of 44.1 kHz mono or stereo 16-bit PCM, in any of the
-//! three generations, and that is the panel this module draws.
+//! A WAV has no document of its own: opened here, it is bytes with an error beside them.
+//! `nord_format`'s sample encoder builds a one-zone instrument from 44.1 kHz mono or
+//! stereo 16-bit PCM in any of the three generations, and this module draws the panel
+//! that runs it.
 //!
 //! ⚠️ Only a v2 instrument has been played on hardware. The wide generations reproduce
 //! what Nord Sample Editor renders, but no instrument that plays them has been
-//! available, so the panel marks them unverified where the operator can read it.
+//! available, so the panel marks them unverified.
 
 use eframe::egui;
 use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
@@ -20,8 +20,8 @@ use super::sample::note_picker;
 
 /// Whether these bytes are worth offering an encode panel over.
 ///
-/// The container test alone, not a successful read: a 24-bit WAV is still a WAV, and
-/// the panel exists to say why that one cannot be encoded.
+/// Tests the container only: a 24-bit WAV still gets the panel, which says why it
+/// cannot be encoded.
 pub fn is_wav(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE"
 }
@@ -31,14 +31,14 @@ pub struct Draft {
     pub name: String,
     pub root_key: u8,
     pub top_note: u8,
-    /// Every content field stated outright rather than the editor's own record coding.
+    /// Every content field written in full, without the editor's record coding.
     pub plain: bool,
     pub layout: Layout,
 }
 
 impl Draft {
-    /// A panel over `label`, opened at the encoder's own defaults: middle C, two
-    /// octaves above it, and the one generation that has been played here.
+    /// A draft named after `label`, at the encoder's defaults: root at middle C, top note
+    /// two octaves above, and v2, the only generation played on hardware.
     pub fn new(label: &str) -> Draft {
         let stem = label.rsplit_once('.').map_or(label, |(stem, _)| stem);
         let mut name = stem.to_string();
@@ -70,9 +70,9 @@ impl Source {
 
 /// Why this WAV cannot become an instrument, in the operator's words.
 ///
-/// The three limits are the encoder's, not this app's: the field lattice is defined
-/// against one rate, a stroke carries one channel or two and nothing else, and a stroke
-/// shorter than [`encode::MIN_FRAMES`] has an opening the encoder does not model.
+/// The three limits are the encoder's: the field lattice is defined at one rate, a stroke
+/// carries one or two channels, and a stroke shorter than [`encode::MIN_FRAMES`] has an
+/// opening the encoder does not model.
 pub fn refusal(source: &Source) -> Option<String> {
     let pcm = match source {
         Source::Unreadable(why) => return Some(why.clone()),
@@ -80,22 +80,19 @@ pub fn refusal(source: &Source) -> Option<String> {
     };
     if pcm.rate != SOURCE_RATE {
         return Some(format!(
-            "{} Hz — the field lattice is defined against {SOURCE_RATE} Hz and the \
-             instrument's own resampler is not decoded, so resample the file first",
+            "{} Hz: the encoder takes only {SOURCE_RATE} Hz, so resample the file first",
             pcm.rate
         ));
     }
     if pcm.channels != 1 && pcm.channels != 2 {
         return Some(format!(
-            "{} channels — a stroke's terminator states one cell size, so it carries \
-             one channel or two and nothing else",
+            "{} channels: an instrument's audio holds one or two channels",
             pcm.channels
         ));
     }
     if pcm.frames() < encode::MIN_FRAMES {
         return Some(format!(
-            "{} frames — shorter than {} means an unresolved opening the encoder does \
-             not model",
+            "{} frames: the encoder needs at least {}",
             pcm.frames(),
             encode::MIN_FRAMES
         ));
@@ -137,8 +134,8 @@ fn generation_note(layout: Layout) -> &'static str {
     match layout {
         Layout::V2 => "played on hardware: mono, stereo and looped",
         Layout::V3 | Layout::V4 => {
-            "unverified: this reproduces the editor's own render, but no instrument \
-             that plays this generation has played one"
+            "unverified: this reproduces the Sample Editor's render, but it has not \
+             been played on an instrument that supports this generation"
         }
     }
 }
@@ -148,9 +145,9 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
     ui.label(egui::RichText::new("This is a WAV, not a Nord file.").strong());
     ui.label(
         egui::RichText::new(
-            "It can be encoded into a one-zone sample instrument. The file is Nord \
-             Sample Editor's own output apart from a float residue in the resampling \
-             kernel that changes nothing the instrument plays. Instruments encoded \
+            "It can be encoded into a one-zone sample instrument. The file matches Nord \
+             Sample Editor's output apart from floating-point rounding in the resampling \
+             kernel, which changes nothing the instrument plays. Instruments encoded \
              this way have been played on hardware.",
         )
         .small()
@@ -224,9 +221,9 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
             ui.add_space(120.0);
             ui.checkbox(&mut draft.plain, "Plain records")
                 .on_hover_text(
-                    "state every content field outright instead of the editor's own \
-                     record coding: the same audio in a larger file, and not the \
-                     editor's bytes",
+                    "write every content field in full instead of using the editor's \
+                     record coding: the same audio in a larger file that differs from \
+                     the editor's bytes",
                 );
         });
     });
@@ -267,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn a_riff_wave_container_is_what_offers_the_panel() {
+    fn only_a_riff_wave_container_offers_the_panel() {
         assert!(is_wav(&wav(44_100, 1, 8)));
         assert!(!is_wav(b"RIFF"));
         assert!(!is_wav(b"not a wav at all"));
@@ -292,7 +289,7 @@ mod tests {
         let short = refused(wav(SOURCE_RATE, 1, encode::MIN_FRAMES - 1)).expect("too short");
         assert!(short.contains(&encode::MIN_FRAMES.to_string()), "{short}");
 
-        // Bytes that are not a readable WAV keep the reader's own complaint.
+        // An unreadable WAV reports the reader's own error.
         let unreadable = refused(b"RIFF\0\0\0\0WAVE".to_vec()).expect("not readable");
         assert!(!unreadable.is_empty());
     }
@@ -367,11 +364,8 @@ mod tests {
         assert!(instrument(&draft, &source).is_ok());
     }
 
-    /// ⚠️ The name field's limit is bytes. A name of accented letters counted in
-    /// letters is twice the length the encoder takes, and it refuses after the panel
-    /// has accepted it.
     #[test]
-    fn a_name_of_accented_letters_is_cut_by_bytes_rather_than_by_letters() {
+    fn a_name_of_accented_letters_is_cut_by_bytes() {
         let draft = Draft::new(&format!("{}.wav", "é".repeat(MAX_NAME_LEN)));
         assert!(draft.name.len() <= MAX_NAME_LEN, "{:?}", draft.name);
         assert_eq!(draft.name.chars().count(), MAX_NAME_LEN / 2);

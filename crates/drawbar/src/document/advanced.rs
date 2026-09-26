@@ -1,8 +1,8 @@
-//! Everything the engineering build showed: the field table, and the record beside it.
+//! The Advanced face: the field table and the record beside it.
 //!
-//! Nothing here is a control but the table. The rest is the record: what the container
-//! says, what the bytes did, and — for something read off the instrument — what the
-//! instrument says about the slot it came from.
+//! The table is the only control here. The record lists what the container says, which
+//! bytes changed, and, for something read from the instrument, what the instrument says
+//! about the slot it came from.
 
 use eframe::egui;
 use nord_format::fields::Field;
@@ -23,9 +23,8 @@ pub struct SlotDetails {
     pub at: Location,
 }
 
-/// The table's columns, left to right. Wide enough for the longest of each in an ne5
-/// body, and fixed rather than reflowing: a path is long, a body has hundreds of them,
-/// and a column that moves per row cannot be read down.
+/// The table's columns, left to right, each wide enough for its longest value in an ne5
+/// body. The widths are fixed so that a column lines up down hundreds of rows.
 const COLUMNS: [(&str, f32); 6] = [
     ("Path", 250.0),
     ("Bits", 74.0),
@@ -35,16 +34,16 @@ const COLUMNS: [(&str, f32); 6] = [
     ("", 20.0),
 ];
 
-/// One row of it, the label column a record block reads down, and the page's own left
-/// margin.
 const ROW: f32 = 22.0;
+/// The label column of a record block.
 const LABEL: f32 = 110.0;
+/// The page's left margin.
 const PAD: f32 = 12.0;
 const MONO: f32 = 10.5;
 const HEAD: f32 = 9.0;
 const HEAD_ROW: f32 = 14.0;
 
-/// The room a typed value keeps inside its box, which is what a `TextEdit` leaves.
+/// The horizontal inset a `TextEdit` gives its text.
 const BOX_PAD: f32 = 4.0;
 
 /// How much of the page the byte diff takes before it scrolls inside itself.
@@ -63,26 +62,26 @@ struct Cell {
 
 #[derive(Default)]
 pub struct Advanced {
-    /// Narrows the table by path or label. A body has ninety fields.
+    /// Narrows the table by path or label.
     filter: String,
     cell: Cell,
-    /// The asset and the two sets of bytes the cached diff is a comparison of.
+    /// The asset id and the two byte stamps the cached diff compares.
     ///
-    /// ⚠️ `byte_diff` walks both bodies. The Advanced face asks for it on every frame
-    /// it is up, and a piano library is hundreds of megabytes — it is walked once per
-    /// pair of bodies.
+    /// ⚠️ `byte_diff` walks both bodies. The Advanced face asks for it every frame it is
+    /// shown, and a piano library is hundreds of megabytes, so it is walked once per pair
+    /// of bodies.
     diff_for: Option<(u64, u64, u64)>,
     diff: Vec<DiffRow>,
 }
 
 impl Advanced {
-    /// What the file says about itself: the same facts the document was built from,
-    /// read here and never written differently.
+    /// What the file says about itself: the facts the document was built from, read here
+    /// and written back unchanged.
     pub fn about(ui: &mut egui::Ui, rows: &[(&'static str, String, String)]) {
         controls::heading(
             ui,
             "About this file",
-            "what the file says about itself — read here, never written differently",
+            "what the file says about itself, read here and written back unchanged",
             None,
         );
         facts(ui, rows);
@@ -91,10 +90,9 @@ impl Advanced {
     /// The whole body as a table: every field the library declares, engineering-only
     /// ones included, each value editable by the spelling `set_field` takes.
     ///
-    /// This is the engineer's view, so nothing is hidden and nothing is prettied up: an
-    /// unrecognised value is spelled `unknown (9)` here and that spelling is accepted
-    /// back, and a field the Basic face does not draw is a row like any other, flagged
-    /// for what it is.
+    /// Nothing is hidden or prettified: an unrecognized value is spelled `unknown (9)` and
+    /// that spelling is accepted back, and a field the Basic face does not draw is an
+    /// ordinary row with a flag.
     pub fn table(&mut self, ui: &mut egui::Ui, table: &Table<'_>, sets: &mut Sets) {
         let quiet = app::caption(ui.visuals());
         let rows: Vec<&Field> = table
@@ -109,8 +107,8 @@ impl Advanced {
         controls::heading(
             ui,
             "Every field",
-            "registry order · raw is what was read; type in Writes to change it — the value \
-             is taken as spelled, refused if the field cannot hold it",
+            "registry order · Raw is what was read; type in Writes to change it. A value is \
+             taken as spelled and refused if the field cannot hold it",
             Some((
                 &format!(
                     "{} of {} rows · {unseen} hidden from Basic",
@@ -156,7 +154,7 @@ impl Advanced {
         let visuals = ui.visuals().clone();
         let changed = table.changed.contains(&field.path);
         let hidden = !table.shows(&field.path);
-        let labelled = strings::known(&field.path);
+        let labeled = strings::known(&field.path);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
         if changed {
@@ -204,7 +202,7 @@ impl Advanced {
             ink,
         );
         self.writes(&mut row, field, sets);
-        if let Some((glyph, tint)) = flag(changed, hidden, labelled, &visuals) {
+        if let Some((glyph, tint)) = flag(changed, hidden, labeled, &visuals) {
             icon(&mut row, glyph, 11.0, tint);
         }
 
@@ -220,9 +218,9 @@ impl Advanced {
         };
         response.on_hover_text(format!(
             "{} · accepts {accepts}",
-            match (hidden, labelled) {
-                (true, _) => "not relevant: the instrument is not using this for the state the \
-                              file holds — stored, valid, writable"
+            match (hidden, labeled) {
+                (true, _) => "not relevant: the instrument ignores this in the state the file \
+                              holds, though it is stored, valid and writable"
                     .to_string(),
                 (false, true) => strings::label(&field.path),
                 (false, false) => "no label in this app's table yet".to_string(),
@@ -230,9 +228,8 @@ impl Advanced {
         ));
     }
 
-    /// The one editable column. A box opens where the value is clicked, commits when it
-    /// gives up the focus, and stays open holding what was typed while the library is
-    /// refusing it.
+    /// The editable column. Clicking a value opens a box, which commits when it loses
+    /// focus and stays open with the typed text while the library refuses it.
     fn writes(&mut self, ui: &mut egui::Ui, field: &Field, sets: &mut Sets) {
         let width = COLUMNS[4].1;
         if self.cell.path != field.path {
@@ -252,12 +249,12 @@ impl Advanced {
             [width, ROW - 4.0],
             egui::TextEdit::singleline(&mut self.cell.text).font(egui::FontId::monospace(MONO)),
         );
-        // ⚠️ Taken once. Asking for focus every frame would mean the cell could never be
-        // left by clicking anything else.
+        // ⚠️ Taken once: asking for focus every frame would keep the cell from ever losing
+        // it.
         if self.cell.fresh {
             self.cell.fresh = false;
             response.request_focus();
-            // Selected, so typing replaces the value rather than growing it.
+            // Select all, so typing replaces the value.
             let all = egui::text::CCursorRange::two(
                 egui::text::CCursor::new(0),
                 egui::text::CCursor::new(self.cell.text.chars().count()),
@@ -274,10 +271,10 @@ impl Advanced {
                     .color(crate::app::bad(ui.visuals())),
             );
         }
-        // ⚠️ The cell's own keys, which a `TextEdit` gives up the focus on. Read from
-        // the window, an Enter pressed anywhere submitted every cell left open on
-        // screen — including one the library had already refused, which went back to
-        // it and into the log on every press.
+        // ⚠️ Keys are read only when this cell loses focus. If they were read from the
+        // window every frame, an Enter pressed anywhere would submit every open cell,
+        // including a refused one, which would go back to the library and into the log on
+        // every press.
         if !response.lost_focus() {
             return;
         }
@@ -291,8 +288,8 @@ impl Advanced {
             self.cell = Cell::default();
             return;
         }
-        // Losing focus while a refusal is showing keeps the cell open: the typed value
-        // is the only copy of what the operator meant, and Enter is what tries again.
+        // Losing focus while a refusal shows keeps the cell open, since the typed value is
+        // the only copy of what the operator meant. Enter tries again.
         if self.cell.error.is_some() && !entered {
             return;
         }
@@ -317,9 +314,9 @@ impl Advanced {
 
     /// Forget the cell being typed into.
     ///
-    /// ⚠️ One table serves every tab, and a cell is remembered by the **path** it sits on
-    /// — which two documents of the same format both declare. Left standing, a half-typed
-    /// value follows the operator into the next document and lands there on Enter.
+    /// ⚠️ One table serves every tab, and a cell is remembered by its path, which two
+    /// documents of the same format share. Left open, a half-typed value would follow the
+    /// operator into the next document and land there on Enter.
     pub(super) fn leave(&mut self) {
         self.cell = Cell::default();
     }
@@ -343,22 +340,21 @@ impl Advanced {
 
     /// Report what the library said about the last cell edit.
     ///
-    /// `Ok` closes the cell; a refusal leaves it open with the message under the table.
+    /// `Ok` closes the cell; a refusal leaves it open with the message beside it.
     pub fn settled(&mut self, outcome: Result<(), String>) {
         match outcome {
             Ok(()) => self.cell = Cell::default(),
             Err(why) => {
                 self.cell.error = Some(why);
-                // Back into the cell: what was typed is the only copy of what was meant.
+                // Refocus the cell so the operator can correct what was typed.
                 self.cell.fresh = true;
             }
         }
     }
 
-    /// The record, block by block: what the container states, what the bytes have done
-    /// since the asset was last saved, and what the instrument says about the slot it
-    /// came off. Every one of them reads like [`Advanced::about`], because every one of
-    /// them is a fact about the file rather than a control.
+    /// The record, block by block: what the container states, which bytes have moved since
+    /// the asset was last saved, and what the instrument says about the slot it came off.
+    /// Each block is laid out like [`Advanced::about`].
     pub fn meta(
         &mut self,
         ui: &mut egui::Ui,
@@ -368,7 +364,7 @@ impl Advanced {
         controls::heading(
             ui,
             "Container",
-            "what the header states — read, checked and written back unchanged",
+            "what the header states; read, checked and written back unchanged",
             None,
         );
         verify(ui, entity);
@@ -424,7 +420,7 @@ pub struct Table<'a> {
 
 impl Table<'_> {
     /// The value this path held in the bytes the document was last saved as. A field the
-    /// saved decode does not carry reads as what is in front of the operator.
+    /// saved decode does not carry shows its current value.
     fn raw(&self, path: &str) -> &str {
         self.saved
             .iter()
@@ -438,9 +434,7 @@ impl Table<'_> {
     }
 }
 
-/// One mono column of a row.
-/// One cell, drawn at its column's own width so the column reads down, and left where
-/// its heading is.
+/// One cell, drawn at its column's width and left-aligned under its heading.
 fn cell(ui: &mut egui::Ui, text: &str, size: egui::Vec2, font: egui::FontId, ink: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let mut cell = ui.new_child(
@@ -464,7 +458,7 @@ pub fn facts(ui: &mut egui::Ui, rows: &[(&str, String, String)]) {
     }
 }
 
-/// One row of a record block, the value in whatever ink its own state calls for.
+/// One row of a record block, with the value in `ink`.
 fn fact(ui: &mut egui::Ui, label: &str, value: &str, note: &str, ink: egui::Color32) {
     let quiet = app::caption(ui.visuals());
     ui.horizontal(|ui| {
@@ -495,8 +489,8 @@ fn fact(ui: &mut egui::Ui, label: &str, value: &str, note: &str, ink: egui::Colo
     });
 }
 
-/// The Writes column before anything is typed in it: the value standing where the box
-/// that opens on a click will stand it.
+/// The Writes column before a click opens its box: the value, drawn where the box will
+/// show it.
 fn held(ui: &mut egui::Ui, value: &str, width: f32) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, ROW - 4.0), egui::Sense::click());
@@ -525,16 +519,15 @@ fn held(ui: &mut egui::Ui, value: &str, width: f32) -> egui::Response {
     response
 }
 
-/// The one mark at the end of a row, in the order that decides which it wears: what the
-/// operator changed, then what the Basic face does not draw, then what this app has no
-/// name for.
+/// The mark at the end of a row, by precedence: changed by the operator, then not drawn
+/// on the Basic face, then unnamed in this app.
 fn flag(
     changed: bool,
     hidden: bool,
-    labelled: bool,
+    labeled: bool,
     visuals: &egui::Visuals,
 ) -> Option<(Glyph, egui::Color32)> {
-    match (changed, hidden, labelled) {
+    match (changed, hidden, labeled) {
         (true, _, _) => Some((Glyph::Pencil, app::warn(visuals))),
         (false, true, _) => Some((Glyph::EyeOff, app::caption(visuals))),
         (false, false, false) => Some((Glyph::Tag, app::caption(visuals))),
@@ -542,8 +535,8 @@ fn flag(
     }
 }
 
-/// Whether the bytes this app would write are the bytes it read, which is the one row
-/// of the record that is a claim rather than a reading.
+/// Whether the bytes this app would write are the bytes it read. This is the only row
+/// of the record that is a claim; the others report what was read.
 fn verify(ui: &mut egui::Ui, entity: &LocalEntity) {
     let ink = entity.verify.color(ui.visuals());
     fact(
@@ -605,12 +598,12 @@ fn container(entity: &LocalEntity) -> Vec<(&str, String, String)> {
     ]
 }
 
-/// What a stored half carries where it names no position.
+/// The value a stored half holds when it names no position.
 const NO_SLOT: u16 = 0xffff;
 
 /// The stored slot, one-indexed as `BANK:SLOT`.
 ///
-/// Library files carry `0xffff:0xffff` where slot files keep a bank/slot pair — a
+/// Library files hold `0xffff:0xffff` where slot files hold a bank and slot, because a
 /// library object has no slot until an instrument gives it one.
 fn stored_slot(slot: (u16, u16)) -> String {
     match slot {
@@ -619,8 +612,7 @@ fn stored_slot(slot: (u16, u16)) -> String {
     }
 }
 
-/// One half of a stored slot, counted from one. A half holding the none marker names no
-/// position, so there is nothing to count from — and `0xffff + 1` does not fit a `u16`.
+/// One half of a stored slot, counted from one, or `none` for the none marker.
 fn counted(half: u16) -> String {
     match half {
         NO_SLOT => "none".to_string(),
@@ -633,7 +625,6 @@ fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
         ui.label(
             egui::RichText::new(match entity.saved.bytes.len() == entity.bytes.len() {
                 true => "nothing moved",
-                // Nothing here can pair the bytes up across a length change.
                 false => "the length changed, so there is nothing to line up",
             })
             .weak()
@@ -738,9 +729,8 @@ mod tests {
     use super::*;
     use crate::workspace::{Fresh, Workspace};
 
-    /// The Changes section is what the asset holds against what it was last saved as,
-    /// and it follows both ends of that: an edit moves the bytes, and saving moves the
-    /// baseline onto them.
+    /// The Changes section compares the asset with its last save: an edit adds rows, and
+    /// saving clears them.
     #[test]
     fn the_changes_rows_follow_the_bytes_and_the_baseline() {
         let ctx = eframe::egui::Context::default();
@@ -778,8 +768,6 @@ mod tests {
         );
     }
 
-    /// A pair is counted from one, and a half holding the none marker is spelled as one
-    /// rather than counted from: `0xffff + 1` is not a slot and does not fit a `u16`.
     #[test]
     fn a_stored_slot_counts_from_one_and_names_a_half_that_holds_no_position() {
         assert_eq!(stored_slot((0, 0)), "1:1");

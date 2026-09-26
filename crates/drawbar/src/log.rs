@@ -1,9 +1,9 @@
 //! The activity log: a bounded record of what the app did, oldest dropped first, and
-//! the one plain-words line the status strip shows above it.
+//! the plain-language line the status strip shows above it.
 //!
-//! The two are written separately on purpose. The log keeps protocol detail — slot
-//! numbers, byte counts, device status codes — and the status line keeps a sentence
-//! about sounds and places. [`Log::say`] and [`Log::trouble`] write both.
+//! The two are written separately. The log keeps protocol detail (slot numbers, byte
+//! counts, device status codes), and the status line keeps a sentence about sounds and
+//! places. [`Log::say`] and [`Log::trouble`] write both.
 
 use std::collections::VecDeque;
 
@@ -44,7 +44,7 @@ pub struct Log {
     /// ⚠️ `std::time::Instant::now()` traps on `wasm32-unknown-unknown`, so the log
     /// cannot read a clock of its own; the timeline is elapsed seconds, not wall time.
     clock: f64,
-    /// The one sentence the status strip shows when nothing is running.
+    /// The sentence the status strip shows when nothing is running.
     status: (Level, String),
 }
 
@@ -83,7 +83,7 @@ impl Log {
         self.push(Level::Info, text);
     }
 
-    /// The same, for something that went wrong.
+    /// Like [`Log::say`], for something that went wrong.
     pub fn trouble(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.status = (Level::Error, text.clone());
@@ -174,8 +174,8 @@ fn written<'a>(entries: impl Iterator<Item = &'a Entry>) -> String {
 mod tests {
     use super::*;
 
-    /// The strip's line and the log's line are written together, so an operator reading
-    /// only the strip is never told less than happened.
+    /// The strip's line and the log's line are written together, so a user reading only
+    /// the strip is never told less than happened.
     #[test]
     fn a_plain_line_reaches_the_strip_and_the_log_alike() {
         let mut log = Log::default();

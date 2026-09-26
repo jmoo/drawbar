@@ -1,4 +1,4 @@
-//! The one row the tree is built from, painted rather than assembled from widgets.
+//! The row the whole tree is built from, painted without child widgets.
 
 use eframe::egui;
 
@@ -9,48 +9,46 @@ use crate::icon::{painted, Glyph};
 pub struct Cells<'a> {
     /// Where the row's contents start. See `tree::indent`.
     pub indent: f32,
-    /// The triangle, and which way it points. A row with nothing under it has none.
+    /// The triangle, and whether it points open. `None` for a row with nothing under it.
     pub open: Option<bool>,
     pub glyph: Option<Glyph>,
     /// The monospace location column, `7:4`. Assets on this computer have none.
     pub at: Option<String>,
     pub name: &'a str,
-    /// A faint word after the name — what kind of thing it is, or where it is owed.
+    /// A faint word after the name: its kind, or the slot it is queued for.
     pub note: Option<&'a str>,
-    /// The dot at the right end, and the words a hover over it says. Every dot means
-    /// something, and nothing else in the row says what.
+    /// The dot at the right end, and its hover text. Nothing else in the row explains the
+    /// dot.
     pub dot: Option<(egui::Color32, &'a str)>,
-    /// The monospace readout at the right end — how full, or how many.
+    /// The monospace readout at the right end: how full, or how many.
     pub count: Option<String>,
-    /// How many tags it wears, painted at the right end as the tag glyph and a number.
-    /// None of them is drawn for a row wearing none.
+    /// How many tags it has, painted at the right end as the tag glyph and a number.
+    /// Nothing is drawn for zero.
     pub tags: usize,
-    /// The name is a stand-in rather than a real one.
+    /// The name is a placeholder, drawn faint.
     pub faint: bool,
-    /// It holds something other than what it was last saved as, which the name says by
-    /// wearing a star.
+    /// It differs from what was last saved, which the name shows with a star.
     pub unsaved: bool,
     /// The instrument's panel has this slot loaded.
     pub loaded: bool,
-    /// A row inside a branch: a point shorter, and in the smaller face.
+    /// A row inside a branch: a pixel shorter, in a smaller font.
     pub child: bool,
 }
 
-/// A drawn row: what it answered, and where the parts a click can mean something on
-/// ended up.
+/// A drawn row: its response, and where its clickable parts ended up.
 pub struct Drawn {
     pub response: egui::Response,
-    /// The triangle's box, where the row has one. A click there opens the branch rather
-    /// than picking the row.
+    /// The triangle's box, if the row has one. A click there opens the branch instead of
+    /// selecting the row.
     pub chevron: Option<egui::Rect>,
 }
 
-/// How tall a row is, and a child row under it.
+/// The height of a row, and of a child row.
 pub const ROW: f32 = 22.0;
 pub const CHILD: f32 = 21.0;
 
-/// The triangle's box and the gap after it — what a leaf skips so its glyph lines up
-/// under the glyph of a branch beside it.
+/// The triangle's box, and the box plus the gap after it: what a leaf skips so its glyph
+/// lines up under the glyph of a branch beside it.
 pub const CHEVRON: f32 = 12.0;
 pub const STEP: f32 = CHEVRON + GAP;
 
@@ -58,26 +56,26 @@ pub const STEP: f32 = CHEVRON + GAP;
 const GLYPH: f32 = 12.0;
 const GAP: f32 = 6.0;
 
-/// The dot that says what the instrument holds where a row stands.
+/// The diameter of the status dot.
 const DOT: f32 = 6.0;
 
-/// The tag glyph beside the number of them.
+/// The size of the tag glyph beside the tag count.
 const SMALL: f32 = 11.0;
 
 /// The width the location column takes, so names line up under each other.
 const AT_W: f32 = 34.0;
 
-/// The faces a row paints in. Painted rather than laid out, so the sizes are here
-/// rather than resolved from the named styles in [`crate::app`].
+/// The text sizes a row paints in. The row is painted directly, so the sizes live here
+/// and not in the named styles in [`crate::app`].
 const NAME: f32 = 12.0;
 const CHILD_NAME: f32 = 11.5;
 const MONO: f32 = 10.0;
 
-/// The ink for a cell that carries a colour of its own — a state word, a dependency, a
+/// The text color for a cell with a color of its own: a state word, a dependency, a
 /// count, an address.
 ///
-/// ⚠️ The signal colours measure 2.3–4.3:1 against `selection.bg_fill`. A selected row
-/// gives every one of them the selection's own ink instead.
+/// ⚠️ The signal colors measure 2.3–4.3:1 contrast against `selection.bg_fill`, so a
+/// selected row draws all of them in the selection's text color.
 pub fn cell_ink(selected: bool, own: egui::Color32, visuals: &egui::Visuals) -> egui::Color32 {
     match selected {
         true => visuals.selection.stroke.color,
@@ -85,12 +83,11 @@ pub fn cell_ink(selected: bool, own: egui::Color32, visuals: &egui::Visuals) -> 
     }
 }
 
-/// The name as it is laid out: italic and starred while the row holds something other
-/// than what it was last saved as.
+/// The name as laid out: italic and starred while the row differs from what was last
+/// saved.
 ///
-/// ⚠️ The star is part of the text, so a name too long for its row loses the star before
-/// it loses the name — and the hover, which is the unmarked name, is what a reader falls
-/// back to.
+/// ⚠️ The star is part of the text, so a name too long for its row loses the star first.
+/// The hover then shows the full name, without the star.
 pub(super) fn name_job(
     cells: &Cells,
     font: egui::FontId,
@@ -110,8 +107,8 @@ pub(super) fn name_job(
     job
 }
 
-/// The name a row shows: its own without the format tag, and a star while it holds
-/// something other than what it was last saved as.
+/// The name a row shows: without the format tag, and with a star while it differs from
+/// what was last saved.
 pub fn starred(name: &str, unsaved: bool) -> String {
     let shown = crate::strings::display_name(name);
     match unsaved {
@@ -122,10 +119,9 @@ pub fn starred(name: &str, unsaved: bool) -> String {
 
 /// One row of the tree: a full-width click target with its parts painted into it.
 ///
-/// ⚠️ Nothing inside is a widget. A label allocates a hover rect of its own, which then
-/// wins the hit test over the row — the highlight drops out as the pointer crosses the
-/// text, and clicks land on whichever word happens to be under them. The row is the only
-/// thing that senses.
+/// ⚠️ Nothing inside is a widget. A label allocates its own hover rect, which wins the
+/// hit test over the row: the highlight drops out as the pointer crosses the text, and
+/// clicks land on whichever word is under them. Only the row senses input.
 pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     let height = match cells.child {
         true => CHILD,
@@ -198,7 +194,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         x += AT_W;
     }
 
-    // The right end is claimed first: the name takes whatever is left, and is cut to it.
+    // The right end is laid out first; the name gets the remaining width, truncated.
     let mut right = rect.right() - GAP;
     if cells.tags > 0 {
         let galley =
@@ -266,13 +262,13 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         );
     }
 
-    // ⚠️ The dot is not a widget either: a hover rect of its own would take the hit
-    // test off the row. Which text the row's own hover carries is decided by where the
-    // pointer is, the way the library's cells decide it.
+    // ⚠️ The dot is not a widget either: its own hover rect would take the hit test from
+    // the row. The row's hover text depends on where the pointer is, as in the library's
+    // cells.
     let over = |box_: egui::Rect| response.hover_pos().is_some_and(|at| box_.contains(at));
     let said = match dot {
         Some((box_, said)) if over(box_) => Some(said),
-        // A name the row had to cut is a name nothing else in this panel would show.
+        // A truncated name is shown in full nowhere else in this panel.
         _ => elided.then_some(cells.name),
     };
     let response = match said {
@@ -287,7 +283,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_coloured_cell_keeps_its_colour_until_its_row_is_selected() {
+    fn a_colored_cell_keeps_its_color_until_its_row_is_selected() {
         for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
             for own in [
                 crate::app::good(&visuals),
@@ -305,8 +301,6 @@ mod tests {
         }
     }
 
-    /// The name of a row holding an edit nothing has saved wears a star, and the row
-    /// stays inside its panel with it.
     #[test]
     fn an_unsaved_row_writes_its_name_with_a_star() {
         fn words(shape: &egui::Shape, into: &mut Vec<String>) {
@@ -343,8 +337,8 @@ mod tests {
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
-    /// ⚠️ A name too long for the panel is cut rather than painted over the count beside
-    /// it, and the whole of it is what the row's own hover then carries.
+    /// ⚠️ A name too long for the panel is truncated so it does not paint over the count
+    /// beside it. The row's hover then shows it in full.
     #[test]
     fn a_name_too_long_for_its_row_is_cut_to_the_room_left() {
         let ctx = egui::Context::default();
@@ -378,7 +372,7 @@ mod tests {
             .iter()
             .find(|galley| galley.text() == long)
             .expect("the long name was painted");
-        assert!(cut.elided, "a name with no room for it is cut");
+        assert!(cut.elided, "a name without room is truncated");
         assert!(
             cut.size().x <= 232.0,
             "and stays inside the panel: {}",

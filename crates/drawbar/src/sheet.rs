@@ -1,6 +1,6 @@
-//! The shape a sheet wears: the modals drawbar opens over the whole window — the first-run
-//! welcome, what changed, and About — share one masthead, one heading, one foot and two
-//! buttons, so they read as one thing on every target.
+//! The layout of a sheet, a modal drawbar opens over the whole window: the first-run
+//! welcome, what's new, and About. They share one masthead, heading style, foot, and pair
+//! of buttons, so they look alike on every target.
 
 use eframe::egui;
 
@@ -8,38 +8,39 @@ use crate::icon::{sized, Glyph};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// One line of what this software is.
+/// A one-line description of this software.
 pub(crate) const WHAT: &str =
     "Your Nord's sounds, in a window: browse what is on your computer and on your \
-                               instrument, edit programs, samples and pianos, and send them back.";
+                               instrument, edit programs, samples, and pianos, and send them back.";
 
-/// Required of every public face of the project — see `CONTRIBUTING.md`.
+/// Required on every public face of the project; see `CONTRIBUTING.md`.
 pub(crate) const DISCLAIMER: &str = "Not affiliated with, authorized, or endorsed by Clavia DMI AB. \
                                      \"Nord\", \"Clavia\" and \"Electro\" are trademarks of Clavia DMI AB, \
                                      used here only to identify the hardware these formats come from.";
 
-/// The room between two lines of a sheet.
+/// The space between two lines of a sheet.
 pub(crate) const GAP: f32 = 4.0;
 
-/// The room inside a sheet's side edges, which every section keeps and the foot does not.
+/// The padding inside a sheet's side edges, which every section keeps and the foot does
+/// not.
 pub(crate) const PAD: f32 = 20.0;
 
-/// The least room a sheet keeps from the window's edge.
+/// The minimum space between a sheet and the window's edge.
 const MARGIN: f32 = 24.0;
 
-/// The room inside a sheet's buttons, wider than the shell's own.
+/// The padding inside a sheet's buttons, wider than the shell's.
 const PADDING: egui::Vec2 = egui::vec2(12.0, 4.0);
 
-/// The glyph beside a sheet's title.
+/// The size of the glyph beside a sheet's title.
 const MARK: f32 = 22.0;
 
-/// A sheet is `most` wide, or the window less its margins where that is narrower.
+/// A sheet's width: `most`, or the window's width minus the margins if that is narrower.
 pub(crate) fn width(ctx: &egui::Context, most: f32) -> f32 {
     (ctx.screen_rect().width() - 2.0 * MARGIN).min(most)
 }
 
-/// The most a sheet's scrolling middle may claim, so the `around` it — masthead and foot —
-/// stays on screen, and never less than `fewest`.
+/// The maximum height of a sheet's scrolling middle, so the masthead and foot (`around`)
+/// stay on screen. Never less than `fewest`.
 pub(crate) fn middle(ctx: &egui::Context, around: f32, fewest: f32) -> f32 {
     (ctx.screen_rect().height() - around).max(fewest)
 }
@@ -67,8 +68,7 @@ pub(crate) fn section<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R
         .inner
 }
 
-/// The mark, the name, the version and, while this is alpha, the pill that says so.
-/// `tagline` adds [`WHAT`] beneath.
+/// The mark, the name, the version, and the alpha pill. `tagline` adds [`WHAT`] below.
 pub(crate) fn masthead(ui: &mut egui::Ui, tagline: bool) {
     ui.horizontal_top(|ui| {
         let accent = crate::app::accent(ui.visuals());
@@ -112,7 +112,7 @@ pub(crate) fn pill(ui: &mut egui::Ui, text: &str, tint: egui::Color32) -> egui::
         .response
 }
 
-/// A section heading, with a quieter aside after it where there is one.
+/// A section heading, with a quieter aside after it if there is one.
 pub(crate) fn heading(ui: &mut egui::Ui, title: &str, aside: Option<&str>) {
     ui.add_space(GAP * 3.0);
     ui.horizontal(|ui| {
@@ -149,8 +149,8 @@ pub(crate) fn foot(
         });
 }
 
-/// The [`DISCLAIMER`] at the left of a foot, wrapping in the room the buttons after it
-/// leave, which is everything but `keep`.
+/// The [`DISCLAIMER`] at the left of a foot, wrapping within the available width less
+/// `keep`, which the buttons after it need.
 pub(crate) fn disclaimer(ui: &mut egui::Ui, keep: f32) {
     let room = egui::vec2((ui.available_width() - keep).max(0.0), 0.0);
     ui.allocate_ui(room, |ui| {
@@ -158,7 +158,7 @@ pub(crate) fn disclaimer(ui: &mut egui::Ui, keep: f32) {
     });
 }
 
-/// The one button a sheet is dismissed with: the accent around it, on the active fill.
+/// The button that dismisses a sheet: an accent border on the active fill.
 pub(crate) fn primary(ui: &mut egui::Ui, glyph: Option<Glyph>, label: &str) -> egui::Response {
     let accent = crate::app::accent(ui.visuals());
     let fill = ui.visuals().widgets.active.bg_fill;
@@ -199,13 +199,13 @@ fn button(
     .inner
 }
 
-/// ⚠️ Always a new tab: in a browser the app *is* the page, and following a link in
-/// place ends the session and everything unsaved in it.
+/// ⚠️ Always a new tab: in a browser the app is the page, and following a link in place
+/// ends the session and loses anything unsaved.
 pub(crate) fn link(ui: &mut egui::Ui, label: &str, url: &str) -> egui::Response {
     ui.add(egui::Hyperlink::from_label_and_url(label, url).open_in_new_tab(true))
 }
 
-/// A [`link`] with a glyph before its label, both in the link colour.
+/// A [`link`] with a glyph before its label, both in the link color.
 pub(crate) fn glyph_link(
     ui: &mut egui::Ui,
     glyph: Glyph,
@@ -248,7 +248,7 @@ mod tests {
     }
 
     /// Every helper lays out in a headless frame: a `Glyph` the image loader lacks, or a
-    /// layout that asks for more than it is given, panics here rather than in a window.
+    /// layout that asks for more than it is given, panics here instead of in a window.
     #[test]
     fn every_helper_draws() {
         let ctx = headless();

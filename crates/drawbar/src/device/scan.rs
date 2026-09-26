@@ -1,19 +1,19 @@
-//! Which classes have been read, and which are still owed.
+//! Which classes have been read, and which are still to read.
 //!
-//! One class is one command: the worker opens a session, reads the class's counters and
-//! then every bank inside it, and streams a bank at a time back. So the queue holds
-//! classes, and the progress each one reports arrives while it is still running.
+//! Each class is one command: the worker opens a session, reads the class's counters and
+//! then every bank in it, and streams the banks back one at a time. The queue holds
+//! classes, and a class reports progress while it runs.
 
 use std::collections::{HashMap, VecDeque};
 
 use nord_usb::ObjectClass;
 
-/// How far through a class the background read has got.
+/// How far the background read has progressed through a class.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Progress {
     /// Banks read so far.
     pub done: u32,
-    /// Banks expected, once the class's counters have said enough to work it out.
+    /// Banks expected, once the class's counters give enough to work it out.
     pub total: Option<u32>,
     /// The walk is still going.
     pub running: bool,
@@ -29,12 +29,12 @@ pub struct Scan {
     queue: VecDeque<ObjectClass>,
     /// Keyed by the raw class number, because [`ObjectClass`] is not `Hash`.
     progress: HashMap<u32, Progress>,
-    /// When each class last said anything about itself, on egui's own clock.
+    /// When each class last answered, on egui's clock.
     read: HashMap<u32, f64>,
 }
 
 impl Scan {
-    /// Read `class` from the top. Queued once however often it is asked for.
+    /// Read `class` from the start. Queued once, however often it is asked for.
     pub fn start(&mut self, class: ObjectClass) {
         if !self.queue.contains(&class) {
             self.queue.push_back(class);
@@ -65,8 +65,8 @@ impl Scan {
         progress.done = progress.done.max(bank);
     }
 
-    /// The walk ended — whether it ran out of banks or gave up part-way. Still running
-    /// if the class has been asked for again in the meantime.
+    /// The walk ended, whether it ran out of banks or gave up partway. The class stays
+    /// running if it was asked for again meanwhile.
     pub fn finished(&mut self, class: ObjectClass) {
         let again = self.queue.contains(&class);
         self.progress.entry(class.to_raw()).or_default().running = again;
@@ -78,8 +78,8 @@ impl Scan {
 
     /// Note that the class has just answered, at `now` on egui's clock.
     ///
-    /// ⚠️ Every bank a walk delivers, and the end of the walk itself: what is wanted is
-    /// how stale the names on screen are, not when a session happened to be opened.
+    /// ⚠️ Called for every bank a walk delivers and at the end of the walk, because what
+    /// matters is how stale the names on screen are, not when the session opened.
     pub fn heard(&mut self, class: ObjectClass, now: f64) {
         self.read.insert(class.to_raw(), now);
     }
@@ -131,8 +131,6 @@ mod tests {
         assert_eq!(progress.done, 1);
     }
 
-    /// Reading a class again starts its count over rather than carrying on from where
-    /// the last walk stopped.
     #[test]
     fn reading_a_class_again_starts_its_count_over() {
         let mut scan = Scan::default();
@@ -146,8 +144,8 @@ mod tests {
         assert_eq!(scan.take(), Some(ObjectClass::Program));
     }
 
-    /// When a class last answered is what says how stale its names are, and letting the
-    /// instrument go leaves nothing to be stale about.
+    /// Clearing the scan, as releasing the instrument does, forgets when each class
+    /// answered.
     #[test]
     fn a_class_remembers_when_it_last_answered() {
         let mut scan = Scan::default();
@@ -162,7 +160,6 @@ mod tests {
         assert_eq!(scan.read_at(ObjectClass::Program), None);
     }
 
-    /// One class finishing leaves the others queued.
     #[test]
     fn finishing_one_class_leaves_the_others_queued() {
         let mut scan = Scan::default();
@@ -173,7 +170,7 @@ mod tests {
         assert_eq!(scan.take(), Some(ObjectClass::SetList));
     }
 
-    /// "Read this folder again" while it is being read means read it again, after.
+    /// Asking to read a folder while it is being read queues a second read.
     #[test]
     fn a_class_asked_for_during_its_own_walk_is_read_again() {
         let mut scan = Scan::default();
@@ -185,7 +182,7 @@ mod tests {
         scan.finished(ObjectClass::Program);
         assert!(
             scan.progress(ObjectClass::Program).unwrap().running,
-            "the second walk is still owed"
+            "the second walk is still queued"
         );
         assert_eq!(scan.take(), Some(ObjectClass::Program));
         scan.finished(ObjectClass::Program);

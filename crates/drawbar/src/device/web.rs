@@ -2,8 +2,8 @@
 //!
 //! There is one thread, so the "worker" is a chain of `spawn_local` tasks: each takes
 //! the device out of the shared cell, runs one command, and puts it back before
-//! starting the next. Holding a `RefCell` borrow across an `await` would panic the
-//! moment the UI touched the same cell, so the device is moved rather than borrowed.
+//! starting the next. Holding a `RefCell` borrow across an `await` would panic as soon
+//! as the UI touched the same cell, so the device is moved out instead of borrowed.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -31,12 +31,12 @@ enum Slot {
     Idle(Device<WebUsbTransport>),
     /// A running command has it.
     Busy,
-    /// It went away, or was let go. Whatever is running is the last thing that runs.
+    /// It was unplugged or released. A command already running is the last to run.
     Gone,
 }
 
 impl Slot {
-    /// Take the device out and mark the slot busy. Every other state is left as it is.
+    /// Take an idle device out and mark the slot busy. Any other state is left as it is.
     fn take(&mut self) -> Option<Device<WebUsbTransport>> {
         match std::mem::replace(self, Slot::Busy) {
             Slot::Idle(device) => Some(device),
@@ -51,20 +51,21 @@ impl Slot {
 #[derive(Default)]
 struct Inner {
     slot: Slot,
-    /// The device the chooser handed over, kept so the browser's own disconnect event
-    /// can be told apart from another Clavia's. WebUSB hands back the same object for
-    /// the same device, so this is an identity and not a description.
+    /// The device the chooser handed over, kept so the browser's disconnect event for it
+    /// can be told apart from another Clavia's. WebUSB returns the same object for the
+    /// same device, so comparing objects identifies the device.
     chosen: Option<UsbDevice>,
     queue: VecDeque<DeviceCmd>,
-    /// Bumped by every [`Link::connect`]. ⚠️ A task spawned under an older number
-    /// belongs to a connection that is over, and finishes into a cell another
-    /// connection owns: its result is dropped rather than applied.
+    /// Incremented by every [`Link::connect`].
+    ///
+    /// ⚠️ A task spawned under an older number belongs to a finished connection and
+    /// completes into a cell another connection owns, so its result is dropped.
     generation: u64,
 }
 
 impl Inner {
-    /// The next queued command and the device to run it on, if there is both. A device
-    /// with nothing to run goes back where it was.
+    /// The next queued command and the device to run it on, if there are both. A device
+    /// with nothing to run goes back into the slot.
     fn start(&mut self) -> Option<(Device<WebUsbTransport>, DeviceCmd)> {
         let device = self.slot.take()?;
         match self.queue.pop_front() {
@@ -97,9 +98,9 @@ impl Link {
     /// Open the chooser and, once a device comes back, claim its vendor interface.
     ///
     /// ⚠️ `requestDevice()` must be called while the click's transient user activation
-    /// is still live. Awaiting anything first — even an already-resolved promise —
-    /// spends it, and Chrome then rejects with `SecurityError`. So the promise is taken
-    /// here, synchronously, and only awaited inside the spawned task.
+    /// is still live. Awaiting anything first, even an already-resolved promise, spends
+    /// it, and Chrome then rejects with `SecurityError`. So the promise is taken here,
+    /// synchronously, and only awaited inside the spawned task.
     pub fn connect(&mut self) {
         let request = match request_device() {
             Ok(request) => request,
@@ -108,7 +109,7 @@ impl Link {
                 return;
             }
         };
-        // Nothing queued against the last instrument is owed by this one.
+        // Commands queued for the last instrument do not carry over to this one.
         let generation = {
             let mut state = self.inner.borrow_mut();
             state.queue.clear();
@@ -152,8 +153,8 @@ impl Link {
                 Ok(transport) => {
                     let mut device = Device::new(transport);
                     emit.send(DeviceEvent::Connected(card));
-                    // ⚠️ Awaited before the device goes into the cell — a borrow held
-                    // across an await panics the moment the UI touches the same cell.
+                    // ⚠️ Awaited before the device goes into the cell: a borrow held
+                    // across an await panics as soon as the UI touches the same cell.
                     let flow = worker::announce(&mut device, &emit).await;
                     let keep = flow == Flow::Continue && inner.borrow().generation == generation;
                     match keep {
@@ -236,12 +237,12 @@ async fn retire(
         state.slot = Slot::Gone;
         said
     };
-    // A device that is already gone cannot be closed, and saying so over its departure
-    // is noise rather than news.
+    // A device that is already gone cannot be closed, and reporting that failure on top
+    // of the disconnect adds nothing.
     if let (Err(e), false) = (closed, flow == Flow::Lost) {
         emit.send(DeviceEvent::OpFailed(e.to_string()));
     }
-    // The unplug event may have got here first, and one departure is one message.
+    // The unplug event may have arrived first; each departure is reported once.
     if !said {
         emit.send(DeviceEvent::Disconnected {
             lost: flow == Flow::Lost,
@@ -252,8 +253,8 @@ async fn retire(
 /// Subscribe to the browser's own "that device is gone" event.
 ///
 /// ⚠️ Without this a pulled cable is invisible until something is attempted. Nothing in
-/// the app asks the browser whether the device is still there, so the instrument's column
-/// would sit answering clicks with nothing behind it until one of them failed.
+/// the app asks the browser whether the device is still there, so the instrument column
+/// would keep accepting clicks until one of them failed.
 fn watch_for_unplug(
     inner: &Rc<RefCell<Inner>>,
     emit: &Emit,
@@ -263,7 +264,7 @@ fn watch_for_unplug(
     let emit = emit.clone();
     let watch = Closure::wrap(Box::new(move |event: UsbConnectionEvent| {
         let went = event.device();
-        // Another Clavia leaving the machine is not this one leaving.
+        // Another Clavia device leaving is not this one.
         if held.borrow().chosen.as_ref() != Some(&went) {
             return;
         }
@@ -288,15 +289,15 @@ fn request_device() -> Result<Promise<UsbDevice>, JsValue> {
         .navigator()
         .usb();
 
-    // Filtering by vendor alone: the chooser then lists any Clavia device, and the
-    // vendor-interface check in `WebUsbTransport::open` is what rejects a wrong one.
+    // Filter by vendor only: the chooser lists any Clavia device, and the vendor-interface
+    // check in `WebUsbTransport::open` rejects one this app cannot drive.
     let filter = UsbDeviceFilter::new();
     filter.set_vendor_id(VENDOR_ID);
     Ok(usb.request_device(&UsbDeviceRequestOptions::new(&[filter])))
 }
 
-/// A rejected promise carries a `DOMException`, whose text is on the object rather than
-/// reachable by downcasting to `Error`.
+/// A rejected promise carries a `DOMException`, whose text is read from its properties
+/// because it does not downcast to `Error`.
 fn describe(err: &JsValue) -> String {
     let field = |k: &str| {
         js_sys::Reflect::get(err, &JsValue::from_str(k))

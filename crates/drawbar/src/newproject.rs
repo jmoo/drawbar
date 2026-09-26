@@ -1,20 +1,18 @@
-//! New → a Sample Editor project, a sample instrument or a piano library: some WAVs,
-//! what each one was recorded at, and the `.nsmpproj`, `.nsmp` or `.npno` that comes
-//! out of them.
+//! New → a Sample Editor project, a sample instrument, or a piano library: some WAVs,
+//! the key each was recorded at, and the `.nsmpproj`, `.nsmp`, or `.npno` made from them.
 //!
-//! The editor's own *Import Auto…* is what the first two imitate — one zone per file,
-//! ordered by root key, key ranges derived from the roots. Everything either format
-//! needs beyond the audio is the root key, and a filename is the only place a guess at
-//! one can come from, so the dialog exists to let that guess be corrected before
-//! anything is made.
+//! The first two imitate the Sample Editor's *Import Auto…*: one zone per file, ordered
+//! by root key, with key ranges derived from the roots. Beyond the audio, either format
+//! needs only the root key, and the filename is the only source of a guess at one. The
+//! dialog lets the user correct that guess before anything is made.
 //!
-//! A piano library asks for more per file — a bank and a velocity layer as well as a
-//! root — and takes long enough to code that the build runs off the frame.
+//! A piano library needs more per file (a bank and a velocity layer as well as a root),
+//! and encoding it takes long enough that the build runs in the background.
 //!
-//! ⚠️ A project holds **paths, not audio**. What lands in the list references the WAVs
-//! by the names they were picked under, and the editor looks for them beside the
-//! project file. An instrument and a library hold the audio itself, which is why they
-//! take the encoder's limits on what a WAV may be.
+//! ⚠️ A project holds **paths, not audio**. It references the WAVs by the names they
+//! were picked under, and the editor looks for them beside the project file. An
+//! instrument and a library hold the audio itself, so the encoder's limits on what a WAV
+//! may be apply to them.
 
 use eframe::egui;
 use nord_format::formats::npno::encode::{
@@ -39,10 +37,10 @@ use crate::log::Log;
 use crate::work::{self, Job, Progress};
 use crate::workspace::{Origin, Workspace};
 
-/// Zones one draft can hold: every key the dialog lays a root on.
+/// The most zones one draft can hold: one per key the dialog can set a root on.
 const MOST_ZONES: usize = (HIGHEST_NOTE - LOWEST_NOTE) as usize + 1;
 
-/// The root a file that names none is taken to have been recorded at.
+/// The root assumed for a file whose name gives none.
 const MIDDLE_C: u8 = 60;
 
 /// What a pick of WAVs is turned into.
@@ -50,12 +48,12 @@ const MIDDLE_C: u8 = 60;
 pub enum Making {
     /// A `.nsmpproj`: the file names, and where each sits on the keyboard.
     Project,
-    /// A `.nsmp`: the audio itself, one zone per file, at the generation that has been
-    /// played on hardware. The document panel over a WAV is where a generation is
-    /// chosen; this makes the one that plays.
+    /// A `.nsmp`: the audio itself, one zone per file, in the generation that has been
+    /// played on hardware. The document panel for a WAV is where a generation is chosen;
+    /// this makes the one that plays.
     Instrument,
-    /// A `.npno`: one stroke per file, resampled onto the lattice the piano section
-    /// plays at and coded into the library.
+    /// A `.npno`: one stroke per file, resampled to the rate the piano section plays at
+    /// and encoded into the library.
     Piano,
 }
 
@@ -63,10 +61,10 @@ impl Making {
     /// Everything a pick of WAVs makes.
     pub const FROM_WAVS: [Making; 3] = [Making::Project, Making::Instrument, Making::Piano];
 
-    /// Whether what this makes is a file an instrument holds, which is the side of the
-    /// New menu's rule it belongs on.
+    /// Whether this makes a file an instrument holds, which decides the side of the New
+    /// menu's separator it goes on.
     ///
-    /// A project is the Sample Editor's own save file. It builds an instrument, and no
+    /// A project is the Sample Editor's save file. It builds an instrument, but no
     /// instrument has a folder for the project itself.
     pub fn instrument_file(self) -> bool {
         match self {
@@ -75,7 +73,7 @@ impl Making {
         }
     }
 
-    /// What it makes, as the dialog, the file picker and the log name it.
+    /// What it makes, as the dialog, the file picker, and the log name it.
     pub fn label(self) -> &'static str {
         match self {
             Making::Project => "Sample Editor project",
@@ -84,7 +82,7 @@ impl Making {
         }
     }
 
-    /// The New menu's own item, and what hovering it says.
+    /// The New menu item's label and hover text.
     pub fn item(self) -> (&'static str, &'static str) {
         match self {
             Making::Project => (
@@ -95,12 +93,12 @@ impl Making {
             Making::Instrument => (
                 "Sample instrument…",
                 "pick the WAVs it plays; the audio is encoded into the instrument, so \
-                 the files are not needed afterwards",
+                 the files are not needed afterward",
             ),
             Making::Piano => (
                 "Piano library…",
-                "pick one WAV per stroke; the audio is coded into the library, so the \
-                 files are not needed afterwards",
+                "pick one WAV per stroke; the audio is encoded into the library, so the \
+                 files are not needed afterward",
             ),
         }
     }
@@ -121,12 +119,12 @@ impl Making {
             }
             Making::Instrument => {
                 "One zone per file, ordered by root key. The audio is encoded into the \
-                 instrument, so the WAVs are not needed afterwards."
+                 instrument, so the WAVs are not needed afterward."
             }
             Making::Piano => {
                 "One stroke per WAV. A name like 060-b0-l00.wav sets the root, bank and \
                  layer; set them here otherwise. Kind, gain and the damper limit are \
-                 edited in the document afterwards."
+                 edited in the document afterward."
             }
         }
     }
@@ -136,17 +134,15 @@ impl Making {
 pub struct Take {
     /// The name a project would reference it by, resolved beside the project file.
     pub path: String,
-    /// The file as it read, or the reader's own complaint.
+    /// The decoded file, or the reader's error.
     pub source: Source,
-    /// Frames as a project counts them — see [`project_frames`]. Zero where the file
-    /// did not read, or holds no audio.
+    /// Frames as a project counts them (see [`project_frames`]). Zero if the file did not
+    /// read or holds no audio.
     pub frames: u64,
     pub root_key: u8,
-    /// Which of a piano library's three banks the stroke belongs to. A zone has no
-    /// such thing.
+    /// Which of a piano library's three banks the stroke belongs to. Unused for a zone.
     pub bank: Bank,
-    /// Where the stroke sits among its root and bank's layers. A zone has no such
-    /// thing.
+    /// Where the stroke sits among its root and bank's layers. Unused for a zone.
     pub layer: LayerTag,
 }
 
@@ -176,9 +172,9 @@ impl Take {
 
     /// Why this file cannot be part of what is being made.
     ///
-    /// A project references audio it never reads, so anything that holds some will do.
-    /// An instrument carries it, and so takes the encoder's own limits. A library takes
-    /// any rate — it resamples — and states the rest of its limits when it is coded.
+    /// A project references audio without reading it, so any file with audio will do. An
+    /// instrument carries the audio, so the encoder's limits apply. A library accepts any
+    /// rate because it resamples, and reports its other limits when it is built.
     pub fn refusal(&self, making: Making) -> Option<String> {
         match making {
             Making::Instrument => encodable(&self.source),
@@ -199,21 +195,19 @@ pub struct Draft {
     pub making: Making,
     pub name: String,
     pub takes: Vec<Take>,
-    /// The piano document a build donates its playback fields from, where one is
-    /// chosen.
+    /// The piano document a build copies its playback fields from, if one is chosen.
     pub template: Option<u64>,
     /// The build in flight, once Create has been pressed.
     job: Option<Job<Result<Built, String>>>,
-    /// What the coder last refused, kept beside the takes so they can be fixed.
+    /// Why the last build failed, kept with the takes so they can be fixed.
     refused: Option<String>,
 }
 
-/// The key each file is taken to have been recorded at.
+/// The key each file is assumed to have been recorded at.
 ///
-/// A note name on the end of a filename, where **every** file carries a distinct one —
-/// a run where one file disagrees is a guess worth not making. Otherwise a chromatic run
-/// from middle C, pulled down where it would not fit under the highest key a project
-/// maps.
+/// The note name at the end of each filename, if **every** file carries a distinct one.
+/// If any file lacks one or two share one, no name is trusted. Otherwise a chromatic run
+/// from middle C, moved down if it would not fit under the highest key a project maps.
 pub fn default_roots(paths: &[String]) -> Vec<u8> {
     let named: Option<Vec<u8>> = paths.iter().map(|path| trailing_note(path)).collect();
     if let Some(named) = named {
@@ -224,9 +218,8 @@ pub fn default_roots(paths: &[String]) -> Vec<u8> {
             return named;
         }
     }
-    // ⚠️ Counted in usize: a pick holds as many files as were picked, which is more than
-    // a count of keys, and the run has to walk up from one end of the keyboard whatever
-    // that count is.
+    // ⚠️ Counted in usize: a pick can hold more files than there are keys, and the run
+    // must still start from one end of the keyboard.
     let after_first = paths.len().min(MOST_ZONES).saturating_sub(1);
     let start = u8::try_from(usize::from(HIGHEST_NOTE).saturating_sub(after_first))
         .unwrap_or(LOWEST_NOTE)
@@ -237,10 +230,10 @@ pub fn default_roots(paths: &[String]) -> Vec<u8> {
         .collect()
 }
 
-/// A note name on the end of a file's stem: `Marimba-C3.wav` is C3.
+/// The note name at the end of a file's stem: `Marimba-C3.wav` is C3.
 ///
-/// The token has to start with a letter, so a trailing `1` is a take number rather
-/// than MIDI note 1.
+/// The token must start with a letter, so a trailing `1` is a take number, not MIDI
+/// note 1.
 fn trailing_note(path: &str) -> Option<u8> {
     let stem = path.rsplit_once('.').map_or(path, |(stem, _)| stem);
     let token = stem.rsplit(['-', '_', ' ']).next()?;
@@ -259,17 +252,17 @@ fn stroke_name(path: &str) -> Option<(u8, Bank, LayerTag)> {
     parse_stroke_name(stem, Stem::Any)
 }
 
-/// Whether a dropped file is one an open draft takes rather than a document to open.
-/// The extension alone: a file that will not read is listed with the reader's own
-/// complaint beside it.
+/// Whether a dropped file goes to an open draft instead of opening as a document. Only
+/// the extension is checked; a file that will not read is listed with the reader's error
+/// beside it.
 pub fn is_wav_name(name: &str) -> bool {
     std::path::Path::new(name)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
 }
 
-/// What a picked WAV is taken to be a recording of: the stroke its name states, or a
-/// root read off the end of the name and the loudest layer of the attack bank.
+/// The stroke a picked WAV is assumed to hold: the one its name states, or else a root
+/// from the end of the name and the loudest layer of the attack bank.
 fn stroke_defaults(path: &str) -> (u8, Bank, LayerTag) {
     stroke_name(path).unwrap_or((
         trailing_note(path).unwrap_or(MIDDLE_C),
@@ -278,13 +271,12 @@ fn stroke_defaults(path: &str) -> (u8, Bank, LayerTag) {
     ))
 }
 
-/// The name a draft over these files starts under: the first file's stem, cut to what
-/// an instrument's own name field holds.
+/// The starting name for a draft of these files: the first file's stem, truncated to fit
+/// an instrument's name field.
 fn draft_name(making: Making, paths: &[String]) -> String {
     let first = paths.first().map(String::as_str).unwrap_or_default();
     let stem = first.rsplit_once('.').map_or(first, |(stem, _)| stem);
-    // A stroke's own name is the stroke, not the library: `Grand-060-b0-l00` opens on
-    // `Grand`.
+    // Drop a stroke suffix: `Grand-060-b0-l00` starts as `Grand`.
     let stem = match making == Making::Piano && stroke_name(stem).is_some() {
         true => stem.rsplitn(4, '-').nth(3).unwrap_or_default(),
         false => stem,
@@ -302,10 +294,10 @@ fn draft_name(making: Making, paths: &[String]) -> String {
 }
 
 impl Draft {
-    /// What was picked, read for what a project needs to know about it.
+    /// Read the picked files for what the dialog needs to know about them.
     ///
-    /// Nothing is refused whole here: a file that will not read is still listed, with
-    /// the reason beside it, because the operator picked it on purpose.
+    /// Nothing is dropped here: a file that will not read is still listed, with the
+    /// reason beside it, because the user picked it.
     pub fn plan(making: Making, files: Vec<(String, Vec<u8>)>) -> Option<Draft> {
         if files.is_empty() {
             return None;
@@ -343,7 +335,7 @@ impl Draft {
         })
     }
 
-    /// Take on more files, as a drop onto the open dialog does.
+    /// Add more files, as a drop onto the open dialog does.
     pub fn add(&mut self, files: Vec<(String, Vec<u8>)>) {
         for (path, bytes) in files {
             let take = match self.making {
@@ -366,15 +358,15 @@ impl Draft {
         }
     }
 
-    /// The lowest key a project maps that no take is on: where a dropped file naming
-    /// no key goes, since each zone needs a key of its own.
+    /// The lowest key a project maps that no take uses. A dropped file whose name gives
+    /// no key goes there, since each zone needs its own key.
     fn free_key(&self) -> u8 {
         (LOWEST_NOTE..=HIGHEST_NOTE)
             .find(|key| self.takes.iter().all(|take| take.root_key != *key))
             .unwrap_or(HIGHEST_NOTE)
     }
 
-    /// Why this draft cannot be made into anything yet, in the operator's words.
+    /// Why this draft cannot be made yet, in words for the user.
     pub fn refusal(&self) -> Option<String> {
         if let Some((take, why)) = self
             .takes
@@ -383,22 +375,22 @@ impl Draft {
         {
             return Some(format!("{}: {why}", take.path));
         }
-        // ⚠️ A library states every other rule about its strokes when it is coded, and
-        // says so in its own words with the takes still here to be fixed.
+        // ⚠️ The library encoder checks every other rule about its strokes when it
+        // builds, and reports it with the takes still here to be fixed.
         if self.making == Making::Piano {
             return layer_values(&self.takes).err();
         }
         if self.making == Making::Instrument && self.name.len() > MAX_NAME_LEN {
             return Some(format!(
-                "the name is {} bytes — an instrument's own name field holds \
+                "the name is {} bytes, but an instrument's name field holds \
                  {MAX_NAME_LEN}",
                 self.name.len()
             ));
         }
         if self.takes.len() > MOST_ZONES {
             return Some(format!(
-                "{} files — one zone per file, and the dialog lays roots on the \
-                 {MOST_ZONES} keys a project maps",
+                "{} files, but each file needs its own zone and a project maps only \
+                 {MOST_ZONES} keys",
                 self.takes.len()
             ));
         }
@@ -408,7 +400,7 @@ impl Draft {
             .find(|take| !(LOWEST_NOTE..=HIGHEST_NOTE).contains(&take.root_key))
         {
             return Some(format!(
-                "{} is set to {} — the keys run {} to {}",
+                "{} is set to {}, but the keys run from {} to {}",
                 take.path,
                 note::name(take.root_key),
                 note::name(LOWEST_NOTE),
@@ -422,26 +414,26 @@ impl Draft {
             .find(|pair| pair[0] == pair[1])
             .map(|pair| {
                 format!(
-                    "two files are set to {} — each zone needs a key of its own",
+                    "two files are set to {}, but each zone needs its own key",
                     note::name(pair[0])
                 )
             })
     }
 
-    /// The file the picked WAVs make, in the frame that asks for it.
+    /// The file the picked WAVs make, built within the current frame.
     ///
-    /// ⚠️ The two kinds a frame can make. Coding a library takes longer than one, so the
-    /// dialog starts that build instead — [`Draft::begin`] — and nothing here can hand
-    /// back a library.
+    /// ⚠️ Only a project or an instrument. Building a library takes longer than a frame,
+    /// so the dialog starts that build with [`Draft::begin`] instead, and this refuses a
+    /// library.
     fn bytes(&self) -> Result<Vec<u8>, String> {
         match self.making {
             Making::Project => self.project(),
             Making::Instrument => self.instrument(),
-            Making::Piano => Err("a piano library is coded off the frame".to_string()),
+            Making::Piano => Err("a piano library is built in the background".to_string()),
         }
     }
 
-    /// Everything a build needs, owned, so it can run away from the dialog.
+    /// Everything a build needs, owned, so it can run apart from the dialog.
     fn coding(&self, donor: Option<Library<'static>>) -> Result<Coding, String> {
         let values = layer_values(&self.takes)?;
         let mut takes = Vec::with_capacity(self.takes.len());
@@ -466,7 +458,7 @@ impl Draft {
         })
     }
 
-    /// Start coding the library, donating from `donor` where a template was chosen.
+    /// Start building the library, copying from `donor` if a template was chosen.
     fn begin(
         &mut self,
         ctx: &egui::Context,
@@ -478,13 +470,13 @@ impl Draft {
         Ok(())
     }
 
-    /// The answer the build has ready, taken once. A refusal stays behind as the line
-    /// the dialog paints.
+    /// The build's result once it is ready, returned once. A failure is also kept for
+    /// the dialog to show.
     fn settle(&mut self) -> Option<Result<Built, String>> {
         let answer = match self.job.as_ref()?.poll() {
             work::Answer::Running => return None,
             work::Answer::Answered(answer) => answer,
-            work::Answer::Died => Err("coding the library stopped without an answer".to_string()),
+            work::Answer::Died => Err("building the library stopped without a result".to_string()),
         };
         self.job = None;
         if let Err(why) = &answer {
@@ -509,8 +501,8 @@ impl Draft {
     }
 
     /// One `stk` per file, highest root first, each zone reaching up to where
-    /// [`derive_top_notes`] puts it — the layout `Project::new` writes, encoded rather
-    /// than referenced.
+    /// [`derive_top_notes`] puts it. This is the layout `Project::new` writes, with the
+    /// audio encoded instead of referenced.
     fn instrument(&self) -> Result<Vec<u8>, String> {
         let mut order: Vec<&Take> = self.takes.iter().collect();
         order.sort_by_key(|take| std::cmp::Reverse(take.root_key));
@@ -556,8 +548,7 @@ impl Draft {
     }
 }
 
-/// One take as a build reads it: the audio as the file holds it, and the stroke it is
-/// to become.
+/// One take as a build reads it: the file's audio, and the stroke it becomes.
 struct Recorded {
     path: String,
     samples: Vec<i16>,
@@ -568,14 +559,14 @@ struct Recorded {
     layer: u8,
 }
 
-/// A piano library's build, away from the dialog that stated it.
+/// A piano library build, detached from the dialog that set it up.
 struct Coding {
     name: String,
     donor: Option<Library<'static>>,
     takes: Vec<Recorded>,
 }
 
-/// A library coded, and what the coding has to say about it.
+/// A built library, and what the build reports about it.
 #[derive(Debug)]
 struct Built {
     bytes: Vec<u8>,
@@ -621,8 +612,8 @@ impl Coding {
     }
 }
 
-/// The layer value each take's stroke states, in the order the takes are listed, as
-/// [`nord_format::formats::npno::encode::layer_values`] reads what their names claim.
+/// The layer value of each take's stroke, in list order, as
+/// [`nord_format::formats::npno::encode::layer_values`] computes it.
 fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
     let named: Vec<(u8, Bank, LayerTag)> = takes
         .iter()
@@ -648,7 +639,7 @@ fn now() -> u32 {
         .map_or(0, |since| since.as_secs() as u32)
 }
 
-/// ⚠️ `SystemTime::now` panics in a wasm module; the page's own clock is the only one.
+/// ⚠️ `SystemTime::now` panics in a wasm module, so this uses the page's clock.
 #[cfg(target_arch = "wasm32")]
 fn now() -> u32 {
     (js_sys::Date::now() / 1000.0) as u32
@@ -771,7 +762,7 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
     }
     if making == Making::Piano {
         start(ctx, workspace, log);
-        // ⚠️ wasm runs the build where it is started, so the answer is already here.
+        // ⚠️ wasm runs the build on the spot, so the result is already here.
         return answered(workspace, log);
     }
     let draft = workspace.take_draft()?;
@@ -793,7 +784,7 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
     }
 }
 
-/// The bank and layer a piano take carries beyond a zone's root key.
+/// The bank and layer controls a piano take has beyond a root key.
 fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
     egui::ComboBox::from_id_salt(("draft_bank", i))
         .width(92.0)
@@ -815,9 +806,9 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
             ui.selectable_value(&mut take.layer, LayerTag::Value(number), "value");
         });
     let mut set = number;
-    // The value scale is the format's: past HIGHEST_PLAYED_LAYER is a stroke no velocity
-    // selects, which `build` refuses. An index is a rank among the takes sharing a root
-    // and bank, and no root is played at more layers than that either.
+    // The value scale is the format's: above HIGHEST_PLAYED_LAYER no velocity selects the
+    // stroke, and `build` refuses it. An index ranks the takes sharing a root and bank,
+    // and no root plays more layers than that either.
     if ui
         .add(egui::DragValue::new(&mut set).range(0..=HIGHEST_PLAYED_LAYER))
         .changed()
@@ -829,8 +820,8 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
     }
 }
 
-/// What "none" is called in the template picker, and the reading of an empty list.
-const NO_TEMPLATE: &str = "none — the rules";
+/// The template picker's label for no template, also shown when the list is empty.
+const NO_TEMPLATE: &str = "none (default rules)";
 
 fn template_picker(ui: &mut egui::Ui, draft: &mut Draft, templates: &[(u64, String)]) {
     ui.horizontal(|ui| {
@@ -874,7 +865,7 @@ fn skeleton(workspace: &Workspace, id: u64) -> Result<Library<'static>, String> 
         .map_err(|e| format!("{}: {e}", entity.name))
 }
 
-/// Set the build going, with whatever template the Advanced row names.
+/// Start the build with the template chosen under Advanced, if any.
 fn start(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) {
     let chosen = workspace.draft_mut().and_then(|draft| draft.template);
     let donor = match chosen {
@@ -890,7 +881,7 @@ fn start(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) {
     }
 }
 
-/// What the build has to say for itself, once it has something to say.
+/// Take the build's result once it is ready, add the library, and log the outcome.
 fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
     let draft = workspace.draft_mut()?;
     let built = match draft.settle()? {
@@ -927,7 +918,7 @@ mod tests {
         let named = ["Marimba-C3.wav", "Marimba-C4.wav", "Marimba_F#4.wav"].map(String::from);
         assert_eq!(default_roots(&named), vec![48, 60, 66]);
 
-        // One file that names no key, and the whole run is a guess again.
+        // If one file names no key, the whole run is guessed.
         let mixed = ["Marimba-C3.wav", "Marimba-take2.wav"].map(String::from);
         assert_eq!(default_roots(&mixed), vec![60, 61]);
 
@@ -951,8 +942,8 @@ mod tests {
         assert_eq!(unique.len(), roots.len(), "one key each");
     }
 
-    /// ⚠️ A pick this long is refused for its count, but the run laid under that refusal
-    /// still walks up from the lowest key, one file per key while there are keys.
+    /// ⚠️ A pick this long is refused for its count, but the default run still climbs
+    /// from the lowest key, one file per key while keys last.
     #[test]
     fn a_pick_longer_than_a_u8_counts_still_walks_up_from_the_lowest_key() {
         let many: Vec<String> = (0..MOST_ZONES + 200).map(|i| format!("{i}.wav")).collect();
@@ -1017,8 +1008,8 @@ mod tests {
         assert_eq!(nord_format::to_bytes(&entity).unwrap(), bytes);
     }
 
-    /// The same pick, made into the instrument instead: the audio itself, one zone per
-    /// file, and bytes that come back the way they went out.
+    /// The same pick made into an instrument: the audio itself, one zone per file, and
+    /// bytes that round-trip.
     #[test]
     fn a_draft_becomes_an_instrument_over_the_same_files() {
         use nord_format::formats::nsmp::encode::MIN_FRAMES;
@@ -1053,9 +1044,9 @@ mod tests {
         assert_eq!(zones, [(72, 96), (48, 59)]);
     }
 
-    /// ⚠️ The instrument carries the audio, so the encoder's own limits are refusals in
-    /// the dialog rather than a failure after Create. A project references the file and
-    /// takes it as it is.
+    /// ⚠️ The instrument carries the audio, so the dialog refuses what the encoder would
+    /// refuse before Create, instead of failing after it. A project references the file
+    /// and accepts it as it is.
     #[test]
     fn a_wav_the_encoder_will_not_take_is_refused_before_create() {
         let slow = vec![("Marimba-C3.wav".into(), wav(22_050, 4_410))];
@@ -1068,7 +1059,7 @@ mod tests {
         assert!(why.starts_with("Marimba-C3.wav: "), "{why}");
     }
 
-    /// The name field an instrument carries is 31 bytes, and a filename is not.
+    /// An instrument's name field holds 31 bytes, and a filename can be longer.
     #[test]
     fn an_instrument_opens_on_a_name_its_own_field_holds() {
         let long = ["an extremely long marimba sample name.wav".to_string()];
@@ -1089,15 +1080,13 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_pick_raises_no_dialog() {
+    fn a_canceled_pick_raises_no_dialog() {
         assert!(Draft::plan(Making::Project, Vec::new()).is_none());
         assert!(Draft::plan(Making::Instrument, Vec::new()).is_none());
     }
 
-    // ---- a piano library ----------------------------------------------------------
-
     /// A short mono take at the rate the piano section plays, so a build resamples
-    /// nothing and the coder has something other than silence to fit.
+    /// nothing and the encoder has something other than silence to fit.
     fn stroke_wav(frames: usize) -> Vec<u8> {
         let samples: Vec<i16> = (0..frames)
             .map(|n| ((n as f64 * 0.05).sin() * 8_000.0) as i16)
@@ -1132,7 +1121,7 @@ mod tests {
         assert_eq!(
             stroke_name("Grand-060-b0-l00.wav"),
             Some((60, Bank::Attack, LayerTag::Index(0))),
-            "and the one a stroke exported from here is written under"
+            "and the name this app exports a stroke under"
         );
         assert_eq!(stroke_name("060-b0.wav"), None, "no stroke named at all");
 
@@ -1144,12 +1133,12 @@ mod tests {
         assert_eq!(
             stroke_defaults("hit.wav"),
             (MIDDLE_C, Bank::Attack, LayerTag::Index(0)),
-            "and a name stating none opens on middle C"
+            "and a name stating none defaults to middle C"
         );
     }
 
-    /// The value a layer takes is what selects it, so the layers of one root are spread
-    /// over the velocity range rather than packed at the loud end.
+    /// A layer's value decides which velocity selects it, so one root's layers are spread
+    /// over the velocity range instead of packed at the loud end.
     #[test]
     fn a_roots_layers_are_spread_over_the_velocity_range_loudest_first() {
         let draft = piano_draft(&["060-b0-l02", "060-b0-l00", "060-b0-l01", "072-b0-l00"]);
@@ -1193,7 +1182,10 @@ mod tests {
     #[test]
     fn a_piano_draft_codes_the_takes_into_a_library() {
         let mut draft = piano_draft(&["Grand-060-b0-l00", "Grand-060-b0-l01", "Grand-072-b2-l00"]);
-        assert_eq!(draft.name, "Grand", "the stroke group is not the name");
+        assert_eq!(
+            draft.name, "Grand",
+            "the stroke suffix is not part of the name"
+        );
         assert!(draft.refusal().is_none());
 
         draft
@@ -1224,8 +1216,8 @@ mod tests {
         );
     }
 
-    /// A template donates the playback a recording cannot carry, and is read without
-    /// its audio because a build cannot borrow the document's bytes.
+    /// A template supplies the playback fields a recording cannot carry, and is read
+    /// without its audio because a build cannot borrow the document's bytes.
     #[test]
     fn a_template_donates_what_the_recordings_do_not_state() {
         let mut plain = piano_draft(&["Grand-060-b0-l00"]);
@@ -1247,15 +1239,12 @@ mod tests {
         assert_eq!(Library::borrow(&built.bytes).unwrap().damper_top(), 100);
     }
 
-    /// ⚠️ Everything a library states about its strokes beyond the rules the dialog holds
-    /// is stated by the coder, in its own words, with the takes still there.
+    /// ⚠️ The encoder reports the rules the dialog does not check, in its own words, with
+    /// the takes still there.
     #[test]
     fn what_the_coder_refuses_comes_back_as_the_dialogs_own_line() {
         let mut draft = piano_draft(&["a-060-b0-v31", "b-072-b0-v31"]);
-        assert!(
-            draft.refusal().is_none(),
-            "the dialog states no rule about this"
-        );
+        assert!(draft.refusal().is_none(), "the dialog does not check this");
 
         draft.begin(&egui::Context::default(), None).unwrap();
         let why = finish(&mut draft).expect_err("a layer no velocity selects");
