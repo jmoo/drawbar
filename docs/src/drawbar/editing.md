@@ -16,6 +16,10 @@ action the document is for. That is usually **Queue send**. It is greyed when
 there is nowhere to send to, and becomes a warning such as `Won't fit · 70 MB
 over` when the send cannot happen yet.
 
+A document that belongs to a slot on the connected instrument also has **Load on
+instrument**, which makes the panel play that slot. The panel plays what the
+instrument holds there, so edits you have not sent are not heard.
+
 ## The faces
 
 - **Basic** is the sound's controls, in the instrument's own words.

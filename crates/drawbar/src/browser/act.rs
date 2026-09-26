@@ -20,6 +20,9 @@ use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Workspace};
 
+/// What [`Act::LoadOnInstrument`] is called wherever it is offered.
+pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
+
 /// What the browser asks the rest of the app to do.
 pub enum Act {
     Connect,

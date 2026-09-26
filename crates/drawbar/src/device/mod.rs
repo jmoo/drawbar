@@ -962,6 +962,10 @@ pub fn read_only(class: ObjectClass) -> bool {
     matches!(class, ObjectClass::Unknown(_))
 }
 
+pub fn loadable(state: &DeviceState, class: ObjectClass, at: Location) -> bool {
+    state.connected() && !read_only(class) && state.slot(class, at).flatten().is_some()
+}
+
 /// What a write into this class disturbs beyond the slot it lands in, for the question
 /// asked before it happens.
 ///

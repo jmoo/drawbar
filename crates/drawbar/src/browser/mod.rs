@@ -33,7 +33,7 @@ mod row;
 mod selection;
 mod tree;
 
-pub use act::{apply, bulk, foreign_format, Act, Bulk};
+pub use act::{apply, bulk, foreign_format, Act, Bulk, LOAD_ON_INSTRUMENT};
 pub use drag::{
     families_present, kinds_present, landing, qualifier, Carried, Held, Item, Kind, Landing, Onto,
 };

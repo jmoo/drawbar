@@ -509,6 +509,9 @@ impl DrawbarApp {
                 at: send.at,
             });
         }
+        if let Some((class, at)) = wants.load {
+            acts.push(browser::Act::LoadOnInstrument { class, at });
+        }
         if wants.keep {
             acts.push(browser::Act::Keep(id));
         }
@@ -688,6 +691,84 @@ mod tests {
         huge(&mut app, "also-huge.nsmp");
         app.save(&mut store);
         assert_eq!(said(&app), 2);
+    }
+
+    #[test]
+    fn a_linked_documents_load_on_instrument_is_the_trees_act() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = DrawbarApp::new(&cc);
+        let at = nord_usb::Location { bank: 6, slot: 3 };
+        let fresh = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .expect("a fresh default");
+        let bytes = app.workspace.get(fresh).expect("just made").bytes.clone();
+        let id = app.workspace.ingest(
+            "Africa Split.ne5p".into(),
+            Origin::Device {
+                class: nord_usb::ObjectClass::Program,
+                at,
+            },
+            bytes,
+            &mut app.log,
+        );
+        app.device.pretend_scanned(
+            nord_usb::ObjectClass::Program,
+            7,
+            &["", "", "", "Africa Split"],
+        );
+        app.device.relink(&mut app.workspace);
+
+        let frame = |app: &mut DrawbarApp, events: Vec<egui::Event>| {
+            let mut acts = Vec::new();
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.open_document(ui, id, &Played::default(), &mut acts)
+                });
+            });
+            (output, acts)
+        };
+        let (output, _) = frame(&mut app, Vec::new());
+        let button = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == browser::LOAD_ON_INSTRUMENT => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            })
+            .expect("the header offers Load on instrument");
+
+        let press = |pressed| egui::Event::PointerButton {
+            pos: button,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(button)]);
+        frame(&mut app, vec![press(true)]);
+        let (_, acts) = frame(&mut app, vec![press(false)]);
+        assert!(
+            matches!(
+                acts.as_slice(),
+                [browser::Act::LoadOnInstrument {
+                    class: nord_usb::ObjectClass::Program,
+                    at: asked,
+                }] if *asked == at
+            ),
+            "one act, the tree's, for Programs 7:4; got {} acts",
+            acts.len()
+        );
     }
 
     #[test]

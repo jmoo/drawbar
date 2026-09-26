@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::act::{will_write, Act, Bulk};
+use super::act::{will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
 use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
@@ -1178,7 +1178,7 @@ impl Browser {
             acts.push(Act::Copy { class, at });
             ui.close();
         }
-        if ui.button("Load on instrument").clicked() {
+        if ui.button(LOAD_ON_INSTRUMENT).clicked() {
             acts.push(Act::LoadOnInstrument { class, at });
             ui.close();
         }
