@@ -839,20 +839,12 @@ fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::bench;
     use crate::strings::folder;
+    use crate::testing::Bench;
     use crate::workspace::Origin;
 
     fn at(slot: u32) -> Location {
         Location { bank: 6, slot }
-    }
-
-    /// The bytes of a new program, removed from the list again.
-    fn program(workspace: &mut Workspace, log: &mut Log) -> Vec<u8> {
-        let id = workspace.create(Fresh::Program, log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
-        workspace.remove(id, log);
-        bytes
     }
 
     /// A checked set: two assets on this computer and two slots on the instrument.
@@ -875,36 +867,30 @@ mod tests {
     /// holds only what this computer has to send.
     #[test]
     fn saving_a_view_writes_it_back_to_its_slot_and_queues_nothing() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
-        device.pretend_attached();
-        let id = workspace.view(
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        bench.device.pretend_attached();
+        let id = bench.workspace.view(
             "Africa Split.ne5p".to_string(),
             Origin::Device {
                 class: ObjectClass::Program,
                 at: at(3),
             },
             bytes,
-            &mut log,
+            &mut bench.log,
         );
-        let held = workspace.get(id).unwrap().bytes.clone();
+        let held = bench.workspace.get(id).unwrap().bytes.clone();
         let (_, edited) =
             crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        bench.workspace.replace_bytes(id, edited, &mut bench.log);
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SaveDoc(id)],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
+        bench.act(vec![Act::SaveDoc(id)]);
+
+        assert!(
+            bench.queue.is_empty(),
+            "a write back does not join the queue"
         );
-
-        assert!(queue.is_empty(), "a write back does not join the queue");
-        let put = device.queued().front().expect("a put was asked for");
+        let put = bench.device.queued().front().expect("a put was asked for");
         assert!(
             matches!(put, DeviceCmd::Put { id: sent, class, at: to, .. }
                 if *sent == id && *class == ObjectClass::Program && *to == at(3)),
@@ -912,89 +898,82 @@ mod tests {
             put.label()
         );
         // The instrument has not answered yet, so the baseline has not moved.
-        assert!(workspace.get(id).unwrap().is_unsaved());
-        device.pretend(crate::device::DeviceEvent::Sent {
+        assert!(bench.workspace.get(id).unwrap().is_unsaved());
+        bench.device.pretend(crate::device::DeviceEvent::Sent {
             id,
             class: ObjectClass::Program,
             at: at(3),
-            bytes: workspace.get(id).unwrap().bytes.clone(),
+            bytes: bench.workspace.get(id).unwrap().bytes.clone(),
         });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        assert!(!workspace.get(id).unwrap().is_unsaved());
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
+        assert!(!bench.workspace.get(id).unwrap().is_unsaved());
     }
 
     #[test]
     fn saving_a_kept_asset_settles_its_baseline_and_queues_it_where_it_stands() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
-        device.pretend_bodies(
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        bench.device.pretend_bodies(
             ObjectClass::Program,
             7,
             &[None, None, None, Some(("held", 7))],
         );
-        let linked = workspace.ingest(
+        let linked = bench.workspace.ingest(
             "Africa Split.ne5p".to_string(),
             Origin::Device {
                 class: ObjectClass::Program,
                 at: at(3),
             },
             bytes.clone(),
-            &mut log,
+            &mut bench.log,
         );
-        let alone = workspace.ingest(
+        let alone = bench.workspace.ingest(
             "Squabble B.ne5p".to_string(),
             Origin::File("Squabble B.ne5p".into()),
             bytes,
-            &mut log,
+            &mut bench.log,
         );
         for id in [linked, alone] {
-            let held = workspace.get(id).unwrap().bytes.clone();
+            let held = bench.workspace.get(id).unwrap().bytes.clone();
             let (_, edited) =
                 crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
-            workspace.replace_bytes(id, edited, &mut log);
+            bench.workspace.replace_bytes(id, edited, &mut bench.log);
         }
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SaveDoc(linked), Act::SaveDoc(alone)],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::SaveDoc(linked), Act::SaveDoc(alone)]);
 
-        assert!(!workspace.get(linked).unwrap().is_unsaved());
-        assert!(!workspace.get(alone).unwrap().is_unsaved());
+        assert!(!bench.workspace.get(linked).unwrap().is_unsaved());
+        assert!(!bench.workspace.get(alone).unwrap().is_unsaved());
         assert_eq!(
-            queue.ids(),
+            bench.queue.ids(),
             vec![linked],
             "only the one that belongs to a slot"
         );
-        assert_eq!(queue.entry(linked).map(|held| held.at), Some(at(3)));
+        assert_eq!(bench.queue.entry(linked).map(|held| held.at), Some(at(3)));
 
         // Saving it again reads nothing from the instrument, because it is already
         // waiting for that slot, and the log still says what the save did.
-        let reads = device.queued().len();
-        log.clear();
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SaveDoc(linked)],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
+        let reads = bench.device.queued().len();
+        bench.log.clear();
+        bench.act(vec![Act::SaveDoc(linked)]);
+        assert_eq!(bench.queue.ids(), vec![linked]);
+        assert_eq!(
+            bench.device.queued().len(),
+            reads,
+            "the slot was not read again"
         );
-        assert_eq!(queue.ids(), vec![linked]);
-        assert_eq!(device.queued().len(), reads, "the slot was not read again");
         assert!(
-            log.transcript()
+            bench
+                .log
+                .transcript()
                 .contains("“Africa Split.ne5p” is saved on this computer"),
             "{}",
-            log.transcript()
+            bench.log.transcript()
         );
     }
 
@@ -1002,7 +981,7 @@ mod tests {
     /// and deleting on all of them.
     #[test]
     fn each_action_over_a_checked_set_asks_only_about_the_rows_it_is_for() {
-        let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
+        let Bench { mut device, .. } = Bench::new();
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
         device.pretend_scanned(ObjectClass::SetList, 7, &["", "", "", "Sunday"]);
         let state = &device.state;
@@ -1045,7 +1024,7 @@ mod tests {
     /// costs a round trip that can only fail.
     #[test]
     fn an_action_with_nothing_to_act_on_asks_for_nothing() {
-        let (_browser, _workspace, mut device, _tabs, _queue, _log) = bench();
+        let Bench { mut device, .. } = Bench::new();
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
         let state = &device.state;
         let slots = vec![Item::Slot {
@@ -1076,60 +1055,55 @@ mod tests {
     /// queued.
     #[test]
     fn queueing_a_checked_set_puts_each_of_them_where_it_is_bound() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
-        device.pretend_partitions(&crate::device::ELECTRO5);
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
         // 7:1 is taken by the asset that came off it; 7:2 is the first free slot.
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
-        let owed = workspace.ingest(
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
+        let owed = bench.workspace.ingest(
             "Africa Split.ne5p".to_string(),
             Origin::Device {
                 class: ObjectClass::Program,
                 at: at(0),
             },
             bytes.clone(),
-            &mut log,
+            &mut bench.log,
         );
-        let opened = workspace.ingest(
+        let opened = bench.workspace.ingest(
             "Squabble B.ne5p".to_string(),
             Origin::File("Squabble B.ne5p".into()),
             bytes,
-            &mut log,
+            &mut bench.log,
         );
-        let nowhere = workspace.ingest(
+        let nowhere = bench.workspace.ingest(
             "mystery.dat".to_string(),
             Origin::Fresh,
             vec![0x00, 0xff, 0x01, 0xfe],
-            &mut log,
+            &mut bench.log,
         );
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            bulk(
-                Bulk::Queue,
-                &[Item::Local(owed), Item::Local(opened), Item::Local(nowhere)],
-                &device.state,
-            ),
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(bulk(
+            Bulk::Queue,
+            &[Item::Local(owed), Item::Local(opened), Item::Local(nowhere)],
+            &bench.device.state,
+        ));
 
-        assert_eq!(queue.ids(), vec![owed, opened]);
-        assert_eq!(queue.entry(owed).map(|held| held.at), Some(at(0)));
+        assert_eq!(bench.queue.ids(), vec![owed, opened]);
+        assert_eq!(bench.queue.entry(owed).map(|held| held.at), Some(at(0)));
         assert_eq!(
-            queue.entry(opened).map(|held| held.at),
+            bench.queue.entry(opened).map(|held| held.at),
             Some(at(1)),
             "the first slot read and found free"
         );
         assert!(
-            log.transcript()
+            bench
+                .log
+                .transcript()
                 .contains("1 of them belongs in no folder the instrument has"),
             "{}",
-            log.transcript()
+            bench.log.transcript()
         );
     }
 
@@ -1138,53 +1112,47 @@ mod tests {
     /// the log names its folder.
     #[test]
     fn a_queued_set_walks_down_the_free_slots_and_names_the_folder_that_runs_out() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
         // Four empty slots, one of them already taken by the queue.
-        device.pretend_scanned(class, 7, &["", "Africa Split", "", "", "Squabble B", ""]);
+        bench
+            .device
+            .pretend_scanned(class, 7, &["", "Africa Split", "", "", "Squabble B", ""]);
 
-        let bytes = program(&mut workspace, &mut log);
+        let bytes = Fresh::Program.bytes().unwrap();
         let ids: Vec<u64> = (0..5)
             .map(|n| {
-                workspace.ingest(
+                bench.workspace.ingest(
                     format!("sound {n}.ne5p"),
                     Origin::File(format!("sound {n}.ne5p")),
                     bytes.clone(),
-                    &mut log,
+                    &mut bench.log,
                 )
             })
             .collect();
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
             ids[0],
             class,
             at(2),
         );
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            bulk(
-                Bulk::Queue,
-                &ids[1..]
-                    .iter()
-                    .copied()
-                    .map(Item::Local)
-                    .collect::<Vec<_>>(),
-                &device.state,
-            ),
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(bulk(
+            Bulk::Queue,
+            &ids[1..]
+                .iter()
+                .copied()
+                .map(Item::Local)
+                .collect::<Vec<_>>(),
+            &bench.device.state,
+        ));
 
-        let landed: Vec<(u64, u32)> = queue
+        let landed: Vec<(u64, u32)> = bench
+            .queue
             .entries()
             .iter()
             .map(|held| (held.id, held.at.slot))
@@ -1194,8 +1162,11 @@ mod tests {
             vec![(ids[0], 2), (ids[1], 0), (ids[2], 3), (ids[3], 5)],
             "each takes the next free slot, and the queue already held 7:3"
         );
-        assert!(!queue.holds(ids[4]), "the free slots ran out before it");
-        let said = log.transcript();
+        assert!(
+            !bench.queue.holds(ids[4]),
+            "the free slots ran out before it"
+        );
+        let said = bench.log.transcript();
         assert!(
             said.contains("“sound 4.ne5p” was not queued: no slot of Programs"),
             "{said}"
@@ -1205,48 +1176,42 @@ mod tests {
     /// The log says how much of the set fit.
     #[test]
     fn queueing_a_mixed_set_queues_only_what_the_instrument_takes() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_partitions(&crate::device::ELECTRO5);
-        device.pretend_scanned(class, 7, &["", "", ""]);
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 7, &["", "", ""]);
 
-        let bytes = program(&mut workspace, &mut log);
-        let mine = workspace.ingest(
+        let bytes = Fresh::Program.bytes().unwrap();
+        let mine = bench.workspace.ingest(
             "Africa Split.ne5p".to_string(),
             Origin::File("Africa Split.ne5p".into()),
             bytes,
-            &mut log,
+            &mut bench.log,
         );
-        let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
+        let stage = bench
+            .workspace
+            .create(Fresh::Stage4Program, &mut bench.log)
+            .unwrap();
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            bulk(
-                Bulk::Queue,
-                &[Item::Local(mine), Item::Local(stage)],
-                &device.state,
-            ),
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(bulk(
+            Bulk::Queue,
+            &[Item::Local(mine), Item::Local(stage)],
+            &bench.device.state,
+        ));
 
         assert_eq!(
-            queue.ids(),
+            bench.queue.ids(),
             vec![mine],
             "only the Electro 5's own is waiting"
         );
-        let said = log.transcript();
+        let said = bench.log.transcript();
         assert!(said.contains("1 of 2 fit the Nord Electro 5"), "{said}");
         assert!(said.contains("Stage 4"), "{said}");
 
         // The control says the same before it is clicked: the count in its label, and the
         // instrument's refusal for the one it leaves out.
         let checked = [Item::Local(mine), Item::Local(stage)];
-        let held = fits(&checked, &workspace, &device.state);
+        let held = fits(&checked, &bench.workspace, &bench.device.state);
         assert_eq!(held.label(), "Queue 1 of 2");
         assert!(held
             .why
@@ -1255,13 +1220,13 @@ mod tests {
 
         // Nothing it takes: the control is disabled, and the hover gives the instrument's
         // reason.
-        let refused = fits(&[Item::Local(stage)], &workspace, &device.state);
+        let refused = fits(&[Item::Local(stage)], &bench.workspace, &bench.device.state);
         assert_eq!(refused.takes, 0);
         assert_eq!(refused.label(), "Queue 0 of 1");
         assert!(refused.why.is_some());
 
         // Everything it takes: the usual label, and no reason.
-        let taken = fits(&[Item::Local(mine)], &workspace, &device.state);
+        let taken = fits(&[Item::Local(mine)], &bench.workspace, &bench.device.state);
         assert_eq!(taken.label(), Bulk::Queue.label());
         assert_eq!(taken.why, None);
     }
@@ -1270,28 +1235,22 @@ mod tests {
     /// the queue, so a foreign file in it would reach a delete-then-write.
     #[test]
     fn a_slot_named_outright_still_refuses_what_the_instrument_does_not_take() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_scanned(class, 7, &[""]);
-        let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
+        bench.device.pretend_scanned(class, 7, &[""]);
+        let stage = bench
+            .workspace
+            .create(Fresh::Stage4Program, &mut bench.log)
+            .unwrap();
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Send {
-                id: stage,
-                class,
-                at: at(0),
-            }],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::Send {
+            id: stage,
+            class,
+            at: at(0),
+        }]);
 
-        assert!(queue.is_empty(), "nothing is waiting");
-        let said = log.transcript();
+        assert!(bench.queue.is_empty(), "nothing is waiting");
+        let said = bench.log.transcript();
         assert!(said.contains("cannot go to"), "{said}");
     }
 
@@ -1299,29 +1258,17 @@ mod tests {
     /// wherever it was dragged from.
     #[test]
     fn dropping_something_already_waiting_onto_a_slot_moves_its_entry() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
         let class = ObjectClass::Program;
-        let id = workspace.ingest(
+        let id = bench.workspace.ingest(
             "Africa Split.ne5p".to_string(),
             Origin::Device { class, at: at(0) },
             bytes,
-            &mut log,
+            &mut bench.log,
         );
-        let mut send = |acts, device: &mut Device, queue: &mut Queue| {
-            apply(
-                &mut browser,
-                &mut Shell::default(),
-                acts,
-                &mut workspace,
-                device,
-                &mut tabs,
-                queue,
-                &mut log,
-            );
-        };
-        send(vec![Act::SendChecked(vec![id])], &mut device, &mut queue);
-        assert_eq!(queue.entry(id).map(|held| held.at), Some(at(0)));
+        bench.act(vec![Act::SendChecked(vec![id])]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(0)));
 
         // What a queue row carries, dropped on a keyboard cell.
         let carried = crate::browser::Held {
@@ -1340,52 +1287,48 @@ mod tests {
             }
         );
 
-        send(
-            vec![Act::Send {
-                id,
-                class,
-                at: at(3),
-            }],
-            &mut device,
-            &mut queue,
-        );
-        assert_eq!(queue.ids(), vec![id], "one entry, moved");
-        assert_eq!(queue.entry(id).map(|held| held.at), Some(at(3)));
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: at(3),
+        }]);
+        assert_eq!(bench.queue.ids(), vec![id], "one entry, moved");
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(3)));
     }
 
     /// Nothing refuses a note by name. It has no object class, so `bound_for` returns
     /// `Nowhere`, as for any other kind with no folder.
     #[test]
     fn a_note_is_never_queued_because_it_belongs_in_no_folder() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        device.pretend_partitions(&crate::device::ELECTRO5);
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
-        let note = workspace.ingest(
+        let mut bench = Bench::new();
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", ""]);
+        let note = bench.workspace.ingest(
             "Set 1.txt".to_string(),
             Origin::Fresh,
             b"Set 1\n".to_vec(),
-            &mut log,
+            &mut bench.log,
         );
-        let program = workspace.create(Fresh::Program, &mut log).unwrap();
+        let program = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SendChecked(vec![note, program])],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::SendChecked(vec![note, program])]);
 
         assert_eq!(
-            queue.ids(),
+            bench.queue.ids(),
             vec![program],
             "the program takes a free slot and the note is not queued"
         );
         assert_eq!(
-            bound_for(workspace.get(note).unwrap(), &device.state, &queue),
+            bound_for(
+                bench.workspace.get(note).unwrap(),
+                &bench.device.state,
+                &bench.queue
+            ),
             Bound::Nowhere
         );
     }
@@ -1394,18 +1337,18 @@ mod tests {
     /// computer.
     #[test]
     fn an_entry_leaves_the_queue_alone_and_the_queue_empties_without_deleting_anything() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_partitions(&crate::device::ELECTRO5);
-        device.pretend_scanned(class, 7, &["", "", ""]);
-        let bytes = program(&mut workspace, &mut log);
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 7, &["", "", ""]);
+        let bytes = Fresh::Program.bytes().unwrap();
         let ids: Vec<u64> = (0..3)
             .map(|n| {
-                workspace.ingest(
+                bench.workspace.ingest(
                     format!("sound {n}.ne5p"),
                     Origin::File(format!("sound {n}.ne5p")),
                     bytes.clone(),
-                    &mut log,
+                    &mut bench.log,
                 )
             })
             .collect();
@@ -1413,30 +1356,18 @@ mod tests {
         let queueing = bulk(
             Bulk::Queue,
             &ids.iter().copied().map(Item::Local).collect::<Vec<_>>(),
-            &device.state,
+            &bench.device.state,
         );
-        let mut run = |acts, queue: &mut Queue, workspace: &mut Workspace| {
-            apply(
-                &mut browser,
-                &mut Shell::default(),
-                acts,
-                workspace,
-                &mut device,
-                &mut tabs,
-                queue,
-                &mut log,
-            )
-        };
-        run(queueing, &mut queue, &mut workspace);
-        assert_eq!(queue.ids(), ids);
+        bench.act(queueing);
+        assert_eq!(bench.queue.ids(), ids);
 
-        run(vec![Act::Unqueue(ids[1])], &mut queue, &mut workspace);
-        assert_eq!(queue.ids(), vec![ids[0], ids[2]]);
+        bench.act(vec![Act::Unqueue(ids[1])]);
+        assert_eq!(bench.queue.ids(), vec![ids[0], ids[2]]);
 
-        run(vec![Act::ClearQueue], &mut queue, &mut workspace);
-        assert!(queue.is_empty());
+        bench.act(vec![Act::ClearQueue]);
+        assert!(bench.queue.is_empty());
         assert_eq!(
-            workspace.listed().count(),
+            bench.workspace.listed().count(),
             3,
             "emptying the queue deletes nothing"
         );
@@ -1446,49 +1377,46 @@ mod tests {
     /// when the dock was closed.
     #[test]
     fn queueing_opens_the_dock_on_the_queue_page() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_partitions(&crate::device::ELECTRO5);
-        device.pretend_scanned(class, 7, &[""]);
-        let bytes = program(&mut workspace, &mut log);
-        let id = workspace.ingest(
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 7, &[""]);
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench.workspace.ingest(
             "Africa Split.ne5p".to_string(),
             Origin::File("Africa Split.ne5p".into()),
             bytes,
-            &mut log,
+            &mut bench.log,
         );
 
-        let mut shell = Shell {
+        bench.shell = Shell {
             dock_open: false,
             page: Page::Log,
             ..Shell::default()
         };
-        apply(
-            &mut browser,
-            &mut shell,
-            vec![Act::Send {
-                id,
-                class,
-                at: at(0),
-            }],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: at(0),
+        }]);
 
-        assert!(queue.holds(id));
-        assert!(shell.dock_open);
-        assert_eq!(shell.page, Page::Queue);
+        assert!(bench.queue.holds(id));
+        assert!(bench.shell.dock_open);
+        assert_eq!(bench.shell.page, Page::Queue);
     }
 
     /// A session belongs to a folder, so a batch is one command per folder, in queue
     /// order.
     #[test]
     fn a_batch_is_grouped_into_one_command_per_folder() {
-        let (_browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
+        let Bench {
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::Program, 1),
@@ -1529,49 +1457,39 @@ mod tests {
     /// the asset it came from, so the right queue entry is cleared.
     #[test]
     fn a_send_queues_and_the_drain_names_the_asset_it_writes() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
+        let mut bench = Bench::new();
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
         let at = Location { bank: 6, slot: 1 };
-        let bytes = program(&mut workspace, &mut log);
-        let id = workspace.ingest(
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench.workspace.ingest(
             "Africa-Split.ne5p".into(),
             Origin::Device {
                 class: ObjectClass::Program,
                 at,
             },
             bytes,
-            &mut log,
+            &mut bench.log,
         );
 
-        let mut act = |acts, device: &mut Device, queue: &mut Queue| {
-            apply(
-                &mut browser,
-                &mut Shell::default(),
-                acts,
-                &mut workspace,
-                device,
-                &mut tabs,
-                queue,
-                &mut log,
-            )
-        };
-        act(
-            vec![Act::Send {
-                id,
-                class: ObjectClass::Program,
-                at,
-            }],
-            &mut device,
-            &mut queue,
+        bench.act(vec![Act::Send {
+            id,
+            class: ObjectClass::Program,
+            at,
+        }]);
+        assert_eq!(
+            bench.queue.ids(),
+            vec![id],
+            "queued, and nothing written yet"
         );
-        assert_eq!(queue.ids(), vec![id], "queued, and nothing written yet");
         assert!(
-            device.queued().is_empty(),
+            bench.device.queued().is_empty(),
             "an empty slot carrying no warning asks nothing"
         );
 
-        act(vec![Act::SendAll], &mut device, &mut queue);
-        match device.queued().front().expect("a batch was queued") {
+        bench.act(vec![Act::SendAll]);
+        match bench.device.queued().front().expect("a batch was queued") {
             DeviceCmd::SendAll { class, items } => {
                 assert_eq!(*class, ObjectClass::Program);
                 assert_eq!(
@@ -1581,7 +1499,11 @@ mod tests {
             }
             other => panic!("{}", other.label()),
         }
-        assert_eq!(queue.ids(), vec![id], "still queued until the write lands");
+        assert_eq!(
+            bench.queue.ids(),
+            vec![id],
+            "still queued until the write lands"
+        );
     }
 
     /// The confirmation says what is known about each destination slot, and an unread
@@ -1589,41 +1511,35 @@ mod tests {
     /// destinations.
     #[test]
     fn the_send_question_says_what_is_known_about_each_slot() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
         // Bank 7 was scanned: 7:1 holds something and 7:2 is empty. Bank 8 was not read.
-        device.pretend_scanned(class, 7, &["Africa Split", ""]);
-        let bytes = program(&mut workspace, &mut log);
+        bench
+            .device
+            .pretend_scanned(class, 7, &["Africa Split", ""]);
+        let bytes = Fresh::Program.bytes().unwrap();
         for (bank, slot) in [(6, 0), (6, 1), (7, 0)] {
-            let id = workspace.ingest(
+            let id = bench.workspace.ingest(
                 format!("sound {bank}-{slot}"),
                 Origin::Fresh,
                 bytes.clone(),
-                &mut log,
+                &mut bench.log,
             );
             enqueue(
-                &workspace,
-                &mut device,
-                &mut queue,
-                &mut log,
+                &bench.workspace,
+                &mut bench.device,
+                &mut bench.queue,
+                &mut bench.log,
                 id,
                 class,
                 Location { bank, slot },
             );
         }
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::AskSendAll],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::AskSendAll]);
 
-        let note = browser
+        let note = bench
+            .browser
             .ask
             .as_ref()
             .and_then(|ask| ask.note.clone())
@@ -1648,58 +1564,75 @@ mod tests {
     fn the_send_question_leaves_out_what_the_batch_would_skip() {
         use crate::device::DeviceEvent;
 
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
-        let theirs = program(&mut workspace, &mut log);
-        let electro = workspace.ingest("Africa-Split.ne5p".into(), Origin::Fresh, theirs, &mut log);
+        bench
+            .device
+            .pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        let theirs = Fresh::Program.bytes().unwrap();
+        let electro = bench.workspace.ingest(
+            "Africa-Split.ne5p".into(),
+            Origin::Fresh,
+            theirs,
+            &mut bench.log,
+        );
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
             electro,
             class,
             at(0),
         );
 
         // Another instrument in its place, which refuses the one already waiting.
-        device.pretend(DeviceEvent::Disconnected { lost: true });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        device.pretend_attached_as("Nord Stage 4");
-        let made = workspace
-            .create(Fresh::Stage4Program, &mut log)
+        bench
+            .device
+            .pretend(DeviceEvent::Disconnected { lost: true });
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
+        bench.device.pretend_attached_as("Nord Stage 4");
+        let made = bench
+            .workspace
+            .create(Fresh::Stage4Program, &mut bench.log)
             .expect("a Stage 4 program");
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
             made,
             class,
             at(1),
         );
-        device.pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
-            class,
-            name: "Program".into(),
-            native: false,
-            unit: None,
-        }]));
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        assert_eq!(queue.ids(), vec![electro, made], "both are still waiting");
-
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::AskSendAll],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
+        bench
+            .device
+            .pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
+                class,
+                name: "Program".into(),
+                native: false,
+                unit: None,
+            }]));
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
+        assert_eq!(
+            bench.queue.ids(),
+            vec![electro, made],
+            "both are still waiting"
         );
 
-        let ask = browser.ask.as_ref().expect("a question was raised");
+        bench.act(vec![Act::AskSendAll]);
+
+        let ask = bench.browser.ask.as_ref().expect("a question was raised");
         assert_eq!(ask.title, "Send 1 sound to the instrument?");
         let note = ask.note.as_deref().expect("the modal has a note");
         assert!(
@@ -1715,64 +1648,79 @@ mod tests {
     fn a_send_re_checks_every_entry_against_the_instrument_attached_now() {
         use crate::device::DeviceEvent;
 
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
-        let theirs = program(&mut workspace, &mut log);
-        let electro = workspace.ingest("Africa-Split.ne5p".into(), Origin::Fresh, theirs, &mut log);
+        bench
+            .device
+            .pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
+        let theirs = Fresh::Program.bytes().unwrap();
+        let electro = bench.workspace.ingest(
+            "Africa-Split.ne5p".into(),
+            Origin::Fresh,
+            theirs,
+            &mut bench.log,
+        );
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
             electro,
             class,
             at(0),
         );
 
         // Another instrument in its place, and something it does take waiting with it.
-        device.pretend(DeviceEvent::Disconnected { lost: true });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        device.pretend_attached_as("Nord Stage 4");
-        let made = workspace
-            .create(Fresh::Stage4Program, &mut log)
+        bench
+            .device
+            .pretend(DeviceEvent::Disconnected { lost: true });
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
+        bench.device.pretend_attached_as("Nord Stage 4");
+        let made = bench
+            .workspace
+            .create(Fresh::Stage4Program, &mut bench.log)
             .expect("a Stage 4 program");
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
             made,
             class,
             at(1),
         );
-        assert_eq!(queue.ids(), vec![electro, made]);
+        assert_eq!(bench.queue.ids(), vec![electro, made]);
 
         // The instrument reports its partitions, and the queue marks the refusal before
         // Send is pressed.
-        device.pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
-            class,
-            name: "Program".into(),
-            native: false,
-            unit: None,
-        }]));
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        assert!(queue
+        bench
+            .device
+            .pretend(DeviceEvent::Partitions(vec![crate::device::Partition {
+                class,
+                name: "Program".into(),
+                native: false,
+                unit: None,
+            }]));
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
+        assert!(bench
+            .queue
             .entry(electro)
             .is_some_and(|held| held.failure.is_some()));
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SendAll],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::SendAll]);
 
-        let batch = device
+        let batch = bench
+            .device
             .queued()
             .iter()
             .find(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
@@ -1785,8 +1733,12 @@ mod tests {
             vec![made],
             "only what this instrument takes is written"
         );
-        assert_eq!(queue.ids(), vec![electro, made], "both are still waiting");
-        let refused = queue.entry(electro).expect("it kept its place");
+        assert_eq!(
+            bench.queue.ids(),
+            vec![electro, made],
+            "both are still waiting"
+        );
+        let refused = bench.queue.entry(electro).expect("it kept its place");
         assert!(
             refused
                 .failure
@@ -1796,9 +1748,12 @@ mod tests {
             refused.failure
         );
         assert!(
-            log.transcript().contains("Africa-Split.ne5p” cannot go to"),
+            bench
+                .log
+                .transcript()
+                .contains("Africa-Split.ne5p” cannot go to"),
             "{}",
-            log.transcript()
+            bench.log.transcript()
         );
     }
 
@@ -1808,26 +1763,28 @@ mod tests {
     fn a_batch_that_stops_leaves_the_rest_of_the_queue_waiting() {
         use crate::device::DeviceEvent;
 
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let class = ObjectClass::Program;
-        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B", "Bass Manual"]);
-        let bytes = program(&mut workspace, &mut log);
+        bench
+            .device
+            .pretend_scanned(class, 7, &["Africa Split", "Squabble B", "Bass Manual"]);
+        let bytes = Fresh::Program.bytes().unwrap();
         let ids: Vec<u64> = (0..3)
             .map(|slot| {
-                let id = workspace.ingest(
+                let id = bench.workspace.ingest(
                     format!("sound {slot}"),
                     Origin::Device {
                         class,
                         at: at(slot),
                     },
                     bytes.clone(),
-                    &mut log,
+                    &mut bench.log,
                 );
                 enqueue(
-                    &workspace,
-                    &mut device,
-                    &mut queue,
-                    &mut log,
+                    &bench.workspace,
+                    &mut bench.device,
+                    &mut bench.queue,
+                    &mut bench.log,
                     id,
                     class,
                     at(slot),
@@ -1836,17 +1793,9 @@ mod tests {
             })
             .collect();
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SendAll],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-        let batch = device
+        bench.act(vec![Act::SendAll]);
+        let batch = bench
+            .device
             .queued()
             .iter()
             .find(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
@@ -1860,7 +1809,8 @@ mod tests {
             "in the order the queue holds them"
         );
         assert_eq!(
-            device
+            bench
+                .device
                 .queued()
                 .iter()
                 .filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
@@ -1876,32 +1826,42 @@ mod tests {
                 .iter()
                 .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
         };
-        while waiting(&device) {
-            device.pump();
-            if waiting(&device) {
-                device.pretend(DeviceEvent::Finished);
-                device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        while waiting(&bench.device) {
+            bench.device.pump();
+            if waiting(&bench.device) {
+                bench.device.pretend(DeviceEvent::Finished);
+                bench.device.poll(
+                    &mut bench.log,
+                    &mut bench.workspace,
+                    &mut bench.tabs,
+                    &mut bench.queue,
+                );
             }
         }
 
         // The instrument takes the first and refuses the second.
-        device.pretend(DeviceEvent::Sent {
+        bench.device.pretend(DeviceEvent::Sent {
             id: ids[0],
             class,
             at: at(0),
-            bytes: workspace.get(ids[0]).unwrap().bytes.clone(),
+            bytes: bench.workspace.get(ids[0]).unwrap().bytes.clone(),
         });
-        device.pretend(DeviceEvent::OpFailed(
+        bench.device.pretend(DeviceEvent::OpFailed(
             "Programs 7:2 is occupied, and the instrument does not overwrite in place".into(),
         ));
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
 
         assert_eq!(
-            queue.ids(),
+            bench.queue.ids(),
             ids[1..],
             "what was not written is still queued"
         );
-        let stopped = queue.entry(ids[1]).expect("the one it stopped on");
+        let stopped = bench.queue.entry(ids[1]).expect("the one it stopped on");
         assert!(
             stopped
                 .failure
@@ -1910,17 +1870,20 @@ mod tests {
             "{:?}",
             stopped.failure
         );
-        assert!(queue.entry(ids[2]).unwrap().failure.is_none());
-        assert!(log.transcript().contains("7:2"), "the log names the slot");
+        assert!(bench.queue.entry(ids[2]).unwrap().failure.is_none());
+        assert!(
+            bench.log.transcript().contains("7:2"),
+            "the log names the slot"
+        );
     }
 
     /// Queueing a folder's members queues everything that came from a slot. With nothing
     /// attached, a new program has no free slot to go to.
     #[test]
     fn a_folder_queues_only_what_can_go_back_to_a_slot() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
-        let folder = browser.folders.make().unwrap();
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let folder = bench.browser.folders.make().unwrap();
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),
@@ -1928,38 +1891,38 @@ mod tests {
             (ObjectClass::Live, 0),
             (ObjectClass::Piano, 0),
         ] {
-            let id = workspace.ingest(
+            let id = bench.workspace.ingest(
                 format!("{}.ne5p", place(class, at(slot))),
                 Origin::Device {
                     class,
                     at: at(slot),
                 },
                 bytes.clone(),
-                &mut log,
+                &mut bench.log,
             );
-            browser.folders.file(id, Some(folder));
+            bench.browser.folders.file(id, Some(folder));
         }
         // Never on an instrument, and nothing is attached to offer it a free slot.
-        let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
-        browser.folders.file(fresh, Some(folder));
+        let fresh = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        bench.browser.folders.file(fresh, Some(folder));
 
-        let members: Vec<Item> = browser
+        let members: Vec<Item> = bench
+            .browser
             .folders
-            .members(folder, &workspace)
+            .members(folder, &bench.workspace)
             .iter()
             .map(|entity| Item::Local(entity.id))
             .collect();
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            bulk(Bulk::Queue, &members, &device.state),
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-        let classes: Vec<ObjectClass> = queue.entries().iter().map(|held| held.class).collect();
+        bench.act(bulk(Bulk::Queue, &members, &bench.device.state));
+        let classes: Vec<ObjectClass> = bench
+            .queue
+            .entries()
+            .iter()
+            .map(|held| held.class)
+            .collect();
         assert_eq!(
             classes,
             vec![
@@ -1969,7 +1932,7 @@ mod tests {
                 ObjectClass::Piano
             ]
         );
-        assert!(!queue.holds(fresh), "it has no slot to go to");
+        assert!(!bench.queue.holds(fresh), "it has no slot to go to");
     }
 
     /// A double-click on a slot opens a view: a tab and a document, with no new row in
@@ -1977,43 +1940,43 @@ mod tests {
     #[test]
     fn opening_a_slot_does_not_put_it_on_this_computer() {
         use crate::device::DeviceEvent;
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
         let at = Location { bank: 6, slot: 3 };
         let origin = Origin::Device {
             class: ObjectClass::Program,
             at,
         };
 
-        device.pretend(DeviceEvent::Got {
+        bench.device.pretend(DeviceEvent::Got {
             name: "Africa-Split.ne5p".into(),
             origin,
             bytes,
             why: Purpose::View,
         });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
 
-        let id = tabs.active().expect("a view opens in a tab");
-        assert!(workspace.is_view(id));
-        assert_eq!(workspace.listed().count(), 0, "nothing joined the list");
+        let id = bench.tabs.active().expect("a view opens in a tab");
+        assert!(bench.workspace.is_view(id));
+        assert_eq!(
+            bench.workspace.listed().count(),
+            0,
+            "nothing joined the list"
+        );
         // It still knows the slot it came from, so it can be sent back.
         assert_eq!(
-            workspace.get(id).unwrap().origin.slot(),
+            bench.workspace.get(id).unwrap().origin.slot(),
             Some((ObjectClass::Program, at))
         );
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Keep(id)],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-        assert!(!workspace.is_view(id));
-        assert_eq!(workspace.listed().count(), 1);
+        bench.act(vec![Act::Keep(id)]);
+        assert!(!bench.workspace.is_view(id));
+        assert_eq!(bench.workspace.listed().count(), 1);
     }
 
     /// ⚠️ The editor opens on the folder's actual name. Prefilled with the generic name
@@ -2021,30 +1984,21 @@ mod tests {
     /// folders with one name, which `make` avoided.
     #[test]
     fn a_new_folder_opens_its_editor_on_the_name_it_was_given() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let mut new_folder = |browser: &mut Browser| {
-            apply(
-                browser,
-                &mut Shell::default(),
-                vec![Act::NewFolder],
-                &mut workspace,
-                &mut device,
-                &mut tabs,
-                &mut queue,
-                &mut log,
-            );
-            let rename = browser.rename.as_ref().expect("the editor is open");
+        let mut bench = Bench::new();
+        let mut new_folder = || {
+            bench.act(vec![Act::NewFolder]);
+            let rename = bench.browser.rename.as_ref().expect("the editor is open");
             let Item::Folder(id) = rename.what else {
                 panic!("it is open on the folder");
             };
             (id, rename.text.clone())
         };
 
-        let (first, typed) = new_folder(&mut browser);
+        let (first, typed) = new_folder();
         assert_eq!(typed, "New folder");
-        let (second, typed) = new_folder(&mut browser);
+        let (second, typed) = new_folder();
         assert_eq!(typed, "New folder 2", "the name it actually has");
-        assert_eq!(browser.folders.name_of(second), Some(typed.as_str()));
+        assert_eq!(bench.browser.folders.name_of(second), Some(typed.as_str()));
         assert_ne!(first, second);
     }
 
@@ -2052,36 +2006,24 @@ mod tests {
     /// close it, and the next folder to reuse the id would inherit it.
     #[test]
     fn removing_a_folder_mid_rename_takes_the_editor_with_it() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let mut act = |browser: &mut Browser, act| {
-            apply(
-                browser,
-                &mut Shell::default(),
-                vec![act],
-                &mut workspace,
-                &mut device,
-                &mut tabs,
-                &mut queue,
-                &mut log,
-            )
-        };
-        act(&mut browser, Act::NewFolder);
-        let Some(Item::Folder(id)) = browser.rename.as_ref().map(|r| r.what) else {
+        let mut bench = Bench::new();
+        bench.act(vec![Act::NewFolder]);
+        let Some(Item::Folder(id)) = bench.browser.rename.as_ref().map(|r| r.what) else {
             panic!("a new folder opens its editor");
         };
 
-        act(&mut browser, Act::RemoveFolder(id));
-        assert!(browser.rename.is_none(), "the editor went with it");
-        assert!(browser.selection.sole().is_none());
+        bench.act(vec![Act::RemoveFolder(id)]);
+        assert!(bench.browser.rename.is_none(), "the editor went with it");
+        assert!(bench.browser.selection.sole().is_none());
 
         // The id `make` hands out again has no editor left open on it.
-        act(&mut browser, Act::NewFolder);
-        let Some(Item::Folder(again)) = browser.rename.as_ref().map(|r| r.what) else {
+        bench.act(vec![Act::NewFolder]);
+        let Some(Item::Folder(again)) = bench.browser.rename.as_ref().map(|r| r.what) else {
             panic!("the new one opens its own");
         };
         assert_eq!(again, id, "the id was reused");
         assert_eq!(
-            browser.rename.as_ref().map(|r| r.text.as_str()),
+            bench.browser.rename.as_ref().map(|r| r.text.as_str()),
             Some("New folder")
         );
     }
@@ -2091,25 +2033,19 @@ mod tests {
     /// id would inherit both.
     #[test]
     fn removing_an_asset_mid_rename_takes_the_editor_with_it() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        browser.start_rename(Item::Local(id), "Africa Split");
-        assert!(browser.selection.holds(Item::Local(id)));
+        let mut bench = Bench::new();
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        bench.browser.start_rename(Item::Local(id), "Africa Split");
+        assert!(bench.browser.selection.holds(Item::Local(id)));
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Remove(id)],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        bench.act(vec![Act::Remove(id)]);
 
-        assert!(browser.rename.is_none(), "the editor went with it");
+        assert!(bench.browser.rename.is_none(), "the editor went with it");
         assert!(
-            !browser.selection.holds(Item::Local(id)),
+            !bench.browser.selection.holds(Item::Local(id)),
             "and the selection holds no removed row"
         );
     }
@@ -2120,51 +2056,44 @@ mod tests {
     #[test]
     fn opening_a_slot_that_is_already_open_activates_its_tab() {
         use crate::device::DeviceEvent;
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = program(&mut workspace, &mut log);
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
         let class = ObjectClass::Program;
         let at = Location { bank: 6, slot: 3 };
-        device.pretend_scanned(class, 7, &["", "", "", "Africa Split"]);
+        bench
+            .device
+            .pretend_scanned(class, 7, &["", "", "", "Africa Split"]);
 
-        device.pretend(DeviceEvent::Got {
+        bench.device.pretend(DeviceEvent::Got {
             name: "Africa-Split.ne5p".into(),
             origin: Origin::Device { class, at },
             bytes,
             why: Purpose::View,
         });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        let first = tabs.active().expect("a view opened");
-
-        tabs.close(Spot::Document(first));
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Open(Item::Slot { class, at })],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
         );
-        assert!(device.queued().is_empty(), "nothing was read again");
-        assert_eq!(tabs.active(), Some(first), "its own tab came forward");
-        assert_eq!(workspace.entities().len(), 1, "and there is one copy");
+        let first = bench.tabs.active().expect("a view opened");
+
+        bench.tabs.close(Spot::Document(first));
+        bench.act(vec![Act::Open(Item::Slot { class, at })]);
+        assert!(bench.device.queued().is_empty(), "nothing was read again");
+        assert_eq!(bench.tabs.active(), Some(first), "its own tab came forward");
+        assert_eq!(bench.workspace.entities().len(), 1, "and there is one copy");
 
         let elsewhere = Location { bank: 6, slot: 4 };
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Open(Item::Slot {
-                class,
-                at: elsewhere,
-            })],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
+        bench.act(vec![Act::Open(Item::Slot {
+            class,
+            at: elsewhere,
+        })]);
+        assert_eq!(
+            bench.device.queued().len(),
+            1,
+            "a slot with no open view is read"
         );
-        assert_eq!(device.queued().len(), 1, "a slot with no open view is read");
     }
 
     /// ⚠️ Sending a file the instrument does not want costs the slot's occupant, and the
@@ -2199,21 +2128,14 @@ mod tests {
 
     #[test]
     fn a_sync_reads_every_folder_again() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+        let mut bench = Bench::new();
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Resync],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-        for class in device.state.classes() {
-            let progress = device.state.scan.progress(class);
+        bench.act(vec![Act::Resync]);
+        for class in bench.device.state.classes() {
+            let progress = bench.device.state.scan.progress(class);
             assert!(
                 progress.is_some_and(|progress| progress.running),
                 "{}",

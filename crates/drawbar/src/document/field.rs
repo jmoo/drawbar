@@ -2090,6 +2090,7 @@ fn contiguous(legal: &[String]) -> Option<(i64, i64)> {
 mod tests {
     use super::*;
     use crate::fields::apply;
+    use crate::testing;
     use crate::workspace::Fresh;
     use nord_format::formats::ne5;
     use nord_format::{Entity, Program};
@@ -2353,23 +2354,10 @@ mod tests {
     fn a_click_anywhere_in_a_stored_alternative_picks_it() {
         /// The outlined card of the alternative that is not playing.
         fn kept_card(output: &egui::FullOutput, stroke: egui::Color32) -> Option<egui::Rect> {
-            fn walk(shape: &egui::Shape, stroke: egui::Color32, found: &mut Vec<egui::Rect>) {
-                match shape {
-                    egui::Shape::Rect(drawn) if drawn.stroke.color == stroke => {
-                        found.push(drawn.rect)
-                    }
-                    egui::Shape::Vec(shapes) => {
-                        shapes.iter().for_each(|shape| walk(shape, stroke, found))
-                    }
-                    _ => {}
-                }
-            }
-            let mut found = Vec::new();
-            for clipped in &output.shapes {
-                walk(&clipped.shape, stroke, &mut found);
-            }
-            found
+            testing::rects(output)
                 .into_iter()
+                .filter(|drawn| drawn.stroke.color == stroke)
+                .map(|drawn| drawn.rect)
                 .find(|rect| rect.width() > 120.0 && rect.height() > 120.0)
         }
 
@@ -2393,16 +2381,7 @@ mod tests {
             .expect("a stored alternative");
         let wanted = kept.pick.expect("a card is picked by its own selector");
 
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        ctx.all_styles_mut(crate::app::metrics);
-        let screen = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1600.0, 1200.0),
-            )),
-            ..Default::default()
-        };
+        let ctx = testing::context();
         let quiet = ctx.style().visuals.widgets.noninteractive.bg_stroke.color;
         let read = Ctx::default();
         let state = State::default();
@@ -2413,14 +2392,12 @@ mod tests {
         for pass in 0..2 {
             let mut piano = lookup();
             sets.clear();
-            let input = egui::RawInput {
-                events: match pass {
-                    0 => Vec::new(),
-                    _ => click(body.center()),
-                },
-                ..screen.clone()
+            let events = match pass {
+                0 => Vec::new(),
+                _ => testing::click(body.center()),
             };
-            let output = ctx.run(input, |ctx| {
+            let input = testing::screen(egui::vec2(1600.0, 1200.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     side_by_side(
                         ui,
@@ -2461,42 +2438,17 @@ mod tests {
         }
     }
 
-    /// The screen one headless frame is drawn on.
-    fn headless() -> egui::RawInput {
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 540.0),
-            )),
-            ..Default::default()
-        }
-    }
-
-    /// A full click at one point: the pointer moves there, presses, and releases.
-    fn click(at: egui::Pos2) -> Vec<egui::Event> {
-        let button = |pressed| egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::default(),
-        };
-        vec![egui::Event::PointerMoved(at), button(true), button(false)]
+    /// One headless frame on the screen the controls are drawn on.
+    fn headless(events: Vec<egui::Event>) -> egui::RawInput {
+        testing::screen(egui::vec2(900.0, 540.0), events)
     }
 
     /// How many filled circles of one color a frame painted.
     fn circles(output: &egui::FullOutput, ink: egui::Color32) -> usize {
-        fn count(shape: &egui::Shape, ink: egui::Color32) -> usize {
-            match shape {
-                egui::Shape::Circle(drawn) => usize::from(drawn.fill == ink),
-                egui::Shape::Vec(shapes) => shapes.iter().map(|shape| count(shape, ink)).sum(),
-                _ => 0,
-            }
-        }
-        output
-            .shapes
+        testing::shapes(output)
             .iter()
-            .map(|clipped| count(&clipped.shape, ink))
-            .sum()
+            .filter(|(shape, _)| matches!(shape, egui::Shape::Circle(drawn) if drawn.fill == ink))
+            .count()
     }
 
     /// A lookup that has asked the instrument nothing, for a cell that references no
@@ -2515,26 +2467,13 @@ mod tests {
 
     /// One headless frame with a single control in it, and how many shapes it painted.
     fn drawn(field: &Field) -> usize {
-        fn count(shape: &egui::Shape) -> usize {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
-                _ => 1,
-            }
-        }
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        ctx.all_styles_mut(crate::app::metrics);
         let legal = (field.spec.legal)();
-        let output = ctx.run(headless(), |ctx| {
+        let output = testing::run(&testing::context(), headless(Vec::new()), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 control(ui, field, &legal, &[], None);
             });
         });
-        output
-            .shapes
-            .iter()
-            .map(|clipped| count(&clipped.shape))
-            .sum()
+        testing::shapes(&output).len()
     }
 
     /// ⚠️ A kind that fell through would be a control the user never sees: the field
@@ -2692,9 +2631,7 @@ mod tests {
         };
 
         let dots = |pending: &str, lens: Option<usize>| -> usize {
-            let ctx = egui::Context::default();
-            ctx.set_fonts(crate::app::fonts());
-            ctx.all_styles_mut(crate::app::metrics);
+            let ctx = testing::context();
             let mut state = State {
                 pending: vec![pending.to_string()],
                 ..Default::default()
@@ -2706,7 +2643,7 @@ mod tests {
             let mut piano = lookup();
             let mut sets = Sets::new();
             let ink = app::warn(&ctx.style().visuals);
-            let output = ctx.run(headless(), |ctx| {
+            let output = testing::run(&ctx, headless(Vec::new()), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     one(ui, &read, &state, &part, &[], &mut piano, &mut sets);
                 });
@@ -2743,18 +2680,13 @@ mod tests {
 
         /// What the last frame committed, and whether the typed text is still held.
         fn exit(field: &Field, focused: bool, events: Vec<egui::Event>) -> (Option<String>, bool) {
-            let ctx = egui::Context::default();
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = testing::context();
             let mut got = None;
             let mut held = false;
             // The first frame opens the box; the second sends the key or click that
             // leaves it.
             for events in [Vec::new(), events] {
-                let input = egui::RawInput {
-                    events,
-                    ..headless()
-                };
-                let _ = ctx.run(input, |ctx| {
+                testing::run(&ctx, headless(events), |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let id = ui.id().with(("wide", field.path.as_str()));
                         ui.data_mut(|data| data.insert_temp(id, TYPED.to_string()));
@@ -2769,15 +2701,7 @@ mod tests {
             (got, held)
         }
 
-        fn key(key: egui::Key) -> Vec<egui::Event> {
-            vec![egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::default(),
-            }]
-        }
+        let key = |key| vec![testing::key(key)];
 
         assert_eq!(
             exit(field, true, Vec::new()),
@@ -2809,21 +2733,16 @@ mod tests {
             .expect("a stage 4 program has switches");
 
         let switched = |legal: &[String]| -> Option<String> {
-            let ctx = egui::Context::default();
-            ctx.set_fonts(crate::app::fonts());
-            ctx.all_styles_mut(crate::app::metrics);
+            let ctx = testing::context();
             let mut got = None;
             let mut at = egui::Pos2::ZERO;
             // The first pass lays the lamp out; the second clicks the rect it claimed.
             for pass in 0..2 {
-                let input = egui::RawInput {
-                    events: match pass {
-                        0 => Vec::new(),
-                        _ => click(at),
-                    },
-                    ..headless()
+                let events = match pass {
+                    0 => Vec::new(),
+                    _ => testing::click(at),
                 };
-                let _ = ctx.run(input, |ctx| {
+                testing::run(&ctx, headless(events), |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let row = ui.horizontal(|ui| toggle(ui, field, legal));
                         got = row.inner;
@@ -2930,24 +2849,6 @@ mod tests {
     /// right edge cannot be clicked, and a lens drawn over the chips hides both.
     #[test]
     fn every_nav_chip_and_the_morph_lens_keep_their_own_room_at_every_width() {
-        fn words(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
-            fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-                match shape {
-                    egui::Shape::Text(drawn) => into.push((
-                        drawn.galley.text().to_string(),
-                        egui::Rect::from_min_size(drawn.pos, drawn.galley.size()),
-                    )),
-                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                    _ => {}
-                }
-            }
-            let mut found = Vec::new();
-            for clipped in &output.shapes {
-                walk(&clipped.shape, &mut found);
-            }
-            found
-        }
-
         let bytes = Fresh::Stage3Program.bytes().unwrap();
         let (fields, _) = apply(&bytes, &[]).unwrap();
         let decoded =
@@ -2956,20 +2857,12 @@ mod tests {
         assert!(doc.sections.len() > 20, "{} sections", doc.sections.len());
         assert!(doc.slots > 0, "and a morph lens to place beside them");
 
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        ctx.all_styles_mut(crate::app::metrics);
+        let ctx = testing::context();
         for width in [320.0, 480.0, 660.0, 900.0] {
             let mut state = State::default();
             let mut room = (egui::Rect::NOTHING, egui::Rect::NOTHING);
-            let screen = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(width, 540.0),
-                )),
-                ..Default::default()
-            };
-            let output = ctx.run(screen, |ctx| {
+            let screen = testing::screen(egui::vec2(width, 540.0), Vec::new());
+            let output = testing::run(&ctx, screen, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     nav(ui, &mut state, &doc);
                     room = (ui.max_rect(), ui.min_rect());
@@ -2982,7 +2875,7 @@ mod tests {
                 took.right() - page.right(),
             );
 
-            let painted = words(&output);
+            let painted = testing::painted(&output);
             for wanted in doc
                 .sections
                 .iter()
@@ -2991,17 +2884,11 @@ mod tests {
                 .chain(SLOTS.iter().map(|(_, word, _)| *word))
             {
                 assert!(
-                    painted.iter().any(|(text, _)| text == wanted),
+                    painted.iter().any(|word| word.text == wanted),
                     "{wanted} is not on a {width} wide nav row",
                 );
             }
-            let row = |wanted: &str| {
-                painted
-                    .iter()
-                    .find(|(text, _)| text == wanted)
-                    .map(|(_, rect)| rect.y_range())
-                    .expect("painted above")
-            };
+            let row = |wanted: &str| testing::where_(&painted, wanted).y_range();
             let caption = row("MORPH");
             for chip in std::iter::once("Panel").chain(SLOTS.iter().map(|(_, word, _)| *word)) {
                 let on = row(chip);
@@ -3011,12 +2898,14 @@ mod tests {
                      at {width} wide",
                 );
             }
-            for (nth, (word, rect)) in painted.iter().enumerate() {
-                for (other, over) in &painted[nth + 1..] {
-                    let shared = rect.intersect(*over);
+            for (nth, word) in painted.iter().enumerate() {
+                for other in &painted[nth + 1..] {
+                    let shared = word.rect.intersect(other.rect);
                     assert!(
                         shared.width() <= 0.0 || shared.height() <= 0.0,
-                        "{word} and {other} overlap at {width} wide",
+                        "{} and {} overlap at {width} wide",
+                        word.text,
+                        other.text,
                     );
                 }
             }

@@ -1336,16 +1336,13 @@ fn destination(held: &Queued) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::act::apply;
-    use crate::browser::bench::{bench, context, words};
-    use crate::shell::Shell;
+    use crate::testing::{self, context, words, Bench};
 
     /// ⚠️ Everything built from audio is on the New menu. One pick of WAVs can make any
     /// of them, and a menu offering only some would hide what the dialog does.
     #[test]
     fn the_new_menu_offers_everything_a_pick_of_wavs_makes() {
-        let ctx = context();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
         });
         let said = words(&output);
@@ -1360,8 +1357,7 @@ mod tests {
     /// computer keeps. A kind on the wrong side would misstate where the new file can go.
     #[test]
     fn the_new_menu_parts_instrument_files_from_the_rest() {
-        let ctx = context();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
         });
         let said = words(&output);
@@ -1401,12 +1397,19 @@ mod tests {
     /// holds keeps the tag; only the drawn text drops it.
     #[test]
     fn a_row_paints_its_name_without_the_format_tag() {
-        let (mut browser, mut workspace, device, _tabs, queue, mut log) = bench();
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         workspace.rename(id, "Africa Split.ne5p".into());
 
-        let ctx = workspace.ctx().clone();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("browser")
                 .exact_width(crate::shell::BROWSER)
                 .show(ctx, |ui| {
@@ -1431,25 +1434,18 @@ mod tests {
             Narrow::State(State::Waiting),
             Narrow::State(State::Differs),
         ] {
-            let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-            let mut shell = Shell::default();
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            tabs.open(id);
+            let mut bench = Bench::new();
+            let id = bench
+                .workspace
+                .create(Fresh::Program, &mut bench.log)
+                .unwrap();
+            bench.tabs.open(id);
 
             let mut acts = Vec::new();
             narrow(&mut acts, asked);
-            apply(
-                &mut browser,
-                &mut shell,
-                acts,
-                &mut workspace,
-                &mut device,
-                &mut tabs,
-                &mut queue,
-                &mut log,
-            );
-            assert!(shell.filter.on(asked), "{asked:?}");
-            assert_eq!(tabs.showing(), Some(Spot::Library), "{asked:?}");
+            bench.act(acts);
+            assert!(bench.shell.filter.on(asked), "{asked:?}");
+            assert_eq!(bench.tabs.showing(), Some(Spot::Library), "{asked:?}");
         }
     }
 
@@ -1457,32 +1453,27 @@ mod tests {
     /// like one. Otherwise nothing in the window shows where the filter came from.
     #[test]
     fn the_place_row_reads_as_on_while_the_library_is_over_that_place() {
-        fn selections(shape: &egui::Shape, want: egui::Color32) -> usize {
-            match shape {
-                egui::Shape::Rect(drawn) => usize::from(drawn.fill == want),
-                egui::Shape::Vec(shapes) => {
-                    shapes.iter().map(|shape| selections(shape, want)).sum()
-                }
-                _ => 0,
-            }
-        }
-
-        let ctx = context();
-        let (mut browser, workspace, device, _tabs, queue, _log) = bench();
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
         let lit = ctx.style().visuals.selection.bg_fill;
         let mut on = |filter: &Filter| -> usize {
-            let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::left("places")
                     .exact_width(crate::shell::BROWSER)
                     .show(ctx, |ui| {
                         browser.ui(ui, &workspace, &device, &queue, filter);
                     });
             });
-            output
-                .shapes
+            testing::rects(&output)
                 .iter()
-                .map(|clipped| selections(&clipped.shape, lit))
-                .sum()
+                .filter(|drawn| drawn.fill == lit)
+                .count()
         };
 
         assert_eq!(on(&Filter::default()), 0, "nothing is narrowed to a place");
@@ -1495,7 +1486,12 @@ mod tests {
     /// neither place holds would narrow the library to nothing.
     #[test]
     fn the_kinds_section_lists_the_union_of_the_two_places() {
-        let (_browser, mut workspace, mut device, _tabs, _queue, mut log) = bench();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         workspace.create(Fresh::Program, &mut log).unwrap();
         let alone = kinds_present(&workspace, &device.state);
         assert_eq!(alone, [Kind::Program]);
@@ -1523,7 +1519,11 @@ mod tests {
     /// kind that is nowhere would show an empty table with nothing to click to clear it.
     #[test]
     fn a_kind_that_leaves_the_union_stops_narrowing() {
-        let (_browser, workspace, mut device, _tabs, _queue, _log) = bench();
+        let Bench {
+            workspace,
+            mut device,
+            ..
+        } = Bench::new();
         let mut filter = Filter::default();
         device.pretend_partitions(&crate::device::ELECTRO5);
         filter.narrow(Narrow::Kind(Kind::Piano));
@@ -1545,7 +1545,13 @@ mod tests {
     /// one address would leave only one.
     #[test]
     fn a_duplicate_lands_past_the_slot_the_queue_is_bound_for() {
-        let (_browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
         let id = workspace.create(Fresh::Program, &mut log).unwrap();

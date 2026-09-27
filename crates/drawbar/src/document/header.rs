@@ -1259,11 +1259,12 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
 mod tests {
     use super::*;
     use crate::log::Log;
+    use crate::testing::{self, sample_bytes, wav_bytes, Bench};
     use crate::workspace::{Fresh, Workspace};
 
     fn workspace() -> (Workspace, Log) {
-        let ctx = egui::Context::default();
-        (Workspace::new(ctx), Log::default())
+        let Bench { workspace, log, .. } = Bench::new();
+        (workspace, log)
     }
 
     /// A workspace holding one file, and its id.
@@ -1280,48 +1281,27 @@ mod tests {
 
     #[test]
     fn a_name_box_settles_only_on_an_enter_it_has_the_focus_for() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = testing::context();
         let mut text = "Marimba".to_string();
-        let key = |key| egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let at = |pos| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        };
+        let enter = || vec![testing::key(egui::Key::Enter)];
         let frame = |events: Vec<egui::Event>, text: &mut String| {
             let mut done = false;
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(400.0, 100.0),
-                )),
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
+            let input = testing::screen(egui::vec2(400.0, 100.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     done = settled(ui, text, NAME, None, false);
                 });
             });
-            done
+            (done, testing::painted(&output))
         };
 
-        assert!(!frame(Vec::new(), &mut text), "nothing has happened");
+        let (done, said) = frame(Vec::new(), &mut text);
+        assert!(!done, "nothing has happened");
+        assert!(!frame(enter(), &mut text).0, "the box never had the focus");
+        let on_box = testing::where_(&said, "Marimba").center();
+        frame(vec![testing::button(on_box, true)], &mut text);
         assert!(
-            !frame(vec![key(egui::Key::Enter)], &mut text),
-            "the box never had the focus"
-        );
-        let _ = frame(vec![at(egui::pos2(40.0, 20.0))], &mut text);
-        assert!(
-            frame(vec![key(egui::Key::Enter)], &mut text),
+            frame(enter(), &mut text).0,
             "an Enter typed in the box settles it"
         );
     }
@@ -1631,23 +1611,6 @@ mod tests {
         assert_eq!(loud.tone, Tone::Idle);
         assert_eq!(loud.send, None);
         assert_eq!(loud.hint, "no instrument has a folder for this note");
-    }
-
-    fn wav_bytes() -> Vec<u8> {
-        use nord_format::formats::nsmp::codec;
-        let samples: Vec<i16> = (0..codec::SOURCE_RATE as usize)
-            .map(|i| ((i as f64 / 40.0).sin() * 12_000.0) as i16)
-            .collect();
-        nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
-    }
-
-    fn sample_bytes() -> Vec<u8> {
-        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
-        let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
-        nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
-            .unwrap()
-            .to_bytes()
-            .unwrap()
     }
 
     fn project_bytes() -> Vec<u8> {

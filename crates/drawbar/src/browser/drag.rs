@@ -492,8 +492,38 @@ pub(super) fn ghost(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::{local, onto, slot, CARRIED};
     use crate::strings::folder;
+
+    /// The asset on this computer every drag fixture carries.
+    const CARRIED: u64 = 1;
+
+    fn local(kind: Kind) -> Held {
+        Held {
+            what: Item::Local(CARRIED),
+            kind,
+            filed: None,
+            fits: true,
+        }
+    }
+
+    fn slot(class: ObjectClass, bank: u32, slot: u32) -> Held {
+        Held {
+            what: Item::Slot {
+                class,
+                at: Location { bank, slot },
+            },
+            kind: Kind::from_class(class),
+            filed: None,
+            fits: true,
+        }
+    }
+
+    fn onto(class: ObjectClass, bank: u32, at: u32) -> Onto {
+        Onto::Slot {
+            class,
+            at: Location { bank, slot: at },
+        }
+    }
 
     #[test]
     fn a_drag_between_the_two_places_copies_one_way_and_sends_the_other() {

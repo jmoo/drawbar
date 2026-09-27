@@ -224,21 +224,17 @@ pub(crate) fn glyph_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing;
 
     fn headless() -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = testing::context();
         egui_extras::install_image_loaders(&ctx);
-        ctx.set_fonts(crate::app::fonts());
         ctx
     }
 
     fn drawn_at(ctx: &egui::Context, size: egui::Vec2, add: impl FnOnce(&mut egui::Ui)) {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-            ..Default::default()
-        };
         let mut add = Some(add);
-        let _ = ctx.run(input, |ctx| {
+        testing::run(ctx, testing::screen(size, Vec::new()), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(add) = add.take() {
                     add(ui);

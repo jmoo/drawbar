@@ -1312,6 +1312,7 @@ pub fn too_small_notice(ctx: &egui::Context) {
 mod tests {
     use super::*;
     use crate::store::Fake;
+    use crate::testing;
     use eframe::{App, Storage};
 
     /// The window size the design is drawn for.
@@ -1379,13 +1380,9 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> Painted {
         let mut frame = eframe::Frame::_new_kittest();
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
-            ..Default::default()
-        };
+        let input = testing::screen(screen, events);
         let mut center = egui::Rect::NOTHING;
-        let output = ctx.run(input, |ctx| {
+        let output = testing::run(ctx, input, |ctx| {
             app.update(ctx, &mut frame);
             // Panels shrink this as they are added; the central panel does not.
             center = ctx.available_rect();
@@ -1400,7 +1397,7 @@ mod tests {
         Painted {
             center,
             panels,
-            words: crate::tabs::words(&output),
+            words: testing::words(&output),
         }
     }
 
@@ -1486,16 +1483,9 @@ mod tests {
     /// A gated frame draws only the notice: what is wrong, and a link to the guide.
     #[test]
     fn the_notice_says_what_is_wrong_and_offers_the_guide() {
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(390.0, 844.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, too_small_notice);
-        let said = crate::tabs::words(&output);
+        let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
+        let output = testing::run(&egui::Context::default(), input, too_small_notice);
+        let said = testing::words(&output);
 
         assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");
         assert!(said.iter().any(|word| word == TOO_SMALL_WHY), "{said:?}");

@@ -286,6 +286,22 @@ fn paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context};
+
+    /// The middle of the dial `ui_for` draws, from a frame that draws it.
+    fn dial(ctx: &egui::Context) -> egui::Pos2 {
+        let mut id = egui::Id::NULL;
+        testing::run(ctx, egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                id = ui.make_persistent_id(("knob", "gain"));
+                ui_for(ui, "gain", 0, 0, 127);
+            });
+        });
+        ctx.read_response(id)
+            .expect("the dial was drawn")
+            .rect
+            .center()
+    }
 
     /// A knob at the bottom of its range is fully counterclockwise, at the top fully
     /// clockwise, and halfway points straight up.
@@ -355,34 +371,23 @@ mod tests {
     /// Dragging up by half of `DRAG_FOR_SWEEP` covers half the range.
     #[test]
     fn a_drag_up_turns_the_knob_open() {
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut value = 0i64;
-        // The dial is the first thing in the panel, so it sits under the panel's margin.
-        let on_dial = egui::pos2(28.0, 28.0);
-        let travel = DRAG_FOR_SWEEP / 2.0;
+        let on_dial = dial(&ctx);
+        let above = on_dial - egui::vec2(0.0, DRAG_FOR_SWEEP / 2.0);
 
         let frames: [Vec<egui::Event>; 4] = [
             vec![egui::Event::PointerMoved(on_dial)],
-            vec![egui::Event::PointerButton {
-                pos: on_dial,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::default(),
-            }],
-            vec![egui::Event::PointerMoved(on_dial - egui::vec2(0.0, travel))],
-            vec![egui::Event::PointerButton {
-                pos: on_dial - egui::vec2(0.0, travel),
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::default(),
-            }],
+            vec![testing::button(on_dial, true)],
+            vec![egui::Event::PointerMoved(above)],
+            vec![testing::button(above, false)],
         ];
         for events in frames {
             let input = egui::RawInput {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     if let Some(moved) = ui_for(ui, "gain", value, 0, 127) {
                         value = moved.parse().expect("a drag lands on a stop");
@@ -401,23 +406,13 @@ mod tests {
             ("400", Some("400")),
             ("zero", Some("zero")),
         ] {
-            let ctx = egui::Context::default();
-            let on_dial = egui::pos2(28.0, 28.0);
+            let ctx = context();
+            let on_dial = dial(&ctx);
             let mut got = None;
             let click = || {
                 vec![
-                    egui::Event::PointerButton {
-                        pos: on_dial,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::default(),
-                    },
-                    egui::Event::PointerButton {
-                        pos: on_dial,
-                        button: egui::PointerButton::Primary,
-                        pressed: false,
-                        modifiers: egui::Modifiers::default(),
-                    },
+                    testing::button(on_dial, true),
+                    testing::button(on_dial, false),
                 ]
             };
             let frames: [Vec<egui::Event>; 6] = [
@@ -427,13 +422,7 @@ mod tests {
                 // The box takes the focus on the frame after the one that opened it.
                 Vec::new(),
                 vec![egui::Event::Text(typed.to_string())],
-                vec![egui::Event::Key {
-                    key: egui::Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::default(),
-                }],
+                vec![testing::key(egui::Key::Enter)],
             ];
             // Two whole clicks, a frame apart: that is what egui counts as a double
             // click, and one press-and-release is not.
@@ -442,7 +431,7 @@ mod tests {
                     events,
                     ..Default::default()
                 };
-                let _ = ctx.run(input, |ctx| {
+                testing::run(&ctx, input, |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         if let Some(moved) = ui_for(ui, "gain", 0, 0, 127) {
                             got = Some(moved);
@@ -456,17 +445,11 @@ mod tests {
 
     #[test]
     fn the_arrows_step_a_focused_knob() {
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut value = 40i64;
         let mut focused = false;
         for _ in 0..4 {
-            let mut events = vec![egui::Event::Key {
-                key: egui::Key::ArrowUp,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::default(),
-            }];
+            let mut events = vec![testing::key(egui::Key::ArrowUp)];
             if !focused {
                 events.clear();
             }
@@ -474,7 +457,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     if !focused {
                         // The dial uses the knob's own id, so this is where Tab would

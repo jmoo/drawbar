@@ -1033,6 +1033,7 @@ fn split_scope(item: &str) -> (Option<&str>, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, Word};
 
     /// The head of the `drawbar-v0.5.0` release body, as `gh release view` returns it.
     const RELEASED: &str = "\
@@ -1045,29 +1046,9 @@ mod tests {
 **Full changelog**: https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0";
 
     fn headless() -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = testing::context();
         egui_extras::install_image_loaders(&ctx);
-        ctx.set_fonts(crate::app::fonts());
-        ctx.all_styles_mut(crate::app::metrics);
         ctx
-    }
-
-    /// Every text painted in a frame, with its bounds.
-    fn painted(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
-        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-            match shape {
-                egui::Shape::Text(text) => {
-                    into.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
-                }
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        said
     }
 
     /// Draw `add` on a screen this size and report what it painted, and where.
@@ -1075,19 +1056,15 @@ mod tests {
         ctx: &egui::Context,
         size: egui::Vec2,
         add: impl FnMut(&egui::Context),
-    ) -> Vec<(String, egui::Rect)> {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-            ..Default::default()
-        };
-        painted(&ctx.run(input, add))
+    ) -> Vec<Word> {
+        testing::painted(&testing::run(ctx, testing::screen(size, Vec::new()), add))
     }
 
-    /// The bounds of a painted text, or `None` when it was never painted.
-    fn box_of(said: &[(String, egui::Rect)], word: &str) -> Option<egui::Rect> {
+    /// The painted bounds of a text, or `None` when it was never painted.
+    fn box_of(said: &[Word], word: &str) -> Option<egui::Rect> {
         said.iter()
-            .find(|(text, _)| text == word)
-            .map(|(_, rect)| *rect)
+            .find(|painted| painted.text == word)
+            .map(|painted| painted.bounds)
     }
 
     #[test]

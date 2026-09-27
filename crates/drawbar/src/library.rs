@@ -1431,21 +1431,12 @@ fn nothing(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::apply;
     use crate::log::Log;
-    use crate::tabs::Tabs;
+    use crate::testing::{self, Bench};
     use crate::workspace::{Fresh, Origin};
 
     fn at(bank: u32, slot: u32) -> Location {
         Location { bank, slot }
-    }
-
-    /// A context set up as `DrawbarApp::new` sets one up, with the named text styles
-    /// installed in both themes.
-    fn context() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        ctx
     }
 
     fn row(name: &str, kind: Kind, where_: Where, at: Option<Location>, size: u64) -> Row {
@@ -1610,18 +1601,15 @@ mod tests {
     fn the_kind_place_and_tag_filters_compose_over_the_row_model() {
         use crate::filter::Narrow;
 
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let mut tags = Tags::default();
 
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         device.pretend_partitions(&crate::device::ELECTRO5);
         device.pretend_scanned(ObjectClass::SetList, 1, &["Sunday"]);
         // One linked to the slot holding its bytes, so it is in both places, and one
@@ -1682,18 +1670,15 @@ mod tests {
     /// link stays where it was.
     #[test]
     fn a_linked_asset_is_in_both_places_and_says_when_the_two_stop_agreeing() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let tags = Tags::default();
 
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         let id = workspace.ingest(
             "Africa-Split.ne5p".into(),
             Origin::Device {
@@ -1752,20 +1737,17 @@ mod tests {
     /// refuses on every click.
     #[test]
     fn a_foreign_asset_is_neither_marked_against_a_slot_nor_counted_as_changed() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
-        let queue = Queue::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
         let held_at = at(6, 0);
 
-        let bytes = {
-            let id = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let bytes = Fresh::Stage4Program.bytes().unwrap();
         let id = workspace.ingest(
             "Africa-Split.ns4p".into(),
             Origin::Device { class, at: held_at },
@@ -1793,11 +1775,14 @@ mod tests {
     /// bytes there.
     #[test]
     fn a_slot_reporting_no_checksum_says_nothing_until_it_is_read_or_written() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
-        let mut queue = Queue::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut tabs,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
         let tags = Tags::default();
         let class = ObjectClass::Settings;
         let held_at = at(6, 0);
@@ -1822,7 +1807,7 @@ mod tests {
                 name: "Live Settings".into(),
             })],
         });
-        device.poll(&mut log, &mut workspace, &mut Tabs::default(), &mut queue);
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
         assert_eq!(
             workspace.get(id).unwrap().link,
             Some((class, held_at)),
@@ -1898,10 +1883,12 @@ mod tests {
     /// it to the slot it came off unless the checksum is computed from the body.
     #[test]
     fn a_type_0_asset_links_to_the_slot_reporting_its_body_checksum() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let (queue, tags) = (Queue::default(), Tags::default());
         let held_at = at(6, 0);
 
@@ -1950,10 +1937,12 @@ mod tests {
     /// where it was.
     #[test]
     fn an_unsaved_edit_still_links_to_the_slot_holding_the_saved_bytes() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let (queue, tags) = (Queue::default(), Tags::default());
         let held_at = at(6, 0);
 
@@ -2020,10 +2009,12 @@ mod tests {
     /// still reflects the saved bytes.
     #[test]
     fn a_row_wears_the_star_for_an_edit_that_is_still_an_editors_plan() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let (queue, tags) = (Queue::default(), Tags::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -2059,10 +2050,12 @@ mod tests {
     fn a_row_waiting_to_be_sent_is_not_also_one_that_differs() {
         use crate::filter::{Narrow, State};
 
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let (tags, mut queue) = (Tags::default(), Queue::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -2135,10 +2128,12 @@ mod tests {
     /// matched them.
     #[test]
     fn a_class_linked_by_name_reads_both_without_a_sign() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let (tags, filter, queue) = (Tags::default(), Filter::default(), Queue::default());
 
         workspace.create(Fresh::Settings, &mut log).unwrap();
@@ -2180,9 +2175,9 @@ mod tests {
     /// explains the color as well as where the row is.
     #[test]
     fn a_colored_where_cell_says_what_its_color_claims() {
-        let ctx = context();
-        let workspace = Workspace::new(ctx.clone());
-        let device = Device::new(ctx);
+        let Bench {
+            workspace, device, ..
+        } = Bench::new();
         let tags = Tags::default();
         let held = row(
             "Africa Split",
@@ -2210,11 +2205,13 @@ mod tests {
     /// are taken, what is already waiting, and what nothing has named.
     #[test]
     fn the_footer_says_where_a_selection_goes_and_what_it_would_replace() {
-        let ctx = egui::Context::default();
-        let mut device = Device::new(ctx.clone());
-        let mut workspace = Workspace::new(ctx);
-        let mut log = crate::log::Log::default();
-        let mut queue = Queue::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
         // Four destinations, two of them already holding something.
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "Squabble B"]);
 
@@ -2288,14 +2285,17 @@ mod tests {
     fn a_click_on_a_row_box_checks_it_beside_what_is_already_checked() {
         const WIDTH: f32 = 900.0;
 
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut browser = Browser::default();
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
         let mut library = Library::default();
-        let queue = Queue::default();
-        let shell = Shell::default();
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
             workspace.create(kind, &mut log).unwrap();
         }
@@ -2305,26 +2305,14 @@ mod tests {
         let on_box = |index: f32| egui::pos2(box_x, BAR + HEAD + ROW * (index + 0.5));
         let mut frames = Vec::new();
         for index in [0.0_f32, 1.0] {
-            let press = move |pressed| egui::Event::PointerButton {
-                pos: on_box(index),
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            };
-            frames.push(vec![egui::Event::PointerMoved(on_box(index))]);
-            frames.push(vec![press(true), press(false)]);
+            let on = on_box(index);
+            frames.push(vec![egui::Event::PointerMoved(on)]);
+            frames.push(vec![testing::button(on, true), testing::button(on, false)]);
             frames.push(Vec::new());
         }
         for events in frames {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(WIDTH, 540.0),
-                )),
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
+            let input = testing::screen(egui::vec2(WIDTH, 540.0), events);
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
@@ -2340,39 +2328,20 @@ mod tests {
         );
     }
 
-    /// Every string one frame painted, anywhere in its shape tree.
-    fn painted(output: &egui::FullOutput) -> Vec<String> {
-        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-                _ => {}
-            }
-        }
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            words(&clipped.shape, &mut said);
-        }
-        said
-    }
-
     /// One mark, four states: no slot to stand on, a slot holding what this was saved
     /// as, a slot holding something else, and a write already waiting to change it.
     #[test]
     fn the_keyboard_mark_says_what_the_instrument_holds_where_this_stands() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut queue = Queue::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
         let (good, warn) = (Mark::Agrees, Mark::Differs);
 
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         let off = |workspace: &mut Workspace, slot: u32, log: &mut Log| {
             workspace.ingest(
                 format!("off-{slot}.ne5p"),
@@ -2434,27 +2403,22 @@ mod tests {
     /// An asset holding an edit nothing has saved says so where its name is written.
     #[test]
     fn an_unsaved_name_wears_a_star_in_the_table() {
-        const WIDTH: f32 = 900.0;
-
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut browser = Browser::default();
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
         let mut library = Library::default();
-        let (queue, shell) = (Queue::default(), Shell::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         workspace.rename(id, "Africa Split".into());
         let draw = |library: &mut Library, browser: &mut Browser, workspace: &Workspace| {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(WIDTH, 540.0),
-                )),
-                ..Default::default()
-            };
-            painted(&ctx.run(input, |ctx| {
+            testing::words(&testing::run(&ctx, screen(), |ctx| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
@@ -2475,31 +2439,31 @@ mod tests {
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
+    /// A frame of the table at the center's width with no dock open.
+    fn screen() -> egui::RawInput {
+        testing::screen(egui::vec2(900.0, 540.0), Vec::new())
+    }
+
     /// The KIND column shows the same word as the browser, so the table and the tree
     /// cannot name one thing two ways, and its heading sorts by it.
     #[test]
     fn the_kind_column_writes_the_browsers_own_word_and_sorts_by_it() {
-        const WIDTH: f32 = 900.0;
-
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut browser = Browser::default();
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
         let mut library = Library::default();
-        let (queue, shell) = (Queue::default(), Shell::default());
         for kind in [Fresh::Settings, Fresh::Program] {
             workspace.create(kind, &mut log).unwrap();
         }
 
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(WIDTH, 540.0),
-            )),
-            ..Default::default()
-        };
-        let said = painted(&ctx.run(input, |ctx| {
+        let said = testing::words(&testing::run(&ctx, screen(), |ctx| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
                 .show(ctx, |ui| {
@@ -2529,86 +2493,69 @@ mod tests {
     /// same way. Two drag paths would be two sets of rules for one gesture.
     #[test]
     fn a_row_dragged_from_the_table_onto_a_folder_files_the_asset() {
-        const WIDTH: f32 = 900.0;
-
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut tabs = Tabs::default();
-        let mut browser = Browser::default();
+        let mut bench = Bench::new();
         let mut library = Library::default();
-        let mut queue = Queue::default();
-        let shell = Shell::default();
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::NewFolder],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        bench.workspace.rename(id, "Africa Split".into());
+        bench.act(vec![Act::NewFolder]);
 
-        // The table's only row, in its name column, and the tree's folder row, under the
-        // section header and the 22 px row for this computer.
-        let from = egui::pos2(crate::shell::BROWSER + PAD + 60.0, BAR + HEAD + ROW / 2.0);
-        let onto = egui::pos2(100.0, crate::panel::HEADER + 22.0 + 10.0);
-        let button = |pos, pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let escape = egui::Event::Key {
-            key: egui::Key::Escape,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        // The new folder opens its rename editor, and Escape closes it; then the pointer
-        // presses on the table's row, carries it over the folder, and lets go.
-        let frames: [Vec<egui::Event>; 6] = [
-            Vec::new(),
-            vec![escape],
-            vec![egui::Event::PointerMoved(from)],
-            vec![button(from, true)],
-            vec![egui::Event::PointerMoved(onto)],
-            vec![button(onto, false)],
-        ];
-
+        let ctx = bench.ctx.clone();
         let mut asked = Vec::new();
-        for events in frames {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(WIDTH, 540.0),
-                )),
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(900.0, 540.0), events);
+            testing::painted(&testing::run(&ctx, input, |ctx| {
                 egui::SidePanel::left("places")
                     .exact_width(crate::shell::BROWSER)
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
-                        asked.extend(browser.ui(
+                        asked.extend(bench.browser.ui(
                             ui,
-                            &workspace,
-                            &device,
-                            &queue,
+                            &bench.workspace,
+                            &bench.device,
+                            &bench.queue,
                             &Filter::default(),
                         ));
                     });
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
-                        library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                        library.ui(
+                            ui,
+                            &mut bench.browser,
+                            &bench.workspace,
+                            &bench.device,
+                            &bench.queue,
+                            &bench.shell,
+                        );
                     });
-            });
+            }))
+        };
+
+        // The new folder opens its rename editor, and Escape closes it. The row is found
+        // in the table, right of the tree, and the folder in the tree.
+        frame(Vec::new());
+        let said = frame(vec![testing::key(egui::Key::Escape)]);
+        let found = |text: &str, in_tree: bool| {
+            said.iter()
+                .find(|word| {
+                    word.text == text && (word.rect.left() < crate::shell::BROWSER) == in_tree
+                })
+                .unwrap_or_else(|| panic!("{text} was not painted: {said:?}"))
+                .rect
+                .center()
+        };
+        let (from, onto) = (found("Africa Split", false), found("New folder", true));
+        // The pointer presses on the table's row, carries it over the folder, and lets go.
+        for events in [
+            vec![egui::Event::PointerMoved(from)],
+            vec![testing::button(from, true)],
+            vec![egui::Event::PointerMoved(onto)],
+            vec![testing::button(onto, false)],
+        ] {
+            frame(events);
         }
 
         let filed: Vec<(u64, Option<u64>)> = asked
@@ -2629,19 +2576,13 @@ mod tests {
     /// this catches a layout that panics or an id that collides.
     #[test]
     fn the_table_paints_at_every_width_the_center_has() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
-        let mut tabs = Tabs::default();
-        let mut browser = Browser::default();
+        let mut bench = Bench::new();
         let mut library = Library::default();
-        let mut queue = Queue::default();
-        let shell = Shell::default();
 
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
-            workspace.create(kind, &mut log).unwrap();
+            bench.workspace.create(kind, &mut bench.log).unwrap();
         }
+        let device = &mut bench.device;
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", "Squabble B"]);
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
         device.pretend_scanned(ObjectClass::SetList, 1, &["Sunday"]);
@@ -2649,52 +2590,40 @@ mod tests {
         // The first row's middle: the bar, the head, and half a row down; and far enough
         // in to land in the name column at either width.
         let on_a_row = egui::pos2(60.0, BAR + HEAD + ROW / 2.0);
-        let press = |pressed| egui::Event::PointerButton {
-            pos: on_a_row,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
+        let ctx = bench.ctx.clone();
         for width in [430.0_f32, 900.0] {
             // The pointer moves, then presses, then the next frame has a row picked and
             // draws the footer under the table.
             let frames: [Vec<egui::Event>; 4] = [
                 Vec::new(),
                 vec![egui::Event::PointerMoved(on_a_row)],
-                vec![press(true), press(false)],
+                vec![
+                    testing::button(on_a_row, true),
+                    testing::button(on_a_row, false),
+                ],
                 Vec::new(),
             ];
             for events in frames {
-                let input = egui::RawInput {
-                    events,
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(width, 540.0),
-                    )),
-                    ..Default::default()
-                };
-                let _ = ctx.run(input, |ctx| {
+                let input = testing::screen(egui::vec2(width, 540.0), events);
+                testing::run(&ctx, input, |ctx| {
                     // The frame the center uses: panels handle their own padding.
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new())
                         .show(ctx, |ui| {
-                            let acts =
-                                library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
-                            apply(
-                                &mut browser,
-                                &mut Shell::default(),
-                                acts,
-                                &mut workspace,
-                                &mut device,
-                                &mut tabs,
-                                &mut queue,
-                                &mut log,
+                            let acts = library.ui(
+                                ui,
+                                &mut bench.browser,
+                                &bench.workspace,
+                                &bench.device,
+                                &bench.queue,
+                                &bench.shell,
                             );
+                            bench.act(acts);
                         });
                 });
             }
             assert!(
-                browser.picked().sole().is_some(),
+                bench.browser.picked().sole().is_some(),
                 "a click on a row selected it at {width}"
             );
         }

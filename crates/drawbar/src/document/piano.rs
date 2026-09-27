@@ -3751,6 +3751,7 @@ mod tests {
     use super::*;
     use crate::device::{pretend_allocation_unit, Device};
     use crate::log::Log;
+    use crate::testing;
     use crate::workspace::{Fresh, Origin, Workspace};
 
     /// The roots the test library records, and the layer values it spreads them over.
@@ -4690,11 +4691,7 @@ mod tests {
         }
 
         fn of(saved: Vec<u8>, free: u64) -> Editor {
-            let ctx = egui::Context::default();
-            // Set up as the app sets it up: without the bold face bound, laying out a
-            // root's name panics mid-frame.
-            ctx.set_fonts(crate::app::fonts());
-            ctx.all_styles_mut(crate::app::metrics);
+            let ctx = testing::context();
             let mut workspace = Workspace::new(ctx.clone());
             let mut log = Log::default();
             let id = workspace.ingest(
@@ -4759,17 +4756,10 @@ mod tests {
 
         /// One frame, with `edit` throwing whatever switch a click on its lamp would.
         fn driven(&mut self, events: Vec<egui::Event>, edit: impl FnOnce(&mut Plan)) -> Painted {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1100.0, 900.0),
-                )),
-                ..Default::default()
-            };
+            let input = testing::screen(egui::vec2(1100.0, 900.0), events);
             let mut asked = Vec::new();
             let mut edit = Some(edit);
-            let output = self.ctx.run(input, |ctx| {
+            let output = testing::run(&self.ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let entity = self.workspace.get(self.id).expect("it is open");
                     self.state.begin(self.id, entity, &self.device.state);
@@ -4796,7 +4786,7 @@ mod tests {
                 lamps: Vec::new(),
                 asked,
             };
-            for (_, shape) in super::super::leaves(&output) {
+            for (shape, _) in testing::shapes(&output) {
                 match shape {
                     egui::Shape::Text(text) => {
                         painted.words.push(text.galley.text().to_string());
@@ -4818,24 +4808,6 @@ mod tests {
             painted.lamps.dedup();
             painted
         }
-    }
-
-    fn press(at: egui::Pos2) -> Vec<egui::Event> {
-        vec![
-            egui::Event::PointerMoved(at),
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]
     }
 
     /// Every section paints, and the map names its roots and the keys they answer.
@@ -4875,7 +4847,7 @@ mod tests {
         let laid = editor.frame(Vec::new());
         let at = laid.white(62);
 
-        let struck = editor.frame(press(at));
+        let struck = editor.frame(testing::click(at));
         assert_eq!(
             struck.asked,
             [Ask::Strike {
@@ -4956,7 +4928,7 @@ mod tests {
         // The size lane sits directly above the keyboard, just inside its own rect.
         let keyboard = laid.whites[0];
         let at = egui::pos2(laid.white(72).x, keyboard.top() - 10.0);
-        editor.frame(press(at));
+        editor.frame(testing::click(at));
         let opened = editor.frame(Vec::new());
         assert!(opened.said("ANSWERS FROM"), "{:?}", opened.words);
         assert!(opened.said("Audition") && opened.said("Drop this root"));
@@ -4973,7 +4945,7 @@ mod tests {
         assert_eq!(laid.lamps.len(), 6 + 3 + 3 * 3, "every switch has a lamp");
         let softest_on_the_lowest_root = laid.lamps[9];
 
-        editor.frame(press(softest_on_the_lowest_root.center()));
+        editor.frame(testing::click(softest_on_the_lowest_root.center()));
         let plan = &editor.state.plans[&editor.id];
         assert_eq!(plan.roots.get(&(ROOTS[0], LAYERS[2])), Some(&false));
         assert!(plan.layers.is_empty(), "every other root keeps it");
@@ -5481,7 +5453,7 @@ mod tests {
         assert!(waiting.said("reading the stroke…"), "{:?}", waiting.words);
         assert_eq!(waiting.asked, [Ask::Show(ROOTS[0])]);
 
-        let clicked = editor.frame(press(waiting.at("Audition").center()));
+        let clicked = editor.frame(testing::click(waiting.at("Audition").center()));
         assert_eq!(clicked.asked, [Ask::Play(ROOTS[0])]);
     }
 
