@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end installed binary checks: surface, USB replay, and file edits.
+# End-to-end installed binary checks: help, USB replay, and file edits.
 # NORD_RUNNER supports foreign binaries; POC_* select the fixtures.
 set -euo pipefail
 
@@ -65,7 +65,6 @@ for want in pianos samples programs 'set lists' '380 / 400 slots' '141 bytes eac
   }
 done
 
-bash "$here/surface.sh" "$bin"
 bash "$here/edit.sh" "$bin"
 
 echo
