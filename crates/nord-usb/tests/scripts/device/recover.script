@@ -1,9 +1,9 @@
 # source: nord
 # device: Nord Electro 5, firmware v2.04 build 592
 # note: two bare frames with no session around them, because a wedged instrument
-#   refuses the session frames. The drain reads before them time out with nothing
-#   on the wire, so they leave no frame here.
+#   refuses the session frames. The drain read before them found nothing queued.
 # intent: device recover
+I timeout
 O 0000001200000006000000010000000226e3
 I 0000001600000006000000010000000300000001104e
 O 000000120000000c0000000a000000066500

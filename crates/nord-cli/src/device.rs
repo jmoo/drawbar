@@ -1935,7 +1935,7 @@ mod tests {
 
     #[test]
     fn replacement_refuses_unusable_geometry_before_deleting() {
-        use nord_usb::transport::{Direction, ReplayTransport, Script};
+        use nord_usb::transport::{ReplayTransport, Script, Step};
         use nord_usb::wire::{cmd, Message, Partition, Service};
 
         let script = Script::parse(include_str!(
@@ -1945,10 +1945,10 @@ mod tests {
         for class in [ObjectClass::Program, ObjectClass::Unknown(9)] {
             let mut steps = script.steps();
             for step in &mut steps {
-                if step.direction != Direction::In {
+                let Step::In(frame) = step else {
                     continue;
-                }
-                let mut reply = Message::decode_response(&step.bytes).unwrap();
+                };
+                let mut reply = Message::decode_response(frame).unwrap();
                 if reply.service != Service::Program || reply.command != cmd::PARTITIONS + 1 {
                     continue;
                 }
@@ -1964,7 +1964,7 @@ mod tests {
                     reply.args.extend_from_slice(partition.name.as_bytes());
                     reply.args.extend_from_slice(&partition.fields);
                 }
-                step.bytes = reply.encode();
+                *frame = reply.encode();
             }
             let mut device = Device::new(ReplayTransport::new(steps));
             nord_usb::block_on(async {
@@ -2150,7 +2150,7 @@ mod tests {
     /// a failed write loses the program.
     mod losing_the_occupant {
         use super::*;
-        use nord_usb::transport::{Direction, ReplayTransport, Script, Step};
+        use nord_usb::transport::{ReplayTransport, Script, Step};
         use nord_usb::wire::Message;
 
         const PUT: &str =
@@ -2186,15 +2186,19 @@ mod tests {
         /// data frames it would have carried dropped: a refusal leaves the session in
         /// step, so the client closes it and sends nothing else.
         fn refused_write(steps: &[Step], status: u32) -> Vec<Step> {
-            let mut refusal = Message::decode_response(&steps[6].bytes).expect("the reply");
+            let mut refusal = Message::decode_response(reply(&steps[6])).expect("the reply");
             refusal.args[..4].copy_from_slice(&status.to_be_bytes());
             let mut out = steps[..6].to_vec();
-            out.push(Step {
-                direction: Direction::In,
-                bytes: refusal.encode(),
-            });
+            out.push(Step::In(refusal.encode()));
             out.extend_from_slice(&steps[12..]);
             out
+        }
+
+        fn reply(step: &Step) -> &[u8] {
+            match step {
+                Step::In(frame) => frame,
+                other => panic!("expected a device frame, found {other:?}"),
+            }
         }
 
         fn send_over(steps: Vec<Step>, spill_into: &Path) -> Result<(), String> {
@@ -2282,9 +2286,9 @@ mod tests {
             let dir = crate::edit::tests::scratch("send-delete-refused");
             let put = recorded();
             let mut delete = put[4][..7].to_vec();
-            let mut refusal = Message::decode_response(&delete[6].bytes).expect("the reply");
+            let mut refusal = Message::decode_response(reply(&delete[6])).expect("the reply");
             refusal.args[..4].copy_from_slice(&3u32.to_be_bytes());
-            delete[6].bytes = refusal.encode();
+            delete[6] = Step::In(refusal.encode());
             delete.extend_from_slice(&put[4][7..]);
             let mut steps: Vec<Step> = put[..4].concat();
             steps.extend(delete);

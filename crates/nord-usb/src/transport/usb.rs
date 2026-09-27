@@ -292,37 +292,58 @@ impl UsbTransport {
     }
 }
 
-impl Transport for UsbTransport {
-    async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        self.write_frame(buf).await?;
-        // The terminator is a packet, not a frame, so it is not recorded.
+impl UsbTransport {
+    fn record(&mut self, step: impl FnOnce(&mut Recorder)) {
         if let Some(r) = self.record.as_mut() {
-            r.out(buf);
+            step(r);
         }
-        Ok(())
+    }
+
+    /// Record a completed write as the step it was.
+    fn wrote(&mut self, buf: &[u8], result: Result<()>) -> Result<()> {
+        match &result {
+            Ok(()) => self.record(|r| r.out(buf)),
+            Err(e) => self.record(|r| r.out_error(buf, e)),
+        }
+        result
+    }
+
+    /// Record a completed read as the step it was.
+    fn received(&mut self, completion: nusb::transfer::Completion<Vec<u8>>) -> Result<Vec<u8>> {
+        match completion.status.map_err(map_err("bulk read")) {
+            Ok(()) => {
+                self.record(|r| r.r#in(&completion.data));
+                Ok(completion.data)
+            }
+            Err(e) => {
+                self.record(|r| r.in_error(&e));
+                Err(e)
+            }
+        }
+    }
+}
+
+impl Transport for UsbTransport {
+    // The terminator is a packet, not a frame, so it is not recorded.
+    async fn write(&mut self, buf: &[u8]) -> Result<()> {
+        let result = self.write_frame(buf).await;
+        self.wrote(buf, result)
     }
 
     async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
         self.read_queue.submit(RequestBuffer::new(max));
         let completion = self.read_queue.next_complete().await;
-        completion.status.map_err(map_err("bulk read"))?;
-        if let Some(r) = self.record.as_mut() {
-            r.r#in(&completion.data);
-        }
-        Ok(completion.data)
+        self.received(completion)
     }
 
     async fn write_timeout(&mut self, buf: &[u8], limit: Duration) -> Result<bool> {
         // Each `bulk_out` owns its transfer, so dropping the future cancels it.
         match with_timeout(self.write_frame(buf), limit).await {
-            Some(result) => {
-                result?;
-                if let Some(r) = self.record.as_mut() {
-                    r.out(buf);
-                }
-                Ok(true)
+            Some(result) => self.wrote(buf, result).map(|()| true),
+            None => {
+                self.record(|r| r.out_timeout(buf));
+                Ok(false)
             }
-            None => Ok(false),
         }
     }
 
@@ -330,24 +351,26 @@ impl Transport for UsbTransport {
         self.read_queue.submit(RequestBuffer::new(max));
 
         if let Some(completion) = with_timeout(self.read_queue.next_complete(), limit).await {
-            completion.status.map_err(map_err("bulk read"))?;
-            if let Some(r) = self.record.as_mut() {
-                r.r#in(&completion.data);
-            }
-            return Ok(Some(completion.data));
+            return self.received(completion).map(Some);
         }
 
         // Cancel and reap the OS-owned transfer before any later read can consume it.
         self.read_queue.cancel_all();
-        match with_timeout(self.read_queue.next_complete(), REAP_LIMIT).await {
-            Some(_) => Ok(None),
-            // An unreaped cancellation leaves the response queue out of step.
-            None => Err(Error::Transport(
-                "read timed out and the transfer could not be canceled; \
-                 the connection is out of step and the instrument needs a power cycle"
-                    .into(),
-            )),
+        if with_timeout(self.read_queue.next_complete(), REAP_LIMIT)
+            .await
+            .is_some()
+        {
+            self.record(Recorder::in_timeout);
+            return Ok(None);
         }
+        // An unreaped cancellation leaves the response queue out of step.
+        let e = Error::Transport(
+            "read timed out and the transfer could not be canceled; \
+             the connection is out of step and the instrument needs a power cycle"
+                .into(),
+        );
+        self.record(|r| r.in_error(&e));
+        Err(e)
     }
 }
 

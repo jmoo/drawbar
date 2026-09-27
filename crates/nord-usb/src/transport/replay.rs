@@ -4,24 +4,35 @@
 //! no device attached. [`ReplayTransport::sent`] returns what an operation put on the
 //! wire, so a test can compare it against a real capture.
 //!
-//! The script is a flat list of directed messages in the order they occurred. `Out`
-//! entries are what the host sent, and are checked against what the code under test
-//! sends; `In` entries are fed back as device responses.
+//! The script is a flat list of [`Step`]s in the order they occurred. The host's steps
+//! are checked against what the code under test sends; the device's are fed back as
+//! its responses. Every read and write must meet a step of its own direction, so a
+//! read the script does not expect is a mismatch, never a timeout.
 //!
 //! # Script format
 //!
-//! A frame is `O <hex>` (host → device) or `I <hex>` (device → host), one per line, and
-//! may carry a trailing `# label` comment. Every other `#` line is either prose or a
-//! field, `# <key>: <value>` with the key in `[a-z_]+`, so a prose line whose first
-//! word is capitalized or hyphenated stays prose. An unknown lowercase key is an error,
-//! so the vocabulary cannot drift.
+//! One step per line, which may carry a trailing `# label` comment:
 //!
-//! `source`, `device`, `trimmed`, and `note` describe the file and must precede its
-//! first frame. `intent` and `expect` describe a section. `intent` opens one, which
-//! runs to the next `intent` or the end of the file, so a recorded command that opened
-//! several transactions is one script of several sections, in order. `expect` names the
-//! outcome its section must produce and defaults to `ok`. It may sit anywhere in that
-//! section, because a recorder only learns the outcome after the frames are written.
+//! | Line | Step |
+//! |---|---|
+//! | `O <hex>` | the host sent a frame |
+//! | `O timeout <hex>` | the host offered a frame, and the device did not accept it in time |
+//! | `O error <hex>` | the transport failed sending a frame |
+//! | `I <hex>` | the device sent a frame |
+//! | `I timeout` | nothing arrived within the read's limit |
+//! | `I error` | the transport failed reading |
+//!
+//! Every other `#` line is either prose or a field, `# <key>: <value>` with the key in
+//! `[a-z_]+`, so a prose line whose first word is capitalized or hyphenated stays prose.
+//! An unknown lowercase key is an error, so the vocabulary cannot drift.
+//!
+//! `source`, `device`, `trimmed`, `note`, `driven_by`, and `undriven` describe the file
+//! and must precede its first step. `intent` and `expect` describe a section. `intent`
+//! opens one, which runs to the next `intent` or the end of the file, so a recorded
+//! command that opened several transactions is one script of several sections, in
+//! order. `expect` names the outcome its section must produce and defaults to `ok`. It
+//! may sit anywhere in that section, because a recorder only learns the outcome after
+//! the steps are written.
 
 use super::Transport;
 use crate::error::{Error, Result};
@@ -45,11 +56,17 @@ pub enum Source {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Header {
     pub source: Option<Source>,
-    /// Free text: the model and firmware the capture was taken from.
+    /// Free text: the model and firmware the capture was taken from, or the model a
+    /// synthetic script imitates.
     pub device: Option<String>,
     /// What was left out of the capture, e.g. `ui-refresh`.
     pub trimmed: Option<String>,
     pub note: Option<String>,
+    /// The test files, comma-separated and relative to this crate, that drive a script
+    /// declaring no intent.
+    pub driven_by: Option<String>,
+    /// Why nothing drives a script that declares no intent.
+    pub undriven: Option<String>,
 }
 
 /// The outcome a section's declared intent must produce.
@@ -60,11 +77,11 @@ pub enum Expect {
     Err(ErrKind),
 }
 
-/// One declared intent and the frames it accounts for.
+/// One declared intent and the steps it accounts for.
 #[derive(Debug, Clone, Default)]
 pub struct Section {
     /// `<class> <verb> <args…>`, in the CLI's own spellings. `None` means the section
-    /// declares nothing, so its frames can be checked but not driven.
+    /// declares nothing, so its steps can be checked but not driven.
     pub intent: Option<String>,
     /// What the section says to expect, if anything. Read through [`Section::expect`],
     /// which supplies the default.
@@ -87,7 +104,16 @@ pub struct Script {
 }
 
 /// The header keys a script may carry, listed when one is misspelled.
-pub const KEYS: &[&str] = &["intent", "expect", "source", "device", "trimmed", "note"];
+pub const KEYS: &[&str] = &[
+    "intent",
+    "expect",
+    "source",
+    "device",
+    "trimmed",
+    "note",
+    "driven_by",
+    "undriven",
+];
 
 impl Source {
     fn parse(value: &str) -> std::result::Result<Self, String> {
@@ -150,11 +176,57 @@ fn field(comment: &str) -> Option<(&str, &str)> {
     named.then(|| (key, value.trim()))
 }
 
+fn frame(hex: &str) -> std::result::Result<Vec<u8>, String> {
+    // ⚠️ The pairs below are byte slices: a multi-byte character would be split across
+    // a char boundary and panic before `from_str_radix` saw it.
+    if !hex.is_ascii() {
+        return Err("non-hex byte".into());
+    }
+    if !hex.len().is_multiple_of(2) {
+        return Err("odd-length hex".into());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect::<std::result::Result<Vec<u8>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+impl Step {
+    /// One step line, its trailing label already removed.
+    fn parse(line: &str) -> std::result::Result<Self, String> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        Ok(match words.as_slice() {
+            ["O", "timeout", hex] => Step::OutTimeout(frame(hex)?),
+            ["O", "error", hex] => Step::OutError(frame(hex)?),
+            ["O", hex] if !matches!(*hex, "timeout" | "error") => Step::Out(frame(hex)?),
+            ["I", "timeout"] => Step::InTimeout,
+            ["I", "error"] => Step::InError,
+            ["I", hex] => Step::In(frame(hex)?),
+            [tag @ ("O" | "I"), ..] => {
+                return Err(format!(
+                    "expected '{tag} <hex>', '{tag} timeout', or '{tag} error'"
+                ))
+            }
+            [other, ..] => return Err(format!("unknown direction {other:?}, want O or I")),
+            [] => unreachable!("blank lines are skipped"),
+        })
+    }
+
+    /// The frame the step carries, whether or not it crossed the wire.
+    pub fn frame(&self) -> Option<&[u8]> {
+        match self {
+            Step::Out(b) | Step::OutTimeout(b) | Step::OutError(b) | Step::In(b) => Some(b),
+            Step::InTimeout | Step::InError => None,
+        }
+    }
+}
+
 impl Script {
-    /// Parse a script: header fields, sections, and frames.
+    /// Parse a script: header fields, sections, and steps.
     ///
-    /// An unknown key, a file-level field after the first frame, a second `expect` in
-    /// one section, an `expect` without an intent, and a section with no frames are all
+    /// An unknown key, a file-level field after the first step, a second `expect` in one
+    /// section, an `expect` without an intent, and a section with no steps are all
     /// errors, so a header that does nothing cannot sit unnoticed in a tree the sweep
     /// walks.
     pub fn parse(text: &str) -> Result<Self> {
@@ -162,7 +234,7 @@ impl Script {
             |n: usize, what: std::fmt::Arguments| Error::Replay(format!("line {}: {what}", n + 1));
         let mut header = Header::default();
         let mut sections = vec![Section::default()];
-        let mut seen_frame = false;
+        let mut seen_step = false;
 
         for (n, raw) in text.lines().enumerate() {
             let line = raw.trim();
@@ -174,7 +246,7 @@ impl Script {
                     continue;
                 };
                 let section = sections.last_mut().expect("one section always exists");
-                match key {
+                let text_field = match key {
                     "intent" => {
                         if section.intent.is_none() && section.steps.is_empty() {
                             section.intent = Some(value.to_string());
@@ -184,6 +256,7 @@ impl Script {
                                 ..Section::default()
                             });
                         }
+                        continue;
                     }
                     "expect" => {
                         if section.expect.is_some() {
@@ -194,12 +267,22 @@ impl Script {
                         }
                         section.expect =
                             Some(Expect::parse(value).map_err(|e| fail(n, format_args!("{e}")))?);
+                        continue;
                     }
-                    "source" | "device" | "trimmed" | "note" if seen_frame => {
+                    _ if !KEYS.contains(&key) => {
                         return Err(fail(
                             n,
                             format_args!(
-                                "{key} describes the file and must come before its first frame"
+                                "unknown header key {key:?}; the vocabulary is {}",
+                                KEYS.join(", ")
+                            ),
+                        ))
+                    }
+                    _ if seen_step => {
+                        return Err(fail(
+                            n,
+                            format_args!(
+                                "{key} describes the file and must come before its first step"
                             ),
                         ))
                     }
@@ -209,75 +292,40 @@ impl Script {
                         if header.source.replace(source).is_some() {
                             return Err(fail(n, format_args!("source is given twice")));
                         }
+                        continue;
                     }
-                    "device" if header.device.replace(value.into()).is_some() => {
-                        return Err(fail(n, format_args!("device is given twice")))
-                    }
-                    "trimmed" if header.trimmed.replace(value.into()).is_some() => {
-                        return Err(fail(n, format_args!("trimmed is given twice")))
-                    }
-                    "note" if header.note.replace(value.into()).is_some() => {
-                        return Err(fail(n, format_args!("note is given twice")))
-                    }
-                    "device" | "trimmed" | "note" => {}
-                    other => {
-                        return Err(fail(
-                            n,
-                            format_args!(
-                                "unknown header key {other:?}; the vocabulary is {}",
-                                KEYS.join(", ")
-                            ),
-                        ))
-                    }
+                    "device" => &mut header.device,
+                    "trimmed" => &mut header.trimmed,
+                    "note" => &mut header.note,
+                    "driven_by" => &mut header.driven_by,
+                    "undriven" => &mut header.undriven,
+                    _ => unreachable!("every key in KEYS is matched"),
+                };
+                if text_field.replace(value.into()).is_some() {
+                    return Err(fail(n, format_args!("{key} is given twice")));
                 }
                 continue;
             }
 
-            // A trailing `# label` says what the frame is; nothing reads it back.
-            let frame = match line.split_once('#') {
-                Some((frame, _)) => frame.trim(),
+            // A trailing `# label` says what the step is; nothing reads it back.
+            let step = match line.split_once('#') {
+                Some((step, _)) => step,
                 None => line,
             };
-            let (tag, hex) = frame
-                .split_once(char::is_whitespace)
-                .ok_or_else(|| fail(n, format_args!("expected '<O|I> <hex>'")))?;
-            let direction = match tag {
-                "O" | "o" => Direction::Out,
-                "I" | "i" => Direction::In,
-                other => {
-                    return Err(fail(
-                        n,
-                        format_args!("unknown direction {other:?}, want O or I"),
-                    ))
-                }
-            };
-            let hex = hex.trim();
-            // ⚠️ The pairs below are byte slices: a multi-byte character would be split
-            // across a char boundary and panic before `from_str_radix` saw it.
-            if !hex.is_ascii() {
-                return Err(fail(n, format_args!("non-hex byte")));
-            }
-            if hex.len() % 2 != 0 {
-                return Err(fail(n, format_args!("odd-length hex")));
-            }
-            let bytes = (0..hex.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
-                .collect::<std::result::Result<Vec<u8>, _>>()
-                .map_err(|e| fail(n, format_args!("{e}")))?;
-            seen_frame = true;
+            let step = Step::parse(step).map_err(|e| fail(n, format_args!("{e}")))?;
+            seen_step = true;
             sections
                 .last_mut()
                 .expect("one section always exists")
                 .steps
-                .push(Step { direction, bytes });
+                .push(step);
         }
 
         for section in &sections {
             if section.steps.is_empty() {
                 let what = match &section.intent {
-                    Some(intent) => format!("intent {intent:?} accounts for no frames"),
-                    None => "the script holds no frames".into(),
+                    Some(intent) => format!("intent {intent:?} accounts for no steps"),
+                    None => "the script holds no steps".into(),
                 };
                 return Err(Error::Replay(what));
             }
@@ -292,7 +340,7 @@ impl Script {
         Ok(Self { header, sections })
     }
 
-    /// Every frame, sections joined, in wire order.
+    /// Every step, sections joined, in wire order.
     pub fn steps(&self) -> Vec<Step> {
         self.sections
             .iter()
@@ -301,27 +349,34 @@ impl Script {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// Host → device.
-    Out,
-    /// Device → host.
-    In,
-}
-
-#[derive(Debug, Clone)]
-pub struct Step {
-    pub direction: Direction,
-    pub bytes: Vec<u8>,
+/// One line of a script: a frame that crossed the wire, or a transfer that did not.
+///
+/// A timeout answers only a transfer that carried a limit: [`Transport::read`] and
+/// [`Transport::write`] would wait forever for what the step says never came, so a
+/// replay refuses them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// `O <hex>`: the host sent a frame.
+    Out(Vec<u8>),
+    /// `O timeout <hex>`: the device did not accept the frame within the write's limit.
+    OutTimeout(Vec<u8>),
+    /// `O error <hex>`: the transport failed sending the frame.
+    OutError(Vec<u8>),
+    /// `I <hex>`: the device sent a frame.
+    In(Vec<u8>),
+    /// `I timeout`: nothing arrived within the read's limit.
+    InTimeout,
+    /// `I error`: the transport failed reading.
+    InError,
 }
 
 /// How strictly to police what the code under test transmits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strictness {
-    /// Every `Out` must match the script byte for byte. Use in tests.
+    /// Every host step must match the script byte for byte. Use in tests.
     Exact,
-    /// Ignore what is sent and serve the next `In`. Useful for demos against a capture
-    /// whose addressing differs from what is being asked for.
+    /// Ignore what is sent and serve the device's next step. Useful for demos against a
+    /// capture whose addressing differs from what is being asked for.
     Lenient,
 }
 
@@ -330,6 +385,7 @@ pub struct ReplayTransport {
     pos: usize,
     sent: Vec<Vec<u8>>,
     strictness: Strictness,
+    mismatch: Option<String>,
 }
 
 impl ReplayTransport {
@@ -339,6 +395,7 @@ impl ReplayTransport {
             pos: 0,
             sent: Vec::new(),
             strictness: Strictness::Exact,
+            mismatch: None,
         }
     }
 
@@ -347,15 +404,28 @@ impl ReplayTransport {
         self
     }
 
-    /// Everything the code under test transmitted, in order.
+    /// Everything the code under test transmitted or offered, in order.
     pub fn sent(&self) -> &[Vec<u8>] {
         &self.sent
     }
 
-    /// Whether the whole script was consumed. A test that leaves steps unread has
-    /// usually stopped short of the behavior it meant to check.
+    /// Whether the whole script was consumed with no mismatch on the way. A test that
+    /// leaves steps unread has usually stopped short of the behavior it meant to check.
     pub fn is_exhausted(&self) -> bool {
-        self.pos >= self.script.len()
+        self.pos >= self.script.len() && self.mismatch.is_none()
+    }
+
+    /// The first time the code under test and the script disagreed, even if the code
+    /// swallowed the error, as a best-effort release does.
+    pub fn mismatch(&self) -> Option<&str> {
+        self.mismatch.as_deref()
+    }
+
+    fn noting<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Err(Error::Replay(what)) = &result {
+            self.mismatch.get_or_insert_with(|| what.clone());
+        }
+        result
     }
 
     /// How many steps have been consumed. With the section boundaries of a [`Script`]
@@ -364,75 +434,113 @@ impl ReplayTransport {
         self.pos
     }
 
-    /// Replay every frame of a script, whatever its header declares.
+    /// Replay every step of a script, whatever its header declares.
     pub fn from_script(text: &str) -> Result<Self> {
         Ok(Self::new(Script::parse(text)?.steps()))
     }
-}
 
-impl Transport for ReplayTransport {
-    async fn write(&mut self, buf: &[u8]) -> Result<()> {
+    /// Meet a write with the host's next step. `Ok(false)` is a frame the device did not
+    /// accept, which only a write with a limit can report.
+    fn take_out(&mut self, buf: &[u8], limited: bool) -> Result<bool> {
         self.sent.push(buf.to_vec());
-
-        let step = self.script.get(self.pos).ok_or_else(|| {
-            Error::Replay(format!(
-                "script exhausted; host sent an extra {} bytes",
-                buf.len()
-            ))
-        })?;
-        if step.direction != Direction::Out {
-            return Err(Error::Replay(
-                "host wrote, but the script expects the device to speak next".into(),
-            ));
-        }
-        if self.strictness == Strictness::Exact && step.bytes != buf {
+        let at = self.pos;
+        let (expected, accepted) = match self.script.get(at) {
+            Some(Step::Out(b)) => (b, Ok(true)),
+            Some(Step::OutTimeout(b)) if limited => (b, Ok(false)),
+            Some(Step::OutError(b)) => (b, Err(replayed_failure(at))),
+            Some(Step::OutTimeout(_)) => {
+                return Err(Error::Replay(format!(
+                    "step {at}: the device never accepts this frame, and a write without a \
+                     limit would wait forever"
+                )))
+            }
+            Some(Step::In(_) | Step::InTimeout | Step::InError) => {
+                return Err(Error::Replay(format!(
+                    "step {at}: host wrote, but the script expects the host to read next"
+                )))
+            }
+            None => {
+                return Err(Error::Replay(format!(
+                    "script exhausted; host sent an extra {} bytes",
+                    buf.len()
+                )))
+            }
+        };
+        if self.strictness == Strictness::Exact && expected != buf {
             return Err(Error::Replay(format!(
-                "sent bytes differ from the script at step {}\n  expected {}\n  got      {}",
-                self.pos,
-                hex(&step.bytes),
+                "sent bytes differ from the script at step {at}\n  expected {}\n  got      {}",
+                hex(expected),
                 hex(buf),
             )));
         }
         self.pos += 1;
-        Ok(())
+        accepted
     }
 
-    /// A bounded read answers `None` wherever the script has nothing for the device to
-    /// say: at the end, or where the host sends the next frame.
-    ///
-    /// That is how a recording of a timed-out read looks: the read produced no frame, so
-    /// none was written down. Without this, replaying an operation built on bounded
-    /// reads, such as [`crate::op::recover`], would fail on the silence it was recorded
-    /// against.
+    /// Meet a read with the device's next step. `Ok(None)` is silence, which only a read
+    /// with a limit can report.
+    fn take_in(&mut self, max: usize, limited: bool) -> Result<Option<Vec<u8>>> {
+        let at = self.pos;
+        let read = match self.script.get(at) {
+            Some(Step::In(b)) if b.len() > max => {
+                return Err(Error::Replay(format!(
+                    "step {at}: device sent {} bytes, but the read buffer holds at most {max}",
+                    b.len()
+                )))
+            }
+            Some(Step::In(b)) => Ok(Some(b.clone())),
+            Some(Step::InTimeout) if limited => Ok(None),
+            Some(Step::InError) => Err(replayed_failure(at)),
+            Some(Step::InTimeout) => {
+                return Err(Error::Replay(format!(
+                    "step {at}: the device says nothing, and a read without a limit would \
+                     wait forever"
+                )))
+            }
+            Some(Step::Out(_) | Step::OutTimeout(_) | Step::OutError(_)) => {
+                return Err(Error::Replay(format!(
+                    "step {at}: host read, but the script expects the host to write next"
+                )))
+            }
+            None => {
+                return Err(Error::Replay(
+                    "script exhausted; host expected a response".into(),
+                ))
+            }
+        };
+        self.pos += 1;
+        read
+    }
+}
+
+fn replayed_failure(at: usize) -> Error {
+    Error::Transport(format!("the transport failed at step {at}, as recorded"))
+}
+
+impl Transport for ReplayTransport {
+    async fn write(&mut self, buf: &[u8]) -> Result<()> {
+        let written = self.take_out(buf, false);
+        self.noting(written).map(|_| ())
+    }
+
+    async fn write_timeout(&mut self, buf: &[u8], _limit: std::time::Duration) -> Result<bool> {
+        let written = self.take_out(buf, true);
+        self.noting(written)
+    }
+
+    async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
+        let read = self.take_in(max, false);
+        self.noting(read)
+            .map(|read| read.expect("an unlimited read never replays silence"))
+    }
+
     async fn read_timeout(
         &mut self,
         max: usize,
         _limit: std::time::Duration,
     ) -> Result<Option<Vec<u8>>> {
-        match self.script.get(self.pos) {
-            Some(step) if step.direction == Direction::In => self.read(max).await.map(Some),
-            _ => Ok(None),
-        }
-    }
-
-    async fn read(&mut self, max: usize) -> Result<Vec<u8>> {
-        let step = self
-            .script
-            .get(self.pos)
-            .ok_or_else(|| Error::Replay("script exhausted; host expected a response".into()))?;
-        if step.direction != Direction::In {
-            return Err(Error::Replay(
-                "host read, but the script expects the host to speak next".into(),
-            ));
-        }
-        if step.bytes.len() > max {
-            return Err(Error::Replay(format!(
-                "device sent {} bytes, but the read buffer holds at most {max}",
-                step.bytes.len()
-            )));
-        }
-        self.pos += 1;
-        Ok(step.bytes.clone())
+        let read = self.take_in(max, true);
+        self.noting(read)
     }
 }
 
@@ -561,15 +669,12 @@ mod tests {
     #[test]
     fn a_frame_may_carry_a_trailing_label() {
         let script = Script::parse("O 0011 # SESSION_OPEN\nI 22\n").unwrap();
-        assert_eq!(script.steps()[0].bytes, vec![0x00, 0x11]);
+        assert_eq!(script.steps()[0], Step::Out(vec![0x00, 0x11]));
     }
 
     #[test]
     fn a_read_rejects_a_frame_larger_than_its_buffer() {
-        let mut transport = ReplayTransport::new(vec![Step {
-            direction: Direction::In,
-            bytes: vec![0; 2],
-        }]);
+        let mut transport = ReplayTransport::new(vec![Step::In(vec![0; 2])]);
         let err = pollster::block_on(transport.read(1)).expect_err("the frame is too large");
         assert!(matches!(err, Error::Replay(_)));
         assert_eq!(
@@ -586,9 +691,9 @@ mod tests {
     }
 
     #[test]
-    fn a_file_level_field_after_the_first_frame_is_refused() {
+    fn a_file_level_field_after_the_first_step_is_refused() {
         let err = Script::parse("O 00\n# source: nsm\n").unwrap_err();
-        assert!(err.to_string().contains("before its first frame"), "{err}");
+        assert!(err.to_string().contains("before its first step"), "{err}");
     }
 
     #[test]
@@ -674,10 +779,10 @@ mod tests {
     }
 
     #[test]
-    fn an_intent_that_accounts_for_no_frames_is_refused() {
+    fn an_intent_that_accounts_for_no_steps_is_refused() {
         let err =
             Script::parse("# intent: program status\nO 00\n# intent: program focus\n").unwrap_err();
-        assert!(err.to_string().contains("no frames"), "{err}");
+        assert!(err.to_string().contains("no steps"), "{err}");
     }
 
     /// A frame line is read two hex digits at a time, so a multi-byte character must be
@@ -692,5 +797,104 @@ mod tests {
     fn an_unknown_source_is_refused() {
         let err = Script::parse("# source: pcap\nO 00\n").unwrap_err();
         assert!(err.to_string().contains("unknown source"), "{err}");
+    }
+
+    #[test]
+    fn a_transfer_that_did_not_happen_is_a_step_of_its_own() {
+        let script = Script::parse(
+            "I timeout # the drain found nothing\n\
+             O timeout 00\n\
+             O error 01\n\
+             I error # bulk read: stall\n",
+        )
+        .unwrap();
+        assert_eq!(
+            script.steps(),
+            [
+                Step::InTimeout,
+                Step::OutTimeout(vec![0]),
+                Step::OutError(vec![1]),
+                Step::InError
+            ]
+        );
+    }
+
+    #[test]
+    fn a_host_fault_without_its_frame_is_refused() {
+        let err = Script::parse("O timeout\n").unwrap_err();
+        assert!(err.to_string().contains("'O timeout'"), "{err}");
+    }
+
+    fn limit() -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
+    /// Silence is a recorded step, so a read where the script has the host speaking, or
+    /// nothing at all, is the script and the code disagreeing.
+    #[test]
+    fn a_bounded_read_the_script_does_not_expect_is_a_mismatch() {
+        let mut transport = ReplayTransport::new(vec![Step::Out(vec![0])]);
+        let err = pollster::block_on(transport.read_timeout(8, limit())).unwrap_err();
+        assert!(matches!(err, Error::Replay(_)), "{err}");
+
+        let mut transport = ReplayTransport::new(Vec::new());
+        let err = pollster::block_on(transport.read_timeout(8, limit())).unwrap_err();
+        assert!(matches!(err, Error::Replay(_)), "{err}");
+    }
+
+    #[test]
+    fn recorded_silence_answers_only_a_bounded_read() {
+        let mut transport = ReplayTransport::new(vec![Step::InTimeout]);
+        let err = pollster::block_on(transport.read(8)).unwrap_err();
+        assert!(matches!(err, Error::Replay(_)), "{err}");
+        assert_eq!(transport.position(), 0);
+
+        let read = pollster::block_on(transport.read_timeout(8, limit())).unwrap();
+        assert_eq!(read, None);
+        assert_eq!(transport.position(), 1);
+    }
+
+    #[test]
+    fn a_refused_write_answers_only_a_bounded_write_of_the_same_frame() {
+        let mut transport = ReplayTransport::new(vec![Step::OutTimeout(vec![7])]);
+        let err = pollster::block_on(transport.write(&[7])).unwrap_err();
+        assert!(matches!(err, Error::Replay(_)), "{err}");
+        let err = pollster::block_on(transport.write_timeout(&[8], limit())).unwrap_err();
+        assert!(matches!(err, Error::Replay(_)), "{err}");
+        assert_eq!(transport.position(), 0);
+
+        let accepted = pollster::block_on(transport.write_timeout(&[7], limit())).unwrap();
+        assert!(!accepted);
+        assert_eq!(transport.position(), 1);
+    }
+
+    #[test]
+    fn a_recorded_transport_failure_replays_as_one() {
+        let mut transport = ReplayTransport::new(vec![Step::OutError(vec![7]), Step::InError]);
+        let err = pollster::block_on(transport.write(&[7])).unwrap_err();
+        assert!(matches!(err, Error::Transport(_)), "{err}");
+        let err = pollster::block_on(transport.read_timeout(8, limit())).unwrap_err();
+        assert!(matches!(err, Error::Transport(_)), "{err}");
+        assert!(transport.is_exhausted());
+    }
+
+    #[test]
+    fn what_drives_an_intentless_script_is_a_file_level_field() {
+        let script =
+            Script::parse("# driven_by: tests/ops.rs\n# undriven: evidence\nO 00\n").unwrap();
+        assert_eq!(script.header.driven_by.as_deref(), Some("tests/ops.rs"));
+        assert_eq!(script.header.undriven.as_deref(), Some("evidence"));
+
+        let err = Script::parse("O 00\n# driven_by: tests/ops.rs\n").unwrap_err();
+        assert!(err.to_string().contains("before its first step"), "{err}");
+    }
+
+    #[test]
+    fn a_mismatch_the_caller_swallowed_still_leaves_the_replay_unfinished() {
+        let mut transport = ReplayTransport::new(vec![Step::Out(vec![0])]);
+        pollster::block_on(transport.write(&[0])).unwrap();
+        let _ = pollster::block_on(transport.read_timeout(8, limit()));
+        assert!(!transport.is_exhausted());
+        assert!(transport.mismatch().is_some());
     }
 }

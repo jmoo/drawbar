@@ -47,10 +47,12 @@ macro_rules! rw_session {
 /// Drive one section's intent through the transport its frames came from.
 ///
 /// `dir` is the script's directory, where any file an intent names sits. `geometry` is
-/// set once one of the script's sections has read it.
+/// set once one of the script's sections has read it; until then, `device` is the
+/// script's header field, which decides whether the committed geometry may stand in.
 pub async fn drive(
     t: &mut ReplayTransport,
     geometry: &mut Option<Geometry>,
+    device: Option<&str>,
     class: Option<ObjectClass>,
     verb: &str,
     args: &[String],
@@ -68,33 +70,56 @@ pub async fn drive(
             drive_read(t, need_class(class)?, verb, args, dir).await
         }
         ("put" | "move" | "duplicate" | "rename" | "delete", _) => {
+            let geometry = Declared { geometry, device };
             drive_write(t, geometry, need_class(class)?, verb, args, dir).await
         }
-        _ => drive_query(t, geometry, class, verb, args).await,
+        _ => drive_query(t, Declared { geometry, device }, class, verb, args).await,
     }
 }
 
-/// A recording without its own geometry uses the committed one.
-async fn declared_banks(geometry: &Option<Geometry>, class: ObjectClass) -> Result<Vec<Bank>> {
-    match geometry {
-        Some(read) => read.banks(class).map(<[Bank]>::to_vec),
-        None => crate::geometry::committed()
-            .await?
-            .banks(class)
-            .map(<[Bank]>::to_vec),
-    }
+/// The instrument the committed geometry was read from, as a script's `device` field
+/// names it before the firmware.
+const COMMITTED_DEVICE: &str = "Nord Electro 5";
+
+/// The tables a script's walks and writes are bounded by: its own `device geometry`
+/// section's, or the committed ones when its `device` field names their instrument.
+struct Declared<'a> {
+    geometry: &'a Option<Geometry>,
+    device: Option<&'a str>,
 }
 
-async fn declared_unit(geometry: &Option<Geometry>, class: ObjectClass) -> Result<AllocationUnit> {
-    match geometry {
-        Some(read) => read.allocation_unit(class),
-        None => crate::geometry::committed().await?.allocation_unit(class),
+impl Declared<'_> {
+    async fn banks(&self, class: ObjectClass) -> Result<Vec<Bank>> {
+        match self.geometry {
+            Some(read) => read.banks(class).map(<[Bank]>::to_vec),
+            None => self.committed().await?.banks(class).map(<[Bank]>::to_vec),
+        }
+    }
+
+    async fn unit(&self, class: ObjectClass) -> Result<AllocationUnit> {
+        match self.geometry {
+            Some(read) => read.allocation_unit(class),
+            None => self.committed().await?.allocation_unit(class),
+        }
+    }
+
+    async fn committed(&self) -> Result<Geometry> {
+        let model = self.device.and_then(|d| d.split(',').next()).map(str::trim);
+        if model != Some(COMMITTED_DEVICE) {
+            return Err(bad(format!(
+                "no `device geometry` section precedes this one, and the committed \
+                 geometry stands in only for a script whose `device` is the \
+                 {COMMITTED_DEVICE}, not {:?}",
+                self.device.unwrap_or("unnamed")
+            )));
+        }
+        crate::geometry::committed().await
     }
 }
 
 async fn drive_query(
     t: &mut ReplayTransport,
-    geometry: &mut Option<Geometry>,
+    geometry: Declared<'_>,
     class: Option<ObjectClass>,
     verb: &str,
     args: &[String],
@@ -132,7 +157,7 @@ async fn drive_query(
                 return Err(bad("walk takes no arguments; the device's banks bound it"));
             }
             let class = need_class(class)?;
-            let banks = declared_banks(geometry, class).await?;
+            let banks = geometry.banks(class).await?;
             session!(t, class, |s| async {
                 for at in op::occupied_slots(&mut s, &banks).await? {
                     op::info(&mut s, at).await?;
@@ -154,7 +179,7 @@ async fn drive_query(
             let targets: Vec<Location> = (0..args.len())
                 .map(|i| slot(args, i))
                 .collect::<Result<_>>()?;
-            let banks = declared_banks(geometry, class).await?;
+            let banks = geometry.banks(class).await?;
             session!(t, class, |s| op::set_lists_referencing(
                 &mut s, &banks, &targets
             ))
@@ -188,7 +213,7 @@ async fn drive_read(
 
 async fn drive_write(
     t: &mut ReplayTransport,
-    geometry: &mut Option<Geometry>,
+    geometry: Declared<'_>,
     class: ObjectClass,
     verb: &str,
     args: &[String],
@@ -202,7 +227,7 @@ async fn drive_write(
                 text(args, 2)?,
                 number(args.get(3).map_or("", String::as_str))?,
             );
-            let unit = declared_unit(geometry, class).await?;
+            let unit = geometry.unit(class).await?;
             rw_session!(t, class, |s| op::write(
                 &mut s, unit, at, &file, name, stamp
             ))

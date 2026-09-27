@@ -960,42 +960,4 @@ mod tests {
         let err = cleaning_progress(&[0; 11]).expect_err("a partial cleaning reply");
         assert!(matches!(err, Error::Truncated { got: 11, need: 12 }));
     }
-
-    /// A transport that never accepts a frame and never fails, like an instrument with a
-    /// stalled bulk OUT endpoint.
-    struct Stalled;
-
-    impl Transport for Stalled {
-        async fn write(&mut self, _buf: &[u8]) -> Result<()> {
-            panic!("recovery frames must carry a deadline");
-        }
-
-        async fn read(&mut self, _max: usize) -> Result<Vec<u8>> {
-            panic!("recovery reads must carry a deadline");
-        }
-
-        async fn write_timeout(
-            &mut self,
-            _buf: &[u8],
-            _limit: std::time::Duration,
-        ) -> Result<bool> {
-            Ok(false)
-        }
-
-        async fn read_timeout(
-            &mut self,
-            _max: usize,
-            _limit: std::time::Duration,
-        ) -> Result<Option<Vec<u8>>> {
-            Ok(None)
-        }
-    }
-
-    #[test]
-    fn recover_names_the_stalled_endpoint_instead_of_waiting_forever() {
-        let err = pollster::block_on(recover(&mut Stalled)).expect_err("the write is refused");
-        let message = err.to_string();
-        assert!(message.contains("GOODBYE"), "{message}");
-        assert!(message.contains("0x03"), "{message}");
-    }
 }

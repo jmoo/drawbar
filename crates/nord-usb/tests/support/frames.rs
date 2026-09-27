@@ -8,7 +8,7 @@
 //! compiles its own copy.
 #![allow(dead_code)]
 
-use nord_usb::transport::{Direction, Step};
+use nord_usb::transport::Step;
 use nord_usb::wire::{cmd, ui, Location, Message, ObjectClass, Service};
 
 /// The subsystem every [`Service::Program`] frame carries.
@@ -16,18 +16,12 @@ pub const SUBSYSTEM: u32 = 10;
 
 /// A frame the host sends.
 pub fn notify(msg: Message) -> Step {
-    Step {
-        direction: Direction::Out,
-        bytes: msg.encode(),
-    }
+    Step::Out(msg.encode())
 }
 
 /// A frame the device sends.
 pub fn reply(msg: Message) -> Step {
-    Step {
-        direction: Direction::In,
-        bytes: msg.encode(),
-    }
+    Step::In(msg.encode())
 }
 
 pub fn request(command: u32, args: &[u8]) -> Step {
@@ -115,4 +109,20 @@ pub fn slot_args(at: Location) -> Vec<u8> {
 
 pub fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|w| w.to_be_bytes()).collect()
+}
+
+/// A host frame the device did not accept within the write's limit.
+pub fn unaccepted(step: Step) -> Step {
+    match step {
+        Step::Out(frame) => Step::OutTimeout(frame),
+        other => panic!("only a host frame can go unaccepted: {other:?}"),
+    }
+}
+
+/// A host frame the transport failed to send.
+pub fn failed(step: Step) -> Step {
+    match step {
+        Step::Out(frame) => Step::OutError(frame),
+        other => panic!("only a host frame can fail to send: {other:?}"),
+    }
 }

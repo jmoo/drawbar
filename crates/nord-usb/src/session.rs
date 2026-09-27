@@ -361,6 +361,9 @@ impl<T: Transport, C> Session<'_, T, C> {
         if transport.write_timeout(&encoded, WRITE_LIMIT).await? {
             Ok(())
         } else {
+            // Nothing more can be delivered, so closing would only wait out the limit
+            // again for every frame it sends.
+            self.closed = true;
             Err(Error::Transport(format!(
                 "the device did not accept command {:#04x} within {}s: its bulk endpoints \
                  are stalled. Only a power cycle clears them; `nord device recover` cannot, \
@@ -382,7 +385,8 @@ impl<T: Transport, C> Session<'_, T, C> {
     }
 
     async fn close(&mut self) -> Result<()> {
-        // A failed exchange already released the session and reported its error.
+        // A failed exchange already released or abandoned the session and reported its
+        // error.
         if self.closed {
             return Ok(());
         }

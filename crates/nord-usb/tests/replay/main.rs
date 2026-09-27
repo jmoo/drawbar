@@ -6,7 +6,8 @@
 //! and every frame's length field must agree with its bytes. A script that declares an
 //! `intent` is also driven: its sections are replayed in order through an exact-match
 //! transport, each is judged against its `expect`, and the whole script must be
-//! consumed.
+//! consumed. A script that declares none must name the tests that drive it, or say why
+//! nothing does.
 //!
 //! ```sh
 //! cargo test -p nord-usb --features replay --test replay        # the fixtures
@@ -25,7 +26,7 @@ mod geometry;
 mod scripts;
 
 use libtest_mimic::{Arguments, Failed, Trial};
-use nord_usb::transport::{ReplayTransport, Script, Step};
+use nord_usb::transport::{ErrKind, Expect, Header, ReplayTransport, Script, Step};
 use std::fs;
 use std::path::Path;
 
@@ -33,20 +34,51 @@ use std::path::Path;
 /// bytes recorded for it. A frame that fails this was captured across a buffer boundary
 /// or edited by hand, and every offset after it is suspect.
 fn framing(steps: &[Step]) -> Result<(), Failed> {
-    for (i, step) in steps.iter().enumerate() {
-        let head = step.bytes.get(..4).ok_or_else(|| {
+    for (i, frame) in steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, step)| Some((i, step.frame()?)))
+    {
+        let head = frame.get(..4).ok_or_else(|| {
             Failed::from(format!(
-                "frame {i} is {} bytes, too short to be a message",
-                step.bytes.len()
+                "step {i} is {} bytes, too short to be a message",
+                frame.len()
             ))
         })?;
         let declared = u32::from_be_bytes(head.try_into().expect("four bytes")) as usize;
-        if declared != step.bytes.len() {
+        if declared != frame.len() {
             return Err(format!(
-                "frame {i} declares {declared} bytes and carries {}",
-                step.bytes.len()
+                "step {i} declares {declared} bytes and carries {}",
+                frame.len()
             )
             .into());
+        }
+    }
+    Ok(())
+}
+
+/// A script with no intent is only framing-checked here, so it must name the test files
+/// that drive it, each of which must mention it by its path under the tree, or say why
+/// nothing does.
+fn accounted_for(header: &Header, name: &str) -> Result<(), Failed> {
+    let tests = match (&header.driven_by, &header.undriven) {
+        (Some(tests), None) => tests,
+        (None, Some(_)) => return Ok(()),
+        (Some(_), Some(_)) => return Err("driven_by and undriven contradict each other".into()),
+        (None, None) => {
+            return Err(
+                "declares no intent, so the sweep checks only its framing: name the \
+                 tests that drive it with `driven_by`, or say why nothing does with \
+                 `undriven`"
+                    .into(),
+            )
+        }
+    };
+    for test in tests.split(',').map(str::trim) {
+        let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(test))
+            .map_err(|e| Failed::from(format!("driven_by {test}: {e}")))?;
+        if !source.contains(name) {
+            return Err(format!("driven_by names {test}, which never mentions {name}").into());
         }
     }
     Ok(())
@@ -70,6 +102,7 @@ fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
         let outcome = pollster::block_on(drive::drive(
             &mut t,
             &mut geometry,
+            script.header.device.as_deref(),
             class,
             &verb[0],
             &verb[1..],
@@ -79,6 +112,15 @@ fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
             .expect()
             .check(&outcome)
             .map_err(|e| where_(i, intent, e))?;
+        if let Some(mismatch) = t.mismatch() {
+            if section.expect() != Expect::Err(ErrKind::Replay) {
+                return Err(where_(
+                    i,
+                    intent,
+                    format!("the replay disagreed: {mismatch}"),
+                ));
+            }
+        }
 
         // Each section accounts for its own frames. Without this a section that stopped
         // short would be reported against whichever later one first ran out of script.
@@ -87,7 +129,7 @@ fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
                 i,
                 intent,
                 format!(
-                    "consumed {} of the section's {} frames",
+                    "consumed {} of the section's {} steps",
                     t.position() - before,
                     section.steps.len()
                 ),
@@ -116,9 +158,9 @@ fn replay(script: &Script, dir: &Path) -> Result<(), Failed> {
         }
     }
 
-    if !t.is_exhausted() {
+    if t.position() != script.steps().len() {
         return Err(format!(
-            "{} of {} frames left unread",
+            "{} of {} steps left unread",
             script.steps().len() - t.position(),
             script.steps().len()
         )
@@ -132,8 +174,8 @@ fn where_(i: usize, intent: &str, what: impl std::fmt::Display) -> Failed {
 }
 
 /// One script: it parses, its frames are well formed, and any intents it declares are
-/// driven.
-fn trial(path: &Path) -> Result<(), Failed> {
+/// driven. `name` is its path under its tree.
+fn trial(path: &Path, name: &str) -> Result<(), Failed> {
     let text = fs::read_to_string(path).map_err(|e| Failed::from(format!("read: {e}")))?;
     let script = Script::parse(&text).map_err(|e| Failed::from(e.to_string()))?;
     framing(&script.steps())?;
@@ -144,7 +186,14 @@ fn trial(path: &Path) -> Result<(), Failed> {
         .filter(|s| s.intent.is_some())
         .count();
     if declared == 0 {
-        return Ok(());
+        return accounted_for(&script.header, name);
+    }
+    if script.header.driven_by.is_some() || script.header.undriven.is_some() {
+        return Err(
+            "driven_by and undriven account for a script with no intent, and this one \
+             declares intents"
+                .into(),
+        );
     }
     if declared != script.sections.len() {
         return Err(
@@ -169,7 +218,8 @@ fn trials_for(label: &str, root: &Path, trials: &mut Vec<Trial>) {
     for path in found {
         let name = scripts::rel(root, &path);
         let kind = name.split('/').next().unwrap_or_default().to_string();
-        trials.push(Trial::test(format!("{label}/{name}"), move || trial(&path)).with_kind(kind));
+        let trial_name = format!("{label}/{name}");
+        trials.push(Trial::test(trial_name, move || trial(&path, &name)).with_kind(kind));
     }
 }
 
