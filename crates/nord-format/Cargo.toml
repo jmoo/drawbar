@@ -7,7 +7,7 @@ rust-version.workspace = true
 keywords = ["clavia", "electro", "nord", "parser"]
 license.workspace = true
 repository.workspace = true
-version = "0.7.0"
+version = "0.7.1"
 
 [lib]
 name = "nord_format"
