@@ -4,11 +4,12 @@
 //! A path is either a registry field (`center_panel.transpose`), which any
 //! `#[bitbody]` format answers from its declaration, or an accessor path: the
 //! organ accessors, the part mix, the settings selection, a song's program list,
-//! or a sample's zone layout. Accessor paths are derived values with no single
+//! or a sample's zone layout, keyboard map, and preset. Accessor paths are derived values with no single
 //! bit placement, so they are spelled here by hand.
 
 use nord_format::bank::Item;
 use nord_format::formats::ne5::{self, OrganModel, Preset};
+use nord_format::formats::nsmp::{self, KeyTable, Level, Sty};
 use nord_format::{Entity, Live, Program, Sample, Settings, Song};
 
 /// Every spelling of the value at `path` in `entity`. A sidecar value that
@@ -65,8 +66,18 @@ pub fn lookup(entity: &Entity, path: &str) -> Result<Vec<String>, String> {
                     .collect();
                 return Ok(vec![format!("{tops:?}")]);
             }
-            _ => {}
+            _ => {
+                if let Some(rest) = path.strip_prefix("key_table.") {
+                    let table = s.key_table().map_err(|e| e.to_string())?;
+                    return key_table_path(&table, rest).map(|spelled| vec![spelled]);
+                }
+            }
         },
+        Entity::Sample(Sample::V3(s)) => {
+            if let Some(spelled) = wide_sample_path(s, path)? {
+                return Ok(vec![spelled]);
+            }
+        }
         Entity::SampleProject(p) => {
             let zones = || p.zones().map_err(|e| e.to_string());
             match path {
@@ -177,4 +188,90 @@ fn preset(digit: &str) -> Result<Preset, String> {
         "2" => Ok(Preset::Two),
         other => Err(format!("organ preset {other}, which is not 1 or 2")),
     }
+}
+
+/// A narrow instrument's keyboard map: `neutral`, `adjusted`, and the gain or detune
+/// of `instrument` or `key(<note>)`.
+fn key_table_path(table: &KeyTable, path: &str) -> Result<String, String> {
+    match path {
+        "neutral" => return Ok((*table == KeyTable::NEUTRAL).to_string()),
+        "adjusted" => return Ok(format!("{:?}", table.adjusted().collect::<Vec<_>>())),
+        _ => {}
+    }
+    let (record, part) = path
+        .rsplit_once('.')
+        .ok_or_else(|| format!("unknown keyboard map path {path}"))?;
+    let level: Level = match record {
+        "instrument" => table.instrument,
+        call => {
+            let note = call
+                .strip_prefix("key(")
+                .and_then(|c| c.strip_suffix(')'))
+                .and_then(|n| n.parse::<u8>().ok())
+                .ok_or_else(|| format!("unknown keyboard map record {call}"))?;
+            table.key(note).map_err(|e| e.to_string())?
+        }
+    };
+    match part {
+        "gain" => Ok(level.gain().to_string()),
+        "detune" => Ok(level.detune().to_string()),
+        other => Err(format!("a keyboard map record has no {other}")),
+    }
+}
+
+/// A wide instrument's zone velocity windows and relative strengths, and its
+/// preset's dynamics group and EQ. `None` for a path this reader does not spell.
+fn wide_sample_path(
+    s: &nord_format::cbin::Cbin<nsmp::SampleV3>,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let zones = || s.zones().map_err(|e| e.to_string());
+    let sty = || s.sty().map_err(|e| e.to_string());
+    let spelled = match path {
+        "velocity_windows" => {
+            let windows = zones()?
+                .iter()
+                .map(|z| {
+                    z.velocity
+                        .map(|w| (w.low, w.high))
+                        .ok_or("this zone layout stores no velocity window")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("{windows:?}")
+        }
+        "rel_strengths" => {
+            let strengths = zones()?
+                .iter()
+                .map(|z| {
+                    z.rel_strength
+                        .ok_or("this zone layout stores no relative strength")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("{strengths:?}")
+        }
+        "sty.dynamics_enabled" => match sty()? {
+            Sty::V3(p) => p.dynamics_enabled().to_string(),
+            Sty::V4(p) => p.dynamics_enabled().to_string(),
+            Sty::V2(_) => return Err("a wide chain read a narrow preset".into()),
+        },
+        "sty.dynamics_curve" => match sty()? {
+            Sty::V3(p) => p.dynamics_curve().to_string(),
+            Sty::V4(p) => format!("{:?}", p.dynamics_curve()),
+            Sty::V2(_) => return Err("a wide chain read a narrow preset".into()),
+        },
+        "sty.dynamics_response" => match sty()? {
+            Sty::V3(p) => p.dynamics_response().to_string(),
+            Sty::V4(p) => format!("{:?}", p.dynamics_response()),
+            Sty::V2(_) => return Err("a wide chain read a narrow preset".into()),
+        },
+        "sty.eq" => match sty()? {
+            Sty::V4(p) => {
+                let bands: Vec<_> = p.eq().iter().map(|b| (b.frequency, b.gain, b.q)).collect();
+                format!("{bands:?}")
+            }
+            _ => return Err("only a v4 preset stores an EQ".into()),
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(spelled))
 }

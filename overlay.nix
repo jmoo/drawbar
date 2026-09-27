@@ -9,6 +9,7 @@ let
     concatMapStringsSep
     concatStringsSep
     crane
+    elem
     escapeShellArgs
     filter
     genAttrs
@@ -550,16 +551,11 @@ let
   # still flow into their suites.
   committed = genAttrs corpusCrates (
     name:
-    final.nord.crates.${name}.override (
-      {
-        NORD_CORPUS_ROOT = "${corpus}";
-        cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
-        pname = "${name}-corpus";
-      }
-      // optionalAttrs (name == "nord-format") {
-        NORD_NSMP_KERNEL_ORACLE = "${corpusTree}/tools/nsmp-pitch/table-fl32.tsv";
-      }
-    )
+    final.nord.crates.${name}.override {
+      NORD_CORPUS_ROOT = "${corpus}";
+      cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
+      pname = "${name}-corpus";
+    }
   );
 
   # The full tier is the committed suite pointed at the bigger assembly.
@@ -590,8 +586,9 @@ in
       # by `corpus nix-add`.
       all-corpus-full = final.linkFarm "all-corpus-full" full;
 
-      # Clippy over every crate and target, with each crate's test features on so the
-      # tests are linted too. A warning fails it. `nix flake check` runs it.
+      # Clippy over every crate and target, with each crate's test features and
+      # `corpus` on so every suite is linted, the corpus ones included; compiling them
+      # needs no specimens. A warning fails it. `nix flake check` runs it.
       clippy = crane.cargoClippy (
         commonArgs
         // audioArgs
@@ -599,7 +596,11 @@ in
           inherit cargoArtifacts;
           cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           cargoExtraArgs = "--locked --workspace ${
-            featureArgs (concatMap (name: map (f: "${name}/${f}") (testFeaturesFor name)) (attrNames manifests))
+            featureArgs (
+              concatMap (
+                name: map (f: "${name}/${f}") (testFeaturesFor name ++ optional (elem name corpusCrates) "corpus")
+              ) (attrNames manifests)
+            )
           }";
           pname = "workspace-clippy";
           version = "0";

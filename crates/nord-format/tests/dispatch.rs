@@ -4,11 +4,12 @@
 
 use nord_format::cbin::{Cbin, Generation, Header, RawBody};
 use nord_format::formats::{ns3, ns4};
+use std::collections::BTreeSet;
 use std::io::Cursor;
 
 #[path = "support/format_table.rs"]
 mod format_table;
-use format_table::formats;
+use format_table::{formats, UNTABLED};
 
 fn synthesize(tag: &str, body_len: usize, version: u32, generation: Generation) -> Vec<u8> {
     let mut header = Header::new(tag, (0, 0), version);
@@ -40,6 +41,25 @@ fn every_tag_dispatches_and_round_trips_both_generations() {
             assert_eq!(back, bytes, "{tag:?} ({generation:?}) round trip");
         }
     }
+}
+
+#[test]
+fn the_reader_dispatches_each_tag_once() {
+    let mut seen = BTreeSet::new();
+    for tag in nord_format::cbin_formats() {
+        assert!(seen.insert(tag), "{tag:?} has two readers");
+    }
+}
+
+#[test]
+fn the_format_table_and_its_exclusions_are_every_dispatched_tag() {
+    let dispatched: BTreeSet<&str> = nord_format::cbin_formats().collect();
+    let tabled: BTreeSet<&str> = formats()
+        .into_iter()
+        .map(|(tag, _, _)| tag)
+        .chain(UNTABLED.iter().copied())
+        .collect();
+    assert_eq!(tabled, dispatched, "format table against the reader");
 }
 
 /// A tag with a NUL in it dispatches by all four bytes: `nss\0` is not `nssX`.

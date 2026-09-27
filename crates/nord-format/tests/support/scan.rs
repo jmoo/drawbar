@@ -8,24 +8,34 @@
 //! [`sampled`] uses to find oracle sidecars.
 #![allow(dead_code)]
 
-use nord_format::formats::nsmp;
 use nord_format::util::{peek, FileType};
-use nord_format::{Entity, Sample};
+use nord_format::Entity;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The private corpus checkout: `NORD_CORPUS_ROOT`.
+/// The corpus: `NORD_CORPUS_ROOT`, any tree of Nord files.
 pub fn root() -> PathBuf {
     std::env::var_os("NORD_CORPUS_ROOT")
         .map(PathBuf::from)
-        .expect("set NORD_CORPUS_ROOT to a nord-corpus checkout for --features corpus")
+        .expect("set NORD_CORPUS_ROOT to a tree of Nord files for --features corpus")
 }
 
+/// The classes of [`peek`] that `from_stream` reads in this build.
+pub const READ: &[FileType] = &[
+    FileType::Cbin,
+    FileType::Cne3,
+    FileType::Midi,
+    FileType::SampleProject,
+    FileType::Sysex,
+    #[cfg(feature = "bundle")]
+    FileType::Zip,
+];
+
 /// Whether the reader takes this file, decided by its leading bytes as
-/// `from_stream` decides. `.skip.` in the name marks a corpus file to leave out.
+/// `from_stream` decides. `.skip.` in the name marks a file to leave out.
 pub fn wanted(path: &Path) -> bool {
     let name = path.file_name().unwrap().to_string_lossy();
     if name.contains(".skip.") || name.ends_with(".oracle.json") {
@@ -34,15 +44,7 @@ pub fn wanted(path: &Path) -> bool {
     let Ok(mut file) = fs::File::open(path) else {
         return false;
     };
-    matches!(
-        peek(&mut file).map(|p| p.file_type),
-        Ok(FileType::Cbin
-            | FileType::Cne3
-            | FileType::Midi
-            | FileType::SampleProject
-            | FileType::Sysex
-            | FileType::Zip)
-    )
+    peek(&mut file).is_ok_and(|p| READ.iter().any(|t| t.as_str() == p.file_type.as_str()))
 }
 
 /// A CBIN file's tag and header generation.
@@ -191,52 +193,20 @@ pub fn fixtures() -> &'static [Specimen] {
         .get_or_init(|| parsed(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")))
 }
 
-/// The corpus specimen with this file name. Panics unless exactly one matches.
-pub fn named(name: &str) -> &'static Specimen {
-    let mut hits = corpus()
-        .iter()
-        .filter(|s| s.path.file_name().is_some_and(|n| n == name));
-    let found = hits
-        .next()
-        .unwrap_or_else(|| panic!("no specimen named {name}"));
-    assert!(hits.next().is_none(), "more than one specimen named {name}");
-    found
-}
-
-/// The corpus file with this name, including one that [`wanted`] leaves out for
-/// its `.skip.` marker. Found by name, so a test does not depend on the tree's
-/// layout.
-pub fn named_skipped(name: &str) -> PathBuf {
-    let mut hits = Vec::new();
-    visit(&root(), &mut |path| {
-        if path.file_name().is_some_and(|found| found == name) {
-            hits.push(path);
+/// Every sample-codec kernel oracle under `root`: a file whose name ends
+/// `.kernel.tsv`.
+pub fn kernel_tables(root: &Path) -> Vec<PathBuf> {
+    let mut tables = Vec::new();
+    visit(root, &mut |path| {
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".kernel.tsv")
+        {
+            tables.push(path);
         }
     });
-    assert_eq!(hits.len(), 1, "corpus files named {name}: {hits:?}");
-    hits.pop().unwrap()
-}
-
-/// Every v2 sample instrument in the corpus, with the specimen it came from.
-pub fn v2_samples() -> impl Iterator<
-    Item = (
-        &'static Specimen,
-        &'static nord_format::cbin::Cbin<nsmp::Sample>,
-    ),
-> {
-    corpus()
-        .iter()
-        .filter_map(|specimen| match &specimen.entity {
-            Entity::Sample(Sample::V2(sample)) => Some((specimen, sample)),
-            _ => None,
-        })
-}
-
-/// The v2 sample instrument with this file name, decoded afresh so a caller may
-/// edit it without disturbing the shared corpus.
-pub fn v2_named(name: &str) -> nord_format::cbin::Cbin<nsmp::Sample> {
-    match nord_format::from_stream(&mut Cursor::new(&named(name).bytes)).unwrap() {
-        Entity::Sample(Sample::V2(sample)) => sample,
-        other => panic!("{name} decoded as {other:?}"),
-    }
+    tables.sort();
+    tables
 }

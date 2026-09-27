@@ -1,14 +1,25 @@
 //! `(tag, body length, a version the reader accepts)` for every CBIN format except
-//! the Electro 5 formats, `nsmp`, and `npno`, each length taken from its format module.
+//! those in [`UNTABLED`], each length taken from its format module.
 //!
 //! ⚠️ Not a test target. Each test target that includes this module compiles its
 //! own copy.
 #![allow(dead_code)]
 
 use nord_format::formats::{
-    nc2, nc2d, nd2, nd3, ne3, ne4, ne6, ne7, ng2, nl4, nla1, no3, np, np2, np3, np4, np5, npip,
-    ns2, ns3, ns4, nsclassic, nw, nw2,
+    nc2, nc2d, nd2, nd3, ne3, ne4, ne5, ne6, ne7, ng2, nl4, nla1, no3, np, np2, np3, np4, np5,
+    npip, npno, ns2, ns3, ns4, nsclassic, nsmp, nw, nw2,
 };
+
+/// The dispatched formats [`formats`] leaves out: the Electro 5 formats and the
+/// sample and piano libraries.
+pub const UNTABLED: &[&str] = &[
+    ne5::program::FORMAT,
+    ne5::live::FORMAT,
+    ne5::song::FORMAT,
+    ne5::settings::FORMAT,
+    nsmp::FORMAT,
+    npno::FORMAT,
+];
 
 pub fn formats() -> Vec<(&'static str, usize, u32)> {
     vec![
