@@ -58,7 +58,7 @@ desktop they stay in their files: drawbar reads only the part it shows or plays,
 and reads a sample whole when you open it. Each one's checksum is checked in the
 background when the library opens. Its row says **checking…** until that is done,
 and **failed verification** if the file does not match its checksum. Such a file
-is not sent.
+is not sent. What stays in its file does not count toward the 1 GiB.
 
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.

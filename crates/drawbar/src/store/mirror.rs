@@ -57,6 +57,9 @@ struct Record {
     /// The file went missing outside drawbar. Nothing writes it again until the asset
     /// is saved.
     missing: bool,
+    /// The last listing that read the file left it resting in place rather than read it
+    /// whole, and nothing has been saved over it since.
+    rests: bool,
     /// The asset left the workspace while its first save was in flight; the file goes
     /// once that save lands.
     removed: bool,
@@ -326,13 +329,19 @@ impl Store {
         if !self.opened() || self.scanning {
             return;
         }
-        let known = self
-            .records
-            .values()
-            .filter_map(|record| Some((record.path.clone()?, record.fingerprint?.stat())))
-            .collect();
+        let mut known = BTreeMap::new();
+        let mut resting = BTreeSet::new();
+        for record in self.records.values() {
+            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
+                continue;
+            };
+            if record.rests {
+                resting.insert(path.clone());
+            }
+            known.insert(path.clone(), print.stat());
+        }
         self.scanning = true;
-        self.backend.send(Cmd::Scan { known });
+        self.backend.send(Cmd::Scan { known, resting });
     }
 
     /// Write everything, waiting for the saves in flight to answer, then let the library
@@ -505,8 +514,7 @@ impl Store {
             if changed && mine.is_some() {
                 conflicts.push(id);
             }
-            self.records
-                .insert(id, Record::of_file(found.path.clone(), print));
+            self.records.insert(id, Record::of_found(&found, print));
             back.push(Saved {
                 id,
                 name: found.path.leaf().to_string(),
@@ -669,6 +677,7 @@ impl Store {
                 record.path = Some(found.path.clone());
                 if let (Some(print), Some(read)) = (&mut record.fingerprint, found.fingerprint()) {
                     *print = read;
+                    record.rests = found.file.is_some();
                 }
             }
             if let Some(before) = before {
@@ -722,6 +731,7 @@ impl Store {
         };
         let name = entity.name.clone();
         let unsaved = entity.is_unsaved();
+        let rests = found.file.is_some();
         match (unsaved, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file, log),
@@ -741,6 +751,7 @@ impl Store {
             record.fingerprint = Some(print);
             record.saved = saved;
             record.missing = false;
+            record.rests = rests;
         }
     }
 
@@ -801,6 +812,7 @@ impl Store {
             Ok(print) => {
                 record.fingerprint = Some(print);
                 record.missing = false;
+                record.rests = false;
                 browser.folders.missing.remove(&id);
                 if record.removed {
                     self.records.remove(&id);
@@ -1110,6 +1122,15 @@ impl Record {
             saving: false,
             missing: false,
             removed: false,
+            rests: false,
+        }
+    }
+
+    /// Recorded from what a listing read.
+    fn of_found(found: &Found, fingerprint: Fingerprint) -> Record {
+        Record {
+            rests: found.file.is_some(),
+            ..Record::of_file(found.path.clone(), fingerprint)
         }
     }
 }
@@ -1232,7 +1253,7 @@ pub(crate) fn duplicates(
 /// a file the listing did not read.
 fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Option<Saved> {
     let print = found.fingerprint()?;
-    records.insert(id, Record::of_file(found.path.clone(), print));
+    records.insert(id, Record::of_found(&found, print));
     Some(Saved {
         id,
         name: found.path.leaf().to_string(),

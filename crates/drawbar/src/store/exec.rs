@@ -27,9 +27,9 @@ pub const TEMP: &str = ".drawbar-tmp";
 /// folder opens as quickly as a small one.
 pub const MOST_ENTRIES: usize = 10_000;
 
-/// The most bytes one listing reads of files drawbar does not hold yet, counting what it
-/// holds already. Whatever drawbar holds is in memory, and a folder of pianos would
-/// otherwise be read whole.
+/// The most bytes one listing reads whole of files drawbar does not hold yet, counting
+/// what it holds whole already. Whatever drawbar holds whole is in memory; a file left
+/// resting in place, read by range, is not counted.
 pub const MOST_BYTES: u64 = 1 << 30;
 
 /// The extensions drawbar opens besides the Nord formats' own tags.
@@ -139,13 +139,13 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
     }
     match cmd {
         Cmd::Open => Some(Event::Opened(open(fs).await)),
-        Cmd::Scan { known } => {
+        Cmd::Scan { known, resting } => {
             let held = known
                 .into_iter()
                 .map(|(path, stat)| (path, Some(stat)))
                 .collect();
             Some(Event::Scanned(
-                listing(fs, &held, &BTreeMap::new())
+                listing(fs, &held, &resting, &BTreeMap::new())
                     .await
                     .map(|(listing, _)| listing)
                     .map_err(|e| e.to_string()),
@@ -238,7 +238,7 @@ async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         .values()
         .filter_map(|row| Some((row.path.clone()?, row.fingerprint?)))
         .collect();
-    let (listing, temps) = listing(fs, &held, &prints)
+    let (listing, temps) = listing(fs, &held, &BTreeSet::new(), &prints)
         .await
         .map_err(|e| e.to_string())?;
     // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
@@ -308,12 +308,15 @@ async fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usi
 ///
 /// Every file in `held` is listed and read, whatever its kind and however far the walk
 /// went, except one whose [`Stat`] is the one `held` gives, which is listed unread.
-/// Every other file is read only when [`opens`] takes it and it fits in [`MOST_BYTES`].
+/// Every other file is read only when [`opens`] takes it and, unless the backend leaves
+/// it resting in place, it fits in [`MOST_BYTES`]. What `held` holds counts against that
+/// first, except the files `resting` names and the ones this listing leaves resting.
 /// A file the backend leaves on disk reuses the CRC `prints` holds for it while its
 /// [`Stat`] is the one there.
 async fn listing(
     fs: &impl Fs,
     held: &BTreeMap<LibPath, Option<Stat>>,
+    resting: &BTreeSet<LibPath>,
     prints: &BTreeMap<LibPath, Fingerprint>,
 ) -> io::Result<(Listing, Vec<String>)> {
     let mut listing = Listing::default();
@@ -365,30 +368,20 @@ async fn listing(
     }
     listing.dirs = dirs.into_iter().collect();
 
-    let holding: u64 = files
-        .iter()
-        .filter(|(path, _)| held.contains_key(*path))
-        .filter_map(|(_, stat)| stat.map(|stat| stat.len))
-        .fold(0, u64::saturating_add);
-    let mut room = MOST_BYTES.saturating_sub(holding);
-    for (path, stat) in files {
-        let known = held.get(&path);
-        let stat = match (stat, known) {
-            (Some(stat), Some(_)) => stat,
-            (Some(stat), None) if opens(path.leaf()) => {
-                if stat.len > room {
-                    listing.unread.push((path, too_much()));
-                    continue;
-                }
-                room -= stat.len;
-                stat
-            }
-            _ => {
-                listing.others.push(path);
-                continue;
-            }
+    let (holds, arrived): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(path, _)| held.contains_key(path));
+    // What drawbar holds is read whatever it costs, and counts before anything new.
+    let mut holding: u64 = 0;
+    for (path, stat) in holds {
+        let Some(stat) = stat else {
+            listing.others.push(path);
+            continue;
         };
-        if known == Some(&Some(stat)) {
+        if held.get(&path) == Some(&Some(stat)) {
+            if !resting.contains(&path) {
+                holding = holding.saturating_add(stat.len);
+            }
             listing.files.push(Found {
                 path,
                 stat,
@@ -410,15 +403,59 @@ async fn listing(
             Err(e) => Err(e),
         };
         match read {
-            Ok((bytes, file)) => listing.files.push(Found {
+            Ok((bytes, file)) => {
+                if bytes.is_some() {
+                    holding = holding.saturating_add(stat.len);
+                }
+                listing.files.push(Found {
+                    path,
+                    stat,
+                    bytes,
+                    file,
+                });
+            }
+            Err(e) => listing.unread.push((path, e.to_string())),
+        }
+    }
+    let mut room = MOST_BYTES.saturating_sub(holding);
+    for (path, stat) in arrived {
+        let Some(stat) = stat.filter(|_| opens(path.leaf())) else {
+            listing.others.push(path);
+            continue;
+        };
+        match fs.rest(path.as_str(), None).await {
+            Ok(Some(file)) => {
+                listing.files.push(Found {
+                    path,
+                    stat,
+                    bytes: None,
+                    file: Some(file),
+                });
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                listing.unread.push((path, e.to_string()));
+                continue;
+            }
+        }
+        if stat.len > room {
+            listing.unread.push((path, too_much()));
+            continue;
+        }
+        room -= stat.len;
+        match fs.read(path.as_str()).await {
+            Ok(bytes) => listing.files.push(Found {
                 path,
                 stat,
-                bytes,
-                file,
+                bytes: Some(bytes),
+                file: None,
             }),
             Err(e) => listing.unread.push((path, e.to_string())),
         }
     }
+    listing.files.sort_by(|a, b| a.path.cmp(&b.path));
+    listing.others.sort();
     listing.unread.sort();
     listing.unwalked.sort();
     Ok((listing, temps))
@@ -510,5 +547,158 @@ async fn remove(fs: &mut impl Fs, path: &LibPath, expect: Fingerprint) -> Result
             .remove_file(path.as_str())
             .await
             .map_err(|e| e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+
+    use super::*;
+    use crate::testing::{on_disk, sample_bytes, Temp};
+
+    /// A library whose files claim whatever size they are given, without taking it. The
+    /// ones in `rests` are left in place, as the desktop leaves a sample instrument.
+    struct Claimed {
+        files: BTreeMap<String, u64>,
+        rests: BTreeMap<String, Arc<OnDisk>>,
+    }
+
+    fn stat(len: u64) -> Stat {
+        Stat {
+            len,
+            modified: Some(1),
+        }
+    }
+
+    fn refused() -> io::Error {
+        io::ErrorKind::Unsupported.into()
+    }
+
+    impl Fs for Claimed {
+        async fn prepare(&mut self) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn lock(&mut self) -> io::Result<bool> {
+            Err(refused())
+        }
+        async fn list(&self) -> io::Result<Vec<Entry>> {
+            Ok(self
+                .files
+                .iter()
+                .map(|(path, len)| Entry {
+                    path: path.clone(),
+                    kind: Kind::File(stat(*len)),
+                })
+                .collect())
+        }
+        async fn names(&self, _: &str) -> io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            Ok(path.as_bytes().to_vec())
+        }
+        async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
+            Ok(self.files.get(path).map(|len| stat(*len)))
+        }
+        async fn create(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn replace(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn rename(&mut self, _: &str, _: &str) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn make_dir(&mut self, _: &str) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn remove_file(&mut self, _: &str) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn remove_dir(&mut self, _: &str) -> io::Result<()> {
+            Err(refused())
+        }
+        async fn rest(
+            &self,
+            path: &str,
+            _: Option<Fingerprint>,
+        ) -> io::Result<Option<Arc<OnDisk>>> {
+            Ok(self.rests.get(path).cloned())
+        }
+    }
+
+    /// The answer of a future that never waits.
+    fn now<T>(future: impl Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(answer) => answer,
+            std::task::Poll::Pending => panic!("the stand-in never waits"),
+        }
+    }
+
+    /// A sample instrument of the whole budget's size, left in its file, and a small
+    /// program after it in path order.
+    fn library(dir: &Temp) -> Claimed {
+        let file = on_disk(dir, "Marimba.nsmp", &sample_bytes());
+        Claimed {
+            files: BTreeMap::from([
+                ("Marimba.nsmp".to_string(), MOST_BYTES),
+                ("Small.ne5p".to_string(), 10),
+            ]),
+            rests: BTreeMap::from([("Marimba.nsmp".to_string(), file)]),
+        }
+    }
+
+    fn paths(unread: &[(LibPath, String)]) -> Vec<&str> {
+        unread.iter().map(|(path, _)| path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_file_left_in_place_takes_none_of_what_a_listing_reads() {
+        let dir = Temp::new();
+        let fs = library(&dir);
+        let (listed, _) = now(listing(
+            &fs,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ))
+        .unwrap();
+        assert_eq!(paths(&listed.unread), [] as [&str; 0]);
+        let read: Vec<(&str, bool, bool)> = listed
+            .files
+            .iter()
+            .map(|found| {
+                (
+                    found.path.as_str(),
+                    found.bytes.is_some(),
+                    found.file.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [("Marimba.nsmp", false, true), ("Small.ne5p", true, false)],
+            "(path, read whole, left in place)"
+        );
+    }
+
+    /// On a rescan the listing does not look at a file it holds again, so the app says
+    /// which of them are left in place.
+    #[test]
+    fn a_held_file_counts_against_a_rescan_only_where_it_is_held_whole() {
+        let dir = Temp::new();
+        let fs = library(&dir);
+        let marimba = LibPath::parse("Marimba.nsmp").unwrap();
+        let held = BTreeMap::from([(marimba.clone(), Some(stat(MOST_BYTES)))]);
+
+        let resting = BTreeSet::from([marimba]);
+        let (listed, _) = now(listing(&fs, &held, &resting, &BTreeMap::new())).unwrap();
+        assert_eq!(paths(&listed.unread), [] as [&str; 0], "left in place");
+
+        let (listed, _) = now(listing(&fs, &held, &BTreeSet::new(), &BTreeMap::new())).unwrap();
+        assert_eq!(paths(&listed.unread), ["Small.ne5p"], "held whole");
     }
 }

@@ -310,6 +310,8 @@ pub enum Cmd {
     /// path. Answered by [`Event::Scanned`].
     Scan {
         known: std::collections::BTreeMap<LibPath, Stat>,
+        /// The files of `known` the app leaves in place rather than holding whole.
+        resting: std::collections::BTreeSet<LibPath>,
     },
     /// Write the `working` copies, then the index, then delete the working copies in
     /// `drop`. Working copies are named `<id>-<generation>`. Answered only on failure.
