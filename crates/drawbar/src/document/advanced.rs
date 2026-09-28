@@ -375,12 +375,16 @@ impl Table<'_> {
 /// What a row says under the pointer: what the field is, the value it was saved as when
 /// Writes holds another, and what Writes accepts.
 fn hover(field: &Field, table: &Table<'_>, hidden: bool, labeled: bool) -> String {
-    let what = match (hidden, labeled) {
-        (true, _) => "not relevant: the instrument ignores this in the state the file holds, \
-                      though it is stored, valid and writable"
-            .to_string(),
-        (false, true) => strings::label(&field.path),
-        (false, false) => "no label in this app's table yet".to_string(),
+    let what = match labeled {
+        true => strings::label(&field.path),
+        false => "no label in this app's table yet".to_string(),
+    };
+    let hidden = match hidden {
+        true => {
+            " · hidden from Basic: unused in this file's state, or placed nowhere; stored, \
+                 valid and writable"
+        }
+        false => "",
     };
     let saved = match table.changed.contains(&field.path) {
         true => format!(" · changed, saved as {}", table.raw(&field.path)),
@@ -391,7 +395,7 @@ fn hover(field: &Field, table: &Table<'_>, hidden: bool, labeled: bool) -> Strin
         legal if legal.len() > 12 => format!("{} .. {}", legal[0], legal[legal.len() - 1]),
         legal => legal.join(", "),
     };
-    format!("{what}{saved} · accepts {accepts}")
+    format!("{what}{hidden}{saved} · accepts {accepts}")
 }
 
 /// One cell, drawn at its column's width and left-aligned under its heading.

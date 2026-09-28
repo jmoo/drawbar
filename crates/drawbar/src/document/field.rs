@@ -131,8 +131,8 @@ pub enum Shape {
 /// One registry body, divided the way it will be drawn.
 pub struct Doc<'a> {
     sections: Vec<Sect<'a>>,
-    /// Registered fields no group named, in registry order.
-    leftovers: Vec<&'a Field>,
+    /// How many registered fields no group places. Only the Advanced table lists them.
+    unplaced: usize,
     /// The titles of the top-level groups the instrument is not using.
     idle: Vec<&'static str>,
     shape: Shape,
@@ -195,12 +195,12 @@ enum Cell<'a> {
 
 /// The document a decoded body is drawn as.
 pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
-    let (mut sections, leftovers, idle, shape) = match nord_format::panel::of(decoded) {
+    let (mut sections, unplaced, idle, shape) = match nord_format::panel::of(decoded) {
         Some(layout) => authored(layout, fields),
         None if crate::fields::is_electro5_settings(decoded) => {
-            (menus(fields), Vec::new(), Vec::new(), Shape::Menus)
+            (menus(fields), 0, Vec::new(), Shape::Menus)
         }
-        None => (flat(fields), Vec::new(), Vec::new(), Shape::Flat),
+        None => (flat(fields), 0, Vec::new(), Shape::Flat),
     };
     let morphs = slots_of(fields);
     for section in &mut sections {
@@ -220,7 +220,7 @@ pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
         .collect();
     Doc {
         sections,
-        leftovers,
+        unplaced,
         idle,
         shape,
         shown,
@@ -239,17 +239,6 @@ impl Doc<'_> {
     /// under their parameter's control.
     pub fn shows(&self, path: &str) -> bool {
         self.shown.contains(path)
-    }
-
-    /// How many fields no group placed, and how many of those the strings table names.
-    /// The named ones are what the "Also stored" section holds.
-    pub fn unplaced(&self) -> (usize, usize) {
-        let named = self
-            .leftovers
-            .iter()
-            .filter(|field| strings::known(&field.path))
-            .count();
-        (self.leftovers.len(), named)
     }
 }
 
@@ -287,12 +276,12 @@ fn which_slot(path: &str) -> Option<usize> {
         .position(|(suffix, _, _)| leaf.ends_with(suffix))
 }
 
-/// The sections of a body the library lays out, the fields no group placed, the titles
-/// of the idle top-level groups, and the shape.
+/// The sections of a body the library lays out, how many fields no group placed, the
+/// titles of the idle top-level groups, and the shape.
 fn authored<'a>(
     layout: &'a Panel,
     fields: &'a [Field],
-) -> (Vec<Sect<'a>>, Vec<&'a Field>, Vec<&'static str>, Shape) {
+) -> (Vec<Sect<'a>>, usize, Vec<&'static str>, Shape) {
     let resolved = layout.resolve(fields);
     let mut sections = Vec::new();
     let mut idle = Vec::new();
@@ -313,22 +302,9 @@ fn authored<'a>(
             count: 0,
         });
     }
-    let named: Vec<&Field> = resolved
-        .leftovers
-        .iter()
-        .copied()
-        .filter(|field| strings::known(&field.path))
-        .collect();
-    if !named.is_empty() {
-        sections.push(plain_sect(
-            "also".to_string(),
-            strings::Section::Other.title(),
-            named,
-        ));
-    }
     (
         sections,
-        resolved.leftovers,
+        resolved.leftovers.len(),
         idle,
         Shape::Authored {
             exhaustive: layout.exhaustive,
@@ -367,7 +343,8 @@ fn hoist<'a>(
     }
 }
 
-/// The settings body, in the order of the instrument's menus.
+/// The settings body, in the order of the instrument's menus. A field no menu names is
+/// left to the Advanced table.
 ///
 /// ⚠️ The library has no layout for the settings body, so the sections come from this
 /// app's table in `strings::FIELDS`.
@@ -378,7 +355,7 @@ fn menus(fields: &[Field]) -> Vec<Sect<'_>> {
         .filter_map(|(nth, section)| {
             let rows: Vec<&Field> = fields
                 .iter()
-                .filter(|field| strings::section(&field.path) == *section)
+                .filter(|field| strings::section(&field.path) == Some(*section))
                 .collect();
             (!rows.is_empty()).then(|| plain_sect(format!("m{nth}"), section.title(), rows))
         })
@@ -930,7 +907,7 @@ fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
     if !doc.idle.is_empty() {
         asked |= idle_line(ui, &doc.idle);
     }
-    let unplaced = doc.leftovers.len();
+    let unplaced = doc.unplaced;
     if matches!(doc.shape, Shape::Authored { exhaustive: false }) && unplaced > 0 {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -938,9 +915,7 @@ fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
             icon(ui, Glyph::CircleAlert, 11.0, quiet);
             ui.label(
                 egui::RichText::new(format!(
-                    "{unplaced} fields the layout does not place. They are under Advanced, \
-                     and under {} once the strings table names them.",
-                    strings::Section::Other.title()
+                    "{unplaced} fields the layout does not place. They are under Advanced."
                 ))
                 .font(egui::FontId::proportional(READING))
                 .color(quiet),
@@ -1892,16 +1867,13 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
             "authored — exhaustive".to_string(),
             "every field the body declares is placed".to_string(),
         ),
-        Shape::Authored { exhaustive: false } => {
-            let (unplaced, named) = doc.unplaced();
-            (
-                "authored".to_string(),
-                format!(
-                    "{unplaced} fields no group names; {named} of them show under {}",
-                    strings::Section::Other.title()
-                ),
-            )
-        }
+        Shape::Authored { exhaustive: false } => (
+            "authored".to_string(),
+            format!(
+                "{} fields no group places; only Every field lists them",
+                doc.unplaced
+            ),
+        ),
         Shape::Menus => (
             "menus".to_string(),
             "this app's own table, in the order the instrument's menus run".to_string(),
@@ -2073,7 +2045,7 @@ mod tests {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let doc = Doc {
             sections: Vec::new(),
-            leftovers: Vec::new(),
+            unplaced: 0,
             idle: Vec::new(),
             shape: Shape::Flat,
             shown: HashSet::new(),
@@ -2130,7 +2102,7 @@ mod tests {
         morphs.remove("organ_a_volume");
         let doc = Doc {
             sections: Vec::new(),
-            leftovers: Vec::new(),
+            unplaced: 0,
             idle: Vec::new(),
             shape: Shape::Flat,
             shown: HashSet::new(),
@@ -2196,27 +2168,41 @@ mod tests {
         // never simply missing.
         assert!(!titles.contains(&"Piano"), "{titles:?}");
         assert!(doc.idle.contains(&"Piano"), "{:?}", doc.idle);
-        let (unplaced, named) = doc.unplaced();
-        assert!(unplaced > 0);
-        assert!(named <= unplaced, "{named} named of {unplaced} unplaced");
+        assert!(doc.unplaced > 0);
     }
 
-    /// The "Also stored" section holds the unplaced fields the strings table names, and
-    /// no others.
+    /// Basic draws what a panel group places or a settings menu names, and nothing else.
     #[test]
-    fn the_layout_line_counts_what_also_stored_will_hold() {
+    fn basic_draws_no_field_the_layout_or_the_menus_leave_out() {
         let (bytes, fields) = electro5();
         let decoded =
             nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
         let doc = of(&decoded, &fields);
-        let (unplaced, named) = doc.unplaced();
-        let also = doc
-            .sections
-            .iter()
-            .find(|section| section.title == strings::Section::Other.title())
-            .expect("the named leftovers have a section");
-        assert_eq!(also.fields.len(), named);
-        assert!(named < unplaced, "{named} of {unplaced} are named");
+        let unplaced = ne5::program::PANEL.resolve(&fields).leftovers;
+        assert!(
+            unplaced
+                .iter()
+                .any(|field| field.path == "center_panel.unknown_boolean1"),
+            "the layout places no group around the unnamed bit"
+        );
+        for field in unplaced {
+            assert!(!doc.shows(&field.path), "{} is drawn", field.path);
+        }
+
+        let bytes = Fresh::Settings.bytes().expect("a fresh settings file");
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let (fields, _) = apply(&bytes, &[]).expect("it reads");
+        let doc = of(&decoded, &fields);
+        assert_eq!(doc.shape, Shape::Menus);
+        for field in &fields {
+            assert_eq!(
+                doc.shows(&field.path),
+                strings::section(&field.path).is_some(),
+                "{}",
+                field.path
+            );
+        }
     }
 
     /// The transpose pair is one control, so the layout must put both halves in the same
