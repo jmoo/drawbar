@@ -23,6 +23,10 @@ const LONGEST: usize = 5_000;
 /// The longest contact address, in characters.
 const CONTACT: usize = 200;
 
+/// The most of the activity log a report carries, newest kept, in characters. Held under
+/// the collector's limit for the field, `log` in `telemetry/src/check.js`.
+const LOG: usize = 60_000;
+
 /// How long to wait before trying again once a send found no one, in seconds.
 const RETRY: f64 = 15.0;
 
@@ -111,7 +115,7 @@ impl Report {
         let instrument = telemetry::instrument();
         let faults = self.faults.join("\n");
         let build = self.build.clone();
-        let tail = log.tail(crate::about::ENTRIES);
+        let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
         let kept = |on: bool, text: &str| match on {
             true => text.to_string(),
             false => String::new(),
@@ -151,6 +155,9 @@ impl Report {
                     None => return,
                     Some(Ok(())) => State::Sent,
                     Some(Err(Undelivered::Unreachable)) => State::Waiting { since: now },
+                    Some(Err(Undelivered::Refused(status))) if status >= 500 => {
+                        State::Waiting { since: now }
+                    }
                     Some(Err(Undelivered::Refused(status))) => State::Refused(status),
                 };
             }
@@ -206,8 +213,6 @@ impl Report {
 
     fn form(&mut self, ui: &mut egui::Ui, log: &Log) {
         ui.horizontal(|ui| {
-            // Radios, not selectable labels: their fill is the instrument's red, which
-            // reads as a warning.
             ui.radio_value(&mut self.kind, Kind::Problem, "Report a problem");
             ui.radio_value(&mut self.kind, Kind::Feedback, "Send feedback");
         });
@@ -285,7 +290,9 @@ impl Report {
     fn preview(&self, log: &Log) -> String {
         let instrument = telemetry::instrument();
         let mut out = format!(
-            "version: {}\nmodel: {}\nfirmware: {}\n",
+            "report: {} ({})\nversion: {}\nmodel: {}\nfirmware: {}\n",
+            self.id,
+            self.kind.wire(),
             sheet::VERSION,
             none(&instrument.model),
             none(&instrument.firmware)
@@ -303,7 +310,10 @@ impl Report {
             out.push_str(&format!("\n{}", self.build));
         }
         if self.with_log {
-            out.push_str(&format!("\n{}", log.tail(crate::about::ENTRIES)));
+            out.push_str(&format!(
+                "\n{}",
+                newest(&log.tail(crate::about::ENTRIES), LOG)
+            ));
         }
         out
     }
@@ -318,10 +328,22 @@ impl Report {
                     .to_string()
             }
             State::Refused(403) => "Only drawbar.app can send reports.".to_string(),
-            State::Refused(status) => {
-                format!("The report was not accepted (error {status}). Shorten it and try again.")
-            }
+            State::Refused(status) => format!("The report was not accepted (error {status})."),
         }
+    }
+}
+
+/// The last `most` characters of `text`, starting on a line of its own where one is
+/// in reach.
+fn newest(text: &str, most: usize) -> String {
+    let skip = text.chars().count().saturating_sub(most);
+    if skip == 0 {
+        return text.to_string();
+    }
+    let kept: String = text.chars().skip(skip).collect();
+    match kept.split_once('\n') {
+        Some((_, whole)) => whole.to_string(),
+        None => kept,
     }
 }
 

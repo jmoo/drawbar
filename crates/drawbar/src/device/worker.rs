@@ -64,6 +64,7 @@ fn hung_up(e: &Error) -> bool {
 /// knows the instrument has one. The table is read once and kept, and later operations
 /// answer from it.
 pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow {
+    let started = crate::telemetry::now();
     let rows = match device.geometry().await {
         Ok(geometry) => geometry
             .entries()
@@ -81,7 +82,8 @@ pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow
                 class: None,
                 asked: false,
             };
-            crate::telemetry::op(partitions, Some(e.expect_kind().to_string()), 0.0);
+            let took = crate::telemetry::now() - started;
+            crate::telemetry::op(partitions, Some(e.expect_kind().to_string()), took);
             emit.send(DeviceEvent::OpFailed(format!("partitions: {e}")));
             return match lost {
                 true => Flow::Lost,
@@ -105,6 +107,12 @@ struct Fault {
 impl Fault {
     fn saw(&mut self, e: &Error) {
         self.gone |= hung_up(e);
+        self.named(e);
+    }
+
+    /// Record `e`'s kind alone: a failure the instrument answered after, so it is still
+    /// there whatever `e` says.
+    fn named(&mut self, e: &Error) {
         self.kind.get_or_insert(e.expect_kind());
     }
 }
@@ -588,7 +596,7 @@ async fn put<T: Transport>(
         (Err(Error::Io(e)), None) => Err(Stop::Said(unreadable(what, &e))),
         (Err(e), None) => Err(Stop::Said(spoil(fault, Some(at))(e))),
         (Err(e), Some(backup)) => {
-            fault.saw(&e);
+            fault.named(&e);
             Err(Stop::Undo(Undo {
                 at,
                 backup,
@@ -2101,6 +2109,23 @@ mod wire_tests {
             .filter(|command| *command == cmd::SESSION_OPEN)
             .count();
         assert_eq!(opens, 2);
+    }
+
+    #[test]
+    fn a_command_reports_its_first_failure_s_kind_and_any_hang_up() {
+        let mut fault = Fault::default();
+        fault.saw(&Error::DeviceStatus(op::OCCUPIED));
+        fault.saw(&Error::Transport("cable".into()));
+        assert_eq!(fault.kind, Some(ErrKind::DeviceStatus(op::OCCUPIED)));
+        assert!(fault.gone);
+    }
+
+    #[test]
+    fn a_failure_the_instrument_answered_after_is_not_a_hang_up() {
+        let mut fault = Fault::default();
+        fault.named(&Error::Transport("the write timed out".into()));
+        assert_eq!(fault.kind, Some(ErrKind::Transport));
+        assert!(!fault.gone);
     }
 
     #[test]

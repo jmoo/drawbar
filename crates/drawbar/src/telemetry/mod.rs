@@ -587,14 +587,18 @@ mod tests {
     }
 
     #[test]
-    fn the_page_s_start_failure_row_sends_what_its_kind_declares() {
+    fn the_page_s_start_failure_row_sends_exactly_what_its_kind_declares() {
         let page = include_str!("../../index.html");
-        for name in declared("start_failed") {
-            assert!(
-                page.contains(&format!("{name}:")),
-                "index.html's start_failed row lacks `{name}`"
-            );
-        }
+        let (_, after) = page
+            .split_once("event: \"start_failed\",")
+            .expect("index.html builds a start_failed row");
+        let (row, _) = after.split_once('}').expect("the row's literal closes");
+        let sent: Vec<&str> = row
+            .lines()
+            .filter_map(|line| line.trim().split_once(':'))
+            .map(|(key, _)| key.trim())
+            .collect();
+        assert_eq!(sent, declared("start_failed"));
     }
 
     #[test]
