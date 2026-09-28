@@ -53,7 +53,7 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     offer(
         ui,
         "New folder",
-        Some("groups the list on this computer; the instrument never sees it"),
+        Some("a folder in the library on this computer; the instrument never sees it"),
         Act::NewFolder,
         acts,
     );
@@ -279,23 +279,14 @@ impl Browser {
                 kept: super::families_present(workspace),
                 instrument: device.state.product().and_then(Family::from_product),
             };
-            for id in self.folder_ids() {
-                self.folder_row(ui, id, workspace, device, queue, &naming, acts);
-            }
-            let loose: Vec<Item> = workspace
-                .listed()
-                .filter(|entity| self.folders.holding(entity.id).is_none())
-                .map(|entity| Item::Local(entity.id))
-                .collect();
-            for entity in workspace.listed() {
-                if self.folders.holding(entity.id).is_none() {
-                    self.local_row(
-                        ui, entity, None, &loose, workspace, device, queue, &naming, acts,
-                    );
-                }
-            }
-            if loose.is_empty() && self.folders.all().is_empty() {
-                nothing(ui, 1, "Drop Nord files here, or use Open…");
+            self.folder_body(ui, None, 0, workspace, device, queue, &naming, acts);
+            self.lost_rows(ui, acts);
+            let opening = self.folders.place.as_ref().is_some_and(|at| at.opening);
+            let empty = workspace.listed().next().is_none() && self.folders.all().is_empty();
+            match (opening, empty) {
+                (true, true) => nothing(ui, 1, "Opening the library…"),
+                (false, true) => nothing(ui, 1, "Drop Nord files here, or use Open…"),
+                (_, false) => {}
             }
         }
 
@@ -369,17 +360,32 @@ impl Browser {
         // The branch's head row takes a drop, so there is always a target that no drag
         // can have started from.
         self.drop_zone(ui, &drawn.response, Onto::Computer, acts);
-        if drawn.response.clicked() {
-            match on_triangle(&drawn) {
+        let triangle = on_triangle(&drawn);
+        let place = self.folders.place.clone().unwrap_or_default();
+        let response = match (&place.note, place.label.is_empty()) {
+            (_, true) => drawn.response,
+            (None, false) => drawn.response.on_hover_text(&place.label),
+            (Some(note), false) => drawn
+                .response
+                .on_hover_text(format!("{}\n{note}", place.label)),
+        };
+        if response.clicked() {
+            match triangle {
                 true => self.twist(Branch::Computer),
                 false => narrow(acts, here),
             }
         }
         let listed = Browser::standing_for(workspace, |_| true);
-        drawn.response.context_menu(|ui| {
+        response.context_menu(|ui| {
             self.set_menu(ui, &listed, workspace, device, acts, |_, ui, acts| {
                 offer(ui, "Open…", None, Act::OpenFiles, acts);
                 ui.menu_button("New", |ui| new_menu(ui, acts));
+                if let Some(url) = &place.reveal {
+                    if ui.button("Show the library folder").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        ui.close();
+                    }
+                }
             });
         });
     }
@@ -416,97 +422,36 @@ impl Browser {
         }
     }
 
-    /// The folder ids in creation order, copied out so a row can change the list it is
-    /// drawn from.
-    fn folder_ids(&self) -> Vec<u64> {
-        self.folders.all().iter().map(|folder| folder.id).collect()
-    }
-
+    /// What is directly in `folder`, or in the root for `None`: its folders, then its
+    /// assets.
     #[allow(clippy::too_many_arguments)]
-    fn folder_row(
+    fn folder_body(
         &mut self,
         ui: &mut egui::Ui,
-        id: u64,
+        folder: Option<u64>,
+        depth: usize,
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
         naming: &Naming,
         acts: &mut Vec<Act>,
     ) {
-        let item = Item::Folder(id);
-        let Some(name) = self.folders.name_of(id).map(str::to_string) else {
-            return;
-        };
+        for id in self.folders.children(folder) {
+            self.folder_row(ui, id, depth + 1, workspace, device, queue, naming, acts);
+        }
         let members: Vec<u64> = self
             .folders
-            .members(id, workspace)
+            .members(folder, workspace)
             .iter()
             .map(|entity| entity.id)
             .collect();
         let inside: Vec<Item> = members.iter().copied().map(Item::Local).collect();
-        let mut open = self.open.contains(&Branch::Folder(id));
-
-        if self.rename.as_ref().is_some_and(|r| r.what == item) {
-            if let Some(name) = self.rename_row(ui, indent(1, true), &name) {
-                acts.push(Act::RenameFolder { id, name });
-            }
-            // A folder being renamed shows its contents, since they are what the name
-            // describes.
-            open = true;
-        } else {
-            let drawn = row(
-                ui,
-                self.selection.holds(item),
-                &Cells {
-                    indent: indent(1, true),
-                    open: Some(open),
-                    glyph: Some(Glyph::Folder),
-                    name: &name,
-                    count: Some(members.len().to_string()),
-                    child: true,
-                    ..Cells::default()
-                },
-            );
-            self.drop_zone(ui, &drawn.response, Onto::Group(id), acts);
-            if drawn.response.clicked() {
-                match on_triangle(&drawn) {
-                    true => self.twist(Branch::Folder(id)),
-                    false => {
-                        let list: Vec<Item> =
-                            self.folder_ids().into_iter().map(Item::Folder).collect();
-                        self.clicked(ui, Click { item, list: &list });
-                    }
-                }
-            }
-            drawn.response.context_menu(|ui| {
-                self.aim(item);
-                self.set_menu(ui, &inside, workspace, device, acts, |browser, ui, acts| {
-                    if ui.button("Rename").clicked() {
-                        browser.start_rename(item, &name);
-                        ui.close();
-                    }
-                    offer(
-                        ui,
-                        "Remove folder",
-                        Some("its contents go back to the list; nothing is deleted"),
-                        Act::RemoveFolder(id),
-                        acts,
-                    );
-                });
-            });
-        }
-
-        if !open {
-            return;
-        }
-        if members.is_empty() {
-            nothing(ui, 2, "empty; drag sounds here");
-        }
         for entity in members.iter().filter_map(|id| workspace.get(*id)) {
             self.local_row(
                 ui,
                 entity,
-                Some(id),
+                folder,
+                depth + 1,
                 &inside,
                 workspace,
                 device,
@@ -518,11 +463,147 @@ impl Browser {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn folder_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: u64,
+        depth: usize,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &Queue,
+        naming: &Naming,
+        acts: &mut Vec<Act>,
+    ) {
+        let item = Item::Folder(id);
+        let Some(name) = self.folders.name_of(id).map(str::to_string) else {
+            return;
+        };
+        let inside: Vec<Item> = self
+            .folders
+            .members(Some(id), workspace)
+            .iter()
+            .map(|entity| Item::Local(entity.id))
+            .collect();
+        let count = inside.len() + self.folders.children(Some(id)).len();
+        let mut open = self.open.contains(&Branch::Folder(id));
+
+        if self.rename.as_ref().is_some_and(|r| r.what == item) {
+            if let Some(name) = self.rename_row(ui, indent(depth, true), &name) {
+                acts.push(Act::RenameFolder { id, name });
+            }
+            // A folder being renamed shows its contents, since they are what the name
+            // describes.
+            open = true;
+        } else {
+            let drawn = row(
+                ui,
+                self.selection.holds(item),
+                &Cells {
+                    indent: indent(depth, true),
+                    open: Some(open),
+                    glyph: Some(Glyph::Folder),
+                    name: &name,
+                    count: Some(count.to_string()),
+                    child: true,
+                    ..Cells::default()
+                },
+            );
+            self.drop_zone(ui, &drawn.response, Onto::Group(id), acts);
+            if drawn.response.clicked() {
+                match on_triangle(&drawn) {
+                    true => self.twist(Branch::Folder(id)),
+                    false => {
+                        let parent = self
+                            .folders
+                            .path_of(id)
+                            .and_then(|path| self.folders.id_of(&path.parent()));
+                        let list: Vec<Item> = self
+                            .folders
+                            .children(parent)
+                            .into_iter()
+                            .map(Item::Folder)
+                            .collect();
+                        self.clicked(ui, Click { item, list: &list });
+                    }
+                }
+            }
+            drawn.response.context_menu(|ui| {
+                self.aim(item);
+                self.set_menu(ui, &inside, workspace, device, acts, |browser, ui, acts| {
+                    offer(ui, "New folder", None, Act::NewFolderIn(id), acts);
+                    if ui.button("Rename").clicked() {
+                        browser.start_rename(item, &name);
+                        ui.close();
+                    }
+                    offer(
+                        ui,
+                        "Remove folder",
+                        Some("what is in it moves up a level; nothing is deleted"),
+                        Act::RemoveFolder(id),
+                        acts,
+                    );
+                });
+            });
+        }
+
+        if !open {
+            return;
+        }
+        if count == 0 {
+            nothing(ui, depth + 1, "empty; drag sounds here");
+        }
+        self.folder_body(ui, Some(id), depth, workspace, device, queue, naming, acts);
+    }
+
+    /// The index rows whose file is gone, for assets this app does not hold. Each keeps
+    /// something the file alone would not give back, until the user lets it go.
+    fn lost_rows(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        let lost: Vec<(u64, String)> = self
+            .folders
+            .lost()
+            .iter()
+            .map(|lost| {
+                let name = match &lost.row.path {
+                    Some(path) => path.to_string(),
+                    None => lost.row.name.clone(),
+                };
+                (lost.id, name)
+            })
+            .collect();
+        for (id, name) in lost {
+            let drawn = row(
+                ui,
+                false,
+                &Cells {
+                    indent: indent(1, false),
+                    glyph: Some(Glyph::CircleAlert),
+                    name: &name,
+                    note: Some("missing"),
+                    faint: true,
+                    tags: self.tags.worn(id).len(),
+                    child: true,
+                    ..Cells::default()
+                },
+            );
+            drawn
+                .response
+                .on_hover_text(
+                    "Its file is gone from the library folder. Its tags and the slot it came \
+                     from are kept until you forget it.",
+                )
+                .context_menu(|ui| {
+                    offer(ui, "Forget", None, Act::Forget(id), acts);
+                });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn local_row(
         &mut self,
         ui: &mut egui::Ui,
         entity: &LocalEntity,
         folder: Option<u64>,
+        depth: usize,
         list: &[Item],
         workspace: &Workspace,
         device: &Device,
@@ -533,10 +614,6 @@ impl Browser {
         let item = Item::Local(entity.id);
         let kind = Kind::of(entity);
         let selected = self.selection.holds(item);
-        let depth = match folder {
-            Some(_) => 2,
-            None => 1,
-        };
 
         // While a name is being typed, the row senses nothing: a drag sense over the
         // field would take the clicks that place the cursor.
@@ -554,6 +631,14 @@ impl Browser {
         let wears = self.tags.worn(entity.id).len();
         let word =
             crate::strings::kind_word(kind, qualifier(entity, &naming.kept, naming.instrument));
+        let trouble = match (
+            self.folders.missing.contains(&entity.id),
+            self.folders.duplicates.contains(&entity.id),
+        ) {
+            (true, _) => Some("missing"),
+            (false, true) => Some("same name as another"),
+            (false, false) => None,
+        };
         let drawn = row(
             ui,
             selected,
@@ -561,7 +646,7 @@ impl Browser {
                 indent: indent(depth, false),
                 glyph: Some(kind.glyph()),
                 name: &entity.name,
-                note: owed.as_deref().or(Some(word.as_str())),
+                note: trouble.or(owed.as_deref()).or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
                 dot: mark(entity, &device.state, queue, ui.visuals()),
                 tags: wears,
@@ -678,7 +763,7 @@ impl Browser {
             ui.close();
         }
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
-        self.filing_menu(ui, id, self.folders.holding(id), acts);
+        self.filing_menu(ui, id, self.folders.holding(entity), acts);
         ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
         offer(
             ui,
@@ -688,7 +773,10 @@ impl Browser {
             acts,
         );
         ui.separator();
-        offer(ui, "Remove from list", None, Act::Remove(id), acts);
+        if ui.button("Delete…").clicked() {
+            self.ask_delete(id, &entity.name);
+            ui.close();
+        }
     }
 
     /// The folders an asset can be moved into, for those who prefer a menu to dragging.
@@ -698,7 +786,7 @@ impl Browser {
         }
         ui.menu_button("Move to folder", |ui| {
             for folder in self.folders.all() {
-                if marked(ui, &folder.name, filed == Some(folder.id), None) {
+                if marked(ui, folder.path.as_str(), filed == Some(folder.id), None) {
                     acts.push(Act::File {
                         id,
                         folder: Some(folder.id),
@@ -707,7 +795,7 @@ impl Browser {
             }
             ui.separator();
             if ui
-                .add_enabled(filed.is_some(), egui::Button::new("Out of any folder"))
+                .add_enabled(filed.is_some(), egui::Button::new("Out to the top level"))
                 .clicked()
             {
                 acts.push(Act::File { id, folder: None });
@@ -1162,12 +1250,12 @@ impl Browser {
         }
         ui.separator();
         if ui.button("Delete…").clicked() {
-            self.ask = Some(Ask {
-                title: format!("Delete “{name}” from {}?", place(class, at)),
-                note: Some("It is removed from the instrument. There is no undo.".into()),
-                verb: "Delete",
-                acts: vec![Act::DeleteSlot { class, at }],
-            });
+            self.ask = Some(Ask::new(
+                format!("Delete “{name}” from {}?", place(class, at)),
+                Some("It is removed from the instrument. There is no undo.".into()),
+                "Delete",
+                vec![Act::DeleteSlot { class, at }],
+            ));
             ui.close();
         }
     }

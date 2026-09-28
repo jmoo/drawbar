@@ -9,13 +9,15 @@ use crate::device::{
     fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
 };
 use crate::filter::Narrow;
+use crate::folders::{Clash, Occupant};
 use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Page, Shell};
+use crate::store::{names, LibPath};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
-use crate::workspace::{Fresh, LocalEntity, Workspace};
+use crate::workspace::{Fresh, LocalEntity, Origin, Workspace};
 
 /// What [`Act::LoadOnInstrument`] is called wherever it is offered.
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
@@ -36,7 +38,31 @@ pub enum Act {
     Open(Item),
     /// A view of a slot becomes an asset on this computer.
     Keep(u64),
+    /// Take a file from outside the library into its top level, under its own name.
+    Import {
+        name: String,
+        bytes: Vec<u8>,
+    },
+    /// Put bytes over an existing asset, which keeps its id, folder and tags. `gone` is an
+    /// asset the overwrite came from and removes: one renamed or moved onto the name.
+    Overwrite {
+        id: u64,
+        bytes: Vec<u8>,
+        gone: Option<u64>,
+    },
+    /// Move an asset into a folder, or the top level for `None`, under `name`.
+    MoveAs {
+        id: u64,
+        folder: Option<u64>,
+        name: String,
+    },
+    /// Keep an unsaved edit as a new asset beside its file, and take the file as it is on
+    /// disk.
+    KeepBoth(u64),
+    /// Let go of an index row whose file is gone, with the tags it kept.
+    Forget(u64),
     NewFolder,
+    NewFolderIn(u64),
     RemoveFolder(u64),
     /// Put a tag on every one of these assets. A view is kept first.
     Tag {
@@ -338,20 +364,40 @@ pub fn apply(
             }
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
-            Act::NewFolder => match browser.folders.make() {
-                // ⚠️ Edit the unique name chosen by `make`, not its generic seed.
-                Some(id) => {
-                    let name = browser.folders.name_of(id).unwrap_or_default().to_string();
-                    browser.start_rename(Item::Folder(id), &name);
+            Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
+            Act::Overwrite { id, bytes, gone } => {
+                workspace.replace_bytes(id, bytes, log);
+                workspace.mark_saved(id);
+                if let Some(gone) = gone {
+                    remove(browser, workspace, tabs, queue, log, gone);
                 }
-                None => log.trouble("The folder list is full, so there is no new folder."),
-            },
-            Act::RemoveFolder(id) => {
-                // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
-                browser.forget_rename(Item::Folder(id));
-                browser.folders.remove(id);
+                if let Some(entity) = workspace.get(id) {
+                    log.say(format!("Replaced “{}”.", entity.name));
+                }
             }
-            Act::File { id, folder } => browser.folders.file(id, folder),
+            Act::MoveAs { id, folder, name } => match browser.folders.dir(folder) {
+                Some(dir) => put(browser, workspace, log, id, dir, name),
+                None => log.say("That folder is gone, so nothing moved."),
+            },
+            Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
+            Act::Forget(id) => {
+                browser.folders.forget(id);
+                browser.tags.forget(id);
+            }
+            Act::NewFolder => new_folder(browser, workspace, None),
+            Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),
+            Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id),
+            Act::File { id, folder } => {
+                let (Some(dir), Some(entity)) = (browser.folders.dir(folder), workspace.get(id))
+                else {
+                    continue;
+                };
+                let name = match &entity.path {
+                    Some(path) => path.leaf().to_string(),
+                    None => crate::workspace::library_filename(entity),
+                };
+                put(browser, workspace, log, id, dir, name);
+            }
             Act::Tag { ids, tag } => tag_all(browser, workspace, log, &ids, tag),
             Act::Untag { ids, tag } => {
                 for id in ids {
@@ -447,30 +493,17 @@ pub fn apply(
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
-            Act::RenameLocal { id, name } => {
-                workspace.rename(id, name.clone());
-                log.say(format!("Renamed it “{name}”."));
-            }
-            Act::RenameFolder { id, name } => browser.folders.rename(id, name),
+            Act::RenameLocal { id, name } => rename(browser, workspace, log, id, name),
+            Act::RenameFolder { id, name } => rename_folder(browser, workspace, log, id, name),
             Act::RenameSlot { class, at, name } => {
                 device.send(DeviceCmd::Rename { class, at, name }, log)
             }
-            Act::DuplicateLocal(id) => {
-                workspace.duplicate(id, log);
-            }
+            Act::DuplicateLocal(id) => duplicate(browser, workspace, log, id),
             Act::DuplicateSlot { class, from, to } => {
                 device.send(DeviceCmd::Duplicate { class, from, to }, log)
             }
             Act::DeleteSlot { class, at } => device.send(DeviceCmd::Delete { class, at }, log),
-            Act::Remove(id) => {
-                tabs.close(Spot::Document(id));
-                queue.forget(id);
-                // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
-                browser.forget_rename(Item::Local(id));
-                browser.folders.forget(id);
-                browser.tags.forget(id);
-                workspace.remove(id, log);
-            }
+            Act::Remove(id) => remove(browser, workspace, tabs, queue, log, id),
             Act::Export(id) => workspace.export(id),
             Act::SaveDoc(id) => save_doc(browser, workspace, device, queue, log, id, true),
             Act::WriteBack(id) => save_doc(browser, workspace, device, queue, log, id, false),
@@ -493,6 +526,271 @@ pub fn apply(
             Act::Refused(why) => log.say(why),
         }
     }
+}
+
+/// Take an asset off this computer, and its file with it.
+fn remove(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    tabs: &mut Tabs,
+    queue: &mut Queue,
+    log: &mut Log,
+    id: u64,
+) {
+    tabs.close(Spot::Document(id));
+    queue.forget(id);
+    // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
+    browser.forget_rename(Item::Local(id));
+    browser.tags.forget(id);
+    browser.folders.missing.remove(&id);
+    workspace.remove(id, log);
+}
+
+/// How a folder is named in a sentence.
+fn spoken(dir: &LibPath) -> String {
+    match dir.is_root() {
+        true => "the top level of the library".to_string(),
+        false => format!("“{dir}”"),
+    }
+}
+
+/// Put an asset at `name` in `dir`, or ask what to do about what is already there.
+///
+/// ⚠️ A name the user typed is refused, never made portable behind their back, and an
+/// existing entry is never replaced without asking.
+fn put(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    log: &mut Log,
+    id: u64,
+    dir: LibPath,
+    name: String,
+) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    if let Some(why) = names::refusal(&name) {
+        return log.trouble(format!("“{name}” cannot be a file's name: {why}."));
+    }
+    if entity.path.as_ref() == Some(&dir.join(&name)) {
+        return;
+    }
+    match browser
+        .folders
+        .clash(&dir, &name, workspace, Some(Occupant::Asset(id)))
+    {
+        Clash::Free => {
+            workspace.place(id, dir.join(&name));
+            log.say(format!("“{name}” is in {}.", spoken(&dir)));
+        }
+        Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
+        Clash::Taken(occupant) => {
+            let folder = browser.folders.id_of(&dir);
+            let free = browser.folders.free(&dir, &name, workspace);
+            let both = vec![Act::MoveAs {
+                id,
+                folder,
+                name: free.clone(),
+            }];
+            let over = over(occupant, workspace, entity.bytes.clone(), Some(id));
+            browser.ask_clash(&name, &dir, over, both, &free);
+        }
+    }
+}
+
+/// The overwrite a clash offers, or `None` when the entry there may not be overwritten:
+/// a folder, a row whose file is gone, or an asset holding the only copy of something.
+fn over(
+    occupant: Occupant,
+    workspace: &Workspace,
+    bytes: Vec<u8>,
+    gone: Option<u64>,
+) -> Option<Vec<Act>> {
+    let Occupant::Asset(held) = occupant else {
+        return None;
+    };
+    let entity = workspace.get(held)?;
+    // The queue is not consulted: an asset waiting to be sent can take new bytes, and
+    // the queue diffs them again.
+    (!entity.is_unsaved()).then(|| {
+        vec![Act::Overwrite {
+            id: held,
+            bytes,
+            gone,
+        }]
+    })
+}
+
+fn ambiguous(held: &[String], dir: &LibPath) -> String {
+    let named: Vec<String> = held.iter().map(|name| format!("“{name}”")).collect();
+    format!(
+        "{} in {} are already one name on a disk that ignores case. Rename one of them \
+         first.",
+        named.join(" and "),
+        spoken(dir)
+    )
+}
+
+/// A file opened from outside the library, into its top level.
+fn import(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    log: &mut Log,
+    name: String,
+    bytes: Vec<u8>,
+) {
+    if let Some(why) = names::refusal(&name) {
+        return log.trouble(format!(
+            "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
+        ));
+    }
+    let root = LibPath::root();
+    match browser.folders.clash(&root, &name, workspace, None) {
+        Clash::Free => {
+            let id = workspace.ingest(name.clone(), Origin::File(name.clone()), bytes, log);
+            workspace.place(id, root.join(&name));
+        }
+        Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &root)),
+        Clash::Taken(occupant) => {
+            let free = browser.folders.free(&root, &name, workspace);
+            let both = vec![Act::Import {
+                name: free.clone(),
+                bytes: bytes.clone(),
+            }];
+            let over = over(occupant, workspace, bytes, None);
+            browser.ask_clash(&name, &root, over, both, &free);
+        }
+    }
+}
+
+/// Rename an asset. A view's name is the slot's, and only a kept asset has a file.
+fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64, name: String) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    let Some(path) = entity.path.clone().filter(|_| entity.kept) else {
+        workspace.rename(id, name.clone());
+        return log.say(format!("Renamed it “{name}”."));
+    };
+    // Every file carries its extension, so a name typed without one keeps the old one.
+    let name = match crate::strings::carries_tag(&name) {
+        true => name,
+        false => crate::strings::tagged(&entity.name, &name),
+    };
+    put(browser, workspace, log, id, path.parent(), name);
+}
+
+fn duplicate(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
+    let dir = workspace
+        .get(id)
+        .and_then(|entity| entity.path.as_ref())
+        .map(LibPath::parent);
+    let Some(copy) = workspace.duplicate(id, log) else {
+        return;
+    };
+    if let (Some(dir), Some(entity)) = (dir, workspace.get(copy)) {
+        let wanted = crate::workspace::library_filename(entity);
+        let name = browser.folders.free(&dir, &wanted, workspace);
+        workspace.place(copy, dir.join(&name));
+    }
+}
+
+/// Keep an edit as a new asset beside the file it was an edit of, named after it, and
+/// take that file as it is on disk.
+fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    let dir = entity
+        .path
+        .as_ref()
+        .map_or_else(LibPath::root, LibPath::parent);
+    let name = browser.folders.free(&dir, &entity.name, workspace);
+    let (origin, mine) = (entity.origin.clone(), entity.bytes.clone());
+    let copy = workspace.ingest(name.clone(), origin, mine, log);
+    workspace.place(copy, dir.join(&name));
+    workspace.revert(id, log);
+}
+
+fn new_folder(browser: &mut Browser, workspace: &Workspace, parent: Option<u64>) {
+    let Some(dir) = browser.folders.dir(parent) else {
+        return;
+    };
+    let id = browser.folders.make(&dir, workspace);
+    if let Some(parent) = parent {
+        browser.open.insert(super::tree::Branch::Folder(parent));
+    }
+    // ⚠️ Edit the unique name chosen by `make`, not its generic seed.
+    let name = browser.folders.name_of(id).unwrap_or_default().to_string();
+    browser.start_rename(Item::Folder(id), &name);
+}
+
+fn rename_folder(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    log: &mut Log,
+    id: u64,
+    name: String,
+) {
+    let Some(from) = browser.folders.path_of(id).cloned() else {
+        return;
+    };
+    if let Some(why) = names::refusal(&name) {
+        return log.trouble(format!("“{name}” cannot be a folder's name: {why}."));
+    }
+    let dir = from.parent();
+    match browser
+        .folders
+        .clash(&dir, &name, workspace, Some(Occupant::Folder(id)))
+    {
+        Clash::Free => browser.folders.relocate(id, dir.join(&name), workspace),
+        Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
+        Clash::Taken(_) => log.trouble(format!(
+            "“{name}” is already in {}, so the folder kept its name.",
+            spoken(&dir)
+        )),
+    }
+}
+
+/// Remove a folder, moving what was in it up a level. Nothing is deleted, and nothing
+/// moves unless everything can.
+fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
+    let Some(path) = browser.folders.path_of(id).cloned() else {
+        return;
+    };
+    let up = path.parent();
+    let assets: Vec<(u64, String)> = browser
+        .folders
+        .members(Some(id), workspace)
+        .iter()
+        .filter_map(|entity| Some((entity.id, entity.path.as_ref()?.leaf().to_string())))
+        .collect();
+    let folders: Vec<(u64, String)> = browser
+        .folders
+        .children(Some(id))
+        .into_iter()
+        .filter_map(|child| Some((child, browser.folders.name_of(child)?.to_string())))
+        .collect();
+    let blocked = assets
+        .iter()
+        .chain(&folders)
+        .map(|(_, name)| name)
+        .find(|name| browser.folders.clash(&up, name, workspace, None) != Clash::Free);
+    if let Some(name) = blocked {
+        return log.trouble(format!(
+            "The folder was not removed: “{name}” is already in {}.",
+            spoken(&up)
+        ));
+    }
+    for (asset, name) in assets {
+        workspace.place(asset, up.join(&name));
+    }
+    for (child, name) in folders {
+        browser.folders.relocate(child, up.join(&name), workspace);
+    }
+    // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
+    browser.forget_rename(Item::Folder(id));
+    browser.folders.remove(id);
 }
 
 /// Put a tag on every one of these assets.
@@ -1897,7 +2195,10 @@ mod tests {
     fn a_folder_queues_only_what_can_go_back_to_a_slot() {
         let mut bench = Bench::new();
         let bytes = Fresh::Program.bytes().unwrap();
-        let folder = bench.browser.folders.make().unwrap();
+        let folder = bench
+            .browser
+            .folders
+            .make(&crate::store::LibPath::root(), &bench.workspace);
         for (class, slot) in [
             (ObjectClass::Program, 0),
             (ObjectClass::SetList, 0),
@@ -1914,19 +2215,25 @@ mod tests {
                 bytes.clone(),
                 &mut bench.log,
             );
-            bench.browser.folders.file(id, Some(folder));
+            bench
+                .browser
+                .folders
+                .file(&mut bench.workspace, id, Some(folder));
         }
         // Never on an instrument, and nothing is attached to offer it a free slot.
         let fresh = bench
             .workspace
             .create(Fresh::Program, &mut bench.log)
             .unwrap();
-        bench.browser.folders.file(fresh, Some(folder));
+        bench
+            .browser
+            .folders
+            .file(&mut bench.workspace, fresh, Some(folder));
 
         let members: Vec<Item> = bench
             .browser
             .folders
-            .members(folder, &bench.workspace)
+            .members(Some(folder), &bench.workspace)
             .iter()
             .map(|entity| Item::Local(entity.id))
             .collect();
@@ -2156,5 +2463,197 @@ mod tests {
                 folder(class)
             );
         }
+    }
+
+    /// A bench whose new programs have files in the top level of the library.
+    fn placed(bench: &mut Bench, count: usize) -> Vec<u64> {
+        let ids = (0..count)
+            .map(|_| {
+                bench
+                    .workspace
+                    .create(Fresh::Program, &mut bench.log)
+                    .unwrap()
+            })
+            .collect();
+        crate::folders::place_new(&mut bench.workspace, &bench.browser.folders);
+        ids
+    }
+
+    fn name(bench: &Bench, id: u64) -> &str {
+        &bench.workspace.get(id).expect("held").name
+    }
+
+    #[test]
+    fn a_name_windows_keeps_for_a_device_is_refused_at_rename() {
+        let mut bench = Bench::new();
+        let [id] = placed(&mut bench, 1)[..] else {
+            unreachable!()
+        };
+        bench.act(vec![Act::RenameLocal {
+            id,
+            name: "CON".into(),
+        }]);
+        assert_eq!(name(&bench, id), "untitled.ne5p", "the name stays");
+        let said = bench.log.status().1;
+        assert!(
+            said.contains("“CON.ne5p”") && said.contains("device"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_rename_onto_a_taken_name_asks_and_an_overwrite_keeps_the_other_id() {
+        let mut bench = Bench::new();
+        let [kept, renamed] = placed(&mut bench, 2)[..] else {
+            unreachable!()
+        };
+        let incoming = with_gain(&bench.workspace.get(renamed).unwrap().bytes);
+        bench
+            .workspace
+            .replace_bytes(renamed, incoming.clone(), &mut bench.log);
+        bench.workspace.mark_saved(renamed);
+
+        bench.act(vec![Act::RenameLocal {
+            id: renamed,
+            name: "UNTITLED.ne5p".into(),
+        }]);
+        let (title, answers) = bench.browser.asking().expect("a question");
+        assert_eq!(
+            title,
+            "“UNTITLED.ne5p” is already in the top level of the library"
+        );
+        assert_eq!(answers, ["Cancel", "Keep both", "Overwrite"]);
+        assert_eq!(
+            name(&bench, renamed),
+            "untitled 2.ne5p",
+            "nothing moved yet"
+        );
+
+        let acts = bench.browser.answer("Overwrite");
+        bench.act(acts);
+        assert_eq!(bench.workspace.get(kept).unwrap().bytes, incoming);
+        assert_eq!(name(&bench, kept), "untitled.ne5p");
+        assert!(
+            bench.workspace.get(renamed).is_none(),
+            "the one renamed is gone"
+        );
+    }
+
+    /// Overwriting the only copy of an edit is not a choice.
+    #[test]
+    fn an_asset_with_unsaved_edits_is_not_offered_for_overwrite() {
+        let mut bench = Bench::new();
+        let [held, moving] = placed(&mut bench, 2)[..] else {
+            unreachable!()
+        };
+        let edited = with_gain(&bench.workspace.get(held).unwrap().bytes);
+        bench.workspace.replace_bytes(held, edited, &mut bench.log);
+
+        bench.act(vec![Act::RenameLocal {
+            id: moving,
+            name: "untitled.ne5p".into(),
+        }]);
+        let (_, answers) = bench.browser.asking().expect("a question");
+        assert_eq!(answers, ["Cancel", "Keep both"]);
+    }
+
+    #[test]
+    fn a_file_opened_under_a_taken_name_lands_only_once_asked() {
+        let mut bench = Bench::new();
+        placed(&mut bench, 1);
+        let bytes = Fresh::Program.bytes().unwrap();
+
+        bench.act(vec![Act::Import {
+            name: "Untitled.ne5p".into(),
+            bytes,
+        }]);
+        assert_eq!(bench.workspace.listed().count(), 1, "nothing landed yet");
+        let (title, _) = bench.browser.asking().expect("a question");
+        assert_eq!(
+            title,
+            "“Untitled.ne5p” is already in the top level of the library"
+        );
+
+        let acts = bench.browser.answer("Keep both");
+        bench.act(acts);
+        let names: Vec<&str> = bench
+            .workspace
+            .listed()
+            .map(|entity| entity.name.as_str())
+            .collect();
+        assert_eq!(names, ["untitled.ne5p", "Untitled 2.ne5p"]);
+    }
+
+    #[test]
+    fn removing_a_folder_moves_what_is_in_it_up_and_deletes_nothing() {
+        let mut bench = Bench::new();
+        let [inside] = placed(&mut bench, 1)[..] else {
+            unreachable!()
+        };
+        let root = crate::store::LibPath::root();
+        let folder = bench.browser.folders.make(&root, &bench.workspace);
+        let within = bench.browser.folders.path_of(folder).unwrap().clone();
+        let nested = bench.browser.folders.make(&within, &bench.workspace);
+        bench.act(vec![Act::RenameFolder {
+            id: nested,
+            name: "Strings".into(),
+        }]);
+        bench
+            .browser
+            .folders
+            .file(&mut bench.workspace, inside, Some(folder));
+        bench.browser.folders.take_ops();
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        let path = bench.workspace.get(inside).unwrap().path.clone().unwrap();
+        assert_eq!(path.as_str(), "untitled.ne5p");
+        assert_eq!(
+            bench
+                .browser
+                .folders
+                .path_of(nested)
+                .map(|path| path.as_str()),
+            Some("Strings")
+        );
+        assert!(bench.browser.folders.path_of(folder).is_none());
+        let ops = bench.browser.folders.take_ops();
+        assert_eq!(
+            ops.last(),
+            Some(&crate::folders::Op::RemoveDir(within)),
+            "removed once what was in it has moved: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_whose_contents_would_collide_a_level_up_stays() {
+        let mut bench = Bench::new();
+        let [outside, inside] = placed(&mut bench, 2)[..] else {
+            unreachable!()
+        };
+        let root = crate::store::LibPath::root();
+        let folder = bench.browser.folders.make(&root, &bench.workspace);
+        let within = bench
+            .browser
+            .folders
+            .path_of(folder)
+            .unwrap()
+            .join("untitled.ne5p");
+        bench.workspace.place(inside, within.clone());
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert_eq!(
+            bench.workspace.get(inside).unwrap().path.as_ref(),
+            Some(&within)
+        );
+        assert_eq!(name(&bench, outside), "untitled.ne5p");
+        let said = bench.log.status().1;
+        assert!(said.contains("was not removed"), "{said}");
+    }
+
+    fn with_gain(bytes: &[u8]) -> Vec<u8> {
+        crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
+            .unwrap()
+            .1
     }
 }

@@ -943,6 +943,8 @@ dependencies = [
  "nord-usb",
  "rfd",
  "rodio",
+ "ron",
+ "serde",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

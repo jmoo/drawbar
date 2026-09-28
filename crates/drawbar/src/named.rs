@@ -1,10 +1,4 @@
-//! Named things with ids, and the stored file for a grouping of the local list.
-//!
-//! [`crate::folders`] and [`crate::tags`] share this naming and storage. They differ in
-//! membership (an asset is in one folder but can have any number of tags), and each
-//! module keeps its own.
-
-use crate::store::{escape, unescape};
+//! Named things with ids, which [`crate::tags`] keeps.
 
 /// One named thing on this computer.
 pub struct Named {
@@ -80,67 +74,6 @@ impl List {
     }
 }
 
-/// One line of a stored grouping.
-pub enum Line {
-    /// A named thing.
-    Named { id: u64, name: String },
-    /// The folder one asset is in, or a tag it has.
-    Member { asset: u64, group: u64 },
-}
-
-/// The marker that starts a membership line, in either grouping.
-const MEMBER: &str = "m";
-
-/// The version line and one row per named thing. The caller appends its memberships
-/// with [`member`].
-pub fn written(version: &str, kind: &str, list: &List) -> String {
-    let mut out = format!("{version}\n");
-    for held in list.all() {
-        out.push_str(&format!("{kind}\t{}\t{}\n", held.id, escape(&held.name)));
-    }
-    out
-}
-
-/// One membership line.
-pub fn member(asset: u64, group: u64) -> String {
-    format!("{MEMBER}\t{asset}\t{group}\n")
-}
-
-/// Read back what [`written`] and [`member`] wrote.
-///
-/// An unknown version line reads as no grouping: a partial one could show names nobody
-/// made.
-pub fn read(text: &str, version: &str, kind: &str) -> Vec<Line> {
-    let mut lines = text.lines();
-    if lines.next() != Some(version) {
-        return Vec::new();
-    }
-    lines.filter_map(|line| parse(line, kind)).collect()
-}
-
-/// One line, or `None` if this build did not write it: an unknown line marker, a missing
-/// or extra column, or an id that is not a number.
-fn parse(line: &str, kind: &str) -> Option<Line> {
-    let mut parts = line.split('\t');
-    let (head, first, second) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() {
-        return None;
-    }
-    if head == kind {
-        return Some(Line::Named {
-            id: first.parse().ok()?,
-            name: unescape(second),
-        });
-    }
-    if head == MEMBER {
-        return Some(Line::Member {
-            asset: first.parse().ok()?,
-            group: second.parse().ok()?,
-        });
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,36 +105,5 @@ mod tests {
         list.restore(1, "Monday".into());
         assert_eq!(list.all().len(), 1);
         assert_eq!(list.name_of(1), Some("Sunday"));
-    }
-
-    #[test]
-    fn a_malformed_line_is_dropped_and_the_rest_is_read() {
-        for (line, why) in [
-            ("t\tx\tNot a number", "an id that is not a number"),
-            ("m\t7", "a membership missing its group"),
-            ("m\t7\t1\textra", "a line with a column too many"),
-            ("x\t7\t1", "a line marker this build does not write"),
-        ] {
-            let read = read(&format!("v\n{line}\nt\t1\tSunday\n"), "v", "t");
-            assert!(
-                matches!(read.as_slice(), [Line::Named { id: 1, name }] if name == "Sunday"),
-                "{why}"
-            );
-        }
-    }
-
-    /// Unescaped, a newline in a name would split its line in two.
-    #[test]
-    fn a_name_across_two_lines_comes_back_as_one_name() {
-        let mut list = List::default();
-        let id = list.make("Sunday").unwrap();
-        list.rename(id, "Sunday\nmorning".into());
-
-        let read = read(&written("v", "t", &list), "v", "t");
-        assert!(
-            matches!(read.as_slice(), [Line::Named { id: 1, name }] if name == "Sunday\nmorning"),
-            "{}",
-            read.len()
-        );
     }
 }

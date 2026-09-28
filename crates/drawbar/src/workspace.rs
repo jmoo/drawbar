@@ -18,6 +18,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::log::Log;
 use crate::newproject::{Draft, Making};
 use crate::queue::Queue;
+use crate::store::{names, LibPath};
 
 /// Where an entity came from.
 #[derive(Clone)]
@@ -213,6 +214,12 @@ pub struct LocalEntity {
     /// Stable across reordering, so a selection survives a removal.
     pub id: u64,
     pub name: String,
+    /// Where its file is in the library. `None` for a view of a slot, and for a kept
+    /// asset whose file has not been placed yet.
+    ///
+    /// ⚠️ While it is set, [`LocalEntity::name`] is its last component. Set both through
+    /// [`Workspace::place`].
+    pub path: Option<LibPath>,
     pub origin: Origin,
     pub bytes: Vec<u8>,
     pub entity: Option<Entity>,
@@ -273,6 +280,7 @@ impl LocalEntity {
         let mut held = LocalEntity {
             id,
             name,
+            path: None,
             origin,
             bytes,
             entity,
@@ -370,6 +378,17 @@ fn export_filename(name: &str, bytes: &[u8]) -> String {
     match crate::strings::carries_tag(&stem) {
         true => stem,
         false => format!("{stem}.{}", format_tag(bytes)),
+    }
+}
+
+/// The filename a kept asset's file takes when the app chooses it: the name made one the
+/// library's rule allows, and given the extension the bytes call for unless it already
+/// carries one.
+pub(crate) fn library_filename(entity: &LocalEntity) -> String {
+    let stem = names::portable(&entity.name);
+    match crate::strings::carries_tag(&stem) {
+        true => stem,
+        false => names::portable(&format!("{stem}.{}", format_tag(&entity.bytes))),
     }
 }
 
@@ -700,6 +719,7 @@ enum Arrival {
 pub struct Saved {
     pub id: u64,
     pub name: String,
+    pub path: Option<LibPath>,
     pub origin: Origin,
     /// What it was last saved as.
     pub saved: Vec<u8>,
@@ -876,6 +896,64 @@ impl Workspace {
         }
     }
 
+    /// Put an asset's file at `path`, which also names it.
+    pub fn place(&mut self, id: u64, path: LibPath) {
+        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+            entity.name = path.leaf().to_string();
+            entity.path = Some(path);
+            self.revision += 1;
+        }
+    }
+
+    /// Forget where an asset's file was to go, so it is placed again under a free name.
+    pub fn unplace(&mut self, id: u64) {
+        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+            entity.path = None;
+            self.revision += 1;
+        }
+    }
+
+    /// Move every asset under the folder `from` to the same place under `to`.
+    pub fn relocate(&mut self, from: &LibPath, to: &LibPath) {
+        for entity in &mut self.entities {
+            if let Some(moved) = entity.path.as_ref().and_then(|at| at.moved(from, to)) {
+                entity.name = moved.leaf().to_string();
+                entity.path = Some(moved);
+            }
+        }
+        self.revision += 1;
+    }
+
+    /// Take bytes that were saved over this asset's file from outside the app. They are
+    /// both what it holds and what it was saved as.
+    ///
+    /// ⚠️ Only for an asset with nothing unsaved. Over an unsaved edit, see
+    /// [`Workspace::rebase`].
+    pub fn adopt(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+        self.replace_bytes(id, bytes, log);
+        self.mark_saved(id);
+    }
+
+    /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
+    /// writes the edit over them, and a revert takes them.
+    pub fn rebase(&mut self, id: u64, theirs: Vec<u8>) {
+        let stamp = self.stamp_for(id, &theirs);
+        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+            entity.saved = Baseline::read(theirs, stamp);
+        }
+    }
+
+    /// Count an asset as unsaved again, because the save it was counted saved by did not
+    /// land.
+    pub fn unsave(&mut self, id: u64) {
+        let stamp = self.stamp();
+        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+            if !entity.is_unsaved() {
+                entity.saved.stamp = stamp;
+            }
+        }
+    }
+
     /// Decode `bytes`, verify them, and add the row, logging the details of what
     /// arrived. Every way in (drop, picker, fresh default, device read) lands here.
     ///
@@ -967,18 +1045,19 @@ impl Workspace {
         }
     }
 
-    /// Drain whatever the pickers finished with. Call once per frame.
-    pub fn poll(&mut self, log: &mut Log) {
+    /// Drain whatever the pickers finished with, and return the files picked to open, by
+    /// name. Call once per frame.
+    pub fn poll(&mut self, log: &mut Log) -> Vec<(String, Vec<u8>)> {
+        let mut opened = Vec::new();
         while let Ok(message) = self.rx.try_recv() {
             match message {
-                Incoming::Opened { name, bytes } => {
-                    self.ingest(name.clone(), Origin::File(name), bytes, log);
-                }
+                Incoming::Opened { name, bytes } => opened.push((name, bytes)),
                 Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
             }
         }
+        opened
     }
 
     pub fn open_dialog(&self) {
@@ -1181,6 +1260,7 @@ impl Workspace {
             .is_some_and(|entity| entity.saved.bytes == bytes);
         let entity = self.entities.iter_mut().find(|e| e.id == id)?;
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
+        let path = entity.path.take();
         let saved = std::mem::take(&mut entity.saved);
         let saved = Baseline {
             stamp: match held {
@@ -1198,6 +1278,7 @@ impl Workspace {
             saved,
             wrote,
             pending,
+            path,
             ..replaced
         };
         Some(verify)
@@ -1240,6 +1321,7 @@ impl Workspace {
         for Saved {
             id,
             name,
+            path,
             origin,
             saved,
             unsaved,
@@ -1262,6 +1344,7 @@ impl Workspace {
             };
             let entity = LocalEntity {
                 saved: Baseline::read(saved, held),
+                path,
                 ..LocalEntity::new(id, name, origin, bytes, stamp)
             };
             if let Some(e) = &entity.parse_error {
@@ -2130,6 +2213,7 @@ mod tests {
             vec![Saved {
                 id: 9,
                 name: "Africa-Split.ne5p".into(),
+                path: None,
                 origin: Origin::Fresh,
                 saved: Fresh::Program.bytes().unwrap(),
                 unsaved: None,

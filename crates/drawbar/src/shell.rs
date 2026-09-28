@@ -1291,8 +1291,8 @@ pub fn too_small_notice(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Fake;
     use crate::testing;
+    use crate::testing::Fake;
     use eframe::{App, Storage};
 
     /// The window size the design is drawn for.
@@ -1311,7 +1311,7 @@ mod tests {
     fn app(ctx: &egui::Context, storage: Option<&dyn eframe::Storage>) -> DrawbarApp {
         let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
         cc.storage = storage;
-        DrawbarApp::new(&cc)
+        DrawbarApp::with_library(&cc, None)
     }
 
     /// Attach an instrument, which the full layout needs.

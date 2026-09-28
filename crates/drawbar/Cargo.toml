@@ -2,7 +2,7 @@
 name = "drawbar"
 description = "Your Nord's sounds, in a window: browse, edit and send programs, samples and pianos, in the browser or on the desktop"
 edition.workspace = true
-rust-version = "1.88"
+rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
 version = "0.9.1"
@@ -32,6 +32,9 @@ nord-format = { path = "../nord-format", version = "0.7.1", features = [
   "bundle",
 ] }
 rfd = "0.15"
+# The library's index. eframe's `persistence` already builds both.
+ron = "0.10"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests

@@ -1,6 +1,9 @@
 //! Headless frames, what they painted, and the state a browser act runs against, for
 //! the UI tests of every module.
 
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use eframe::egui;
@@ -12,6 +15,63 @@ use crate::queue::Queue;
 use crate::shell::Shell;
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
+
+/// A directory of its own under the system's temp folder, removed when dropped.
+pub(crate) struct Temp(pub PathBuf);
+
+impl Temp {
+    pub fn new() -> Temp {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "drawbar-library-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        Temp(dir)
+    }
+
+    pub fn at(&self, path: &str) -> PathBuf {
+        self.0.join(path)
+    }
+
+    pub fn read(&self, path: &str) -> Vec<u8> {
+        fs::read(self.at(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// The names in one folder, sorted.
+    pub fn names(&self, dir: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.at(dir))
+            .unwrap_or_else(|e| panic!("{dir}: {e}"))
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// eframe's string store, in a map.
+#[derive(Default)]
+pub(crate) struct Fake(std::collections::HashMap<String, String>);
+
+impl eframe::Storage for Fake {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+
+    fn flush(&mut self) {}
+}
 
 /// A context styled as `DrawbarApp::new` styles one.
 ///
