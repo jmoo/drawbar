@@ -83,10 +83,10 @@ guaranteed while drawbar is in alpha. Keep your own copies.
 
 ## Opening another folder
 
-On the desktop, **File ▸ Open library folder…** opens any folder as the library:
-a Sample Editor project folder, a sample pack, a folder on a shared drive. A
-window has one library open at a time, and the browser calls it by its folder's
-name where it would say This computer. **File ▸ Open recent library** switches
+On the desktop, and in Chrome and Edge, **File ▸ Open library folder…** opens
+any folder as the library: a Sample Editor project folder, a sample pack, a
+folder on a shared drive. A window has one library open at a time, and the
+browser calls it by its folder's name where it would say This computer. **File ▸ Open recent library** switches
 between the libraries opened lately, and always lists your own. The same items
 are on This computer's menu. drawbar opens the last library again when it
 starts.
@@ -102,7 +102,18 @@ another drawbar already has open, opens read-only; hover its name for the
 reason. Two files whose names differ only in case both show, marked, and drawbar
 renames neither.
 
-In the browser, the library is the browser's own, and no other folder opens yet.
+In Chrome and Edge, the browser asks whether drawbar may change the folder you
+pick. It forgets that answer when you close drawbar.app, unless you told it to
+allow the site on every visit. drawbar then opens the browser's own library,
+and **File ▸ Reconnect** followed by the folder's name opens yours again once
+you allow it. If you do not, the library that was open stays open. drawbar.app
+cannot show the folder in your file manager, and the browser's storage limits do
+not apply to it. Firefox and Safari cannot open a folder, so there the library is
+always the browser's own.
+
+A second tab opens a folder read-only while the first has it open, but a
+browser tab cannot tell that the desktop app has the same folder open. Open a
+folder in one of them at a time.
 
 ## Changes made outside drawbar
 

@@ -745,8 +745,7 @@ impl DrawbarApp {
         }
         ui.menu_button("New", |ui| new_menu(ui, acts));
         ui.separator();
-        #[cfg(not(target_arch = "wasm32"))]
-        {
+        if !self.browser.folders.libraries.is_empty() {
             crate::browser::library_items(ui, &self.browser.folders, acts);
             ui.separator();
         }

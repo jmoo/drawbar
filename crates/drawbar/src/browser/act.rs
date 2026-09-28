@@ -180,11 +180,11 @@ pub enum Act {
     CopyLog,
     /// Ask the window to close. Never reached on the web, where the tab is the window.
     Quit,
-    /// Pick a folder to open as the library. Desktop only, for now.
+    /// Pick a folder to open as the library.
     PickLibrary,
-    /// Open this folder as the library, in place of the one open now. The app runs it,
-    /// not [`apply`], once every piano plan over the open library's assets is laid out.
-    OpenLibrary(std::path::PathBuf),
+    /// Open this library in place of the one open now. The app runs it, not [`apply`],
+    /// once every piano plan over the open library's assets is laid out.
+    OpenLibrary(crate::store::Root),
     /// Nothing happened, and this is why.
     Refused(String),
 }

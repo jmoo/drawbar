@@ -38,7 +38,6 @@ pub use drag::{
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
-#[cfg(not(target_arch = "wasm32"))]
 pub use tree::library_items;
 pub use tree::new_menu;
 
@@ -160,7 +159,6 @@ impl Browser {
     /// Forget everything about the library open until now: its folders, its tags, and
     /// whatever was selected, renamed or asked about in it. Whether all files are shown
     /// stays, since that is the window's choice.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn leave_library(&mut self) {
         self.selection.clear();
         self.rename = None;

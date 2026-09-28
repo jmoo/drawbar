@@ -152,11 +152,21 @@ fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
 }
 
 /// The items that open another folder as the library, switch to a recent one, and show
-/// the open one's folder. Only the desktop opens other folders, for now, and only it has
-/// a folder to show.
-#[cfg(not(target_arch = "wasm32"))]
+/// the open one's folder. Only where [`crate::folders::Folders::libraries`] lists some.
 pub fn library_items(ui: &mut egui::Ui, folders: &crate::folders::Folders, acts: &mut Vec<Act>) {
-    offer(ui, "Open library folder…", None, Act::PickLibrary, acts);
+    if let Some(library) = &folders.reconnect {
+        let label = format!("Reconnect {}", library.name);
+        offer(
+            ui,
+            &label,
+            None,
+            Act::OpenLibrary(library.root.clone()),
+            acts,
+        );
+    }
+    if crate::libraries::can_pick() {
+        offer(ui, "Open library folder…", None, Act::PickLibrary, acts);
+    }
     if !folders.libraries.is_empty() {
         ui.menu_button("Open recent library", |ui| {
             for library in &folders.libraries {
@@ -414,8 +424,7 @@ impl Browser {
                 if marked(ui, SHOW_ALL_FILES, all, None) {
                     browser.folders.all_files = !all;
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
+                if !browser.folders.libraries.is_empty() {
                     ui.separator();
                     library_items(ui, &browser.folders, acts);
                 }

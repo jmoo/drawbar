@@ -176,6 +176,12 @@ pub struct DrawbarApp {
     recent: crate::libraries::Recent,
     #[cfg(not(target_arch = "wasm32"))]
     picker: crate::libraries::Picker,
+    /// The libraries opened lately, and the browser's answers about them.
+    #[cfg(target_arch = "wasm32")]
+    libraries: crate::libraries::Libraries,
+    /// The library to open once the open one has no answer outstanding.
+    #[cfg(target_arch = "wasm32")]
+    waiting: Option<crate::store::Root>,
     /// Said once, over everything, until it is dismissed.
     notice: Option<String>,
     /// eframe's store still holds a library kept the old way, to empty at the first
@@ -203,12 +209,17 @@ impl DrawbarApp {
         DrawbarApp::with_library(cc, store)
     }
 
-    /// The app over the browser's library.
+    /// The app over the browser's own library, or, where the browser opens folders, the
+    /// library open last once the list of them has been read back.
     #[cfg(target_arch = "wasm32")]
     pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
-        let store = crate::store::default_root()
-            .map(|root| Store::start(crate::store::Backend::start(&cc.egui_ctx, root)));
-        DrawbarApp::with_library(cc, store)
+        if !crate::libraries::can_pick() {
+            let store = crate::store::default_root().map(|root| library(&cc.egui_ctx, root));
+            return DrawbarApp::with_library(cc, store);
+        }
+        let app = DrawbarApp::with_library(cc, None);
+        app.libraries.restore(&cc.egui_ctx);
+        app
     }
 
     /// The app over `store`, or over no library at all.
@@ -263,6 +274,10 @@ impl DrawbarApp {
                 .unwrap_or_default(),
             #[cfg(not(target_arch = "wasm32"))]
             picker: crate::libraries::Picker::default(),
+            #[cfg(target_arch = "wasm32")]
+            libraries: crate::libraries::Libraries::default(),
+            #[cfg(target_arch = "wasm32")]
+            waiting: None,
             notice,
             leaving,
             synced: 0,
@@ -405,9 +420,11 @@ impl DrawbarApp {
 
 /// The store over the library at `root`, named for the browser unless it is the default
 /// library.
-#[cfg(not(target_arch = "wasm32"))]
-fn library(ctx: &egui::Context, root: std::path::PathBuf) -> Store {
+fn library(ctx: &egui::Context, root: crate::store::Root) -> Store {
+    #[cfg(not(target_arch = "wasm32"))]
     let name = crate::libraries::name(&root, crate::store::default_root().as_deref());
+    #[cfg(target_arch = "wasm32")]
+    let name = root.name();
     let store = Store::start(crate::store::Backend::start(ctx, root));
     match name {
         Some(name) => store.named(name),
@@ -415,7 +432,6 @@ fn library(ctx: &egui::Context, root: std::path::PathBuf) -> Store {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl DrawbarApp {
     /// Run the acts that pick or open a library, and pass the rest on.
     fn switch_libraries(
@@ -426,29 +442,37 @@ impl DrawbarApp {
         let mut rest = Vec::new();
         for act in acts {
             match act {
+                #[cfg(not(target_arch = "wasm32"))]
                 browser::Act::PickLibrary => self.picker.pick(ctx),
+                #[cfg(not(target_arch = "wasm32"))]
                 browser::Act::OpenLibrary(root) => self.open_library(ctx, root),
+                #[cfg(target_arch = "wasm32")]
+                browser::Act::PickLibrary => self.libraries.pick(ctx),
+                #[cfg(target_arch = "wasm32")]
+                browser::Act::OpenLibrary(root) => self.libraries.allow(ctx, root),
                 act => rest.push(act),
             }
         }
         rest
     }
 
-    /// Open the folder at `root` as this window's library, in place of the one open now.
+    /// Open the library at `root` in place of the one open now.
     ///
     /// The open library is written first, its unsaved edits as working copies in its own
     /// `.drawbar/`, where they come back when it is opened again. Its assets then leave
     /// the window; the views of slots stay.
     ///
-    /// ⚠️ It waits for the library's saves in flight to land, as quitting does.
-    pub(crate) fn open_library(&mut self, ctx: &egui::Context, root: std::path::PathBuf) {
+    /// ⚠️ On the desktop it waits for the library's saves in flight to land, as quitting
+    /// does. The browser cannot wait, so there it is called once [`Store::settled`].
+    pub(crate) fn open_library(&mut self, ctx: &egui::Context, root: crate::store::Root) {
         if self
             .store
             .as_ref()
-            .is_some_and(|store| store.root() == root)
+            .is_some_and(|store| *store.root() == root)
         {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if !root.is_dir() {
             self.log.trouble(format!(
                 "{} is not a folder drawbar can open as the library.",
@@ -486,6 +510,7 @@ impl DrawbarApp {
     }
 
     /// Put the library just opened first among the recent ones.
+    #[cfg(not(target_arch = "wasm32"))]
     fn opened(&mut self) {
         let default = crate::store::default_root();
         let open = self.store.as_ref().map(|store| store.root().to_path_buf());
@@ -493,6 +518,59 @@ impl DrawbarApp {
             self.recent.opened(open);
         }
         self.browser.folders.libraries = self.recent.offered(default.as_deref(), open.as_deref());
+    }
+
+    /// Put the library just opened first among the recent ones.
+    #[cfg(target_arch = "wasm32")]
+    fn opened(&mut self) {
+        let open = self.store.as_ref().map(|store| store.root().clone());
+        if let Some(open) = &open {
+            self.libraries.opened(open);
+        }
+        self.browser.folders.libraries = self.libraries.offered(open.as_ref());
+    }
+
+    /// Fold in what the browser answered about libraries, and open the one waiting once
+    /// the open library has no answer outstanding.
+    #[cfg(target_arch = "wasm32")]
+    fn follow_libraries(&mut self, ctx: &egui::Context) {
+        use crate::libraries::Heard;
+        use crate::store::Root;
+
+        while let Some(heard) = self.libraries.heard() {
+            match heard {
+                Heard::Restored { recent, permitted } => {
+                    self.libraries.restored(recent);
+                    let last = self.libraries.last().cloned();
+                    let (root, reconnect) = match last {
+                        Some(last @ Root::Picked(_)) if !permitted => (Root::Private, Some(last)),
+                        last => (last.unwrap_or(Root::Private), None),
+                    };
+                    self.store = Some(library(ctx, root));
+                    self.opened();
+                    if let Some(root) = reconnect {
+                        let name = root.name().unwrap_or_default();
+                        self.log.say(format!(
+                            "{name} opens again once you let this browser into it: choose \
+                             File ▸ Reconnect {name}. Until then the library is {}.",
+                            crate::libraries::THIS_COMPUTER
+                        ));
+                        self.browser.folders.reconnect = Some(crate::folders::Library {
+                            root,
+                            name,
+                            open: false,
+                        });
+                    }
+                }
+                Heard::Open(root) => self.waiting = Some(root),
+                Heard::Trouble(why) => self.log.trouble(why),
+            }
+        }
+        if self.store.as_ref().is_none_or(Store::settled) {
+            if let Some(root) = self.waiting.take() {
+                self.open_library(ctx, root);
+            }
+        }
     }
 }
 
@@ -604,6 +682,8 @@ impl eframe::App for DrawbarApp {
         arrived.extend(self.take_dropped_files(ctx));
         #[cfg(not(target_arch = "wasm32"))]
         arrived.extend(self.picker.picked().map(browser::Act::OpenLibrary));
+        #[cfg(target_arch = "wasm32")]
+        self.follow_libraries(ctx);
         if released {
             arrived.push(browser::Act::SendAll);
         }
@@ -645,7 +725,6 @@ impl eframe::App for DrawbarApp {
             true => acts,
             false => self.hold_sends(acts),
         };
-        #[cfg(not(target_arch = "wasm32"))]
         let acts = self.switch_libraries(ctx, acts);
         browser::apply(
             &mut self.browser,

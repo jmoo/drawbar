@@ -67,7 +67,7 @@ pub struct Where {
 /// A library a window can open, for the menus that switch between them.
 #[derive(Clone, Debug)]
 pub struct Library {
-    pub root: std::path::PathBuf,
+    pub root: crate::store::Root,
     pub name: String,
     /// It is the one open now.
     pub open: bool,
@@ -113,8 +113,11 @@ pub struct Folders {
     pub unwalked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
     pub all_files: bool,
-    /// The libraries the window can switch to, the open one among them.
+    /// The libraries the window can switch to, the open one among them. Empty where
+    /// the window cannot switch.
     pub libraries: Vec<Library>,
+    /// The library open last, which the browser must be let into again before it opens.
+    pub reconnect: Option<Library>,
 }
 
 impl Folders {
@@ -186,7 +189,6 @@ impl Folders {
 
     /// Forget the library open until now, and keep what is the window's: whether all
     /// files are shown, and the libraries to switch between.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn leave(&mut self) {
         *self = Folders {
             all_files: self.all_files,
