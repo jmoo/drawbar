@@ -224,21 +224,12 @@ impl Disk {
                     true => name.clone(),
                     false => format!("{prefix}/{name}"),
                 };
-                // A link is neither a file nor a folder here and is left out, which also
-                // keeps a loop of links from being walked forever.
-                let kind = entry.file_type()?;
-                let kind = if kind.is_dir() {
-                    if !name.starts_with('.') {
-                        folders.push_back(path.clone());
-                    }
-                    Kind::Dir
-                } else if kind.is_file() && exec::opens(&name) {
-                    Kind::File(stat(&entry.metadata()?))
-                } else if kind.is_file() {
-                    Kind::Other
-                } else {
+                let Some(kind) = kind(&entry, &name) else {
                     continue;
                 };
+                if matches!(kind, Kind::Dir) && !name.starts_with('.') {
+                    folders.push_back(path.clone());
+                }
                 entries.push(Entry { path, kind });
             }
         }
@@ -274,6 +265,33 @@ fn sorted(dir: &Path) -> io::Result<Vec<(String, fs::DirEntry)>> {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(found)
+}
+
+/// What a listing says about one entry of a folder. `None` leaves it out: a link, which
+/// is neither a file nor a folder here, so a loop of links is never walked, and an entry
+/// gone since the folder was read.
+fn kind(entry: &fs::DirEntry, name: &str) -> Option<Kind> {
+    let unread = |e: io::Error| {
+        let gone = e.kind() == io::ErrorKind::NotFound;
+        (!gone && exec::opens(name)).then(|| Kind::Unread(e.to_string()))
+    };
+    let kind = match entry.file_type() {
+        Ok(kind) => kind,
+        Err(e) => return unread(e),
+    };
+    if kind.is_dir() {
+        return Some(Kind::Dir);
+    }
+    if !kind.is_file() {
+        return None;
+    }
+    if !exec::opens(name) {
+        return Some(Kind::Other);
+    }
+    match entry.metadata() {
+        Ok(meta) => Some(Kind::File(stat(&meta))),
+        Err(e) => unread(e),
+    }
 }
 
 fn stat(meta: &fs::Metadata) -> Stat {

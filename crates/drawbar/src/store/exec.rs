@@ -62,6 +62,12 @@ pub enum Kind {
     /// [`Kind::Dir`].
     Unwalked,
     File(Stat),
+    /// A file [`opens`] takes that could not be looked at, and why.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the browser's walk does not report one yet")
+    )]
+    Unread(String),
     /// A file [`opens`] does not take, listed by name without a look at it.
     Other,
 }
@@ -326,10 +332,11 @@ async fn listing(
     let mut dirs = BTreeSet::new();
     // Every file, with its `Stat` where the walk took one.
     let mut files: BTreeMap<LibPath, Option<Stat>> = BTreeMap::new();
+    let mut unread: BTreeMap<LibPath, String> = BTreeMap::new();
     for entry in fs.list().await? {
         let leaf = entry.path.rsplit('/').next().unwrap_or(&entry.path);
         if entry.path.split('/').any(|part| part.starts_with('.')) {
-            let file = matches!(entry.kind, Kind::File(_) | Kind::Other);
+            let file = matches!(entry.kind, Kind::File(_) | Kind::Unread(_) | Kind::Other);
             if file && leaf.starts_with('.') && leaf.ends_with(TEMP) {
                 temps.push(entry.path);
             }
@@ -346,6 +353,9 @@ async fn listing(
             Kind::File(stat) => {
                 files.insert(path, Some(stat));
             }
+            Kind::Unread(why) => {
+                unread.insert(path, why);
+            }
             Kind::Other => {
                 files.insert(path, None);
             }
@@ -356,6 +366,8 @@ async fn listing(
         if hidden || matches!(files.get(path), Some(Some(_))) {
             continue;
         }
+        // A file drawbar holds is looked at again, whatever the walk made of it.
+        unread.remove(path);
         match fs.stat(path.as_str()).await {
             Ok(Some(stat)) => {
                 files.insert(path.clone(), Some(stat));
@@ -369,6 +381,7 @@ async fn listing(
         }
     }
     listing.dirs = dirs.into_iter().collect();
+    listing.unread.extend(unread);
 
     let (holds, arrived): (Vec<_>, Vec<_>) = files
         .into_iter()

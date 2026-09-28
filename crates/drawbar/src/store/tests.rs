@@ -637,6 +637,53 @@ fn a_folder_drawbar_cannot_write_opens_read_only_and_says_why() {
     assert_eq!(root.names(""), ["Grand.ne5p"]);
 }
 
+/// A folder that lists its names but refuses a look at the files in it: every file there
+/// is shown unread, and the rest of the library opens.
+#[cfg(unix)]
+#[test]
+fn a_file_that_cannot_be_looked_at_is_shown_unread_and_the_library_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Gives the folder back its permissions, so it can be removed.
+    struct Searchable(std::path::PathBuf);
+    impl Drop for Searchable {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::create_dir(root.at("Cello")).unwrap();
+    fs::write(root.at("Cello/c3.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::set_permissions(root.at("Cello"), fs::Permissions::from_mode(0o444)).unwrap();
+    let _searchable = Searchable(root.at("Cello"));
+    if fs::metadata(root.at("Cello/c3.ne5p")).is_ok() {
+        // Permissions do not bind this user.
+        return;
+    }
+
+    let session = Session::open(&root);
+    assert_eq!(session.store.read_only(), None);
+    let names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Grand.ne5p"]);
+    let unread: Vec<&str> = session
+        .bench
+        .browser
+        .folders
+        .unread
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect();
+    assert_eq!(unread, ["Cello/c3.ne5p"]);
+}
+
 #[test]
 fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
     let root = Temp::new();
