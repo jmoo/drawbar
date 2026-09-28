@@ -185,6 +185,9 @@ pub enum Act {
     /// Open this library in place of the one open now. The app runs it, not [`apply`],
     /// once every piano plan over the open library's assets is laid out.
     OpenLibrary(crate::store::Root),
+    /// [`Act::OpenLibrary`], confirmed though the library open now loses what it cannot
+    /// keep.
+    OpenLibraryDiscarding(crate::store::Root),
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -530,7 +533,7 @@ pub fn apply(
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
             // The app takes these before the browser's acts run.
-            Act::PickLibrary | Act::OpenLibrary(_) => {}
+            Act::PickLibrary | Act::OpenLibrary(_) | Act::OpenLibraryDiscarding(_) => {}
         }
     }
 }

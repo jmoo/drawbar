@@ -94,7 +94,8 @@ the last library again when it starts.
 Switching writes the library you leave first. Edits you have not saved stay in
 its `.drawbar` folder and come back, still unsaved, when you open it again.
 Views of the instrument's slots stay open, and sounds of the library you leave
-come off the send queue.
+come off the send queue. A read-only library cannot keep what is unsaved in it,
+so leaving one asks before discarding that.
 
 drawbar changes nothing in a folder you open until you change something there,
 and only then makes its `.drawbar` folder. A folder drawbar cannot write, or one

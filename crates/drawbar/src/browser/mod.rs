@@ -558,6 +558,30 @@ impl Browser {
         });
     }
 
+    /// Ask before another library opens in place of one that cannot keep the assets
+    /// named in `unkept`.
+    pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
+        const SHOWN: usize = 5;
+        let mut names: Vec<String> = unkept
+            .iter()
+            .take(SHOWN)
+            .map(|name| format!("“{name}”"))
+            .collect();
+        if unkept.len() > SHOWN {
+            names.push(format!("and {} more", unkept.len() - SHOWN));
+        }
+        self.raise(Ask::new(
+            "Discard what this library cannot keep?".to_string(),
+            Some(format!(
+                "Nothing can be written to the library open now, so opening another \
+                 discards what is unsaved in it: {}.",
+                names.join(", ")
+            )),
+            "Discard",
+            vec![Act::OpenLibraryDiscarding(root)],
+        ));
+    }
+
     /// The confirmation for a batch write: every entry it would write, and what each
     /// would replace. Entries the instrument has already refused are left out.
     fn ask_send(

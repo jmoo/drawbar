@@ -144,6 +144,27 @@ impl Store {
         !self.scanning && !self.records.values().any(|record| record.saving)
     }
 
+    /// The names of the assets that letting this library go would lose: where nothing may
+    /// be written here, each edit not already kept as a working copy, and each asset
+    /// never written to a file.
+    pub fn unkept(&self, workspace: &Workspace) -> Vec<String> {
+        if self.open() {
+            return Vec::new();
+        }
+        workspace
+            .listed()
+            .filter(|entity| {
+                let record = self.records.get(&entity.id);
+                let written = record.is_some_and(|record| record.fingerprint.is_some());
+                let held = record
+                    .and_then(|record| record.working.as_ref())
+                    .is_some_and(|working| working.stamp == entity.stamp);
+                !written || (entity.is_unsaved() && !held)
+            })
+            .map(|entity| entity.name.clone())
+            .collect()
+    }
+
     /// Where the library is, as the user would look for it.
     pub fn label(&self) -> String {
         self.backend.label()
