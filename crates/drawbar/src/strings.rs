@@ -10,10 +10,9 @@
 
 use std::borrow::Borrow;
 
-use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use crate::browser::Kind;
+use crate::browser::{Kind, Qualifier};
 
 /// A part of a document, named the way the panel divides itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -570,14 +569,14 @@ pub fn fitting(fits: usize, of: usize, product: &str) -> Option<String> {
     (fits < of).then(|| format!("{fits} of {of} fit the {product}"))
 }
 
-/// A row's kind, prefixed with the family where the kind alone would not say which
-/// instrument the file is for: `Stage 4 program`.
+/// A row's kind, prefixed where the kind alone would not say which of its kind the file
+/// is: `Stage 4 program`, `v3 sample`.
 ///
-/// [`crate::browser::qualifier`] decides when; this is the only place a family name is
+/// [`crate::browser::qualifier`] decides when; this is the only place a qualifier is
 /// prefixed.
-pub fn kind_word(kind: Kind, family: Option<Family>) -> String {
-    match family {
-        Some(family) => format!("{} {}", family.label(), kind.chip()),
+pub fn kind_word(kind: Kind, qualifier: Option<Qualifier>) -> String {
+    match qualifier {
+        Some(qualifier) => format!("{} {}", qualifier.label(), kind.chip()),
         None => kind.chip().to_string(),
     }
 }

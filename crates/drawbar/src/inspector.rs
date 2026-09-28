@@ -115,7 +115,7 @@ pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
         },
         Fact {
             what: "kind",
-            said: kind_word(row.kind, row.family),
+            said: kind_word(row.kind, row.qualifier),
             hint: None,
         },
         Fact {
@@ -504,12 +504,13 @@ mod tests {
 
     #[test]
     fn the_facts_of_one_picked_asset_are_its_rows_own() {
+        use crate::browser::Qualifier;
         use nord_format::accept::Family;
 
         let row = Row {
             item: Item::Local(1),
             kind: Kind::Program,
-            family: Some(Family::Stage4),
+            qualifier: Some(Qualifier::Family(Family::Stage4)),
             name: "Africa Split".into(),
             tags: 1,
             unsaved: true,
@@ -590,7 +591,7 @@ mod tests {
         let row = |name: &str, unsaved: bool, where_: Where| Row {
             item: Item::Local(1),
             kind: Kind::Program,
-            family: None,
+            qualifier: None,
             name: name.into(),
             tags: 0,
             unsaved,

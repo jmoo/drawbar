@@ -14,7 +14,7 @@ use nord_usb::{Location, ObjectClass};
 use super::controls::{self, Sets};
 use super::{encode, piano, project, sample, setlist, text, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
-use crate::browser::{Kind, LOAD_ON_INSTRUMENT};
+use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT};
 use crate::device::{loadable, read_only, DeviceState};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{keyboard_mark, mark_words, Mark};
@@ -940,7 +940,7 @@ fn settled(
 pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     let tag = entity.tag();
     let kind = Kind::of(entity);
-    let word = kind_word(kind, Family::of_tag(&tag));
+    let word = kind_word(kind, Family::of_tag(&tag).map(Qualifier::Family));
     let version = entity.container.as_ref().map(|held| held.header.version);
     let sentence = match version {
         Some(version) => format!("{word}, content version {version}"),

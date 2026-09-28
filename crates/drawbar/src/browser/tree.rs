@@ -10,7 +10,7 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
-use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
+use super::drag::{kinds_present, qualifier, Item, Kept, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
@@ -176,11 +176,11 @@ pub(super) fn bank_branch(class: ObjectClass, bank: u64) -> Branch {
     Branch::Bank(class.to_raw(), bank)
 }
 
-/// What a local row's kind word needs from outside the row: the families on this
-/// computer's list, and the attached instrument's family. Read once a frame, because
-/// every row asks the same question of the whole list.
+/// What a local row's kind word needs from outside the row: what this computer's list
+/// holds, and the attached instrument's family. Read once a frame, because every row asks
+/// the same question of the whole list.
 struct Naming {
-    kept: Vec<Family>,
+    kept: Kept,
     instrument: Option<Family>,
 }
 
@@ -276,7 +276,7 @@ impl Browser {
         self.computer_row(ui, workspace, device, filter, acts);
         if self.open.contains(&Branch::Computer) {
             let naming = Naming {
-                kept: super::families_present(workspace),
+                kept: Kept::of(workspace),
                 instrument: device.state.product().and_then(Family::from_product),
             };
             for id in self.folder_ids() {

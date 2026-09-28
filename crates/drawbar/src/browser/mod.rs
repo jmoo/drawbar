@@ -32,7 +32,7 @@ mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk, LOAD_ON_INSTRUMENT};
 pub use drag::{
-    families_present, kinds_present, landing, qualifier, Carried, Held, Item, Kind, Onto,
+    kinds_present, landing, qualifier, Carried, Held, Item, Kept, Kind, Onto, Qualifier,
 };
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
