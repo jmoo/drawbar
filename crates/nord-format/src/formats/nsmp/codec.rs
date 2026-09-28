@@ -84,8 +84,7 @@ impl Layout {
     }
 
     /// Whether stereo channels occupy alternating, independently padded word streams.
-    /// True only for V4. Content of whole cells per channel tiles whole words, so only
-    /// 1:1 records and shorter content gain padding.
+    /// True only for V4; only 1:1 records gain padding because content tiles whole words.
     pub const fn splits_wide_openings(self) -> bool {
         matches!(self, Layout::V4)
     }
@@ -583,6 +582,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             || count == 0
             || (stereo && !count.is_multiple_of(2))
             || (!one_to_one && !count.is_multiple_of(cell))
+            || (wide_openings && !one_to_one && !count.is_multiple_of(2 * cell))
         {
             return Err(Unsupported::Malformed { word: i });
         }
@@ -1179,17 +1179,12 @@ mod tests {
     }
 
     #[test]
-    fn a_v4_stereo_content_record_of_half_cells_skips_each_channels_padding() {
-        let l: Vec<i32> = (0..16).map(|k| k - 8).collect();
-        let r: Vec<i32> = (0..16).map(|k| 7 - k).collect();
-        let s = stereo_stroke(Layout::V4, 5, &l, &r);
-
-        let walked = walk(&s, 0, Layout::V4).expect("the padded record walks");
-        assert_eq!(walked.records.len(), 1);
-        assert_eq!(walked.records[0].values, [l, r].concat());
+    fn a_v4_stereo_content_record_needs_whole_cells_per_channel() {
+        let half_cell: Vec<i32> = (0..16).map(|k| k - 8).collect();
+        let s = stereo_stroke(Layout::V4, 5, &half_cell, &half_cell);
         assert_eq!(
-            walked.terminator, 7,
-            "a header and three padded words per channel"
+            walk(&s, 0, Layout::V4),
+            Err(Unsupported::Malformed { word: 0 })
         );
     }
 
