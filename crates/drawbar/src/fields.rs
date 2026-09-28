@@ -7,6 +7,7 @@
 use std::io::Cursor;
 use std::ops::Range;
 
+use nord_format::cbin::{self, Generation};
 use nord_format::fields::Field;
 use nord_format::{Entity, Settings, Song};
 
@@ -110,18 +111,16 @@ pub struct DiffRow {
 
 /// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
 /// are not a CBIN file.
-///
-/// ⚠️ The two generations store it in different places. In a type-0 file `0x18` is body
-/// data, and annotating it as the type-1 crc32 would label a real edit as a checksum.
 fn checksum_bytes(file: &[u8]) -> Option<(Range<usize>, &'static str)> {
-    if file.len() < 8 || &file[0..4] != nord_format::cbin::MAGIC {
+    if file.len() < 8 || &file[0..4] != cbin::MAGIC {
         return None;
     }
-    match u32::from_le_bytes(file[4..8].try_into().ok()?) {
-        0 => Some((file.len() - 2..file.len(), "  (file crc16)")),
-        1 => Some((0x18..0x1c, "  (body crc32)")),
-        _ => None,
-    }
+    let (generation, label) = match u32::from_le_bytes(file[4..8].try_into().ok()?) {
+        0 => (Generation::V0, "  (file crc16)"),
+        1 => (Generation::V1, "  (body crc32)"),
+        _ => return None,
+    };
+    Some((generation.checksum_range(file.len())?, label))
 }
 
 /// The bytes that changed.
@@ -179,7 +178,8 @@ mod tests {
     use super::*;
     use crate::drawbar_widget;
     use crate::workspace::Fresh;
-    use nord_format::formats::ne5;
+    use nord_format::cbin::{Cbin, Header, RawBody};
+    use nord_format::formats::{ne5, ns3};
     use nord_format::Program;
 
     /// A spelling that is not a number is refused, not read as zero.
@@ -263,6 +263,32 @@ mod tests {
         assert!(
             diff.iter().any(|row| row.note.is_empty()),
             "the edit itself must show as an unannotated byte",
+        );
+    }
+
+    #[test]
+    fn a_type_0_edit_at_0x18_is_not_annotated_as_a_checksum() {
+        let file = |first: u8| {
+            let mut body = vec![0u8; 8];
+            body[0] = first;
+            let mut file = Cbin {
+                header: Header::new(ns3::song::FORMAT, (0, 0), 0),
+                body: RawBody(body),
+            };
+            file.header.generation = Generation::V0;
+            let mut out = Cursor::new(Vec::new());
+            file.write_to(&mut out).unwrap();
+            out.into_inner()
+        };
+        let diff = byte_diff(&file(0), &file(1));
+        let end = file(0).len();
+        let rows: Vec<(usize, &str)> = diff.iter().map(|row| (row.at, row.note)).collect();
+        assert_eq!(rows[0], (0x18, ""), "{rows:?}");
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|&(at, note)| at >= end - 2 && note == "  (file crc16)"),
+            "{rows:?}"
         );
     }
 
