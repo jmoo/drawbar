@@ -181,8 +181,6 @@ enum Asked {
     /// The header's Export, offered by a body with nothing to edit.
     Export,
     Open(crate::browser::Item),
-    /// The Advanced link under a section the instrument is not using.
-    Advanced,
 }
 
 /// The state one open document keeps between frames.
@@ -460,9 +458,6 @@ impl Document {
         for asked in asked {
             match asked {
                 Asked::Open(item) => wants.open = Some(item),
-                Asked::Advanced => {
-                    self.views.insert(id, Face::Advanced);
-                }
                 Asked::Export => self.export(ui.ctx(), id, workspace),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
@@ -698,8 +693,8 @@ impl Document {
             }
             Shape::Fields => {
                 let open = self.open.as_mut()?;
-                field::body(ui, &open.ctx, &mut open.fields, doc?, piano, sets)
-                    .then_some(Asked::Advanced)
+                field::body(ui, &open.ctx, &mut open.fields, doc?, piano, sets);
+                None
             }
             Shape::Text => {
                 let open = self.open.as_mut()?;
@@ -1841,23 +1836,18 @@ mod tests {
     }
 
     /// A group is not in use when the file's state leaves its controls without effect.
-    /// Its controls are hidden, and the section names the group.
+    /// Basic folds it away, and the registration in use is drawn.
     #[test]
-    fn a_group_the_instrument_is_not_using_is_named() {
+    fn a_group_the_instrument_is_not_using_is_not_drawn() {
         let mut open = Open::fresh(Fresh::Program);
         let said = open.twice();
-        let idle: Vec<&String> = said
-            .iter()
-            .filter(|word| word.contains("stored but not in use"))
-            .collect();
-        assert!(!idle.is_empty(), "{said:?}");
         assert!(
-            idle.iter().any(|line| line.contains("Vox")),
-            "a B3 program keeps the other models' registrations: {idle:?}"
+            said.iter().any(|word| word == "B3 · Preset 1"),
+            "the B3 registrations are in use: {said:?}"
         );
         assert!(
-            idle.iter().all(|line| line.contains("Kept, not cleared")),
-            "{idle:?}"
+            !said.iter().any(|word| word.contains("Vox")),
+            "a B3 program keeps the other models' registrations out of sight: {said:?}"
         );
     }
 
