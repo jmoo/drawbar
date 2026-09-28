@@ -19,7 +19,9 @@ use nord_usb::{Location, ObjectClass};
 use crate::device::{read_only, Device, DeviceState};
 use crate::filter::Filter;
 use crate::folders::{self, Folders};
+use crate::icon::Glyph;
 use crate::queue::Queue;
+use crate::sheet;
 use crate::tags::{self, Tags};
 use crate::workspace::Workspace;
 
@@ -64,9 +66,57 @@ struct Click<'a> {
 struct Ask {
     title: String,
     note: Option<String>,
-    verb: &'static str,
+    verb: Verb,
     acts: Vec<Act>,
 }
+
+/// What a yes to an [`Ask`] does, which names and marks its button.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verb {
+    Send,
+    Save,
+    Replace,
+    Delete,
+}
+
+impl Verb {
+    fn label(self) -> &'static str {
+        match self {
+            Verb::Send => "Send",
+            Verb::Save => "Save",
+            Verb::Replace => "Replace",
+            Verb::Delete => "Delete",
+        }
+    }
+
+    /// The button that answers yes, in the loss color where the answer discards something.
+    fn button(self, ui: &mut egui::Ui) -> egui::Response {
+        let (label, glyph) = (self.label(), self.glyph());
+        match self {
+            Verb::Send | Verb::Save => sheet::primary(ui, Some(glyph), label),
+            Verb::Replace | Verb::Delete => sheet::destructive(ui, glyph, label),
+        }
+    }
+
+    fn glyph(self) -> Glyph {
+        match self {
+            Verb::Send => Glyph::Upload,
+            Verb::Save => Glyph::Save,
+            Verb::Replace => Glyph::Replace,
+            Verb::Delete => Glyph::Trash2,
+        }
+    }
+}
+
+/// The widest the confirmation sheet may be.
+const ASK_WIDTH: f32 = 440.0;
+
+/// The height the confirmation sheet keeps for its title and foot, so a long note scrolls
+/// and the buttons stay on screen.
+const ASK_AROUND: f32 = 160.0;
+
+/// The shortest the note gets, however short the window.
+const ASK_FEWEST: f32 = 80.0;
 
 /// The new name Enter commits from an in-place rename, if any.
 ///
@@ -172,9 +222,10 @@ impl Browser {
     /// ⚠️ Called whether or not the browser dock is open: the library's table shows the
     /// same selection, and a selection nothing draws could never be cleared.
     ///
-    /// During a rename, Escape cancels the rename and the row stays selected.
+    /// During a rename or a question, Escape cancels that and the selection stays.
     pub fn let_go(&mut self, ctx: &egui::Context) {
-        if self.rename.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        let busy = self.rename.is_some() || self.ask.is_some();
+        if !busy && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.selection.clear();
         }
     }
@@ -398,27 +449,37 @@ impl Browser {
             return;
         };
         let mut decision = None;
-        egui::Modal::new(egui::Id::new("browser_ask")).show(ctx, |ui| {
-            ui.set_width(400.0);
-            ui.heading(&ask.title);
-            if let Some(note) = &ask.note {
-                ui.add_space(4.0);
-                ui.label(note);
-            }
-            ui.add_space(8.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+        egui::Modal::new(egui::Id::new("browser_ask"))
+            .frame(sheet::frame(&ctx.style().visuals))
+            .show(ctx, |ui| {
+                ui.set_width(sheet::width(ui.ctx(), ASK_WIDTH));
+                ui.add_space(sheet::GAP * 4.0);
+                sheet::section(ui, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&ask.title).strong()).wrap());
+                    if let Some(note) = &ask.note {
+                        ui.add_space(sheet::GAP * 2.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("browser_ask_note")
+                            .max_height(sheet::middle(ui.ctx(), ASK_AROUND, ASK_FEWEST))
+                            .show(ui, |ui| ui.add(egui::Label::new(note).wrap()));
+                    }
+                });
+                sheet::foot(
+                    ui,
+                    |_| {},
+                    |ui| {
+                        if ask.verb.button(ui).clicked() {
+                            decision = Some(true);
+                        }
+                        if sheet::secondary(ui, None, "Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                    },
+                );
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
                     decision = Some(false);
                 }
-                if ui
-                    .add(egui::Button::new(egui::RichText::new(ask.verb).strong()))
-                    .clicked()
-                {
-                    decision = Some(true);
-                }
             });
-        });
         match decision {
             Some(true) => {
                 if let Some(ask) = self.ask.take() {
@@ -472,7 +533,7 @@ impl Browser {
         self.ask = Some(Ask {
             title,
             note: Some(note.join("\n")),
-            verb: "Send",
+            verb: Verb::Send,
             acts: vec![act],
         });
     }
@@ -482,7 +543,7 @@ impl Browser {
         self.ask = Some(Ask {
             title: format!("Save “{name}” to {at}?"),
             note: Some(note),
-            verb: "Save",
+            verb: Verb::Save,
             acts: vec![act],
         });
     }
@@ -504,7 +565,7 @@ impl Browser {
                 Some(warning) => format!("{warning}\n\n{note}"),
                 None => note,
             }),
-            verb: "Replace",
+            verb: Verb::Replace,
             acts: vec![act],
         });
     }
@@ -571,21 +632,29 @@ impl Browser {
             .count();
         let locals = checked.iter().filter(|item| item.local().is_some()).count();
         let mut note = Vec::new();
-        if slots > 0 {
-            note.push(format!(
-                "{slots} on the instrument are removed from it. There is no undo."
-            ));
+        match slots {
+            0 => {}
+            1 => note.push("1 item is removed from the instrument. There is no undo.".to_string()),
+            n => note.push(format!(
+                "{n} items are removed from the instrument. There is no undo."
+            )),
         }
-        if locals > 0 {
-            note.push(format!(
-                "{locals} leave the list on this computer; the files themselves stay where \
-                 they are."
-            ));
+        match locals {
+            0 => {}
+            1 => note.push(
+                "1 item leaves the list on this computer. Its file stays where it is.".to_string(),
+            ),
+            n => note.push(format!(
+                "{n} items leave the list on this computer. Their files stay where they are."
+            )),
         }
         self.ask = Some(Ask {
-            title: format!("Delete {} checked items?", slots + locals),
+            title: format!(
+                "Delete {}?",
+                crate::strings::counted(slots + locals, "checked item", "checked items")
+            ),
             note: Some(note.join("\n\n")),
-            verb: "Delete",
+            verb: Verb::Delete,
             acts,
         });
     }
@@ -868,9 +937,9 @@ mod tests {
         );
     }
 
-    /// ⚠️ Escape during a rename cancels only the rename, and the selection stays.
+    /// ⚠️ Escape during a rename or a question cancels only that, and the selection stays.
     #[test]
-    fn escape_lets_go_of_the_selection_unless_a_name_is_being_typed() {
+    fn escape_lets_go_of_the_selection_unless_a_name_or_a_question_is_open() {
         let ctx = testing::context();
         let mut browser = Browser::default();
         let escape = egui::RawInput {
@@ -887,6 +956,20 @@ mod tests {
         );
 
         browser.rename = None;
+        browser.ask = Some(Ask {
+            title: "Delete 1 checked item?".into(),
+            note: None,
+            verb: Verb::Delete,
+            acts: Vec::new(),
+        });
+        testing::run(&ctx, escape.clone(), |ctx| browser.let_go(ctx));
+        assert_eq!(
+            browser.picked().items().count(),
+            1,
+            "Escape in a question cancels only the question"
+        );
+
+        browser.ask = None;
         testing::run(&ctx, escape, |ctx| browser.let_go(ctx));
         assert_eq!(browser.picked().items().count(), 0);
     }
@@ -1009,6 +1092,89 @@ mod tests {
         bench.workspace.remove(ids[0], &mut bench.log);
         after.settle(&bench.workspace);
         assert_eq!(after.tags.count(tag), 1, "the one still on the list");
+    }
+
+    /// The question's verb runs what was asked, Cancel and Escape run nothing, and each
+    /// closes the question.
+    #[test]
+    fn a_confirmation_runs_its_acts_only_on_its_verb() {
+        let bench = Bench::new();
+        egui_extras::install_image_loaders(&bench.ctx);
+        let at = Location { bank: 6, slot: 3 };
+        let delete = || Act::DeleteSlot {
+            class: ObjectClass::Program,
+            at,
+        };
+        let frame = |browser: &mut Browser, events: Vec<egui::Event>| {
+            let mut acts = Vec::new();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = testing::run(&bench.ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    acts = browser.ui(
+                        ui,
+                        &bench.workspace,
+                        &bench.device,
+                        &bench.queue,
+                        &Filter::default(),
+                    );
+                });
+            });
+            (acts, testing::painted(&output))
+        };
+
+        for (answer, runs) in [("Delete", true), ("Cancel", false), ("Escape", false)] {
+            let mut browser = Browser {
+                ask: Some(Ask {
+                    title: "Delete “Africa Split” from Programs 7:4?".into(),
+                    note: Some("It is removed from the instrument. There is no undo.".into()),
+                    verb: Verb::Delete,
+                    acts: vec![delete()],
+                }),
+                ..Browser::default()
+            };
+            // A sheet is laid out unseen on its first frame.
+            frame(&mut browser, Vec::new());
+            let (_, placed) = frame(&mut browser, Vec::new());
+            let events = match answer {
+                "Escape" => vec![testing::key(egui::Key::Escape)],
+                word => {
+                    let at = testing::where_(&placed, word).center();
+                    frame(&mut browser, vec![testing::button(at, true)]);
+                    vec![testing::button(at, false)]
+                }
+            };
+            let (acts, _) = frame(&mut browser, events);
+            assert_eq!(acts.contains(&delete()), runs, "{answer}: {acts:?}");
+            assert!(browser.ask.is_none(), "{answer} closes the question");
+        }
+    }
+
+    #[test]
+    fn the_delete_question_counts_in_the_number_it_names() {
+        let mut browser = Browser::default();
+        browser.ask_discard(&[Item::Local(1)], Vec::new());
+        let ask = browser.ask.take().expect("a question");
+        assert_eq!(ask.title, "Delete 1 checked item?");
+        assert_eq!(
+            ask.note.as_deref(),
+            Some("1 item leaves the list on this computer. Its file stays where it is.")
+        );
+
+        let slot = |slot| Item::Slot {
+            class: ObjectClass::Program,
+            at: Location { bank: 0, slot },
+        };
+        browser.ask_discard(&[slot(0), slot(1), Item::Local(1)], Vec::new());
+        let ask = browser.ask.take().expect("a question");
+        assert_eq!(ask.title, "Delete 3 checked items?");
+        let note = ask.note.unwrap_or_default();
+        assert!(
+            note.starts_with("2 items are removed from the instrument."),
+            "{note}"
+        );
     }
 
     /// A new tag's name is typed in the browser's tags section, so making one shows it.

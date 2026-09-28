@@ -1,6 +1,6 @@
 //! The layout of a sheet, a modal drawbar opens over the whole window: the first-run
-//! welcome, what's new, and About. They share one masthead, heading style, foot, and pair
-//! of buttons, so they look alike on every target.
+//! welcome, what's new, About, and the browser's confirmations. They share one masthead,
+//! heading style, foot, and set of buttons, so they look alike on every target.
 
 use eframe::egui;
 
@@ -167,6 +167,20 @@ pub(crate) fn primary(ui: &mut egui::Ui, glyph: Option<Glyph>, label: &str) -> e
         label,
         fill,
         egui::Stroke::new(1.0_f32, accent),
+    )
+}
+
+/// A [`primary`] whose action throws something away, marked as a loss.
+pub(crate) fn destructive(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
+    let bad = crate::app::bad(ui.visuals());
+    let fill = ui.visuals().widgets.active.bg_fill;
+    button(
+        ui,
+        Some(glyph),
+        bad,
+        label,
+        fill,
+        egui::Stroke::new(1.0_f32, bad),
     )
 }
 

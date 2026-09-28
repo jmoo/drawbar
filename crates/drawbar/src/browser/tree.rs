@@ -12,7 +12,7 @@ use nord_usb::{Location, ObjectClass};
 use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
 use super::drag::{kinds_present, qualifier, Item, Kept, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
-use super::{Ask, Browser, Click};
+use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
@@ -1158,7 +1158,7 @@ impl Browser {
             self.ask = Some(Ask {
                 title: format!("Delete “{name}” from {}?", place(class, at)),
                 note: Some("It is removed from the instrument. There is no undo.".into()),
-                verb: "Delete",
+                verb: Verb::Delete,
                 acts: vec![Act::DeleteSlot { class, at }],
             });
             ui.close();
