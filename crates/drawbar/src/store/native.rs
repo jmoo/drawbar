@@ -127,9 +127,8 @@ impl Backend {
         self.rx.try_recv().ok()
     }
 
-    /// The next answer, waiting for it.
-    #[cfg(test)]
-    pub fn recv(&self) -> Option<Event> {
+    /// The next answer, waiting a while for it.
+    pub fn recv(&mut self) -> Option<Event> {
         self.rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .ok()

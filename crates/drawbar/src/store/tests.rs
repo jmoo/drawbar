@@ -70,8 +70,14 @@ impl Session {
 
     /// Quit: everything is written first.
     fn close(mut self) {
-        self.sync();
-        self.store.finish();
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.close(workspace, browser, queue, log);
     }
 
     fn create(&mut self) -> u64 {
@@ -160,6 +166,32 @@ fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
         root.names(".drawbar/working").is_empty(),
         "the working copy goes once the save has landed"
     );
+}
+
+/// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
+/// check, and be refused as a write over someone else's file.
+#[test]
+fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, queue, Pass::Files));
+    let edited = with_gain(&workspace.get(id).unwrap().bytes, "96");
+    workspace.replace_bytes(id, edited.clone(), log);
+    workspace.mark_saved(id);
+    assert!(
+        !session.store.sync(workspace, browser, queue, Pass::Files),
+        "the save waits"
+    );
+    session.close();
+    assert_eq!(root.read("untitled.ne5p"), edited);
 }
 
 #[test]

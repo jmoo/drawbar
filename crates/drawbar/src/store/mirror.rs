@@ -265,8 +265,27 @@ impl Store {
         self.backend.send(Cmd::Scan { known });
     }
 
-    /// Let the backend finish what it was sent, then let the library go.
-    pub fn finish(&mut self) {
+    /// Write everything, waiting for the saves in flight to answer, then let the library
+    /// go. It blocks, so it is for the end of a session.
+    pub fn close(
+        &mut self,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) {
+        // Each round sends the saves that waited on the round before.
+        for _ in 0..3 {
+            if self.sync(workspace, browser, queue, Pass::Last) {
+                break;
+            }
+            while self.records.values().any(|record| record.saving) {
+                let Some(event) = self.backend.recv() else {
+                    break;
+                };
+                self.handle(event, workspace, browser, queue, log);
+            }
+        }
         self.backend.finish();
     }
 
@@ -728,7 +747,9 @@ impl Store {
         ));
     }
 
-    /// Bring the files level with the workspace, and return whether it did.
+    /// Bring the files level with the workspace, and return whether it did. A save that
+    /// must wait for the one before it to answer makes it return `false`, and the next
+    /// sync sends it.
     ///
     /// ⚠️ Nothing is sent while a rescan is in flight: its listing must describe the
     /// files as the commands before it left them, or a file moved after it was sent would
@@ -760,8 +781,9 @@ impl Store {
             true => std::mem::take(&mut self.stale),
             false => Vec::new(),
         };
+        let mut done = true;
         for entity in workspace.entities() {
-            self.file(entity);
+            done &= self.file(entity);
             if full {
                 self.working(entity, queue, &mut writes, &mut drops);
             }
@@ -782,7 +804,7 @@ impl Store {
                 self.committed = Some(sidecar);
             }
         }
-        true
+        done
     }
 
     fn tree_op(&mut self, op: Op) {
@@ -800,10 +822,11 @@ impl Store {
         }
     }
 
-    /// Send what one asset's file needs: its first write, a move, or a save.
-    fn file(&mut self, entity: &LocalEntity) {
+    /// Send what one asset's file needs: its first write, a move, or a save. Returns
+    /// `false` when a save has to wait.
+    fn file(&mut self, entity: &LocalEntity) -> bool {
         let (true, Some(path)) = (entity.kept, &entity.path) else {
-            return;
+            return true;
         };
         let bytes = || entity.saved.bytes.clone();
         if !self
@@ -825,15 +848,16 @@ impl Store {
                     ..Record::of_file(path.clone(), None)
                 },
             );
-            return self.backend.send(Cmd::Save {
+            self.backend.send(Cmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect: None,
             });
+            return true;
         }
         let Some(record) = self.records.get_mut(&entity.id) else {
-            return;
+            return true;
         };
         if record.path.as_ref() != Some(path) && !record.missing {
             if let Some(from) = record.path.replace(path.clone()) {
@@ -845,7 +869,12 @@ impl Store {
         }
         record.path = Some(path.clone());
         if entity.saved.stamp == record.saved {
-            return;
+            return true;
+        }
+        // ⚠️ The file's fingerprint is known only once the save before answers, and a
+        // save sent without it would be refused as a write over someone else's file.
+        if record.saving {
+            return false;
         }
         record.saved = entity.saved.stamp;
         record.saving = true;
@@ -859,6 +888,7 @@ impl Store {
             bytes: bytes(),
             expect,
         });
+        true
     }
 
     /// Write a working copy for an edit not yet saved, or drop the one a save made

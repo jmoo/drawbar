@@ -64,6 +64,12 @@ impl Backend {
         self.events.pop_front()
     }
 
+    /// The next answer. Every command has answered by the time it returns, so there is
+    /// nothing to wait for.
+    pub fn recv(&mut self) -> Option<Event> {
+        self.events.pop_front()
+    }
+
     pub fn finish(&mut self) {}
 }
 

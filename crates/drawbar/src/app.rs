@@ -403,13 +403,12 @@ impl eframe::App for DrawbarApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.device.release();
         if let Some(store) = &mut self.store {
-            store.sync(
+            store.close(
                 &mut self.workspace,
                 &mut self.browser,
                 &self.queue,
-                Pass::Last,
+                &mut self.log,
             );
-            store.finish();
         }
     }
 
