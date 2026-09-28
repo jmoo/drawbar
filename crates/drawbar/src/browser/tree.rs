@@ -99,7 +99,7 @@ pub(super) enum Branch {
 pub(super) struct Sections {
     places: bool,
     kinds: bool,
-    tags: bool,
+    pub(super) tags: bool,
 }
 
 impl Default for Sections {
@@ -680,13 +680,6 @@ impl Browser {
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(id), acts);
         ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
-        offer(
-            ui,
-            "Save as gig…",
-            Some("puts the selection under a new tag"),
-            Act::SaveAsGig,
-            acts,
-        );
         ui.separator();
         offer(ui, "Remove from list", None, Act::Remove(id), acts);
     }
@@ -734,7 +727,7 @@ impl Browser {
         if !self.tags.all().is_empty() {
             ui.separator();
         }
-        offer(ui, "New tag…", None, Act::SaveAsGig, acts);
+        offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1275,7 +1268,7 @@ impl Browser {
             },
         );
         if drawn.response.clicked() {
-            acts.push(Act::NewTag("New tag".into()));
+            acts.push(Act::NewTag(Vec::new()));
         }
     }
 

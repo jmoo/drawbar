@@ -690,7 +690,7 @@ mod tests {
             })
             .collect();
 
-        bench.act(vec![Act::NewTag("Sunday".into())]);
+        bench.act(vec![Act::NewTag(Vec::new())]);
         let tag = bench.browser.tags().all()[0].id;
         assert!(
             !bench.browser.tags().on_all(&ids, tag),

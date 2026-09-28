@@ -1935,4 +1935,63 @@ mod tests {
         assert_eq!(lamp, crate::app::bad(&visuals));
         assert!(!detail.contains("TypeError"), "{detail}");
     }
+
+    /// Tag ▸ New tag… in a row's menu puts a new tag on that row and opens the tag's name
+    /// for typing where it can be seen, though the tags are below the fold.
+    #[test]
+    fn a_new_tag_from_a_rows_menu_tags_the_row_and_is_named_in_view() {
+        use crate::workspace::Fresh;
+
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let ids: Vec<u64> = (0..40)
+            .map(|_| app.workspace.create(Fresh::Program, &mut app.log).unwrap())
+            .collect();
+        let named = ids[0];
+        app.workspace.rename(named, "Africa Split.ne5p".into());
+
+        let mut run = |events: Vec<egui::Event>| -> Vec<testing::Word> {
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = testing::screen(SCREEN, events);
+            let output = testing::run(&ctx, input, |ctx| app.update(ctx, &mut frame));
+            testing::painted(&output)
+                .into_iter()
+                .filter(|word| word.clip.intersects(word.rect))
+                .collect()
+        };
+        let at = |seen: &[testing::Word], word: &str| testing::where_(seen, word).center();
+
+        run(Vec::new());
+        let seen = run(Vec::new());
+        let row = at(&seen, "Africa Split");
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: row,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(vec![
+            egui::Event::PointerMoved(row),
+            secondary(true),
+            secondary(false),
+        ]);
+        let seen = run(Vec::new());
+        run(testing::click(at(&seen, "Tag")));
+        let seen = run(Vec::new());
+        run(testing::click(at(&seen, "New tag…")));
+        // The tree scrolls to the editor over a few frames.
+        let seen = (0..30).fold(Vec::new(), |_, _| run(Vec::new()));
+        at(&seen, "New tag");
+
+        run(vec![egui::Event::Text("Sunday".into())]);
+        run(vec![testing::key(egui::Key::Enter)]);
+        run(Vec::new());
+        let tags = app.browser.tags();
+        let [made] = tags.all() else {
+            panic!("one tag was made: {:?}", tags.all().len());
+        };
+        assert_eq!(made.name, "Sunday");
+        assert!(tags.worn(named).contains(&made.id), "the row wears it");
+        assert_eq!(tags.count(made.id), 1, "and nothing else does");
+    }
 }

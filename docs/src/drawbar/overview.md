@@ -35,9 +35,11 @@ explanation.
 
 ## Folders and tags
 
-Folders group sounds on this computer; the instrument never sees them. Tags label
-sounds without moving them, and a sound can carry several. Both come from a row's
-menu or the **New** menu. Removing a folder or a tag deletes no sounds.
+Folders group sounds on this computer; the instrument never sees them. Make one
+with **New ▸ New folder**. Tags label sounds without moving them, and a sound can
+carry several. **Tag ▸ New tag…** in a row's menu puts a new tag on the selected
+sounds and opens its name for typing. Removing a folder or a tag deletes no
+sounds.
 
 ## MIDI controllers
 

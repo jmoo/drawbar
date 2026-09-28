@@ -315,6 +315,7 @@ impl Browser {
         if rename.fresh {
             rename.fresh = false;
             output.response.request_focus();
+            output.response.scroll_to_me(None);
             let all = egui::text::CCursorRange::two(
                 egui::text::CCursor::new(0),
                 egui::text::CCursor::new(rename.text.chars().count()),
@@ -976,10 +977,10 @@ mod tests {
         assert_eq!(browser.folders.all().len(), 1, "the folder itself stays");
     }
 
-    /// Two assets selected and saved as a gig have that tag next session, and the third
-    /// does not. An asset missing from the restored list leaves no membership behind.
+    /// Two assets given a new tag have that tag next session, and the third does not. An
+    /// asset missing from the restored list leaves no membership behind.
     #[test]
-    fn a_tag_put_on_a_multi_selection_comes_back_next_session() {
+    fn a_new_tag_on_two_assets_comes_back_next_session() {
         let mut bench = Bench::new();
         let ids: Vec<u64> = (0..3)
             .map(|_| {
@@ -989,12 +990,10 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        bench.browser.selection.toggle(Item::Local(ids[0]));
-        bench.browser.selection.toggle(Item::Local(ids[1]));
 
-        bench.act(vec![Act::SaveAsGig]);
+        bench.act(vec![Act::NewTag(ids[..2].to_vec())]);
         let Some(Item::Tag(tag)) = bench.browser.rename.as_ref().map(|r| r.what) else {
-            panic!("a new gig opens its editor");
+            panic!("a new tag opens its editor");
         };
         assert!(bench.browser.tags.on_all(&ids[..2], tag));
         assert!(!bench.browser.tags.worn(ids[2]).contains(&tag));
@@ -1004,12 +1003,24 @@ mod tests {
         let mut after = Browser::default();
         after.restore(&store);
         after.settle(&bench.workspace);
-        assert_eq!(after.tags.name_of(tag), Some("New gig"));
+        assert_eq!(after.tags.name_of(tag), Some("New tag"));
         assert!(after.tags.on_all(&ids[..2], tag));
 
         bench.workspace.remove(ids[0], &mut bench.log);
         after.settle(&bench.workspace);
         assert_eq!(after.tags.count(tag), 1, "the one still on the list");
+    }
+
+    /// A new tag's name is typed in the browser's tags section, so making one shows it.
+    #[test]
+    fn a_new_tag_opens_the_section_its_name_is_typed_in() {
+        let mut bench = Bench::new();
+        bench.browser.sections.tags = false;
+        bench.shell.browser_open = false;
+
+        bench.act(vec![Act::NewTag(Vec::new())]);
+        assert!(bench.browser.sections.tags, "the tags section is open");
+        assert!(bench.shell.browser_open, "the browser is open");
     }
 
     /// ⚠️ A view is the only copy of its bytes and the store skips it, so a tag on a view
