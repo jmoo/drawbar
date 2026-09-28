@@ -15,8 +15,8 @@ use std::ops::Range;
 ///
 /// No stroke is read past its id and root key, so memory and I/O grow with the zone
 /// count, not with the instrument. A stroke can then be read by its range, positionally
-/// from a file or as a slice of a browser `File`, and handed to [`codec::decode`]
-/// through [`ZoneSpan::with_stream`].
+/// from a file or as a slice of a browser `File`, and paired with its zone by
+/// [`Index::zone`], ready for [`codec::decode`].
 ///
 /// Zones pair with strokes as [`crate::Sample::zones`] pairs them, and the section chain
 /// is walked under the same rules, so an instrument whose zones one refuses the other
@@ -30,6 +30,8 @@ pub struct Index {
     header: Header,
     layout: Layout,
     zones: Vec<ZoneSpan>,
+    /// Where the body starts in the stream the index was read from.
+    body_start: u64,
 }
 
 /// One zone, and where the stream that plays it sits.
@@ -39,33 +41,8 @@ pub struct ZoneSpan {
     pub top_note: u8,
     /// Lowest note, where the generation stores one. See [`ZoneAudio::low_note`].
     pub low_note: Option<u8>,
-    /// The stream's offset from the start of the body, which [`codec::decode`] takes
-    /// beside the stream.
-    pub at: usize,
     /// Where the stream sits in the stream the index was read from.
     pub stream: Range<u64>,
-}
-
-impl ZoneSpan {
-    /// This zone with `stream`, the bytes read from its range. A stream of any other
-    /// length is refused.
-    pub fn with_stream<'a>(&self, stream: &'a [u8]) -> Result<ZoneAudio<'a>, Error> {
-        let len = self.stream.end - self.stream.start;
-        if u64::try_from(stream.len()) != Ok(len) {
-            return Err(ParseError::AssertFail(format!(
-                "the zone's stream is {len} bytes, and {} were given",
-                stream.len()
-            ))
-            .into());
-        }
-        Ok(ZoneAudio {
-            root_key: self.root_key,
-            top_note: self.top_note,
-            low_note: self.low_note,
-            at: self.at,
-            stream,
-        })
-    }
 }
 
 impl Index {
@@ -95,6 +72,7 @@ impl Index {
             header,
             layout,
             zones,
+            body_start: body.start,
         })
     }
 
@@ -111,6 +89,40 @@ impl Index {
     /// that name one stroke share its range.
     pub fn zones(&self) -> &[ZoneSpan] {
         &self.zones
+    }
+
+    /// The `index`-th zone, playing `stream`: the bytes read from its range, ready for
+    /// [`codec::decode`]. A stream of any other length is refused.
+    pub fn zone<'a>(&self, index: usize, stream: &'a [u8]) -> Result<ZoneAudio<'a>, Error> {
+        let count = self.zones.len();
+        let span = self
+            .zones
+            .get(index)
+            .ok_or_else(|| ParseError::OutOfBounds {
+                value: format!("zone {index}"),
+                bound: format!("the {count} zones the map holds"),
+            })?;
+        let len = span.stream.end - span.stream.start;
+        if u64::try_from(stream.len()) != Ok(len) {
+            return Err(ParseError::AssertFail(format!(
+                "zone {index}'s stream is {len} bytes, and {} were given",
+                stream.len()
+            ))
+            .into());
+        }
+        let at = span
+            .stream
+            .start
+            .checked_sub(self.body_start)
+            .and_then(|at| usize::try_from(at).ok())
+            .ok_or_else(|| overflow("a stroke's body offset"))?;
+        Ok(ZoneAudio {
+            root_key: span.root_key,
+            top_note: span.top_note,
+            low_note: span.low_note,
+            at,
+            stream,
+        })
     }
 }
 
@@ -266,7 +278,6 @@ fn span(
         root_key,
         top_note,
         low_note,
-        at: usize::try_from(head.at).map_err(|_| overflow("a stroke's body offset"))?,
         stream: position(body, head.at)?..position(body, head.end)?,
     })
 }
@@ -355,7 +366,7 @@ mod tests {
         assert_eq!(index.zones().len(), whole.len());
         for (i, (span, whole)) in index.zones().iter().zip(&whole).enumerate() {
             let stream = &bytes[span.stream.start as usize..span.stream.end as usize];
-            let audio = span.with_stream(stream).unwrap();
+            let audio = index.zone(i, stream).unwrap();
             assert_eq!(audio.stream, whole.stream, "zone {i}'s stream");
             assert_eq!(audio.at, whole.at, "zone {i}'s body offset");
             assert_eq!(audio.root_key, whole.root_key, "zone {i}'s root key");
@@ -377,9 +388,9 @@ mod tests {
             let bytes = built(layout);
             let whole = sample(&bytes).unwrap();
             let index = index(&bytes).unwrap();
-            for (span, zone) in index.zones().iter().zip(whole.zones().unwrap()) {
+            for (i, (span, zone)) in index.zones().iter().zip(whole.zones().unwrap()).enumerate() {
                 let stream = &bytes[span.stream.start as usize..span.stream.end as usize];
-                let audio = span.with_stream(stream).unwrap();
+                let audio = index.zone(i, stream).unwrap();
                 assert_eq!(
                     codec::decode(audio.stream, audio.at, index.layout()).unwrap(),
                     codec::decode(zone.stream, zone.at, layout).unwrap(),
@@ -393,15 +404,27 @@ mod tests {
     #[test]
     fn a_stream_of_another_length_is_refused() {
         let bytes = built(Layout::V3);
-        let span = index(&bytes).unwrap().zones()[0].clone();
+        let index = index(&bytes).unwrap();
+        let span = &index.zones()[0];
         let stream = &bytes[span.stream.start as usize..span.stream.end as usize];
-        let error = span.with_stream(&stream[1..]).err().unwrap().to_string();
+        let error = index.zone(0, &stream[1..]).err().unwrap().to_string();
         let given = format!(
             "is {} bytes, and {} were given",
             stream.len(),
             stream.len() - 1
         );
         assert!(error.contains(&given), "{error}");
+    }
+
+    #[test]
+    fn a_zone_past_the_last_is_refused() {
+        let index = index(&built(Layout::V3)).unwrap();
+        let count = index.zones().len();
+        let error = index.zone(count, &[]).err().unwrap().to_string();
+        assert!(
+            error.contains(&format!("the {count} zones the map holds")),
+            "{error}"
+        );
     }
 
     /// `bytes` with its body changed by `edit` and the type-1 checksum recomputed, so a

@@ -173,12 +173,15 @@ fn sample_index(bytes: &[u8], sample: &Sample) -> Result<(), String> {
         zones.len()
     );
     for (i, (span, zone)) in index.zones().iter().zip(&zones).enumerate() {
+        let audio = index
+            .zone(i, at(bytes, &span.stream)?)
+            .map_err(|e| format!("zone {i}: {e}"))?;
         ensure!(
-            at(bytes, &span.stream)? == zone.stream,
+            audio.stream == zone.stream,
             "zone {i}: the bytes at {:?} are not the stream a whole read gives it",
             span.stream
         );
-        let placed = (span.at, span.root_key, span.low_note, span.top_note);
+        let placed = (audio.at, audio.root_key, audio.low_note, audio.top_note);
         let whole = (zone.at, zone.root_key, zone.low_note, zone.top_note);
         ensure!(
             placed == whole,
