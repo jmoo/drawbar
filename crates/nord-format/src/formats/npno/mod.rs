@@ -132,15 +132,15 @@ const SEEDS: usize = 4;
 /// Length marks a record carries at [`REC_MARKS`].
 const MARKS: usize = 4;
 
-/// One-pole decay coefficients a record carries after the one at [`REC_DECAY`], from
-/// [`REC_DECAYS`] up to the identifier. This ladder is decay the instrument applies on
-/// top of the stroke's own. Its entries are non-decreasing, and strokes of every bank
-/// carry it, including release strokes, which zero only the coefficient at
-/// [`REC_DECAY`]. This crate does not derive them from audio. Confirmed on hardware.
+/// One-pole decay coefficients a record carries after the one at `0x2e`, from `0x36`
+/// up to the identifier. This ladder is decay the instrument applies on top of the
+/// stroke's own. Its entries are non-decreasing, and strokes of every bank carry it,
+/// including release strokes, which zero only the coefficient at `0x2e`. This crate
+/// does not derive them from audio. Confirmed on hardware.
 pub const DECAYS: usize = 14;
 const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
 
-/// A [`REC_DECAYS`] entry that applies no decay: 1.0 in the ladder's fixed point.
+/// A [`DECAYS`] ladder entry that applies no decay: 1.0 in the ladder's fixed point.
 /// Vendor entries sit just below it.
 pub const LADDER_UNITY: u32 = 0x0080_0000;
 
@@ -899,8 +899,8 @@ impl<'a> Library<'a> {
         self.prefix[KIND_AT] = kind.code();
     }
 
-    /// The long name at `0x3c` and the voicing at `0x5c`, which only
-    /// [`VERSION_SPLIT_NAME`] streams carry. Both are `None` on the older stream.
+    /// The long name at `0x3c` and the voicing at `0x5c`, which only version `0x464`
+    /// streams carry. Both are `None` on the older stream.
     ///
     /// They are separate fields, not a split of `Name#Variant`: a library can
     /// spell the long name differently from the name before the `#`, and the voicing

@@ -318,8 +318,8 @@ impl Family {
     ///
     /// The string is the model followed by the keybed: an Electro 5 reads
     /// `Nord Electro 5`, and a 73-key 5D reads `Nord Electro 5D 73`. The family is the
-    /// longest [`product_name`](Self::product_name) the string contains, because `Stage`
-    /// sits inside `Stage 3`, `Piano` inside `Piano 5`, and `C2` inside `C2D`.
+    /// one whose model name is the longest the string contains, because `Stage` sits
+    /// inside `Stage 3`, `Piano` inside `Piano 5`, and `C2` inside `C2D`.
     ///
     /// `Nord Electro 5` is the descriptor string in the recorded exchanges of
     /// `nord-usb`'s replay scripts. Confirmed on hardware.
