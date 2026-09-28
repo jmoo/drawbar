@@ -1154,9 +1154,9 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
         return Loud {
             label: "Build → .nsmp".to_string(),
             short: "Build".to_string(),
-            glyph: Glyph::CircleAlert,
+            glyph: Glyph::Hammer,
             tone: Tone::Blocked,
-            hint: "the codec is not understood yet".to_string(),
+            hint: "building an nsmp from a project is not implemented yet".to_string(),
             send: None,
         };
     }
@@ -1589,6 +1589,7 @@ mod tests {
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.label, "Build → .nsmp");
         assert_eq!(loud.short, "Build");
+        assert_eq!(loud.glyph, Glyph::Hammer);
         assert_eq!(loud.send, None);
     }
 
