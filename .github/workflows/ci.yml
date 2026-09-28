@@ -3,8 +3,8 @@
 # lives in title.yml, which alone re-runs when a title is edited:
 #
 #   check: `nix flake check`. treefmt (fails on anything `nix fmt` would change),
-#          clippy over the workspace with `--deny warnings`, and the tests of
-#          scripts/bump.bash.
+#          clippy and rustdoc over the workspace with `--deny warnings`, and the
+#          tests of scripts/bump.bash.
 #   build: every crate with its test suite, the cross matrix (Windows under Wine,
 #          aarch64 Linux under QEMU, nord-usb under wasmtime) and drawbar-web.
 #   corpus: `nord.all-corpus`, the committed tier of the private specimen
