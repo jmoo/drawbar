@@ -62,7 +62,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Read, Seek, Write};
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 
 pub const FORMAT: &str = "npno";
 
@@ -495,6 +495,71 @@ fn first_audio_offset(directory_end: usize, block: usize) -> Result<usize, Error
         .ok_or_else(|| overflow("the first audio offset"))
 }
 
+/// What the prefix says about the rest of the body.
+struct Extent {
+    channels: u16,
+    /// Each stroke's root note, in directory order, from the per-root counts.
+    roots: Vec<u8>,
+    directory_end: usize,
+    first_audio: usize,
+}
+
+impl Extent {
+    /// Read from the first bytes of a body, which must hold the whole prefix.
+    fn of(body: &[u8]) -> Result<Extent, Error> {
+        check_mapped(body)?;
+        let prefix = body
+            .get(..DIRECTORY_AT)
+            .ok_or_else(|| short("the prefix"))?;
+
+        let version = be16(prefix, VERSION_AT);
+        let echo = be16(prefix, VERSION_ECHO_AT);
+        if echo != version {
+            return Err(ParseError::AssertFail(format!(
+                "the stream version {version:#06x} is echoed as {echo:#06x}"
+            ))
+            .into());
+        }
+
+        let channels = be16(prefix, CHANNELS_AT);
+        if !(1..=2).contains(&channels) {
+            return Err(ParseError::OutOfBounds {
+                value: format!("{channels} channels"),
+                bound: "1 or 2".into(),
+            }
+            .into());
+        }
+
+        let count = usize::from(be16(prefix, STROKE_COUNT_AT));
+        let counts = (0..NOTES).map(|note| usize::from(be16(prefix, ROOT_COUNTS_AT + note * 2)));
+        let summed: usize = counts.clone().sum();
+        if summed != count {
+            return Err(ParseError::AssertFail(format!(
+                "the per-root counts sum to {summed} where the stroke count is {count}"
+            ))
+            .into());
+        }
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(count)
+            .map_err(|_| overflow("the stroke list"))?;
+        roots.extend(
+            counts
+                .enumerate()
+                .flat_map(|(note, n)| std::iter::repeat_n(note as u8, n)),
+        );
+
+        let directory_end = directory_end(count)?;
+        let first_audio = first_audio_offset(directory_end, block_bytes(channels))?;
+        Ok(Extent {
+            channels,
+            roots,
+            directory_end,
+            first_audio,
+        })
+    }
+}
+
 /// One recorded note: the directory record, and the audio bytes it owns.
 ///
 /// The record is kept as read except for its audio offset, which is recomputed every
@@ -646,106 +711,20 @@ impl<'a> Library<'a> {
     }
 
     fn parse_body(header: Header, body: &'a [u8]) -> Result<Library<'a>, Error> {
-        check_mapped(body)?;
-        let prefix = body
-            .get(..DIRECTORY_AT)
-            .ok_or_else(|| short("the prefix"))?;
-
-        let version = be16(prefix, VERSION_AT);
-        let echo = be16(prefix, VERSION_ECHO_AT);
-        if echo != version {
-            return Err(ParseError::AssertFail(format!(
-                "the stream version {version:#06x} is echoed as {echo:#06x}"
-            ))
-            .into());
-        }
-
-        let channels = be16(prefix, CHANNELS_AT);
-        if !(1..=2).contains(&channels) {
-            return Err(ParseError::OutOfBounds {
-                value: format!("{channels} channels"),
-                bound: "1 or 2".into(),
-            }
-            .into());
-        }
-        let block = block_bytes(channels);
-
-        let count = usize::from(be16(prefix, STROKE_COUNT_AT));
-        let counts: Vec<u16> = (0..NOTES)
-            .map(|n| be16(prefix, ROOT_COUNTS_AT + n * 2))
+        let (skeleton, spans) = Library::skeleton(header, body, body.len())?;
+        let strokes = skeleton
+            .strokes
+            .into_iter()
+            .zip(spans)
+            .map(|(stroke, span)| Stroke {
+                audio: Cow::Borrowed(&body[span]),
+                ..stroke
+            })
             .collect();
-        let summed: usize = counts.iter().map(|&c| usize::from(c)).sum();
-        if summed != count {
-            return Err(ParseError::AssertFail(format!(
-                "the per-root counts sum to {summed} where the stroke count is {count}"
-            ))
-            .into());
-        }
-
-        let directory_end = directory_end(count)?;
-        let records = body
-            .get(DIRECTORY_AT..directory_end)
-            .ok_or_else(|| short("the stroke directory"))?;
-
-        let first = first_audio_offset(directory_end, block)?;
-        let pad = body
-            .get(directory_end..first)
-            .ok_or_else(|| short("the alignment gap before the audio"))?;
-        if pad.iter().any(|&b| b != 0) {
-            return Err(ParseError::AssertFail(
-                "the alignment gap before the audio is not zero".into(),
-            )
-            .into());
-        }
-
-        let mut strokes = Vec::new();
-        strokes
-            .try_reserve_exact(count)
-            .map_err(|_| overflow("the stroke list"))?;
-        let mut at = first;
-        let mut roots = counts
-            .iter()
-            .enumerate()
-            .flat_map(|(note, &n)| std::iter::repeat_n(note as u8, usize::from(n)));
-        for i in 0..count {
-            let mut record = [0u8; RECORD];
-            record.copy_from_slice(&records[i * RECORD..(i + 1) * RECORD]);
-            let root = roots.next().expect("the counts sum to the stroke count");
-            let start = be32(&record, REC_START);
-            if usize::try_from(start) != Ok(at) {
-                return Err(ParseError::AssertFail(format!(
-                    "stroke {i} starts at {start:#x} where the spans before it end at {at:#x}"
-                ))
-                .into());
-            }
-            let span = audio_span(be16(&record, REC_BLOCKS), block)?;
-            let end = at.checked_add(span).ok_or_else(|| overflow("the audio"))?;
-            let audio = body
-                .get(at..end)
-                .ok_or_else(|| short("a stroke's audio span"))?;
-            strokes.push(Stroke {
-                root,
-                record,
-                audio: Cow::Borrowed(audio),
-            });
-            at = end;
-        }
-        if at != body.len() {
-            return Err(ParseError::AssertFail(format!(
-                "the audio ends at {at:#x} where the body ends at {:#x}",
-                body.len()
-            ))
-            .into());
-        }
-
-        let library = Library {
-            header,
-            prefix: prefix.to_vec(),
-            channels,
+        Ok(Library {
             strokes,
-        };
-        library.check_key_map()?;
-        Ok(library)
+            ..skeleton
+        })
     }
 
     /// Every key map entry names a root the directory holds.
@@ -1204,6 +1183,84 @@ impl<'a> Library<'a> {
                 body: RawBody(self.to_body()?),
             },
         })
+    }
+}
+
+impl Library<'static> {
+    /// The prefix and the directory of a body `body_len` bytes long, with no audio, and
+    /// each stroke's audio span as body offsets.
+    ///
+    /// `head` is the body from its first byte through the alignment gap, and may run
+    /// on into the audio. Every check a parse makes is made here, and none reads audio.
+    fn skeleton(
+        header: Header,
+        head: &[u8],
+        body_len: usize,
+    ) -> Result<(Library<'static>, Vec<Range<usize>>), Error> {
+        let Extent {
+            channels,
+            roots,
+            directory_end,
+            first_audio,
+        } = Extent::of(head)?;
+        let records = head
+            .get(DIRECTORY_AT..directory_end)
+            .ok_or_else(|| short("the stroke directory"))?;
+        let pad = head
+            .get(directory_end..first_audio)
+            .ok_or_else(|| short("the alignment gap before the audio"))?;
+        if pad.iter().any(|&b| b != 0) {
+            return Err(ParseError::AssertFail(
+                "the alignment gap before the audio is not zero".into(),
+            )
+            .into());
+        }
+
+        let block = block_bytes(channels);
+        let mut strokes = Vec::new();
+        let mut spans = Vec::new();
+        strokes
+            .try_reserve_exact(roots.len())
+            .and_then(|()| spans.try_reserve_exact(roots.len()))
+            .map_err(|_| overflow("the stroke list"))?;
+        let mut at = first_audio;
+        for (i, (record, root)) in records.chunks_exact(RECORD).zip(roots).enumerate() {
+            let record: [u8; RECORD] = record.try_into().expect("chunks are one record long");
+            let start = be32(&record, REC_START);
+            if usize::try_from(start) != Ok(at) {
+                return Err(ParseError::AssertFail(format!(
+                    "stroke {i} starts at {start:#x} where the spans before it end at {at:#x}"
+                ))
+                .into());
+            }
+            let span = audio_span(be16(&record, REC_BLOCKS), block)?;
+            let end = at.checked_add(span).ok_or_else(|| overflow("the audio"))?;
+            if end > body_len {
+                return Err(short("a stroke's audio span"));
+            }
+            strokes.push(Stroke {
+                root,
+                record,
+                audio: Cow::Owned(Vec::new()),
+            });
+            spans.push(at..end);
+            at = end;
+        }
+        if at != body_len {
+            return Err(ParseError::AssertFail(format!(
+                "the audio ends at {at:#x} where the body ends at {body_len:#x}"
+            ))
+            .into());
+        }
+
+        let library = Library {
+            header,
+            prefix: head[..DIRECTORY_AT].to_vec(),
+            channels,
+            strokes,
+        };
+        library.check_key_map()?;
+        Ok((library, spans))
     }
 }
 
