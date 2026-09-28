@@ -69,6 +69,10 @@ impl ZoneSpan {
 }
 
 impl Index {
+    /// The bytes read of each stroke, from its start: its u32 id, a byte, then its root
+    /// key.
+    pub const STROKE_OPENING: usize = stroke::ROOT_KEY + 1;
+
     /// Read the index of the `nsmp` file that starts at the reader's position and runs
     /// to the end of the stream.
     pub fn read_from(r: &mut (impl Read + Seek)) -> Result<Index, Error> {
@@ -173,9 +177,6 @@ fn walk<F: Framing>(
     Ok(walked)
 }
 
-/// Bytes a stroke payload opens with: its u32 id, a byte, then its root key.
-const STROKE_OPENING: usize = stroke::ROOT_KEY + 1;
-
 /// The `index`-th stroke's id and root key, from the payload at body offsets
 /// `at..end`.
 fn stroke_head(
@@ -186,13 +187,13 @@ fn stroke_head(
     end: u64,
 ) -> Result<Head, Error> {
     let len = end - at;
-    if len < STROKE_OPENING as u64 {
+    if len < Index::STROKE_OPENING as u64 {
         return Err(ParseError::AssertFail(format!(
             "stroke {index} is {len} bytes, too short for its id and root key"
         ))
         .into());
     }
-    let mut opening = [0u8; STROKE_OPENING];
+    let mut opening = [0u8; Index::STROKE_OPENING];
     cbin::read_at(r, position(body, at)?, &mut opening)?;
     let [a, b, c, d, ..] = opening;
     Ok(Head {
@@ -406,19 +407,26 @@ mod tests {
     /// `bytes` with its body changed by `edit` and the type-1 checksum recomputed, so a
     /// whole read reaches the body.
     fn edited(bytes: &[u8], edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
-        let mut body = bytes[0x2c..].to_vec();
+        let v1 = cbin::Generation::V1;
+        let (head, body) = bytes.split_at(v1.body_start() as usize);
+        let mut body = body.to_vec();
         edit(&mut body);
-        let mut out = bytes[..0x2c].to_vec();
-        out[0x18..0x1c].copy_from_slice(&crc32(&body).to_le_bytes());
+        let mut out = head.to_vec();
+        let checksum = v1.checksum_range(out.len()).unwrap();
+        out[checksum].copy_from_slice(&crc32(&body).to_le_bytes());
         out.extend_from_slice(&body);
         out
     }
 
     /// The body offset of the `n`-th section tagged `tag`.
     fn section_at(bytes: &[u8], tag: &[u8], n: usize) -> usize {
-        let body = &bytes[0x2c..];
-        let wide = body.starts_with(section::CONTAINER4);
-        let (header, len_at) = if wide { (12, 8) } else { (9, 5) };
+        let body = &bytes[cbin::Generation::V1.body_start() as usize..];
+        let header = match body.starts_with(section::CONTAINER4) {
+            true => section::HEADER4_LEN,
+            false => section::HEADER_LEN,
+        };
+        // Both framings close their header with the u32 payload length.
+        let len_at = header - 4;
         let mut at = 0;
         let mut seen = 0;
         loop {

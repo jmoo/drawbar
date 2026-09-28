@@ -185,8 +185,8 @@ fn sample_index(bytes: &[u8], sample: &Sample) -> Result<(), String> {
             "zone {i}: the index places it as {placed:?} and a whole read as {whole:?} \
              (body offset, root key, low note, top note)"
         );
-        // A stroke opens with its u32 id, a byte, and its root key.
-        reads_within(&reader.reads, &span.stream, 6).map_err(|e| format!("zone {i}: {e}"))?;
+        let opening = nsmp::Index::STROKE_OPENING as u64;
+        reads_within(&reader.reads, &span.stream, opening).map_err(|e| format!("zone {i}: {e}"))?;
     }
     Ok(())
 }

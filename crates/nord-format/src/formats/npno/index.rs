@@ -118,6 +118,11 @@ mod tests {
         Index::read_from(&mut Cursor::new(bytes))
     }
 
+    /// Where a synthetic library's body starts: it is written as a type-1 file.
+    fn body_start() -> usize {
+        Generation::V1.body_start() as usize
+    }
+
     /// A built library's file bytes after `edit` changes its body; the container
     /// checksum is recomputed.
     fn edited(build: &Build, edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
@@ -255,14 +260,14 @@ mod tests {
     #[test]
     fn a_file_cut_inside_the_directory_is_refused() {
         let bytes = Build::new().bytes().unwrap();
-        let cut = 0x2c + DIRECTORY_AT + RECORD + 5;
+        let cut = body_start() + DIRECTORY_AT + RECORD + 5;
         refused_as_a_parse_refuses(&bytes[..cut], "ends inside the stroke directory");
     }
 
     #[test]
     fn a_file_cut_inside_the_prefix_is_refused() {
         let bytes = Build::new().bytes().unwrap();
-        refused_as_a_parse_refuses(&bytes[..0x2c + 0x700], "ends inside the prefix");
+        refused_as_a_parse_refuses(&bytes[..body_start() + 0x700], "ends inside the prefix");
     }
 
     #[test]
