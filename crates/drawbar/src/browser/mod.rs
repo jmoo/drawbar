@@ -72,6 +72,8 @@ struct Ask {
     other: Option<(&'static str, Vec<Act>)>,
     /// What the answer that runs nothing is called.
     cancel: &'static str,
+    /// The answer drawn as the one expected.
+    strong: Answer,
 }
 
 impl Ask {
@@ -83,11 +85,25 @@ impl Ask {
             acts,
             other: None,
             cancel: "Cancel",
+            strong: Answer::Verb,
         }
+    }
+
+    /// The label of each answer, as the dialog lays them out.
+    fn answers(&self) -> Vec<(Answer, &'static str)> {
+        let mut answers = vec![(Answer::Cancel, self.cancel)];
+        answers.extend(
+            self.other
+                .as_ref()
+                .map(|(label, _)| (Answer::Other, *label)),
+        );
+        answers.push((Answer::Verb, self.verb));
+        answers
     }
 }
 
 /// Which answer a question got.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Answer {
     Verb,
     Other,
@@ -429,19 +445,14 @@ impl Browser {
             ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button(ask.cancel).clicked() {
-                    decision = Some(Answer::Cancel);
-                }
-                if let Some((label, _)) = &ask.other {
-                    if ui.button(*label).clicked() {
-                        decision = Some(Answer::Other);
+                for (answer, label) in ask.answers() {
+                    let mut text = egui::RichText::new(label);
+                    if answer == ask.strong {
+                        text = text.strong();
                     }
-                }
-                if ui
-                    .add(egui::Button::new(egui::RichText::new(ask.verb).strong()))
-                    .clicked()
-                {
-                    decision = Some(Answer::Verb);
+                    if ui.button(text).clicked() {
+                        decision = Some(answer);
+                    }
                 }
             });
         });
@@ -462,10 +473,18 @@ impl Browser {
     #[cfg(test)]
     pub(crate) fn asking(&self) -> Option<(String, Vec<&'static str>)> {
         let ask = self.ask.as_ref().or(self.later.front())?;
-        let mut answers = vec![ask.cancel];
-        answers.extend(ask.other.as_ref().map(|(label, _)| *label));
-        answers.push(ask.verb);
+        let answers = ask.answers().into_iter().map(|(_, label)| label).collect();
         Some((ask.title.clone(), answers))
+    }
+
+    /// The answer that question draws as the one expected.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn expected(&self) -> Option<&'static str> {
+        let ask = self.ask.as_ref().or(self.later.front())?;
+        ask.answers()
+            .into_iter()
+            .find(|(answer, _)| *answer == ask.strong)
+            .map(|(_, label)| label)
     }
 
     /// Answer that question as a click on the answer labeled `label` would, and return
@@ -527,6 +546,7 @@ impl Browser {
                 acts: over,
                 other: Some(("Keep both", both)),
                 cancel: "Cancel",
+                strong: Answer::Verb,
             },
             None => Ask::new(
                 title,
@@ -555,6 +575,7 @@ impl Browser {
             acts: vec![Act::Revert(id)],
             other: Some(("Keep both", vec![Act::KeepBoth(id)])),
             cancel: "Keep mine",
+            strong: Answer::Cancel,
         });
     }
 

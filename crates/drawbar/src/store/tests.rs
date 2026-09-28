@@ -61,6 +61,17 @@ impl Session {
         self.settle();
     }
 
+    /// Whether the library may be let go without waiting, as a browser asks each frame.
+    fn settled(&mut self) -> bool {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            ..
+        } = &mut self.bench;
+        self.store.settled(workspace, browser, queue)
+    }
+
     /// The window loses focus and gets it back.
     fn refocus(&mut self) {
         self.store.focus(false);
@@ -237,35 +248,33 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
 }
 
 /// A browser cannot wait for its library's answers, so it lets a library go only once it
-/// is settled, after one last pass whose answers nothing reads.
+/// is settled, after one last pass whose answers nothing reads. That pass sends no save,
+/// so the index it writes holds what each save answered.
 #[test]
 fn a_settled_library_let_go_without_waiting_keeps_its_save_and_its_edit() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut session.bench;
-    assert!(session.store.sync(workspace, browser, queue, Pass::Files));
-    assert!(!session.store.settled(), "the first write is in flight");
-    while !session.store.settled() {
+    assert!(!session.settled(), "the first write is in flight");
+    while !session.settled() {
         assert!(session.next(), "the first write answered");
     }
     let saved = with_gain(&session.bytes(id), "96");
     let edited = with_gain(&saved, "12");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, edited.clone(), log);
+    assert!(!session.settled(), "the save is in flight");
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
     let Bench {
         workspace,
         browser,
         queue,
-        log,
         ..
     } = &mut session.bench;
-    workspace.replace_bytes(id, saved.clone(), log);
-    workspace.mark_saved(id);
-    workspace.replace_bytes(id, edited.clone(), log);
     assert!(
         session.store.sync(workspace, browser, queue, Pass::Last),
         "nothing waits"
@@ -277,6 +286,31 @@ fn a_settled_library_let_go_without_waiting_keeps_its_save_and_its_edit() {
     let entity = again.bench.workspace.get(id).expect("the same id");
     assert_eq!(entity.bytes, edited, "the edit came back");
     assert!(entity.is_unsaved());
+    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
+}
+
+/// Quitting right after a save writes the index only once the save has answered, so the
+/// next run knows the file as the save left it, not as changed outside drawbar.
+#[test]
+fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let saved = with_gain(&first.bytes(id), "96");
+    let edited = with_gain(&saved, "12");
+    let Bench { workspace, log, .. } = &mut first.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+    assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
+
+    let second = Session::open(&root);
+    assert_eq!(second.bench.browser.asking(), None, "nothing to ask");
+    let entity = second.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.saved.bytes, saved, "the file as saved");
+    assert_eq!(entity.bytes, edited, "and the edit over it");
 }
 
 #[test]
@@ -327,6 +361,7 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
     let (title, answers) = session.bench.browser.asking().expect("a question");
     assert_eq!(title, "“untitled.ne5p” changed on disk");
     assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+    assert_eq!(session.bench.browser.expected(), Some("Keep mine"));
     let entity = session.bench.workspace.get(id).unwrap();
     assert_eq!(entity.bytes, mine, "nothing was taken without asking");
     assert_eq!(entity.saved.bytes, theirs, "a save would write over theirs");

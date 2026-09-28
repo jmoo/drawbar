@@ -96,6 +96,8 @@ pub struct Store {
     /// Working copies the index still names that nothing needs, to drop at the next
     /// full pass.
     stale: Vec<String>,
+    /// How many writing commands have been sent.
+    sent: u64,
 }
 
 impl Store {
@@ -115,6 +117,7 @@ impl Store {
             keeps_views: true,
             name: None,
             stale: Vec::new(),
+            sent: 0,
         }
     }
 
@@ -138,10 +141,21 @@ impl Store {
         self.backend.root()
     }
 
-    /// Whether no save or rescan waits for its answer, so a library whose answers cannot
-    /// be waited for can be let go without losing one.
-    pub fn settled(&self) -> bool {
-        !self.scanning && !self.records.values().any(|record| record.saving)
+    /// Send the saves the files need, then say whether no save or rescan waits for its
+    /// answer. A library whose answers cannot be waited for is let go only once settled,
+    /// so its last pass sends no save and the index it writes holds every save's answer.
+    pub fn settled(
+        &mut self,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+    ) -> bool {
+        self.sync(workspace, browser, queue, Pass::Files);
+        !self.scanning && !self.saving()
+    }
+
+    fn saving(&self) -> bool {
+        self.records.values().any(|record| record.saving)
     }
 
     /// The names of the assets that letting this library go would lose: where nothing may
@@ -335,6 +349,7 @@ impl Store {
     /// Send a command that writes. The first one makes `.drawbar/`.
     fn write(&mut self, cmd: Cmd) {
         self.indexed = true;
+        self.sent += 1;
         self.backend.send(cmd);
     }
 
@@ -379,6 +394,9 @@ impl Store {
 
     /// Write everything, waiting for the saves in flight to answer, then let the library
     /// go. It blocks, so it is for the end of a session.
+    ///
+    /// ⚠️ An index sent beside a save carries the file's fingerprint from before it, so a
+    /// pass that sent anything is followed by another once the saves have answered.
     pub fn close(
         &mut self,
         workspace: &mut Workspace,
@@ -386,19 +404,41 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) {
-        // Each round sends the saves that waited on the round before.
-        for _ in 0..3 {
-            if self.sync(workspace, browser, queue, Pass::Last) {
+        const ROUNDS: usize = 8;
+        for _ in 0..ROUNDS {
+            if !self.answered(workspace, browser, queue, log) {
                 break;
             }
-            while self.records.values().any(|record| record.saving) {
-                let Some(event) = self.backend.recv() else {
-                    break;
-                };
-                self.handle(event, workspace, browser, queue, log);
+            let sent = self.sent;
+            self.sync(workspace, browser, queue, Pass::Last);
+            if self.sent == sent {
+                break;
             }
         }
         self.backend.finish();
+    }
+
+    /// Wait for every save in flight to answer, and fold the answers in. `false` when one
+    /// did not come.
+    fn answered(
+        &mut self,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> bool {
+        while self.saving() {
+            match self.backend.recv() {
+                None => return false,
+                // ⚠️ A listing taken before the last pass's moves would read each as a
+                // deletion, and nothing needs it now.
+                Some(Event::Scanned(_)) => self.scanning = false,
+                Some(event) => {
+                    self.handle(event, workspace, browser, queue, log);
+                }
+            }
+        }
+        true
     }
 
     /// Write everything, as [`Store::close`] does, before another library takes this one's

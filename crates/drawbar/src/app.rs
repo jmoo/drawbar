@@ -586,10 +586,15 @@ impl DrawbarApp {
                 Heard::Trouble(why) => self.log.trouble(why),
             }
         }
-        if self.store.as_ref().is_none_or(Store::settled) {
-            if let Some((root, discard)) = self.waiting.take() {
-                self.open_library(ctx, root, discard);
-            }
+        if self.waiting.is_none() {
+            return;
+        }
+        let settled = match &mut self.store {
+            Some(store) => store.settled(&mut self.workspace, &mut self.browser, &self.queue),
+            None => true,
+        };
+        if let Some((root, discard)) = self.waiting.take_if(|_| settled) {
+            self.open_library(ctx, root, discard);
         }
     }
 }
