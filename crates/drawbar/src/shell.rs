@@ -1994,4 +1994,35 @@ mod tests {
         assert!(tags.worn(named).contains(&made.id), "the row wears it");
         assert_eq!(tags.count(made.id), 1, "and nothing else does");
     }
+
+    /// A question raised outside the browser is asked with the browser dock shut.
+    #[test]
+    fn the_library_asks_before_deleting_with_the_browser_shut() {
+        use crate::workspace::Fresh;
+
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app.workspace.create(Fresh::Program, &mut app.log).unwrap();
+        app.workspace.rename(id, "Africa Split.ne5p".into());
+        app.shell.browser_open = false;
+
+        let mut run = |events: Vec<egui::Event>| -> Vec<testing::Word> {
+            let mut frame = eframe::Frame::_new_kittest();
+            let output = testing::run(&ctx, testing::screen(SCREEN, events), |ctx| {
+                app.update(ctx, &mut frame)
+            });
+            testing::painted(&output)
+        };
+        run(Vec::new());
+        let seen = run(Vec::new());
+        run(testing::click(
+            testing::where_(&seen, "Africa Split").center(),
+        ));
+        let seen = run(Vec::new());
+        run(testing::click(testing::where_(&seen, "Delete…").center()));
+        // A sheet is laid out unseen on its first frame.
+        run(Vec::new());
+        let seen = run(Vec::new());
+        testing::where_(&seen, "Delete 1 checked item?");
+    }
 }

@@ -404,6 +404,7 @@ impl eframe::App for DrawbarApp {
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
         acts.extend(asked);
+        self.browser.dialog(ctx, &mut acts);
         self.titlebar(ctx, frame, &mut acts);
         self.toolbar(ctx, &mut acts);
         self.status_bar(ctx, &mut acts);

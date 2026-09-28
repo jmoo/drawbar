@@ -195,7 +195,6 @@ impl Browser {
         filter: &Filter,
     ) -> Vec<Act> {
         let mut acts = Vec::new();
-        self.dialog(ui.ctx(), &mut acts);
         self.tree(ui, workspace, device, queue, filter, &mut acts);
         ghost(ui.ctx());
         acts
@@ -443,8 +442,11 @@ impl Browser {
         );
     }
 
-    /// Ask before a slot is replaced or emptied.
-    fn dialog(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+    /// The open question, if any, and the acts a yes to it runs.
+    ///
+    /// ⚠️ Called whether or not the browser dock is open: the toolbar, the library and the
+    /// document header ask questions too.
+    pub fn dialog(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let Some(ask) = &self.ask else {
             return;
         };
@@ -1098,8 +1100,8 @@ mod tests {
     /// closes the question.
     #[test]
     fn a_confirmation_runs_its_acts_only_on_its_verb() {
-        let bench = Bench::new();
-        egui_extras::install_image_loaders(&bench.ctx);
+        let ctx = testing::context();
+        egui_extras::install_image_loaders(&ctx);
         let at = Location { bank: 6, slot: 3 };
         let delete = || Act::DeleteSlot {
             class: ObjectClass::Program,
@@ -1111,17 +1113,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let output = testing::run(&bench.ctx, input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    acts = browser.ui(
-                        ui,
-                        &bench.workspace,
-                        &bench.device,
-                        &bench.queue,
-                        &Filter::default(),
-                    );
-                });
-            });
+            let output = testing::run(&ctx, input, |ctx| browser.dialog(ctx, &mut acts));
             (acts, testing::painted(&output))
         };
 
