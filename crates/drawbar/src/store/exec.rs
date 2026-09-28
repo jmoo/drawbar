@@ -8,9 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::sync::Arc;
 
 use super::sidecar::{self, Read, Sidecar};
 use super::{Cmd, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened, Stat};
+use crate::ondisk::OnDisk;
 
 /// The sidecar. It is made at drawbar's first write to a library, never on open.
 pub const DIR: &str = ".drawbar";
@@ -108,6 +110,17 @@ pub trait Fs {
     async fn remove_file(&mut self, path: &str) -> io::Result<()>;
     /// Only an empty folder.
     async fn remove_dir(&mut self, path: &str) -> io::Result<()>;
+    /// The file at `path` indexed and left on disk, to be read by range, where this
+    /// backend reads files that way and the file is a piano or sample instrument. `None`
+    /// has it read whole. `known` is its fingerprint where its [`Stat`] has not moved
+    /// since, so its CRC need not be taken again.
+    async fn rest(
+        &self,
+        _path: &str,
+        _known: Option<Fingerprint>,
+    ) -> io::Result<Option<Arc<OnDisk>>> {
+        Ok(None)
+    }
 }
 
 /// Run one command on a thread that may wait for it, as [`run`] does.
@@ -132,7 +145,7 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
                 .map(|(path, stat)| (path, Some(stat)))
                 .collect();
             Some(Event::Scanned(
-                listing(fs, &held)
+                listing(fs, &held, &BTreeMap::new())
                     .await
                     .map(|(listing, _)| listing)
                     .map_err(|e| e.to_string()),
@@ -220,7 +233,14 @@ async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         .values()
         .filter_map(|row| Some((row.path.clone()?, None)))
         .collect();
-    let (listing, temps) = listing(fs, &held).await.map_err(|e| e.to_string())?;
+    let prints: BTreeMap<LibPath, Fingerprint> = sidecar
+        .assets
+        .values()
+        .filter_map(|row| Some((row.path.clone()?, row.fingerprint?)))
+        .collect();
+    let (listing, temps) = listing(fs, &held, &prints)
+        .await
+        .map_err(|e| e.to_string())?;
     // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
     // must not write keeps what a newer drawbar left.
     let sweeps = indexed && writable.is_ok();
@@ -289,9 +309,12 @@ async fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usi
 /// Every file in `held` is listed and read, whatever its kind and however far the walk
 /// went, except one whose [`Stat`] is the one `held` gives, which is listed unread.
 /// Every other file is read only when [`opens`] takes it and it fits in [`MOST_BYTES`].
+/// A file the backend leaves on disk reuses the CRC `prints` holds for it while its
+/// [`Stat`] is the one there.
 async fn listing(
     fs: &impl Fs,
     held: &BTreeMap<LibPath, Option<Stat>>,
+    prints: &BTreeMap<LibPath, Fingerprint>,
 ) -> io::Result<(Listing, Vec<String>)> {
     let mut listing = Listing::default();
     let mut temps = Vec::new();
@@ -370,14 +393,28 @@ async fn listing(
                 path,
                 stat,
                 bytes: None,
+                file: None,
             });
             continue;
         }
-        match fs.read(path.as_str()).await {
-            Ok(bytes) => listing.files.push(Found {
+        let print = prints
+            .get(&path)
+            .copied()
+            .filter(|print| print.stat() == stat);
+        let read = match fs.rest(path.as_str(), print).await {
+            Ok(Some(file)) => Ok((None, Some(file))),
+            Ok(None) => fs
+                .read(path.as_str())
+                .await
+                .map(|bytes| (Some(bytes), None)),
+            Err(e) => Err(e),
+        };
+        match read {
+            Ok((bytes, file)) => listing.files.push(Found {
                 path,
                 stat,
-                bytes: Some(bytes),
+                bytes,
+                file,
             }),
             Err(e) => listing.unread.push((path, e.to_string())),
         }

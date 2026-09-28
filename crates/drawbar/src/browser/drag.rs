@@ -94,8 +94,13 @@ impl Kind {
     ///
     /// Bytes that did not decode are a note when
     /// [`is_text`](crate::document::text::is_text) said so on arrival, and
-    /// [`Kind::Other`] otherwise.
+    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads.
     pub fn of(entity: &LocalEntity) -> Kind {
+        match entity.indexed() {
+            Some(crate::ondisk::Index::Piano(_)) => return Kind::Piano,
+            Some(crate::ondisk::Index::Sample(_)) => return Kind::Sample,
+            None => {}
+        }
         let Some(decoded) = entity.entity.as_ref() else {
             return match entity.is_text {
                 true => Kind::Text,

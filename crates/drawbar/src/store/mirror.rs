@@ -287,7 +287,7 @@ impl Store {
         ));
         for (id, record) in &mut self.records {
             if std::mem::take(&mut record.saving) {
-                workspace.unsave(*id);
+                workspace.unsave(*id, log);
                 if let Some(entity) = workspace.get(*id) {
                     record.saved = entity.saved.stamp;
                 }
@@ -495,23 +495,25 @@ impl Store {
             .into_iter()
             .map(|(id, found)| (id, found, true));
         for (id, found, changed) in on_disk.map(|(id, found)| (id, found, false)).chain(changed) {
-            let (Some(row), Some(bytes)) = (rows.get(&id), found.bytes) else {
+            let (Some(row), Some(print)) = (rows.get(&id), found.fingerprint()) else {
                 continue;
             };
-            let mine = working.remove(&id).filter(|mine| *mine != bytes);
+            let mine = working.remove(&id).filter(|mine| match &found.bytes {
+                Some(bytes) => mine != bytes,
+                None => !print.holds(mine),
+            });
             if changed && mine.is_some() {
                 conflicts.push(id);
             }
-            self.records.insert(
-                id,
-                Record::of_file(found.path.clone(), Fingerprint::of(found.stat, &bytes)),
-            );
+            self.records
+                .insert(id, Record::of_file(found.path.clone(), print));
             back.push(Saved {
                 id,
                 name: found.path.leaf().to_string(),
                 path: Some(found.path),
                 origin: Origin::from(&row.origin),
-                saved: bytes,
+                saved: found.bytes.unwrap_or_default(),
+                file: found.file,
                 unsaved: mine,
             });
         }
@@ -542,29 +544,17 @@ impl Store {
             }
         }
         for found in matched.arrived {
-            let Some(bytes) = found.bytes else {
+            let Some(saved) = newcomer(fresh(), found, &mut self.records) else {
                 continue;
             };
-            let id = fresh();
-            self.records.insert(
-                id,
-                Record::of_file(found.path.clone(), Fingerprint::of(found.stat, &bytes)),
-            );
-            back.push(Saved {
-                id,
-                name: found.path.leaf().to_string(),
-                origin: Origin::File(found.path.leaf().to_string()),
-                path: Some(found.path),
-                saved: bytes,
-                unsaved: None,
-            });
+            back.push(saved);
         }
 
         let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
         let count = ids.len();
         workspace.restore(back, Some(next), log);
         for id in &missing {
-            workspace.unsave(*id);
+            workspace.unsave(*id, log);
             browser.folders.missing.insert(*id);
         }
         for id in &ids {
@@ -677,8 +667,8 @@ impl Store {
             workspace.place(id, found.path.clone());
             if let Some(record) = self.records.get_mut(&id) {
                 record.path = Some(found.path.clone());
-                if let (Some(print), Some(bytes)) = (&mut record.fingerprint, &found.bytes) {
-                    *print = Fingerprint::of(found.stat, bytes);
+                if let (Some(print), Some(read)) = (&mut record.fingerprint, found.fingerprint()) {
+                    *print = read;
                 }
             }
             if let Some(before) = before {
@@ -697,23 +687,11 @@ impl Store {
             let mut next = workspace.next_id();
             let mut back = Vec::new();
             for found in arrived {
-                let Some(bytes) = found.bytes else {
+                let Some(saved) = newcomer(next, found, &mut self.records) else {
                     continue;
                 };
-                let id = next;
                 next = next.saturating_add(1);
-                self.records.insert(
-                    id,
-                    Record::of_file(found.path.clone(), Fingerprint::of(found.stat, &bytes)),
-                );
-                back.push(Saved {
-                    id,
-                    name: found.path.leaf().to_string(),
-                    origin: Origin::File(found.path.leaf().to_string()),
-                    path: Some(found.path),
-                    saved: bytes,
-                    unsaved: None,
-                });
+                back.push(saved);
             }
             let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
             log.say(match ids.len() {
@@ -739,22 +717,23 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let (Some(bytes), Some(entity)) = (found.bytes, workspace.get(id)) else {
+        let (Some(print), Some(entity)) = (found.fingerprint(), workspace.get(id)) else {
             return;
         };
-        let print = Fingerprint::of(found.stat, &bytes);
         let name = entity.name.clone();
-        match entity.is_unsaved() {
-            true => {
-                workspace.rebase(id, bytes);
-                conflict(id, workspace, browser, log);
-            }
-            false => {
-                workspace.adopt(id, bytes, log);
-                log.say(format!(
-                    "“{name}” changed on disk, and drawbar now shows it as it is there."
-                ));
-            }
+        let unsaved = entity.is_unsaved();
+        match (unsaved, found.bytes, found.file) {
+            (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
+            (true, None, Some(file)) => workspace.rebase_file(id, file, log),
+            (false, Some(bytes), _) => workspace.adopt(id, bytes, log),
+            (false, None, Some(file)) => workspace.adopt_file(id, file),
+            (_, None, None) => return,
+        }
+        match unsaved {
+            true => conflict(id, workspace, browser, log),
+            false => log.say(format!(
+                "“{name}” changed on disk, and drawbar now shows it as it is there."
+            )),
         }
         browser.folders.missing.remove(&id);
         let saved = workspace.get(id).map(|entity| entity.saved.stamp);
@@ -845,7 +824,7 @@ impl Store {
             }
             Err(Failure::Io(why)) => why,
         };
-        workspace.unsave(id);
+        workspace.unsave(id, log);
         if let (Some(record), Some(entity)) = (self.records.get_mut(&id), workspace.get(id)) {
             record.saved = entity.saved.stamp;
         }
@@ -975,6 +954,10 @@ impl Store {
             .path
             .replace(path.clone())
             .filter(|from| from != path && !missing);
+        // A baseline resting in its file is what the file holds, and needs no write.
+        if entity.saved.file.is_some() {
+            record.saved = entity.saved.stamp;
+        }
         let unsaved = entity.saved.stamp != record.saved;
         // ⚠️ The file's fingerprint is known only once the save before answers, and a
         // save sent without it would be refused as a write over someone else's file.
@@ -1245,6 +1228,22 @@ pub(crate) fn duplicates(
     (flagged, groups)
 }
 
+/// A file drawbar did not know, recorded under `id`, and the asset it becomes. `None` for
+/// a file the listing did not read.
+fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Option<Saved> {
+    let print = found.fingerprint()?;
+    records.insert(id, Record::of_file(found.path.clone(), print));
+    Some(Saved {
+        id,
+        name: found.path.leaf().to_string(),
+        origin: Origin::File(found.path.leaf().to_string()),
+        path: Some(found.path),
+        saved: found.bytes.unwrap_or_default(),
+        file: found.file,
+        unsaved: None,
+    })
+}
+
 /// An asset brought back from its working copy alone: the working copy is all there is,
 /// so it is also what the asset counts as saved.
 fn saved_from(id: u64, row: &Row, bytes: Vec<u8>) -> Saved {
@@ -1258,6 +1257,7 @@ fn saved_from(id: u64, row: &Row, bytes: Vec<u8>) -> Saved {
         path: row.path.clone(),
         origin: Origin::from(&row.origin),
         saved: bytes,
+        file: None,
         unsaved: None,
     }
 }

@@ -101,6 +101,11 @@ impl<'a> Asset<'a> {
 fn shape(entity: &LocalEntity) -> Shape {
     use nord_format::Entity as E;
 
+    match entity.indexed() {
+        Some(crate::ondisk::Index::Piano(_)) => return Shape::Piano,
+        Some(crate::ondisk::Index::Sample(_)) => return Shape::Sample,
+        None => {}
+    }
     let Some(decoded) = &entity.entity else {
         // ⚠️ Checked before `is_text`, so a WAV always opens in the encode panel and
         // never as text.
@@ -288,6 +293,16 @@ impl Document {
         around: &Around<'_>,
     ) -> Wants {
         let played = around.played;
+        // The sample editor works on the whole body, so an instrument resting in its file
+        // is read whole first, off the frame.
+        if workspace
+            .get(id)
+            .is_some_and(|entity| entity.rests().is_some() && shape(entity) == Shape::Sample)
+        {
+            workspace.wake(id);
+            ui.label(egui::RichText::new("Reading the instrument…").weak());
+            return Wants::default();
+        }
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
@@ -521,7 +536,7 @@ impl Document {
             return;
         };
         let checked = match workspace.get(id) {
-            Some(entity) => piano::planned(&entity.saved.bytes, &plan).map(|_| ()),
+            Some(entity) => piano::check(entity, &plan),
             None => return,
         };
         match checked {
@@ -1503,6 +1518,33 @@ mod tests {
 
     fn render(sets: &[(&str, &str)], kind: Fresh) {
         render_view(sets, kind, Face::Basic);
+    }
+
+    /// A sample instrument resting in its file is read whole, off the frame, when its
+    /// document opens, and the editor draws once the read answers.
+    #[test]
+    fn a_resting_sample_is_read_whole_when_its_document_opens() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+
+        let words = open.frame(Vec::new());
+        assert!(
+            words.iter().any(|word| word == "Reading the instrument…"),
+            "{words:?}"
+        );
+        assert!(open.workspace.waking(open.id));
+        assert!(
+            open.entity().rests().is_some(),
+            "nothing is held until the read answers"
+        );
+
+        open.workspace.settle_files(&mut open.log);
+        assert!(open.entity().rests().is_none(), "it is held whole");
+        assert!(!open.entity().is_unsaved());
+        let words = open.frame(Vec::new());
+        assert!(words.iter().any(|word| word == "Marimba"), "{words:?}");
     }
 
     /// Every kind, in both the dark and the light theme.

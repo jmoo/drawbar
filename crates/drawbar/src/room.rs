@@ -113,7 +113,7 @@ fn incoming(
         .filter_map(|held| match by_slot {
             true => Some(1),
             false => {
-                let bytes = workspace.get(held.id)?.bytes.len();
+                let bytes = usize::try_from(workspace.get(held.id)?.size()).ok()?;
                 unit?.blocks_for(bytes).ok().map(u64::from)
             }
         })
@@ -157,7 +157,7 @@ pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) ->
         .iter()
         .filter_map(|held| {
             let entity = workspace.get(held.id)?;
-            Some((entity.name.clone(), entity.bytes.len() as u64, held.class))
+            Some((entity.name.clone(), entity.size(), held.class))
         })
         .max_by_key(|(_, bytes, _)| *bytes)?;
     let free = free_bytes(class, device)?;

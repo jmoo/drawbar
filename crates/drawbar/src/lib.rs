@@ -27,6 +27,7 @@ pub mod log;
 pub mod midi;
 pub mod named;
 pub mod newproject;
+pub mod ondisk;
 pub mod panel;
 pub mod queue;
 pub mod room;

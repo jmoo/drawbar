@@ -6,12 +6,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use eframe::egui;
 
 use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TEMP, TMP, WORKING};
-use super::{names, Cmd, Event, Stat};
+use super::{names, Cmd, Event, Fingerprint, Stat};
+use crate::ondisk::OnDisk;
 
 /// The default library: `drawbar` in the user's Music folder, or in the home folder
 /// where the system names no Music folder.
@@ -435,6 +437,15 @@ impl Fs for Disk {
 
     async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
         fs::remove_dir(self.locate(path)?)
+    }
+
+    async fn rest(
+        &self,
+        path: &str,
+        known: Option<Fingerprint>,
+    ) -> io::Result<Option<Arc<OnDisk>>> {
+        let file = File::open(self.locate(path)?)?;
+        Ok(OnDisk::open(file, known.map(|print| print.crc))?.map(Arc::new))
     }
 }
 

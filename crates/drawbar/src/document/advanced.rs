@@ -387,7 +387,11 @@ impl Advanced {
     fn changes(&mut self, entity: &LocalEntity) -> &[DiffRow] {
         let against = (entity.id, entity.stamp, entity.saved.stamp);
         if self.diff_for != Some(against) {
-            self.diff = byte_diff(&entity.saved.bytes, &entity.bytes);
+            // A baseline resting in its file is not held to line the bytes up against.
+            self.diff = match entity.saved.file {
+                Some(_) => Vec::new(),
+                None => byte_diff(&entity.saved.bytes, &entity.bytes),
+            };
             self.diff_for = Some(against);
         }
         &self.diff
@@ -562,11 +566,7 @@ fn container(entity: &LocalEntity) -> Vec<(&str, String, String)> {
             format!("{} bytes", container.body_len()),
             String::new(),
         ),
-        (
-            "File",
-            format!("{} bytes", entity.bytes.len()),
-            String::new(),
-        ),
+        ("File", format!("{} bytes", entity.size()), String::new()),
         (
             container.checksum_label.trim_end_matches(':'),
             container.checksum.clone(),
@@ -603,10 +603,16 @@ fn counted(half: u16) -> String {
 fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
     if rows.is_empty() {
         ui.label(
-            egui::RichText::new(match entity.saved.bytes.len() == entity.bytes.len() {
-                true => "nothing moved",
-                false => "the length changed, so there is nothing to line up",
-            })
+            egui::RichText::new(
+                match (entity.saved.file.is_some(), entity.rests().is_some()) {
+                    (true, true) => "nothing moved",
+                    (true, false) => {
+                        "what it was saved as is left in its file, so nothing is lined up"
+                    }
+                    (false, _) if entity.saved.bytes.len() == entity.bytes.len() => "nothing moved",
+                    (false, _) => "the length changed, so there is nothing to line up",
+                },
+            )
             .weak()
             .small(),
         );

@@ -599,7 +599,13 @@ fn put(
                 folder,
                 name: free.clone(),
             }];
-            let over = over(occupant, workspace, entity.bytes.clone(), Some(id));
+            let over = match entity.whole() {
+                Ok(bytes) => over(occupant, workspace, bytes.into_owned(), Some(id)),
+                Err(e) => {
+                    log.error(format!("{}: {e}", entity.name));
+                    None
+                }
+            };
             browser.ask_clash(&name, &dir, over, both, &free);
         }
     }
@@ -713,7 +719,14 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         .as_ref()
         .map_or_else(LibPath::root, LibPath::parent);
     let name = browser.folders.free(&dir, &entity.name, workspace);
-    let (origin, mine) = (entity.origin.clone(), entity.bytes.clone());
+    let mine = match entity.whole() {
+        Ok(mine) => mine.into_owned(),
+        Err(e) => {
+            log.error(format!("{}: {e}", entity.name));
+            return log.trouble(format!("“{}” could not be read.", entity.name));
+        }
+    };
+    let origin = entity.origin.clone();
     let copy = workspace.ingest(name.clone(), origin, mine, log);
     workspace.place(copy, dir.join(&name));
     workspace.revert(id, log);
@@ -840,7 +853,13 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
-    let batch = grouped(queue, workspace);
+    let batch = match grouped(queue, workspace) {
+        Ok(batch) => batch,
+        Err((name, e)) => {
+            log.error(format!("{name}: {e}"));
+            return log.trouble(format!("“{name}” could not be read, so nothing was sent."));
+        }
+    };
     // Validate the whole batch before the first delete-then-write.
     for item in batch.iter().flat_map(|(_, items)| items) {
         if let Err(e) = nord_usb::envelope::unwrap(&item.bytes) {
@@ -857,10 +876,16 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     }
 }
 
+/// One folder's writes, in queue order.
+type Batch = (ObjectClass, Vec<Outgoing>);
+
 /// What will be written, grouped by folder in queue order. A session belongs to a
-/// folder, so a batch is split by folder.
-fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoing>)> {
-    let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
+/// folder, so a batch is split by folder. An asset whose file does not read stops the
+/// batch, named with why.
+///
+/// ⚠️ An asset resting in its file is read whole here, on the frame.
+fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, std::io::Error)> {
+    let mut by_class: Vec<Batch> = Vec::new();
     for held in will_write(queue) {
         let Some(entity) = workspace.get(held.id) else {
             continue;
@@ -869,14 +894,17 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoi
             id: entity.id,
             at: held.at,
             name: entity.name.clone(),
-            bytes: entity.bytes.clone(),
+            bytes: entity
+                .whole()
+                .map_err(|e| (entity.name.clone(), e))?
+                .into_owned(),
         };
         match by_class.iter_mut().find(|(class, _)| *class == held.class) {
             Some((_, items)) => items.push(item),
             None => by_class.push((held.class, vec![item])),
         }
     }
-    by_class
+    Ok(by_class)
 }
 
 /// What a batch would write: every waiting entry the attached instrument has not
@@ -1089,9 +1117,8 @@ fn save_doc(
             entity.name
         ));
     };
-    // Refused before the write: bytes that are not what they claim to be must never
-    // reach a delete-then-write.
-    if let Err(e) = nord_usb::envelope::unwrap(&entity.bytes) {
+    // Refused before the write.
+    if let Err(e) = entity.sendable() {
         log.error(format!("{}: {e}", entity.name));
         return log.trouble(format!(
             "“{}” is not a file the instrument takes.",
@@ -1101,13 +1128,20 @@ fn save_doc(
     if let Some(note) = write_note(&device.state, class, entity).filter(|_| ask) {
         return browser.ask_write(&entity.name, place(class, at), note, Act::WriteBack(id));
     }
+    let bytes = match entity.whole() {
+        Ok(bytes) => bytes.into_owned(),
+        Err(e) => {
+            log.error(format!("{}: {e}", entity.name));
+            return log.trouble(format!("“{}” could not be read.", entity.name));
+        }
+    };
     device.send(
         DeviceCmd::Put {
             id,
             class,
             at,
             name: entity.name.clone(),
-            bytes: entity.bytes.clone(),
+            bytes,
         },
         log,
     );
@@ -1135,9 +1169,8 @@ fn send(
     let Some(entity) = workspace.get(id) else {
         return;
     };
-    // Refused before anything is queued: bytes that are not what they claim to be must
-    // never reach a delete-then-write.
-    if let Err(e) = nord_usb::envelope::unwrap(&entity.bytes) {
+    // Refused before anything is queued.
+    if let Err(e) = entity.sendable() {
         log.error(format!("{}: {e}", entity.name));
         log.trouble(format!(
             "“{}” is not a file the instrument takes.",
@@ -1767,7 +1800,7 @@ mod tests {
             );
         }
 
-        let grouped = grouped(&queue, &workspace);
+        let grouped = grouped(&queue, &workspace).expect("every asset reads");
         assert_eq!(grouped.len(), 2, "one command per folder");
         let programs = grouped
             .iter()

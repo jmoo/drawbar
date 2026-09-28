@@ -44,7 +44,11 @@ pub use exec::{MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Row, Sidecar, Stored};
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+
+use crate::ondisk::OnDisk;
 
 /// Where an entry sits in a library: its names from the root down, joined by `/`. The
 /// root itself is the empty path.
@@ -215,6 +219,32 @@ pub struct Found {
     /// The contents, when the listing was asked to read them: always on open, and on a
     /// rescan for a file whose [`Stat`] is not the one the app knew.
     pub bytes: Option<Vec<u8>>,
+    /// The file left on disk and indexed in place of `bytes`, where the backend reads a
+    /// piano or sample instrument by range.
+    pub file: Option<Arc<OnDisk>>,
+}
+
+impl Found {
+    /// What the listing read of the contents, as length and CRC-32. `None` for a file it
+    /// was not asked to read.
+    pub fn contents(&self) -> Option<(u64, u32)> {
+        match (&self.bytes, &self.file) {
+            (Some(bytes), _) => Some((bytes.len() as u64, nord_format::crc::crc32(bytes))),
+            (None, Some(file)) => Some((file.len, file.crc)),
+            (None, None) => None,
+        }
+    }
+
+    /// The fingerprint of what the listing read. `None` for a file it was not asked to
+    /// read.
+    pub fn fingerprint(&self) -> Option<Fingerprint> {
+        let (_, crc) = self.contents()?;
+        Some(Fingerprint {
+            len: self.stat.len,
+            modified: self.stat.modified,
+            crc,
+        })
+    }
 }
 
 /// The library's tree as the disk has it. `.drawbar/` and names starting with a dot are

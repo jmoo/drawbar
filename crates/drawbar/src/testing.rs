@@ -261,6 +261,34 @@ pub(crate) fn sample_bytes() -> Vec<u8> {
         .unwrap()
 }
 
+/// `bytes` written to `name` in `dir` and indexed in place, as a library opens a piano or
+/// sample instrument.
+pub(crate) fn on_disk(dir: &Temp, name: &str, bytes: &[u8]) -> Arc<crate::ondisk::OnDisk> {
+    fs::write(dir.at(name), bytes).expect("the file is written");
+    let file = fs::File::open(dir.at(name)).expect("the file opens");
+    let indexed = crate::ondisk::OnDisk::open(file, None).expect("the file reads");
+    Arc::new(indexed.expect("a piano or sample instrument is indexed"))
+}
+
+/// An asset resting in `file`, restored as a library restores one, and its id.
+pub(crate) fn rest(workspace: &mut Workspace, name: &str, file: Arc<crate::ondisk::OnDisk>) -> u64 {
+    let id = workspace.next_id();
+    workspace.restore(
+        vec![crate::workspace::Saved {
+            id,
+            name: name.to_string(),
+            path: None,
+            origin: crate::workspace::Origin::File(name.to_string()),
+            saved: Vec::new(),
+            file: Some(file),
+            unsaved: None,
+        }],
+        None,
+        &mut Log::default(),
+    );
+    id
+}
+
 /// Everything [`apply`] runs a browser act against, on one context.
 pub(crate) struct Bench {
     pub ctx: egui::Context,

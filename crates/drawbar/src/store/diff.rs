@@ -44,11 +44,11 @@ pub fn match_files(known: &BTreeMap<u64, Known>, files: Vec<Found>) -> Matched {
             continue;
         };
         claimed.insert(id);
-        let same = match &found.bytes {
+        let same = match found.contents() {
             None => true,
-            Some(bytes) => known[&id]
+            Some(contents) => known[&id]
                 .fingerprint
-                .is_some_and(|print| print.holds(bytes)),
+                .is_some_and(|print| (print.len, print.crc) == contents),
         };
         match same {
             true => matched.same.push((id, found)),
@@ -60,8 +60,7 @@ pub fn match_files(known: &BTreeMap<u64, Known>, files: Vec<Found>) -> Matched {
     type Contents = (u64, u32);
     let mut strangers_by: BTreeMap<Contents, Vec<usize>> = BTreeMap::new();
     for (at, found) in strangers.iter().enumerate() {
-        if let Some(bytes) = &found.bytes {
-            let contents = (bytes.len() as u64, nord_format::crc::crc32(bytes));
+        if let Some(contents) = found.contents() {
             strangers_by.entry(contents).or_default().push(at);
         }
     }

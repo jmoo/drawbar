@@ -780,10 +780,10 @@ fn stored_name(
     shape: Shape,
     renaming: (Option<String>, Option<String>),
 ) -> Option<(Named, String)> {
-    let decoded = entity.entity.as_ref()?;
+    let decoded = || entity.entity.as_ref();
     match shape {
         Shape::Sample => {
-            let held = sample::snapshot(decoded)?.ok()?;
+            let held = sample::snapshot(decoded()?)?.ok()?;
             Some((
                 Named::Stored {
                     limit: Some(held.max_name_len),
@@ -794,7 +794,7 @@ fn stored_name(
             ))
         }
         Shape::Project => {
-            let held = project::snapshot(decoded)?.ok()?;
+            let held = project::snapshot(decoded()?)?.ok()?;
             Some((
                 Named::Stored {
                     limit: None,
@@ -805,7 +805,7 @@ fn stored_name(
             ))
         }
         Shape::Piano => {
-            let held = piano::snapshot(decoded)?.ok()?;
+            let held = piano::named(entity)?.ok()?;
             let (name, variant) = renaming;
             Some((
                 Named::Stored {
@@ -941,7 +941,11 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     let tag = entity.tag();
     let kind = Kind::of(entity);
     let word = kind_word(kind, Family::of_tag(&tag));
-    let version = entity.container.as_ref().map(|held| held.header.version);
+    let version = match (&entity.container, entity.indexed()) {
+        (Some(held), _) => Some(held.header.version),
+        (None, Some(index)) => Some(index.header().version),
+        (None, None) => None,
+    };
     let sentence = match version {
         Some(version) => format!("{word}, content version {version}"),
         None => word,
@@ -998,6 +1002,9 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
 
 /// The stream version a piano library states, which is separate from the container's.
 fn stream_version(entity: &LocalEntity) -> Option<u16> {
+    if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
+        return Some(index.library().stream_version());
+    }
     match entity.entity.as_ref()? {
         nord_format::Entity::Piano(piano) => piano.stream_version().ok(),
         _ => None,
@@ -1069,7 +1076,7 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
             hint: "the programs this set list orders".to_string(),
         });
     }
-    let bytes = entity.bytes.len() as u64;
+    let bytes = entity.size();
     Some(SizeLine {
         text: room::measure(bytes),
         warn: false,
@@ -1189,7 +1196,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
                 "{} is free in {}, and this is {}",
                 room::measure(free),
                 folder(class),
-                room::measure(entity.bytes.len() as u64)
+                room::measure(entity.size())
             ),
             send: None,
         };
@@ -1211,7 +1218,7 @@ pub(super) fn loads(entity: &LocalEntity, device: &DeviceState) -> Option<(Objec
 /// `None` where the folder does not count in bytes or the document fits.
 fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Option<(u64, u64)> {
     let free = room::free_bytes(class, device)?;
-    let bytes = entity.bytes.len() as u64;
+    let bytes = entity.size();
     bytes
         .checked_sub(free)
         .filter(|over| *over > 0)

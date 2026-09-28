@@ -10,8 +10,9 @@ use super::diff::{match_files, Known};
 use super::exec::{MOST_BYTES, MOST_ENTRIES};
 use super::sidecar::{self, Read};
 use super::*;
+use crate::browser::Kind;
 use crate::testing::{Bench, Temp};
-use crate::workspace::{Fresh, Origin};
+use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
 
 /// One run of the app over a library: the store, and the state it mirrors.
@@ -95,6 +96,46 @@ impl Session {
     fn path(&self, id: u64) -> Option<String> {
         let entity = self.bench.workspace.get(id)?;
         Some(entity.path.as_ref()?.to_string())
+    }
+
+    /// One frame of the document open on `id`, and every word it painted.
+    fn document(&mut self, id: u64) -> Vec<String> {
+        let mut document = crate::document::Document::default();
+        let Bench {
+            ctx,
+            workspace,
+            device,
+            log,
+            queue,
+            browser,
+            ..
+        } = &mut self.bench;
+        let input = crate::testing::screen(eframe::egui::vec2(1280.0, 720.0), Vec::new());
+        let output = crate::testing::run(&ctx.clone(), input, |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| {
+                document.ui(
+                    ui,
+                    id,
+                    workspace,
+                    device,
+                    log,
+                    &crate::document::Around {
+                        queue,
+                        tags: &browser.tags,
+                        played: &crate::midi::Played::default(),
+                    },
+                );
+            });
+        });
+        crate::testing::words(&output)
+    }
+
+    /// The one asset the library lists.
+    fn only(&self) -> u64 {
+        let mut listed = self.bench.workspace.listed();
+        let id = listed.next().expect("an asset is listed").id;
+        assert!(listed.next().is_none(), "one asset is listed");
+        id
     }
 
     fn said(&self, words: &str) -> usize {
@@ -692,6 +733,7 @@ fn a_file_at_a_new_path_is_an_asset_moved_only_when_one_matches_one() {
             modified: Some(1),
         },
         bytes: Some(bytes.to_vec()),
+        file: None,
     };
     let known = |path: &str, bytes: &[u8]| Known {
         path: LibPath::parse(path).unwrap(),
@@ -913,4 +955,97 @@ fn an_asset_under_an_id_already_given_out_takes_a_new_one_with_its_edit() {
     let entity = third.bench.workspace.get(back).expect("under its new id");
     assert_eq!(entity.bytes, edited);
     assert!(entity.is_unsaved());
+}
+
+/// A piano library the size a vendor ships: three strokes, each of the most blocks a
+/// stroke record can state, about 200 MB in all.
+fn large_piano() -> Vec<u8> {
+    use nord_format::formats::npno::synthetic::{take, Build};
+    use nord_format::formats::npno::Bank;
+
+    const ROOTS: [u8; 3] = [48, 60, 72];
+    Build {
+        version: 0x464,
+        channels: 1,
+        takes: ROOTS
+            .into_iter()
+            .map(|root| take(root, Bank::Attack, 0, u16::MAX))
+            .collect(),
+        map: (21..=108)
+            .map(|key: u8| {
+                let root = ROOTS.into_iter().min_by_key(|root| root.abs_diff(key));
+                (key, root.expect("three roots"))
+            })
+            .collect(),
+    }
+    .bytes()
+    .expect("the builder lays out a library")
+}
+
+/// A piano library of a vendor's size opens resting in its file: the frame reads none of
+/// its body, its document draws from the index while its row still says it is being
+/// checked, and the check answers off the frame.
+#[test]
+fn a_large_piano_opens_and_draws_before_its_check_answers() {
+    let root = Temp::new();
+    let bytes = large_piano();
+    let len = bytes.len() as u64;
+    assert!(len > 200_000_000, "{len} bytes is a vendor's size");
+    fs::write(root.at("Grand.npno"), &bytes).unwrap();
+    drop(bytes);
+
+    let mut session = Session::open(&root);
+    let id = session.only();
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(entity.rests().is_some(), "it rests in its file");
+    assert!(entity.bytes.is_empty() && entity.saved.bytes.is_empty());
+    assert_eq!(entity.size(), len);
+    assert_eq!(entity.verify.note(), Some("checking…"));
+    let file = entity.rests().unwrap().clone();
+
+    let words = session.document(id);
+    assert!(
+        words.iter().any(|word| word == "npno 0x464"),
+        "the header reads the index: {words:?}"
+    );
+    assert_eq!(file.take_reads(), [], "the frame read none of its body");
+
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.settle_files(log);
+    let entity = workspace.get(id).unwrap();
+    assert!(matches!(entity.verify, VerifyState::Checked));
+    assert_eq!(entity.verify.note(), None);
+    assert!(
+        entity.saved.crc32.is_some(),
+        "a slot holding it can be matched"
+    );
+    assert!(entity.sendable().is_ok());
+}
+
+/// A piano library whose body no longer matches its checksum opens like any other,
+/// resting in its file, and its row says it failed once the check answers. Nothing sends
+/// it, and its index is no longer trusted to make it a piano.
+#[test]
+fn a_corrupted_piano_opens_and_then_shows_it_failed_verification() {
+    let root = Temp::new();
+    let mut bytes = nord_format::formats::npno::synthetic::Build::new()
+        .bytes()
+        .unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(root.at("Broken.npno"), &bytes).unwrap();
+
+    let mut session = Session::open(&root);
+    let id = session.only();
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(entity.rests().is_some());
+    assert_eq!(entity.verify.note(), Some("checking…"));
+    assert_eq!(Kind::of(entity), Kind::Piano);
+
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.settle_files(log);
+    let entity = workspace.get(id).unwrap();
+    assert_eq!(entity.verify.note(), Some("failed verification"));
+    assert!(entity.sendable().is_err());
+    assert_eq!(Kind::of(entity), Kind::Other);
 }

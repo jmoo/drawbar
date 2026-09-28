@@ -739,7 +739,7 @@ impl Browser {
         ) {
             (true, _) => Some("missing"),
             (false, true) => Some("same name as another"),
-            (false, false) => None,
+            (false, false) => entity.verify.note(),
         };
         let drawn = row(
             ui,

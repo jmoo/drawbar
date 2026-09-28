@@ -318,7 +318,7 @@ fn local(
         unsaved: entity.is_unsaved(),
         where_: whereabouts(entity, device, queue),
         at: entity.spot(),
-        size: entity.bytes.len() as u64,
+        size: entity.size(),
         needs: wanted(entity, device),
     }
 }
