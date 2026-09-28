@@ -105,7 +105,7 @@ pub struct DiffRow {
     pub at: usize,
     pub before: u8,
     pub after: u8,
-    /// `  (body crc32)` when the byte is a checksum, not an edit.
+    /// `  (body crc32)` or `  (file crc16)` when the byte is a checksum, not an edit.
     pub note: &'static str,
 }
 
@@ -280,8 +280,9 @@ mod tests {
             file.write_to(&mut out).unwrap();
             out.into_inner()
         };
-        let diff = byte_diff(&file(0), &file(1));
-        let end = file(0).len();
+        let before = file(0);
+        let diff = byte_diff(&before, &file(1));
+        let end = before.len();
         let rows: Vec<(usize, &str)> = diff.iter().map(|row| (row.at, row.note)).collect();
         assert_eq!(rows[0], (0x18, ""), "{rows:?}");
         assert!(
