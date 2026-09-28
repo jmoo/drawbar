@@ -26,6 +26,8 @@ fn synthesize(tag: &str, body_len: usize, version: u32, generation: Generation) 
 #[test]
 fn every_tag_dispatches_and_round_trips_both_generations() {
     for (tag, body_len, version) in formats() {
+        // A library's body varies in length, so any length stands for it.
+        let body_len = body_len.unwrap_or(64);
         for generation in [Generation::V1, Generation::V0] {
             let bytes = synthesize(tag, body_len, version, generation);
             let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
