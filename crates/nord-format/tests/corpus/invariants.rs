@@ -43,7 +43,7 @@ pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
         let tag = &bytes[8..12];
         if format_table::formats()
             .iter()
-            .any(|(format, _, _)| format.as_bytes() == tag)
+            .any(|(format, body_len, _)| format.as_bytes() == tag && body_len.is_some())
         {
             kinds.push(Kind::Tabled);
         }
@@ -264,10 +264,10 @@ fn aux_word(bytes: &[u8], _: &Entity) -> Result<(), String> {
 fn body_length(bytes: &[u8], _: &Entity) -> Result<(), String> {
     let info = nord_format::cbin::inspect(&mut Cursor::new(bytes)).context("inspect")?;
     let tag = String::from_utf8_lossy(&info.header.tag).into_owned();
-    let (_, want, _) = format_table::formats()
+    let want = format_table::formats()
         .into_iter()
-        .find(|(format, _, _)| *format == tag)
-        .ok_or_else(|| format!("{tag:?} is not in the format table"))?;
+        .find_map(|(format, body_len, _)| body_len.filter(|_| format == tag))
+        .ok_or_else(|| format!("{tag:?} has no fixed body length in the format table"))?;
     ensure!(
         info.body_len == want as u64,
         "{tag:?} body is {} bytes, its format's {want}",
