@@ -236,6 +236,7 @@ async fn drive(
     room: Rc<RefCell<Room>>,
     ctx: egui::Context,
 ) {
+    let private = root == Root::Private;
     let mut fs = Folder::open(root, room.clone()).await;
     while let Some(cmd) = next(&inbox).await {
         let event = match &mut fs {
@@ -245,7 +246,7 @@ async fn drive(
         if let Some(event) = event {
             events.borrow_mut().push_back(event);
         }
-        if inbox.borrow().cmds.is_empty() {
+        if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }
         ctx.request_repaint();
