@@ -163,6 +163,8 @@ pub struct Around<'a> {
 pub struct Wants {
     /// The write the header queued.
     pub send: Option<SendBack>,
+    /// The slot the header asked the panel to play.
+    pub load: Option<(ObjectClass, Location)>,
     /// The banner's offer to put a view of a slot on this computer.
     pub keep: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
@@ -383,6 +385,7 @@ impl Document {
 
         let mut wants = Wants {
             send: act.send,
+            load: act.load,
             ..Wants::default()
         };
         let mut details = None;

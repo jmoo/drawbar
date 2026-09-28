@@ -14,8 +14,8 @@ use nord_usb::{Location, ObjectClass};
 use super::controls::{self, Sets};
 use super::{encode, piano, project, sample, setlist, text, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
-use crate::browser::Kind;
-use crate::device::{read_only, DeviceState};
+use crate::browser::{Kind, LOAD_ON_INSTRUMENT};
+use crate::device::{loadable, read_only, DeviceState};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
@@ -248,6 +248,8 @@ pub(super) struct Clicked {
     pub revert: bool,
     pub export: bool,
     pub send: Option<SendBack>,
+    /// The slot the panel is to play, where Load on instrument was clicked.
+    pub load: Option<(ObjectClass, Location)>,
     /// The face picked, where one was.
     pub face: Option<Face>,
     /// The asset's new name, where a rename settled. Applied once nothing is borrowing
@@ -488,6 +490,16 @@ fn right(
             },
         )
     };
+    if let Some((class, at)) = loads(entity, facts.device) {
+        let why = format!(
+            "the panel plays {} as the instrument holds it; nothing here is sent",
+            place(class, at)
+        );
+        act.load = quiet_pill(ui, Glyph::Keyboard, LOAD_ON_INSTRUMENT, true)
+            .on_hover_text(hint(LOAD_ON_INSTRUMENT, &why, words))
+            .clicked()
+            .then_some((class, at));
+    }
     act.export = quiet_pill(ui, Glyph::ArrowDownToLine, "Export…", true)
         .on_hover_text(hint(
             "Export…",
@@ -1216,6 +1228,16 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     send(format!("replaces {}", place(class, at)))
 }
 
+/// The slot the panel can be asked to play for this document: the one it is linked to.
+///
+/// ⚠️ The slot's content, never this document's: a copy edited here loads what the
+/// instrument still holds.
+pub(super) fn loads(entity: &LocalEntity, device: &DeviceState) -> Option<(ObjectClass, Location)> {
+    entity
+        .link
+        .filter(|(class, at)| loadable(device, *class, *at))
+}
+
 /// How far the document exceeds the free space in its folder, and that free space.
 /// `None` where the folder does not count in bytes or the document fits.
 fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Option<(u64, u64)> {
@@ -1611,6 +1633,55 @@ mod tests {
         assert_eq!(loud.tone, Tone::Idle);
         assert_eq!(loud.send, None);
         assert_eq!(loud.hint, "no instrument has a folder for this note");
+    }
+
+    #[test]
+    fn a_document_offers_to_load_only_the_slot_it_is_linked_to() {
+        use crate::device::Device;
+
+        let (mut workspace, mut log) = workspace();
+        let at = Location { bank: 6, slot: 3 };
+        let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
+        let bytes = workspace.get(fresh).unwrap().bytes.clone();
+        let copied = workspace.ingest(
+            "Africa Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at,
+            },
+            bytes,
+            &mut log,
+        );
+
+        let unattached = Device::new(egui::Context::default());
+        unattached.relink(&mut workspace);
+        assert_eq!(
+            loads(workspace.get(copied).unwrap(), &unattached.state),
+            None,
+            "no instrument attached"
+        );
+
+        let mut attached = Device::new(egui::Context::default());
+        attached.pretend_scanned(ObjectClass::Program, 7, &["", "", "", "Africa Split"]);
+        attached.relink(&mut workspace);
+        assert_eq!(
+            loads(workspace.get(copied).unwrap(), &attached.state),
+            Some((ObjectClass::Program, at))
+        );
+        assert_eq!(
+            loads(workspace.get(fresh).unwrap(), &attached.state),
+            None,
+            "a program the instrument does not hold has no slot to load"
+        );
+
+        let mut edited = workspace.get(copied).unwrap().bytes.clone();
+        *edited.last_mut().expect("a byte to move") ^= 0xff;
+        workspace.replace_bytes(copied, edited, &mut log);
+        assert_eq!(
+            loads(workspace.get(copied).unwrap(), &attached.state),
+            Some((ObjectClass::Program, at)),
+            "an edit here does not change what the slot holds"
+        );
     }
 
     fn project_bytes() -> Vec<u8> {
