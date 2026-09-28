@@ -68,6 +68,14 @@ pub fn key(name: &str) -> String {
     name.to_lowercase()
 }
 
+/// Whether the library path `path` is inside the folder `dir`, comparing each name by
+/// its [`key`]. A folder cannot be moved there.
+pub fn inside(path: &str, dir: &str) -> bool {
+    key(path)
+        .strip_prefix(&key(dir))
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// `wanted`, or the first of `wanted 2`, `wanted 3`, … that `taken` refuses, with the
 /// number before the extension so `c3 2.wav` still reads as a WAV.
 pub fn free(wanted: &str, taken: impl Fn(&str) -> bool) -> String {
@@ -194,6 +202,15 @@ mod tests {
         assert_eq!(key("Flügel.npno"), key("FLÜGEL.NPNO"));
         assert_ne!(key("Strings.nsmp"), key("Strings.npno"));
         assert_ne!(key("My Piano.npno"), key("My-Piano.npno"));
+    }
+
+    #[test]
+    fn a_path_is_inside_a_folder_whatever_the_case_of_its_names() {
+        assert!(inside("Cello/c3.wav", "Cello"));
+        assert!(inside("cello/Low/c3.wav", "Cello"));
+        assert!(!inside("Cello", "Cello"), "a folder is not inside itself");
+        assert!(!inside("Cellos/c3.wav", "Cello"));
+        assert!(!inside("Cello", "Cello/Low"));
     }
 
     #[test]

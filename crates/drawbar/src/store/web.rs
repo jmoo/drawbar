@@ -991,6 +991,12 @@ impl Fs for Folder {
     /// ⚠️ Chrome cannot move a folder whole, so there a folder moves file by file, and
     /// one interrupted leaves its files split between the two names, none lost.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
+        if to == from || names::inside(to, from) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "it cannot move into itself",
+            ));
+        }
         let same = from.rsplit_once('/').map(|(dir, _)| dir)
             == to.rsplit_once('/').map(|(dir, _)| dir)
             && names::key(from) == names::key(to);
