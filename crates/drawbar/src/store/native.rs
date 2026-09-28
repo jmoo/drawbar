@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use eframe::egui;
 
 use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TEMP, TMP, WORKING};
-use super::{names, Cmd, Event, Fingerprint, Stat};
+use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
 
 /// The default library: `drawbar` in the user's Music folder, or in the home folder
@@ -297,6 +297,22 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether two paths reach one entry, as two spellings of a name do on a disk that
+/// ignores case.
+#[cfg(unix)]
+fn one_entry(a: &Path, b: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (a, b) = (fs::symlink_metadata(a)?, fs::symlink_metadata(b)?);
+    Ok((a.dev(), a.ino()) == (b.dev(), b.ino()))
+}
+
+/// Whether two paths reach one entry: the system resolves each to the name the entry
+/// has on disk.
+#[cfg(not(unix))]
+fn one_entry(a: &Path, b: &Path) -> io::Result<bool> {
+    Ok(fs::canonicalize(a)? == fs::canonicalize(b)?)
+}
+
 fn parent(path: &Path) -> &Path {
     path.parent().unwrap_or(path)
 }
@@ -412,12 +428,14 @@ impl Fs for Disk {
 
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         let (source, target) = (self.locate(from)?, self.locate(to)?);
-        // On a disk that ignores case, a rename that only changes case finds itself at
-        // `to`, which is not another entry.
-        let same = from.rsplit_once('/').map(|(dir, _)| dir)
-            == to.rsplit_once('/').map(|(dir, _)| dir)
-            && names::key(from) == names::key(to);
-        if !same && fs::symlink_metadata(&target).is_ok() {
+        // On a disk that ignores case, a rename that only changes case finds the entry
+        // itself at `to`.
+        let taken = match fs::symlink_metadata(&target) {
+            Ok(_) => !one_entry(&source, &target)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        if taken {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         fs::rename(&source, &target)?;
@@ -452,6 +470,54 @@ impl Fs for Disk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::LibPath;
+    use crate::testing::Temp;
+
+    fn disk(root: &Temp) -> Disk {
+        Disk {
+            root: root.0.clone(),
+            prepared: false,
+            lock: None,
+        }
+    }
+
+    #[test]
+    fn a_rename_that_changes_only_case_goes_through() {
+        let root = Temp::new();
+        fs::write(root.at("c3.ne5p"), b"lower").unwrap();
+        let moved = exec::execute(
+            &mut disk(&root),
+            Cmd::Move {
+                from: LibPath::root().join("c3.ne5p"),
+                to: LibPath::root().join("C3.ne5p"),
+            },
+        );
+        assert!(moved.is_none(), "{moved:?}");
+        assert_eq!(root.names(""), [".drawbar", "C3.ne5p"]);
+        assert_eq!(root.read("C3.ne5p"), b"lower");
+    }
+
+    /// Only a disk that tells case apart can hold both names, so elsewhere this checks
+    /// nothing.
+    #[test]
+    fn a_rename_onto_another_file_one_case_apart_is_refused() {
+        let root = Temp::new();
+        fs::write(root.at("c3.ne5p"), b"lower").unwrap();
+        fs::write(root.at("C3.ne5p"), b"upper").unwrap();
+        if root.names("").len() < 2 {
+            return;
+        }
+        let moved = exec::execute(
+            &mut disk(&root),
+            Cmd::Move {
+                from: LibPath::root().join("c3.ne5p"),
+                to: LibPath::root().join("C3.ne5p"),
+            },
+        );
+        assert!(matches!(moved, Some(Event::Failed(_))), "{moved:?}");
+        assert_eq!(root.read("c3.ne5p"), b"lower");
+        assert_eq!(root.read("C3.ne5p"), b"upper");
+    }
 
     #[test]
     fn the_music_folder_is_read_from_user_dirs_as_xdg_writes_it() {
