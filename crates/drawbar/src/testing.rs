@@ -29,11 +29,15 @@ pub(crate) fn context() -> egui::Context {
 ///
 /// Panics if egui found two widgets sharing an id. egui 0.32 reports a clash only by
 /// painting a warning, so a frame that merely returned would pass over one.
+///
+/// ⚠️ egui paints that warning only in debug builds unless asked, and the packaged
+/// suites run in release.
 pub(crate) fn run(
     ctx: &egui::Context,
     input: egui::RawInput,
     ui: impl FnMut(&egui::Context),
 ) -> egui::FullOutput {
+    ctx.options_mut(|options| options.warn_on_id_clash = true);
     let output = ctx.run(input, ui);
     let clashes: Vec<String> = words(&output)
         .into_iter()
