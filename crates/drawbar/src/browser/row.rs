@@ -133,25 +133,13 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     );
 
     let visuals = ui.visuals().clone();
-    let fill = match (selected, response.hovered()) {
-        (true, _) => Some(visuals.selection.bg_fill),
-        (false, true) => Some(visuals.faint_bg_color),
-        (false, false) => None,
-    };
-    // ⚠️ Normal body text has insufficient contrast on the selection fill.
-    let ink = match selected {
-        true => visuals.selection.stroke.color,
-        false => visuals.text_color(),
-    };
-    let quiet = cell_ink(selected, visuals.weak_text_color(), &visuals);
+    let painter = ui.painter().clone();
+    let (ink, quiet) =
+        crate::panel::row_ink(&painter, rect, selected, response.hovered(), &visuals);
     let strong = match cells.faint {
         true => quiet,
         false => ink,
     };
-    let painter = ui.painter().clone();
-    if let Some(fill) = fill {
-        painter.rect_filled(rect, 3.0, fill);
-    }
     let middle = |size: f32| rect.center().y - size / 2.0;
 
     let mut x = rect.left() + cells.indent;
@@ -248,17 +236,13 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     painter.galley(at, galley, egui::Color32::PLACEHOLDER);
 
     if let Some(note) = cells.note {
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            note.to_string(),
-            egui::FontId::proportional(MONO),
-            quiet,
-        );
-        job.wrap = egui::text::TextWrapping::truncate_at_width((right - x).max(0.0));
-        let galley = painter.layout_job(job);
-        painter.galley(
-            egui::pos2(x, middle(galley.size().y)),
-            galley,
-            egui::Color32::PLACEHOLDER,
+        crate::panel::cut(
+            &painter,
+            x,
+            rect.center().y,
+            right - x,
+            note,
+            egui::TextFormat::simple(egui::FontId::proportional(MONO), quiet),
         );
     }
 

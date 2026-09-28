@@ -215,16 +215,11 @@ fn closed_form_at(b: f64) -> Box<[[f32; TAPS]; PHASES]> {
     bank
 }
 
-/// [`closed_form_at`] at the measured cutoff.
-fn closed_form() -> Box<[[f32; TAPS]; PHASES]> {
-    closed_form_at(B)
-}
-
 /// Lazily build the `[phase][tap]` bank the instrument stores.
 pub fn taps() -> &'static [[f32; TAPS]; PHASES] {
     static BANK: OnceLock<Box<[[f32; TAPS]; PHASES]>> = OnceLock::new();
     BANK.get_or_init(|| {
-        let mut bank = closed_form();
+        let mut bank = closed_form_at(B);
         for &(phase, tap, value) in &MEASURED {
             bank[phase][tap] = value;
         }
@@ -234,18 +229,13 @@ pub fn taps() -> &'static [[f32; TAPS]; PHASES] {
 
 /// Return field `f` as `(floor(source position), phase)` without index overflow, on a
 /// lattice of `num` source samples per `den` fields.
-pub fn lattice_at(field: usize, num: u32, den: u32) -> (i128, usize) {
+fn lattice_at(field: usize, num: u32, den: u32) -> (i128, usize) {
     let t = u128::from(num) * field as u128;
     let remainder = t % u128::from(den);
     (
         (t / u128::from(den)) as i128,
         (remainder * PHASES as u128 / u128::from(den)) as usize,
     )
-}
-
-/// [`lattice_at`] on the lattice the tap bank was measured for.
-pub fn lattice(field: usize) -> (i128, usize) {
-    lattice_at(field, PITCH_NUM, PITCH_DEN)
 }
 
 /// Sum field `f`'s tap products in `f64` over `bank`; samples outside `source` are
@@ -268,18 +258,6 @@ fn accumulate_over(
         }
     }
     acc
-}
-
-/// Sum field `f`'s tap products in `f64` on the lattice the tap bank was measured for;
-/// samples outside `source` are zero.
-pub fn accumulate(source: &[i16], field: usize) -> f64 {
-    accumulate_over(taps(), source, field, PITCH_NUM, PITCH_DEN)
-}
-
-/// Return a field in source units on the lattice the tap bank was measured for,
-/// truncating toward zero once after the full sum.
-pub fn field(source: &[i16], at: usize) -> i64 {
-    accumulate(source, at).trunc() as i64
 }
 
 /// The tap bank at one lattice ratio, for a source at a rate of its own.
@@ -325,6 +303,14 @@ mod tests {
     use super::super::codec::{FIELD_RATE, SOURCE_RATE};
     use super::*;
 
+    fn measured() -> Kernel {
+        Kernel::new(PITCH_NUM, PITCH_DEN)
+    }
+
+    fn lattice(field: usize) -> (i128, usize) {
+        lattice_at(field, PITCH_NUM, PITCH_DEN)
+    }
+
     #[test]
     fn the_bessel_series_matches_tabulated_values() {
         assert_eq!(bessel_i0(0.0), 1.0);
@@ -344,7 +330,7 @@ mod tests {
 
     #[test]
     fn the_closed_form_is_mirror_symmetric_to_the_bit() {
-        let bank = closed_form();
+        let bank = closed_form_at(B);
         for phase in 1..PHASES {
             for j in 0..TAPS {
                 assert_eq!(
@@ -383,11 +369,11 @@ mod tests {
     fn a_constant_resamples_one_count_under_itself() {
         let source = vec![1000i16; 4096];
         for f in 20..3000 {
-            assert_eq!(field(&source, f), 999, "field {f}");
+            assert_eq!(measured().field(&source, f), 999, "field {f}");
         }
         let source = vec![-1000i16; 4096];
         for f in 20..3000 {
-            assert_eq!(field(&source, f), -999, "field {f}");
+            assert_eq!(measured().field(&source, f), -999, "field {f}");
         }
     }
 
@@ -397,7 +383,7 @@ mod tests {
         source[0] = 32767;
         let sample = f32::from(32767i16) * DEPTH_16;
         let expected = f64::from(sample * taps()[0][FIRST as usize]);
-        assert_eq!(accumulate(&source, 0), expected);
+        assert_eq!(measured().accumulate(&source, 0), expected);
         assert_ne!(
             expected,
             f64::from(sample) * f64::from(taps()[0][FIRST as usize])
@@ -445,7 +431,10 @@ mod tests {
     fn one_impulse_lights_the_kernels_support() {
         let mut source = vec![0i16; 4096];
         source[2048] = 30_000;
-        let lit: Vec<usize> = (0..3000).filter(|&f| field(&source, f) != 0).collect();
+        let kernel = measured();
+        let lit: Vec<usize> = (0..3000)
+            .filter(|&f| kernel.field(&source, f) != 0)
+            .collect();
         let (near, _) = lattice(lit[0]);
         let (far, _) = lattice(lit[lit.len() - 1]);
         assert!(2048 - near <= 15 && far - 2048 <= 14, "{near}..{far}");

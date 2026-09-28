@@ -79,7 +79,7 @@ pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
                     if matches!(wide.sty(), Ok(nsmp::Sty::V4(_))) {
                         kinds.push(Kind::WideV4Preset);
                     }
-                    if nsmp::section::find4(&wide.body.sections, nsmp::section::MAP4).is_some() {
+                    if nsmp::section::find(&wide.body.sections, nsmp::section::MAP4).is_some() {
                         kinds.push(Kind::WideMap);
                     }
                 }
@@ -309,7 +309,7 @@ fn routes_a_section(_: &[u8], entity: &Entity) -> Result<(), String> {
 type Octaves = (&'static str, i8);
 
 /// A field, the value it holds, and the highest stored value the panel reaches.
-type Selector = (&'static str, u8, u8);
+type Selector = (&'static str, u16, u16);
 
 /// Each selector holds a value the panel can select, and octave shifts stay within
 /// two octaves.
@@ -580,7 +580,6 @@ fn preset_schema(_: &[u8], entity: &Entity) -> Result<(), String> {
             );
         }
         Sample::V3(sample) => match sample.sty().context("sty")? {
-            nsmp::Sty::V2(_) => return Err("a wide chain read a v2 preset".into()),
             nsmp::Sty::V3(block) => {
                 ensure!(
                     block.raw.len() == nsmp::sty::V3_LEN,
@@ -864,7 +863,7 @@ fn planned_key_map(
     sample: &nord_format::cbin::Cbin<nsmp::SampleV3>,
 ) -> Result<Option<KeyMapPlan>, String> {
     let map =
-        nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
+        nsmp::section::find(&sample.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
     let table = sample.zone_table().context("zone table")?;
     let kind = table.key_map(&map.payload).context("per-key table")?;
     if kind == nsmp::zone::KeyMap::Absent {
@@ -942,7 +941,7 @@ fn populated(entity: &Entity) -> Result<bool, String> {
 fn key_levels(entity: &Entity) -> Result<Vec<Vec<u8>>, String> {
     let wide = samples::wide(entity)?;
     let map =
-        nsmp::section::find4(&wide.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
+        nsmp::section::find(&wide.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
     Ok((0..128)
         .map(|k| map.payload[6 + k * 10..][..6].to_vec())
         .collect())

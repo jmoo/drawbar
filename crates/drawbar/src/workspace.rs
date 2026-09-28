@@ -9,9 +9,10 @@
 use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui;
+use nord_format::accept::Slot;
 use nord_format::cbin::{Cbin, Generation, Header};
 use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
-use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Settings, Song, Synth};
+use nord_format::{Entity, OrganPreset, PianoPreset, Program, Synth};
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
@@ -332,10 +333,25 @@ impl LocalEntity {
     /// The counterpart of `nord … get --body` pointed at a file. `None` for anything
     /// that is not a CBIN container.
     pub fn raw_body(&self) -> Option<Vec<u8>> {
-        nord_usb::envelope::unwrap(&self.bytes)
-            .ok()
-            .map(|read| read.body.0)
+        wire_body(&self.bytes)
     }
+}
+
+/// A file's body as the wire carries it, without its container, or `None` for bytes no
+/// container this app unwraps.
+pub(crate) fn wire_body(bytes: &[u8]) -> Option<Vec<u8>> {
+    nord_usb::envelope::unwrap(bytes)
+        .ok()
+        .map(|read| read.body.0)
+}
+
+/// The offset of the first byte where the two differ, if they differ.
+pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
+    if let Some(at) = a.iter().zip(b).position(|(a, b)| a != b) {
+        return Some(at);
+    }
+    // One is a prefix of the other; the first difference is where the shorter one ends.
+    (a.len() != b.len()).then(|| a.len().min(b.len()))
 }
 
 /// Whether an asset holds something no other copy of it does.
@@ -350,10 +366,7 @@ pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
 /// The filename an export suggests for a name: made path-safe, and given the extension
 /// the bytes call for unless the name already carries one.
 fn export_filename(name: &str, bytes: &[u8]) -> String {
-    let stem = match filename_stem(name) {
-        s if s.is_empty() => "unnamed".to_string(),
-        s => s,
-    };
+    let stem = filename_stem(name);
     match crate::strings::carries_tag(&stem) {
         true => stem,
         false => format!("{stem}.{}", format_tag(bytes)),
@@ -366,10 +379,7 @@ fn export_filename(name: &str, bytes: &[u8]) -> String {
 /// `nord sample decode --out` writes the same name, so a zone exported from either tool
 /// gets one name.
 pub fn zone_wav_name(instrument: &str, zone: usize) -> String {
-    let stem = match filename_stem(instrument) {
-        s if s.is_empty() => "unnamed".to_string(),
-        s => s,
-    };
+    let stem = filename_stem(instrument);
     format!("{stem}-zone{zone}.wav")
 }
 
@@ -377,17 +387,14 @@ pub fn zone_wav_name(instrument: &str, zone: usize) -> String {
 /// and the stroke named as `nord piano decode` names it, `<root>-b<bank>-l<layer>`, with
 /// the MIDI note zero-padded to three digits.
 pub fn stroke_wav_name(library: &str, root: u8, bank: u8, layer: u8) -> String {
-    let stem = match filename_stem(library) {
-        s if s.is_empty() => "unnamed".to_string(),
-        s => s,
-    };
+    let stem = filename_stem(library);
     format!("{stem}-{root:03}-b{bank}-l{layer:02}.wav")
 }
 
 /// A name reduced to what a path can carry: runs of whitespace, dashes, and path
 /// separators become one `-`, control characters are dropped, and leading or trailing
-/// dots and dashes are trimmed so the file is neither hidden nor option-like. For
-/// filenames only; the name itself is never changed.
+/// dots and dashes are trimmed so the file is neither hidden nor option-like. A name
+/// with nothing left is `unnamed`. For filenames only; the name itself is never changed.
 fn filename_stem(label: &str) -> String {
     // A separator is written only before the next kept character, so a run collapses to
     // one `-` and none trails.
@@ -410,7 +417,10 @@ fn filename_stem(label: &str) -> String {
     }
     // A leading dot hides the file and dots alone spell `.` and `..`; a leading dash is
     // an option to every tool that later reads it.
-    out.trim_matches(['.', '-']).to_string()
+    match out.trim_matches(['.', '-']) {
+        "" => "unnamed".to_string(),
+        stem => stem.to_string(),
+    }
 }
 
 /// The extension an export gets when the name carries none: the CBIN tag in the bytes,
@@ -443,13 +453,9 @@ fn verify(entity: &Entity, bytes: &[u8]) -> VerifyState {
         Ok(out) => out,
         Err(e) => return VerifyState::Failed(e.to_string()),
     };
-    match out.iter().zip(bytes).position(|(a, b)| a != b) {
+    match first_difference(&out, bytes) {
         Some(at) => VerifyState::Differs { at },
-        None if out.len() == bytes.len() => VerifyState::Ok,
-        // A shared prefix and a different length: they differ where the shorter ends.
-        None => VerifyState::Differs {
-            at: out.len().min(bytes.len()),
-        },
+        None => VerifyState::Ok,
     }
 }
 
@@ -603,17 +609,7 @@ impl Fresh {
                 "A text file. It stays on this computer, since no instrument has a \
                  folder for one.",
             ),
-            Fresh::Program
-            | Fresh::Live
-            | Fresh::SetList
-            | Fresh::Settings
-            | Fresh::Stage2Program
-            | Fresh::Stage3Program
-            | Fresh::Stage3Synth
-            | Fresh::Stage4Program
-            | Fresh::Stage4Organ
-            | Fresh::Stage4Piano
-            | Fresh::Stage4Synth => self.zeroed().then_some(
+            _ => self.zeroed().then_some(
                 "Every control at zero. The file decodes and re-saves byte for byte, but \
                  it is not a factory program. This app does not know what one would hold.",
             ),
@@ -622,25 +618,19 @@ impl Fresh {
 
     /// The file this makes, as [`Workspace::create`] adds it to the list.
     pub(crate) fn bytes(self) -> Result<Vec<u8>, String> {
-        let at = |slot: u16| -> Result<ne5::program::Location, String> {
-            (0, slot).try_into().map_err(|e| format!("{e}"))
-        };
-        let entity = match self {
-            Fresh::Program => Entity::Program(Program::Electro5(ne5::program::new(at(0)?))),
-            Fresh::Live => Entity::Live(Live::Electro5(ne5::live::new(
-                (0, 0).try_into().map_err(|e| format!("{e}"))?,
-            ))),
+        let at = |slot| ne5::program::Location::new(0, slot).map_err(|e| e.to_string());
+        let electro5 = |class| -> Result<Entity, String> {
             // A set list is only four program pointers, so it starts with the first four
             // programs.
-            Fresh::SetList => Entity::Song(Song::Electro5(
-                ne5::song::new(
-                    (0, 0).try_into().map_err(|e| format!("{e}"))?,
-                    ne5::song::DEFAULT_VERSION,
-                    [at(0)?, at(1)?, at(2)?, at(3)?],
-                )
-                .map_err(|e| format!("{e}"))?,
-            )),
-            Fresh::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
+            Entity::electro5(class, [at(0)?, at(1)?, at(2)?, at(3)?])
+                .ok_or_else(|| format!("no new {} exists", self.label()))?
+                .map_err(|e| e.to_string())
+        };
+        let entity = match self {
+            Fresh::Program => electro5(Slot::Program)?,
+            Fresh::Live => electro5(Slot::Live)?,
+            Fresh::SetList => electro5(Slot::SetList)?,
+            Fresh::Settings => electro5(Slot::Settings)?,
             Fresh::Stage2Program => zeroed!(
                 ns2::Program,
                 ns2::program::BODY_LEN,

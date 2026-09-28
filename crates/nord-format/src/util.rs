@@ -50,6 +50,17 @@ fn unknown(file_type: FileType) -> Peek {
     }
 }
 
+/// `file_type` if the whole of `magic` is next in `reader`, or the bytes found there as
+/// an unknown format.
+fn expect_magic(reader: &mut impl Read, magic: &[u8], file_type: FileType) -> Result<Peek, Error> {
+    let mut head = vec![0u8; magic.len()];
+    reader.read_exact(&mut head)?;
+    if head != magic {
+        return Err(ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned()).into());
+    }
+    Ok(unknown(file_type))
+}
+
 /// Identify a file by its magic, leaving the stream where it started.
 pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
     let start = reader.stream_position()?;
@@ -61,50 +72,17 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
         match head[0] {
             // 'P': a ZIP local-file header, checked in full so a stray P (or a bare
             // central directory) is not called an archive.
-            0x50 => {
-                let mut head = [0u8; 4];
-                reader.read_exact(&mut head)?;
-                if &head == b"PK\x03\x04" {
-                    Ok(unknown(FileType::Zip))
-                } else {
-                    Err(
-                        ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned())
-                            .into(),
-                    )
-                }
-            }
+            0x50 => expect_magic(reader, b"PK\x03\x04", FileType::Zip),
 
             0x3c => Ok(unknown(FileType::Xml)),
 
             // 'S': a Sample Editor project, checked in full so a stray S is not called one.
-            0x53 => {
-                let mut head = vec![0u8; nsmpproj::MAGIC.len()];
-                reader.read_exact(&mut head)?;
-                if head == nsmpproj::MAGIC {
-                    Ok(unknown(FileType::SampleProject))
-                } else {
-                    Err(
-                        ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned())
-                            .into(),
-                    )
-                }
-            }
+            0x53 => expect_magic(reader, nsmpproj::MAGIC, FileType::SampleProject),
 
             sysex::SYSEX_START => Ok(unknown(FileType::Sysex)),
 
             // 'M': `MThd`, checked in full so a stray M is not called MIDI.
-            0x4d => {
-                let mut head = [0u8; 4];
-                reader.read_exact(&mut head)?;
-                if &head == midi::MAGIC {
-                    Ok(unknown(FileType::Midi))
-                } else {
-                    Err(
-                        ParseError::UnknownFormat(String::from_utf8_lossy(&head).into_owned())
-                            .into(),
-                    )
-                }
-            }
+            0x4d => expect_magic(reader, midi::MAGIC, FileType::Midi),
 
             // 'C': CBIN, or the Electro 2 library's CNE3.
             0x43 => {

@@ -16,6 +16,8 @@ const HEAD_H: f32 = 20.0;
 const HEAD_TEXT: f32 = 9.0;
 /// The text size of a row's first column, which names the row.
 pub const NAME_TEXT: f32 = 11.5;
+/// How far an open row's body is indented, measured from the page's edge.
+pub const INDENT: f32 = 68.0;
 
 /// What one column is worth: a figure the list fixes, or a share of what the fixed ones
 /// leave.
@@ -24,6 +26,16 @@ pub enum Width {
     Fixed(f32),
     Share(f32),
 }
+
+/// The five columns of a zone or root list: the name, what it answers, what it is made
+/// of, its size, and the chevron.
+pub const GRID: [Width; 5] = [
+    Width::Fixed(56.0),
+    Width::Share(1.1),
+    Width::Share(1.5),
+    Width::Fixed(74.0),
+    Width::Fixed(20.0),
+];
 
 /// Each column's left edge and width, in order.
 pub fn columns<const N: usize>(rect: egui::Rect, widths: [Width; N]) -> [(f32, f32); N] {

@@ -1,6 +1,6 @@
 //! The zone table at the tail of the `map` section.
 
-use super::Chain;
+use super::{keymap, Chain};
 use crate::error::ParseError;
 
 /// Offset of the zone count within the `map` payload. The keyboard map fills everything
@@ -316,10 +316,26 @@ impl Wide {
 /// zones, by [`partners`].
 ///
 /// Inferred from specimens; not confirmed on hardware.
-const KEY_TABLE_AT: usize = 6;
-const KEY_STRIDE: usize = 10;
-const KEY_QUAD_AT: usize = 6;
-const KEYS: usize = 128;
+const KEY_TABLE_AT: usize = keymap::RECORD_LEN;
+const KEY_QUAD_AT: usize = keymap::RECORD_LEN;
+const KEY_STRIDE: usize = KEY_QUAD_AT + 4;
+const KEYS: usize = keymap::KEYS;
+
+/// Each key's partner quad in a per-key table, as `(key, offset, quad)`, once the
+/// whole table is known to fit `map`.
+fn key_quads(map: &[u8]) -> Result<impl Iterator<Item = (u8, usize, &[u8])>, ParseError> {
+    let quad_at = |key: usize| KEY_TABLE_AT + key * KEY_STRIDE + KEY_QUAD_AT;
+    if map.len() < quad_at(KEYS - 1) + 4 {
+        return Err(ParseError::AssertFail(format!(
+            "map section is {} bytes, too short for a per-key table",
+            map.len()
+        )));
+    }
+    Ok((0..KEYS).map(move |key| {
+        let at = quad_at(key);
+        (key as u8, at, &map[at..at + 4])
+    }))
+}
 
 /// The lowest key the per-key table describes, and the note the editor's project
 /// file counts its note list from. The editor writes it into the bottom zone's
@@ -581,17 +597,7 @@ impl Table {
         if !self.wide.has_key_map() {
             return Ok(KeyMap::Absent);
         }
-        let mut neutral = true;
-        for key in 0..KEYS {
-            let at = KEY_TABLE_AT + key * KEY_STRIDE + KEY_QUAD_AT;
-            let quad = map.get(at..at + 4).ok_or_else(|| {
-                ParseError::AssertFail(format!(
-                    "map section is {} bytes, too short for a per-key table",
-                    map.len()
-                ))
-            })?;
-            neutral &= quad == [key as u8; 4];
-        }
+        let neutral = key_quads(map)?.all(|(key, _, quad)| quad == [key; 4]);
         Ok(if neutral {
             KeyMap::Neutral
         } else {
@@ -624,23 +630,13 @@ impl Table {
         let Some((lo, hi)) = span(&ladder) else {
             return Ok(Vec::new());
         };
-        let mut plan = Vec::new();
-        for key in 0..KEYS {
-            let k = key as u8;
-            let at = KEY_TABLE_AT + key * KEY_STRIDE + KEY_QUAD_AT;
-            let quad = map.get(at..at + 4).ok_or_else(|| {
-                ParseError::AssertFail(format!(
-                    "map section is {} bytes, too short for a per-key table",
-                    map.len()
-                ))
-            })?;
-            if !(lo..=hi).contains(&k) && quad == [0, 0, 0, k] {
-                continue;
-            }
-            let (a, b) = partners(&ladder, k);
-            plan.push((at, [a, b, a, k]));
-        }
-        Ok(plan)
+        Ok(key_quads(map)?
+            .filter(|&(k, _, quad)| (lo..=hi).contains(&k) || quad != [0, 0, 0, k])
+            .map(|(k, at, _)| {
+                let (a, b) = partners(&ladder, k);
+                (at, [a, b, a, k])
+            })
+            .collect())
     }
 
     /// Check that a populated per-key table follows the derived partner law.
@@ -655,15 +651,6 @@ impl Table {
         }
         Ok(())
     }
-}
-
-/// Find and validate a wide zone table against `(stroke global id, root key)` pairs.
-pub fn read_v3(
-    map_version: u32,
-    map: &[u8],
-    strokes: &[(u32, u8)],
-) -> Result<Vec<ZoneV3>, ParseError> {
-    Table::locate(map_version, map, strokes)?.read(map, strokes)
 }
 
 /// Derive the editor's default high-to-low top notes from root keys.
@@ -689,6 +676,14 @@ pub fn derive_top_notes(roots_high_to_low: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_v3(
+        map_version: u32,
+        map: &[u8],
+        strokes: &[(u32, u8)],
+    ) -> Result<Vec<ZoneV3>, ParseError> {
+        Table::locate(map_version, map, strokes)?.read(map, strokes)
+    }
 
     /// A table whose stroke ids run `n…1`, which is what the editor emits when it
     /// builds an instrument in one pass.

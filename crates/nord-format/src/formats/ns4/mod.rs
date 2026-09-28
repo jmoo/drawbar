@@ -65,22 +65,21 @@ pub mod synth_voice;
 pub use synth_voice::SynthVoice;
 pub mod program;
 pub use program::Program;
+mod program_panel;
 
 pub mod live {
     //! The live buffer (`.ns4l`): the current panel state, as a program body under its
     //! own tag.
 
     use super::program::{self, Program};
-    use crate::cbin::{self, Cbin};
+    use crate::cbin::Cbin;
     use crate::error::Error;
     use std::io::{Read, Seek};
 
     pub const FORMAT: &str = "ns4l";
 
     pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-        let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-        crate::formats::known_version(FORMAT, file.header.version, program::KNOWN_VERSIONS)?;
-        Ok(file)
+        crate::formats::read_known(reader, FORMAT, program::KNOWN_VERSIONS)
     }
 }
 

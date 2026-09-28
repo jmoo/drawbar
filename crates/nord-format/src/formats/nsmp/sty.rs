@@ -43,14 +43,14 @@ pub const V4_LEN: usize = 92;
 pub const V4_LEN_LONG: usize = 108;
 
 /// Within a v2 payload: whether the category's dynamics curve is enabled.
-const V2_DYNAMICS_ENABLE: usize = 3;
+pub(super) const V2_DYNAMICS_ENABLE: usize = 3;
 
 /// Within a v2 payload: how far velocity moves level, quantized to
 /// [`VELOCITY_LEVELS`].
-const V2_VELOCITY_TO_AMPLITUDE: usize = 4;
+pub(super) const V2_VELOCITY_TO_AMPLITUDE: usize = 4;
 
 /// Within a v2 payload: how far velocity moves timbre, on the same scale.
-const V2_VELOCITY_TO_TIMBRE: usize = 5;
+pub(super) const V2_VELOCITY_TO_TIMBRE: usize = 5;
 
 /// Steps a v2 velocity depth takes. The project's own field has four; the byte
 /// holds three, with the project's middle two both landing on 1.
@@ -268,10 +268,10 @@ impl StyV4 {
     }
 }
 
-/// A `sty` section read under the schema its own length and version select.
+/// A wide-chain `sty` section read under the schema its own length and version
+/// select. The narrow chain's is a [`StyV2`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sty {
-    V2(StyV2),
     V3(StyV3),
     V4(StyV4),
 }
@@ -285,14 +285,6 @@ impl Sty {
             v => Err(ParseError::AssertFail(format!(
                 "sty section version {v} has no preset layout derived from a specimen"
             ))),
-        }
-    }
-
-    pub fn raw(&self) -> &[u8] {
-        match self {
-            Sty::V2(s) => &s.raw,
-            Sty::V3(s) => &s.raw,
-            Sty::V4(s) => &s.raw,
         }
     }
 }

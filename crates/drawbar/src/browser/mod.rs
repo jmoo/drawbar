@@ -32,7 +32,7 @@ mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk, LOAD_ON_INSTRUMENT};
 pub use drag::{
-    families_present, kinds_present, landing, qualifier, Carried, Held, Item, Kind, Landing, Onto,
+    families_present, kinds_present, landing, qualifier, Carried, Held, Item, Kind, Onto,
 };
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
@@ -78,21 +78,6 @@ pub fn renamed(original: &str, typed: &str) -> Option<String> {
         true => None,
         false => Some(typed.to_string()),
     }
-}
-
-/// The act a verdict runs. `None` for a refusal, which [`Browser::land`] reports instead.
-fn act_of(verdict: Landing) -> Option<Act> {
-    Some(match verdict {
-        Landing::Copy { class, at } => Act::Copy { class, at },
-        Landing::Send { id, class, at } => Act::Send { id, class, at },
-        Landing::Rearrange { class, from, to } => Act::Rearrange { class, from, to },
-        Landing::File { id, folder } => Act::File {
-            id,
-            folder: Some(folder),
-        },
-        Landing::Unfile { id } => Act::File { id, folder: None },
-        Landing::No(_) => return None,
-    })
 }
 
 pub struct Browser {
@@ -364,7 +349,7 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         if let Some(carried) = response.dnd_hover_payload::<Carried>() {
-            if landing(&carried.head, onto).allowed() {
+            if landing(&carried.head, onto).is_ok() {
                 ui.painter().rect_stroke(
                     response.rect,
                     3.0,
@@ -380,24 +365,30 @@ impl Browser {
     }
 
     /// Run the drop for the pressed row, and for the rest of what it carries when the
-    /// verdict [`Landing::repeats`].
+    /// verdict is a copy or a filing.
+    ///
+    /// ⚠️ A send and a rearrange name one destination, and several rows sent to one slot
+    /// would overwrite each other, so those take only the pressed row.
     fn land(&mut self, carried: &Arc<Carried>, onto: Onto, acts: &mut Vec<Act>) {
-        let verdict = landing(&carried.head, onto);
-        if let Landing::No(why) = verdict {
-            return acts.push(Act::Refused(format!(
-                "“{}” cannot go there: {why}.",
-                carried.name
-            )));
-        }
-        if !verdict.repeats() {
-            return acts.extend(act_of(verdict));
-        }
-        for held in carried.all() {
-            let each = landing(&held, onto);
-            if each.same(verdict) {
-                acts.extend(act_of(each));
+        let verdict = match landing(&carried.head, onto) {
+            Ok(act) => act,
+            Err(why) => {
+                return acts.push(Act::Refused(format!(
+                    "“{}” cannot go there: {why}.",
+                    carried.name
+                )))
             }
+        };
+        if !matches!(verdict, Act::Copy { .. } | Act::File { .. }) {
+            return acts.push(verdict);
         }
+        let kind = std::mem::discriminant(&verdict);
+        acts.extend(
+            carried
+                .all()
+                .filter_map(|held| landing(&held, onto).ok())
+                .filter(|each| std::mem::discriminant(each) == kind),
+        );
     }
 
     /// Ask before a slot is replaced or emptied.

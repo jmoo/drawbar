@@ -361,9 +361,9 @@ pub fn keyboard(
         let key = key_rect(rect, span, note);
         let black = is_black(note);
         let fill = match (black, lit.contains(&note) || hovered == Some(note)) {
-            (true, false) => app::stop_black(&visuals),
+            (true, false) => app::STOP_BLACK,
             (true, true) => app::accent(&visuals),
-            (false, false) => app::stop_white(&visuals),
+            (false, false) => app::STOP_WHITE,
             (false, true) => visuals.selection.bg_fill,
         };
         painter.rect_filled(key, 0.0, fill);
@@ -373,7 +373,7 @@ pub fn keyboard(
                 egui::Align2::CENTER_BOTTOM,
                 note::name(note),
                 egui::FontId::monospace(OCTAVE_TEXT),
-                app::stop_black(&visuals).gamma_multiply(OCTAVE_ALPHA),
+                app::STOP_BLACK.gamma_multiply(OCTAVE_ALPHA),
             );
         }
     }
@@ -561,21 +561,33 @@ const HATCH_ALPHA: f32 = 0.55;
 
 /// The stretches of `span` no band covers, low to high.
 pub fn gaps(bounds: &[(u8, u8)], span: Span) -> Vec<(u8, u8)> {
-    let (low, high) = span.ends();
-    let mut sorted = bounds.to_vec();
+    uncovered(bounds, span.ends())
+}
+
+/// The stretches of `low..=high` no range covers, low to high.
+fn uncovered(ranges: &[(u8, u8)], (low, high): (u8, u8)) -> Vec<(u8, u8)> {
+    let mut sorted = ranges.to_vec();
     sorted.sort_by_key(|(low, _)| *low);
     let mut out = Vec::new();
     let mut at = low;
-    for (band_low, band_top) in sorted {
-        if band_low > at {
-            out.push((at, band_low.saturating_sub(1)));
+    for (range_low, range_top) in sorted {
+        if range_low > at {
+            out.push((at, range_low.saturating_sub(1)));
         }
-        at = at.max(band_top.saturating_add(1));
+        at = at.max(range_top.saturating_add(1));
     }
     if at <= high {
         out.push((at, high));
     }
     out
+}
+
+/// How a key map's heading reads `silent` uncovered stretches.
+pub fn coverage(silent: usize) -> String {
+    match silent {
+        0 => "every key answered".to_string(),
+        n => crate::strings::counted(n, "silent range", "silent ranges"),
+    }
 }
 
 /// How far a lane's rows may be dragged into each other.
@@ -776,30 +788,44 @@ pub fn bands(
         span,
         &bounds,
         edges,
-        |index, edge| drag_hint(&zones[index], edge, edges, index),
+        |index, edge| {
+            let follows = match (edges, edge, index) {
+                (Edges::TopOnly, Edge::Top, 1..) => ", and the low of the band above it",
+                _ => "",
+            };
+            edge_hint(&zones[index].name, "note", bounds[index], edge, follows)
+        },
         |index, edge, note| clamped(&bounds, span, index, edge, note, edges),
     );
+    answered(&response, hint, act, &grabs, |at| {
+        row_at(rect, span, &bounds, at.x).map(BandAct::Pick)
+    })
+}
 
+/// What a lane answers this frame: it shows the hover hint, then returns the drag, or
+/// else the row a click picked.
+///
+/// ⚠️ A handle sits over its row, and a click on it belongs to the handle, so it is
+/// never a pick.
+fn answered<A>(
+    response: &egui::Response,
+    hint: Option<String>,
+    act: Option<A>,
+    grabs: &[egui::Rect],
+    pick: impl FnOnce(egui::Pos2) -> Option<A>,
+) -> Option<A> {
     if let Some(hint) = hint {
         response.clone().on_hover_text(hint);
     }
     if act.is_some() {
         return act;
     }
-    let picked = picked_at(&response, &grabs)?;
-    row_at(rect, span, &bounds, picked.x).map(BandAct::Pick)
-}
-
-/// Where a click on a lane landed.
-///
-/// ⚠️ A handle sits over its row, and a click on it belongs to the handle, so it is
-/// never a pick.
-fn picked_at(response: &egui::Response, grabs: &[egui::Rect]) -> Option<egui::Pos2> {
     response
         .clicked()
         .then(|| response.interact_pointer_pos())
         .flatten()
         .filter(|at| !grabs.iter().any(|grab| grab.contains(*at)))
+        .and_then(pick)
 }
 
 /// The row whose keys `x` falls in.
@@ -916,20 +942,14 @@ fn handle_rect(
     )
 }
 
-/// A handle's tooltip. With [`Edges::TopOnly`] a top handle also moves the low derived
-/// from it.
-fn drag_hint(band: &Band, edge: Edge, edges: Edges, index: usize) -> String {
+/// A handle's tooltip: which end of `subject` it moves, and what else moves with it.
+fn edge_hint(subject: &str, noun: &str, (low, top): (u8, u8), edge: Edge, follows: &str) -> String {
     let (what, note) = match edge {
-        Edge::Top => ("top", band.top),
-        Edge::Low => ("low", band.low),
-    };
-    let follows = match (edges, edge, index) {
-        (Edges::TopOnly, Edge::Top, 1..) => ", and the low of the band above it",
-        _ => "",
+        Edge::Top => ("top", top),
+        Edge::Low => ("low", low),
     };
     format!(
-        "Drag to move {}'s {what} note{follows} (now {})",
-        band.name,
+        "Drag to move {subject}'s {what} {noun}{follows} (now {})",
         note::name(note)
     )
 }
@@ -1007,19 +1027,6 @@ pub fn boundary(
         fewest: 1,
     };
     dragged(bounds, span, cell, edge, note, room)
-}
-
-/// A root boundary handle's tooltip.
-fn root_hint(cell: &SizeCell, edge: Edge) -> String {
-    let (what, note) = match edge {
-        Edge::Top => ("top", cell.top),
-        Edge::Low => ("low", cell.low),
-    };
-    format!(
-        "Drag to move root {}'s {what} key (now {})",
-        cell.name,
-        note::name(note)
-    )
 }
 
 /// The size lane: one cell per root, with its kept megabytes as a bar inside a dashed
@@ -1135,18 +1142,15 @@ pub fn size_cells(
         span,
         &bounds,
         edges,
-        |index, edge| root_hint(&cells[index], edge),
+        |index, edge| {
+            let subject = format!("root {}", cells[index].name);
+            edge_hint(&subject, "key", bounds[index], edge, "")
+        },
         |index, edge, note| boundary(&bounds, span, index, edge, note),
     );
-
-    if let Some(hint) = hint {
-        response.clone().on_hover_text(hint);
-    }
-    if act.is_some() {
-        return act;
-    }
-    let picked = picked_at(&response, &grabs)?;
-    row_at(rect, span, &bounds, picked.x).map(BandAct::Pick)
+    answered(&response, hint, act, &grabs, |at| {
+        row_at(rect, span, &bounds, at.x).map(BandAct::Pick)
+    })
 }
 
 /// How many keys a cell spans.
@@ -1225,29 +1229,23 @@ const HOLE_ALPHA: f32 = 0.5;
 /// block whose keys overlap it does. The holes are what remains of `1..=127` after those
 /// windows are combined.
 pub fn velocity_holes(blocks: &[VelBlock]) -> Vec<(usize, u8, u8)> {
-    let mut out = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let mut covered: Vec<(u8, u8)> = blocks
-            .iter()
-            .enumerate()
-            .filter(|(other, over)| {
-                *other == index || (over.low <= block.top && over.top >= block.low)
-            })
-            .map(|(_, over)| ordered(over.window))
-            .collect();
-        covered.sort_by_key(|(low, _)| *low);
-        let mut at = VELOCITY_LOW;
-        for (low, high) in covered {
-            if low > at {
-                out.push((index, at, low.saturating_sub(1)));
-            }
-            at = at.max(high.saturating_add(1));
-        }
-        if at <= VELOCITY_HIGH {
-            out.push((index, at, VELOCITY_HIGH));
-        }
-    }
-    out
+    blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(index, block)| {
+            let covered: Vec<(u8, u8)> = blocks
+                .iter()
+                .enumerate()
+                .filter(|(other, over)| {
+                    *other == index || (over.low <= block.top && over.top >= block.low)
+                })
+                .map(|(_, over)| ordered(over.window))
+                .collect();
+            uncovered(&covered, (VELOCITY_LOW, VELOCITY_HIGH))
+                .into_iter()
+                .map(move |(from, to)| (index, from, to))
+        })
+        .collect()
 }
 
 /// A window's ends in order, so an inverted window still reads as a range.
@@ -1409,17 +1407,12 @@ pub fn velocity(
         }
     }
 
-    if let Some(hint) = hint {
-        response.clone().on_hover_text(hint);
-    }
-    if act.is_some() {
-        return act;
-    }
-    let picked = picked_at(&response, &grabs)?;
-    blocks
-        .iter()
-        .position(|block| cell(rect, span, block, block.window).contains(picked))
-        .map(VelocityAct::Pick)
+    answered(&response, hint, act, &grabs, |at| {
+        blocks
+            .iter()
+            .position(|block| cell(rect, span, block, block.window).contains(at))
+            .map(VelocityAct::Pick)
+    })
 }
 
 /// Where one velocity sits in the field.
@@ -1966,8 +1959,8 @@ mod tests {
             assert_eq!(fills(&output, key_rect(rect, NSMP, note)), vec![lit]);
             let quiet = key_rect(rect, NSMP, note + 12);
             let own = match is_black(note) {
-                true => crate::app::stop_black(&visuals),
-                false => crate::app::stop_white(&visuals),
+                true => crate::app::STOP_BLACK,
+                false => crate::app::STOP_WHITE,
             };
             assert_eq!(fills(&output, quiet), vec![own], "an octave up is unlit");
         }

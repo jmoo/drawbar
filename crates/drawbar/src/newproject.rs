@@ -31,7 +31,7 @@ use nord_format::wav::Pcm16;
 use nord_format::Entity;
 
 use crate::document::controls::fits;
-use crate::document::encode::{refusal as encodable, Source};
+use crate::document::encode::{encodable, read, Source};
 use crate::document::note_picker;
 use crate::log::Log;
 use crate::work::{self, Job, Progress};
@@ -147,11 +147,17 @@ pub struct Take {
 }
 
 impl Take {
-    fn new(path: String, bytes: &[u8], root_key: u8, bank: Bank, layer: LayerTag) -> Take {
-        let source = Source::read(bytes);
+    /// A picked file, keyed at `root` as a zone. A piano stroke takes its key, bank and
+    /// layer from [`stroke_defaults`] instead.
+    fn new(making: Making, path: String, bytes: &[u8], root: u8) -> Take {
+        let (root_key, bank, layer) = match making {
+            Making::Piano => stroke_defaults(&path),
+            Making::Project | Making::Instrument => (root, Bank::Attack, LayerTag::Index(0)),
+        };
+        let source = read(bytes);
         let frames = match &source {
-            Source::Read(pcm) => project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
-            Source::Unreadable(_) => 0,
+            Ok(pcm) => project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
+            Err(_) => 0,
         };
         Take {
             path,
@@ -164,10 +170,7 @@ impl Take {
     }
 
     fn pcm(&self) -> Option<&Pcm16> {
-        match &self.source {
-            Source::Read(pcm) => Some(pcm),
-            Source::Unreadable(_) => None,
-        }
+        self.source.as_ref().ok()
     }
 
     /// Why this file cannot be part of what is being made.
@@ -177,15 +180,12 @@ impl Take {
     /// rate because it resamples, and reports its other limits when it is built.
     pub fn refusal(&self, making: Making) -> Option<String> {
         match making {
-            Making::Instrument => encodable(&self.source),
+            Making::Instrument => encodable(&self.source).err(),
             Making::Project => match &self.source {
-                Source::Unreadable(why) => Some(why.clone()),
-                Source::Read(_) => (self.frames == 0).then(|| "it holds no audio".to_string()),
+                Err(why) => Some(why.clone()),
+                Ok(_) => (self.frames == 0).then(|| "it holds no audio".to_string()),
             },
-            Making::Piano => match &self.source {
-                Source::Unreadable(why) => Some(why.clone()),
-                Source::Read(_) => None,
-            },
+            Making::Piano => self.source.as_ref().err().cloned(),
         }
     }
 }
@@ -303,28 +303,11 @@ impl Draft {
             return None;
         }
         let paths: Vec<String> = files.iter().map(|(name, _)| name.clone()).collect();
-        let takes = match making {
-            Making::Piano => files
-                .iter()
-                .map(|(path, bytes)| {
-                    let (root, bank, layer) = stroke_defaults(path);
-                    Take::new(path.clone(), bytes, root, bank, layer)
-                })
-                .collect(),
-            Making::Project | Making::Instrument => files
-                .iter()
-                .zip(default_roots(&paths))
-                .map(|((path, bytes), root_key)| {
-                    Take::new(
-                        path.clone(),
-                        bytes,
-                        root_key,
-                        Bank::Attack,
-                        LayerTag::Index(0),
-                    )
-                })
-                .collect(),
-        };
+        let takes = files
+            .iter()
+            .zip(default_roots(&paths))
+            .map(|((path, bytes), root)| Take::new(making, path.clone(), bytes, root))
+            .collect();
         Some(Draft {
             making,
             name: draft_name(making, &paths),
@@ -338,22 +321,8 @@ impl Draft {
     /// Add more files, as a drop onto the open dialog does.
     pub fn add(&mut self, files: Vec<(String, Vec<u8>)>) {
         for (path, bytes) in files {
-            let take = match self.making {
-                Making::Piano => {
-                    let (root, bank, layer) = stroke_defaults(&path);
-                    Take::new(path, bytes.as_slice(), root, bank, layer)
-                }
-                Making::Project | Making::Instrument => {
-                    let root = trailing_note(&path).unwrap_or_else(|| self.free_key());
-                    Take::new(
-                        path,
-                        bytes.as_slice(),
-                        root,
-                        Bank::Attack,
-                        LayerTag::Index(0),
-                    )
-                }
-            };
+            let root = trailing_note(&path).unwrap_or_else(|| self.free_key());
+            let take = Take::new(self.making, path, &bytes, root);
             self.takes.push(take);
         }
     }
@@ -496,7 +465,8 @@ impl Draft {
                 root_key: take.root_key,
             })
             .collect();
-        let project = Project::new(&self.name, &zones, now()).map_err(|e| e.to_string())?;
+        let modified = crate::work::unix_seconds().unwrap_or(0);
+        let project = Project::new(&self.name, &zones, modified).map_err(|e| e.to_string())?;
         nord_format::to_bytes(&Entity::SampleProject(project)).map_err(|e| e.to_string())
     }
 
@@ -629,20 +599,6 @@ fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
             Clash::Twice => format!("{what} names one of its layers twice"),
         }
     })
-}
-
-/// Unix seconds, for the `m_modifyDate` every block in a project carries.
-#[cfg(not(target_arch = "wasm32"))]
-fn now() -> u32 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as u32)
-}
-
-/// ⚠️ `SystemTime::now` panics in a wasm module, so this uses the page's clock.
-#[cfg(target_arch = "wasm32")]
-fn now() -> u32 {
-    (js_sys::Date::now() / 1000.0) as u32
 }
 
 /// The dialog between picking WAVs and having what they make, if a draft is waiting.

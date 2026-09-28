@@ -143,6 +143,11 @@ impl UsbTransport {
         self.terminate(buf.len()).await
     }
 
+    /// The number of the vendor-specific interface this transport claimed.
+    pub fn interface_number(&self) -> u8 {
+        self.interface.interface_number()
+    }
+
     /// The product string from the device descriptor, or `None` if it has none. It
     /// identifies the instrument (`nord_format::accept::Family::from_product` reads it)
     /// and goes into a recording's header.

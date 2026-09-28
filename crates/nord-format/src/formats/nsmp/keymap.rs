@@ -131,7 +131,7 @@ impl Level {
         Level { gain, detune }
     }
 
-    fn write(&self, record: &mut [u8]) {
+    pub(super) fn write(&self, record: &mut [u8]) {
         record[..3].copy_from_slice(&self.gain.to_be_bytes()[1..]);
         record[3..RECORD_LEN].copy_from_slice(&(self.detune as u32).to_be_bytes()[1..]);
     }

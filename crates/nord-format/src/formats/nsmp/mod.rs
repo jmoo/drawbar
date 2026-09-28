@@ -36,7 +36,7 @@ pub mod zone;
 
 pub use keymap::{KeyTable, Level};
 pub use meta::Meta;
-pub use section::Section;
+pub use section::{Framed, Framing, Narrow, Section, Wide};
 pub use stroke::Stroke;
 pub use sty::{velocity_level, EqBand, Sty, StyV2, StyV3};
 pub use zone::Zone;
@@ -44,7 +44,6 @@ pub use zone::ZoneV3;
 
 use crate::cbin::{self, BodyReader, BodyWriter, Cbin, Header};
 use crate::error::{Error, ParseError};
-use std::fmt;
 use std::io::{Read, Seek, Write};
 
 pub const FORMAT: &str = "nsmp";
@@ -218,19 +217,17 @@ fn nul_terminated(bytes: &[u8]) -> String {
 /// Longest instrument name the narrow chain holds.
 pub const MAX_NAME_LEN: usize = StringField::NAME.capacity();
 
-/// A v2 sample instrument's body: the section chain in file order, including repeats
-/// (`stk` appears once per zone). A file is a `Cbin<Sample>`.
-///
-/// Reads and writes byte-exactly, checksum verified. The name, categories, zones
-/// and stroke metadata decode and are editable; the audio is left as stored.
-pub struct Sample {
-    pub sections: Vec<Section>,
+/// A sample instrument's body: the section chain in file order, including repeats
+/// (`stk` appears once per stroke).
+#[derive(Debug)]
+pub struct Body<F: Framing> {
+    pub sections: Vec<Framed<F>>,
 }
 
-impl cbin::Body for Sample {
+impl<F: Framing> cbin::Body for Body<F> {
     fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<Self, Error> {
         let remaining = r.remaining();
-        Ok(Sample {
+        Ok(Body {
             sections: section::read_chain(r, remaining)?,
         })
     }
@@ -243,14 +240,19 @@ impl cbin::Body for Sample {
     }
 }
 
+/// A v2 sample instrument's body, one `stk` per zone. A file is a `Cbin<Sample>`.
+///
+/// Reads and writes byte-exactly, checksum verified. The name, categories, zones
+/// and stroke metadata decode and are editable; the audio is left as stored.
+pub type Sample = Body<Narrow>;
+
 /// Reads a whole instrument, verifying its checksum.
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error> {
     cbin::read(reader, FORMAT)
 }
 
-/// A v3/v4 body: the wide (`NSMP`) section chain in file order, including repeats
-/// (`stk` appears once per stroke). Sections are kept as stored, so a file
-/// round-trips byte-exactly, and the name, zone boundaries and root keys patch in
+/// A v3/v4 body: the wide (`NSMP`) section chain. Sections are kept as stored, so a
+/// file round-trips byte-exactly, and the name, zone boundaries and root keys patch in
 /// place without touching the audio.
 ///
 /// Every corpus specimen chains `NSMP`, `hdr`, `cat`, `map`, N × `stk`, `sty`,
@@ -259,41 +261,36 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error>
 ///
 /// The stroke payloads are the encoded audio. The enclosing content version selects
 /// [`codec::Layout::V3`] or [`codec::Layout::V4`] through [`codec::Layout::from_version`].
-#[derive(Debug)]
-pub struct SampleV3 {
-    pub sections: Vec<section::Section4>,
-}
-
-impl cbin::Body for SampleV3 {
-    fn read<R: Read + Seek>(r: &mut BodyReader<'_, R>, _: &Header) -> Result<Self, Error> {
-        let remaining = r.remaining();
-        Ok(SampleV3 {
-            sections: section::read_chain4(r, remaining)?,
-        })
-    }
-
-    fn write<W: Write + Seek>(&self, w: &mut BodyWriter<'_, W>) -> Result<(), Error> {
-        for s in &self.sections {
-            s.write_to(w)?;
-        }
-        Ok(())
-    }
-}
+pub type SampleV3 = Body<Wide>;
 
 /// Longest main name the wide chain holds. Vendor filenames join the main name and
 /// the sub name with `_`: `Bass Clarinet 2` and `KG  mono` make
 /// `Bass Clarinet 2_KG  mono 3.11`.
 pub const MAX_NAME_V3_LEN: usize = StringField::NAME_V3.capacity();
 
-impl Cbin<SampleV3> {
-    fn hdr(&self) -> Result<&section::Section4, Error> {
-        section::find4(&self.body.sections, section::HDR4)
-            .ok_or_else(|| ParseError::AssertFail("no hdr section".into()).into())
+impl<F: Framing> Cbin<Body<F>> {
+    fn required(&self, tag: &F::Tag) -> Result<&Framed<F>, Error> {
+        section::find(&self.body.sections, tag).ok_or_else(|| no_section(tag.as_ref()))
     }
 
+    fn required_mut(&mut self, tag: &F::Tag) -> Result<&mut Framed<F>, Error> {
+        section::find_mut(&mut self.body.sections, tag).ok_or_else(|| no_section(tag.as_ref()))
+    }
+
+    /// Each section with its index and its payload's offset from the start of the body.
+    fn placed(&self) -> impl Iterator<Item = (usize, usize, &Framed<F>)> {
+        self.body.sections.iter().enumerate().scan(0, |at, (i, s)| {
+            let payload = *at + F::HEADER;
+            *at += s.encoded_len();
+            Some((i, payload, s))
+        })
+    }
+}
+
+impl Cbin<SampleV3> {
     /// The instrument's main name.
     pub fn name(&self) -> Result<String, Error> {
-        Ok(StringField::NAME_V3.read(&self.hdr()?.payload))
+        Ok(StringField::NAME_V3.read(&self.required(section::HDR4)?.payload))
     }
 
     /// The sub name: the string after the `_` in vendor filenames. Empty on files
@@ -302,7 +299,7 @@ impl Cbin<SampleV3> {
     /// It starts where the main name's field ends. Its end is unmapped, so this reads
     /// to the terminator and there is no setter.
     pub fn sub_name(&self) -> Result<String, Error> {
-        let payload = &self.hdr()?.payload;
+        let payload = &self.required(section::HDR4)?.payload;
         let from = StringField::NAME_V3.next.min(payload.len());
         Ok(nul_terminated(&payload[from..]))
     }
@@ -323,7 +320,7 @@ impl Cbin<SampleV3> {
             .sections
             .iter()
             .filter(|s| s.is(section::STK4))
-            .map(|s| match (stroke_gid(s), s.payload.get(5)) {
+            .map(|s| match (leading_u32(&s.payload), s.payload.get(5)) {
                 (Some(gid), Some(&root)) => Ok((gid, root)),
                 _ => Err(ParseError::AssertFail(format!(
                     "stroke payload is {} bytes, too short for its id fields",
@@ -338,31 +335,22 @@ impl Cbin<SampleV3> {
     /// files occur in both orders and a record states its own notes. Each zone is
     /// verified against the stroke it names.
     pub fn zones(&self) -> Result<Vec<ZoneV3>, Error> {
-        let map = self.map()?;
-        Ok(zone::read_v3(
-            map.version,
-            &map.payload,
-            &self.stroke_ids()?,
-        )?)
-    }
-
-    fn map(&self) -> Result<&section::Section4, Error> {
-        section::find4(&self.body.sections, section::MAP4)
-            .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
+        let map = self.required(section::MAP4)?;
+        let strokes = self.stroke_ids()?;
+        Ok(zone::Table::locate(map.version, &map.payload, &strokes)?
+            .read(&map.payload, &strokes)?)
     }
 
     /// The instrument's default sound preset, under the schema its section
     /// version selects.
     pub fn sty(&self) -> Result<Sty, Error> {
-        let s = section::find4(&self.body.sections, section::STY4)
-            .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
+        let s = self.required(section::STY4)?;
         Ok(Sty::parse_wide(s.version, &s.payload)?)
     }
 
     /// The chain's own length, as its closing `meta` section states it.
     pub fn meta(&self) -> Result<Meta, Error> {
-        let s = section::find4(&self.body.sections, section::META4)
-            .ok_or_else(|| ParseError::AssertFail("no meta section".into()))?;
+        let s = self.required(section::META4)?;
         Ok(Meta::parse(s.version, &s.payload)?)
     }
 
@@ -372,13 +360,8 @@ impl Cbin<SampleV3> {
             .sections
             .iter()
             .take_while(|s| !s.is(section::META4))
-            .map(section::Section4::encoded_len)
+            .map(Framed::encoded_len)
             .sum()
-    }
-
-    fn map_mut(&mut self) -> Result<&mut section::Section4, Error> {
-        section::find_mut4(&mut self.body.sections, section::MAP4)
-            .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
     }
 
     /// The zone table, located the same way [`Self::zones`] locates it.
@@ -386,7 +369,7 @@ impl Cbin<SampleV3> {
     /// Carries the record layout and, through [`zone::Table::key_map`], what the
     /// `map`'s per-key table holds.
     pub fn zone_table(&self) -> Result<zone::Table, Error> {
-        let map = self.map()?;
+        let map = self.required(section::MAP4)?;
         Ok(zone::Table::locate(
             map.version,
             &map.payload,
@@ -397,9 +380,7 @@ impl Cbin<SampleV3> {
     /// Renames in place, NUL-padding the rest of the main-name field. The
     /// sub-name is a separate field and is left alone.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
-        let hdr = section::find_mut4(&mut self.body.sections, section::HDR4)
-            .ok_or_else(|| ParseError::AssertFail("no hdr section".into()))?;
-        StringField::NAME_V3.write(&mut hdr.payload, name)
+        StringField::NAME_V3.write(&mut self.required_mut(section::HDR4)?.payload, name)
     }
 
     /// Whether this body's zones can be retuned and remapped.
@@ -407,7 +388,11 @@ impl Cbin<SampleV3> {
     /// True wherever the zone table reads and, if the `map` also describes the
     /// keyboard note by note, that table can be recomputed from the layout.
     pub fn zones_are_editable(&self) -> bool {
-        match (self.zone_table(), self.map(), self.zones()) {
+        match (
+            self.zone_table(),
+            self.required(section::MAP4),
+            self.zones(),
+        ) {
             (Ok(table), Ok(map), Ok(zones)) => table.validate_key_map(&map.payload, &zones).is_ok(),
             _ => false,
         }
@@ -421,7 +406,7 @@ impl Cbin<SampleV3> {
     fn edit_zone(&mut self, index: usize, field: zone::Field, note: u8) -> Result<(), Error> {
         let table = self.zone_table()?;
         let mut zones = self.zones()?;
-        let map = self.map()?;
+        let map = self.required(section::MAP4)?;
         table.validate_key_map(&map.payload, &zones)?;
         let zone = zones
             .get_mut(index)
@@ -432,7 +417,7 @@ impl Cbin<SampleV3> {
             zone::Field::Low => zone.low_note = Some(note),
         }
         let plan = table.plan_key_map(&map.payload, &zones)?;
-        let map = self.map_mut()?;
+        let map = self.required_mut(section::MAP4)?;
         table.set(&mut map.payload, index, field, note)?;
         for (at, quad) in plan {
             map.payload[at..at + quad.len()].copy_from_slice(&quad);
@@ -455,23 +440,9 @@ impl Cbin<SampleV3> {
     /// ⚠️ The root key is stored twice, in the stroke and in the zone record, and the
     /// table stops reading if the two disagree. Both move here or neither does.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        let gid = self
-            .zones()?
-            .get(index)
-            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?
-            .stroke_gid;
         // Both copies are located before either moves: a half-written pair leaves a
         // zone table that does not read.
-        let at = self
-            .body
-            .sections
-            .iter()
-            .position(|s| s.is(section::STK4) && stroke_gid(s) == Some(gid))
-            .ok_or_else(|| {
-                ParseError::AssertFail(format!(
-                    "zone {index} names stroke {gid}, which the file does not contain"
-                ))
-            })?;
+        let (at, _) = self.zone_stroke(index)?;
         self.edit_zone(index, zone::Field::Root, note)?;
         stroke::set_root_key(&mut self.body.sections[at].payload, note)?;
         Ok(())
@@ -485,15 +456,10 @@ impl Cbin<SampleV3> {
     /// Decode the streams with
     /// [`codec::Layout::from_version(self.header.version)`](codec::Layout::from_version).
     pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
-        let mut at = 0;
-        let mut out = Vec::new();
-        for section in &self.body.sections {
-            if section.is(section::STK4) {
-                out.push((at + section::HEADER4_LEN, section.payload.as_slice()));
-            }
-            at += section.encoded_len();
-        }
-        out
+        self.placed()
+            .filter(|(_, _, s)| s.is(section::STK4))
+            .map(|(_, at, s)| (at, s.payload.as_slice()))
+            .collect()
     }
 
     /// One zone's encoded stream, in [`Self::zones`] order. Decode it with
@@ -502,22 +468,27 @@ impl Cbin<SampleV3> {
     /// Paired by the global id the zone record names, so it is safe on library
     /// content whose strokes are not in zone order.
     pub fn zone_stream(&self, index: usize) -> Result<(usize, &[u8]), Error> {
-        let zones = self.zones()?;
-        let zone = zones
+        let (section, at) = self.zone_stroke(index)?;
+        Ok((at, self.body.sections[section].payload.as_slice()))
+    }
+
+    /// The index of the `stk` section one zone names, and its payload's offset from the
+    /// start of the body.
+    fn zone_stroke(&self, index: usize) -> Result<(usize, usize), Error> {
+        let gid = self
+            .zones()?
             .get(index)
-            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
-        let mut at = 0;
-        for section in &self.body.sections {
-            if section.is(section::STK4) && stroke_gid(section) == Some(zone.stroke_gid) {
-                return Ok((at + section::HEADER4_LEN, section.payload.as_slice()));
-            }
-            at += section.encoded_len();
-        }
-        Err(ParseError::AssertFail(format!(
-            "zone {index} names stroke {}, which the file does not contain",
-            zone.stroke_gid
-        ))
-        .into())
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?
+            .stroke_gid;
+        self.placed()
+            .find(|(_, _, s)| s.is(section::STK4) && leading_u32(&s.payload) == Some(gid))
+            .map(|(i, at, _)| (i, at))
+            .ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "zone {index} names stroke {gid}, which the file does not contain"
+                ))
+                .into()
+            })
     }
 }
 
@@ -526,16 +497,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Cbin<Sample>, Error> {
 }
 
 /// The global id a `stk` payload leads with.
-fn stroke_id(section: &Section) -> Option<u32> {
-    let b = section.payload.get(0..4)?;
-    Some(u32::from_be_bytes(b.try_into().ok()?))
+fn leading_u32(payload: &[u8]) -> Option<u32> {
+    payload.first_chunk().map(|b| u32::from_be_bytes(*b))
 }
 
-/// The global id a v3/v4 `stk` payload leads with. Unlike the narrow
-/// [`stroke_id`], it is compared whole: a wide zone record stores the same u32.
-fn stroke_gid(section: &section::Section4) -> Option<u32> {
-    let b = section.payload.get(0..4)?;
-    Some(u32::from_be_bytes(b.try_into().ok()?))
+fn no_section(tag: &[u8]) -> Error {
+    let tag = String::from_utf8_lossy(tag);
+    ParseError::AssertFail(format!("no {} section", tag.trim_start_matches('\0'))).into()
 }
 
 /// Whether a stroke is the one a narrow zone record names.
@@ -564,32 +532,34 @@ impl Cbin<Sample> {
     /// instruments carry no name, and [`Self::set_name`] refuses them. Check
     /// [`Self::chain`] before reporting the empty string as the name.
     pub fn name(&self) -> Result<String, Error> {
-        Ok(StringField::NAME.read(&self.hdr()?.payload))
+        Ok(StringField::NAME.read(&self.required(section::HDR)?.payload))
     }
 
     /// Renames in place, NUL-padding the rest of the field.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
-        let hdr = section::find_mut(&mut self.body.sections, section::HDR)
-            .ok_or_else(|| ParseError::AssertFail("no hdr section".into()))?;
-        StringField::NAME.write(&mut hdr.payload, name)
+        StringField::NAME.write(&mut self.required_mut(section::HDR)?.payload, name)
     }
 
     /// Which narrow chain this body's sections form, from the `map` section's own
     /// version. An unknown version is refused; the section chain, the name and the
     /// checksum still read.
     pub fn chain(&self) -> Result<Chain, Error> {
-        Ok(Chain::from_map_version(self.map()?.version)?)
+        Ok(Chain::from_map_version(
+            self.required(section::MAP)?.version,
+        )?)
     }
 
     /// Keyboard zones, high to low.
     pub fn zones(&self) -> Result<Vec<Zone>, Error> {
-        Ok(zone::read(self.chain()?, &self.map()?.payload)?)
+        Ok(zone::read(
+            self.chain()?,
+            &self.required(section::MAP)?.payload,
+        )?)
     }
 
     /// The instrument's default sound preset: nine enum-quantized bytes.
     pub fn sty(&self) -> Result<StyV2, Error> {
-        let s = section::find(&self.body.sections, section::STY)
-            .ok_or_else(|| ParseError::AssertFail("no sty section".into()))?;
+        let s = self.required(section::STY)?;
         if s.version != sty::VERSION_V2 {
             return Err(ParseError::AssertFail(format!(
                 "sty section version {} has no preset layout derived from a specimen",
@@ -603,8 +573,7 @@ impl Cbin<Sample> {
     /// Sets one zone's top note. The strokes are untouched.
     pub fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
         let chain = self.chain()?;
-        let map = section::find_mut(&mut self.body.sections, section::MAP)
-            .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
+        let map = self.required_mut(section::MAP)?;
         zone::set_top_note(chain, &mut map.payload, index, note)?;
         Ok(())
     }
@@ -615,16 +584,14 @@ impl Cbin<Sample> {
         // Both narrow chains carry the same table ahead of their zone tables; a `map`
         // this crate does not recognize may carry something else.
         self.chain()?;
-        Ok(KeyTable::read(&self.map()?.payload)?)
+        Ok(KeyTable::read(&self.required(section::MAP)?.payload)?)
     }
 
     /// Replaces the keyboard map. The zone table and the strokes are untouched.
     pub fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
         // As in `key_table`, an unrecognized `map` is refused.
         self.chain()?;
-        let map = section::find_mut(&mut self.body.sections, section::MAP)
-            .ok_or_else(|| ParseError::AssertFail("no map section".into()))?;
-        table.write(&mut map.payload)?;
+        table.write(&mut self.required_mut(section::MAP)?.payload)?;
         Ok(())
     }
 
@@ -661,15 +628,10 @@ impl Cbin<Sample> {
     /// The offset is the base the stroke's own [`codec::Directory`] is written
     /// against, so a caller checking those pointers needs it as well as the payload.
     pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
-        let mut at = 0;
-        let mut out = Vec::new();
-        for section in &self.body.sections {
-            if section.is(section::STK) {
-                out.push((at + section::HEADER_LEN, section.payload.as_slice()));
-            }
-            at += section.encoded_len();
-        }
-        out
+        self.placed()
+            .filter(|(_, _, s)| s.is(section::STK))
+            .map(|(_, at, s)| (at, s.payload.as_slice()))
+            .collect()
     }
 
     /// One zone's encoded stream, in [`Self::zones`] order, ready for
@@ -678,24 +640,30 @@ impl Cbin<Sample> {
     /// Paired by stroke id like [`Self::strokes`], so it is safe on library content
     /// that the editor did not build in a single pass.
     pub fn zone_stream(&self, index: usize) -> Result<(usize, &[u8]), Error> {
-        let zones = self.zones()?;
-        let zone = zones
+        let (section, at) = self.zone_stroke(index)?;
+        Ok((at, self.body.sections[section].payload.as_slice()))
+    }
+
+    /// The index of the `stk` section one zone names, and its payload's offset from the
+    /// start of the body.
+    fn zone_stroke(&self, index: usize) -> Result<(usize, usize), Error> {
+        let wanted = self
+            .zones()?
             .get(index)
-            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
-        let wanted = zone.stroke_id;
-        let mut at = 0;
-        for section in &self.body.sections {
-            if section.is(section::STK)
-                && stroke_id(section).is_some_and(|id| names_stroke(id, wanted))
-            {
-                return Ok((at + section::HEADER_LEN, section.payload.as_slice()));
-            }
-            at += section.encoded_len();
-        }
-        Err(ParseError::AssertFail(format!(
-            "zone {index} names stroke {wanted}, which the file does not contain"
-        ))
-        .into())
+            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?
+            .stroke_id;
+        self.placed()
+            .find(|(_, _, s)| {
+                s.is(section::STK)
+                    && leading_u32(&s.payload).is_some_and(|id| names_stroke(id, wanted))
+            })
+            .map(|(i, at, _)| (i, at))
+            .ok_or_else(|| {
+                ParseError::AssertFail(format!(
+                    "zone {index} names stroke {wanted}, which the file does not contain"
+                ))
+                .into()
+            })
     }
 
     /// Every stroke with the global id it carries, in section order.
@@ -706,22 +674,18 @@ impl Cbin<Sample> {
         // The first stroke's header fills out a fixed preamble it shares with the
         // `cat` and `map` payloads, so their sizes fix where its audio starts.
         let chain = self.chain()?;
-        let map_len = self.map()?.payload.len();
+        let map_len = self.required(section::MAP)?.payload.len();
         let cat_len =
             section::find(&self.body.sections, section::CAT).map_or(0, |s| s.payload.len());
         self.stroke_sections()
             .enumerate()
             .map(|(i, s)| {
-                let id = s
-                    .payload
-                    .get(0..4)
-                    .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-                    .ok_or_else(|| {
-                        ParseError::AssertFail(format!(
-                            "stroke {i} is {} bytes, too short for its id",
-                            s.payload.len()
-                        ))
-                    })?;
+                let id = leading_u32(&s.payload).ok_or_else(|| {
+                    ParseError::AssertFail(format!(
+                        "stroke {i} is {} bytes, too short for its id",
+                        s.payload.len()
+                    ))
+                })?;
                 Ok((id, stroke::read(&s.payload, chain, i, cat_len, map_len)?))
             })
             .collect()
@@ -733,23 +697,8 @@ impl Cbin<Sample> {
     /// stroke it reaches is the one that zone names. That is the nth `stk` section only
     /// for instruments the editor built in a single pass.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
-        let zones = self.zones()?;
-        let zone = zones
-            .get(index)
-            .ok_or_else(|| ParseError::AssertFail(format!("no zone {index}")))?;
-        let wanted = zone.stroke_id;
-        let section = self
-            .body
-            .sections
-            .iter_mut()
-            .filter(|s| s.is(section::STK))
-            .find(|s| stroke_id(s).is_some_and(|id| names_stroke(id, wanted)))
-            .ok_or_else(|| {
-                ParseError::AssertFail(format!(
-                    "zone {index} names stroke {wanted}, which the file does not contain"
-                ))
-            })?;
-        stroke::set_root_key(&mut section.payload, note)?;
+        let (at, _) = self.zone_stroke(index)?;
+        stroke::set_root_key(&mut self.body.sections[at].payload, note)?;
         Ok(())
     }
 
@@ -779,24 +728,6 @@ impl Cbin<Sample> {
     fn stroke_sections(&self) -> impl Iterator<Item = &Section> {
         self.body.sections.iter().filter(|s| s.is(section::STK))
     }
-
-    fn hdr(&self) -> Result<&Section, Error> {
-        section::find(&self.body.sections, section::HDR)
-            .ok_or_else(|| ParseError::AssertFail("no hdr section".into()).into())
-    }
-
-    fn map(&self) -> Result<&Section, Error> {
-        section::find(&self.body.sections, section::MAP)
-            .ok_or_else(|| ParseError::AssertFail("no map section".into()).into())
-    }
-}
-
-impl fmt::Debug for Sample {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sample")
-            .field("sections", &self.sections)
-            .finish()
-    }
 }
 
 #[cfg(test)]
@@ -822,7 +753,7 @@ mod tests {
         let before = map.payload.clone();
         assert!(sample.zones().is_err());
         assert!(sample.set_zone_top_note(0, 60).is_err());
-        assert_eq!(sample.map().unwrap().payload, before);
+        assert_eq!(sample.required(section::MAP).unwrap().payload, before);
     }
 
     #[test]
@@ -837,7 +768,7 @@ mod tests {
         let before = map.payload.clone();
         assert!(sample.key_table().is_err());
         assert!(sample.set_key_table(&KeyTable::NEUTRAL).is_err());
-        assert_eq!(sample.map().unwrap().payload, before);
+        assert_eq!(sample.required(section::MAP).unwrap().payload, before);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use super::program::*;
 use crate::components::{
     Bipolar, ClockDivision, Drawbar, DrawbarMorph, Effect1Type, Effect2Type, EqBand, Frequency,
-    KbZone3, Level, MorphOf, MorphTarget, PianoRef, Rate, SampleRef, Selector, Time, WideSelector,
+    KbZone3, Level, MorphOf, MorphTarget, PianoRef, Rate, SampleRef, Selector, Time,
 };
 use crate::types::{RangedU16, RangedU8};
 
@@ -102,446 +102,10 @@ pub struct Slot {
     pub organ_vox_vox_ii: bool,
     #[bits(216..=216)]
     pub organ_farfisa_preset_2: bool,
-    #[bits(224..=228)]
-    pub organ_b3_preset_1_drawbar_1_wheel: DrawbarMorph,
-    #[bits(229..=233)]
-    pub organ_b3_preset_1_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(234..=238)]
-    pub organ_b3_preset_1_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(239..=242)]
-    pub organ_b3_preset_1_drawbar_1: Drawbar,
-    #[bits(243..=247)]
-    pub organ_b3_preset_1_drawbar_2_wheel: DrawbarMorph,
-    #[bits(248..=252)]
-    pub organ_b3_preset_1_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(253..=257)]
-    pub organ_b3_preset_1_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(258..=261)]
-    pub organ_b3_preset_1_drawbar_2: Drawbar,
-    #[bits(262..=266)]
-    pub organ_b3_preset_1_drawbar_3_wheel: DrawbarMorph,
-    #[bits(267..=271)]
-    pub organ_b3_preset_1_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(272..=276)]
-    pub organ_b3_preset_1_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(277..=280)]
-    pub organ_b3_preset_1_drawbar_3: Drawbar,
-    #[bits(281..=285)]
-    pub organ_b3_preset_1_drawbar_4_wheel: DrawbarMorph,
-    #[bits(286..=290)]
-    pub organ_b3_preset_1_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(291..=295)]
-    pub organ_b3_preset_1_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(296..=299)]
-    pub organ_b3_preset_1_drawbar_4: Drawbar,
-    #[bits(300..=304)]
-    pub organ_b3_preset_1_drawbar_5_wheel: DrawbarMorph,
-    #[bits(305..=309)]
-    pub organ_b3_preset_1_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(310..=314)]
-    pub organ_b3_preset_1_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(315..=318)]
-    pub organ_b3_preset_1_drawbar_5: Drawbar,
-    #[bits(319..=323)]
-    pub organ_b3_preset_1_drawbar_6_wheel: DrawbarMorph,
-    #[bits(324..=328)]
-    pub organ_b3_preset_1_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(329..=333)]
-    pub organ_b3_preset_1_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(334..=337)]
-    pub organ_b3_preset_1_drawbar_6: Drawbar,
-    #[bits(338..=342)]
-    pub organ_b3_preset_1_drawbar_7_wheel: DrawbarMorph,
-    #[bits(343..=347)]
-    pub organ_b3_preset_1_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(348..=352)]
-    pub organ_b3_preset_1_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(353..=356)]
-    pub organ_b3_preset_1_drawbar_7: Drawbar,
-    #[bits(357..=361)]
-    pub organ_b3_preset_1_drawbar_8_wheel: DrawbarMorph,
-    #[bits(362..=366)]
-    pub organ_b3_preset_1_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(367..=371)]
-    pub organ_b3_preset_1_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(372..=375)]
-    pub organ_b3_preset_1_drawbar_8: Drawbar,
-    #[bits(376..=380)]
-    pub organ_b3_preset_1_drawbar_9_wheel: DrawbarMorph,
-    #[bits(381..=385)]
-    pub organ_b3_preset_1_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(386..=390)]
-    pub organ_b3_preset_1_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(391..=394)]
-    pub organ_b3_preset_1_drawbar_9: Drawbar,
-    #[bits(395..=395)]
-    pub organ_b3_preset_1_vibrato_chorus: bool,
-    #[bits(396..=396)]
-    pub organ_b3_preset_1_percussion: bool,
-    #[bits(408..=412)]
-    pub organ_vox_preset_1_drawbar_1_wheel: DrawbarMorph,
-    #[bits(413..=417)]
-    pub organ_vox_preset_1_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(418..=422)]
-    pub organ_vox_preset_1_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(423..=426)]
-    pub organ_vox_preset_1_drawbar_1: Drawbar,
-    #[bits(427..=431)]
-    pub organ_vox_preset_1_drawbar_2_wheel: DrawbarMorph,
-    #[bits(432..=436)]
-    pub organ_vox_preset_1_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(437..=441)]
-    pub organ_vox_preset_1_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(442..=445)]
-    pub organ_vox_preset_1_drawbar_2: Drawbar,
-    #[bits(446..=450)]
-    pub organ_vox_preset_1_drawbar_3_wheel: DrawbarMorph,
-    #[bits(451..=455)]
-    pub organ_vox_preset_1_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(456..=460)]
-    pub organ_vox_preset_1_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(461..=464)]
-    pub organ_vox_preset_1_drawbar_3: Drawbar,
-    #[bits(465..=469)]
-    pub organ_vox_preset_1_drawbar_4_wheel: DrawbarMorph,
-    #[bits(470..=474)]
-    pub organ_vox_preset_1_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(475..=479)]
-    pub organ_vox_preset_1_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(480..=483)]
-    pub organ_vox_preset_1_drawbar_4: Drawbar,
-    #[bits(484..=488)]
-    pub organ_vox_preset_1_drawbar_5_wheel: DrawbarMorph,
-    #[bits(489..=493)]
-    pub organ_vox_preset_1_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(494..=498)]
-    pub organ_vox_preset_1_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(499..=502)]
-    pub organ_vox_preset_1_drawbar_5: Drawbar,
-    #[bits(503..=507)]
-    pub organ_vox_preset_1_drawbar_6_wheel: DrawbarMorph,
-    #[bits(508..=512)]
-    pub organ_vox_preset_1_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(513..=517)]
-    pub organ_vox_preset_1_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(518..=521)]
-    pub organ_vox_preset_1_drawbar_6: Drawbar,
-    #[bits(522..=526)]
-    pub organ_vox_preset_1_drawbar_7_wheel: DrawbarMorph,
-    #[bits(527..=531)]
-    pub organ_vox_preset_1_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(532..=536)]
-    pub organ_vox_preset_1_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(537..=540)]
-    pub organ_vox_preset_1_drawbar_7: Drawbar,
-    #[bits(541..=545)]
-    pub organ_vox_preset_1_drawbar_8_wheel: DrawbarMorph,
-    #[bits(546..=550)]
-    pub organ_vox_preset_1_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(551..=555)]
-    pub organ_vox_preset_1_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(556..=559)]
-    pub organ_vox_preset_1_drawbar_8: Drawbar,
-    #[bits(560..=564)]
-    pub organ_vox_preset_1_drawbar_9_wheel: DrawbarMorph,
-    #[bits(565..=569)]
-    pub organ_vox_preset_1_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(570..=574)]
-    pub organ_vox_preset_1_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(575..=578)]
-    pub organ_vox_preset_1_drawbar_9: Drawbar,
-    #[bits(592..=593)]
-    pub organ_farfisa_preset_1_drawbar_1_wheel: MorphOf<2>,
-    #[bits(594..=595)]
-    pub organ_farfisa_preset_1_drawbar_1_aftertouch: MorphOf<2>,
-    #[bits(596..=597)]
-    pub organ_farfisa_preset_1_drawbar_1_ctrl_pedal: MorphOf<2>,
-    #[bits(598..=598)]
-    pub organ_farfisa_preset_1_drawbar_1: bool,
-    #[bits(599..=600)]
-    pub organ_farfisa_preset_1_drawbar_2_wheel: MorphOf<2>,
-    #[bits(601..=602)]
-    pub organ_farfisa_preset_1_drawbar_2_aftertouch: MorphOf<2>,
-    #[bits(603..=604)]
-    pub organ_farfisa_preset_1_drawbar_2_ctrl_pedal: MorphOf<2>,
-    #[bits(605..=605)]
-    pub organ_farfisa_preset_1_drawbar_2: bool,
-    #[bits(606..=607)]
-    pub organ_farfisa_preset_1_drawbar_3_wheel: MorphOf<2>,
-    #[bits(608..=609)]
-    pub organ_farfisa_preset_1_drawbar_3_aftertouch: MorphOf<2>,
-    #[bits(610..=611)]
-    pub organ_farfisa_preset_1_drawbar_3_ctrl_pedal: MorphOf<2>,
-    #[bits(612..=612)]
-    pub organ_farfisa_preset_1_drawbar_3: bool,
-    #[bits(613..=614)]
-    pub organ_farfisa_preset_1_drawbar_4_wheel: MorphOf<2>,
-    #[bits(615..=616)]
-    pub organ_farfisa_preset_1_drawbar_4_aftertouch: MorphOf<2>,
-    #[bits(617..=618)]
-    pub organ_farfisa_preset_1_drawbar_4_ctrl_pedal: MorphOf<2>,
-    #[bits(619..=619)]
-    pub organ_farfisa_preset_1_drawbar_4: bool,
-    #[bits(620..=621)]
-    pub organ_farfisa_preset_1_drawbar_5_wheel: MorphOf<2>,
-    #[bits(622..=623)]
-    pub organ_farfisa_preset_1_drawbar_5_aftertouch: MorphOf<2>,
-    #[bits(624..=625)]
-    pub organ_farfisa_preset_1_drawbar_5_ctrl_pedal: MorphOf<2>,
-    #[bits(626..=626)]
-    pub organ_farfisa_preset_1_drawbar_5: bool,
-    #[bits(627..=628)]
-    pub organ_farfisa_preset_1_drawbar_6_wheel: MorphOf<2>,
-    #[bits(629..=630)]
-    pub organ_farfisa_preset_1_drawbar_6_aftertouch: MorphOf<2>,
-    #[bits(631..=632)]
-    pub organ_farfisa_preset_1_drawbar_6_ctrl_pedal: MorphOf<2>,
-    #[bits(633..=633)]
-    pub organ_farfisa_preset_1_drawbar_6: bool,
-    #[bits(634..=635)]
-    pub organ_farfisa_preset_1_drawbar_7_wheel: MorphOf<2>,
-    #[bits(636..=637)]
-    pub organ_farfisa_preset_1_drawbar_7_aftertouch: MorphOf<2>,
-    #[bits(638..=639)]
-    pub organ_farfisa_preset_1_drawbar_7_ctrl_pedal: MorphOf<2>,
-    #[bits(640..=640)]
-    pub organ_farfisa_preset_1_drawbar_7: bool,
-    #[bits(641..=642)]
-    pub organ_farfisa_preset_1_drawbar_8_wheel: MorphOf<2>,
-    #[bits(643..=644)]
-    pub organ_farfisa_preset_1_drawbar_8_aftertouch: MorphOf<2>,
-    #[bits(645..=646)]
-    pub organ_farfisa_preset_1_drawbar_8_ctrl_pedal: MorphOf<2>,
-    #[bits(647..=647)]
-    pub organ_farfisa_preset_1_drawbar_8: bool,
-    #[bits(648..=649)]
-    pub organ_farfisa_preset_1_drawbar_9_wheel: MorphOf<2>,
-    #[bits(650..=651)]
-    pub organ_farfisa_preset_1_drawbar_9_aftertouch: MorphOf<2>,
-    #[bits(652..=653)]
-    pub organ_farfisa_preset_1_drawbar_9_ctrl_pedal: MorphOf<2>,
-    #[bits(654..=654)]
-    pub organ_farfisa_preset_1_drawbar_9: bool,
-    #[bits(664..=668)]
-    pub organ_b3_preset_2_drawbar_1_wheel: DrawbarMorph,
-    #[bits(669..=673)]
-    pub organ_b3_preset_2_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(674..=678)]
-    pub organ_b3_preset_2_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(679..=682)]
-    pub organ_b3_preset_2_drawbar_1: Drawbar,
-    #[bits(683..=687)]
-    pub organ_b3_preset_2_drawbar_2_wheel: DrawbarMorph,
-    #[bits(688..=692)]
-    pub organ_b3_preset_2_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(693..=697)]
-    pub organ_b3_preset_2_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(698..=701)]
-    pub organ_b3_preset_2_drawbar_2: Drawbar,
-    #[bits(702..=706)]
-    pub organ_b3_preset_2_drawbar_3_wheel: DrawbarMorph,
-    #[bits(707..=711)]
-    pub organ_b3_preset_2_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(712..=716)]
-    pub organ_b3_preset_2_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(717..=720)]
-    pub organ_b3_preset_2_drawbar_3: Drawbar,
-    #[bits(721..=725)]
-    pub organ_b3_preset_2_drawbar_4_wheel: DrawbarMorph,
-    #[bits(726..=730)]
-    pub organ_b3_preset_2_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(731..=735)]
-    pub organ_b3_preset_2_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(736..=739)]
-    pub organ_b3_preset_2_drawbar_4: Drawbar,
-    #[bits(740..=744)]
-    pub organ_b3_preset_2_drawbar_5_wheel: DrawbarMorph,
-    #[bits(745..=749)]
-    pub organ_b3_preset_2_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(750..=754)]
-    pub organ_b3_preset_2_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(755..=758)]
-    pub organ_b3_preset_2_drawbar_5: Drawbar,
-    #[bits(759..=763)]
-    pub organ_b3_preset_2_drawbar_6_wheel: DrawbarMorph,
-    #[bits(764..=768)]
-    pub organ_b3_preset_2_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(769..=773)]
-    pub organ_b3_preset_2_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(774..=777)]
-    pub organ_b3_preset_2_drawbar_6: Drawbar,
-    #[bits(778..=782)]
-    pub organ_b3_preset_2_drawbar_7_wheel: DrawbarMorph,
-    #[bits(783..=787)]
-    pub organ_b3_preset_2_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(788..=792)]
-    pub organ_b3_preset_2_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(793..=796)]
-    pub organ_b3_preset_2_drawbar_7: Drawbar,
-    #[bits(797..=801)]
-    pub organ_b3_preset_2_drawbar_8_wheel: DrawbarMorph,
-    #[bits(802..=806)]
-    pub organ_b3_preset_2_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(807..=811)]
-    pub organ_b3_preset_2_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(812..=815)]
-    pub organ_b3_preset_2_drawbar_8: Drawbar,
-    #[bits(816..=820)]
-    pub organ_b3_preset_2_drawbar_9_wheel: DrawbarMorph,
-    #[bits(821..=825)]
-    pub organ_b3_preset_2_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(826..=830)]
-    pub organ_b3_preset_2_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(831..=834)]
-    pub organ_b3_preset_2_drawbar_9: Drawbar,
-    #[bits(835..=835)]
-    pub organ_b3_preset_2_vibrato_chorus: bool,
-    #[bits(836..=836)]
-    pub organ_b3_preset_2_percussion: bool,
-    #[bits(848..=852)]
-    pub organ_vox_preset_2_drawbar_1_wheel: DrawbarMorph,
-    #[bits(853..=857)]
-    pub organ_vox_preset_2_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(858..=862)]
-    pub organ_vox_preset_2_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(863..=866)]
-    pub organ_vox_preset_2_drawbar_1: Drawbar,
-    #[bits(867..=871)]
-    pub organ_vox_preset_2_drawbar_2_wheel: DrawbarMorph,
-    #[bits(872..=876)]
-    pub organ_vox_preset_2_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(877..=881)]
-    pub organ_vox_preset_2_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(882..=885)]
-    pub organ_vox_preset_2_drawbar_2: Drawbar,
-    #[bits(886..=890)]
-    pub organ_vox_preset_2_drawbar_3_wheel: DrawbarMorph,
-    #[bits(891..=895)]
-    pub organ_vox_preset_2_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(896..=900)]
-    pub organ_vox_preset_2_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(901..=904)]
-    pub organ_vox_preset_2_drawbar_3: Drawbar,
-    #[bits(905..=909)]
-    pub organ_vox_preset_2_drawbar_4_wheel: DrawbarMorph,
-    #[bits(910..=914)]
-    pub organ_vox_preset_2_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(915..=919)]
-    pub organ_vox_preset_2_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(920..=923)]
-    pub organ_vox_preset_2_drawbar_4: Drawbar,
-    #[bits(924..=928)]
-    pub organ_vox_preset_2_drawbar_5_wheel: DrawbarMorph,
-    #[bits(929..=933)]
-    pub organ_vox_preset_2_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(934..=938)]
-    pub organ_vox_preset_2_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(939..=942)]
-    pub organ_vox_preset_2_drawbar_5: Drawbar,
-    #[bits(943..=947)]
-    pub organ_vox_preset_2_drawbar_6_wheel: DrawbarMorph,
-    #[bits(948..=952)]
-    pub organ_vox_preset_2_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(953..=957)]
-    pub organ_vox_preset_2_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(958..=961)]
-    pub organ_vox_preset_2_drawbar_6: Drawbar,
-    #[bits(962..=966)]
-    pub organ_vox_preset_2_drawbar_7_wheel: DrawbarMorph,
-    #[bits(967..=971)]
-    pub organ_vox_preset_2_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(972..=976)]
-    pub organ_vox_preset_2_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(977..=980)]
-    pub organ_vox_preset_2_drawbar_7: Drawbar,
-    #[bits(981..=985)]
-    pub organ_vox_preset_2_drawbar_8_wheel: DrawbarMorph,
-    #[bits(986..=990)]
-    pub organ_vox_preset_2_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(991..=995)]
-    pub organ_vox_preset_2_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(996..=999)]
-    pub organ_vox_preset_2_drawbar_8: Drawbar,
-    #[bits(1000..=1004)]
-    pub organ_vox_preset_2_drawbar_9_wheel: DrawbarMorph,
-    #[bits(1005..=1009)]
-    pub organ_vox_preset_2_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(1010..=1014)]
-    pub organ_vox_preset_2_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(1015..=1018)]
-    pub organ_vox_preset_2_drawbar_9: Drawbar,
-    #[bits(1032..=1033)]
-    pub organ_farfisa_preset_2_drawbar_1_wheel: MorphOf<2>,
-    #[bits(1034..=1035)]
-    pub organ_farfisa_preset_2_drawbar_1_aftertouch: MorphOf<2>,
-    #[bits(1036..=1037)]
-    pub organ_farfisa_preset_2_drawbar_1_ctrl_pedal: MorphOf<2>,
-    #[bits(1038..=1038)]
-    pub organ_farfisa_preset_2_drawbar_1: bool,
-    #[bits(1039..=1040)]
-    pub organ_farfisa_preset_2_drawbar_2_wheel: MorphOf<2>,
-    #[bits(1041..=1042)]
-    pub organ_farfisa_preset_2_drawbar_2_aftertouch: MorphOf<2>,
-    #[bits(1043..=1044)]
-    pub organ_farfisa_preset_2_drawbar_2_ctrl_pedal: MorphOf<2>,
-    #[bits(1045..=1045)]
-    pub organ_farfisa_preset_2_drawbar_2: bool,
-    #[bits(1046..=1047)]
-    pub organ_farfisa_preset_2_drawbar_3_wheel: MorphOf<2>,
-    #[bits(1048..=1049)]
-    pub organ_farfisa_preset_2_drawbar_3_aftertouch: MorphOf<2>,
-    #[bits(1050..=1051)]
-    pub organ_farfisa_preset_2_drawbar_3_ctrl_pedal: MorphOf<2>,
-    #[bits(1052..=1052)]
-    pub organ_farfisa_preset_2_drawbar_3: bool,
-    #[bits(1053..=1054)]
-    pub organ_farfisa_preset_2_drawbar_4_wheel: MorphOf<2>,
-    #[bits(1055..=1056)]
-    pub organ_farfisa_preset_2_drawbar_4_aftertouch: MorphOf<2>,
-    #[bits(1057..=1058)]
-    pub organ_farfisa_preset_2_drawbar_4_ctrl_pedal: MorphOf<2>,
-    #[bits(1059..=1059)]
-    pub organ_farfisa_preset_2_drawbar_4: bool,
-    #[bits(1060..=1061)]
-    pub organ_farfisa_preset_2_drawbar_5_wheel: MorphOf<2>,
-    #[bits(1062..=1063)]
-    pub organ_farfisa_preset_2_drawbar_5_aftertouch: MorphOf<2>,
-    #[bits(1064..=1065)]
-    pub organ_farfisa_preset_2_drawbar_5_ctrl_pedal: MorphOf<2>,
-    #[bits(1066..=1066)]
-    pub organ_farfisa_preset_2_drawbar_5: bool,
-    #[bits(1067..=1068)]
-    pub organ_farfisa_preset_2_drawbar_6_wheel: MorphOf<2>,
-    #[bits(1069..=1070)]
-    pub organ_farfisa_preset_2_drawbar_6_aftertouch: MorphOf<2>,
-    #[bits(1071..=1072)]
-    pub organ_farfisa_preset_2_drawbar_6_ctrl_pedal: MorphOf<2>,
-    #[bits(1073..=1073)]
-    pub organ_farfisa_preset_2_drawbar_6: bool,
-    #[bits(1074..=1075)]
-    pub organ_farfisa_preset_2_drawbar_7_wheel: MorphOf<2>,
-    #[bits(1076..=1077)]
-    pub organ_farfisa_preset_2_drawbar_7_aftertouch: MorphOf<2>,
-    #[bits(1078..=1079)]
-    pub organ_farfisa_preset_2_drawbar_7_ctrl_pedal: MorphOf<2>,
-    #[bits(1080..=1080)]
-    pub organ_farfisa_preset_2_drawbar_7: bool,
-    #[bits(1081..=1082)]
-    pub organ_farfisa_preset_2_drawbar_8_wheel: MorphOf<2>,
-    #[bits(1083..=1084)]
-    pub organ_farfisa_preset_2_drawbar_8_aftertouch: MorphOf<2>,
-    #[bits(1085..=1086)]
-    pub organ_farfisa_preset_2_drawbar_8_ctrl_pedal: MorphOf<2>,
-    #[bits(1087..=1087)]
-    pub organ_farfisa_preset_2_drawbar_8: bool,
-    #[bits(1088..=1089)]
-    pub organ_farfisa_preset_2_drawbar_9_wheel: MorphOf<2>,
-    #[bits(1090..=1091)]
-    pub organ_farfisa_preset_2_drawbar_9_aftertouch: MorphOf<2>,
-    #[bits(1092..=1093)]
-    pub organ_farfisa_preset_2_drawbar_9_ctrl_pedal: MorphOf<2>,
-    #[bits(1094..=1094)]
-    pub organ_farfisa_preset_2_drawbar_9: bool,
+    #[at(28..83)]
+    pub organ_preset_1: OrganPreset,
+    #[at(83..138)]
+    pub organ_preset_2: OrganPreset,
     #[bits(1104..=1106)]
     pub piano_type: Selector<3>,
     #[bits(1119..=1120)]
@@ -589,7 +153,7 @@ pub struct Slot {
     #[bits(1270..=1272)]
     pub synth_osc_mode: Selector<3>,
     #[bits(1273..=1282)]
-    pub synth_osc_waveform: WideSelector<10>,
+    pub synth_osc_waveform: Selector<10>,
     #[bits(1283..=1290)]
     pub synth_shape_wheel: MorphTarget,
     #[bits(1291..=1298)]
@@ -827,4 +391,231 @@ pub struct Slot {
     pub eq_bass: EqBand,
     #[bits(1956..=1962)]
     pub eq_mid_flt_freq: Frequency,
+}
+
+/// One organ preset: a B3, a Vox and a Farfisa registration, each bar with its morph
+/// slots. Bits are MSB-first from preset byte 0, which is slot byte 28 for preset 1 and
+/// 83 for preset 2.
+#[nord_bits_derive::bitbody(55)]
+pub struct OrganPreset {
+    #[bits(0..=4)]
+    pub b3_drawbar_1_wheel: DrawbarMorph,
+    #[bits(5..=9)]
+    pub b3_drawbar_1_aftertouch: DrawbarMorph,
+    #[bits(10..=14)]
+    pub b3_drawbar_1_ctrl_pedal: DrawbarMorph,
+    #[bits(15..=18)]
+    pub b3_drawbar_1: Drawbar,
+    #[bits(19..=23)]
+    pub b3_drawbar_2_wheel: DrawbarMorph,
+    #[bits(24..=28)]
+    pub b3_drawbar_2_aftertouch: DrawbarMorph,
+    #[bits(29..=33)]
+    pub b3_drawbar_2_ctrl_pedal: DrawbarMorph,
+    #[bits(34..=37)]
+    pub b3_drawbar_2: Drawbar,
+    #[bits(38..=42)]
+    pub b3_drawbar_3_wheel: DrawbarMorph,
+    #[bits(43..=47)]
+    pub b3_drawbar_3_aftertouch: DrawbarMorph,
+    #[bits(48..=52)]
+    pub b3_drawbar_3_ctrl_pedal: DrawbarMorph,
+    #[bits(53..=56)]
+    pub b3_drawbar_3: Drawbar,
+    #[bits(57..=61)]
+    pub b3_drawbar_4_wheel: DrawbarMorph,
+    #[bits(62..=66)]
+    pub b3_drawbar_4_aftertouch: DrawbarMorph,
+    #[bits(67..=71)]
+    pub b3_drawbar_4_ctrl_pedal: DrawbarMorph,
+    #[bits(72..=75)]
+    pub b3_drawbar_4: Drawbar,
+    #[bits(76..=80)]
+    pub b3_drawbar_5_wheel: DrawbarMorph,
+    #[bits(81..=85)]
+    pub b3_drawbar_5_aftertouch: DrawbarMorph,
+    #[bits(86..=90)]
+    pub b3_drawbar_5_ctrl_pedal: DrawbarMorph,
+    #[bits(91..=94)]
+    pub b3_drawbar_5: Drawbar,
+    #[bits(95..=99)]
+    pub b3_drawbar_6_wheel: DrawbarMorph,
+    #[bits(100..=104)]
+    pub b3_drawbar_6_aftertouch: DrawbarMorph,
+    #[bits(105..=109)]
+    pub b3_drawbar_6_ctrl_pedal: DrawbarMorph,
+    #[bits(110..=113)]
+    pub b3_drawbar_6: Drawbar,
+    #[bits(114..=118)]
+    pub b3_drawbar_7_wheel: DrawbarMorph,
+    #[bits(119..=123)]
+    pub b3_drawbar_7_aftertouch: DrawbarMorph,
+    #[bits(124..=128)]
+    pub b3_drawbar_7_ctrl_pedal: DrawbarMorph,
+    #[bits(129..=132)]
+    pub b3_drawbar_7: Drawbar,
+    #[bits(133..=137)]
+    pub b3_drawbar_8_wheel: DrawbarMorph,
+    #[bits(138..=142)]
+    pub b3_drawbar_8_aftertouch: DrawbarMorph,
+    #[bits(143..=147)]
+    pub b3_drawbar_8_ctrl_pedal: DrawbarMorph,
+    #[bits(148..=151)]
+    pub b3_drawbar_8: Drawbar,
+    #[bits(152..=156)]
+    pub b3_drawbar_9_wheel: DrawbarMorph,
+    #[bits(157..=161)]
+    pub b3_drawbar_9_aftertouch: DrawbarMorph,
+    #[bits(162..=166)]
+    pub b3_drawbar_9_ctrl_pedal: DrawbarMorph,
+    #[bits(167..=170)]
+    pub b3_drawbar_9: Drawbar,
+    #[bits(171..=171)]
+    pub b3_vibrato_chorus: bool,
+    #[bits(172..=172)]
+    pub b3_percussion: bool,
+    #[bits(184..=188)]
+    pub vox_drawbar_1_wheel: DrawbarMorph,
+    #[bits(189..=193)]
+    pub vox_drawbar_1_aftertouch: DrawbarMorph,
+    #[bits(194..=198)]
+    pub vox_drawbar_1_ctrl_pedal: DrawbarMorph,
+    #[bits(199..=202)]
+    pub vox_drawbar_1: Drawbar,
+    #[bits(203..=207)]
+    pub vox_drawbar_2_wheel: DrawbarMorph,
+    #[bits(208..=212)]
+    pub vox_drawbar_2_aftertouch: DrawbarMorph,
+    #[bits(213..=217)]
+    pub vox_drawbar_2_ctrl_pedal: DrawbarMorph,
+    #[bits(218..=221)]
+    pub vox_drawbar_2: Drawbar,
+    #[bits(222..=226)]
+    pub vox_drawbar_3_wheel: DrawbarMorph,
+    #[bits(227..=231)]
+    pub vox_drawbar_3_aftertouch: DrawbarMorph,
+    #[bits(232..=236)]
+    pub vox_drawbar_3_ctrl_pedal: DrawbarMorph,
+    #[bits(237..=240)]
+    pub vox_drawbar_3: Drawbar,
+    #[bits(241..=245)]
+    pub vox_drawbar_4_wheel: DrawbarMorph,
+    #[bits(246..=250)]
+    pub vox_drawbar_4_aftertouch: DrawbarMorph,
+    #[bits(251..=255)]
+    pub vox_drawbar_4_ctrl_pedal: DrawbarMorph,
+    #[bits(256..=259)]
+    pub vox_drawbar_4: Drawbar,
+    #[bits(260..=264)]
+    pub vox_drawbar_5_wheel: DrawbarMorph,
+    #[bits(265..=269)]
+    pub vox_drawbar_5_aftertouch: DrawbarMorph,
+    #[bits(270..=274)]
+    pub vox_drawbar_5_ctrl_pedal: DrawbarMorph,
+    #[bits(275..=278)]
+    pub vox_drawbar_5: Drawbar,
+    #[bits(279..=283)]
+    pub vox_drawbar_6_wheel: DrawbarMorph,
+    #[bits(284..=288)]
+    pub vox_drawbar_6_aftertouch: DrawbarMorph,
+    #[bits(289..=293)]
+    pub vox_drawbar_6_ctrl_pedal: DrawbarMorph,
+    #[bits(294..=297)]
+    pub vox_drawbar_6: Drawbar,
+    #[bits(298..=302)]
+    pub vox_drawbar_7_wheel: DrawbarMorph,
+    #[bits(303..=307)]
+    pub vox_drawbar_7_aftertouch: DrawbarMorph,
+    #[bits(308..=312)]
+    pub vox_drawbar_7_ctrl_pedal: DrawbarMorph,
+    #[bits(313..=316)]
+    pub vox_drawbar_7: Drawbar,
+    #[bits(317..=321)]
+    pub vox_drawbar_8_wheel: DrawbarMorph,
+    #[bits(322..=326)]
+    pub vox_drawbar_8_aftertouch: DrawbarMorph,
+    #[bits(327..=331)]
+    pub vox_drawbar_8_ctrl_pedal: DrawbarMorph,
+    #[bits(332..=335)]
+    pub vox_drawbar_8: Drawbar,
+    #[bits(336..=340)]
+    pub vox_drawbar_9_wheel: DrawbarMorph,
+    #[bits(341..=345)]
+    pub vox_drawbar_9_aftertouch: DrawbarMorph,
+    #[bits(346..=350)]
+    pub vox_drawbar_9_ctrl_pedal: DrawbarMorph,
+    #[bits(351..=354)]
+    pub vox_drawbar_9: Drawbar,
+    #[bits(368..=369)]
+    pub farfisa_drawbar_1_wheel: MorphOf<2>,
+    #[bits(370..=371)]
+    pub farfisa_drawbar_1_aftertouch: MorphOf<2>,
+    #[bits(372..=373)]
+    pub farfisa_drawbar_1_ctrl_pedal: MorphOf<2>,
+    #[bits(374..=374)]
+    pub farfisa_drawbar_1: bool,
+    #[bits(375..=376)]
+    pub farfisa_drawbar_2_wheel: MorphOf<2>,
+    #[bits(377..=378)]
+    pub farfisa_drawbar_2_aftertouch: MorphOf<2>,
+    #[bits(379..=380)]
+    pub farfisa_drawbar_2_ctrl_pedal: MorphOf<2>,
+    #[bits(381..=381)]
+    pub farfisa_drawbar_2: bool,
+    #[bits(382..=383)]
+    pub farfisa_drawbar_3_wheel: MorphOf<2>,
+    #[bits(384..=385)]
+    pub farfisa_drawbar_3_aftertouch: MorphOf<2>,
+    #[bits(386..=387)]
+    pub farfisa_drawbar_3_ctrl_pedal: MorphOf<2>,
+    #[bits(388..=388)]
+    pub farfisa_drawbar_3: bool,
+    #[bits(389..=390)]
+    pub farfisa_drawbar_4_wheel: MorphOf<2>,
+    #[bits(391..=392)]
+    pub farfisa_drawbar_4_aftertouch: MorphOf<2>,
+    #[bits(393..=394)]
+    pub farfisa_drawbar_4_ctrl_pedal: MorphOf<2>,
+    #[bits(395..=395)]
+    pub farfisa_drawbar_4: bool,
+    #[bits(396..=397)]
+    pub farfisa_drawbar_5_wheel: MorphOf<2>,
+    #[bits(398..=399)]
+    pub farfisa_drawbar_5_aftertouch: MorphOf<2>,
+    #[bits(400..=401)]
+    pub farfisa_drawbar_5_ctrl_pedal: MorphOf<2>,
+    #[bits(402..=402)]
+    pub farfisa_drawbar_5: bool,
+    #[bits(403..=404)]
+    pub farfisa_drawbar_6_wheel: MorphOf<2>,
+    #[bits(405..=406)]
+    pub farfisa_drawbar_6_aftertouch: MorphOf<2>,
+    #[bits(407..=408)]
+    pub farfisa_drawbar_6_ctrl_pedal: MorphOf<2>,
+    #[bits(409..=409)]
+    pub farfisa_drawbar_6: bool,
+    #[bits(410..=411)]
+    pub farfisa_drawbar_7_wheel: MorphOf<2>,
+    #[bits(412..=413)]
+    pub farfisa_drawbar_7_aftertouch: MorphOf<2>,
+    #[bits(414..=415)]
+    pub farfisa_drawbar_7_ctrl_pedal: MorphOf<2>,
+    #[bits(416..=416)]
+    pub farfisa_drawbar_7: bool,
+    #[bits(417..=418)]
+    pub farfisa_drawbar_8_wheel: MorphOf<2>,
+    #[bits(419..=420)]
+    pub farfisa_drawbar_8_aftertouch: MorphOf<2>,
+    #[bits(421..=422)]
+    pub farfisa_drawbar_8_ctrl_pedal: MorphOf<2>,
+    #[bits(423..=423)]
+    pub farfisa_drawbar_8: bool,
+    #[bits(424..=425)]
+    pub farfisa_drawbar_9_wheel: MorphOf<2>,
+    #[bits(426..=427)]
+    pub farfisa_drawbar_9_aftertouch: MorphOf<2>,
+    #[bits(428..=429)]
+    pub farfisa_drawbar_9_ctrl_pedal: MorphOf<2>,
+    #[bits(430..=430)]
+    pub farfisa_drawbar_9: bool,
 }

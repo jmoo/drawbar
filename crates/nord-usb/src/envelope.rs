@@ -39,6 +39,28 @@ pub fn tag(header: &Header) -> String {
     String::from_utf8_lossy(&header.tag).into_owned()
 }
 
+/// The four-character format tag in file bytes, if those bytes are one.
+///
+/// ⚠️ Read from the header bytes without parsing: this must work for a file whose
+/// checksum is bad, because that file may be a slot's last remaining copy.
+pub fn unchecked_tag(file: &[u8]) -> Option<String> {
+    file.get(8..12)
+        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
+        .map(|tag| String::from_utf8_lossy(tag).into_owned())
+}
+
+/// Filename for the bytes rescued from a slot: the location as the instrument labels
+/// it, and the object's own format tag, or `bin` without one, so the file can be
+/// written straight back. The checksum is not verified.
+pub fn rescue_name(at: Location, backup: &[u8]) -> String {
+    let format = unchecked_tag(backup).unwrap_or_else(|| "bin".to_string());
+    format!(
+        "nord-rescued-{}-{}.{format}",
+        at.user_bank(),
+        at.user_slot()
+    )
+}
+
 /// Wrap a wire body in a `CBIN` header, producing the bytes of a `.ne5p`-style file.
 ///
 /// `format` and `version` are the tag and schema version the device reported for the
@@ -149,6 +171,40 @@ mod tests {
             unwrap(&file).is_err(),
             "a corrupted body should fail the checksum"
         );
+    }
+
+    /// A rescue file is the last copy of an object that no longer exists on the
+    /// instrument, so its name must say where it came from and what it is.
+    #[test]
+    fn a_rescued_slot_is_named_for_its_location_and_format() {
+        // A minimal CBIN: magic, header type, tag. The checksum is left wrong, because
+        // naming must not depend on the backup being intact.
+        let mut file = vec![0u8; 45];
+        file[0..4].copy_from_slice(b"CBIN");
+        file[4..8].copy_from_slice(&1u32.to_le_bytes());
+        file[8..12].copy_from_slice(b"ne5p");
+        let at = Location { bank: 6, slot: 49 };
+        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
+    }
+
+    /// A set list must not land with a program's extension.
+    #[test]
+    fn a_rescued_slot_takes_its_format_tag_from_the_bytes() {
+        let mut file = vec![0u8; 45];
+        file[8..12].copy_from_slice(b"ne5t");
+        let at = Location { bank: 0, slot: 3 };
+        assert_eq!(rescue_name(at, &file), "nord-rescued-1-4.ne5t");
+    }
+
+    /// Bytes that do not parse are still the only copy, so they must still get a name.
+    #[test]
+    fn unparseable_bytes_are_rescued_as_bin() {
+        let at = Location { bank: 0, slot: 0 };
+        assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
+        let mut short = vec![0u8; 12];
+        short[8..12].copy_from_slice(b"ne5\0");
+        assert_eq!(unchecked_tag(&short), None, "a NUL is not part of a tag");
+        assert_eq!(unchecked_tag(&short[..11]), None, "a tag cut short");
     }
 
     #[test]

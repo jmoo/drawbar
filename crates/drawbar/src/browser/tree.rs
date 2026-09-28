@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::act::{will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
+use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
 use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
@@ -50,35 +50,36 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     for making in Making::FROM_WAVS.iter().filter(|it| !it.instrument_file()) {
         from_wavs(ui, *making, acts);
     }
-    if ui
-        .button("New folder")
-        .on_hover_text("groups the list on this computer; the instrument never sees it")
-        .clicked()
-    {
-        acts.push(Act::NewFolder);
+    offer(
+        ui,
+        "New folder",
+        Some("groups the list on this computer; the instrument never sees it"),
+        Act::NewFolder,
+        acts,
+    );
+}
+
+/// A menu item that runs `act` and closes the menu.
+fn offer(ui: &mut egui::Ui, label: &str, hint: Option<&str>, act: Act, acts: &mut Vec<Act>) {
+    let mut button = ui.button(label);
+    if let Some(hint) = hint {
+        button = button.on_hover_text(hint);
+    }
+    if button.clicked() {
+        acts.push(act);
         ui.close();
     }
 }
 
 /// One kind this app creates from a default.
 fn entry(ui: &mut egui::Ui, kind: Fresh, acts: &mut Vec<Act>) {
-    let mut button = ui.button(kind.label());
-    if let Some(note) = kind.note() {
-        button = button.on_hover_text(note);
-    }
-    if button.clicked() {
-        acts.push(Act::New(kind));
-        ui.close();
-    }
+    offer(ui, kind.label(), kind.note(), Act::New(kind), acts);
 }
 
 /// One kind built from audio files, which asks for the files before it exists.
 fn from_wavs(ui: &mut egui::Ui, making: Making, acts: &mut Vec<Act>) {
     let (item, hint) = making.item();
-    if ui.button(item).on_hover_text(hint).clicked() {
-        acts.push(Act::NewFromWavs(making));
-        ui.close();
-    }
+    offer(ui, item, Some(hint), Act::NewFromWavs(making), acts);
 }
 
 /// A row of the tree with something under it.
@@ -128,7 +129,7 @@ fn indent(depth: usize, branch: bool) -> f32 {
 
 /// A section's header, and whether its body should be drawn.
 fn section(ui: &mut egui::Ui, title: &str, open: &mut bool) -> bool {
-    panel_header(ui, title, Some(open), None);
+    panel_header(ui, title, open);
     *open
 }
 
@@ -181,15 +182,6 @@ pub(super) fn bank_branch(class: ObjectClass, bank: u64) -> Branch {
 struct Naming {
     kept: Vec<Family>,
     instrument: Option<Family>,
-}
-
-/// Where a duplicate of a slot lands: the first slot of its folder that a scan found
-/// empty and nothing in the queue is waiting for.
-///
-/// ⚠️ The same exclusion that places a queued asset. Two writes to one address would
-/// leave only one.
-fn spare_slot(device: &DeviceState, class: ObjectClass, queue: &Queue) -> Option<Location> {
-    device.first_free(class, &queue.waiting_in(class))
 }
 
 /// Where a drop onto a row of the local list lands: the folder the row is drawn under, or
@@ -314,7 +306,7 @@ impl Browser {
 
         let counts = [
             queue.len(),
-            crate::library::differing(workspace, &device.state, queue),
+            crate::queue::changed(workspace, &device.state, queue).len(),
         ];
         let states = [
             (
@@ -386,10 +378,7 @@ impl Browser {
         let listed = Browser::standing_for(workspace, |_| true);
         drawn.response.context_menu(|ui| {
             self.set_menu(ui, &listed, workspace, device, acts, |_, ui, acts| {
-                if ui.button("Open…").clicked() {
-                    acts.push(Act::OpenFiles);
-                    ui.close();
-                }
+                offer(ui, "Open…", None, Act::OpenFiles, acts);
                 ui.menu_button("New", |ui| new_menu(ui, acts));
             });
         });
@@ -496,14 +485,13 @@ impl Browser {
                         browser.start_rename(item, &name);
                         ui.close();
                     }
-                    if ui
-                        .button("Remove folder")
-                        .on_hover_text("its contents go back to the list; nothing is deleted")
-                        .clicked()
-                    {
-                        acts.push(Act::RemoveFolder(id));
-                        ui.close();
-                    }
+                    offer(
+                        ui,
+                        "Remove folder",
+                        Some("its contents go back to the list; nothing is deleted"),
+                        Act::RemoveFolder(id),
+                        acts,
+                    );
                 });
             });
         }
@@ -682,38 +670,25 @@ impl Browser {
         };
         let item = Item::Local(id);
         let picked = self.selection.locals();
-        if ui.button("Open").clicked() {
-            acts.push(Act::Open(item));
-            ui.close();
-        }
+        offer(ui, "Open", None, Act::Open(item), acts);
         self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
-        if ui.button("Export…").clicked() {
-            acts.push(Act::Export(id));
-            ui.close();
-        }
+        offer(ui, "Export…", None, Act::Export(id), acts);
         if ui.button("Rename").clicked() {
             self.start_rename(item, &entity.name);
             ui.close();
         }
-        if ui.button("Duplicate").clicked() {
-            acts.push(Act::DuplicateLocal(id));
-            ui.close();
-        }
+        offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(id), acts);
         ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
-        if ui
-            .button("Save as gig…")
-            .on_hover_text("puts the selection under a new tag")
-            .clicked()
-        {
-            acts.push(Act::SaveAsGig);
-            ui.close();
-        }
+        offer(
+            ui,
+            "Save as gig…",
+            Some("puts the selection under a new tag"),
+            Act::SaveAsGig,
+            acts,
+        );
         ui.separator();
-        if ui.button("Remove from list").clicked() {
-            acts.push(Act::Remove(id));
-            ui.close();
-        }
+        offer(ui, "Remove from list", None, Act::Remove(id), acts);
     }
 
     /// The folders an asset can be moved into, for those who prefer a menu to dragging.
@@ -759,10 +734,7 @@ impl Browser {
         if !self.tags.all().is_empty() {
             ui.separator();
         }
-        if ui.button("New tag…").clicked() {
-            acts.push(Act::SaveAsGig);
-            ui.close();
-        }
+        offer(ui, "New tag…", None, Act::SaveAsGig, acts);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -832,15 +804,12 @@ impl Browser {
                     acts.push(Act::Resync);
                     ui.close();
                 }
-                if waiting > 0 && ui.button(format!("Send all ({waiting})")).clicked() {
-                    acts.push(Act::AskSendAll);
-                    ui.close();
+                if waiting > 0 {
+                    let label = format!("Send all ({waiting})");
+                    offer(ui, &label, None, Act::AskSendAll, acts);
                 }
                 ui.separator();
-                if ui.button("Disconnect").clicked() {
-                    acts.push(Act::Disconnect);
-                    ui.close();
-                }
+                offer(ui, "Disconnect", None, Act::Disconnect, acts);
             });
         });
 
@@ -915,16 +884,13 @@ impl Browser {
         });
         drawn.response.context_menu(|ui| {
             self.set_menu(ui, &off_it, workspace, device, acts, |browser, ui, acts| {
-                if ui
-                    .button("Read this folder again")
-                    .on_hover_text(
-                        "Read everything reads the whole instrument; this reads one folder",
-                    )
-                    .clicked()
-                {
-                    acts.push(Act::ReadAgain(class));
-                    ui.close();
-                }
+                offer(
+                    ui,
+                    "Read this folder again",
+                    Some("Read everything reads the whole instrument; this reads one folder"),
+                    Act::ReadAgain(class),
+                    acts,
+                );
                 if let Some(at) = focus {
                     if ui
                         .button("Go to loaded")
@@ -1154,22 +1120,27 @@ impl Browser {
         }
         let item = Item::Slot { class, at };
         let free = spare_slot(&device.state, class, queue);
-        if ui
-            .button("Open")
-            .on_hover_text("a view of this slot, without adding it to the list on this computer")
-            .clicked()
-        {
-            acts.push(Act::Open(item));
-            ui.close();
-        }
-        if ui.button("Copy to this computer").clicked() {
-            acts.push(Act::Copy { class, at });
-            ui.close();
-        }
-        if ui.button(LOAD_ON_INSTRUMENT).clicked() {
-            acts.push(Act::LoadOnInstrument { class, at });
-            ui.close();
-        }
+        offer(
+            ui,
+            "Open",
+            Some("a view of this slot, without adding it to the list on this computer"),
+            Act::Open(item),
+            acts,
+        );
+        offer(
+            ui,
+            "Copy to this computer",
+            None,
+            Act::Copy { class, at },
+            acts,
+        );
+        offer(
+            ui,
+            LOAD_ON_INSTRUMENT,
+            None,
+            Act::LoadOnInstrument { class, at },
+            acts,
+        );
         ui.separator();
         if ui.button("Rename").clicked() {
             self.start_rename(item, &name);
@@ -1281,14 +1252,13 @@ impl Browser {
                             browser.start_rename(item, &name);
                             ui.close();
                         }
-                        if ui
-                            .button("Remove tag")
-                            .on_hover_text("removes the tag from everything; nothing is deleted")
-                            .clicked()
-                        {
-                            acts.push(Act::RemoveTag(id));
-                            ui.close();
-                        }
+                        offer(
+                            ui,
+                            "Remove tag",
+                            Some("removes the tag from everything; nothing is deleted"),
+                            Act::RemoveTag(id),
+                            acts,
+                        );
                     },
                 );
             });
@@ -1445,7 +1415,7 @@ mod tests {
             narrow(&mut acts, asked);
             bench.act(acts);
             assert!(bench.shell.filter.on(asked), "{asked:?}");
-            assert_eq!(bench.tabs.showing(), Some(Spot::Library), "{asked:?}");
+            assert_eq!(bench.tabs.showing(), Spot::Library, "{asked:?}");
         }
     }
 

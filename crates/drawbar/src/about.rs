@@ -57,10 +57,7 @@ impl Group {
     }
 
     fn held(&self) -> String {
-        match self.count() {
-            1 => "1 dependency".to_string(),
-            count => format!("{count} dependencies"),
-        }
+        crate::strings::counted(self.count(), "dependency", "dependencies")
     }
 }
 
@@ -275,10 +272,8 @@ fn files(workspace: &Workspace) -> Line {
         true => "Local storage",
         false => "Files",
     };
-    match workspace.listed().count() {
-        1 => Line::new(key, "1 file", ""),
-        held => Line::new(key, format!("{held} files"), ""),
-    }
+    let held = crate::strings::counted(workspace.listed().count(), "file", "files");
+    Line::new(key, held, "")
 }
 
 /// What Copy diagnostics puts on the clipboard: what this build is, then the tail of the
@@ -317,7 +312,7 @@ impl About {
         ui.set_width(sheet::width(ui.ctx(), WIDE));
         ui.add_space(TOP);
         sheet::section(ui, |ui| {
-            sheet::masthead(ui, true);
+            sheet::masthead(ui);
             ui.add_space(GAP * 2.0);
             links(ui);
         });

@@ -130,16 +130,16 @@ impl Build {
 
         let mut body = vec![0u8; first + audio];
         body[..4].copy_from_slice(CNSP_MAGIC);
-        body[VERSION_AT..VERSION_AT + 2].copy_from_slice(&self.version.to_be_bytes());
-        body[VERSION_ECHO_AT..VERSION_ECHO_AT + 2].copy_from_slice(&self.version.to_be_bytes());
-        body[CHANNELS_AT..CHANNELS_AT + 2].copy_from_slice(&self.channels.to_be_bytes());
+        put16(&mut body, VERSION_AT, self.version);
+        put16(&mut body, VERSION_ECHO_AT, self.version);
+        put16(&mut body, CHANNELS_AT, self.channels);
         body[TextField::COMBINED.at..TextField::COMBINED.at + NAME.len()].copy_from_slice(NAME);
 
         body[KEY_MAP_AT..KEY_MAP_AT + NOTES].fill(UNCOVERED);
         for &(key, root) in &self.map {
             body[KEY_MAP_AT + usize::from(key)] = root;
         }
-        body[STROKE_COUNT_AT..STROKE_COUNT_AT + 2].copy_from_slice(&(count as u16).to_be_bytes());
+        put16(&mut body, STROKE_COUNT_AT, count as u16);
         for note in 0..NOTES {
             let n = self
                 .takes
@@ -147,30 +147,27 @@ impl Build {
                 .filter(|take| usize::from(take.root) == note)
                 .count() as u16;
             let at = ROOT_COUNTS_AT + note * 2;
-            body[at..at + 2].copy_from_slice(&n.to_be_bytes());
+            put16(&mut body, at, n);
         }
 
         let mut at = first;
         for (i, take) in self.takes.iter().enumerate() {
             let record = DIRECTORY_AT + i * RECORD;
-            body[record + REC_START..record + REC_START + 4]
-                .copy_from_slice(&(at as u32).to_be_bytes());
+            put32(&mut body, record + REC_START, at as u32);
             body[record + REC_BANK] = take.bank.code();
             body[record + REC_LAYER] = take.layer;
-            body[record + REC_BLOCKS..record + REC_BLOCKS + 2]
-                .copy_from_slice(&take.blocks.to_be_bytes());
+            put16(&mut body, record + REC_BLOCKS, take.blocks);
             for (mark, value) in take.marks.iter().enumerate() {
                 let field = record + REC_MARKS + mark * 4;
-                body[field..field + 4].copy_from_slice(&value.to_be_bytes());
+                put32(&mut body, field, *value);
             }
-            body[record + REC_DECAY..record + REC_DECAY + 4]
-                .copy_from_slice(&take.decay.to_be_bytes());
+            put32(&mut body, record + REC_DECAY, take.decay);
             for (entry, value) in take.ladder.iter().enumerate() {
                 let field = record + REC_DECAYS + entry * 4;
-                body[field..field + 4].copy_from_slice(&value.to_be_bytes());
+                put32(&mut body, field, *value);
             }
             let id = take.id.unwrap_or(i as u32);
-            body[record + REC_ID..record + REC_ID + 4].copy_from_slice(&id.to_be_bytes());
+            put32(&mut body, record + REC_ID, id);
 
             let span = usize::from(take.blocks) * block;
             if take.silent {
@@ -178,10 +175,9 @@ impl Build {
                     codec::block_frames(codec::MAX_WIDTH, block, usize::from(self.channels))
                         - codec::OVERLAP;
                 let owned = (usize::from(take.blocks) * per_block) as u32;
-                body[record + REC_FRAMES..record + REC_FRAMES + 4]
-                    .copy_from_slice(&owned.to_be_bytes());
+                put32(&mut body, record + REC_FRAMES, owned);
                 for block_at in (at..at + span).step_by(block) {
-                    body[block_at..block_at + 2].copy_from_slice(&SILENT_HEADER.to_be_bytes());
+                    put16(&mut body, block_at, SILENT_HEADER);
                 }
             } else {
                 body[at..at + span].fill(0x40 + i as u8);

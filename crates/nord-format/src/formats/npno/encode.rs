@@ -73,14 +73,14 @@
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, Bank, Library, Stroke, CNSP_MAGIC, DAMPER_TOP_AT, DECAYS,
-    DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT, LADDER_UNITY, MARKS, NOTES,
-    RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS,
-    REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT,
-    VERSION_ECHO_AT,
+    be32, block_bytes, midi_key, put16, put32, Bank, Library, Stroke, CNSP_MAGIC, DAMPER_TOP_AT,
+    DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT, LADDER_UNITY, MARKS,
+    NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER,
+    REC_MARKS, REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED,
+    VERSION_AT, VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
-use crate::error::{Error, ParseError};
+use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
 use crate::formats::nsmp::kernel;
 use crate::formats::predictor;
 use std::borrow::Cow;
@@ -133,21 +133,22 @@ pub enum Donor<'a> {
 /// from specimens; not confirmed on hardware. The byte does not change how the library
 /// sounds. Confirmed on hardware.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
 pub enum Kind {
-    ElectricGrand,
+    ElectricGrand = 1,
     /// The tine electric pianos.
-    ElectricPiano,
+    ElectricPiano = 2,
     /// The reed electric pianos.
-    Wurlitzer,
-    Clavinet,
+    Wurlitzer = 3,
+    Clavinet = 4,
     #[default]
-    Grand,
-    Upright,
-    Harpsichord,
-    DigitalPiano,
+    Grand = 5,
+    Upright = 6,
+    Harpsichord = 7,
+    DigitalPiano = 14,
     /// The hybrid and ballad electric pianos.
-    Hybrid,
-    Mallet,
+    Hybrid = 15,
+    Mallet = 16,
 }
 
 impl Kind {
@@ -165,34 +166,11 @@ impl Kind {
     ];
 
     pub fn from_code(code: u8) -> Option<Kind> {
-        match code {
-            1 => Some(Kind::ElectricGrand),
-            2 => Some(Kind::ElectricPiano),
-            3 => Some(Kind::Wurlitzer),
-            4 => Some(Kind::Clavinet),
-            5 => Some(Kind::Grand),
-            6 => Some(Kind::Upright),
-            7 => Some(Kind::Harpsichord),
-            14 => Some(Kind::DigitalPiano),
-            15 => Some(Kind::Hybrid),
-            16 => Some(Kind::Mallet),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|kind| kind.code() == code)
     }
 
     pub fn code(self) -> u8 {
-        match self {
-            Kind::ElectricGrand => 1,
-            Kind::ElectricPiano => 2,
-            Kind::Wurlitzer => 3,
-            Kind::Clavinet => 4,
-            Kind::Grand => 5,
-            Kind::Upright => 6,
-            Kind::Harpsichord => 7,
-            Kind::DigitalPiano => 14,
-            Kind::Hybrid => 15,
-            Kind::Mallet => 16,
-        }
+        self as u8
     }
 
     /// The [`Rules::damper_top`] this kind of instrument has. The acoustic pianos damp up
@@ -549,9 +527,9 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
     let mut prefix = vec![0u8; DIRECTORY_AT];
     prefix[..CNSP_MAGIC.len()].copy_from_slice(CNSP_MAGIC);
     for at in [VERSION_AT, VERSION_REPEAT_AT, VERSION_ECHO_AT] {
-        prefix[at..at + 2].copy_from_slice(&RULES_VERSION.to_be_bytes());
+        put16(&mut prefix, at, RULES_VERSION);
     }
-    prefix[FILE_ID_AT..FILE_ID_AT + 4].copy_from_slice(&FILE_ID.to_be_bytes());
+    put32(&mut prefix, FILE_ID_AT, FILE_ID);
     prefix[KIND_AT] = rules.kind.code();
     prefix[KIND_AT + 1..KIND_AT + 1 + KIND_TRAILER.len()].copy_from_slice(&KIND_TRAILER);
     for (at, value) in PER_NOTE_TABLES {
@@ -601,13 +579,13 @@ fn damper_cut(note: usize) -> u8 {
 fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     let mut out = [0u8; RECORD];
     let (window, trim) = velocity_window(recording.bank, recording.layer);
-    out[REC_WINDOW..REC_WINDOW + 2].copy_from_slice(&window.to_be_bytes());
-    out[REC_TRIM..REC_TRIM + 2].copy_from_slice(&trim.to_be_bytes());
+    put16(&mut out, REC_WINDOW, window);
+    put16(&mut out, REC_TRIM, trim);
     for entry in 0..DECAYS {
         let at = REC_DECAYS + entry * 4;
-        out[at..at + 4].copy_from_slice(&LADDER_UNITY.to_be_bytes());
+        put32(&mut out, at, LADDER_UNITY);
     }
-    out[REC_ID..REC_ID + 4].copy_from_slice(&(index as u32 + 1).to_be_bytes());
+    put32(&mut out, REC_ID, index as u32 + 1);
     out
 }
 
@@ -748,18 +726,10 @@ pub fn resample(samples: &[i16], channels: usize, rate: u32) -> Result<Resampled
             .step_by(channels)
             .copied()
             .collect();
-        let mut out = Vec::new();
-        out.try_reserve_exact(fields)
-            .map_err(|_| ParseError::OutOfBounds {
-                value: format!("{fields} frame(s)"),
-                bound: "an allocation that fits memory".into(),
-            })?;
-        out.extend((0..fields).map(|f| {
-            let value = kernel.field(&lane, f);
-            let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
-            clipped += usize::from(i64::from(narrow) != value);
-            narrow
-        }));
+        let mut out = try_with_capacity(fields, "frame(s)")?;
+        out.extend(
+            (0..fields).map(|f| predictor::saturate_i16(kernel.field(&lane, f), &mut clipped)),
+        );
         lanes.push(out);
     }
     Ok(Resampled {
@@ -1050,31 +1020,19 @@ fn planes(
     };
     let mut out = Vec::with_capacity(MAX_ORDER + 1);
     for order in 0..=MAX_ORDER {
-        let mut plane = residuals(total * channels)?;
+        let mut plane = try_zeroed(total * channels, "residual(s)")?;
         for n in 0..total {
             for channel in 0..channels {
-                let mut acc = 0i64;
-                for j in 0..=order {
-                    let term =
-                        predictor::binomial(order, j) * sample(channel, n as isize - j as isize);
-                    acc += if j.is_multiple_of(2) { term } else { -term };
-                }
+                let acc: i64 = predictor::DIFFERENCE[order]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &c)| c * sample(channel, n as isize - j as isize))
+                    .sum();
                 plane[n * channels + channel] = acc as i32;
             }
         }
         out.push(plane);
     }
-    Ok(out)
-}
-
-fn residuals(len: usize) -> Result<Vec<i32>, Error> {
-    let mut out = Vec::new();
-    out.try_reserve_exact(len)
-        .map_err(|_| ParseError::OutOfBounds {
-            value: format!("{len} residual(s)"),
-            bound: "an allocation that fits memory".into(),
-        })?;
-    out.resize(len, 0);
     Ok(out)
 }
 
@@ -1205,12 +1163,12 @@ fn record(
     out[REC_START..REC_START + 4].fill(0);
     out[REC_BANK] = bank;
     out[REC_LAYER] = layer;
-    out[REC_FRAMES..REC_FRAMES + 4].copy_from_slice(&owned.to_be_bytes());
-    out[REC_BLOCKS..REC_BLOCKS + 2].copy_from_slice(&blocks.to_be_bytes());
+    put32(&mut out, REC_FRAMES, owned);
+    put16(&mut out, REC_BLOCKS, blocks);
     for (channel, group) in seeds.iter().enumerate() {
         for (i, seed) in group.iter().enumerate() {
             let at = REC_SEEDS + (channel * SEEDS + i) * 2;
-            out[at..at + 2].copy_from_slice(&seed.to_be_bytes());
+            put16(&mut out, at, *seed as u16);
         }
     }
 
@@ -1223,7 +1181,7 @@ fn record(
             (true, _) | (_, 0) => 0,
             _ => rescale(be32(donor, at), owned, donor_frames),
         };
-        out[at..at + 4].copy_from_slice(&scaled.to_be_bytes());
+        put32(&mut out, at, scaled);
         if mark == 0 {
             first = scaled;
         }
@@ -1233,11 +1191,11 @@ fn record(
         .iter()
         .rposition(|&start| start as u64 <= u64::from(first))
         .unwrap_or(0);
-    out[REC_MARK_BLOCK..REC_MARK_BLOCK + 2].copy_from_slice(&(holding as u16).to_be_bytes());
+    put16(&mut out, REC_MARK_BLOCK, holding as u16);
     if silent {
         out[REC_DECAY..REC_DECAY + 4].fill(0);
     }
-    out[REC_ID..REC_ID + 4].copy_from_slice(&id.to_be_bytes());
+    put32(&mut out, REC_ID, id);
     Ok(out)
 }
 

@@ -8,7 +8,7 @@
 //! part pickers decide which engine sections apply. A picker that makes a section
 //! relevant must never be inside that section.
 
-use crate::panel::{Group, Match, Panel, Relevance, Selection};
+use crate::panel::{switched_on, Group, Match, Panel, Relevance, Selection};
 
 /// One of a model's two stored presets, chosen by its `…_preset2_selected` flag.
 macro_rules! preset {
@@ -58,17 +58,6 @@ macro_rules! routed {
             any_of: &[Match {
                 field: $field,
                 is: &["Lower", "Upper"],
-            }],
-        })
-    };
-}
-
-macro_rules! switched_on {
-    ($field:expr) => {
-        Some(Relevance {
-            any_of: &[Match {
-                field: $field,
-                is: &["true"],
             }],
         })
     };

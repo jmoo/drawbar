@@ -211,6 +211,17 @@ impl Queue {
         self.notes.push_back((at, note));
     }
 
+    /// Queue each note `stream` decodes from `bytes` as arriving at `at`, and say whether
+    /// there was one.
+    fn feed(&mut self, stream: &mut Stream, at: f64, bytes: &[u8]) -> bool {
+        let mut heard = false;
+        stream.feed(bytes, |note| {
+            heard = true;
+            self.push(at, note);
+        });
+        heard
+    }
+
     /// Every waiting message except strikes older than [`STALE`]. A release is never too
     /// old: its key may still hold a voice.
     fn drain(&mut self, now: f64) -> Vec<Note> {

@@ -78,15 +78,32 @@ pub enum Error {
     Zip(#[from] zip::result::ZipError),
 }
 
-/// A zeroed buffer of `len` bytes, reporting an allocation the platform cannot
-/// make instead of aborting the process on it.
-pub(crate) fn try_vec(len: usize) -> std::result::Result<Vec<u8>, ParseError> {
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len)
+/// An empty vector with room for `len` elements, reporting an allocation the platform
+/// cannot make instead of aborting the process on it. The error counts `len` in `unit`.
+pub(crate) fn try_with_capacity<T>(
+    len: usize,
+    unit: &str,
+) -> std::result::Result<Vec<T>, ParseError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
         .map_err(|_| ParseError::OutOfBounds {
-            value: format!("{len} bytes"),
+            value: format!("{len} {unit}"),
             bound: "an allocation that fits memory".into(),
         })?;
-    buf.resize(len, 0);
-    Ok(buf)
+    Ok(out)
+}
+
+/// `len` zeroed elements, failing as [`try_with_capacity`] does.
+pub(crate) fn try_zeroed<T: Clone + Default>(
+    len: usize,
+    unit: &str,
+) -> std::result::Result<Vec<T>, ParseError> {
+    let mut out = try_with_capacity(len, unit)?;
+    out.resize(len, T::default());
+    Ok(out)
+}
+
+/// A zeroed buffer of `len` bytes, failing as [`try_with_capacity`] does.
+pub(crate) fn try_vec(len: usize) -> std::result::Result<Vec<u8>, ParseError> {
+    try_zeroed(len, "bytes")
 }

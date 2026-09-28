@@ -19,10 +19,10 @@ use crate::browser::{cell_ink, families_present, qualifier, Act, Browser, Bulk, 
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
-use crate::panel::{chip, Track};
+use crate::panel::{chip, cut, inset, list_width, row_ink, Track, GLYPH, PAD};
 use crate::queue::{Diff, Queue};
 use crate::shell::{Page, Shell};
-use crate::strings::{folder, place, shown};
+use crate::strings::{counted, folder, place, shown};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
 
@@ -85,6 +85,20 @@ impl Where {
             Where::Computer | Where::Foreign | Where::Unread => &[Place::Computer],
             Where::Keyboard => &[Place::Keyboard],
         }
+    }
+
+    /// The mark a row with these whereabouts wears, given whether a write to its slot is
+    /// `waiting`. Only a linked asset gets one, and a waiting write means it differs.
+    pub fn mark(self, waiting: bool) -> Option<Mark> {
+        let Where::Both(agrees) = self else {
+            return None;
+        };
+        Some(match (waiting, agrees) {
+            (true, _) | (false, Some(false)) => Mark::Differs,
+            (false, Some(true)) => Mark::Agrees,
+            // A green dot is a claim, and there is no evidence for one.
+            (false, None) => Mark::Unknown,
+        })
     }
 
     /// Sort rank: both places first, then this computer, the instrument, and unread.
@@ -254,21 +268,6 @@ pub fn state(item: Item, where_: Where, queue: &Queue) -> Option<State> {
         Item::Local(_) => (where_ == Where::Both(Some(false))).then_some(State::Differs),
         _ => None,
     }
-}
-
-/// How many assets differ from their slot with no write waiting to settle them. The
-/// tree's row and the library's chip both show this count.
-pub fn differing(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> usize {
-    workspace
-        .listed()
-        .filter(|entity| {
-            state(
-                Item::Local(entity.id),
-                whereabouts(entity, device, queue),
-                queue,
-            ) == Some(State::Differs)
-        })
-        .count()
 }
 
 /// The row for one item, for a caller that needs one item and not the whole table.
@@ -446,17 +445,7 @@ pub fn mark_words(mark: Mark) -> &'static str {
 /// ⚠️ The only rule for a local row's dot. An asset with no link gets no mark. The link
 /// is the slot [`whereabouts`] reads, and no other slot counts.
 pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Option<Mark> {
-    let (class, at) = entity.link?;
-    let info = device.slot(class, at).flatten()?;
-    if queue.holds(entity.id) {
-        return Some(Mark::Differs);
-    }
-    match agrees(entity, class, info, queue) {
-        Some(true) => Some(Mark::Agrees),
-        Some(false) => Some(Mark::Differs),
-        // A green dot is a claim, and there is no evidence for one.
-        None => Some(Mark::Unknown),
-    }
+    whereabouts(entity, device, queue).mark(queue.holds(entity.id))
 }
 
 /// The library a program names, and its name if the instrument has reported one.
@@ -568,21 +557,6 @@ impl Column {
         }
     }
 
-    /// This column's position in a row, which is also the index of its track.
-    fn index(self) -> usize {
-        match self {
-            Column::Mark => 0,
-            Column::Glyph => 1,
-            Column::Kind => 2,
-            Column::Name => 3,
-            Column::Tags => 4,
-            Column::Where => 5,
-            Column::At => 6,
-            Column::Size => 7,
-            Column::Needs => 8,
-        }
-    }
-
     /// What the column asks for: a fixed width, or a share of what the fixed ones leave.
     fn track(self) -> Track {
         match self {
@@ -680,8 +654,7 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String
             .count();
         said.push(match occupied {
             0 => "every slot is empty".to_string(),
-            1 => "1 slot occupied".to_string(),
-            n => format!("{n} slots occupied"),
+            n => counted(n, "slot occupied", "slots occupied"),
         });
     }
     let mine = rows.iter().filter(|row| matches!(row.item, Item::Local(_)));
@@ -747,14 +720,7 @@ const ROW: f32 = 24.0;
 const HEAD: f32 = 20.0;
 const BAR: f32 = 28.0;
 
-/// The padding the bar, the table, and the footer keep at each end.
-///
-/// ⚠️ It matches the tree's row indent. Without it the first track starts at the panel's
-/// edge and the mark's left stroke is painted half outside the window.
-const PAD: f32 = 8.0;
-
-/// A kind glyph in a row, and the smaller ones beside a count.
-const GLYPH: f32 = 13.0;
+/// The glyphs beside a count.
 const SMALL: f32 = 10.0;
 
 /// The selection mark's box.
@@ -803,7 +769,10 @@ impl Library {
         );
         let held = arrange(held, &shell.omnibox, self.by, self.order);
 
-        let counts = [queue.len(), differing(workspace, &device.state, queue)];
+        let counts = [
+            queue.len(),
+            crate::queue::changed(workspace, &device.state, queue).len(),
+        ];
         bar(ui, counts, browser.tags(), &shell.filter, &mut acts);
         let picked: Vec<&Row> = held
             .iter()
@@ -842,25 +811,8 @@ impl Library {
         queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
-        // The heads and rows start where a tree row starts. Insetting the whole grid keeps
-        // it aligned and leaves the scroll bar at the panel's edge.
-        let room = ui.available_rect_before_wrap();
-        let mut inset = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(room.with_min_x(room.left() + PAD))
-                .layout(*ui.layout()),
-        );
-        let ui = &mut inset;
-
-        // The head and the rows are laid out to one width, so a scroll bar the rows make
-        // room for must come off the head as well.
-        let body = ui.available_height() - HEAD;
-        let scrolls = rows.len() as f32 * ROW > body;
-        let bar = match scrolls {
-            true => ui.spacing().scroll.bar_width,
-            false => 0.0,
-        };
-        let width = (ui.available_width() - bar).max(0.0);
+        let ui = &mut inset(ui);
+        let width = list_width(ui, rows.len(), ROW, HEAD);
         let tracks = tracks(width);
         self.head(ui, width, &tracks);
         if rows.is_empty() {
@@ -929,20 +881,13 @@ impl Library {
                 painted(ui, glyph, box_, ink);
                 room = (room - SMALL - 2.0).max(0.0);
             }
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                column.head().to_uppercase(),
-                egui::FontId::proportional(9.5),
-                ink,
-            );
-            job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-            let galley = painter.layout_job(job);
-            painter.galley(
-                egui::pos2(
-                    rect.left() + track.start,
-                    rect.center().y - galley.size().y / 2.0,
-                ),
-                galley,
-                egui::Color32::PLACEHOLDER,
+            cut(
+                &painter,
+                rect.left() + track.start,
+                rect.center().y,
+                room,
+                &column.head().to_uppercase(),
+                egui::TextFormat::simple(egui::FontId::proportional(9.5), ink),
             );
         }
 
@@ -1075,46 +1020,22 @@ fn paint(
         ui.allocate_exact_size(egui::vec2(width, ROW), egui::Sense::click_and_drag());
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    let fill = match (selected, response.hovered()) {
-        (true, _) => Some(visuals.selection.bg_fill),
-        (false, true) => Some(visuals.faint_bg_color),
-        (false, false) => None,
-    };
-    if let Some(fill) = fill {
-        painter.rect_filled(rect, 3.0, fill);
-    }
-    let ink = match selected {
-        true => visuals.selection.stroke.color,
-        false => visuals.text_color(),
-    };
-    let quiet = cell_ink(selected, visuals.weak_text_color(), &visuals);
+    let (ink, quiet) = row_ink(&painter, rect, selected, response.hovered(), &visuals);
 
-    let cell = |column: Column| {
-        let track = &tracks[column.index()];
-        egui::Rect::from_min_max(
-            egui::pos2(rect.left() + track.start, rect.top()),
-            egui::pos2(rect.left() + track.end, rect.bottom()),
-        )
-    };
+    let cell = |column: Column| crate::panel::cell(rect, &tracks[column as usize]);
     let write =
         |box_: egui::Rect, text: &str, font: egui::FontId, tint: egui::Color32, italics: bool| {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
+            let format = egui::TextFormat {
+                italics,
+                ..egui::TextFormat::simple(font, tint)
+            };
+            cut(
+                &painter,
+                box_.left(),
+                box_.center().y,
+                box_.width(),
                 text,
-                0.0,
-                egui::TextFormat {
-                    font_id: font,
-                    color: tint,
-                    italics,
-                    ..egui::TextFormat::default()
-                },
-            );
-            job.wrap = egui::text::TextWrapping::truncate_at_width(box_.width());
-            let galley = painter.layout_job(job);
-            painter.galley(
-                egui::pos2(box_.left(), box_.center().y - galley.size().y / 2.0),
-                galley,
-                egui::Color32::PLACEHOLDER,
+                format,
             );
         };
 
@@ -1169,8 +1090,7 @@ fn paint(
     let mark = row
         .item
         .local()
-        .and_then(|id| workspace.get(id))
-        .and_then(|entity| keyboard_mark(entity, &device.state, queue));
+        .and_then(|id| row.where_.mark(queue.holds(id)));
     write(
         cell(Column::Where),
         row.where_.short(),
@@ -1477,7 +1397,7 @@ mod tests {
                 );
             }
             for column in [Column::At, Column::Size, Column::Needs] {
-                let track = &tracks[column.index()];
+                let track = &tracks[column as usize];
                 assert!(
                     track.end - track.start > 0.0,
                     "{column:?} vanished at {width}"
@@ -1491,7 +1411,7 @@ mod tests {
     #[test]
     fn the_kind_reaches_96_px_when_wide_and_yields_to_the_name_when_narrow() {
         let width_of = |tracks: &[Range<f32>; 9], column: Column| {
-            let track = &tracks[column.index()];
+            let track = &tracks[column as usize];
             track.end - track.start
         };
 
@@ -1514,12 +1434,13 @@ mod tests {
         );
     }
 
-    /// Each column's track is at its own index. Otherwise every cell after the first
-    /// mismatch is painted into the next column.
+    /// A track is found by its column's discriminant, and the tracks are laid out in
+    /// [`Column::ALL`] order. Otherwise every cell after the first mismatch is painted
+    /// into the next column.
     #[test]
     fn every_column_indexes_its_own_track() {
         for (index, column) in Column::ALL.iter().enumerate() {
-            assert_eq!(column.index(), index, "{column:?}");
+            assert_eq!(*column as usize, index, "{column:?}");
         }
     }
 
@@ -2088,7 +2009,6 @@ mod tests {
                 .filter(|row| matches!(row.item, Item::Local(_)))
                 .count()
         }
-        assert_eq!(differing(&workspace, &device.state, &queue), 1);
         assert_eq!(
             narrowed(&workspace, &device, &queue, &tags, State::Differs),
             1
@@ -2108,11 +2028,6 @@ mod tests {
             at(6, 0),
         );
         assert!(queue.holds(id), "it is owed back to the slot it came off");
-        assert_eq!(
-            differing(&workspace, &device.state, &queue),
-            0,
-            "the queued write settles the two"
-        );
         assert_eq!(
             narrowed(&workspace, &device, &queue, &tags, State::Waiting),
             1
@@ -2301,7 +2216,7 @@ mod tests {
         }
 
         // The table starts PAD in, and the mark is the first track inside it.
-        let box_x = PAD + tracks(WIDTH - PAD)[Column::Mark.index()].start + MARK / 2.0;
+        let box_x = PAD + tracks(WIDTH - PAD)[Column::Mark as usize].start + MARK / 2.0;
         let on_box = |index: f32| egui::pos2(box_x, BAR + HEAD + ROW * (index + 0.5));
         let mut frames = Vec::new();
         for index in [0.0_f32, 1.0] {

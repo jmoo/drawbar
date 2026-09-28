@@ -138,6 +138,20 @@ pub struct Match {
     pub is: &'static [&'static str],
 }
 
+/// Relevant while the `bool` field `$field` is on.
+macro_rules! switched_on {
+    ($field:expr) => {
+        Some($crate::panel::Relevance {
+            any_of: &[$crate::panel::Match {
+                field: $field,
+                is: &["true"],
+            }],
+        })
+    };
+}
+
+pub(crate) use switched_on;
+
 /// A body's fields by path, so resolving a layout takes one pass.
 type Index<'a> = HashMap<&'a str, &'a Field>;
 

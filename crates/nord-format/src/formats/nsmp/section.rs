@@ -7,7 +7,41 @@
 
 use crate::error::{try_vec, ParseError};
 
-/// Bytes of section header: 3-char tag, NUL, `u8` version, `u32` length.
+/// How a chain frames its sections.
+///
+/// A header is the tag, a version field, and the payload's length as a big-endian
+/// `u32`. The length counts the payload only, not the header.
+///
+/// ⚠️ The length on the wire is big-endian, inside a CBIN file whose header is
+/// little-endian. Read little-endian, it becomes a length in the hundreds of millions.
+pub trait Framing {
+    type Tag: Copy + Eq + AsRef<[u8]>;
+    type Version: Copy + Eq + std::fmt::Debug;
+    /// Header bytes, the length included.
+    const HEADER: usize;
+    /// The tag of the section every chain opens with.
+    const OPENER: Self::Tag;
+
+    /// The tag a header leads with.
+    fn tag(head: &[u8]) -> Self::Tag;
+
+    /// The version and payload length a header states, refusing a header whose bytes
+    /// a section would not write back.
+    fn fields(head: &[u8], at: u64) -> Result<(Self::Version, usize), ParseError>;
+
+    /// The bytes between the tag and the length.
+    fn version_field(version: Self::Version) -> impl AsRef<[u8]>;
+}
+
+/// The v2 `NWS` chain: 3-char tag, NUL, `u8` version, `u32` length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Narrow {}
+
+/// The v3/v4 `NSMP` chain: 4-byte tag, `u32` version, `u32` length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wide {}
+
+/// Bytes of a v2 section header.
 pub const HEADER_LEN: usize = 9;
 
 /// Opens the body. Its payload is empty; the first real section follows it.
@@ -19,112 +53,30 @@ pub const MAP: &[u8; 3] = b"map";
 pub const STK: &[u8; 3] = b"stk";
 pub const STY: &[u8; 3] = b"sty";
 
-/// One section of a sample instrument body.
-///
-/// ⚠️ The length on the wire is big-endian, inside a CBIN file whose header is
-/// little-endian. Read little-endian, it becomes a length in the hundreds of millions.
-///
-/// The length counts the payload only, not the 9 header bytes.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Section {
-    pub tag: [u8; 3],
-    /// Schema version of this section alone; sections revise independently.
-    pub version: u8,
-    pub payload: Vec<u8>,
-}
+impl Framing for Narrow {
+    type Tag = [u8; 3];
+    type Version = u8;
+    const HEADER: usize = HEADER_LEN;
+    const OPENER: [u8; 3] = *CONTAINER;
 
-impl Section {
-    /// Length on disk, header included.
-    pub fn encoded_len(&self) -> usize {
-        HEADER_LEN + self.payload.len()
+    fn tag(head: &[u8]) -> [u8; 3] {
+        [head[0], head[1], head[2]]
     }
 
-    pub fn tag_str(&self) -> String {
-        String::from_utf8_lossy(&self.tag).into_owned()
-    }
-
-    pub fn is(&self, tag: &[u8; 3]) -> bool {
-        &self.tag == tag
-    }
-
-    pub fn write_to(&self, w: &mut impl std::io::Write) -> Result<(), ParseError> {
-        let len = wire_len(self.payload.len())?;
-        let head = |w: &mut dyn std::io::Write| -> std::io::Result<()> {
-            w.write_all(&self.tag)?;
-            w.write_all(&[0, self.version])?;
-            w.write_all(&len.to_be_bytes())?;
-            w.write_all(&self.payload)
-        };
-        head(w).map_err(|e| ParseError::AssertFail(format!("writing a section: {e}")))
-    }
-}
-
-/// A chain whose first section is not its container: the leading sections are missing,
-/// or the bytes are not a chain. Raised before the first declared length is trusted,
-/// since a corrupt opener's length is arbitrary.
-fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
-    ParseError::AssertFail(format!(
-        "the body does not open with the {} container section; found {}",
-        expected.escape_ascii(),
-        found.escape_ascii(),
-    ))
-}
-
-/// A header whose tag is not NUL-padded. [`Section`] models no field there and
-/// [`Section::write_to`] writes 0, so decoding one would drop the byte and
-/// write the section back changed. Raised with [`wrong_opener`], before the
-/// declared length is trusted.
-fn unpadded_tag(tag: &[u8], at: u64, found: u8) -> ParseError {
-    ParseError::AssertFail(format!(
-        "section {} at {at} holds {found} where its tag's padding NUL belongs",
-        String::from_utf8_lossy(tag),
-    ))
-}
-
-fn missing_opener(expected: &[u8]) -> ParseError {
-    ParseError::AssertFail(format!(
-        "the body does not open with the {} container section; found end of body",
-        expected.escape_ascii(),
-    ))
-}
-
-/// Walks the chain from the reader's position to its end, `remaining` bytes away.
-///
-/// The chain must open with [`CONTAINER`] and end exactly at the end of the body. A
-/// wrong length anywhere shifts every later section, so a short or overrunning walk is
-/// an error.
-pub fn read_chain(r: &mut impl std::io::Read, remaining: u64) -> Result<Vec<Section>, ParseError> {
-    let mut sections = Vec::new();
-    let mut pos: u64 = 0;
-    loop {
-        let mut head = [0u8; HEADER_LEN];
-        if !read_exact_or_end(r, &mut head, pos)? {
-            return if pos == 0 {
-                Err(missing_opener(CONTAINER))
-            } else {
-                Ok(sections)
-            };
-        }
-        if pos == 0 && &head[..3] != CONTAINER {
-            return Err(wrong_opener(CONTAINER, &head[..3]));
-        }
+    fn fields(head: &[u8], at: u64) -> Result<(u8, usize), ParseError> {
         if head[3] != 0 {
-            return Err(unpadded_tag(&head[..3], pos, head[3]));
+            return Err(unpadded_tag(&head[..3], at, head[3]));
         }
-        let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
-        let end = section_end(pos, HEADER_LEN, len, remaining, &head[..3])?;
-        let payload = read_payload(r, len, pos, &head[..3])?;
-        pos = end;
-        sections.push(Section {
-            tag: [head[0], head[1], head[2]],
-            version: head[4],
-            payload,
-        });
+        let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]);
+        Ok((head[4], len as usize))
+    }
+
+    fn version_field(version: u8) -> impl AsRef<[u8]> {
+        [0, version]
     }
 }
 
-/// Bytes of a v3/v4 section header: 4-byte tag, `u32` version, `u32` length, both
-/// big-endian like the v2 chain's length.
+/// Bytes of a v3/v4 section header.
 pub const HEADER4_LEN: usize = 12;
 
 /// Opens a v3/v4 body. Its 4-byte payload is `0002000c` on every v3 specimen and
@@ -142,42 +94,66 @@ pub const STY4: &[u8; 4] = b"\0sty";
 /// Trails every v3/v4 specimen, after `sty`.
 pub const META4: &[u8; 4] = b"meta";
 
-/// One section of a v3/v4 sample instrument body.
-///
-/// The `4` is the tag width. The walk rules match [`Section`]'s: the length counts
-/// the payload only, and the chain must end exactly at the end of the body.
+impl Framing for Wide {
+    type Tag = [u8; 4];
+    type Version = u32;
+    const HEADER: usize = HEADER4_LEN;
+    const OPENER: [u8; 4] = *CONTAINER4;
+
+    fn tag(head: &[u8]) -> [u8; 4] {
+        [head[0], head[1], head[2], head[3]]
+    }
+
+    fn fields(head: &[u8], _: u64) -> Result<(u32, usize), ParseError> {
+        let version = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
+        let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]);
+        Ok((version, len as usize))
+    }
+
+    fn version_field(version: u32) -> impl AsRef<[u8]> {
+        version.to_be_bytes()
+    }
+}
+
+/// One section of a sample instrument body.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Section4 {
-    pub tag: [u8; 4],
+pub struct Framed<F: Framing> {
+    pub tag: F::Tag,
     /// Schema version of this section alone; sections revise independently.
-    /// The `map` version (12 or 14 on v3 specimens, 21 on v4) selects the
+    /// The wide `map` version (12 or 14 on v3 specimens, 21 on v4) selects the
     /// zone-record layout; the file's content version does not.
-    pub version: u32,
+    pub version: F::Version,
     pub payload: Vec<u8>,
 }
 
-impl Section4 {
+/// A section of the v2 chain.
+pub type Section = Framed<Narrow>;
+
+/// A section of the v3/v4 chain. The `4` is the tag width.
+pub type Section4 = Framed<Wide>;
+
+impl<F: Framing> Framed<F> {
     /// Length on disk, header included.
     pub fn encoded_len(&self) -> usize {
-        HEADER4_LEN + self.payload.len()
+        F::HEADER + self.payload.len()
     }
 
     /// The tag without its padding NUL.
     pub fn tag_str(&self) -> String {
-        String::from_utf8_lossy(&self.tag)
+        String::from_utf8_lossy(self.tag.as_ref())
             .trim_start_matches('\0')
             .to_owned()
     }
 
-    pub fn is(&self, tag: &[u8; 4]) -> bool {
+    pub fn is(&self, tag: &F::Tag) -> bool {
         &self.tag == tag
     }
 
     pub fn write_to(&self, w: &mut impl std::io::Write) -> Result<(), ParseError> {
         let len = wire_len(self.payload.len())?;
         let head = |w: &mut dyn std::io::Write| -> std::io::Result<()> {
-            w.write_all(&self.tag)?;
-            w.write_all(&self.version.to_be_bytes())?;
+            w.write_all(self.tag.as_ref())?;
+            w.write_all(F::version_field(self.version).as_ref())?;
             w.write_all(&len.to_be_bytes())?;
             w.write_all(&self.payload)
         };
@@ -185,33 +161,76 @@ impl Section4 {
     }
 }
 
-/// Walks a v3/v4 chain from the reader's position to its end. As in [`read_chain`],
-/// the chain must open with [`CONTAINER4`] and end exactly at the end of the body.
-pub fn read_chain4(
+impl<F: Framing> std::fmt::Debug for Framed<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Section")
+            .field("tag", &self.tag_str())
+            .field("version", &self.version)
+            .field("len", &self.payload.len())
+            .finish()
+    }
+}
+
+/// A chain whose first section is not its container: the leading sections are missing,
+/// or the bytes are not a chain. Raised before the first declared length is trusted,
+/// since a corrupt opener's length is arbitrary.
+fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
+    ParseError::AssertFail(format!(
+        "the body does not open with the {} container section; found {}",
+        expected.escape_ascii(),
+        found.escape_ascii(),
+    ))
+}
+
+/// A narrow header whose tag is not NUL-padded. [`Section`] models no field there and
+/// [`Framed::write_to`] writes 0, so decoding one would drop the byte and write the
+/// section back changed. Raised after [`wrong_opener`], before the declared length is
+/// trusted.
+fn unpadded_tag(tag: &[u8], at: u64, found: u8) -> ParseError {
+    ParseError::AssertFail(format!(
+        "section {} at {at} holds {found} where its tag's padding NUL belongs",
+        String::from_utf8_lossy(tag),
+    ))
+}
+
+fn missing_opener(expected: &[u8]) -> ParseError {
+    ParseError::AssertFail(format!(
+        "the body does not open with the {} container section; found end of body",
+        expected.escape_ascii(),
+    ))
+}
+
+/// Walks the chain from the reader's position to its end, `remaining` bytes away.
+///
+/// The chain must open with its [`Framing::OPENER`] and end exactly at the end of the
+/// body. A wrong length anywhere shifts every later section, so a short or overrunning
+/// walk is an error.
+pub fn read_chain<F: Framing>(
     r: &mut impl std::io::Read,
     remaining: u64,
-) -> Result<Vec<Section4>, ParseError> {
+) -> Result<Vec<Framed<F>>, ParseError> {
     let mut sections = Vec::new();
+    let mut head = vec![0u8; F::HEADER];
     let mut pos: u64 = 0;
     loop {
-        let mut head = [0u8; HEADER4_LEN];
         if !read_exact_or_end(r, &mut head, pos)? {
             return if pos == 0 {
-                Err(missing_opener(CONTAINER4))
+                Err(missing_opener(F::OPENER.as_ref()))
             } else {
                 Ok(sections)
             };
         }
-        if pos == 0 && &head[..4] != CONTAINER4 {
-            return Err(wrong_opener(CONTAINER4, &head[..4]));
+        let tag = F::tag(&head);
+        if pos == 0 && tag != F::OPENER {
+            return Err(wrong_opener(F::OPENER.as_ref(), tag.as_ref()));
         }
-        let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
-        let end = section_end(pos, HEADER4_LEN, len, remaining, &head[..4])?;
-        let payload = read_payload(r, len, pos, &head[..4])?;
+        let (version, len) = F::fields(&head, pos)?;
+        let end = section_end(pos, F::HEADER, len, remaining, tag.as_ref())?;
+        let payload = read_payload(r, len, pos, tag.as_ref())?;
         pos = end;
-        sections.push(Section4 {
-            tag: [head[0], head[1], head[2], head[3]],
-            version: u32::from_be_bytes([head[4], head[5], head[6], head[7]]),
+        sections.push(Framed {
+            tag,
+            version,
             payload,
         });
     }
@@ -285,49 +304,20 @@ fn wire_len(len: usize) -> Result<u32, ParseError> {
     })
 }
 
-/// Finds the single v3/v4 section with `tag`.
-///
-/// ⚠️ As with [`find`], `stk` repeats, once per stroke, and a lookup returns only the
-/// first.
-pub fn find4<'a>(sections: &'a [Section4], tag: &[u8; 4]) -> Option<&'a Section4> {
-    sections.iter().find(|s| s.is(tag))
-}
-
-pub fn find_mut4<'a>(sections: &'a mut [Section4], tag: &[u8; 4]) -> Option<&'a mut Section4> {
-    sections.iter_mut().find(|s| s.is(tag))
-}
-
-impl std::fmt::Debug for Section4 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Section4")
-            .field("tag", &self.tag_str())
-            .field("version", &self.version)
-            .field("len", &self.payload.len())
-            .finish()
-    }
-}
-
 /// Finds the single section with `tag`.
 ///
-/// ⚠️ Only for tags that appear at most once. `stk` repeats, once per zone, and must be
-/// collected in order: a lookup returns the first stroke and drops the rest, which no
-/// single-zone file reveals.
-pub fn find<'a>(sections: &'a [Section], tag: &[u8; 3]) -> Option<&'a Section> {
+/// ⚠️ Only for tags that appear at most once. `stk` repeats, once per stroke, and must
+/// be collected in order: a lookup returns the first stroke and drops the rest, which
+/// no single-zone file reveals.
+pub fn find<'a, F: Framing>(sections: &'a [Framed<F>], tag: &F::Tag) -> Option<&'a Framed<F>> {
     sections.iter().find(|s| s.is(tag))
 }
 
-pub fn find_mut<'a>(sections: &'a mut [Section], tag: &[u8; 3]) -> Option<&'a mut Section> {
+pub fn find_mut<'a, F: Framing>(
+    sections: &'a mut [Framed<F>],
+    tag: &F::Tag,
+) -> Option<&'a mut Framed<F>> {
     sections.iter_mut().find(|s| s.is(tag))
-}
-
-impl std::fmt::Debug for Section {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Section")
-            .field("tag", &self.tag_str())
-            .field("version", &self.version)
-            .field("len", &self.payload.len())
-            .finish()
-    }
 }
 
 #[cfg(test)]
@@ -339,7 +329,7 @@ mod tests {
     }
 
     fn walk4(body: &[u8]) -> Result<Vec<Section4>, ParseError> {
-        read_chain4(&mut { body }, body.len() as u64)
+        read_chain(&mut { body }, body.len() as u64)
     }
 
     fn section(tag: &[u8; 3], version: u8, payload: &[u8]) -> Vec<u8> {

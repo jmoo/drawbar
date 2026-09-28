@@ -6,7 +6,7 @@
 use std::io::{Read, Seek};
 
 use crate::bank;
-use crate::cbin::{self, Cbin, Header};
+use crate::cbin::{Cbin, Header};
 use crate::error::Error;
 use crate::formats::ne5::program;
 use crate::types::RangedU16Pair;
@@ -114,7 +114,7 @@ pub fn new(
     version: u32,
     programs: [program::Location; PROGRAM_COUNT],
 ) -> Result<Cbin<Song>, Error> {
-    program::known_version(FORMAT, version, KNOWN_VERSIONS)?;
+    crate::formats::known_version(FORMAT, version, KNOWN_VERSIONS)?;
     let echo = u16::try_from(version).map_err(|_| crate::error::ParseError::OutOfBounds {
         value: format!("version {version}"),
         bound: "a version the body's 16-bit echo can hold".into(),
@@ -134,11 +134,7 @@ pub fn new(
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Song>, Error> {
-    let file: Cbin<Song> = cbin::read(reader, FORMAT)?;
-    program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    program::unset_aux(FORMAT, &file.header)?;
-    location(&file)?;
-    Ok(file)
+    program::read_slotted::<_, Location>(reader, FORMAT, KNOWN_VERSIONS)
 }
 
 impl bank::Item<Location> for Cbin<Song> {

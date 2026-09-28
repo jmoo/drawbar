@@ -17,6 +17,17 @@ const DRAG_FOR_SWEEP: f32 = 220.0;
 
 const DIAL: f32 = 42.0;
 
+/// The keys that turn a focused knob, and by how much. When several are pressed at once
+/// the first listed wins.
+const STEPS: [(egui::Key, i64); 6] = [
+    (egui::Key::ArrowUp, 1),
+    (egui::Key::ArrowRight, 1),
+    (egui::Key::ArrowDown, -1),
+    (egui::Key::ArrowLeft, -1),
+    (egui::Key::PageUp, 10),
+    (egui::Key::PageDown, -10),
+];
+
 /// Where `value` sits between the stops, as 0..=1.
 ///
 /// A range with one value reads as fully counterclockwise instead of dividing by zero.
@@ -118,22 +129,8 @@ pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> O
         }
 
         if response.has_focus() {
-            let step = ui.input(|i| {
-                let held = |key| i.key_pressed(key);
-                match (
-                    held(egui::Key::ArrowUp) || held(egui::Key::ArrowRight),
-                    held(egui::Key::ArrowDown) || held(egui::Key::ArrowLeft),
-                    held(egui::Key::PageUp),
-                    held(egui::Key::PageDown),
-                ) {
-                    (true, _, _, _) => 1,
-                    (_, true, _, _) => -1,
-                    (_, _, true, _) => 10,
-                    (_, _, _, true) => -10,
-                    _ => 0,
-                }
-            });
-            if step != 0 {
+            let step = ui.input(|i| STEPS.into_iter().find(|(key, _)| i.key_pressed(*key)));
+            if let Some((_, step)) = step {
                 moved = Some((value + step).clamp(min, max));
             }
             if ui.input(|i| i.key_pressed(egui::Key::Home)) {

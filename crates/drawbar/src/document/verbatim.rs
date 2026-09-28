@@ -158,7 +158,7 @@ fn sentence(ui: &mut egui::Ui) -> bool {
         ui.add(egui::Label::new(
             egui::RichText::new(WHY).size(SENTENCE).color(quiet),
         ));
-        sample::action(ui, "Save a copy…", Glyph::Save, false)
+        sample::action(ui, "Save a copy…", Glyph::Save, app::caption(ui.visuals()))
     })
     .inner
 }

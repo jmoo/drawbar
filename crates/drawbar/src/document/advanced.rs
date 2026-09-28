@@ -173,34 +173,20 @@ impl Advanced {
             false => visuals.weak_text_color(),
         };
         let mono = egui::FontId::monospace(MONO);
-        cell(
-            &mut row,
-            &field.path,
-            egui::vec2(COLUMNS[0].1, ROW),
-            mono.clone(),
-            ink,
-        );
-        cell(
-            &mut row,
-            field.spec.placement,
-            egui::vec2(COLUMNS[1].1, ROW),
-            mono.clone(),
-            app::caption(&visuals),
-        );
-        cell(
-            &mut row,
-            &field::kind_word(field),
-            egui::vec2(COLUMNS[2].1, ROW),
-            egui::FontId::proportional(MONO),
-            app::caption(&visuals),
-        );
-        cell(
-            &mut row,
-            table.raw(&field.path),
-            egui::vec2(COLUMNS[3].1, ROW),
-            mono,
-            ink,
-        );
+        let kind = field::kind_word(field);
+        let cells = [
+            (field.path.as_str(), mono.clone(), ink),
+            (field.spec.placement, mono.clone(), app::caption(&visuals)),
+            (
+                kind.as_str(),
+                egui::FontId::proportional(MONO),
+                app::caption(&visuals),
+            ),
+            (table.raw(&field.path), mono, ink),
+        ];
+        for ((text, font, ink), (_, width)) in cells.into_iter().zip(COLUMNS) {
+            cell(&mut row, text, egui::vec2(width, ROW), font, ink);
+        }
         self.writes(&mut row, field, sets);
         if let Some((glyph, tint)) = flag(changed, hidden, labeled, &visuals) {
             icon(&mut row, glyph, 11.0, tint);
@@ -501,20 +487,14 @@ fn held(ui: &mut egui::Ui, value: &str, width: f32) -> egui::Response {
         egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
         egui::StrokeKind::Inside,
     );
-    let ink = visuals.text_color();
     let inner = rect.shrink2(egui::vec2(BOX_PAD, 0.0));
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
+    crate::panel::cut(
+        ui.painter(),
+        inner.left(),
+        rect.center().y,
+        inner.width(),
         value,
-        0.0,
-        egui::TextFormat::simple(egui::FontId::monospace(MONO), ink),
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width().max(0.0));
-    let galley = ui.painter().layout_job(job);
-    ui.painter().galley(
-        egui::pos2(inner.left(), rect.center().y - galley.size().y / 2.0),
-        galley,
-        ink,
+        egui::TextFormat::simple(egui::FontId::monospace(MONO), visuals.text_color()),
     );
     response
 }
@@ -670,28 +650,27 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
         return asked;
     }
     match &device.state.detail.info {
-        Some(Some(info)) => facts(
-            ui,
-            &[
-                ("Name", format!("{:?}", info.name), String::new()),
-                ("Format", info.format.clone(), String::new()),
-                ("Version", info.version.to_string(), String::new()),
-                ("Body", format!("{} bytes", info.body_len), String::new()),
-                (
-                    "crc32",
-                    match info.crc32 {
-                        Some(crc) => format!("{crc:#010x}"),
-                        None => "none".to_string(),
-                    },
-                    match info.crc32 {
-                        // Library content reports 0xffffffff: no checksum is kept for
-                        // objects this large.
-                        Some(_) => String::new(),
-                        None => "not checksummed for this class".to_string(),
-                    },
+        Some(Some(info)) => {
+            let (crc, note) = match info.crc32 {
+                Some(crc) => (format!("{crc:#010x}"), String::new()),
+                // Library content reports 0xffffffff: no checksum is kept for objects
+                // this large.
+                None => (
+                    "none".to_string(),
+                    "not checksummed for this class".to_string(),
                 ),
-            ],
-        ),
+            };
+            facts(
+                ui,
+                &[
+                    ("Name", format!("{:?}", info.name), String::new()),
+                    ("Format", info.format.clone(), String::new()),
+                    ("Version", info.version.to_string(), String::new()),
+                    ("Body", format!("{} bytes", info.body_len), String::new()),
+                    ("crc32", crc, note),
+                ],
+            );
+        }
         Some(None) => {
             ui.label(egui::RichText::new("the slot is empty").weak());
         }

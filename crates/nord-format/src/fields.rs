@@ -193,15 +193,16 @@ pub enum PackedOrder {
 /// Only libraries that a decoded body refers to are listed. The instruments hold others
 /// (the live slots, the settings singleton) that no reference points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum Library {
     /// Piano instruments (`.npno`).
-    Piano,
+    Piano = 1,
     /// Sample instruments (`.nsmp`).
-    Sample,
+    Sample = 3,
     /// The instrument's own programs.
-    Program,
+    Program = 4,
     /// Set lists, which name programs in turn.
-    SetList,
+    SetList = 5,
 }
 
 impl Library {
@@ -215,12 +216,7 @@ impl Library {
     /// `nord-usb`'s `ObjectClass` takes its library codes from here, so a caller holding
     /// both has one table.
     pub const fn code(self) -> u8 {
-        match self {
-            Library::Piano => 1,
-            Library::Sample => 3,
-            Library::Program => 4,
-            Library::SetList => 5,
-        }
+        self as u8
     }
 
     /// The library a [`code`](Self::code) names, or `None`; most bytes name none.
@@ -267,6 +263,7 @@ impl Library {
 /// what the panel shows, and the type's own `Display` prints a converted reading only
 /// where the transform is known. See [`Unit::describes_a_known_transform`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum Unit {
     /// The panel's own `0..10`, which most Nord knobs read in.
     Panel10,
@@ -286,24 +283,27 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// Every unit, in code order.
+    const ALL: [Unit; 10] = [
+        Unit::Panel10,
+        Unit::Decibels,
+        Unit::Milliseconds,
+        Unit::Hertz,
+        Unit::Bpm,
+        Unit::ClockDivision,
+        Unit::Semitones,
+        Unit::Octaves,
+        Unit::Pan,
+        Unit::None,
+    ];
+
     /// The unit's numeric code.
     ///
     /// A const generic parameter cannot be an enum, so a type that carries its unit, such
     /// as [`BipolarOf`](crate::components::BipolarOf), carries this code and turns it
     /// back with [`expect_code`](Self::expect_code).
     pub const fn code(self) -> u8 {
-        match self {
-            Unit::Panel10 => 0,
-            Unit::Decibels => 1,
-            Unit::Milliseconds => 2,
-            Unit::Hertz => 3,
-            Unit::Bpm => 4,
-            Unit::ClockDivision => 5,
-            Unit::Semitones => 6,
-            Unit::Octaves => 7,
-            Unit::Pan => 8,
-            Unit::None => 9,
-        }
+        self as u8
     }
 
     /// The unit a [`code`](Self::code) names, for the type-level parameter this
@@ -313,19 +313,8 @@ impl Unit {
     /// is forced at compile time, as it is for the aliases in
     /// [`components`](crate::components).
     pub const fn expect_code(code: u8) -> Unit {
-        match code {
-            0 => Unit::Panel10,
-            1 => Unit::Decibels,
-            2 => Unit::Milliseconds,
-            3 => Unit::Hertz,
-            4 => Unit::Bpm,
-            5 => Unit::ClockDivision,
-            6 => Unit::Semitones,
-            7 => Unit::Octaves,
-            8 => Unit::Pan,
-            9 => Unit::None,
-            _ => panic!("no unit has this code"),
-        }
+        assert!((code as usize) < Unit::ALL.len(), "no unit has this code");
+        Unit::ALL[code as usize]
     }
 
     /// Whether a value in this unit can be computed from the stored one.
@@ -439,9 +428,13 @@ pub fn legal_values<T: Packed + Debug>(width: u32) -> Vec<String> {
 /// pattern to match and fails here instead of being clamped.
 ///
 /// ⚠️ An unexplained value can only be written by its unexplained spelling: a sparse enum
-/// renders an unrecognized `9` as `Unknown(9)`, so a bare `9` matches nothing and
-/// `Unknown(9)` is the only spelling.
-pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, FieldError> {
+/// renders an unrecognized `9` as `unknown (9)`, so a bare `9` matches nothing and
+/// `unknown (9)`, in any case, is the only spelling.
+pub fn parse_field<T: Packed + Debug>(
+    field: &'static str,
+    width: u32,
+    given: &str,
+) -> Result<T, FieldError> {
     let wanted = normalize(given);
     // A truth word for a `bool` field: its `Debug` is `true`/`false`, which no numeric
     // field renders, so trying the canonical spelling second cannot collide.
@@ -469,8 +462,7 @@ pub fn parse_field<T: Packed + Debug>(width: u32, given: &str) -> Result<T, Fiel
         }
     }
     Err(FieldError::BadValue {
-        // Filled in by the caller, which knows the field's name.
-        field: "",
+        field,
         given: given.to_string(),
         legal: legal_values::<T>(width),
     })
@@ -505,25 +497,28 @@ pub fn settable_form(width: u32, debug: &str, raw: u64) -> String {
     }
 }
 
-impl FieldError {
-    /// Attach the field's name to an error raised before it was known.
-    pub fn at(self, field: &'static str) -> Self {
-        match self {
-            FieldError::BadValue { given, legal, .. } => FieldError::BadValue {
-                field,
-                given,
-                legal,
-            },
-            other => other,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::components::MorphTarget;
     use crate::formats::ne5::{Level, Transpose};
+
+    /// A unit or library carried as a const generic code comes back as itself.
+    #[test]
+    fn every_code_names_its_own_unit_and_library() {
+        for unit in Unit::ALL {
+            assert_eq!(Unit::expect_code(unit.code()), unit);
+        }
+        for library in [
+            Library::Piano,
+            Library::Sample,
+            Library::Program,
+            Library::SetList,
+        ] {
+            assert_eq!(Library::from_code(library.code()), Some(library));
+        }
+        assert_eq!(Library::Sample.code(), 3, "the wire's object class");
+    }
 
     /// A refinement adds what the declaration site knows and the type cannot. A field
     /// whose name looks like a morph slot or a drawbar, but whose type says otherwise,
@@ -574,7 +569,7 @@ mod tests {
 
     #[test]
     fn a_value_is_parsed_out_of_the_way_it_prints() {
-        let v: Transpose = parse_field(4, "-5").unwrap();
+        let v: Transpose = parse_field("field", 4, "-5").unwrap();
         assert_eq!(v.inner(), -5);
         // The type applies the bias: -5 stores as 1.
         assert_eq!(<Transpose as Packed>::to_bits(&v), 1);
@@ -583,16 +578,19 @@ mod tests {
     #[test]
     fn a_leading_plus_and_stray_space_are_the_same_value() {
         for spelling in ["+3", "3", " 3 "] {
-            assert_eq!(parse_field::<Transpose>(4, spelling).unwrap().inner(), 3);
+            assert_eq!(
+                parse_field::<Transpose>("field", 4, spelling)
+                    .unwrap()
+                    .inner(),
+                3
+            );
         }
     }
 
     /// Out of range has no bit pattern to match, so it cannot reach an encode.
     #[test]
     fn a_value_outside_the_types_range_is_refused() {
-        let err = parse_field::<Transpose>(4, "9")
-            .unwrap_err()
-            .at("transpose");
+        let err = parse_field::<Transpose>("transpose", 4, "9").unwrap_err();
         assert!(
             err.to_string().contains("not a value of transpose"),
             "{err}"
@@ -602,19 +600,19 @@ mod tests {
     #[test]
     fn a_bool_takes_the_words_people_actually_type() {
         for yes in ["true", "on", "yes", "1"] {
-            assert!(parse_field::<bool>(1, yes).unwrap(), "{yes}");
+            assert!(parse_field::<bool>("field", 1, yes).unwrap(), "{yes}");
         }
         for no in ["false", "off", "no", "0"] {
-            assert!(!parse_field::<bool>(1, no).unwrap(), "{no}");
+            assert!(!parse_field::<bool>("field", 1, no).unwrap(), "{no}");
         }
     }
 
     #[test]
     fn a_wide_numeric_value_must_fit_its_declared_width() {
-        assert!(parse_field::<u16>(16, "70000").is_err());
-        assert!(parse_field::<u32>(32, "4294967296").is_err());
+        assert!(parse_field::<u16>("field", 16, "70000").is_err());
+        assert!(parse_field::<u32>("field", 32, "4294967296").is_err());
         assert_eq!(
-            parse_field::<u64>(64, "18446744073709551615").unwrap(),
+            parse_field::<u64>("field", 64, "18446744073709551615").unwrap(),
             u64::MAX
         );
     }

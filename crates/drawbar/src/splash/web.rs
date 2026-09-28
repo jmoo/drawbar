@@ -4,12 +4,13 @@
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
-use wasm_bindgen::{JsCast as _, JsValue};
+use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
 use super::{https, news, opening, plain, welcome, Notes, Opening, Wanted, VERSION};
 use crate::about::RELEASES;
 use crate::browser::Act;
+use crate::js::field;
 
 /// Which version's sheet has already been dismissed.
 ///
@@ -133,25 +134,18 @@ async fn read(url: &str) -> Option<Notes> {
         return None;
     }
     let json = JsFuture::from(response.json().ok()?).await.ok()?;
-    let body = text(&json, "body")?;
+    let body = field(&json, "body")?.as_string()?;
     if body.len() > MOST {
         return None;
     }
     let body = plain(&body);
-    let page = text(&json, "html_url");
+    let page = field(&json, "html_url").and_then(|url| url.as_string());
     let page = page
         .as_deref()
         .and_then(https)
         .unwrap_or(RELEASES)
         .to_owned();
     Some(Notes::Read { body, page })
-}
-
-/// A field of the reply, when it is a string.
-fn text(json: &JsValue, field: &str) -> Option<String> {
-    js_sys::Reflect::get(json, &JsValue::from_str(field))
-        .ok()?
-        .as_string()
 }
 
 fn store() -> Option<web_sys::Storage> {

@@ -21,7 +21,7 @@ pub struct SamplePanel {
     #[bits(14..=21)]
     pub number: u8,
     /// The sample (`.nsmp`) this program depends on, laid out as
-    /// [`PianoPanel::id`](super::PianoPanel::id).
+    /// [`PianoPanel::id`](super::piano_panel::PianoPanel::id).
     #[bits(22..=53)]
     pub id: SampleRef,
     #[bits(54..=55)]

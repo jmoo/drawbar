@@ -153,13 +153,29 @@ struct Sect<'a> {
     key: String,
     title: String,
     fields: Vec<&'a Field>,
-    nested: Vec<Sect<'a>>,
-    /// The selection that makes this stored alternative the one that plays.
-    pick: Option<&'a Selection>,
-    selected: bool,
+    cards: Vec<Card<'a>>,
     /// The titles of the groups under this one the instrument is not using.
     idle: Vec<&'static str>,
     count: usize,
+}
+
+impl<'a> Sect<'a> {
+    /// Every field the section draws, its cards included.
+    fn every(&self) -> impl Iterator<Item = &'a Field> + '_ {
+        self.fields
+            .iter()
+            .chain(self.cards.iter().flat_map(|card| &card.fields))
+            .copied()
+    }
+}
+
+/// A group under a section.
+struct Card<'a> {
+    title: String,
+    fields: Vec<&'a Field>,
+    /// The selection that makes this stored alternative the one that plays.
+    pick: Option<&'a Selection>,
+    selected: bool,
 }
 
 /// A parameter and the performance controls that morph it.
@@ -179,25 +195,43 @@ enum Cell<'a> {
 
 /// The document a decoded body is drawn as.
 pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
-    let morphs = slots_of(fields);
-    let mut doc = match nord_format::panel::of(decoded) {
-        Some(layout) => authored(layout, fields, morphs),
-        None if crate::fields::is_electro5_settings(decoded) => menus(fields, morphs),
-        None => flat(fields, morphs),
+    let (mut sections, leftovers, idle, shape) = match nord_format::panel::of(decoded) {
+        Some(layout) => authored(layout, fields),
+        None if crate::fields::is_electro5_settings(decoded) => {
+            (menus(fields), Vec::new(), Vec::new(), Shape::Menus)
+        }
+        None => (flat(fields), Vec::new(), Vec::new(), Shape::Flat),
     };
-    doc.fields = fields.len();
-    doc.slots = fields
-        .iter()
-        .filter(|field| matches!(field.spec.control, ControlKind::Morph { .. }))
-        .count();
-    for section in &mut doc.sections {
-        count(section, &doc.morphs);
+    let morphs = slots_of(fields);
+    for section in &mut sections {
+        section.count = count(section, &morphs);
     }
-    doc.shown = doc.sections.iter().flat_map(paths).collect();
-    let lensed = lensed(&doc.morphs, &doc.shown);
-    doc.shown.extend(lensed);
-    doc.picks = doc.sections.iter().flat_map(selectors).collect();
-    doc
+    let mut shown: HashSet<&str> = sections
+        .iter()
+        .flat_map(Sect::every)
+        .map(|field| field.path.as_str())
+        .collect();
+    let lensed = lensed(&morphs, &shown);
+    shown.extend(lensed);
+    let picks = sections
+        .iter()
+        .flat_map(|section| &section.cards)
+        .filter_map(|card| card.pick.map(|selection| selection.field))
+        .collect();
+    Doc {
+        sections,
+        leftovers,
+        idle,
+        shape,
+        shown,
+        picks,
+        morphs,
+        fields: fields.len(),
+        slots: fields
+            .iter()
+            .filter(|field| matches!(field.spec.control, ControlKind::Morph { .. }))
+            .count(),
+    }
 }
 
 impl Doc<'_> {
@@ -205,15 +239,6 @@ impl Doc<'_> {
     /// under their parameter's control.
     pub fn shows(&self, path: &str) -> bool {
         self.shown.contains(path)
-    }
-
-    pub fn shape(&self) -> Shape {
-        self.shape
-    }
-
-    /// How many fields there are, and how many of them are morph slots.
-    pub fn tally(&self) -> (usize, usize) {
-        (self.fields, self.slots)
     }
 
     /// How many fields no group placed, and how many of those the strings table names.
@@ -262,11 +287,12 @@ fn which_slot(path: &str) -> Option<usize> {
         .position(|(suffix, _, _)| leaf.ends_with(suffix))
 }
 
+/// The sections of a body the library lays out, the fields no group placed, the titles
+/// of the idle top-level groups, and the shape.
 fn authored<'a>(
     layout: &'a Panel,
     fields: &'a [Field],
-    morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
-) -> Doc<'a> {
+) -> (Vec<Sect<'a>>, Vec<&'a Field>, Vec<&'static str>, Shape) {
     let resolved = layout.resolve(fields);
     let mut sections = Vec::new();
     let mut idle = Vec::new();
@@ -275,16 +301,14 @@ fn authored<'a>(
             idle.push(placed.group.title);
             continue;
         }
-        let mut nested = Vec::new();
+        let mut cards = Vec::new();
         let mut under = Vec::new();
-        hoist(&placed.groups, None, fields, &mut nested, &mut under);
+        hoist(&placed.groups, None, fields, &mut cards, &mut under);
         sections.push(Sect {
             key: format!("s{nth}"),
             title: placed.group.title.to_string(),
             fields: placed.fields.clone(),
-            nested,
-            pick: None,
-            selected: true,
+            cards,
             idle: under,
             count: 0,
         });
@@ -302,19 +326,14 @@ fn authored<'a>(
             named,
         ));
     }
-    Doc {
+    (
         sections,
-        leftovers: resolved.leftovers,
+        resolved.leftovers,
         idle,
-        shape: Shape::Authored {
+        Shape::Authored {
             exhaustive: layout.exhaustive,
         },
-        shown: HashSet::new(),
-        picks: HashSet::new(),
-        morphs,
-        fields: 0,
-        slots: 0,
-    }
+    )
 }
 
 /// The groups under a section, with the third level flattened onto the second.
@@ -325,7 +344,7 @@ fn hoist<'a>(
     groups: &[Placed<'a>],
     under: Option<&str>,
     fields: &'a [Field],
-    into: &mut Vec<Sect<'a>>,
+    into: &mut Vec<Card<'a>>,
     idle: &mut Vec<&'static str>,
 ) {
     for group in groups {
@@ -338,15 +357,11 @@ fn hoist<'a>(
             None => group.group.title.to_string(),
         };
         let pick = group.group.selected_by.as_ref();
-        into.push(Sect {
-            key: String::new(),
+        into.push(Card {
             title: title.clone(),
             fields: group.fields.clone(),
-            nested: Vec::new(),
             pick,
             selected: pick.is_some_and(|selection| selection.selected(fields)),
-            idle: Vec::new(),
-            count: 0,
         });
         hoist(&group.groups, Some(&title), fields, into, idle);
     }
@@ -356,11 +371,8 @@ fn hoist<'a>(
 ///
 /// ⚠️ The library has no layout for the settings body, so the sections come from this
 /// app's table in `strings::FIELDS`.
-fn menus<'a>(
-    fields: &'a [Field],
-    morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
-) -> Doc<'a> {
-    let sections = strings::SETTINGS_SECTIONS
+fn menus(fields: &[Field]) -> Vec<Sect<'_>> {
+    strings::SETTINGS_SECTIONS
         .iter()
         .enumerate()
         .filter_map(|(nth, section)| {
@@ -370,42 +382,17 @@ fn menus<'a>(
                 .collect();
             (!rows.is_empty()).then(|| plain_sect(format!("m{nth}"), section.title(), rows))
         })
-        .collect();
-    Doc {
-        sections,
-        leftovers: Vec::new(),
-        idle: Vec::new(),
-        shape: Shape::Menus,
-        shown: HashSet::new(),
-        picks: HashSet::new(),
-        morphs,
-        fields: 0,
-        slots: 0,
-    }
+        .collect()
 }
 
 /// Any other registry-backed body, sectioned by path prefix. Nothing here knows how that
 /// instrument's panel is divided, but the registry groups fields that belong together.
-fn flat<'a>(
-    fields: &'a [Field],
-    morphs: HashMap<&'a str, [Option<&'a Field>; SLOTS.len()]>,
-) -> Doc<'a> {
-    let sections = prefixes(fields)
+fn flat(fields: &[Field]) -> Vec<Sect<'_>> {
+    prefixes(fields)
         .into_iter()
         .enumerate()
         .map(|(nth, group)| plain_sect(format!("f{nth}"), &group.title, group.rows))
-        .collect();
-    Doc {
-        sections,
-        leftovers: Vec::new(),
-        idle: Vec::new(),
-        shape: Shape::Flat,
-        shown: HashSet::new(),
-        picks: HashSet::new(),
-        morphs,
-        fields: 0,
-        slots: 0,
-    }
+        .collect()
 }
 
 fn plain_sect<'a>(key: String, title: &str, rows: Vec<&'a Field>) -> Sect<'a> {
@@ -413,9 +400,7 @@ fn plain_sect<'a>(key: String, title: &str, rows: Vec<&'a Field>) -> Sect<'a> {
         key,
         title: title.to_string(),
         fields: rows,
-        nested: Vec::new(),
-        pick: None,
-        selected: true,
+        cards: Vec::new(),
         idle: Vec::new(),
         count: 0,
     }
@@ -431,18 +416,19 @@ struct Group<'a> {
 
 /// The sections a field list falls into.
 ///
-/// A nested body's fields are contiguous and share a dotted prefix, which is the
-/// registry's own division. A prefix with too many fields to read in one run is divided
-/// again on the leading word of each field's name, where the Stage bodies spell their
-/// sections (`slot_a.organ_preset_1_drawbar_1`). A word that recurs later joins the group
-/// it started instead of starting a second one.
+/// A nested body's fields share a dotted prefix, which is the registry's own division.
+/// The enclosing body's fields can sit on both sides of a nested body, so a prefix that
+/// recurs later joins the group it started. A prefix with too many fields to read in
+/// one run is divided again on the leading word of each field's name, where the Stage
+/// bodies spell their sections (`slot_a.piano_volume`). A word that recurs later joins
+/// the group it started in the same way.
 fn prefixes(fields: &[Field]) -> Vec<Group<'_>> {
     let mut out: Vec<Group> = Vec::new();
     for field in fields {
         let prefix = field.path.rsplit_once('.').map_or("", |(head, _)| head);
-        match out.last_mut() {
-            Some(group) if group.key == prefix => group.rows.push(field),
-            _ => out.push(Group {
+        match out.iter_mut().find(|group| group.key == prefix) {
+            Some(group) => group.rows.push(field),
+            None => out.push(Group {
                 key: prefix.to_string(),
                 title: match prefix.is_empty() {
                     true => strings::UNPREFIXED.to_string(),
@@ -483,34 +469,16 @@ fn divide(group: Group<'_>) -> Vec<Group<'_>> {
     out
 }
 
-/// How many registry fields a section covers: its own, their morph slots, and everything
-/// nested under it.
-fn count(section: &mut Sect<'_>, morphs: &HashMap<&str, [Option<&Field>; SLOTS.len()]>) {
-    let mut total = section.fields.len();
-    for field in &section.fields {
-        total += morphs.get(field.path.as_str()).map_or(0, |slots| {
-            slots.iter().filter(|slot| slot.is_some()).count()
-        });
-    }
-    for nested in &mut section.nested {
-        count(nested, morphs);
-        total += nested.count;
-    }
-    section.count = total;
-}
-
-/// The selectors that pick between a section's stored alternatives, however deeply the
-/// layout nested them before they were flattened.
-fn selectors<'a>(section: &Sect<'a>) -> Vec<&'a str> {
-    let mut out: Vec<&str> = section
-        .pick
-        .map(|selection| selection.field)
-        .into_iter()
-        .collect();
-    for nested in &section.nested {
-        out.extend(selectors(nested));
-    }
-    out
+/// How many registry fields a section covers: the fields it draws and their morph slots.
+fn count(section: &Sect<'_>, morphs: &HashMap<&str, [Option<&Field>; SLOTS.len()]>) -> usize {
+    section
+        .every()
+        .map(|field| {
+            1 + morphs
+                .get(field.path.as_str())
+                .map_or(0, |slots| slots.iter().flatten().count())
+        })
+        .sum()
 }
 
 /// The morph slots of the drawn parameters.
@@ -533,19 +501,6 @@ fn lensed<'a>(
                     .map(|slot| slot.path.as_str()),
             );
         }
-    }
-    out
-}
-
-/// Every path a section draws, its nested cards included.
-fn paths<'a>(section: &Sect<'a>) -> Vec<&'a str> {
-    let mut out: Vec<&str> = section
-        .fields
-        .iter()
-        .map(|field| field.path.as_str())
-        .collect();
-    for nested in &section.nested {
-        out.extend(paths(nested));
     }
     out
 }
@@ -785,21 +740,19 @@ fn drew(
     sets: &mut Sets,
 ) -> bool {
     let quiet = app::caption(ui.visuals());
-    let reading = match section.count {
-        1 => "1 field".to_string(),
-        n => format!("{n} fields"),
-    };
+    let reading = strings::counted(section.count, "field", "fields");
     controls::heading(ui, &section.title, "", Some((&reading, quiet)));
     if section.fields.iter().any(|field| field.path == PIANO_MODEL) {
         piano.ui(ui);
     }
     cells(ui, ctx, state, doc, &section.fields, piano, sets);
 
-    let (alternatives, cards): (Vec<&Sect>, Vec<&Sect>) = section
-        .nested
+    let alternatives: Vec<(&Card, &Selection)> = section
+        .cards
         .iter()
-        .partition(|nested| nested.pick.is_some());
-    for card in cards {
+        .filter_map(|card| Some((card, card.pick?)))
+        .collect();
+    for card in section.cards.iter().filter(|card| card.pick.is_none()) {
         egui::Frame::new()
             .fill(ui.visuals().window_fill)
             .stroke(egui::Stroke::new(
@@ -830,13 +783,13 @@ fn side_by_side(
     ctx: &Ctx,
     state: &State,
     doc: &Doc<'_>,
-    alternatives: &[&Sect<'_>],
+    alternatives: &[(&Card<'_>, &Selection)],
     piano: &mut PianoLookup,
     sets: &mut Sets,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-        for alternative in alternatives {
+        for (alternative, selection) in alternatives {
             let stroke = match alternative.selected {
                 true => app::accent(ui.visuals()),
                 false => ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -851,19 +804,13 @@ fn side_by_side(
                     // The cards sit side by side, so each stacks its heading over its
                     // controls instead of inheriting the row's layout.
                     ui.vertical(|ui| {
-                        if alternative.pick.is_some() {
-                            picked |=
-                                card_title(ui, &alternative.title, Some(alternative.selected));
-                        }
+                        picked |= card_title(ui, &alternative.title, Some(alternative.selected));
                         if !alternative.selected {
                             ui.set_opacity(0.45);
                         }
                         cells(ui, ctx, state, doc, &alternative.fields, piano, sets);
                     });
                 });
-            let Some(selection) = alternative.pick else {
-                continue;
-            };
             picked |= clicked_in(ui, card.response.rect);
             if picked && !alternative.selected {
                 sets.push((selection.field.to_string(), selection.value.to_string()));
@@ -952,7 +899,7 @@ fn idle_line(ui: &mut egui::Ui, idle: &[&'static str]) -> bool {
         ui.label(
             egui::RichText::new(format!(
                 "{} {} stored but not in use for the state this file holds. Kept, not cleared.",
-                listed(idle),
+                strings::listed(idle),
                 match idle.len() {
                     1 => "is",
                     _ => "are",
@@ -974,15 +921,6 @@ fn idle_line(ui: &mut egui::Ui, idle: &[&'static str]) -> bool {
             .clicked();
     });
     asked
-}
-
-/// `A`, `A and B`, `A, B and C`.
-fn listed(words: &[&str]) -> String {
-    match words {
-        [] => String::new(),
-        [one] => (*one).to_string(),
-        [head @ .., last] => format!("{} and {last}", head.join(", ")),
-    }
 }
 
 /// The line under the last section: what the layout does not place.
@@ -1293,28 +1231,12 @@ fn dots(ui: &mut egui::Ui, morphs: &[Option<&Field>; SLOTS.len()]) {
 }
 
 /// The value a morph slot of this width holds when it does not morph its parameter.
-///
-/// ⚠️ The morph encoding is not established, and a `Field` carries only the stored
-/// number, so the midpoint comes from the library's constant for the slot's width
-/// instead of being restated here.
-/// Inferred from specimens; not confirmed on hardware.
 fn neutral(width: u32) -> Option<u64> {
-    use nord_format::components::MorphOf;
-    Some(u64::from(match width {
-        1 => MorphOf::<1>::NEUTRAL,
-        2 => MorphOf::<2>::NEUTRAL,
-        3 => MorphOf::<3>::NEUTRAL,
-        4 => MorphOf::<4>::NEUTRAL,
-        5 => MorphOf::<5>::NEUTRAL,
-        6 => MorphOf::<6>::NEUTRAL,
-        7 => MorphOf::<7>::NEUTRAL,
-        8 => MorphOf::<8>::NEUTRAL,
-        _ => return None,
-    }))
+    nord_format::components::morph_neutral(width).map(u64::from)
 }
 
 fn is_neutral(slot: &Field) -> bool {
-    word(&slot.value) == neutral(slot.spec.width)
+    crate::fields::number(&slot.value) == neutral(slot.spec.width)
 }
 
 /// The width of a cell, set by the control it holds.
@@ -1652,7 +1574,7 @@ fn bar(ui: &mut egui::Ui, field: &Field, rank: Option<u8>) -> Option<String> {
     let rank = rank
         .and_then(|rank| usize::from(rank).checked_sub(1))
         .filter(|rank| *rank < drawbar_widget::BARS);
-    drawbar_widget::ui_one(ui, rank, position, true).map(|moved| moved.to_string())
+    drawbar_widget::ui_one(ui, rank, position).map(|moved| moved.to_string())
 }
 
 /// A whole register in one field.
@@ -1661,7 +1583,7 @@ fn bar(ui: &mut egui::Ui, field: &Field, rank: Option<u8>) -> Option<String> {
 /// plausible registration, so the packing order comes from the field instead of being
 /// assumed.
 fn packed(ui: &mut egui::Ui, field: &Field, order: PackedOrder) -> Option<String> {
-    let bits = drawbar_widget::parse(&field.value)?;
+    let bits = crate::fields::number(&field.value)?;
     let stored = drawbar_widget::bars(bits);
     let shown = match order {
         PackedOrder::HighFirst => stored,
@@ -1689,7 +1611,7 @@ fn bars(
 ) -> Option<[u8; drawbar_widget::BARS]> {
     let mut moved = None;
     ui.vertical(|ui| {
-        moved = drawbar_widget::ui_ranks(ui, positions, true, &drawbar_widget::ALL_RANKS);
+        moved = drawbar_widget::ui_ranks(ui, positions);
         ui.label(
             egui::RichText::new(drawbar_widget::digits(&moved.unwrap_or(positions)))
                 .font(egui::FontId::monospace(READING))
@@ -1820,7 +1742,7 @@ fn pattern(
     bits_per_step: u8,
     order: PackedOrder,
 ) -> Option<String> {
-    let stored = word(&field.value)?;
+    let stored = crate::fields::number(&field.value)?;
     let mut moved = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
@@ -1976,9 +1898,8 @@ fn transpose(ui: &mut egui::Ui, ctx: &Ctx, state: &State, rows: &[&Field], sets:
 
 /// The rows of the Advanced face's "About this file": a label, a value, and a note.
 pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, String)> {
-    let (fields, slots) = doc.tally();
     let (badge, format) = super::header::badge(entity);
-    let layout = match doc.shape() {
+    let layout = match doc.shape {
         Shape::Authored { exhaustive: true } => (
             "authored — exhaustive".to_string(),
             "every field the body declares is placed".to_string(),
@@ -2006,8 +1927,8 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
         ("Format", badge, format),
         (
             "Fields",
-            fields.to_string(),
-            match slots {
+            doc.fields.to_string(),
+            match doc.slots {
                 0 => "no morph slots in this body".to_string(),
                 n => format!("{n} of them morph slots"),
             },
@@ -2059,15 +1980,6 @@ fn unit_word(unit: Unit) -> &'static str {
         Unit::Octaves => "oct",
         Unit::Pan => "pan",
         Unit::None => "",
-    }
-}
-
-/// A stored word as a field spells it: `0x…`, or decimal.
-fn word(value: &str) -> Option<u64> {
-    let text = value.trim();
-    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        Some(hex) => u64::from_str_radix(hex, 16).ok(),
-        None => text.parse().ok(),
     }
 }
 
@@ -2141,14 +2053,6 @@ mod tests {
         assert_eq!(neutral(5), Some(15));
         assert_eq!(neutral(3), Some(3));
         assert_eq!(neutral(9), None);
-    }
-
-    /// The list a section's idle line is built from.
-    #[test]
-    fn the_idle_line_names_what_is_stored_and_not_played() {
-        assert_eq!(listed(&["Vox"]), "Vox");
-        assert_eq!(listed(&["Vox", "Farfisa"]), "Vox and Farfisa");
-        assert_eq!(listed(&["Vox", "Farfisa", "Pipe"]), "Vox, Farfisa and Pipe");
     }
 
     /// The Electro 5 packs a whole registration into one field, and the Stage 4 gives
@@ -2292,7 +2196,7 @@ mod tests {
         let decoded =
             nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
         let doc = of(&decoded, &fields);
-        assert_eq!(doc.shape(), Shape::Authored { exhaustive: false });
+        assert_eq!(doc.shape, Shape::Authored { exhaustive: false });
         let titles: Vec<&str> = doc
             .sections
             .iter()
@@ -2365,21 +2269,16 @@ mod tests {
         let decoded =
             nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
         let doc = of(&decoded, &fields);
-        let alternatives: Vec<&Sect> = doc
+        let alternatives: Vec<(&Card, &Selection)> = doc
             .sections
             .iter()
-            .flat_map(|section| &section.nested)
-            .filter(|nested| nested.pick.is_some())
+            .flat_map(|section| &section.cards)
+            .filter_map(|card| Some((card, card.pick?)))
             .collect();
-        assert!(
-            alternatives.iter().filter(|kept| !kept.selected).count() > 0,
-            "the Electro 5 stores a preset it is not playing",
-        );
-        let kept = alternatives
+        let (_, wanted) = alternatives
             .iter()
-            .find(|kept| !kept.selected)
-            .expect("a stored alternative");
-        let wanted = kept.pick.expect("a card is picked by its own selector");
+            .find(|(kept, _)| !kept.selected)
+            .expect("the Electro 5 stores a preset it is not playing");
 
         let ctx = testing::context();
         let quiet = ctx.style().visuals.widgets.noninteractive.bg_stroke.color;
@@ -2812,18 +2711,6 @@ mod tests {
         assert!(bar_sets(&run, &was, &was).is_empty());
     }
 
-    /// A spelling that is not a number is refused, not read as zero.
-    #[test]
-    fn a_stored_word_is_refused_unless_it_spells_a_number() {
-        assert_eq!(word("0x1f"), Some(31));
-        assert_eq!(word("0X1F"), Some(31));
-        assert_eq!(word(" 42 "), Some(42));
-        assert_eq!(word("0x"), None);
-        assert_eq!(word(""), None);
-        assert_eq!(word("ff"), None);
-        assert_eq!(word("-1"), None);
-    }
-
     /// Every field lands in exactly one section.
     #[test]
     fn a_body_with_no_layout_falls_into_the_sections_its_paths_name() {
@@ -2842,6 +2729,10 @@ mod tests {
 
         let stage2 = titles(Fresh::Stage2Program.bytes().unwrap());
         assert!(stage2.contains(&"Slot a — organ".to_string()), "{stage2:?}");
+        assert!(
+            stage2.contains(&"Slot a organ preset 1".to_string()),
+            "{stage2:?}"
+        );
         assert_eq!(titles(Fresh::Stage3Synth.bytes().unwrap()), ["General"]);
     }
 

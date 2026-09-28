@@ -159,14 +159,11 @@ mod tests {
         #[bits(31..=38)]
         #[morphs(volume)]
         pub misnamed_wheel: crate::components::MorphTarget,
-        #[bits(39..=42)]
-        #[rank(7)]
-        pub seventh: crate::components::Drawbar,
     }
 
     /// A morph slot binds its parameter by name, only where the body registers one, and
     /// a `…_N` drawbar takes its rank from its name. Neither reaches a field whose type
-    /// has no use for it, and `#[morphs]` or `#[rank]` binds where the name says nothing.
+    /// has no use for it, and `#[morphs]` binds where the name says nothing.
     #[test]
     fn a_name_binds_a_morph_slot_and_places_a_drawbar() {
         let specs = Named::field_specs();
@@ -185,7 +182,6 @@ mod tests {
         let drawbar = <crate::components::Drawbar as crate::bits::Packed>::CONTROL;
         assert_eq!(of("drawbar_4"), drawbar.ranked(4));
         assert_eq!(of("bar"), drawbar);
-        assert_eq!(of("seventh"), drawbar.ranked(7));
         // The knob a morph slot is named after is untouched by the binding.
         assert_eq!(of("volume"), ControlKind::Knob(Unit::Panel10));
     }

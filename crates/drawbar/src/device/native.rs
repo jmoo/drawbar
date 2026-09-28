@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use nord_usb::device::Device;
-use nord_usb::transport::{usb, UsbTransport, CLASS_VENDOR_SPECIFIC};
+use nord_usb::transport::{usb, UsbTransport};
 
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
@@ -108,26 +108,12 @@ impl Link {
 }
 
 /// The first attached Clavia, with the descriptor facts the card shows.
-///
-/// This repeats [`UsbTransport::open`]'s vendor-interface search to get the interface
-/// number the card reports; the transport claims the interface.
 fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     let devices = usb::list().map_err(|e| e.to_string())?;
     let info = devices
         .into_iter()
         .next()
         .ok_or("no Clavia device found. Is the instrument awake and on a data cable?")?;
-
-    let Some(interface) = info
-        .interfaces()
-        .find(|i| i.class() == CLASS_VENDOR_SPECIFIC)
-    else {
-        return Err(format!(
-            "{} exposes no vendor interface; this tool cannot drive it",
-            info.product_string().unwrap_or("the attached device"),
-        ));
-    };
-    let interface = interface.interface_number();
 
     let transport = UsbTransport::open(&info).map_err(|e| e.to_string())?;
     // Endpoint 0 is outside sessions. A failure here loses the identity details but
@@ -137,7 +123,7 @@ fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
     let card = DeviceCard {
         build: identity.map(|id| id.build),
         firmware: identity.map(|id| id.firmware),
-        interface: Some(interface),
+        interface: Some(transport.interface_number()),
         kind: identity.map(|id| id.kind),
         manufacturer: info.manufacturer_string().map(str::to_string),
         max_transfer: identity.map(|id| id.max_transfer),

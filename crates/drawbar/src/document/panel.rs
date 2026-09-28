@@ -9,7 +9,9 @@
 use eframe::egui;
 use nord_format::fields::{ControlKind, Field, Library};
 
-use super::controls::{self, Sets};
+use super::controls::Sets;
+use super::sample;
+use crate::strings;
 
 /// The field the piano lookup decorates, and so the section it belongs in.
 pub const PIANO_MODEL: &str = "piano_panel.piano_model";
@@ -73,7 +75,7 @@ impl PianoLookup {
             .map(|(position, name)| format!("{position} — {name}"))
             // A dial position past the scanned list shows its number.
             .unwrap_or_else(|| field.value.clone());
-        controls::named_cell(ui, &field.path, 230.0, |ui| {
+        sample::cell(ui, &strings::label(&field.path), 230.0, |ui| {
             egui::ComboBox::from_id_salt("piano-model-names")
                 .selected_text(shown)
                 .width(214.0)

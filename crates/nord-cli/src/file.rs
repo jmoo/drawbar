@@ -5,11 +5,10 @@
 //! hold (the slot name, the names behind dependency ids) is reported as held by the
 //! instrument, never guessed.
 
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use nord_format::cbin::{Generation, Header};
-use nord_format::formats::{ne5, npno, nsmp};
+use nord_format::accept::Family;
+use nord_format::cbin::{self, Generation, Info};
 use nord_format::{Entity, Live, Program};
 use nord_usb::ObjectClass;
 
@@ -18,15 +17,7 @@ use crate::ui::Ui;
 
 /// The format tag a class's files carry, or `None` for a class with no known tag.
 pub(crate) fn tag(class: ObjectClass) -> Option<&'static str> {
-    match class {
-        ObjectClass::Piano => Some(npno::FORMAT),
-        ObjectClass::Sample => Some(nsmp::FORMAT),
-        ObjectClass::Program => Some(ne5::program::FORMAT),
-        ObjectClass::SetList => Some(ne5::song::FORMAT),
-        ObjectClass::Live => Some(ne5::live::FORMAT),
-        ObjectClass::Settings => Some(ne5::settings::FORMAT),
-        ObjectClass::Unknown(_) => None,
-    }
+    Family::Electro5.tag(class.storage()?)
 }
 
 /// Every class a noun addresses, so a tag reads back to the command that takes it.
@@ -69,38 +60,11 @@ fn check(path: &Path, format: &str, class: ObjectClass) -> Result<(), String> {
     }
 }
 
-/// Where a CBIN file of this generation keeps its checksum.
-///
-/// ⚠️ A type-0 file holds body data at `0x18`, where a type-1 file holds its crc32, so
-/// the range follows the generation. With the wrong one, a program's panel bytes would
-/// print as a checksum, and a real edit would be labeled as a checksum change.
-///
-/// This belongs in `cbin::Generation`, beside the rest of the layout it describes.
-pub(crate) fn checksum_range(generation: Generation, len: usize) -> Option<Range<usize>> {
-    match generation {
-        Generation::V0 => len.checked_sub(2).map(|at| at..len),
-        Generation::V1 => (len >= 0x1c).then_some(0x18..0x1c),
-    }
-}
-
 /// The stored checksum, with its generation's label.
-///
-/// The parsed [`Header`] does not carry the value; it is in the bytes at
-/// [`checksum_range`]. `unwrap` already verified it, so this reports the checked value.
-fn crc(header: &Header, bytes: &[u8]) -> (&'static str, String) {
-    let stored = checksum_range(header.generation, bytes.len()).and_then(|at| bytes.get(at));
-    match (header.generation, stored) {
-        (Generation::V0, Some(b)) => (
-            "crc16:",
-            format!("{:#06x}", u16::from_le_bytes(b.try_into().unwrap())),
-        ),
-        (Generation::V1, Some(b)) => (
-            "crc32:",
-            format!("{:#010x}", u32::from_le_bytes(b.try_into().unwrap())),
-        ),
-        // A parsed header implies a file longer than either range. A file too short to
-        // hold a checksum says so instead of printing a number it did not read.
-        _ => ("crc:", "not in these bytes".to_string()),
+fn crc(info: &Info) -> (&'static str, String) {
+    match info.header.generation {
+        Generation::V0 => ("crc16:", format!("{:#06x}", info.stored_checksum)),
+        Generation::V1 => ("crc32:", format!("{:#010x}", info.stored_checksum)),
     }
 }
 
@@ -157,7 +121,9 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
             path.display()
         )
     })?;
-    let (crc_label, crc_value) = crc(&read.header, &file);
+    let container = cbin::inspect(&mut std::io::Cursor::new(&file))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let (crc_label, crc_value) = crc(&container);
 
     let row = |label: &str, value: String| {
         ui.out(format!("  {}{value}", ui.dim(format!("{label:<11}"))));
@@ -209,7 +175,7 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
 /// slot form of the verb resolves them.
 pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let entity = nord_format::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let format = entity_tag(&entity);
+    let format = entity.identity().format;
     check(path, format, class)?;
 
     // The two bodies are byte-identical but live in different slot spaces, so each
@@ -250,11 +216,6 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     }
     ui.note(ui.dim("(ids only: the instrument holds the names, and `deps BANK:SLOT` shows them)"));
     Ok(())
-}
-
-/// The format tag a decoded entity would carry on disk.
-pub(crate) fn entity_tag(entity: &Entity) -> &'static str {
-    entity.identity().format
 }
 
 /// Where two encodings of one object first differ.
@@ -299,10 +260,44 @@ pub(crate) fn check_each<T>(
     }
 }
 
+/// Run each item under its heading, a blank line apart, report each failure beneath
+/// its heading, and fail with a count of the items that did not run.
+///
+/// The reporting verbs print what each item holds instead of one verdict line, as
+/// [`check_each`] does, but a run that loses an item still says how many failed.
+pub(crate) fn report_each<T>(
+    ui: &Ui,
+    items: &[T],
+    what: &str,
+    heading: impl Fn(&T) -> String,
+    mut run: impl FnMut(&T) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut failed = 0usize;
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            ui.out("");
+        }
+        ui.out(ui.bold(heading(item)));
+        if let Err(e) = run(item) {
+            failed += 1;
+            ui.note(format!("  {} {e}", ui.danger("error")));
+        }
+    }
+    match failed {
+        0 => Ok(()),
+        n => Err(format!("{n} of {} {what}", items.len())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nord_format::formats::ne5;
     use nord_usb::wire::Location;
+
+    fn inspect(file: &[u8]) -> Info {
+        cbin::inspect(&mut std::io::Cursor::new(file)).unwrap()
+    }
 
     /// A wrapped file reports a crc32 that tracks its body.
     #[test]
@@ -310,9 +305,8 @@ mod tests {
         let at = Location::from_user(7, 4);
         let a = nord_usb::envelope::wrap("ne5p", at, 4, &[0u8; 8]).unwrap();
         let b = nord_usb::envelope::wrap("ne5p", at, 4, &[1u8; 8]).unwrap();
-        let header = |file: &[u8]| nord_usb::envelope::unwrap(file).unwrap().header;
-        assert_eq!(crc(&header(&a), &a).0, "crc32:");
-        assert_ne!(crc(&header(&a), &a).1, crc(&header(&b), &b).1);
+        assert_eq!(crc(&inspect(&a)).0, "crc32:");
+        assert_ne!(crc(&inspect(&a)).1, crc(&inspect(&b)).1);
     }
 
     /// A type-0 file has body bytes where the type-1 crc32 sits, so the checksum row
@@ -328,7 +322,7 @@ mod tests {
 
         let header = nord_usb::envelope::unwrap(&bytes).unwrap().header;
         assert_eq!(header.version, 4);
-        let (label, value) = crc(&header, &bytes);
+        let (label, value) = crc(&inspect(&bytes));
         assert_eq!(label, "crc16:");
         let stored = u16::from_le_bytes(bytes[bytes.len() - 2..].try_into().unwrap());
         assert_eq!(value, format!("{stored:#06x}"));
@@ -361,6 +355,22 @@ mod tests {
         assert_eq!(
             check_each(&ui, &["a", "bad", "bad"], what, verdict).unwrap_err(),
             "2 of 3 file(s) did not round-trip"
+        );
+    }
+
+    #[test]
+    fn a_report_of_many_items_counts_what_failed() {
+        let ui = Ui::piped();
+        let heading = |item: &&str| item.to_string();
+        let run = |item: &&str| match *item {
+            "bad" => Err("unreadable".to_string()),
+            _ => Ok(()),
+        };
+        let what = "file(s) did not read";
+        assert!(report_each(&ui, &["a", "b"], what, heading, run).is_ok());
+        assert_eq!(
+            report_each(&ui, &["bad", "a", "bad"], what, heading, run).unwrap_err(),
+            "2 of 3 file(s) did not read"
         );
     }
 

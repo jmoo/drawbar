@@ -69,14 +69,15 @@
 //! seam is clean. Confirmed on hardware. The wide generations: Inferred from
 //! specimens; not confirmed on hardware.
 
-use super::codec::{self, Layout, PITCH_DEN, PITCH_NUM, WRAP};
+use super::codec::{self, Head, Layout, PITCH_DEN, PITCH_NUM, WRAP};
 use super::kernel;
-use super::section::{self, Section, Section4};
+use super::section::{self, Framed, Framing, Section, Section4};
 use super::stroke::packet_len;
 use super::{Sample, SampleV3};
 use crate::cbin::{Cbin, Generation, Header};
 use crate::error::{Error, ParseError};
 use crate::formats::nsmpproj;
+use crate::formats::predictor::DIFFERENCE;
 use std::borrow::Cow;
 
 /// Content version this writes per generation: `format × 100 + revision`, at the
@@ -139,21 +140,12 @@ impl Units {
         self.channels == 2 && self.layout.splits_wide_openings()
     }
 
-    /// Words one channel's half of a split record occupies.
-    const fn half(self, count: usize, width: u8) -> usize {
-        (count / 2 * width as usize).div_ceil(self.word_bits())
-    }
-
     /// Words one record occupies, header included.
     ///
     /// A split record pays for each channel's own padding; a content record tiles
     /// whole words either way, so only the 1:1 regime is ever wider for it.
     const fn span(self, count: usize, width: u8) -> usize {
-        if self.splits() {
-            1 + 2 * self.half(count, width)
-        } else {
-            (self.word_bits() + count * width as usize).div_ceil(self.word_bits())
-        }
+        self.layout.record_span(count, width, self.splits())
     }
 
     /// Words in one packet of allocation.
@@ -246,8 +238,7 @@ fn spends_extra_bit(values: &[i64], plan: &Plan) -> bool {
 
 /// The smallest nonnegative shift fitting every value in `width` bits.
 fn peak_shift(values: &[i64], width: u8) -> i32 {
-    let low = values.iter().copied().min().unwrap_or(0);
-    let high = values.iter().copied().max().unwrap_or(0);
+    let (low, high) = extent(values);
     let mut shift = 0i32;
     while width_of(low >> shift, high >> shift) > width {
         shift += 1;
@@ -311,15 +302,6 @@ const fn min_resync_gap(layout: Layout) -> usize {
 /// Most stream words the stroke header's 16-bit word directory can address
 /// unambiguously.
 const MAX_STREAM_WORDS: usize = WRAP;
-
-/// Backward-difference coefficients for predictor orders 0 to 4.
-const DIFFERENCE: [&[i32]; 5] = [
-    &[1],
-    &[1, -1],
-    &[1, -2, 1],
-    &[1, -3, 3, -1],
-    &[1, -4, 6, -4, 1],
-];
 
 /// How content records code their fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -944,11 +926,12 @@ fn quantize(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantized {
     // The sums each field truncates from. Statistic B ranks fields on these, so two
     // fields that truncate alike still order.
     let mut sums = vec![0f64; plan.fields];
+    let kernel = kernel::Kernel::new(PITCH_NUM, PITCH_DEN);
     let mut lane: Vec<i16> = Vec::with_capacity(source.len().div_ceil(channels));
     for channel in 0..channels {
         lane.clear();
         lane.extend(source.iter().skip(channel).step_by(channels).copied());
-        let accumulated: Vec<f64> = (0..per).map(|f| kernel::accumulate(&lane, f)).collect();
+        let accumulated: Vec<f64> = (0..per).map(|f| kernel.accumulate(&lane, f)).collect();
         let mut fields: Vec<i64> = accumulated.iter().map(|sum| sum.trunc() as i64).collect();
         ramp_in(&mut fields);
         match &plan.looped {
@@ -1008,6 +991,12 @@ fn quantize(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantized {
     }
 }
 
+/// The least and the greatest of `values`, `(0, 0)` when there are none.
+fn extent<T: Copy + Into<i64>>(values: &[T]) -> (i64, i64) {
+    let values = values.iter().map(|&v| v.into());
+    (values.clone().min().unwrap_or(0), values.max().unwrap_or(0))
+}
+
 /// Bits a two's-complement field needs to hold everything in `low..=high`, floored at
 /// [`MIN_WIDTH`].
 fn width_of(low: i64, high: i64) -> u8 {
@@ -1046,7 +1035,7 @@ fn residual(values: &[i32], at: usize, order: u8, stride: usize) -> i64 {
         .iter()
         .enumerate()
         .map(|(j, &c)| match at.checked_sub(j * stride) {
-            Some(k) => i64::from(c) * i64::from(values[k]),
+            Some(k) => c * i64::from(values[k]),
             None => 0,
         })
         .sum()
@@ -1111,12 +1100,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spe
 
     let one_to_one = |out: &mut Vec<Spec>, at: &mut usize, fields: usize| {
         for count in chunks(fields, chunk) {
-            let mut low = 0i64;
-            let mut high = 0i64;
-            for &v in &values[*at..*at + count] {
-                low = low.min(i64::from(v));
-                high = high.max(i64::from(v));
-            }
+            let (low, high) = extent(&values[*at..*at + count]);
             out.push(Spec {
                 one_to_one: true,
                 width: width_of(low, high),
@@ -1344,7 +1328,7 @@ fn pack(
         ))
         .into());
     }
-    let terminator = (1u32 << 23) | plan.cell() as u32;
+    let terminator = Head::terminator(plan.cell()).to_word();
     words[at * word..(at + 1) * word].copy_from_slice(&terminator.to_be_bytes()[4 - word..]);
 
     Ok(Stream {
@@ -1365,11 +1349,15 @@ fn pack(
 /// interleaved. Only the residual's stride depends on the channel count.
 fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units: Units) {
     let (word, bits) = (units.word(), units.word_bits());
-    let head = (u32::from(spec.one_to_one) << 23)
-        | (u32::from(spec.width - 1) << 19)
-        | (u32::from(spec.mark) << 18)
-        | (u32::from(spec.order) << 14)
-        | spec.count as u32;
+    let head = Head {
+        one_to_one: spec.one_to_one,
+        width: spec.width,
+        mark: spec.mark,
+        reserved: false,
+        order: spec.order,
+        count: spec.count,
+    }
+    .to_word();
     words[at * word..(at + 1) * word].copy_from_slice(&head.to_be_bytes()[4 - word..]);
 
     let stored = |k: usize| -> u64 {
@@ -1398,7 +1386,7 @@ fn write_record(words: &mut [u8], at: usize, spec: &Spec, values: &[i32], units:
     // Each channel is packed into its own contiguous words first, because the two
     // halves are padded apart; the words then alternate from the header on.
     let per = spec.count / 2;
-    let half = units.half(spec.count, spec.width);
+    let half = units.layout.half_span(spec.count, spec.width);
     let mut packed = vec![0u8; half * word];
     for channel in 0..2 {
         packed.fill(0);
@@ -1535,9 +1523,8 @@ fn encode_stroke(
         &plan,
         zone.shift,
     );
-    let low = q.values.iter().copied().min().unwrap_or(0);
-    let high = q.values.iter().copied().max().unwrap_or(0);
-    if width_of(i64::from(low), i64::from(high)) > MAX_STORED_WIDTH {
+    let (low, high) = extent(&q.values);
+    if width_of(low, high) > MAX_STORED_WIDTH {
         return Err(ParseError::OutOfBounds {
             value: format!(
                 "a quantizer shift of {} bits for fields spanning {low}..={high}",
@@ -1576,6 +1563,29 @@ fn encode_strokes(
         .max()
         .unwrap_or(1);
     Ok((encoded, peak))
+}
+
+/// Appends one `stk` section per zone behind `sections`, each payload built at the
+/// body offset it lands on.
+fn push_strokes<F: Framing>(
+    sections: &mut Vec<Framed<F>>,
+    layout: Layout,
+    zones: &[NewZone<'_>],
+    (encoded, file_peak): (Vec<Encoded>, u32),
+    tag: F::Tag,
+    version: F::Version,
+) -> Result<(), Error> {
+    let mut body_at: usize = sections.iter().map(Framed::encoded_len).sum();
+    for (zone, stroke) in zones.iter().zip(&encoded) {
+        let payload = stroke_payload(layout, zone, stroke, body_at + F::HEADER, file_peak)?;
+        body_at += F::HEADER + payload.len();
+        sections.push(Framed {
+            tag,
+            version,
+            payload,
+        });
+    }
+    Ok(())
 }
 
 /// One zone's `stk` payload at body offset `body_at`.
@@ -1692,9 +1702,9 @@ fn sty(preset: Preset) -> Result<Section, Error> {
         .into());
     }
     let mut payload = vec![0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00];
-    payload[3] = u8::from(preset.dynamics_enabled);
-    payload[4] = preset.velocity_to_amplitude;
-    payload[5] = preset.velocity_to_timbre;
+    payload[super::sty::V2_DYNAMICS_ENABLE] = u8::from(preset.dynamics_enabled);
+    payload[super::sty::V2_VELOCITY_TO_AMPLITUDE] = preset.velocity_to_amplitude;
+    payload[super::sty::V2_VELOCITY_TO_TIMBRE] = preset.velocity_to_timbre;
     Ok(Section {
         tag: *section::STY,
         version: STY_VERSION,
@@ -1729,14 +1739,6 @@ struct WideSchema {
     sty_payload: &'static [u8],
     /// Where the category's dynamics curve writes into that payload, and what.
     sty_dynamics: &'static [(usize, u8)],
-}
-
-/// One gain-and-detune unit at `gain`, with no detune. It opens the `map` section as
-/// the instrument's own level and then repeats once per key.
-fn level(gain: u32) -> [u8; super::keymap::RECORD_LEN] {
-    let mut out = [0u8; super::keymap::RECORD_LEN];
-    out[..3].copy_from_slice(&gain.to_be_bytes()[1..]);
-    out
 }
 
 const STY_V3_PAYLOAD: [u8; super::sty::V3_LEN] = [
@@ -1824,7 +1826,7 @@ fn cat4() -> Section4 {
 /// The wider schema's per-key record carries a partner quad as well as the level.
 /// The editor writes the identity there whatever the zone layout (only the vendor's
 /// builder fills it in), so every quad names its own key.
-fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section4 {
+fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Result<Section4, Error> {
     let mut payload = Vec::with_capacity(
         super::keymap::RECORD_LEN
             + super::keymap::KEYS * schema.key_stride
@@ -1833,9 +1835,12 @@ fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section
             + super::zone::WIDE_RECORD_LEN * zones.len()
             + schema.map_tail.len(),
     );
-    payload.extend_from_slice(&level(map_gain));
+    let mut level = [0u8; super::keymap::RECORD_LEN];
+    super::keymap::Level::new(map_gain, 0)?.write(&mut level);
+    payload.extend_from_slice(&level);
+    super::keymap::Level::NEUTRAL.write(&mut level);
     for key in 0..super::keymap::KEYS as u8 {
-        payload.extend_from_slice(&level(super::zone::GAIN_UNITY));
+        payload.extend_from_slice(&level);
         payload.extend(std::iter::repeat_n(
             key,
             schema.key_stride - super::keymap::RECORD_LEN,
@@ -1847,11 +1852,11 @@ fn map4(schema: &WideSchema, map_gain: u32, zones: &[WideZoneRecord]) -> Section
         payload.extend_from_slice(&record.bytes());
     }
     payload.extend_from_slice(schema.map_tail);
-    Section4 {
+    Ok(Section4 {
         tag: *section::MAP4,
         version: schema.map,
         payload,
-    }
+    })
 }
 
 /// The wide `sty` preset, including the dynamics group a project controls.
@@ -2042,24 +2047,15 @@ fn narrow_chain(instrument: Instrument<'_>, zones: &[NewZone<'_>]) -> Result<Cbi
         cat,
         map,
     ];
-    let (encoded, file_peak) =
-        encode_strokes(Layout::V2, zones, instrument.predictor, cat_len, map_len)?;
-    let mut body_at: usize = sections.iter().map(Section::encoded_len).sum();
-    for (zone, stroke) in zones.iter().zip(&encoded) {
-        let payload = stroke_payload(
-            Layout::V2,
-            zone,
-            stroke,
-            body_at + section::HEADER_LEN,
-            file_peak,
-        )?;
-        body_at += section::HEADER_LEN + payload.len();
-        sections.push(Section {
-            tag: *section::STK,
-            version: STK_VERSION,
-            payload,
-        });
-    }
+    let strokes = encode_strokes(Layout::V2, zones, instrument.predictor, cat_len, map_len)?;
+    push_strokes(
+        &mut sections,
+        Layout::V2,
+        zones,
+        strokes,
+        *section::STK,
+        STK_VERSION,
+    )?;
     sections.push(sty(instrument.preset)?);
 
     Ok(Cbin {
@@ -2080,7 +2076,7 @@ fn wide_chain(
     let table = wide_zone_table(zones)?;
     let hdr = hdr4(schema, instrument.name)?;
     let cat = cat4();
-    let map = map4(schema, map_gain_units(instrument.map_gain), &table);
+    let map = map4(schema, map_gain_units(instrument.map_gain), &table)?;
     let cat_len = cat.payload.len();
     let map_len = map.payload.len();
 
@@ -2094,26 +2090,17 @@ fn wide_chain(
         cat,
         map,
     ];
-    let (encoded, file_peak) =
-        encode_strokes(layout, zones, instrument.predictor, cat_len, map_len)?;
-    let mut body_at: usize = sections.iter().map(Section4::encoded_len).sum();
-    for (zone, stroke) in zones.iter().zip(&encoded) {
-        let payload = stroke_payload(
-            layout,
-            zone,
-            stroke,
-            body_at + section::HEADER4_LEN,
-            file_peak,
-        )?;
-        body_at += section::HEADER4_LEN + payload.len();
-        sections.push(Section4 {
-            tag: *section::STK4,
-            version: STK4_VERSION,
-            payload,
-        });
-    }
+    let strokes = encode_strokes(layout, zones, instrument.predictor, cat_len, map_len)?;
+    push_strokes(
+        &mut sections,
+        layout,
+        zones,
+        strokes,
+        *section::STK4,
+        STK4_VERSION,
+    )?;
     sections.push(sty4(schema, instrument.preset));
-    let chain_len: usize = sections.iter().map(Section4::encoded_len).sum();
+    let chain_len: usize = sections.iter().map(Framed::encoded_len).sum();
     sections.push(meta4(chain_len));
 
     Ok(Cbin {
@@ -4118,7 +4105,7 @@ mod tests {
                     assert_eq!(sty.payload, [0, 1, 0, 1, 2, 0, 0, 0, 0]);
                 }
                 crate::Sample::V3(file) => {
-                    let sty = section::find4(&file.body.sections, section::STY4).unwrap();
+                    let sty = section::find(&file.body.sections, section::STY4).unwrap();
                     match layout {
                         Layout::V3 => {
                             assert_eq!((sty.payload[4], sty.payload[12]), (43, 74));

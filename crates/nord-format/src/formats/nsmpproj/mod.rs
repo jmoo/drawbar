@@ -253,41 +253,98 @@ pub const MAX_VELOCITY: u8 = 127;
 /// zone may reach past them.
 pub const MAX_NOTE: u8 = 127;
 
-/// One field of one stroke, with the value to give it.
-///
-/// The trim and loop points sit in the `common_zone`'s `common_stroke`; gain
-/// and the velocity window in the `map_zone`'s `map_stroke`. Both blocks name
-/// the stroke by the same `m_globalID`, so one id reaches either.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StrokeField {
-    /// `m_start`: where playback begins, frames into the file.
-    Start(f64),
-    /// `m_stop`: where it ends.
-    Stop(f64),
-    LoopEnabled(bool),
-    LoopStart(f64),
-    /// `m_loopLengthLong`.
-    LoopLength(f64),
-    /// `m_loopXFadeLengthLong`, frames.
-    LoopCrossfade(f64),
-    /// `m_loopXFModeLong`.
-    LoopCrossfadeMode(u32),
-    LoopDecayEnabled(bool),
-    LoopDecay(f64),
-    LoopDetune(i32),
-    ShortLoopEnabled(bool),
-    /// `m_loopLengthShort`.
-    ShortLoopLength(f64),
-    /// `m_loopXFadeShort`.
-    ShortLoopCrossfade(u32),
-    ShortLoopUsesPitch(bool),
-    /// `m_gain`, a linear factor; the editor writes 1 for an untouched stroke.
-    Gain(f64),
-    /// `m_velocityMin`. Not checked against the window's other end: an
-    /// inverted window silences the stroke, which is a valid thing to store.
-    VelocityMin(u8),
-    /// `m_velocityMax`, under the same rule as [`StrokeField::VelocityMin`].
-    VelocityMax(u8),
+/// Declares [`StrokeField`] from one row per field: the variant and its value type,
+/// the name [`StrokeField::parse`] takes and the parser that reads its value, then the
+/// block, key and encoder the field writes through.
+macro_rules! stroke_fields {
+    (
+        $(#[$meta:meta])*
+        pub enum StrokeField {
+            $(
+                $(#[$doc:meta])*
+                $variant:ident($ty:ty) $name:literal $parse:ident => $block:ident $key:literal $encode:ident;
+            )+
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub enum StrokeField {
+            $($(#[$doc])* $variant($ty),)+
+        }
+
+        impl StrokeField {
+            /// Parse one `field = value` using the field names of [`Stroke`] and
+            /// [`ZoneStroke`], so a CLI, a UI and a script name a stroke's fields the
+            /// same way. Flags take `on`/`off`, `yes`/`no`, `true`/`false` or `1`/`0`.
+            pub fn parse(field: &str, value: &str) -> Result<StrokeField, ParseError> {
+                match field {
+                    $($name => Ok(StrokeField::$variant($parse(field, value)?)),)+
+                    _ => Err(ParseError::AssertFail(format!(
+                        "a stroke has no field named {field:?}"
+                    ))),
+                }
+            }
+
+            /// The block, key and text this field writes, or why the value cannot be
+            /// written at all.
+            fn placement(self) -> Result<(Block, &'static str, String), ParseError> {
+                match self {
+                    $(StrokeField::$variant(v) => Ok((Block::$block, $key, $encode(v)?)),)+
+                }
+            }
+        }
+    };
+}
+
+stroke_fields! {
+    /// One field of one stroke, with the value to give it.
+    ///
+    /// The trim and loop points sit in the `common_zone`'s `common_stroke`; gain
+    /// and the velocity window in the `map_zone`'s `map_stroke`. Both blocks name
+    /// the stroke by the same `m_globalID`, so one id reaches either.
+    pub enum StrokeField {
+        /// `m_start`: where playback begins, frames into the file.
+        Start(f64) "start" number => Common "m_start" frames;
+        /// `m_stop`: where it ends.
+        Stop(f64) "stop" number => Common "m_stop" frames;
+        LoopEnabled(bool) "loop_enabled" truth => Common "m_loopEnabled" bit;
+        LoopStart(f64) "loop_start" number => Common "m_loopStart" frames;
+        LoopLength(f64) "loop_length" number => Common "m_loopLengthLong" frames;
+        LoopCrossfade(f64) "loop_crossfade" number => Common "m_loopXFadeLengthLong" frames;
+        LoopCrossfadeMode(u32) "loop_crossfade_mode" number => Common "m_loopXFModeLong" plain;
+        LoopDecayEnabled(bool) "loop_decay_enabled" truth => Common "m_loopDecayEnabled" bit;
+        LoopDecay(f64) "loop_decay" number => Common "m_loopDecay" decay;
+        LoopDetune(i32) "loop_detune" number => Common "m_loopDetune" plain;
+        ShortLoopEnabled(bool) "short_loop_enabled" truth => Common "m_shortLoopEnabled" bit;
+        ShortLoopLength(f64) "short_loop_length" number => Common "m_loopLengthShort" frames;
+        ShortLoopCrossfade(u32) "short_loop_crossfade" number => Common "m_loopXFadeShort" plain;
+        ShortLoopUsesPitch(bool) "short_loop_uses_pitch" truth => Common "m_shortLoopUsesPitch" bit;
+        /// `m_gain`, a linear factor; the editor writes 1 for an untouched stroke.
+        Gain(f64) "gain" number => Map "m_gain" gain;
+        /// `m_velocityMin`. Not checked against the window's other end: an
+        /// inverted window silences the stroke, which is a valid thing to store.
+        VelocityMin(u8) "velocity_min" number => Map "m_velocityMin" velocity;
+        /// `m_velocityMax`, under the same rule as [`StrokeField::VelocityMin`].
+        VelocityMax(u8) "velocity_max" number => Map "m_velocityMax" velocity;
+    }
+}
+
+/// Why [`Project::set_path`] refused an edit. It carries no wording; a front end says
+/// what went wrong in its own terms.
+#[derive(Debug)]
+pub enum PathError {
+    /// No project field has this path.
+    Unknown,
+    /// The path names a zone the project does not hold.
+    NoZone(u32),
+    /// The value is not one the field takes, or the project cannot take the edit.
+    Refused(ParseError),
+}
+
+impl From<ParseError> for PathError {
+    fn from(e: ParseError) -> Self {
+        PathError::Refused(e)
+    }
 }
 
 /// Which of the two blocks naming a stroke holds a field.
@@ -295,69 +352,6 @@ pub enum StrokeField {
 enum Block {
     Common,
     Map,
-}
-
-impl StrokeField {
-    /// Parse one `field = value` using the field names of [`Stroke`] and
-    /// [`ZoneStroke`], so a CLI, a UI and a script name a stroke's fields the same way.
-    /// Flags take `on`/`off`, `yes`/`no`, `true`/`false` or `1`/`0`.
-    pub fn parse(field: &str, value: &str) -> Result<StrokeField, ParseError> {
-        use StrokeField::*;
-        Ok(match field {
-            "start" => Start(number(field, value)?),
-            "stop" => Stop(number(field, value)?),
-            "gain" => Gain(number(field, value)?),
-            "velocity_min" => VelocityMin(number(field, value)?),
-            "velocity_max" => VelocityMax(number(field, value)?),
-            "loop_enabled" => LoopEnabled(truth(field, value)?),
-            "loop_start" => LoopStart(number(field, value)?),
-            "loop_length" => LoopLength(number(field, value)?),
-            "loop_crossfade" => LoopCrossfade(number(field, value)?),
-            "loop_crossfade_mode" => LoopCrossfadeMode(number(field, value)?),
-            "loop_decay_enabled" => LoopDecayEnabled(truth(field, value)?),
-            "loop_decay" => LoopDecay(number(field, value)?),
-            "loop_detune" => LoopDetune(number(field, value)?),
-            "short_loop_enabled" => ShortLoopEnabled(truth(field, value)?),
-            "short_loop_length" => ShortLoopLength(number(field, value)?),
-            "short_loop_crossfade" => ShortLoopCrossfade(number(field, value)?),
-            "short_loop_uses_pitch" => ShortLoopUsesPitch(truth(field, value)?),
-            _ => {
-                return Err(ParseError::AssertFail(format!(
-                    "a stroke has no field named {field:?}"
-                )))
-            }
-        })
-    }
-
-    /// The block, key and text this field writes, or why the value cannot be
-    /// written at all.
-    fn placement(self) -> Result<(Block, &'static str, String), ParseError> {
-        use Block::{Common, Map};
-        use StrokeField::*;
-        Ok(match self {
-            Start(v) => (Common, "m_start", frames(v)?),
-            Stop(v) => (Common, "m_stop", frames(v)?),
-            LoopEnabled(v) => (Common, "m_loopEnabled", bit(v)),
-            LoopStart(v) => (Common, "m_loopStart", frames(v)?),
-            LoopLength(v) => (Common, "m_loopLengthLong", frames(v)?),
-            LoopCrossfade(v) => (Common, "m_loopXFadeLengthLong", frames(v)?),
-            LoopCrossfadeMode(v) => (Common, "m_loopXFModeLong", v.to_string()),
-            LoopDecayEnabled(v) => (Common, "m_loopDecayEnabled", bit(v)),
-            LoopDecay(v) => (
-                Common,
-                "m_loopDecay",
-                positive(v, "a decay at or above zero")?,
-            ),
-            LoopDetune(v) => (Common, "m_loopDetune", v.to_string()),
-            ShortLoopEnabled(v) => (Common, "m_shortLoopEnabled", bit(v)),
-            ShortLoopLength(v) => (Common, "m_loopLengthShort", frames(v)?),
-            ShortLoopCrossfade(v) => (Common, "m_loopXFadeShort", v.to_string()),
-            ShortLoopUsesPitch(v) => (Common, "m_shortLoopUsesPitch", bit(v)),
-            Gain(v) => (Map, "m_gain", positive(v, "a gain at or above zero")?),
-            VelocityMin(v) => (Map, "m_velocityMin", velocity(v)?),
-            VelocityMax(v) => (Map, "m_velocityMax", velocity(v)?),
-        })
-    }
 }
 
 /// What [`Project::new`] needs for one zone: a WAV and the key it was
@@ -382,8 +376,12 @@ fn real(v: f64) -> String {
     format!("{v:.6}")
 }
 
-fn bit(v: bool) -> String {
-    if v { "1" } else { "0" }.to_string()
+fn bit(v: bool) -> Result<String, ParseError> {
+    Ok(if v { "1" } else { "0" }.to_string())
+}
+
+fn plain(v: impl ToString) -> Result<String, ParseError> {
+    Ok(v.to_string())
 }
 
 fn positive(v: f64, bound: &str) -> Result<String, ParseError> {
@@ -400,6 +398,14 @@ fn frames(v: f64) -> Result<String, ParseError> {
     positive(v, "a frame position at or above zero")
 }
 
+fn decay(v: f64) -> Result<String, ParseError> {
+    positive(v, "a decay at or above zero")
+}
+
+fn gain(v: f64) -> Result<String, ParseError> {
+    positive(v, "a gain at or above zero")
+}
+
 fn number<T: std::str::FromStr>(field: &str, value: &str) -> Result<T, ParseError> {
     value.parse().map_err(|_| {
         ParseError::AssertFail(format!(
@@ -407,6 +413,16 @@ fn number<T: std::str::FromStr>(field: &str, value: &str) -> Result<T, ParseErro
             std::any::type_name::<T>()
         ))
     })
+}
+
+/// `zone3` → 3, for any label, in the 1-based numbering every listing uses.
+///
+/// The result is as wide as the ids the project stores, so an id too large for that is
+/// not a path, and cannot wrap around to name another block.
+fn indexed(part: &str, label: &str) -> Option<u32> {
+    part.strip_prefix(label)
+        .and_then(|n| n.parse().ok())
+        .filter(|&n| n >= 1)
 }
 
 fn truth(field: &str, value: &str) -> Result<bool, ParseError> {
@@ -545,10 +561,7 @@ impl Project {
     }
 
     fn instrument_mut(&mut self) -> Result<&mut Node, ParseError> {
-        self.root
-            .blocks_mut("instrument")
-            .next()
-            .ok_or_else(|| ParseError::AssertFail("project has no instrument block".into()))
+        self.root.require_mut("instrument")
     }
 
     /// The instrument's name, which the generated `.nsmp` takes.
@@ -617,10 +630,7 @@ impl Project {
     }
 
     fn map_info_mut(&mut self) -> Result<&mut Node, ParseError> {
-        self.instrument_mut()?
-            .blocks_mut("map_info")
-            .next()
-            .ok_or_else(|| ParseError::AssertFail("instrument has no map_info block".into()))
+        self.instrument_mut()?.require_mut("map_info")
     }
 
     fn map_zone_mut(&mut self, zone_id: u32) -> Result<&mut Node, ParseError> {
@@ -658,10 +668,7 @@ impl Project {
     }
 
     fn attrs_mut(&mut self) -> Result<&mut Node, ParseError> {
-        self.instrument_mut()?
-            .blocks_mut("samplib_attrs")
-            .next()
-            .ok_or_else(|| ParseError::AssertFail("instrument has no samplib_attrs block".into()))
+        self.instrument_mut()?.require_mut("samplib_attrs")
     }
 
     pub fn velocity_defaults(&self) -> Result<VelocityDefaults, ParseError> {
@@ -723,6 +730,60 @@ impl Project {
             .find(|f| f.field("m_id") == Some(file_id.to_string().as_str()))
             .ok_or_else(|| ParseError::AssertFail(format!("no audio file with id {file_id}")))?
             .set_field("m_fullName", path)
+    }
+
+    /// Apply one `path = value` edit, addressed as a listing names the fields: `name`,
+    /// `fileN.path`, `strokeN.<field>` with the fields [`StrokeField::parse`] takes,
+    /// `velocity.{attack_amount,amplitude,timbre}` and
+    /// `zoneN.{root_key,bottom_note,top_note}`. Ids are the 1-based ids the project
+    /// stores, and a note is a name or a number, as [`crate::note::parse`] reads it.
+    pub fn set_path(&mut self, path: &str, value: &str) -> Result<(), PathError> {
+        if path == "name" {
+            return Ok(self.set_name(value)?);
+        }
+        let (block, field) = path.split_once('.').ok_or(PathError::Unknown)?;
+        if block == "velocity" {
+            return self.set_velocity_field(field, value);
+        }
+        if let Some(id) = indexed(block, "file") {
+            if field != "path" {
+                return Err(PathError::Unknown);
+            }
+            return Ok(self.set_audio_path(id, value)?);
+        }
+        if let Some(id) = indexed(block, "stroke") {
+            return Ok(self.set_stroke_field(id, StrokeField::parse(field, value)?)?);
+        }
+        let id = indexed(block, "zone").ok_or(PathError::Unknown)?;
+        self.set_zone_note(id, field, value)
+    }
+
+    fn set_velocity_field(&mut self, field: &str, value: &str) -> Result<(), PathError> {
+        let mut defaults = self.velocity_defaults()?;
+        let slot = match field {
+            "attack_amount" => &mut defaults.attack_amount,
+            "amplitude" => &mut defaults.amplitude,
+            "timbre" => &mut defaults.timbre,
+            _ => return Err(PathError::Unknown),
+        };
+        *slot = number(field, value)?;
+        Ok(self.set_velocity_defaults(defaults)?)
+    }
+
+    fn set_zone_note(&mut self, zone_id: u32, field: &str, value: &str) -> Result<(), PathError> {
+        let zone = self
+            .zones()?
+            .into_iter()
+            .find(|z| z.zone_id == zone_id)
+            .ok_or(PathError::NoZone(zone_id))?;
+        let note = || crate::note::parse(value).map_err(ParseError::AssertFail);
+        match field {
+            "root_key" => self.set_root_key(zone_id, note()?),
+            "bottom_note" => self.set_key_range(zone_id, note()?, zone.top_note),
+            "top_note" => self.set_key_range(zone_id, zone.bottom_note, note()?),
+            _ => return Err(PathError::Unknown),
+        }?;
+        Ok(())
     }
 
     /// A project laid out as the editor lays one out after *Import Auto…*: one zone
@@ -1231,6 +1292,54 @@ mod tests {
         assert!(project.set_root_key(200, 60).is_err());
         assert!(project.set_audio_path(9, "x").is_err());
         assert!(project.set_key_range(131, 70, 60).is_err());
+    }
+
+    #[test]
+    fn a_path_reaches_the_field_a_listing_names() {
+        let mut project = three_zones();
+        for (path, value) in [
+            ("name", "Renamed"),
+            ("file2.path", "moved/c4.wav"),
+            ("stroke2.gain", "0.5"),
+            ("velocity.timbre", "3"),
+            ("zone130.root_key", "C#4"),
+            ("zone131.bottom_note", "62"),
+        ] {
+            project
+                .set_path(path, value)
+                .unwrap_or_else(|e| panic!("{path} = {value}: {e:?}"));
+        }
+        assert_eq!(project.name().unwrap(), "Renamed");
+        assert_eq!(project.audio_files().unwrap()[1].path, "moved/c4.wav");
+        assert_eq!(zone_stroke(&project, 2).gain, 0.5);
+        assert_eq!(project.velocity_defaults().unwrap().timbre, 3);
+        let zones = project.zones().unwrap();
+        assert_eq!(zones[1].root_key, 61);
+        assert_eq!((zones[0].bottom_note, zones[0].top_note), (62, 96));
+    }
+
+    #[test]
+    fn a_path_outside_the_project_is_refused_by_kind() {
+        let mut project = three_zones();
+        let before = project.render();
+        for path in [
+            "tempo",
+            "zone0.root_key",
+            "stroke0.gain",
+            "file1.name",
+            "velocity.depth",
+            "zone130.pitch",
+        ] {
+            let err = project.set_path(path, "1");
+            assert!(matches!(err, Err(PathError::Unknown)), "{path}: {err:?}");
+        }
+        let err = project.set_path("zone99.root_key", "C4");
+        assert!(matches!(err, Err(PathError::NoZone(99))), "{err:?}");
+        for (path, value) in [("velocity.timbre", "256"), ("zone130.root_key", "H9")] {
+            let err = project.set_path(path, value);
+            assert!(matches!(err, Err(PathError::Refused(_))), "{path}: {err:?}");
+        }
+        assert_eq!(project.render(), before);
     }
 
     #[test]

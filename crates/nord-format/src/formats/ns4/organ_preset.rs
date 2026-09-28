@@ -6,7 +6,7 @@
 
 use super::fx::FxChain;
 use super::organ_layers::OrganLayer;
-use crate::cbin::{self, Cbin};
+use crate::cbin::Cbin;
 use crate::components::{Level, MorphTarget};
 use crate::error::Error;
 use std::io::{Read, Seek};
@@ -58,7 +58,5 @@ pub struct OrganPreset {
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<OrganPreset>, Error> {
-    let file: Cbin<OrganPreset> = cbin::read(reader, FORMAT)?;
-    crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    Ok(file)
+    crate::formats::read_known(reader, FORMAT, KNOWN_VERSIONS)
 }

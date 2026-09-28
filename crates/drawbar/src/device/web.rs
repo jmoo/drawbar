@@ -21,6 +21,7 @@ use web_sys::{UsbConnectionEvent, UsbDevice, UsbDeviceFilter, UsbDeviceRequestOp
 
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
+use crate::js;
 
 /// Where the connection stands, as one value: the device is in exactly one place.
 #[derive(Default)]
@@ -76,6 +77,14 @@ impl Inner {
             }
         }
     }
+
+    /// Mark the device gone and drop what was queued for it. Returns whether it was gone
+    /// already, so each departure is reported once.
+    fn depart(&mut self) -> bool {
+        self.queue.clear();
+        self.chosen = None;
+        matches!(std::mem::replace(&mut self.slot, Slot::Gone), Slot::Gone)
+    }
 }
 
 pub struct Link {
@@ -105,7 +114,7 @@ impl Link {
         let request = match request_device() {
             Ok(request) => request,
             Err(e) => {
-                self.emit.send(DeviceEvent::ConnectFailed(describe(&e)));
+                self.emit.send(DeviceEvent::ConnectFailed(js::describe(&e)));
                 return;
             }
         };
@@ -129,7 +138,7 @@ impl Link {
                 Err(e) => {
                     emit.send(DeviceEvent::ConnectFailed(format!(
                         "no device chosen: {}",
-                        describe(&e)
+                        js::describe(&e)
                     )));
                     return;
                 }
@@ -231,11 +240,7 @@ async fn retire(
         if state.generation != generation {
             return;
         }
-        state.queue.clear();
-        state.chosen = None;
-        let said = matches!(state.slot, Slot::Gone);
-        state.slot = Slot::Gone;
-        said
+        state.depart()
     };
     // A device that is already gone cannot be closed, and reporting that failure on top
     // of the disconnect adds nothing.
@@ -268,13 +273,8 @@ fn watch_for_unplug(
         if held.borrow().chosen.as_ref() != Some(&went) {
             return;
         }
-        let mut state = held.borrow_mut();
-        state.queue.clear();
-        state.chosen = None;
         // An unplugged device cannot be closed; whichever owner holds it drops it.
-        let said = matches!(state.slot, Slot::Gone);
-        state.slot = Slot::Gone;
-        drop(state);
+        let said = held.borrow_mut().depart();
         if !said {
             emit.send(DeviceEvent::Disconnected { lost: true });
         }
@@ -294,19 +294,4 @@ fn request_device() -> Result<Promise<UsbDevice>, JsValue> {
     let filter = UsbDeviceFilter::new();
     filter.set_vendor_id(VENDOR_ID);
     Ok(usb.request_device(&UsbDeviceRequestOptions::new(&[filter])))
-}
-
-/// A rejected promise carries a `DOMException`, whose text is read from its properties
-/// because it does not downcast to `Error`.
-fn describe(err: &JsValue) -> String {
-    let field = |k: &str| {
-        js_sys::Reflect::get(err, &JsValue::from_str(k))
-            .ok()
-            .and_then(|v| v.as_string())
-    };
-    match (field("name"), field("message")) {
-        (Some(name), Some(message)) => format!("{name}: {message}"),
-        (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => err.as_string().unwrap_or_else(|| format!("{err:?}")),
-    }
 }

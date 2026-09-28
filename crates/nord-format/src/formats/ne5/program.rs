@@ -7,19 +7,16 @@
 //! The live buffer ([`crate::formats::ne5::live`]) is the same body under the tag
 //! `ne5l`, addressed in three slots instead of eight banks of fifty.
 
-mod center;
-mod effects;
-mod organ;
-mod panel;
-mod piano;
-mod sample;
-
-pub use center::{CenterPanel, OrganType};
-pub use effects::{EffectsPanel, EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Routing};
-pub use organ::{B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, Preset, VoxVib};
-pub use panel::PANEL;
-pub use piano::{PianoCategory, PianoPanel};
-pub use sample::SamplePanel;
+pub use super::center_panel::{CenterPanel, OrganType};
+pub use super::effects_panel::{
+    EffectsPanel, EqualizerPart, Fx1Type, Fx2Type, Fx3Type, Fx5Type, Routing,
+};
+pub use super::organ_panel::{
+    B3PercSpeed, B3Vib, Drawbars, FarfisaVib, OrganModel, OrganPanel, Preset, VoxVib,
+};
+pub use super::piano_panel::{PianoCategory, PianoPanel};
+pub use super::program_panel::PANEL;
+pub use super::sample_panel::SamplePanel;
 
 pub use crate::fields::Field;
 
@@ -92,8 +89,6 @@ impl Default for Program {
     }
 }
 
-pub(crate) use crate::formats::known_version;
-
 /// Refuses a header whose `aux` word is not `0xFFFFFFFF`.
 ///
 /// Inferred from specimens; not confirmed on hardware. Every slot-addressed specimen
@@ -120,6 +115,19 @@ pub(crate) fn slot<L: bank::Location>(header: &Header) -> Result<L, Error> {
         .map_err(|_| ParseError::AssertFail(format!("invalid location: {bank} {slot}")).into())
 }
 
+/// Read one slot-addressed `format` container: a known version, an unset aux word, and
+/// a location inside `L`'s slot space.
+pub(crate) fn read_slotted<B: cbin::Body, L: bank::Location>(
+    reader: &mut (impl Read + Seek),
+    format: &'static str,
+    supported: &'static [u32],
+) -> Result<Cbin<B>, Error> {
+    let file: Cbin<B> = crate::formats::read_known(reader, format, supported)?;
+    unset_aux(format, &file.header)?;
+    slot::<L>(&file.header)?;
+    Ok(file)
+}
+
 /// The program slot the file claims.
 ///
 /// ⚠️ A live slot is the same body under another tag, so this reads a `ne5l` file's
@@ -138,11 +146,7 @@ pub fn new(location: Location) -> Cbin<Program> {
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-    let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-    known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    unset_aux(FORMAT, &file.header)?;
-    location(&file)?;
-    Ok(file)
+    read_slotted::<_, Location>(reader, FORMAT, KNOWN_VERSIONS)
 }
 
 /// ⚠️ Programs and live slots are one type, so a `ne5l` file placed in a program

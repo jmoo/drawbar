@@ -21,16 +21,14 @@ pub mod live {
     //! The live buffer (`.ns2l`): a program body under its own tag.
 
     use super::program::{self, Program};
-    use crate::cbin::{self, Cbin};
+    use crate::cbin::Cbin;
     use crate::error::Error;
     use std::io::{Read, Seek};
 
     pub const FORMAT: &str = "ns2l";
 
     pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-        let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-        crate::formats::known_version(FORMAT, file.header.version, program::KNOWN_VERSIONS)?;
-        Ok(file)
+        crate::formats::read_known(reader, FORMAT, program::KNOWN_VERSIONS)
     }
 }
 

@@ -11,7 +11,7 @@ use std::io::{Read, Seek};
 
 /// An Electro 5 bundle or backup, walked from its ZIP archive: banked
 /// programs and songs, plus the piano and sample libraries they use.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Bundle {
     programs: program::Bank,
     songs: song::Bank,
@@ -23,13 +23,7 @@ pub struct Bundle {
 
 impl Bundle {
     pub fn new() -> Self {
-        Self {
-            programs: program::Bank::new(),
-            songs: song::Bank::new(),
-            pianos: Vec::new(),
-            samples: Vec::new(),
-            skipped: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Bundle, Error> {
@@ -99,12 +93,6 @@ impl Bundle {
     /// Empty means the whole bundle was understood.
     pub fn skipped(&self) -> &[(String, String)] {
         &self.skipped
-    }
-}
-
-impl Default for Bundle {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -57,9 +57,8 @@
 //! unaffected, and a morph slot with no parameter beside it binds to nothing.
 //!
 //! Where a name says the wrong thing, the declaration says the right one:
-//! `#[morphs(x)]` binds a slot to the registered leaf `x` whatever the slot is called,
-//! and `#[rank(N)]` places a drawbar at N. Either names a registered leaf of the same
-//! body or fails to compile.
+//! `#[morphs(x)]` binds a slot to the registered leaf `x` whatever the slot is called.
+//! It names a registered leaf of the same body or fails to compile.
 //!
 //! Only usable inside `nord-format`: generated code names `crate::bits`,
 //! `crate::cbin`, `crate::error`, `crate::layout` and `crate::fields`.
@@ -270,15 +269,14 @@ fn trailing_ordinal(field: &str) -> Option<u8> {
 }
 
 /// What a field's own attributes say about its control, where the name would say the
-/// wrong thing: `#[morphs(x)]` and `#[rank(N)]`.
+/// wrong thing: `#[morphs(x)]`.
 #[derive(Debug, Default)]
 struct Refinement {
     morphs: Option<String>,
-    rank: Option<u8>,
 }
 
 /// The refinements declared on `field`, each checked against the body: a parent must be
-/// a registered leaf, and a rank starts at 1.
+/// a registered leaf.
 fn refinement(field: &syn::Field, registered: &[&str]) -> syn::Result<Refinement> {
     let mut out = Refinement::default();
     for attr in &field.attrs {
@@ -294,16 +292,6 @@ fn refinement(field: &syn::Field, registered: &[&str]) -> syn::Result<Refinement
                 ));
             }
             out.morphs = Some(parent.to_string());
-        } else if attr.path().is_ident("rank") {
-            if out.rank.is_some() {
-                return Err(syn::Error::new_spanned(attr, "a drawbar has one rank"));
-            }
-            let rank: LitInt = attr.parse_args()?;
-            let rank: u8 = rank.base10_parse()?;
-            if rank == 0 {
-                return Err(syn::Error::new_spanned(attr, "rank 1 is the leftmost bar"));
-            }
-            out.rank = Some(rank);
         }
     }
     Ok(out)
@@ -460,7 +448,7 @@ fn common_field(
     });
 
     let kept = field.attrs.iter().filter(|attr| {
-        !["bits", "at", "morphs", "rank"]
+        !["bits", "at", "morphs"]
             .iter()
             .any(|own| attr.path().is_ident(own))
     });
@@ -591,7 +579,7 @@ fn leaf_field(
     if let Some(parent) = parent {
         control = quote! { #control.morphing(#parent) };
     }
-    if let Some(rank) = refinement.rank.or_else(|| trailing_ordinal(&path)) {
+    if let Some(rank) = trailing_ordinal(&path) {
         control = quote! { #control.ranked(#rank) };
     }
     generated.specs.push(quote! {
@@ -606,8 +594,7 @@ fn leaf_field(
     // The type rejects values it cannot hold instead of clamping them into the slot.
     generated.setters.push(quote! {
         #path => {
-            self.#ident = crate::fields::parse_field::<#ty>(#width, value)
-                .map_err(|e| e.at(#path))?;
+            self.#ident = crate::fields::parse_field::<#ty>(#path, #width, value)?;
             return Ok(());
         }
     });
@@ -647,7 +634,7 @@ fn generate_fields(
         common_field(&mut generated, field, placement, &ty_str);
         let refinement = refinement(field, &registered)?;
         let registered_leaf = !placement.nested && matches!(field.vis, syn::Visibility::Public(_));
-        if !registered_leaf && (refinement.morphs.is_some() || refinement.rank.is_some()) {
+        if !registered_leaf && refinement.morphs.is_some() {
             return Err(syn::Error::new_spanned(
                 field,
                 "a refinement belongs on a registered (pub) leaf: a nested body registers a \
@@ -955,16 +942,14 @@ mod tests {
     fn a_declared_refinement_names_a_registered_leaf() {
         let registered = ["cc_value", "cc_number"];
         let bound = refinement(
-            &field(quote! { #[morphs(cc_value)] #[rank(3)] pub cc_wheel: MorphTarget }),
+            &field(quote! { #[morphs(cc_value)] pub cc_wheel: MorphTarget }),
             &registered,
         )
         .unwrap();
         assert_eq!(bound.morphs.as_deref(), Some("cc_value"));
-        assert_eq!(bound.rank, Some(3));
 
         let plain = refinement(&field(quote! { pub cc_wheel: MorphTarget }), &registered).unwrap();
         assert_eq!(plain.morphs, None);
-        assert_eq!(plain.rank, None);
 
         let orphan = refinement(
             &field(quote! { #[morphs(cc)] pub cc_wheel: MorphTarget }),
@@ -974,15 +959,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not a registered leaf"));
-
-        let zero = refinement(&field(quote! { #[rank(0)] pub bar: Drawbar }), &registered);
-        assert!(zero.unwrap_err().to_string().contains("leftmost"));
-
-        let twice = refinement(
-            &field(quote! { #[rank(1)] #[rank(2)] pub bar: Drawbar }),
-            &registered,
-        );
-        assert!(twice.is_err());
     }
 
     #[test]
@@ -1074,17 +1050,6 @@ mod tests {
     /// in it.
     #[test]
     fn a_refinement_outside_the_registry_is_refused() {
-        let private = quote! {
-            struct Private {
-                #[bits(0..=6)]
-                pub gain: u8,
-                #[bits(7..=7)]
-                #[rank(3)]
-                bar: Drawbar,
-            }
-        };
-        assert!(refused(quote!(1), private).contains("registered (pub) leaf"));
-
         let private_morph = quote! {
             struct PrivateMorph {
                 #[bits(0..=6)]
@@ -1097,13 +1062,15 @@ mod tests {
         assert!(refused(quote!(1), private_morph).contains("registered (pub) leaf"));
 
         let nested = quote! {
-            struct NestedRank {
-                #[at(0x00..0x01)]
-                #[rank(3)]
+            struct NestedMorph {
+                #[bits(0..=6)]
+                pub gain: u8,
+                #[at(0x01..0x02)]
+                #[morphs(gain)]
                 pub child: Child,
             }
         };
-        assert!(refused(quote!(1), nested).contains("registered (pub) leaf"));
+        assert!(refused(quote!(2), nested).contains("registered (pub) leaf"));
     }
 
     #[test]

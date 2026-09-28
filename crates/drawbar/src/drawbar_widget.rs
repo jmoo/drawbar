@@ -19,14 +19,11 @@ pub const MAX: u8 = 8;
 /// panel's convention and are not stored in the file.
 const FOOTAGE: [&str; BARS] = ["16", "5⅓", "8", "4", "2⅔", "2", "1⅗", "1⅓", "1"];
 
-/// Every rank, in register order.
-pub const ALL_RANKS: [usize; BARS] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-
-fn stop_color(visuals: &egui::Visuals, bar: usize) -> egui::Color32 {
+fn stop_color(bar: usize) -> egui::Color32 {
     match bar {
         0 | 1 => egui::Color32::from_rgb(0x6b, 0x4a, 0x33),
-        4 | 6 | 7 => crate::app::stop_black(visuals),
-        _ => crate::app::stop_white(visuals),
+        4 | 6 | 7 => crate::app::STOP_BLACK,
+        _ => crate::app::STOP_WHITE,
     }
 }
 
@@ -68,15 +65,6 @@ pub fn spell(bits: u64) -> String {
     format!("{bits:#x}")
 }
 
-/// Parse a stored register as a field prints it: `0x…` or decimal.
-pub fn parse(text: &str) -> Option<u64> {
-    let text = text.trim();
-    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        Some(hex) => u64::from_str_radix(hex, 16).ok(),
-        None => text.parse().ok(),
-    }
-}
-
 const STOP_H: f32 = 15.0;
 const BAR_W: f32 = 21.0;
 const TRACK_H: f32 = 104.0;
@@ -99,28 +87,19 @@ pub fn digits(positions: &[u8]) -> String {
     out
 }
 
-/// The first `ranks.len()` bars of `positions`, each labeled and colored for its rank.
-/// Returns the new positions when a bar is pulled.
-///
-/// With `live` false the bars are dimmed and ignore input. That is for a registration
-/// the instrument is not reading, where draggable bars would suggest that moving them
-/// does something.
+/// The nine bars of `positions`, each labeled and colored for its rank. Returns the new
+/// positions when a bar is pulled.
 ///
 /// ⚠️ The bass manual of B3 + bass has two drawbars, and they are not the first two
 /// nibbles of a nine-drawbar block: they are separate fields, `b3_bass_bar1` and
 /// `b3_bass_bar2`. Drawing nine there would show a registration that plays nothing.
-pub fn ui_ranks(
-    ui: &mut egui::Ui,
-    positions: [u8; BARS],
-    live: bool,
-    ranks: &[usize],
-) -> Option<[u8; BARS]> {
+pub fn ui_ranks(ui: &mut egui::Ui, positions: [u8; BARS]) -> Option<[u8; BARS]> {
     let mut moved = positions;
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        for (value, &rank) in moved.iter_mut().zip(ranks) {
-            if bar(ui, Some(rank), value, live) {
+        for (rank, value) in moved.iter_mut().enumerate() {
+            if bar(ui, Some(rank), value) {
                 changed = true;
             }
         }
@@ -130,19 +109,15 @@ pub fn ui_ranks(
 
 /// A single drawbar, the `rank`-th of a registration, for the Stage bodies, which store
 /// one field per bar. Returns the new position when it is pulled.
-pub fn ui_one(ui: &mut egui::Ui, rank: Option<usize>, position: u8, live: bool) -> Option<u8> {
+pub fn ui_one(ui: &mut egui::Ui, rank: Option<usize>, position: u8) -> Option<u8> {
     let mut moved = position;
-    bar(ui, rank, &mut moved, live).then_some(moved)
+    bar(ui, rank, &mut moved).then_some(moved)
 }
 
 /// One drawbar. Pull down to increase, as on the instrument.
-fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8, live: bool) -> bool {
+fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8) -> bool {
     let size = egui::vec2(BAR_W, TRACK_H + 16.0);
-    let sense = match live {
-        true => egui::Sense::click_and_drag(),
-        false => egui::Sense::hover(),
-    };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
     let track = egui::Rect::from_min_size(rect.min, egui::vec2(BAR_W, TRACK_H));
     // The stop's center is at the top of its travel at position 0 and at the bottom at
@@ -151,7 +126,7 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8, live: bool) -> bo
     let travel = TRACK_H - STOP_H;
 
     let mut changed = false;
-    if live && response.dragged() {
+    if response.dragged() {
         if let Some(pointer) = response.interact_pointer_pos() {
             let fraction = ((pointer.y - top) / travel).clamp(0.0, 1.0);
             let want = (fraction * MAX as f32).round() as u8;
@@ -161,11 +136,7 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8, live: bool) -> bo
     }
 
     let painter = ui.painter();
-    let dim = |c: egui::Color32| match live {
-        true => c,
-        false => c.gamma_multiply(0.4),
-    };
-    painter.rect_filled(track, 3.0, dim(egui::Color32::from_rgb(0x11, 0x11, 0x13)));
+    painter.rect_filled(track, 3.0, egui::Color32::from_rgb(0x11, 0x11, 0x13));
 
     // A stored position above MAX is painted at the bottom: the readout shows that it
     // is out of range, and a stop drawn off the end of its track would not.
@@ -174,7 +145,7 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8, live: bool) -> bo
         egui::pos2(track.center().x, center),
         egui::vec2(BAR_W - 2.0, STOP_H),
     );
-    let color = dim(rank.map_or(NO_RANK, |rank| stop_color(ui.visuals(), rank)));
+    let color = rank.map_or(NO_RANK, stop_color);
     painter.rect_filled(stop, 2.0, color);
     painter.text(
         stop.center(),
@@ -245,9 +216,7 @@ mod tests {
     fn the_spelling_matches_what_the_field_reads_back() {
         let value = 0x8_8880_0000u64;
         assert_eq!(spell(value), "0x888800000");
-        assert_eq!(parse(&spell(value)), Some(value));
-        assert_eq!(parse("2290649224"), Some(2290649224));
-        assert_eq!(parse("nonsense"), None);
+        assert_eq!(crate::fields::number(&spell(value)), Some(value));
     }
 
     #[test]

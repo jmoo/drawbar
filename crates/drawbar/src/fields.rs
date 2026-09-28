@@ -72,6 +72,15 @@ pub fn decoded(bytes: &[u8]) -> Option<Vec<Field>> {
     fields_of(&entity)
 }
 
+/// A field value as the registry spells a number: `0x…` or decimal.
+pub fn number(value: &str) -> Option<u64> {
+    let text = value.trim();
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
 /// The registry paths the two sets of bytes spell differently, in registry order.
 ///
 /// ⚠️ An edit reaches the working copy in the frame it is made, so a pending change
@@ -172,6 +181,20 @@ mod tests {
     use crate::workspace::Fresh;
     use nord_format::formats::ne5;
     use nord_format::Program;
+
+    /// A spelling that is not a number is refused, not read as zero.
+    #[test]
+    fn a_value_is_refused_unless_it_spells_a_number() {
+        assert_eq!(number("0x1f"), Some(31));
+        assert_eq!(number("0X1F"), Some(31));
+        assert_eq!(number(" 42 "), Some(42));
+        assert_eq!(number("2290649224"), Some(2290649224));
+        assert_eq!(number("0x"), None);
+        assert_eq!(number(""), None);
+        assert_eq!(number("ff"), None);
+        assert_eq!(number("-1"), None);
+        assert_eq!(number("nonsense"), None);
+    }
 
     fn program() -> Vec<u8> {
         let entity = Entity::Program(Program::Electro5(ne5::program::new(
@@ -284,7 +307,7 @@ mod tests {
             .iter()
             .find(|f| f.path == "organ_panel.vox_preset1_drawbars")
             .unwrap();
-        let bits = drawbar_widget::parse(&register.value).unwrap();
+        let bits = number(&register.value).unwrap();
         let parked = drawbar_widget::written(bits, drawbar_widget::bars(bits))
             .expect("every bar is where it was stored");
         assert_eq!(drawbar_widget::spell(parked), register.value);
@@ -292,7 +315,7 @@ mod tests {
         let (after, _) = apply(&bytes, &[(register.path.clone(), "0x888800000".into())]).unwrap();
         let edited = after.iter().find(|f| f.path == register.path).unwrap();
         assert_eq!(
-            drawbar_widget::bars(drawbar_widget::parse(&edited.value).unwrap()),
+            drawbar_widget::bars(number(&edited.value).unwrap()),
             [8, 8, 8, 8, 0, 0, 0, 0, 0]
         );
     }

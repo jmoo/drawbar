@@ -143,6 +143,14 @@ impl Node {
             .ok_or_else(|| ParseError::AssertFail(format!("{} has no {name} block", self.name)))
     }
 
+    /// Like [`Node::require`], for editing the block.
+    pub fn require_mut(&mut self, name: &str) -> Result<&mut Node, ParseError> {
+        let parent = self.name.clone();
+        self.blocks_mut(name)
+            .next()
+            .ok_or_else(|| ParseError::AssertFail(format!("{parent} has no {name} block")))
+    }
+
     /// The tree as text, the root at `depth` levels of indent.
     pub fn render(&self, out: &mut String, depth: usize) {
         let pad = " ".repeat(depth * INDENT);

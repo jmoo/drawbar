@@ -17,19 +17,15 @@ use nord_usb::{Location, ObjectClass};
 use crate::app::{good, ui as ui_text};
 use crate::browser::{Act, Browser, Item, Kind};
 use crate::device::{fit, occupancy, Device, Fit};
-use crate::icon::{painted, Glyph};
+use crate::icon::{icon, Glyph};
 use crate::library::{row_of, Row, Where};
-use crate::panel::{chip, dock_header, panel_header};
+use crate::panel::{chip, dock_header, panel_header, GAP, PAD};
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
 use crate::strings::{kind_word, place};
 use crate::tags::Tags;
 use crate::workspace::Workspace;
-
-/// A panel body's padding at each end, and the gap between its parts.
-const PAD: i8 = 8;
-const GAP: f32 = 6.0;
 
 /// The size of a glyph in a line, and of the smaller one on a tag chip.
 const GLYPH: f32 = 12.0;
@@ -56,11 +52,11 @@ pub fn ui(
         return acts;
     }
     dock_header(ui, "instrument");
-    panel_header(ui, "room", Some(&mut shell.room_open), None);
+    panel_header(ui, "room", &mut shell.room_open);
     if shell.room_open {
         room_panel(ui, workspace, device, queue);
     }
-    panel_header(ui, "info", Some(&mut shell.info_open), None);
+    panel_header(ui, "info", &mut shell.info_open);
     if shell.info_open {
         body(ui, |ui| crate::browser::about(ui, device));
     }
@@ -92,11 +88,8 @@ fn selection(
         about_selection(ui, picked, &rows, workspace, device)
     });
     tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
-    // Only a slot the instrument has been asked about has a dependency list; for
-    // everything else the lines are absent.
-    let answered = needs(&slots(browser), device);
-    if !answered.is_empty() {
-        dependencies(ui, &answered, device);
+    if let Some((slot, deps)) = answered(browser, device) {
+        dependencies(ui, slot, deps);
     }
     acts
 }
@@ -210,34 +203,13 @@ fn void(ui: &mut egui::Ui, said: String) {
     ui.label(egui::RichText::new(said).text_style(ui_text()));
 }
 
-/// The slots the selection holds. Only a slot has a dependency list on the instrument.
-fn slots(browser: &Browser) -> Vec<(ObjectClass, Location)> {
-    browser
-        .picked()
-        .items()
-        .filter_map(|item| match item {
-            Item::Slot { class, at } => Some((class, at)),
-            _ => None,
-        })
-        .collect()
-}
-
 /// One meter per folder the instrument has counted, and a sentence on the limit the
 /// queue runs into.
 fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: &Queue) {
     body(ui, |ui| {
         let mut drawn = 0;
         for class in device.state.classes() {
-            let unit = device.state.allocation_unit(class);
-            let banks = device.state.banks(class);
-            let Some(held) = room::meter(
-                class,
-                &device.state.inventory,
-                unit,
-                banks,
-                queue,
-                workspace,
-            ) else {
+            let Some(held) = room::meter(class, &device.state, queue, workspace) else {
                 continue;
             };
             drawn += 1;
@@ -248,6 +220,7 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // ⚠️ The bar takes the status color and the readout stays in the text
                     // color: the signal colors are not legible as 10 px figures.
+                    let unit = device.state.allocation_unit(class);
                     if let Some(said) = occupancy(class, &device.state.inventory, unit) {
                         ui.label(egui::RichText::new(said).monospace().size(MONO).weak());
                     }
@@ -265,48 +238,37 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
     });
 }
 
-/// The dependency list the instrument gave for `slot`, if it is the slot last asked
-/// about and the list is not empty.
+/// The picked slot the instrument last listed dependencies for, and that list when it is
+/// not empty.
 ///
 /// ⚠️ `DEPENDENCIES` answers for one slot at a time and the cache holds the last answer,
 /// so it applies only to that class at that address. A slot nobody asked about has no
 /// answer, which is not the same as needing nothing.
-fn answer(device: &Device, slot: (ObjectClass, Location)) -> Option<&[Dependency]> {
-    if device.state.detail.at != Some(slot) {
+fn answered<'a>(
+    browser: &Browser,
+    device: &'a Device,
+) -> Option<((ObjectClass, Location), &'a [Dependency])> {
+    let (class, at) = device.state.detail.at?;
+    if !browser.picked().holds(Item::Slot { class, at }) {
         return None;
     }
     let deps = device.state.detail.deps.as_deref()?;
-    (!deps.is_empty()).then_some(deps)
+    (!deps.is_empty()).then_some(((class, at), deps))
 }
 
-/// The picked slots the instrument has answered about. The panel appears only when there
-/// is at least one.
-fn needs(picked: &[(ObjectClass, Location)], device: &Device) -> Vec<(ObjectClass, Location)> {
-    picked
-        .iter()
-        .copied()
-        .filter(|slot| answer(device, *slot).is_some())
-        .collect()
-}
-
-/// What the instrument said the picked slots need.
-fn dependencies(ui: &mut egui::Ui, answered: &[(ObjectClass, Location)], device: &Device) {
+/// What the instrument said a picked slot needs.
+fn dependencies(ui: &mut egui::Ui, (class, at): (ObjectClass, Location), deps: &[Dependency]) {
     body(ui, |ui| {
-        for (class, at) in answered.iter().copied() {
-            let Some(deps) = answer(device, (class, at)) else {
-                continue;
-            };
-            for dep in deps {
-                let named = Some(dep.name.trim()).filter(|name| !name.is_empty());
-                needed(ui, dep.class, named, dep.id);
-            }
-            ui.label(
-                egui::RichText::new(place(class, at))
-                    .monospace()
-                    .size(MONO)
-                    .weak(),
-            );
+        for dep in deps {
+            let named = Some(dep.name.trim()).filter(|name| !name.is_empty());
+            needed(ui, dep.class, named, dep.id);
         }
+        ui.label(
+            egui::RichText::new(place(class, at))
+                .monospace()
+                .size(MONO)
+                .weak(),
+        );
     });
 }
 
@@ -316,7 +278,7 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     ui.horizontal(|ui| {
         let quiet = ui.visuals().weak_text_color();
         let lit = good(ui.visuals());
-        mark(ui, Kind::from_class(class).glyph(), GLYPH, quiet);
+        icon(ui, Kind::from_class(class).glyph(), GLYPH, quiet);
         match named {
             Some(name) => {
                 ui.label(egui::RichText::new(name).text_style(ui_text()));
@@ -399,16 +361,10 @@ fn wearing<'a>(picked: &[u64], worn: &'a Tags) -> Vec<(u64, &'a str, bool)> {
         .collect()
 }
 
-/// A glyph in a line, claiming its own box so the words after it line up.
-fn mark(ui: &mut egui::Ui, glyph: Glyph, size: f32, tint: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
-    painted(ui, glyph, rect, tint);
-}
-
 /// A panel's body: padded at each end, with its lines under each other.
 fn body<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(PAD, 6))
+        .inner_margin(egui::Margin::symmetric(PAD as i8, 6))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
             contents(ui)
@@ -499,7 +455,9 @@ mod tests {
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
                         super::ui(panel, shell, &mut browser, &workspace, device, &queue);
-                        dependencies(panel, picked, device);
+                        if let Some((slot, deps)) = answered(&browser, device) {
+                            dependencies(panel, slot, deps);
+                        }
                         tags(panel, &[7, 8], &labels, &mut Vec::new());
                     });
             });
@@ -658,18 +616,25 @@ mod tests {
     fn a_selection_the_instrument_was_not_asked_about_shows_nothing() {
         let ctx = context();
         let (device, at) = attached(&ctx);
+        let picking = |class, at| {
+            let mut browser = Browser::default();
+            browser.check(Item::Slot { class, at });
+            answered(&browser, &device).map(|(slot, _)| slot)
+        };
         assert_eq!(
-            needs(&[(ObjectClass::Program, at)], &device),
-            [(ObjectClass::Program, at)],
+            picking(ObjectClass::Program, at),
+            Some((ObjectClass::Program, at)),
             "the slot it was asked about"
         );
-        assert!(
-            needs(&[(ObjectClass::Sample, at)], &device).is_empty(),
+        assert_eq!(
+            picking(ObjectClass::Sample, at),
+            None,
             "another class at the same address"
         );
         let elsewhere = Location { bank: 0, slot: 0 };
-        assert!(
-            needs(&[(ObjectClass::Program, elsewhere)], &device).is_empty(),
+        assert_eq!(
+            picking(ObjectClass::Program, elsewhere),
+            None,
             "a program nothing has asked about"
         );
         // A dependency returned with a blank name has only its id to show.

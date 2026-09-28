@@ -108,497 +108,132 @@ pub enum Acceptance {
     Unknown,
 }
 
-/// How a row of [`TAKES`] is known.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Evidence {
-    /// Confirmed on hardware.
-    Hardware,
-    /// Inferred from specimens; not confirmed on hardware.
-    Specimens,
-}
-
-impl Evidence {
-    fn acceptance(self) -> Acceptance {
-        match self {
-            Evidence::Hardware => Acceptance::Confirmed,
-            Evidence::Specimens => Acceptance::Inferred,
-        }
-    }
-}
-
-/// What each family keeps in each of its classes.
+/// Which family's files carry a tag, and the class that family keeps it in.
 ///
-/// The Electro 5's rows are `Hardware` because this project has written each of them to
-/// the instrument and read the body back byte-exact: programs and set lists into slots,
-/// a sample instrument and a trimmed piano library into their partitions, and the live
-/// and settings singletons written in place. Every other row is the tag its family's
-/// format module declares, in the class the module's name implies.
-const TAKES: &[(Family, Slot, &str, Evidence)] = &[
-    (
-        Family::Electro3,
-        Slot::Program,
-        ne3::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro4,
-        Slot::Program,
-        ne4::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro4,
-        Slot::Live,
-        ne4::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro4,
-        Slot::Settings,
-        ne4::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro5,
-        Slot::Program,
-        ne5::program::FORMAT,
-        Evidence::Hardware,
-    ),
-    (
-        Family::Electro5,
-        Slot::SetList,
-        ne5::song::FORMAT,
-        Evidence::Hardware,
-    ),
-    (
-        Family::Electro5,
-        Slot::Live,
-        ne5::live::FORMAT,
-        Evidence::Hardware,
-    ),
-    (
-        Family::Electro5,
-        Slot::Settings,
-        ne5::settings::FORMAT,
-        Evidence::Hardware,
-    ),
-    (
-        Family::Electro5,
-        Slot::Sample,
-        nsmp::FORMAT,
-        Evidence::Hardware,
-    ),
-    (
-        Family::Electro5,
-        Slot::Piano,
-        npno::FORMAT,
-        Evidence::Hardware,
-    ),
-    (
-        Family::Electro6,
-        Slot::Program,
-        ne6::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro6,
-        Slot::Live,
-        ne6::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro6,
-        Slot::Settings,
-        ne6::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro7,
-        Slot::Program,
-        ne7::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro7,
-        Slot::Live,
-        ne7::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Electro7,
-        Slot::Settings,
-        ne7::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::StageClassic,
-        Slot::Program,
-        nsclassic::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::StageClassic,
-        Slot::Piano,
-        nsclassic::piano_library::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage2,
-        Slot::Program,
-        ns2::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage2,
-        Slot::Live,
-        ns2::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage2,
-        Slot::Settings,
-        ns2::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage3,
-        Slot::Program,
-        ns3::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage3,
-        Slot::Live,
-        ns3::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage3,
-        Slot::SetList,
-        ns3::song::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage3,
-        Slot::Settings,
-        ns3::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage4,
-        Slot::Program,
-        ns4::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage4,
-        Slot::Live,
-        ns4::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Stage4,
-        Slot::Settings,
-        ns4::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano,
-        Slot::Program,
-        np::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano,
-        Slot::Live,
-        np::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano,
-        Slot::Settings,
-        np::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano2,
-        Slot::Program,
-        np2::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano2,
-        Slot::Live,
-        np2::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano2,
-        Slot::Settings,
-        np2::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano3,
-        Slot::Program,
-        np3::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano3,
-        Slot::Live,
-        np3::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano3,
-        Slot::Settings,
-        np3::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano4,
-        Slot::Program,
-        np4::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano4,
-        Slot::Live,
-        np4::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano4,
-        Slot::Settings,
-        np4::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano5,
-        Slot::Program,
-        np5::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano5,
-        Slot::Live,
-        np5::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Piano5,
-        Slot::Settings,
-        np5::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Grand,
-        Slot::Program,
-        ng2::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Grand,
-        Slot::Live,
-        ng2::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Grand,
-        Slot::Settings,
-        ng2::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Wave,
-        Slot::Program,
-        nw::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Wave,
-        Slot::Settings,
-        nw::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Wave2,
-        Slot::Program,
-        nw2::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Wave2,
-        Slot::Live,
-        nw2::live::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Wave2,
-        Slot::Settings,
-        nw2::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::C2,
-        Slot::Program,
-        nc2::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::C2,
-        Slot::Settings,
-        nc2::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::C2D,
-        Slot::Program,
-        nc2d::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::C2D,
-        Slot::Settings,
-        nc2d::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Organ3,
-        Slot::Program,
-        no3::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Organ3,
-        Slot::Settings,
-        no3::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Lead4,
-        Slot::Program,
-        nl4::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Lead4,
-        Slot::Settings,
-        nl4::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::LeadA1,
-        Slot::Program,
-        nla1::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::LeadA1,
-        Slot::Settings,
-        nla1::settings::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Drum2,
-        Slot::Program,
-        nd2::program::FORMAT,
-        Evidence::Specimens,
-    ),
-    (
-        Family::Drum3,
-        Slot::Program,
-        nd3::kit::FORMAT,
-        Evidence::Specimens,
-    ),
-];
-
-/// Which family's files carry a tag.
+/// Each class is the one its family's format module implies. `None` marks a tag this
+/// table places in no class, so every class refuses it.
 ///
 /// ⚠️ The shared library formats are absent: several families read the same sample
 /// instrument or piano library file, so a tag missing here is no evidence that an
 /// instrument refuses it. Only a tag listed here can refuse another family's instrument.
-const CARRIES: &[(&str, Family)] = &[
-    (ne3::program::FORMAT, Family::Electro3),
-    (ne3::organ_preset::FORMAT, Family::Electro3),
-    (ne4::program::FORMAT, Family::Electro4),
-    (ne4::live::FORMAT, Family::Electro4),
-    (ne4::settings::FORMAT, Family::Electro4),
-    (ne5::program::FORMAT, Family::Electro5),
-    (ne5::live::FORMAT, Family::Electro5),
-    (ne5::song::FORMAT, Family::Electro5),
-    (ne5::settings::FORMAT, Family::Electro5),
-    (ne6::program::FORMAT, Family::Electro6),
-    (ne6::live::FORMAT, Family::Electro6),
-    (ne6::settings::FORMAT, Family::Electro6),
-    (ne7::program::FORMAT, Family::Electro7),
-    (ne7::live::FORMAT, Family::Electro7),
-    (ne7::settings::FORMAT, Family::Electro7),
-    (nsclassic::program::FORMAT, Family::StageClassic),
-    (nsclassic::synth::FORMAT, Family::StageClassic),
-    (nsclassic::piano_library::FORMAT, Family::StageClassic),
-    (ns2::program::FORMAT, Family::Stage2),
-    (ns2::live::FORMAT, Family::Stage2),
-    (ns2::synth::FORMAT, Family::Stage2),
-    (ns2::settings::FORMAT, Family::Stage2),
-    (ns3::program::FORMAT, Family::Stage3),
-    (ns3::live::FORMAT, Family::Stage3),
-    (ns3::song::FORMAT, Family::Stage3),
-    (ns3::synth::FORMAT, Family::Stage3),
-    (ns3::settings::FORMAT, Family::Stage3),
-    (ns4::program::FORMAT, Family::Stage4),
-    (ns4::live::FORMAT, Family::Stage4),
-    (ns4::synth::FORMAT, Family::Stage4),
-    (ns4::piano_preset::FORMAT, Family::Stage4),
-    (ns4::organ_preset::FORMAT, Family::Stage4),
-    (ns4::settings::FORMAT, Family::Stage4),
-    (np::program::FORMAT, Family::Piano),
-    (np::live::FORMAT, Family::Piano),
-    (np::settings::FORMAT, Family::Piano),
-    (np2::program::FORMAT, Family::Piano2),
-    (np2::live::FORMAT, Family::Piano2),
-    (np2::settings::FORMAT, Family::Piano2),
-    (np3::program::FORMAT, Family::Piano3),
-    (np3::live::FORMAT, Family::Piano3),
-    (np3::settings::FORMAT, Family::Piano3),
-    (np4::program::FORMAT, Family::Piano4),
-    (np4::live::FORMAT, Family::Piano4),
-    (np4::settings::FORMAT, Family::Piano4),
-    (np5::program::FORMAT, Family::Piano5),
-    (np5::live::FORMAT, Family::Piano5),
-    (np5::settings::FORMAT, Family::Piano5),
-    (ng2::program::FORMAT, Family::Grand),
-    (ng2::live::FORMAT, Family::Grand),
-    (ng2::settings::FORMAT, Family::Grand),
-    (nw::program::FORMAT, Family::Wave),
-    (nw::settings::FORMAT, Family::Wave),
-    (nw2::program::FORMAT, Family::Wave2),
-    (nw2::live::FORMAT, Family::Wave2),
-    (nw2::settings::FORMAT, Family::Wave2),
-    (nc2::program::FORMAT, Family::C2),
-    (nc2::settings::FORMAT, Family::C2),
-    (npip::pipe_library::FORMAT, Family::C2),
-    (nc2d::program::FORMAT, Family::C2D),
-    (nc2d::settings::FORMAT, Family::C2D),
-    (no3::program::FORMAT, Family::Organ3),
-    (no3::settings::FORMAT, Family::Organ3),
-    (nl4::program::FORMAT, Family::Lead4),
-    (nl4::performance::FORMAT, Family::Lead4),
-    (nl4::settings::FORMAT, Family::Lead4),
-    (nla1::program::FORMAT, Family::LeadA1),
-    (nla1::performance::FORMAT, Family::LeadA1),
-    (nla1::settings::FORMAT, Family::LeadA1),
-    (nd2::program::FORMAT, Family::Drum2),
-    (nd3::kit::FORMAT, Family::Drum3),
+const CARRIES: &[(&str, Family, Option<Slot>)] = &[
+    (ne3::program::FORMAT, Family::Electro3, Some(Slot::Program)),
+    (ne3::organ_preset::FORMAT, Family::Electro3, None),
+    (ne4::program::FORMAT, Family::Electro4, Some(Slot::Program)),
+    (ne4::live::FORMAT, Family::Electro4, Some(Slot::Live)),
+    (
+        ne4::settings::FORMAT,
+        Family::Electro4,
+        Some(Slot::Settings),
+    ),
+    (ne5::program::FORMAT, Family::Electro5, Some(Slot::Program)),
+    (ne5::live::FORMAT, Family::Electro5, Some(Slot::Live)),
+    (ne5::song::FORMAT, Family::Electro5, Some(Slot::SetList)),
+    (
+        ne5::settings::FORMAT,
+        Family::Electro5,
+        Some(Slot::Settings),
+    ),
+    (ne6::program::FORMAT, Family::Electro6, Some(Slot::Program)),
+    (ne6::live::FORMAT, Family::Electro6, Some(Slot::Live)),
+    (
+        ne6::settings::FORMAT,
+        Family::Electro6,
+        Some(Slot::Settings),
+    ),
+    (ne7::program::FORMAT, Family::Electro7, Some(Slot::Program)),
+    (ne7::live::FORMAT, Family::Electro7, Some(Slot::Live)),
+    (
+        ne7::settings::FORMAT,
+        Family::Electro7,
+        Some(Slot::Settings),
+    ),
+    (
+        nsclassic::program::FORMAT,
+        Family::StageClassic,
+        Some(Slot::Program),
+    ),
+    (nsclassic::synth::FORMAT, Family::StageClassic, None),
+    (
+        nsclassic::piano_library::FORMAT,
+        Family::StageClassic,
+        Some(Slot::Piano),
+    ),
+    (ns2::program::FORMAT, Family::Stage2, Some(Slot::Program)),
+    (ns2::live::FORMAT, Family::Stage2, Some(Slot::Live)),
+    (ns2::synth::FORMAT, Family::Stage2, None),
+    (ns2::settings::FORMAT, Family::Stage2, Some(Slot::Settings)),
+    (ns3::program::FORMAT, Family::Stage3, Some(Slot::Program)),
+    (ns3::live::FORMAT, Family::Stage3, Some(Slot::Live)),
+    (ns3::song::FORMAT, Family::Stage3, Some(Slot::SetList)),
+    (ns3::synth::FORMAT, Family::Stage3, None),
+    (ns3::settings::FORMAT, Family::Stage3, Some(Slot::Settings)),
+    (ns4::program::FORMAT, Family::Stage4, Some(Slot::Program)),
+    (ns4::live::FORMAT, Family::Stage4, Some(Slot::Live)),
+    (ns4::synth::FORMAT, Family::Stage4, None),
+    (ns4::piano_preset::FORMAT, Family::Stage4, None),
+    (ns4::organ_preset::FORMAT, Family::Stage4, None),
+    (ns4::settings::FORMAT, Family::Stage4, Some(Slot::Settings)),
+    (np::program::FORMAT, Family::Piano, Some(Slot::Program)),
+    (np::live::FORMAT, Family::Piano, Some(Slot::Live)),
+    (np::settings::FORMAT, Family::Piano, Some(Slot::Settings)),
+    (np2::program::FORMAT, Family::Piano2, Some(Slot::Program)),
+    (np2::live::FORMAT, Family::Piano2, Some(Slot::Live)),
+    (np2::settings::FORMAT, Family::Piano2, Some(Slot::Settings)),
+    (np3::program::FORMAT, Family::Piano3, Some(Slot::Program)),
+    (np3::live::FORMAT, Family::Piano3, Some(Slot::Live)),
+    (np3::settings::FORMAT, Family::Piano3, Some(Slot::Settings)),
+    (np4::program::FORMAT, Family::Piano4, Some(Slot::Program)),
+    (np4::live::FORMAT, Family::Piano4, Some(Slot::Live)),
+    (np4::settings::FORMAT, Family::Piano4, Some(Slot::Settings)),
+    (np5::program::FORMAT, Family::Piano5, Some(Slot::Program)),
+    (np5::live::FORMAT, Family::Piano5, Some(Slot::Live)),
+    (np5::settings::FORMAT, Family::Piano5, Some(Slot::Settings)),
+    (ng2::program::FORMAT, Family::Grand, Some(Slot::Program)),
+    (ng2::live::FORMAT, Family::Grand, Some(Slot::Live)),
+    (ng2::settings::FORMAT, Family::Grand, Some(Slot::Settings)),
+    (nw::program::FORMAT, Family::Wave, Some(Slot::Program)),
+    (nw::settings::FORMAT, Family::Wave, Some(Slot::Settings)),
+    (nw2::program::FORMAT, Family::Wave2, Some(Slot::Program)),
+    (nw2::live::FORMAT, Family::Wave2, Some(Slot::Live)),
+    (nw2::settings::FORMAT, Family::Wave2, Some(Slot::Settings)),
+    (nc2::program::FORMAT, Family::C2, Some(Slot::Program)),
+    (nc2::settings::FORMAT, Family::C2, Some(Slot::Settings)),
+    (npip::pipe_library::FORMAT, Family::C2, None),
+    (nc2d::program::FORMAT, Family::C2D, Some(Slot::Program)),
+    (nc2d::settings::FORMAT, Family::C2D, Some(Slot::Settings)),
+    (no3::program::FORMAT, Family::Organ3, Some(Slot::Program)),
+    (no3::settings::FORMAT, Family::Organ3, Some(Slot::Settings)),
+    (nl4::program::FORMAT, Family::Lead4, Some(Slot::Program)),
+    (nl4::performance::FORMAT, Family::Lead4, None),
+    (nl4::settings::FORMAT, Family::Lead4, Some(Slot::Settings)),
+    (nla1::program::FORMAT, Family::LeadA1, Some(Slot::Program)),
+    (nla1::performance::FORMAT, Family::LeadA1, None),
+    (nla1::settings::FORMAT, Family::LeadA1, Some(Slot::Settings)),
+    (nd2::program::FORMAT, Family::Drum2, Some(Slot::Program)),
+    (nd3::kit::FORMAT, Family::Drum3, Some(Slot::Program)),
+];
+
+/// The rows written to the instrument and read back byte-exact: programs and set lists
+/// into slots, a sample instrument and a trimmed piano library into their partitions,
+/// and the live and settings singletons written in place. Confirmed on hardware.
+///
+/// The shared library rows are here and not in [`CARRIES`], so they name no family.
+const CONFIRMED: &[(Family, Slot, &str)] = &[
+    (Family::Electro5, Slot::Program, ne5::program::FORMAT),
+    (Family::Electro5, Slot::SetList, ne5::song::FORMAT),
+    (Family::Electro5, Slot::Live, ne5::live::FORMAT),
+    (Family::Electro5, Slot::Settings, ne5::settings::FORMAT),
+    (Family::Electro5, Slot::Sample, nsmp::FORMAT),
+    (Family::Electro5, Slot::Piano, npno::FORMAT),
 ];
 
 // Every hand-written CBIN `FORMAT` reaches one of these two tables, and the stub macro
 // asserts its own, so a tag of the wrong length fails the build.
 const _: () = {
     let mut i = 0;
-    while i < TAKES.len() {
-        assert!(TAKES[i].2.len() == 4, "a CBIN tag is four bytes");
+    while i < CONFIRMED.len() {
+        assert!(CONFIRMED[i].2.len() == 4, "a CBIN tag is four bytes");
         i += 1;
     }
     let mut i = 0;
@@ -702,22 +337,37 @@ impl Family {
     pub fn of_tag(tag: &str) -> Option<Family> {
         CARRIES
             .iter()
-            .find(|(held, _)| *held == tag)
-            .map(|(_, family)| *family)
+            .find(|(held, _, _)| *held == tag)
+            .map(|(_, family, _)| *family)
+    }
+
+    /// The tag this family keeps in `slot`, which [`accepts`](Self::accepts) takes there.
+    /// `None` where the table lists no tag for the pair.
+    pub fn tag(self, slot: Slot) -> Option<&'static str> {
+        let confirmed = CONFIRMED
+            .iter()
+            .find(|(family, held, _)| (*family, *held) == (self, slot))
+            .map(|(_, _, tag)| *tag);
+        confirmed.or_else(|| {
+            CARRIES
+                .iter()
+                .find(|(_, family, held)| (*family, *held) == (self, Some(slot)))
+                .map(|(tag, _, _)| *tag)
+        })
     }
 
     /// Whether this family keeps files under `tag` in `slot`.
     pub fn accepts(self, slot: Slot, tag: &str) -> Acceptance {
-        if let Some((_, _, _, evidence)) = TAKES
-            .iter()
-            .find(|(family, held, format, _)| (*family, *held, *format) == (self, slot, tag))
-        {
-            return evidence.acceptance();
+        if CONFIRMED.contains(&(self, slot, tag)) {
+            return Acceptance::Confirmed;
         }
-        // A family's tag is refused outside the classes the table lists it under, even
-        // by its own family: the Stage 4 refuses an `ns4p` in the piano partition just as
-        // an Electro 5 does.
-        match Family::of_tag(tag) {
+        // A family's tag is refused outside the class the table lists it under, even by
+        // its own family: the Stage 4 refuses an `ns4p` in the piano partition just as an
+        // Electro 5 does.
+        match CARRIES.iter().find(|(held, _, _)| *held == tag) {
+            Some((_, family, Some(class))) if (*family, *class) == (self, slot) => {
+                Acceptance::Inferred
+            }
             Some(_) => Acceptance::Refused,
             None => Acceptance::Unknown,
         }
@@ -755,7 +405,7 @@ mod tests {
             Family::Stage4.accepts(Slot::Piano, ns4::program::FORMAT),
             Acceptance::Refused
         );
-        for (tag, owner) in CARRIES {
+        for (tag, owner, _) in CARRIES {
             let open: Vec<Slot> = Slot::ALL
                 .into_iter()
                 .filter(|slot| owner.accepts(*slot, tag) != Acceptance::Refused)
@@ -789,22 +439,50 @@ mod tests {
     /// wrong partition and still be called accepted.
     #[test]
     fn every_tag_a_family_takes_lands_in_one_class() {
-        for family in Family::ALL {
-            let mine: Vec<&str> = TAKES
-                .iter()
-                .filter(|(held, _, _, _)| *held == family)
-                .map(|(_, _, tag, _)| *tag)
-                .collect();
-            for tag in &mine {
-                assert_eq!(
-                    mine.iter().filter(|held| *held == tag).count(),
-                    1,
-                    "{} lists {tag} in more than one class",
+        let tags = CARRIES
+            .iter()
+            .map(|(tag, _, _)| *tag)
+            .chain(CONFIRMED.iter().map(|(_, _, tag)| *tag));
+        for tag in tags {
+            for family in Family::ALL {
+                let open: Vec<Slot> = Slot::ALL
+                    .into_iter()
+                    .filter(|slot| {
+                        matches!(
+                            family.accepts(*slot, tag),
+                            Acceptance::Confirmed | Acceptance::Inferred
+                        )
+                    })
+                    .collect();
+                assert!(
+                    open.len() <= 1,
+                    "{} takes {tag} in {open:?}",
                     family.label()
                 );
                 assert!(
-                    Family::of_tag(tag).is_none_or(|held| held == family),
+                    open.is_empty() || Family::of_tag(tag).is_none_or(|held| held == family),
                     "{} takes {tag}, which is another family's",
+                    family.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tag_a_family_keeps_in_a_class_is_one_it_accepts_there() {
+        assert_eq!(Family::Electro5.tag(Slot::Piano), Some(npno::FORMAT));
+        assert_eq!(Family::Stage4.tag(Slot::Piano), None);
+        for family in Family::ALL {
+            for slot in Slot::ALL {
+                let Some(tag) = family.tag(slot) else {
+                    continue;
+                };
+                assert!(
+                    matches!(
+                        family.accepts(slot, tag),
+                        Acceptance::Confirmed | Acceptance::Inferred
+                    ),
+                    "{} keeps {tag} in {slot:?} but does not accept it there",
                     family.label()
                 );
             }
@@ -814,7 +492,7 @@ mod tests {
     #[test]
     fn a_foreign_tag_is_refused_in_every_class() {
         for family in Family::ALL {
-            for (tag, owner) in CARRIES.iter().filter(|(_, owner)| *owner != family) {
+            for (tag, owner, _) in CARRIES.iter().filter(|(_, owner, _)| *owner != family) {
                 for slot in Slot::ALL {
                     assert_eq!(
                         family.accepts(slot, tag),

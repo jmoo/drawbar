@@ -45,16 +45,22 @@ struct Wire {
 }
 
 #[derive(Default)]
+enum Phase {
+    #[default]
+    Off,
+    On(Wire),
+    Failed(String),
+}
+
+#[derive(Default)]
 pub struct Ports {
     open: Vec<Open>,
     /// Ports that would not open, perhaps because another program holds them. Not
     /// retried until they leave the list or listening restarts.
     refused: Vec<Port>,
-    /// `None` while nothing is listening.
-    wire: Option<Wire>,
+    phase: Phase,
     /// When the system's port list was last read, on egui's frame clock.
     scanned: f64,
-    failed: Option<String>,
 }
 
 impl Ports {
@@ -67,11 +73,11 @@ impl Ports {
         let listing = match MidiInput::new(CLIENT) {
             Ok(listing) => listing,
             Err(why) => {
-                self.failed = Some(why.to_string());
+                self.phase = Phase::Failed(why.to_string());
                 return;
             }
         };
-        self.wire = Some(Wire {
+        self.phase = Phase::On(Wire {
             listing,
             queue: Arc::default(),
             epoch: Instant::now(),
@@ -83,15 +89,14 @@ impl Ports {
     pub fn stop(&mut self) {
         self.open.clear();
         self.refused.clear();
-        self.wire = None;
-        self.failed = None;
+        self.phase = Phase::Off;
     }
 
     pub fn state(&self) -> State {
-        match (&self.failed, &self.wire) {
-            (Some(why), _) => State::Failed(why.clone()),
-            (None, None) => State::Off,
-            (None, Some(_)) => State::On {
+        match &self.phase {
+            Phase::Off => State::Off,
+            Phase::Failed(why) => State::Failed(why.clone()),
+            Phase::On(_) => State::On {
                 ports: self
                     .open
                     .iter()
@@ -103,11 +108,11 @@ impl Ports {
     }
 
     pub fn drain(&mut self, now: f64) -> Vec<super::Note> {
-        if self.wire.is_some() && now - self.scanned >= RESCAN {
+        if matches!(self.phase, Phase::On(_)) && now - self.scanned >= RESCAN {
             self.scanned = now;
             self.scan();
         }
-        let Some(wire) = &self.wire else {
+        let Phase::On(wire) = &self.phase else {
             return Vec::new();
         };
         let at = wire.epoch.elapsed().as_secs_f64();
@@ -120,7 +125,7 @@ impl Ports {
     /// Open every input port that is neither open nor refused, and drop the ones that
     /// have disappeared.
     fn scan(&mut self) {
-        let Some(wire) = &self.wire else {
+        let Phase::On(wire) = &self.phase else {
             return;
         };
         let live = wire.listing.ports();
@@ -173,15 +178,13 @@ fn open(id: &str, wire: &Wire) -> Result<Option<MidiInputConnection<()>>, String
             CLIENT,
             move |_micros, bytes, ()| {
                 let at = epoch.elapsed().as_secs_f64();
-                let mut heard = false;
                 // ⚠️ This is the driver's thread. The lock is only ever held to move a
                 // few messages in or out, never across anything that waits.
-                let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-                stream.feed(bytes, |note| {
-                    heard = true;
-                    queue.push(at, note);
-                });
-                drop(queue);
+                let heard = queue.lock().unwrap_or_else(PoisonError::into_inner).feed(
+                    &mut stream,
+                    at,
+                    bytes,
+                );
                 if heard {
                     ctx.request_repaint();
                 }
