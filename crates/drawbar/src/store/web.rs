@@ -4,8 +4,8 @@
 //! Reads and folder changes run on the page's one thread. A file is written by
 //! `library-writer.js`, a dedicated worker served beside the page, because the handles
 //! that write in place exist only there: the file is written under `.drawbar/tmp/` in
-//! chunks, flushed, then moved over its path. The worker also holds `.drawbar/lock`
-//! open, and a second tab that finds it held opens the library read-only.
+//! chunks, flushed, then moved over its path. From the first write the worker also holds
+//! `.drawbar/lock` open, and a second tab that finds it held only reads the library.
 //!
 //! Commands run one at a time in a task of their own, in the order they were sent.
 
@@ -26,7 +26,7 @@ use web_sys::{
     FileSystemHandle, FileSystemHandleKind, MessageEvent, StorageManager, Worker,
 };
 
-use super::exec::{self, Entry, Fs, Kind, TMP, WORKING};
+use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TMP, WORKING};
 use super::{names, Cmd, Event, Failure, Stat};
 use crate::js::{describe, field};
 
@@ -363,6 +363,8 @@ struct Opfs {
     root: FileSystemDirectoryHandle,
     /// Started with the first write, since a library only read needs none.
     writer: Option<Writer>,
+    /// `.drawbar/` and its folders have been made, once, for this page.
+    prepared: bool,
     /// Names the next temporary file under `.drawbar/tmp/`.
     temps: u64,
     room: Rc<RefCell<Room>>,
@@ -387,6 +389,7 @@ impl Opfs {
         Ok(Opfs {
             root,
             writer: None,
+            prepared: false,
             temps: 0,
             room,
             asked: false,
@@ -585,10 +588,14 @@ fn move_tree<'a>(
 
 impl Fs for Opfs {
     async fn prepare(&mut self) -> io::Result<()> {
+        if self.prepared {
+            return Ok(());
+        }
         for dir in [TMP, WORKING] {
             self.dir(dir, true).await?;
         }
         self.writer()?;
+        self.prepared = true;
         Ok(())
     }
 
@@ -597,33 +604,57 @@ impl Fs for Opfs {
         Ok(held.as_bool() == Some(true))
     }
 
+    /// Breadth first, so the top of a large tree is listed before the bound is reached.
     async fn list(&self) -> io::Result<Vec<Entry>> {
         let mut into = Vec::new();
+        let mut looked = 0;
         let mut folders = VecDeque::from([(self.root.clone(), String::new())]);
         while let Some((dir, prefix)) = folders.pop_front() {
-            for (name, handle) in entries(&dir).await? {
+            if looked >= MOST_ENTRIES {
+                into.push(Entry {
+                    path: prefix,
+                    kind: Kind::Unwalked,
+                });
+                continue;
+            }
+            let found = match entries(&dir).await {
+                Ok(found) => found,
+                // A folder inside that cannot be read is left unlisted, not the library.
+                Err(_) if !prefix.is_empty() => {
+                    into.push(Entry {
+                        path: prefix,
+                        kind: Kind::Unwalked,
+                    });
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let room = MOST_ENTRIES - looked;
+            if found.len() > room {
+                into.push(Entry {
+                    path: prefix.clone(),
+                    kind: Kind::Unwalked,
+                });
+            }
+            for (name, handle) in found.into_iter().take(room) {
+                looked += 1;
                 let path = match prefix.is_empty() {
                     true => name.clone(),
                     false => format!("{prefix}/{name}"),
                 };
-                match handle.kind() {
+                let kind = match handle.kind() {
                     FileSystemHandleKind::Directory => {
-                        into.push(Entry {
-                            path: path.clone(),
-                            kind: Kind::Dir,
-                        });
                         if !name.starts_with('.') {
-                            folders.push_back((handle.unchecked_into(), path));
+                            folders.push_back((handle.unchecked_into(), path.clone()));
                         }
+                        Kind::Dir
                     }
-                    _ => {
-                        let file = snapshot(handle.unchecked_ref()).await?;
-                        into.push(Entry {
-                            path,
-                            kind: Kind::File(stat(&file)),
-                        });
+                    _ if exec::opens(&name) => {
+                        Kind::File(stat(&snapshot(handle.unchecked_ref()).await?))
                     }
-                }
+                    _ => Kind::Other,
+                };
+                into.push(Entry { path, kind });
             }
         }
         Ok(into)

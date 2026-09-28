@@ -53,8 +53,6 @@ pub fn opens(name: &str) -> bool {
 }
 
 /// What a listing says about one entry.
-// Only the desktop's walk stops short or skips a look at a file.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum Kind {
     Dir,
     /// A folder whose contents were not all listed: the listing had already looked at
