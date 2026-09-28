@@ -86,10 +86,10 @@ guaranteed while drawbar is in alpha. Keep your own copies.
 On the desktop, and in Chrome and Edge, **File ▸ Open library folder…** opens
 any folder as the library: a Sample Editor project folder, a sample pack, a
 folder on a shared drive. A window has one library open at a time, and the
-browser calls it by its folder's name where it would say This computer. **File ▸ Open recent library** switches
-between the libraries opened lately, and always lists your own. The same items
-are on This computer's menu. drawbar opens the last library again when it
-starts.
+browser calls it by its folder's name where it would say This computer.
+**File ▸ Open recent library** switches between the libraries opened lately, and
+always lists your own. The same items are on This computer's menu. drawbar opens
+the last library again when it starts.
 
 Switching writes the library you leave first. Edits you have not saved stay in
 its `.drawbar` folder and come back, still unsaved, when you open it again.
