@@ -101,24 +101,30 @@ const ops = {
 };
 
 async function answer(request) {
+  const id = request?.id;
   try {
-    const op = ops[request.op];
+    const op = ops[request?.op];
     if (!op) {
-      throw new DOMException(`no operation ${request.op}`, "NotSupportedError");
+      throw new DOMException(`no operation ${request?.op}`, "NotSupportedError");
     }
     const value = await op(request);
-    postMessage({ id: request.id, ok: true, value });
+    postMessage({ id, ok: true, value });
   } catch (e) {
-    postMessage({
-      id: request.id,
-      ok: false,
-      name: e.name || "Error",
-      message: e.message || String(e),
-    });
+    try {
+      postMessage({
+        id,
+        ok: false,
+        name: e?.name || "Error",
+        message: e?.message || String(e),
+      });
+    } catch {
+      // A request whose id cannot be cloned cannot be answered.
+    }
   }
 }
 
 let queue = Promise.resolve();
 onmessage = ({ data }) => {
-  queue = queue.then(() => answer(data));
+  const run = () => answer(data);
+  queue = queue.then(run, run);
 };
