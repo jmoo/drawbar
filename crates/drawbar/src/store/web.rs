@@ -54,7 +54,15 @@ impl Backend {
     }
 
     pub fn send(&mut self, cmd: Cmd) {
-        if let Some(event) = exec::execute(&mut self.fs, cmd) {
+        // Every call on the tree in memory finishes before it returns, so one poll runs
+        // the command to its end.
+        let mut running = std::pin::pin!(exec::run(&mut self.fs, cmd));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(answer) = std::future::Future::poll(running.as_mut(), &mut cx)
+        else {
+            unreachable!("the tree in memory never waits");
+        };
+        if let Some(event) = answer {
             self.events.push_back(event);
             self.ctx.request_repaint();
         }
@@ -151,7 +159,7 @@ impl Mem {
 }
 
 impl Fs for Mem {
-    fn prepare(&mut self) -> io::Result<()> {
+    async fn prepare(&mut self) -> io::Result<()> {
         if [".drawbar", exec::TMP, exec::WORKING]
             .iter()
             .all(|dir| self.entries.contains_key(*dir))
@@ -166,11 +174,11 @@ impl Fs for Mem {
         })
     }
 
-    fn lock(&mut self) -> io::Result<bool> {
+    async fn lock(&mut self) -> io::Result<bool> {
         Ok(true)
     }
 
-    fn list(&self) -> io::Result<Vec<Entry>> {
+    async fn list(&self) -> io::Result<Vec<Entry>> {
         Ok(self
             .entries
             .iter()
@@ -187,7 +195,7 @@ impl Fs for Mem {
             .collect())
     }
 
-    fn names(&self, dir: &str) -> io::Result<Vec<String>> {
+    async fn names(&self, dir: &str) -> io::Result<Vec<String>> {
         Ok(self
             .entries
             .keys()
@@ -196,7 +204,7 @@ impl Fs for Mem {
             .collect())
     }
 
-    fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+    async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         match self.entries.get(path) {
             Some(Node::File { bytes, .. }) => {
                 BASE64_STANDARD.decode(bytes).map_err(io::Error::other)
@@ -205,7 +213,7 @@ impl Fs for Mem {
         }
     }
 
-    fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
+    async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         Ok(match self.entries.get(path) {
             Some(Node::File { len, modified, .. }) => Some(Stat {
                 len: *len,
@@ -219,18 +227,18 @@ impl Fs for Mem {
         })
     }
 
-    fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
+    async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         if self.entries.contains_key(path) {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         self.change(|mem| mem.put(path, bytes))
     }
 
-    fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
+    async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         self.change(|mem| mem.put(path, bytes))
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
+    async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         if self.entries.contains_key(to) && names::key(from) != names::key(to) {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
@@ -259,7 +267,7 @@ impl Fs for Mem {
         })
     }
 
-    fn make_dir(&mut self, path: &str) -> io::Result<()> {
+    async fn make_dir(&mut self, path: &str) -> io::Result<()> {
         self.change(|mem| {
             let mut at = String::new();
             for part in path.split('/') {
@@ -273,7 +281,7 @@ impl Fs for Mem {
         })
     }
 
-    fn remove_file(&mut self, path: &str) -> io::Result<()> {
+    async fn remove_file(&mut self, path: &str) -> io::Result<()> {
         if !matches!(self.entries.get(path), Some(Node::File { .. })) {
             return Err(missing());
         }
@@ -283,7 +291,7 @@ impl Fs for Mem {
         })
     }
 
-    fn remove_dir(&mut self, path: &str) -> io::Result<()> {
+    async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
         if self.entries.keys().any(|held| parent(held) == path) {
             return Err(io::Error::other("the folder is not empty"));
         }

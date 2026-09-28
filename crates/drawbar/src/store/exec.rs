@@ -75,50 +75,59 @@ pub struct Entry {
 
 /// A library's files, as one backend reaches them. Paths are relative to the root and
 /// joined by `/`.
+///
+/// The desktop's calls finish before they return; a browser's storage answers only
+/// later, so every call is a future.
 pub trait Fs {
     /// Create the root, `.drawbar/`, and its `tmp/` and `working/`, where missing.
-    fn prepare(&mut self) -> io::Result<()>;
+    async fn prepare(&mut self) -> io::Result<()>;
     /// Hold the one-writer lock for as long as this lives. `Ok(false)` when another
     /// drawbar holds it. Taking a lock already held here answers `Ok(true)`.
-    fn lock(&mut self) -> io::Result<bool>;
+    async fn lock(&mut self) -> io::Result<bool>;
     /// Whether a file could be written at the root, found out without leaving anything
     /// there. A backend that cannot tell answers `Ok(())`, and the first write finds out.
-    fn probe(&mut self) -> io::Result<()> {
+    async fn probe(&mut self) -> io::Result<()> {
         Ok(())
     }
     /// Every entry below the root, parents before children, up to [`MOST_ENTRIES`] of
     /// them. A folder whose name starts with a dot is listed but not entered.
-    fn list(&self) -> io::Result<Vec<Entry>>;
+    async fn list(&self) -> io::Result<Vec<Entry>>;
     /// The names in one folder.
-    fn names(&self, dir: &str) -> io::Result<Vec<String>>;
-    fn read(&self, path: &str) -> io::Result<Vec<u8>>;
+    async fn names(&self, dir: &str) -> io::Result<Vec<String>>;
+    async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     /// `None` when nothing is there.
-    fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
+    async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
     /// Write a file where none is. It appears whole or not at all, and a file that
     /// appeared there first is left alone and reported as
     /// [`io::ErrorKind::AlreadyExists`].
-    fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
+    async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
     /// Write a file over whatever is there. Afterwards, or after a crash at any point,
     /// the path holds the old contents or the new, never part of either.
-    fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
+    async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
     /// Rename a file or folder. Refused when another entry is at `to`.
-    fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
-    fn make_dir(&mut self, path: &str) -> io::Result<()>;
-    fn remove_file(&mut self, path: &str) -> io::Result<()>;
+    async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
+    async fn make_dir(&mut self, path: &str) -> io::Result<()>;
+    async fn remove_file(&mut self, path: &str) -> io::Result<()>;
     /// Only an empty folder.
-    fn remove_dir(&mut self, path: &str) -> io::Result<()>;
+    async fn remove_dir(&mut self, path: &str) -> io::Result<()>;
+}
+
+/// Run one command on a thread that may wait for it, as [`run`] does.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
+    nord_usb::block_on(run(fs, cmd))
 }
 
 /// Run one command. Commands that answer only on failure return `None` when they
 /// succeed.
-pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
+pub async fn run(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
     if !matches!(cmd, Cmd::Open | Cmd::Scan { .. }) {
-        if let Err(why) = take(fs) {
+        if let Err(why) = take(fs).await {
             return Some(Event::ReadOnly(why));
         }
     }
     match cmd {
-        Cmd::Open => Some(Event::Opened(open(fs))),
+        Cmd::Open => Some(Event::Opened(open(fs).await)),
         Cmd::Scan { known } => {
             let held = known
                 .into_iter()
@@ -126,6 +135,7 @@ pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
                 .collect();
             Some(Event::Scanned(
                 listing(fs, &held)
+                    .await
                     .map(|(listing, _)| listing)
                     .map_err(|e| e.to_string()),
             ))
@@ -135,6 +145,7 @@ pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
             working,
             drop,
         } => commit(fs, &sidecar, working, drop)
+            .await
             .err()
             .map(|e| Event::Failed(format!("keeping the library's index: {e}"))),
         Cmd::Save {
@@ -143,41 +154,46 @@ pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
             bytes,
             expect,
         } => {
-            let result = save(fs, &path, &bytes, expect);
+            let result = save(fs, &path, &bytes, expect).await;
             Some(Event::Saved { id, path, result })
         }
         Cmd::Move { from, to } => fs
             .rename(from.as_str(), to.as_str())
+            .await
             .err()
             .map(|e| Event::Failed(format!("moving {from} to {to}: {e}"))),
         Cmd::MakeDir(path) => fs
             .make_dir(path.as_str())
+            .await
             .err()
             .map(|e| Event::Failed(format!("making the folder {path}: {e}"))),
         Cmd::RemoveFile { path, expect } => remove(fs, &path, expect)
+            .await
             .err()
             .map(|why| Event::Failed(format!("deleting {path}: {why}"))),
         Cmd::RemoveDir(path) => remove_dir(fs, &path)
+            .await
             .err()
             .map(|e| Event::Failed(format!("removing the folder {path}: {e}"))),
     }
 }
 
-fn open(fs: &mut impl Fs) -> Result<Opened, String> {
-    let indexed = matches!(fs.stat(DIR), Ok(Some(_)));
+async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
+    let indexed = matches!(fs.stat(DIR).await, Ok(Some(_)));
     let mut writable = match indexed {
         // drawbar has written here before, so it takes the lock now and a second drawbar
         // finds it taken.
-        true => take(fs),
+        true => take(fs).await,
         false => fs
             .probe()
+            .await
             .map_err(|e| format!("drawbar cannot write here: {e}")),
     };
     let mut swept = 0;
     if indexed && writable.is_ok() {
-        swept += sweep(fs, TMP, |_| true);
+        swept += sweep(fs, TMP, |_| true).await;
     }
-    let sidecar = match fs.read(INDEX) {
+    let sidecar = match fs.read(INDEX).await {
         Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
             Read::Known(sidecar) => sidecar,
             Read::Newer(version) => {
@@ -206,13 +222,13 @@ fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         .values()
         .filter_map(|row| Some((row.path.clone()?, None)))
         .collect();
-    let (listing, temps) = listing(fs, &held).map_err(|e| e.to_string())?;
+    let (listing, temps) = listing(fs, &held).await.map_err(|e| e.to_string())?;
     // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
     // must not write keeps what a newer drawbar left.
     let sweeps = indexed && writable.is_ok();
     if sweeps {
         for temp in temps {
-            if fs.remove_file(&temp).is_ok() {
+            if fs.remove_file(&temp).await.is_ok() {
                 swept += 1;
             }
         }
@@ -222,12 +238,14 @@ fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         .iter()
         .filter_map(|(id, row)| Some((working_name(*id, row.working?), *id)))
         .collect();
-    let working = named
-        .iter()
-        .filter_map(|(name, id)| Some((*id, fs.read(&format!("{WORKING}/{name}")).ok()?)))
-        .collect();
+    let mut working = BTreeMap::new();
+    for (name, id) in &named {
+        if let Ok(bytes) = fs.read(&format!("{WORKING}/{name}")).await {
+            working.insert(*id, bytes);
+        }
+    }
     if sweeps {
-        swept += sweep(fs, WORKING, |name| !named.contains_key(name));
+        swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
     }
     Ok(Opened {
         writable,
@@ -241,10 +259,11 @@ fn open(fs: &mut impl Fs) -> Result<Opened, String> {
 
 /// Make the sidecar where there is none yet, and hold the library's lock, or say why
 /// nothing may be written.
-fn take(fs: &mut impl Fs) -> Result<(), String> {
+async fn take(fs: &mut impl Fs) -> Result<(), String> {
     fs.prepare()
+        .await
         .map_err(|e| format!("drawbar cannot write here: {e}"))?;
-    match fs.lock() {
+    match fs.lock().await {
         Ok(true) => Ok(()),
         Ok(false) => Err("another drawbar has this library open".to_string()),
         Err(e) => Err(format!("the library's lock could not be taken: {e}")),
@@ -257,13 +276,14 @@ pub fn working_name(id: u64, generation: u64) -> String {
 }
 
 /// Remove the files in `dir` that `stale` picks, and return how many went.
-fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usize {
-    let names = fs.names(dir).unwrap_or_default();
-    names
-        .iter()
-        .filter(|name| stale(name))
-        .filter(|name| fs.remove_file(&format!("{dir}/{name}")).is_ok())
-        .count()
+async fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usize {
+    let mut swept = 0;
+    for name in fs.names(dir).await.unwrap_or_default() {
+        if stale(&name) && fs.remove_file(&format!("{dir}/{name}")).await.is_ok() {
+            swept += 1;
+        }
+    }
+    swept
 }
 
 /// The tree, and the temporary siblings interrupted saves left in it.
@@ -271,7 +291,7 @@ fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usize {
 /// Every file in `held` is listed and read, whatever its kind and however far the walk
 /// went, except one whose [`Stat`] is the one `held` gives, which is listed unread.
 /// Every other file is read only when [`opens`] takes it and it fits in [`MOST_BYTES`].
-fn listing(
+async fn listing(
     fs: &impl Fs,
     held: &BTreeMap<LibPath, Option<Stat>>,
 ) -> io::Result<(Listing, Vec<String>)> {
@@ -280,7 +300,7 @@ fn listing(
     let mut dirs = BTreeSet::new();
     // Every file, with its `Stat` where the walk took one.
     let mut files: BTreeMap<LibPath, Option<Stat>> = BTreeMap::new();
-    for entry in fs.list()? {
+    for entry in fs.list().await? {
         let leaf = entry.path.rsplit('/').next().unwrap_or(&entry.path);
         if entry.path.split('/').any(|part| part.starts_with('.')) {
             let file = matches!(entry.kind, Kind::File(_) | Kind::Other);
@@ -310,7 +330,7 @@ fn listing(
         if hidden || matches!(files.get(path), Some(Some(_))) {
             continue;
         }
-        match fs.stat(path.as_str()) {
+        match fs.stat(path.as_str()).await {
             Ok(Some(stat)) => {
                 files.insert(path.clone(), Some(stat));
                 let mut dir = path.parent();
@@ -355,7 +375,7 @@ fn listing(
             });
             continue;
         }
-        match fs.read(path.as_str()) {
+        match fs.read(path.as_str()).await {
             Ok(bytes) => listing.files.push(Found {
                 path,
                 stat,
@@ -377,7 +397,7 @@ fn too_much() -> String {
     )
 }
 
-fn commit(
+async fn commit(
     fs: &mut impl Fs,
     sidecar: &Sidecar,
     working: Vec<(String, Vec<u8>)>,
@@ -385,13 +405,15 @@ fn commit(
 ) -> Result<(), String> {
     for (name, bytes) in working {
         fs.replace(&format!("{WORKING}/{name}"), &bytes)
+            .await
             .map_err(|e| e.to_string())?;
     }
     let text = sidecar::write(sidecar)?;
     fs.replace(INDEX, text.as_bytes())
+        .await
         .map_err(|e| e.to_string())?;
     for name in drop {
-        match fs.remove_file(&format!("{WORKING}/{name}")) {
+        match fs.remove_file(&format!("{WORKING}/{name}")).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.to_string()),
             _ => {}
         }
@@ -401,17 +423,17 @@ fn commit(
 
 /// Whether the file at `path` still holds what `expect` says, reading it only when its
 /// [`Stat`] moved.
-fn still(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> io::Result<Option<bool>> {
-    let Some(stat) = fs.stat(path.as_str())? else {
+async fn still(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> io::Result<Option<bool>> {
+    let Some(stat) = fs.stat(path.as_str()).await? else {
         return Ok(None);
     };
     if stat == expect.stat() {
         return Ok(Some(true));
     }
-    Ok(Some(expect.holds(&fs.read(path.as_str())?)))
+    Ok(Some(expect.holds(&fs.read(path.as_str()).await?)))
 }
 
-fn save(
+async fn save(
     fs: &mut impl Fs,
     path: &LibPath,
     bytes: &[u8],
@@ -419,17 +441,18 @@ fn save(
 ) -> Result<Fingerprint, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
     match expect {
-        None => match fs.create(path.as_str(), bytes) {
+        None => match fs.create(path.as_str(), bytes).await {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Moved),
             wrote => wrote.map_err(io)?,
         },
-        Some(expect) => match still(fs, path, &expect).map_err(io)? {
-            Some(true) => fs.replace(path.as_str(), bytes).map_err(io)?,
+        Some(expect) => match still(fs, path, &expect).await.map_err(io)? {
+            Some(true) => fs.replace(path.as_str(), bytes).await.map_err(io)?,
             Some(false) | None => return Err(Failure::Moved),
         },
     }
     let stat = fs
         .stat(path.as_str())
+        .await
         .map_err(io)?
         .ok_or_else(|| Failure::Io("the file was gone as soon as it was written".into()))?;
     Ok(Fingerprint::of(stat, bytes))
@@ -437,17 +460,20 @@ fn save(
 
 /// Remove a folder drawbar has emptied. macOS leaves a `.DS_Store` in any folder Finder
 /// has shown, which would otherwise keep it from being removed.
-fn remove_dir(fs: &mut impl Fs, path: &LibPath) -> io::Result<()> {
-    if fs.names(path.as_str())? == [".DS_Store"] {
-        fs.remove_file(&format!("{path}/.DS_Store"))?;
+async fn remove_dir(fs: &mut impl Fs, path: &LibPath) -> io::Result<()> {
+    if fs.names(path.as_str()).await? == [".DS_Store"] {
+        fs.remove_file(&format!("{path}/.DS_Store")).await?;
     }
-    fs.remove_dir(path.as_str())
+    fs.remove_dir(path.as_str()).await
 }
 
-fn remove(fs: &mut impl Fs, path: &LibPath, expect: Fingerprint) -> Result<(), String> {
-    match still(fs, path, &expect).map_err(|e| e.to_string())? {
+async fn remove(fs: &mut impl Fs, path: &LibPath, expect: Fingerprint) -> Result<(), String> {
+    match still(fs, path, &expect).await.map_err(|e| e.to_string())? {
         None => Ok(()),
         Some(false) => Err("it changed on disk since drawbar read it, so it was left".into()),
-        Some(true) => fs.remove_file(path.as_str()).map_err(|e| e.to_string()),
+        Some(true) => fs
+            .remove_file(path.as_str())
+            .await
+            .map_err(|e| e.to_string()),
     }
 }

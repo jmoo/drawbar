@@ -300,7 +300,7 @@ fn parent(path: &Path) -> &Path {
 }
 
 impl Fs for Disk {
-    fn prepare(&mut self) -> io::Result<()> {
+    async fn prepare(&mut self) -> io::Result<()> {
         if self.prepared {
             return Ok(());
         }
@@ -311,7 +311,7 @@ impl Fs for Disk {
         Ok(())
     }
 
-    fn lock(&mut self) -> io::Result<bool> {
+    async fn lock(&mut self) -> io::Result<bool> {
         // ⚠️ A second lock on its own handle would be refused by the one this already
         // holds.
         if self.lock.is_some() {
@@ -332,7 +332,7 @@ impl Fs for Disk {
         }
     }
 
-    fn probe(&mut self) -> io::Result<()> {
+    async fn probe(&mut self) -> io::Result<()> {
         // A root that is not there yet is made at the first write.
         if !self.root.exists() {
             return Ok(());
@@ -346,7 +346,7 @@ impl Fs for Disk {
         fs::remove_file(&probe)
     }
 
-    fn list(&self) -> io::Result<Vec<Entry>> {
+    async fn list(&self) -> io::Result<Vec<Entry>> {
         match self.walk() {
             // The default library is made at its first write.
             Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.exists() => Ok(Vec::new()),
@@ -354,7 +354,7 @@ impl Fs for Disk {
         }
     }
 
-    fn names(&self, dir: &str) -> io::Result<Vec<String>> {
+    async fn names(&self, dir: &str) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in fs::read_dir(self.locate(dir)?)? {
             if let Ok(name) = entry?.file_name().into_string() {
@@ -365,11 +365,11 @@ impl Fs for Disk {
         Ok(names)
     }
 
-    fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+    async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         fs::read(self.locate(path)?)
     }
 
-    fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
+    async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match fs::symlink_metadata(self.locate(path)?) {
             Ok(meta) => Ok(Some(stat(&meta))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -377,7 +377,7 @@ impl Fs for Disk {
         }
     }
 
-    fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
+    async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let target = self.locate(path)?;
         if fs::symlink_metadata(&target).is_ok() {
             return Err(io::ErrorKind::AlreadyExists.into());
@@ -398,7 +398,7 @@ impl Fs for Disk {
         sync_dir(parent(&target))
     }
 
-    fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
+    async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let target = self.locate(path)?;
         let temp = self.stage(path, bytes)?;
         if let Err(e) = fs::rename(&temp, &target) {
@@ -408,7 +408,7 @@ impl Fs for Disk {
         sync_dir(parent(&target))
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
+    async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         let (source, target) = (self.locate(from)?, self.locate(to)?);
         // On a disk that ignores case, a rename that only changes case finds itself at
         // `to`, which is not another entry.
@@ -423,17 +423,17 @@ impl Fs for Disk {
         sync_dir(parent(&target))
     }
 
-    fn make_dir(&mut self, path: &str) -> io::Result<()> {
+    async fn make_dir(&mut self, path: &str) -> io::Result<()> {
         let target = self.locate(path)?;
         fs::create_dir_all(&target)?;
         sync_dir(parent(&target))
     }
 
-    fn remove_file(&mut self, path: &str) -> io::Result<()> {
+    async fn remove_file(&mut self, path: &str) -> io::Result<()> {
         fs::remove_file(self.locate(path)?)
     }
 
-    fn remove_dir(&mut self, path: &str) -> io::Result<()> {
+    async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
         fs::remove_dir(self.locate(path)?)
     }
 }
