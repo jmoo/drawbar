@@ -1941,35 +1941,29 @@ pub fn capabilities(generation: &str) -> Vec<Row> {
         ),
         row(
             "per-zone gain / detune",
-            match v2 {
-                true => Cap::ReadOnly,
-                false => Cap::Absent,
-            },
+            Cap::ReadOnly,
             match v2 {
                 true => "a u24 gain in the record, and no detune beside it",
-                false => "a dB float in the stroke header, which is not decoded",
+                false => "a dB float in the stroke header, which is not read here",
             },
         ),
         row(
             "per-key table",
             match v2 {
                 true => Cap::Editable,
-                false => Cap::Absent,
+                false => Cap::ReadOnly,
             },
             match v2 {
                 true => "128 records of gain and detune",
-                false => "no keyboard map the wide layouts expose",
+                false => "128 records of gain and detune in the wide map, not read here",
             },
         ),
         row(
             "instrument gain",
-            match v2 {
-                true => Cap::ReadOnly,
-                false => Cap::Absent,
-            },
+            Cap::ReadOnly,
             match v2 {
                 true => "the map's own record, read on the Per key heading",
-                false => "not in the wide chain's map",
+                false => "the map's own record, which is not read here",
             },
         ),
         row(
