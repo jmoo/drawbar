@@ -616,11 +616,15 @@ fn a_folder_opened_is_left_as_it_was_until_something_changes() {
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
 
+    let touched = || fs::metadata(&root.0).unwrap().modified().unwrap();
+    let before = touched();
+
     let mut session = Session::open(&root);
     assert_eq!(session.store.read_only(), None);
     session.refocus();
     session.sync();
     assert_eq!(root.names(""), ["Grand.ne5p"], "nothing was added");
+    assert_eq!(touched(), before, "nothing was written and removed");
 
     let id = session
         .bench
@@ -639,9 +643,11 @@ fn a_folder_opened_is_left_as_it_was_until_something_changes() {
     assert!(again.bench.browser.tags.worn(id).contains(&tag));
 }
 
+/// Whether a folder can be written is found out by the first write, so opening one
+/// writes nothing to find out.
 #[cfg(unix)]
 #[test]
-fn a_folder_drawbar_cannot_write_opens_read_only_and_says_why() {
+fn a_folder_drawbar_cannot_write_turns_read_only_at_the_first_write_and_says_why() {
     use std::os::unix::fs::PermissionsExt;
 
     /// Gives the folder back its write permission, so it can be removed.
@@ -663,14 +669,27 @@ fn a_folder_drawbar_cannot_write_opens_read_only_and_says_why() {
     }
 
     let mut session = Session::open(&root);
-    let why = session.store.read_only().expect("read-only");
-    assert!(why.contains("cannot write here"), "{why}");
     assert_eq!(
         session.bench.workspace.listed().count(),
         1,
         "it still shows"
     );
-    session.create();
+    let id = session.create();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Last);
+    assert!(session.next(), "the write answered");
+    let why = session.store.read_only().expect("read-only");
+    assert!(why.contains("cannot write here"), "{why}");
+    assert_eq!(session.said("read-only now"), 1);
+    assert!(
+        session.bench.workspace.get(id).unwrap().is_unsaved(),
+        "its new file counts as unsaved"
+    );
     session.close();
     assert_eq!(root.names(""), ["Grand.ne5p"]);
 }

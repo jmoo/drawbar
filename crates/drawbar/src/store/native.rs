@@ -62,10 +62,6 @@ fn xdg_music(text: &str, home: &Path) -> Option<PathBuf> {
 
 const LOCK: &str = ".drawbar/lock";
 
-/// What [`Fs::probe`] writes and removes at once. Named as a save's temporary, so one a
-/// crash left behind is swept as one.
-const PROBE: &str = ".drawbar-probe.drawbar-tmp";
-
 /// Where [`Fs::replace`] and [`Fs::create`] write before the rename: `.drawbar/tmp/` for
 /// the index's own files, and a hidden sibling in the same folder for a library file, so
 /// the rename never crosses a volume.
@@ -366,20 +362,6 @@ impl Fs for Disk {
             Err(fs::TryLockError::WouldBlock) => Ok(false),
             Err(fs::TryLockError::Error(e)) => Err(e),
         }
-    }
-
-    async fn probe(&mut self) -> io::Result<()> {
-        // A root that is not there yet is made at the first write.
-        if !self.root.exists() {
-            return Ok(());
-        }
-        let probe = self.root.join(PROBE);
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&probe)?;
-        fs::remove_file(&probe)
     }
 
     async fn list(&self) -> io::Result<Vec<Entry>> {
