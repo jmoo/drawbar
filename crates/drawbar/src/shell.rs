@@ -733,6 +733,7 @@ impl DrawbarApp {
                 self.about = Some(crate::about::About::new(
                     &self.device.state,
                     &self.workspace,
+                    self.store.as_ref(),
                 ));
             }
         });

@@ -17,7 +17,6 @@ name = "drawbar"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.22"
 # glow (WebGL2 / OpenGL) makes a smaller wasm module than the default wgpu backend,
 # and every browser with WebUSB has WebGL2.
 eframe = { version = "0.32", default-features = false, features = [
@@ -72,9 +71,16 @@ web-sys = { version = "0.3", features = [
   "BlobPropertyBag",
   "Document",
   "Element",
+  "File",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemHandle",
+  "FileSystemHandleKind",
   "Headers",
   "HtmlAnchorElement",
   "HtmlCanvasElement",
+  "MessageEvent",
   "MidiAccess",
   "MidiInput",
   "MidiInputMap",
@@ -86,6 +92,7 @@ web-sys = { version = "0.3", features = [
   "RequestInit",
   "Response",
   "Storage",
+  "StorageManager",
   "Url",
   "Usb",
   "UsbConnectionEvent",
@@ -93,6 +100,7 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceFilter",
   "UsbDeviceRequestOptions",
   "Window",
+  "Worker",
 ] }
 nord-usb = { path = "../nord-usb", version = "0.7.1", default-features = false, features = [
   "web",

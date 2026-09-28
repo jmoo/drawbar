@@ -134,6 +134,21 @@ impl Store {
         self.backend.label()
     }
 
+    /// What the browser says about keeping the library: its share of the browser's
+    /// storage, and whether the browser may clear it. Empty on the desktop.
+    #[cfg(target_arch = "wasm32")]
+    pub fn kept(&self) -> String {
+        match self.phase {
+            Phase::Failed(_) => "kept only until this tab closes".to_string(),
+            _ => self.backend.room(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn kept(&self) -> String {
+        String::new()
+    }
+
     fn open(&self) -> bool {
         matches!(self.phase, Phase::Open)
     }

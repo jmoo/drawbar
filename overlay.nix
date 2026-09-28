@@ -398,6 +398,8 @@ let
             --replace-fail @version@ "${manifests.drawbar.version}" \
             --replace-fail @wasmBytes@ "$(stat -c %s "$out/pkg/$wasm")"
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
+          # The worker that writes the library; the app asks for it beside the page.
+          cp ${./crates/drawbar/library-writer.js} "$out/library-writer.js"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2

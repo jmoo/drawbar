@@ -56,12 +56,19 @@ read**.
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.
 
-Only one drawbar at a time changes a library. A second one opens it read-only
-and says so, and so does a drawbar older than the one that last wrote it.
+Only one drawbar at a time changes a library. A second one, or a second browser
+tab, opens it read-only and says so, and so does a drawbar older than the one
+that last wrote it.
 
-In the browser, this computer is kept in the browser's own storage, which holds
-about 2 MB in all. The log says when something does not fit. Samples and piano
-libraries are usually larger, so export them.
+In the browser, this computer is the same kind of folder, kept in the storage
+the browser gives drawbar.app and nothing else can see. Samples and piano
+libraries fit; the limit is what the browser allows the site, and **Help ▸ About
+drawbar** shows how much is used. The first time drawbar writes there, it asks
+the browser to keep the files even when space runs low. Firefox asks you; other
+browsers decide for themselves. Clearing the site's data deletes the library, so
+export what you want to keep outside the browser. If the browser gives drawbar
+no storage, as some private windows do, drawbar says so, and what you make lasts
+until the tab closes.
 
 This version of drawbar starts with an empty list. What an earlier version kept
 is not carried over, and drawbar says so once. Long-term storage is not
