@@ -362,12 +362,7 @@ pub enum Event {
 
 /// The keys of eframe's store that held the library before it was a folder. Nothing
 /// reads them.
-const LEFT_BEHIND: [&str; 4] = [
-    "drawbar.this_computer",
-    "drawbar.folders",
-    "drawbar.tags",
-    "drawbar.library",
-];
+const LEFT_BEHIND: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.tags"];
 
 /// What the user is told, once, when a library kept the old way is left behind.
 pub const STARTS_EMPTY: &str = "This computer starts empty in this version of drawbar. \
