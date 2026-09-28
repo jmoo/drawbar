@@ -381,9 +381,14 @@ impl Store {
         if swept > 0 {
             log.info(format!("removed {swept} leftovers of interrupted writes"));
         }
-        for (path, why) in &listing.unread {
-            log.warn(format!("{path}: {why}"));
-        }
+        let Listing {
+            dirs,
+            files,
+            unread,
+            others,
+            unwalked,
+        } = listing;
+        beside(&mut browser.folders, unread, others, unwalked, log);
         self.next_generation = sidecar.next_generation.max(1);
         let Sidecar { tags, assets, .. } = sidecar;
 
@@ -425,7 +430,7 @@ impl Store {
                 ))
             })
             .collect();
-        let matched = match_files(&known, listing.files);
+        let matched = match_files(&known, files);
         let mut back = Vec::new();
         let mut conflicts = Vec::new();
         let mut missing = Vec::new();
@@ -521,7 +526,7 @@ impl Store {
             tags,
             rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
         );
-        browser.folders.sync(&listing.dirs);
+        browser.folders.sync(&dirs);
         flag_duplicates(workspace, browser, log);
         for id in conflicts {
             conflict(id, workspace, browser, log);
@@ -564,9 +569,14 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> BTreeSet<u64> {
-        for (path, why) in &listing.unread {
-            log.warn(format!("{path}: {why}"));
-        }
+        let Listing {
+            dirs,
+            files,
+            unread,
+            others,
+            unwalked,
+        } = listing;
+        beside(&mut browser.folders, unread, others, unwalked, log);
         let known = self
             .records
             .iter()
@@ -580,7 +590,7 @@ impl Store {
                 ))
             })
             .collect();
-        let matched = match_files(&known, listing.files);
+        let matched = match_files(&known, files);
         let mut touched = BTreeSet::new();
         for (id, found) in matched.same {
             let Some(record) = self.records.get_mut(&id) else {
@@ -652,7 +662,7 @@ impl Store {
                 self.settle(id, workspace, &BTreeMap::new());
             }
         }
-        browser.folders.sync(&listing.dirs);
+        browser.folders.sync(&dirs);
         flag_duplicates(workspace, browser, log);
         touched
     }
@@ -1058,6 +1068,31 @@ impl Record {
     }
 }
 
+/// Take what a listing found beside the assets, and say what is new in it: a file that
+/// did not read, and a library too large to list whole.
+fn beside(
+    folders: &mut crate::folders::Folders,
+    unread: Vec<(LibPath, String)>,
+    others: Vec<LibPath>,
+    unwalked: Vec<LibPath>,
+    log: &mut Log,
+) {
+    for (path, why) in &unread {
+        if !folders.unread.contains(&(path.clone(), why.clone())) {
+            log.warn(format!("{path}: {why}"));
+        }
+    }
+    if !unwalked.is_empty() && folders.unwalked.is_empty() {
+        log.say(
+            "Some of the library folder is not listed: it holds more than drawbar lists, or \
+             folders drawbar cannot read.",
+        );
+    }
+    folders.unread = unread;
+    folders.others = others;
+    folders.unwalked = unwalked.into_iter().collect();
+}
+
 /// Whether an index holds something no file in the library says: a tag, an unsaved edit,
 /// or the slot an asset came off.
 fn beyond_files(sidecar: &Sidecar) -> bool {
@@ -1087,7 +1122,17 @@ fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) 
     browser.folders.duplicates = flagged;
 }
 
-/// Entries sharing a name: each asset's id, or `None` for a folder, and its name.
+/// One entry of a folder, as [`duplicates`] compares it.
+struct Entry {
+    /// An asset's id, or `None` for a folder or a file drawbar does not hold.
+    id: Option<u64>,
+    name: String,
+    /// A file drawbar does not hold.
+    stranger: bool,
+}
+
+/// Entries sharing a name: each asset's id, or `None` for a folder or a file drawbar does
+/// not hold, and its name.
 type Sharing = Vec<(Option<u64>, String)>;
 
 /// One folder's entries that share a name.
@@ -1099,21 +1144,36 @@ pub(crate) fn duplicates(
     workspace: &Workspace,
     folders: &crate::folders::Folders,
 ) -> (BTreeSet<u64>, Vec<Group>) {
-    let mut by_name: BTreeMap<(LibPath, String), Sharing> = BTreeMap::new();
+    let mut by_name: BTreeMap<(LibPath, String), Vec<Entry>> = BTreeMap::new();
     let assets = workspace
         .listed()
-        .filter_map(|entity| Some((Some(entity.id), entity.path.as_ref()?)));
-    let dirs = folders.all().iter().map(|folder| (None, &folder.path));
-    for (id, path) in assets.chain(dirs) {
+        .filter_map(|entity| Some((Some(entity.id), entity.path.as_ref()?, false)));
+    let dirs = folders
+        .all()
+        .iter()
+        .map(|folder| (None, &folder.path, false));
+    let strangers = folders.strangers().map(|path| (None, path, true));
+    for (id, path, stranger) in assets.chain(dirs).chain(strangers) {
         by_name
             .entry((path.parent(), names::key(path.leaf())))
             .or_default()
-            .push((id, path.leaf().to_string()));
+            .push(Entry {
+                id,
+                name: path.leaf().to_string(),
+                stranger,
+            });
     }
+    // A group of files drawbar does not hold is none of its business.
     let groups: Vec<Group> = by_name
         .into_iter()
-        .filter(|(_, group)| group.len() > 1)
-        .map(|((dir, _), group)| (dir, group))
+        .filter(|(_, group)| group.len() > 1 && group.iter().any(|entry| !entry.stranger))
+        .map(|((dir, _), group)| {
+            let group = group
+                .into_iter()
+                .map(|entry| (entry.id, entry.name))
+                .collect();
+            (dir, group)
+        })
         .collect();
     let flagged = groups
         .iter()

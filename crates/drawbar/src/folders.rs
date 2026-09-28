@@ -42,6 +42,13 @@ pub struct Lost {
     pub row: Row,
 }
 
+/// The menu item that shows the files drawbar does not open, and hides them again.
+pub const SHOW_ALL_FILES: &str = "Show all files";
+
+/// Where [`Folders::all_files`] is kept between sessions: a preference of the app, not of
+/// any one library.
+pub(crate) const ALL_FILES_KEY: &str = "drawbar.all_files";
+
 /// Where the library is, for the header of This computer.
 #[derive(Clone, Default)]
 pub struct Where {
@@ -61,6 +68,8 @@ pub enum Occupant {
     Folder(u64),
     /// An index row whose file is gone.
     Lost(u64),
+    /// A file drawbar does not hold: one it does not open, or one it did not read.
+    Other,
 }
 
 /// What a name would collide with in a folder.
@@ -84,6 +93,14 @@ pub struct Folders {
     /// Assets whose name collides with another entry of their folder.
     pub duplicates: BTreeSet<u64>,
     pub place: Option<Where>,
+    /// Files drawbar does not open, shown only while [`Folders::all_files`] is on.
+    pub others: Vec<LibPath>,
+    /// Files drawbar would hold that it did not read, and why.
+    pub unread: Vec<(LibPath, String)>,
+    /// Folders whose contents were not all listed.
+    pub unwalked: BTreeSet<LibPath>,
+    /// Show the files drawbar does not open, too.
+    pub all_files: bool,
 }
 
 impl Folders {
@@ -153,6 +170,20 @@ impl Folders {
             .collect()
     }
 
+    /// Every file drawbar does not hold, read or not.
+    pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
+        self.others
+            .iter()
+            .chain(self.unread.iter().map(|(path, _)| path))
+    }
+
+    /// Whether a folder holds something drawbar does not, or may: a file it does not
+    /// hold, or contents it did not list.
+    pub fn holds_strangers(&self, dir: &LibPath) -> bool {
+        self.strangers().any(|path| path.is_in(dir) && path != dir)
+            || self.unwalked.iter().any(|path| path.is_in(dir))
+    }
+
     /// The index rows whose file is gone.
     pub fn lost(&self) -> &[Lost] {
         &self.lost
@@ -219,9 +250,14 @@ impl Folders {
             let path = lost.row.path.as_ref()?;
             (path.parent() == *dir).then(|| (path.leaf(), Occupant::Lost(lost.id)))
         });
+        let others = self
+            .strangers()
+            .filter(|path| path.parent() == *dir)
+            .map(|path| (path.leaf(), Occupant::Other));
         assets
             .chain(folders)
             .chain(lost)
+            .chain(others)
             .map(|(name, what)| (names::key(name), name.to_string(), what))
             .collect()
     }

@@ -15,11 +15,13 @@ use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
+use crate::folders::SHOW_ALL_FILES;
 use crate::icon::Glyph;
 use crate::newproject::Making;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::shell::marked;
+use crate::store::LibPath;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -282,7 +284,10 @@ impl Browser {
             self.folder_body(ui, None, 0, workspace, device, queue, &naming, acts);
             self.lost_rows(ui, acts);
             let opening = self.folders.place.as_ref().is_some_and(|at| at.opening);
-            let empty = workspace.listed().next().is_none() && self.folders.all().is_empty();
+            let empty = workspace.listed().next().is_none()
+                && self.folders.all().is_empty()
+                && self.strangers_shown(None) == 0
+                && self.folders.unwalked.is_empty();
             match (opening, empty) {
                 (true, true) => nothing(ui, 1, "Opening the library…"),
                 (false, true) => nothing(ui, 1, "Drop Nord files here, or use Open…"),
@@ -377,9 +382,13 @@ impl Browser {
         }
         let listed = Browser::standing_for(workspace, |_| true);
         response.context_menu(|ui| {
-            self.set_menu(ui, &listed, workspace, device, acts, |_, ui, acts| {
+            self.set_menu(ui, &listed, workspace, device, acts, |browser, ui, acts| {
                 offer(ui, "Open…", None, Act::OpenFiles, acts);
                 ui.menu_button("New", |ui| new_menu(ui, acts));
+                let all = browser.folders.all_files;
+                if marked(ui, SHOW_ALL_FILES, all, None) {
+                    browser.folders.all_files = !all;
+                }
                 if let Some(url) = &place.reveal {
                     if ui.button("Show the library folder").clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
@@ -460,6 +469,53 @@ impl Browser {
                 acts,
             );
         }
+        if let Some(dir) = self.folders.dir(folder) {
+            self.stranger_rows(ui, &dir, depth + 1);
+        }
+    }
+
+    /// The files in `dir` drawbar does not hold: those it did not read, always, and those
+    /// it does not open while all files are shown. Then a line if the folder was not
+    /// listed whole.
+    fn stranger_rows(&self, ui: &mut egui::Ui, dir: &LibPath, depth: usize) {
+        let unread = self
+            .folders
+            .unread
+            .iter()
+            .filter(|(path, _)| path.parent() == *dir)
+            .map(|(path, why)| (path, Some(why.as_str())));
+        let others = self
+            .folders
+            .others
+            .iter()
+            .filter(|path| self.folders.all_files && path.parent() == *dir)
+            .map(|path| (path, None));
+        for (path, why) in unread.chain(others) {
+            let drawn = row(
+                ui,
+                false,
+                &Cells {
+                    indent: indent(depth, false),
+                    glyph: Some(match why {
+                        Some(_) => Glyph::CircleAlert,
+                        None => Glyph::CircleDashed,
+                    }),
+                    name: path.leaf(),
+                    note: why.map(|_| "not read"),
+                    faint: true,
+                    child: true,
+                    whole: true,
+                    ..Cells::default()
+                },
+            );
+            drawn.response.on_hover_text(match why {
+                Some(why) => format!("drawbar did not read this file: {why}."),
+                None => "drawbar does not open this kind of file.".to_string(),
+            });
+        }
+        if self.folders.unwalked.contains(dir) {
+            nothing(ui, depth, "not all listed");
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -484,7 +540,8 @@ impl Browser {
             .iter()
             .map(|entity| Item::Local(entity.id))
             .collect();
-        let count = inside.len() + self.folders.children(Some(id)).len();
+        let count =
+            inside.len() + self.folders.children(Some(id)).len() + self.strangers_shown(Some(id));
         let mut open = self.open.contains(&Branch::Folder(id));
 
         if self.rename.as_ref().is_some_and(|r| r.what == item) {
@@ -549,10 +606,31 @@ impl Browser {
         if !open {
             return;
         }
-        if count == 0 {
+        let unwalked = self
+            .folders
+            .path_of(id)
+            .is_some_and(|path| self.folders.unwalked.contains(path));
+        if count == 0 && !unwalked {
             nothing(ui, depth + 1, "empty; drag sounds here");
         }
         self.folder_body(ui, Some(id), depth, workspace, device, queue, naming, acts);
+    }
+
+    /// How many rows [`Browser::stranger_rows`] draws for a folder's files.
+    fn strangers_shown(&self, folder: Option<u64>) -> usize {
+        let Some(dir) = self.folders.dir(folder) else {
+            return 0;
+        };
+        let unread = self.folders.unread.iter().map(|(path, _)| path);
+        let others = self
+            .folders
+            .others
+            .iter()
+            .filter(|_| self.folders.all_files);
+        unread
+            .chain(others)
+            .filter(|path| path.parent() == dir)
+            .count()
     }
 
     /// The index rows whose file is gone, for assets this app does not hold. Each keeps
@@ -1479,6 +1557,37 @@ mod tests {
         assert!(said.iter().any(|word| word == "Africa Split"), "{said:?}");
         assert!(!said.iter().any(|word| word.contains(".ne5p")), "{said:?}");
         assert_eq!(workspace.get(id).unwrap().name, "Africa Split.ne5p");
+    }
+
+    #[test]
+    fn files_drawbar_does_not_open_show_only_while_all_files_are_shown() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        browser.folders.others = vec![LibPath::root().join("cover.jpg")];
+        browser.folders.unread = vec![(LibPath::root().join("Huge.nsmp"), "too big".into())];
+        let drawn = |browser: &mut Browser| {
+            let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                    });
+            });
+            words(&output)
+        };
+
+        let said = drawn(&mut browser);
+        assert!(said.iter().any(|word| word == "Huge.nsmp"), "{said:?}");
+        assert!(!said.iter().any(|word| word == "cover.jpg"), "{said:?}");
+        browser.folders.all_files = true;
+        let said = drawn(&mut browser);
+        assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
     }
 
     /// ⚠️ A filter applied while a document is in front would narrow a table nobody is

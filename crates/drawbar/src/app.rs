@@ -241,6 +241,8 @@ impl DrawbarApp {
         };
         if let Some(storage) = cc.storage {
             app.shell.restore(storage);
+            app.browser.folders.all_files =
+                storage.get_string(crate::folders::ALL_FILES_KEY).as_deref() == Some("true");
             #[cfg(not(target_arch = "wasm32"))]
             app.midi.restore(storage, &cc.egui_ctx);
         }
@@ -390,6 +392,10 @@ impl eframe::App for DrawbarApp {
             }
         }
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
+        storage.set_string(
+            crate::folders::ALL_FILES_KEY,
+            self.browser.folders.all_files.to_string(),
+        );
         // Unlike the theme, these are not written from the frame that changed them: a
         // divider moves on every frame of a drag, and each write rewrites the whole
         // store.

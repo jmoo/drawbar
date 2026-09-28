@@ -1,6 +1,7 @@
 //! The desktop backend: a library is a directory, and commands run in order on a thread
 //! of their own.
 
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use super::exec::{self, Entry, Fs, Kind, TEMP, TMP, WORKING};
+use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TEMP, TMP, WORKING};
 use super::{names, Cmd, Event, Stat};
 
 /// The default library: `drawbar` in the user's Music folder, or in the home folder
@@ -179,41 +180,63 @@ impl Disk {
         Ok(at)
     }
 
-    fn walk(&self, dir: &Path, prefix: &str, into: &mut Vec<Entry>) -> io::Result<()> {
-        let mut names: Vec<(String, fs::Metadata)> = Vec::new();
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            // A name that is not Unicode cannot be named in the index; it is left out.
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            names.push((name, entry.metadata()?));
-        }
-        names.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, meta) in names {
-            let path = match prefix.is_empty() {
-                true => name.clone(),
-                false => format!("{prefix}/{name}"),
-            };
-            // `DirEntry::metadata` does not follow a link, so a link is neither a file
-            // nor a folder here and is left out, which also keeps a loop of links from
-            // being walked forever.
-            if meta.is_dir() {
-                into.push(Entry {
-                    path: path.clone(),
-                    kind: Kind::Dir,
+    /// Breadth first, so the top of a large tree is listed before the bound is reached.
+    fn walk(&self) -> io::Result<Vec<Entry>> {
+        let mut entries = Vec::new();
+        let mut looked = 0;
+        let mut folders = VecDeque::from([String::new()]);
+        while let Some(prefix) = folders.pop_front() {
+            if looked >= MOST_ENTRIES {
+                entries.push(Entry {
+                    path: prefix,
+                    kind: Kind::Unwalked,
                 });
-                if !name.starts_with('.') {
-                    self.walk(&dir.join(&name), &path, into)?;
+                continue;
+            }
+            let found = match sorted(&self.locate(&prefix)?) {
+                Ok(found) => found,
+                // A folder inside that cannot be read is left unlisted, not the library.
+                Err(_) if !prefix.is_empty() => {
+                    entries.push(Entry {
+                        path: prefix,
+                        kind: Kind::Unwalked,
+                    });
+                    continue;
                 }
-            } else if meta.is_file() {
-                into.push(Entry {
-                    path,
-                    kind: Kind::File(stat(&meta)),
+                Err(e) => return Err(e),
+            };
+            let room = MOST_ENTRIES - looked;
+            if found.len() > room {
+                entries.push(Entry {
+                    path: prefix.clone(),
+                    kind: Kind::Unwalked,
                 });
             }
+            for (name, entry) in found.into_iter().take(room) {
+                looked += 1;
+                let path = match prefix.is_empty() {
+                    true => name.clone(),
+                    false => format!("{prefix}/{name}"),
+                };
+                // A link is neither a file nor a folder here and is left out, which also
+                // keeps a loop of links from being walked forever.
+                let kind = entry.file_type()?;
+                let kind = if kind.is_dir() {
+                    if !name.starts_with('.') {
+                        folders.push_back(path.clone());
+                    }
+                    Kind::Dir
+                } else if kind.is_file() && exec::opens(&name) {
+                    Kind::File(stat(&entry.metadata()?))
+                } else if kind.is_file() {
+                    Kind::Other
+                } else {
+                    continue;
+                };
+                entries.push(Entry { path, kind });
+            }
         }
-        Ok(())
+        Ok(entries)
     }
 
     /// Write `bytes` to the temporary for `path`, synced to the disk.
@@ -231,6 +254,20 @@ impl Disk {
             }
         }
     }
+}
+
+/// The entries of one folder, by name. A name that is not Unicode cannot be named in the
+/// index, so it is left out.
+fn sorted(dir: &Path) -> io::Result<Vec<(String, fs::DirEntry)>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Ok(name) = entry.file_name().into_string() {
+            found.push((name, entry));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
 }
 
 fn stat(meta: &fs::Metadata) -> Stat {
@@ -306,11 +343,10 @@ impl Fs for Disk {
     }
 
     fn list(&self) -> io::Result<Vec<Entry>> {
-        let mut entries = Vec::new();
-        match self.walk(&self.root, "", &mut entries) {
+        match self.walk() {
             // The default library is made at its first write.
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.exists() => Ok(entries),
-            walked => walked.map(|()| entries),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.exists() => Ok(Vec::new()),
+            walked => walked,
         }
     }
 

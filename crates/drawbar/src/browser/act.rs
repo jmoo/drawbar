@@ -758,6 +758,12 @@ fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log
     let Some(path) = browser.folders.path_of(id).cloned() else {
         return;
     };
+    if browser.folders.holds_strangers(&path) {
+        return log.trouble(format!(
+            "“{}” was not removed: it holds files drawbar does not hold.",
+            path.leaf()
+        ));
+    }
     let up = path.parent();
     let assets: Vec<(u64, String)> = browser
         .folders

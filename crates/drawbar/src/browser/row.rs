@@ -33,6 +33,8 @@ pub struct Cells<'a> {
     pub loaded: bool,
     /// A row inside a branch: a pixel shorter, in a smaller font.
     pub child: bool,
+    /// The name keeps its extension, for a file with no kind glyph to say what it is.
+    pub whole: bool,
 }
 
 /// A drawn row: its response, and where its clickable parts ended up.
@@ -94,8 +96,12 @@ pub(super) fn name_job(
     tint: egui::Color32,
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
+    let name = match cells.whole {
+        true => cells.name.to_string(),
+        false => starred(cells.name, cells.unsaved),
+    };
     job.append(
-        &starred(cells.name, cells.unsaved),
+        &name,
         0.0,
         egui::TextFormat {
             font_id: font,

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use super::diff::{match_files, Known};
+use super::exec::{MOST_BYTES, MOST_ENTRIES};
 use super::sidecar::{self, Read};
 use super::*;
 use crate::testing::{Bench, Temp};
@@ -719,4 +720,149 @@ fn a_file_at_a_new_path_is_an_asset_moved_only_when_one_matches_one() {
         "two could have moved, so neither did"
     );
     assert_eq!(matched.arrived.len(), 1);
+}
+
+#[test]
+fn only_files_drawbar_opens_are_read_and_the_rest_are_listed_by_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::create_dir(root.at("Cello")).unwrap();
+    fs::write(root.at("Cello/c3.NE5P"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("Cello/notes.pdf"), b"%PDF").unwrap();
+    fs::write(root.at("cover.jpg"), b"not a nord file").unwrap();
+    fs::write(root.at(".DS_Store"), b"hidden").unwrap();
+    #[cfg(unix)]
+    {
+        // A file drawbar does not open is never read, so one nobody may read says nothing.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.at("cover.jpg"), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    let session = Session::open(&root);
+    let mut held: Vec<String> = session
+        .bench
+        .workspace
+        .listed()
+        .filter_map(|entity| Some(entity.path.as_ref()?.to_string()))
+        .collect();
+    held.sort();
+    assert_eq!(
+        held,
+        ["Cello/c3.NE5P", "Grand.ne5p"],
+        "by extension, in any case"
+    );
+    let others: Vec<&str> = session
+        .bench
+        .browser
+        .folders
+        .others
+        .iter()
+        .map(LibPath::as_str)
+        .collect();
+    assert_eq!(others, ["Cello/notes.pdf", "cover.jpg"], "no hidden file");
+    assert!(session.bench.browser.folders.unread.is_empty());
+    session.close();
+}
+
+/// A file drawbar holds stays held whatever its name: it made it, or was given it.
+#[test]
+fn a_held_file_of_a_kind_drawbar_does_not_open_stays_held() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let Bench { workspace, log, .. } = &mut first.bench;
+    let id = workspace.ingest("scan.pdf".into(), Origin::Fresh, b"%PDF".to_vec(), log);
+    workspace.place(id, LibPath::root().join("scan.pdf"));
+    first.close();
+
+    let second = Session::open(&root);
+    assert!(second.bench.workspace.get(id).is_some(), "the same asset");
+    assert!(second.bench.browser.folders.others.is_empty());
+}
+
+/// A listing looks at a bounded number of entries, breadth first, so a folder like a
+/// whole Music folder opens without walking all of it. A file drawbar holds is still
+/// found where the walk stopped short of it.
+#[test]
+fn a_large_tree_is_listed_only_as_far_as_the_bound() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for dir in ["a", "b", "c"] {
+        fs::create_dir(root.at(dir)).unwrap();
+    }
+    fs::write(root.at("top.ne5p"), &program).unwrap();
+    fs::write(root.at("c/kept.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut first = Session::open(&root);
+    let kept = first
+        .bench
+        .workspace
+        .listed()
+        .find(|entity| entity.name == "kept.ne5p")
+        .expect("found while the tree is small")
+        .id;
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(kept, tag, true);
+    first.close();
+
+    for n in 0..MOST_ENTRIES {
+        fs::write(root.at(&format!("a/{n:05}.jpg")), b"").unwrap();
+    }
+    fs::write(root.at("b/deep.ne5p"), &program).unwrap();
+    let session = Session::open(&root);
+    let folders = &session.bench.browser.folders;
+    let unwalked: Vec<&str> = folders.unwalked.iter().map(LibPath::as_str).collect();
+    assert_eq!(unwalked, ["a", "b", "c"]);
+    assert!(
+        folders.others.len() < MOST_ENTRIES,
+        "{}",
+        folders.others.len()
+    );
+    let names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert!(names.contains(&"top.ne5p"), "{names:?}");
+    assert!(!names.contains(&"deep.ne5p"), "past the bound: {names:?}");
+    assert!(
+        session.bench.browser.tags.worn(kept).contains(&tag),
+        "a held file past the bound keeps its id and tags"
+    );
+    assert_eq!(session.said("holds more than drawbar lists"), 1);
+}
+
+/// Everything drawbar holds is in memory, so it reads only so much from one folder. A
+/// file past that is shown unread, and not read at all. The file here is sparse, so it
+/// takes no room on disk.
+#[test]
+fn a_file_past_the_most_drawbar_reads_is_shown_unread() {
+    let root = Temp::new();
+    let huge = fs::File::create(root.at("Huge.nsmp")).unwrap();
+    huge.set_len(MOST_BYTES + 1).unwrap();
+    drop(huge);
+    fs::write(root.at("Small.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+
+    let session = Session::open(&root);
+    let names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Small.ne5p"]);
+    let unread = &session.bench.browser.folders.unread;
+    assert_eq!(unread.len(), 1, "{unread:?}");
+    assert_eq!(unread[0].0.as_str(), "Huge.nsmp");
+    assert!(unread[0].1.contains("at most 1 GiB"), "{}", unread[0].1);
+    assert_eq!(
+        session.bench.browser.folders.clash(
+            &LibPath::root(),
+            "huge.NSMP",
+            &session.bench.workspace,
+            None
+        ),
+        crate::folders::Clash::Taken(crate::folders::Occupant::Other),
+        "its name is still taken"
+    );
 }

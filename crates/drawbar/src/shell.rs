@@ -803,6 +803,10 @@ impl DrawbarApp {
                 acts.push(Act::ToggleDock(dock));
             }
         }
+        let all = self.browser.folders.all_files;
+        if marked(ui, crate::folders::SHOW_ALL_FILES, all, None) {
+            self.browser.folders.all_files = !all;
+        }
         ui.separator();
         ui.menu_button("Theme", |ui| {
             for choice in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {

@@ -6,7 +6,7 @@
 //! flight is either under `.drawbar/tmp/` or a hidden `.<name>.drawbar-tmp` sibling, and
 //! opening the library sweeps both.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use super::sidecar::{self, Read, Sidecar};
@@ -20,10 +20,50 @@ pub const WORKING: &str = ".drawbar/working";
 /// What a save's temporary sibling ends in: `.<name>.drawbar-tmp`.
 pub const TEMP: &str = ".drawbar-tmp";
 
+/// The most entries, files and folders alike, one listing looks at. A folder it reaches
+/// past that is listed without its contents, so a folder the size of a whole Music
+/// folder opens as quickly as a small one.
+pub const MOST_ENTRIES: usize = 10_000;
+
+/// The most bytes one listing reads of files drawbar does not hold yet, counting what it
+/// holds already. Whatever drawbar holds is in memory, and a folder of pianos would
+/// otherwise be read whole.
+pub const MOST_BYTES: u64 = 1 << 30;
+
+/// The extensions drawbar opens besides the Nord formats' own tags.
+const OPENS: [&str; 5] = [
+    nord_format::formats::nsmpproj::FORMAT,
+    crate::document::text::EXTENSION,
+    "mid",
+    "syx",
+    "cn3",
+];
+
+/// Whether drawbar opens a file of this name, by its extension: a Nord file, a Sample
+/// Editor project, a note, a MIDI file or a SysEx dump. A listing reads no other file it
+/// does not already hold.
+pub fn opens(name: &str) -> bool {
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    nord_format::cbin_formats()
+        .map(|tag| tag.trim_end_matches('\0'))
+        .chain(OPENS)
+        .any(|opened| opened.eq_ignore_ascii_case(extension))
+}
+
 /// What a listing says about one entry.
+// Only the desktop's walk stops short or skips a look at a file.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum Kind {
     Dir,
+    /// A folder whose contents were not all listed: the listing had already looked at
+    /// [`MOST_ENTRIES`] entries, or the folder could not be read. It is also listed as a
+    /// [`Kind::Dir`].
+    Unwalked,
     File(Stat),
+    /// A file [`opens`] does not take, listed by name without a look at it.
+    Other,
 }
 
 /// One entry below a library's root.
@@ -46,8 +86,8 @@ pub trait Fs {
     fn probe(&mut self) -> io::Result<()> {
         Ok(())
     }
-    /// Every entry below the root, parents before children. A folder whose name starts
-    /// with a dot is listed but not entered.
+    /// Every entry below the root, parents before children, up to [`MOST_ENTRIES`] of
+    /// them. A folder whose name starts with a dot is listed but not entered.
     fn list(&self) -> io::Result<Vec<Entry>>;
     /// The names in one folder.
     fn names(&self, dir: &str) -> io::Result<Vec<String>>;
@@ -79,11 +119,17 @@ pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
     }
     match cmd {
         Cmd::Open => Some(Event::Opened(open(fs))),
-        Cmd::Scan { known } => Some(Event::Scanned(
-            listing(fs, Some(&known))
-                .map(|(listing, _)| listing)
-                .map_err(|e| e.to_string()),
-        )),
+        Cmd::Scan { known } => {
+            let held = known
+                .into_iter()
+                .map(|(path, stat)| (path, Some(stat)))
+                .collect();
+            Some(Event::Scanned(
+                listing(fs, &held)
+                    .map(|(listing, _)| listing)
+                    .map_err(|e| e.to_string()),
+            ))
+        }
         Cmd::Commit {
             sidecar,
             working,
@@ -155,7 +201,12 @@ fn open(fs: &mut impl Fs) -> Result<Opened, String> {
             Sidecar::default()
         }
     };
-    let (listing, temps) = listing(fs, None).map_err(|e| e.to_string())?;
+    let held = sidecar
+        .assets
+        .values()
+        .filter_map(|row| Some((row.path.clone()?, None)))
+        .collect();
+    let (listing, temps) = listing(fs, &held).map_err(|e| e.to_string())?;
     // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
     // must not write keeps what a newer drawbar left.
     let sweeps = indexed && writable.is_ok();
@@ -217,19 +268,23 @@ fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usize {
 
 /// The tree, and the temporary siblings interrupted saves left in it.
 ///
-/// With `known`, a file is read only when its [`Stat`] is not the one known under its
-/// path; without, every file is read.
+/// Every file in `held` is listed and read, whatever its kind and however far the walk
+/// went, except one whose [`Stat`] is the one `held` gives, which is listed unread.
+/// Every other file is read only when [`opens`] takes it and it fits in [`MOST_BYTES`].
 fn listing(
     fs: &impl Fs,
-    known: Option<&BTreeMap<LibPath, Stat>>,
+    held: &BTreeMap<LibPath, Option<Stat>>,
 ) -> io::Result<(Listing, Vec<String>)> {
     let mut listing = Listing::default();
     let mut temps = Vec::new();
+    let mut dirs = BTreeSet::new();
+    // Every file, with its `Stat` where the walk took one.
+    let mut files: BTreeMap<LibPath, Option<Stat>> = BTreeMap::new();
     for entry in fs.list()? {
         let leaf = entry.path.rsplit('/').next().unwrap_or(&entry.path);
         if entry.path.split('/').any(|part| part.starts_with('.')) {
-            if leaf.starts_with('.') && leaf.ends_with(TEMP) && matches!(entry.kind, Kind::File(_))
-            {
+            let file = matches!(entry.kind, Kind::File(_) | Kind::Other);
+            if file && leaf.starts_with('.') && leaf.ends_with(TEMP) {
                 temps.push(entry.path);
             }
             continue;
@@ -237,14 +292,62 @@ fn listing(
         let Some(path) = LibPath::parse(&entry.path) else {
             continue;
         };
-        let stat = match entry.kind {
+        match entry.kind {
             Kind::Dir => {
-                listing.dirs.push(path);
+                dirs.insert(path);
+            }
+            Kind::Unwalked => listing.unwalked.push(path),
+            Kind::File(stat) => {
+                files.insert(path, Some(stat));
+            }
+            Kind::Other => {
+                files.insert(path, None);
+            }
+        }
+    }
+    for path in held.keys() {
+        let hidden = path.components().any(|part| part.starts_with('.'));
+        if hidden || matches!(files.get(path), Some(Some(_))) {
+            continue;
+        }
+        match fs.stat(path.as_str()) {
+            Ok(Some(stat)) => {
+                files.insert(path.clone(), Some(stat));
+                let mut dir = path.parent();
+                while !dir.is_root() && dirs.insert(dir.clone()) {
+                    dir = dir.parent();
+                }
+            }
+            Ok(None) => {}
+            Err(e) => listing.unread.push((path.clone(), e.to_string())),
+        }
+    }
+    listing.dirs = dirs.into_iter().collect();
+
+    let holding: u64 = files
+        .iter()
+        .filter(|(path, _)| held.contains_key(*path))
+        .filter_map(|(_, stat)| stat.map(|stat| stat.len))
+        .fold(0, u64::saturating_add);
+    let mut room = MOST_BYTES.saturating_sub(holding);
+    for (path, stat) in files {
+        let known = held.get(&path);
+        let stat = match (stat, known) {
+            (Some(stat), Some(_)) => stat,
+            (Some(stat), None) if opens(path.leaf()) => {
+                if stat.len > room {
+                    listing.unread.push((path, too_much()));
+                    continue;
+                }
+                room -= stat.len;
+                stat
+            }
+            _ => {
+                listing.others.push(path);
                 continue;
             }
-            Kind::File(stat) => stat,
         };
-        if known.is_some_and(|known| known.get(&path) == Some(&stat)) {
+        if known == Some(&Some(stat)) {
             listing.files.push(Found {
                 path,
                 stat,
@@ -261,8 +364,17 @@ fn listing(
             Err(e) => listing.unread.push((path, e.to_string())),
         }
     }
-    listing.files.sort_by(|a, b| a.path.cmp(&b.path));
+    listing.unread.sort();
+    listing.unwalked.sort();
     Ok((listing, temps))
+}
+
+fn too_much() -> String {
+    format!(
+        "drawbar reads at most {} GiB from one library, and the files before this one \
+         already came to that",
+        MOST_BYTES >> 30
+    )
 }
 
 fn commit(

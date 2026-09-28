@@ -46,6 +46,14 @@ Sample Editor see what drawbar sees. A hidden `.drawbar` folder beside them keep
 what a file cannot: tags, the slot a sound came from, and edits not yet saved.
 drawbar makes it the first time it changes something in the folder.
 
+The browser shows the files drawbar opens: Nord files, Sample Editor projects,
+notes, MIDI files and SysEx dumps. **Show all files**, in the View menu or on
+This computer's menu, lists the rest by name as well. drawbar lists at most
+10,000 files and folders in a library, and reads at most 1 GiB of files from it.
+Past either limit it says so: a folder it did not list in full, or could not
+read, shows **not all listed**, and a file it did not read is marked **not
+read**.
+
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.
 

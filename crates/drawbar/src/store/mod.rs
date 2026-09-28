@@ -40,6 +40,7 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::{default_root, Backend};
 
+pub use exec::{MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Row, Sidecar, Stored};
 
@@ -216,16 +217,23 @@ pub struct Found {
     pub bytes: Option<Vec<u8>>,
 }
 
-/// The library's tree as the disk has it.
+/// The library's tree as the disk has it. `.drawbar/` and names starting with a dot are
+/// left out.
 #[derive(Clone, Debug, Default)]
 pub struct Listing {
-    /// Every folder below the root, parents before children.
+    /// Every folder below the root, in path order.
     pub dirs: Vec<LibPath>,
-    /// Every file below the root, in path order. `.drawbar/` and names starting with a
-    /// dot are left out.
+    /// Every file drawbar holds or opens, in path order.
     pub files: Vec<Found>,
-    /// Files that could not be read, and why. They are left out of `files`.
+    /// Files drawbar would have held that were not read, and why, in path order. They
+    /// are left out of `files`.
     pub unread: Vec<(LibPath, String)>,
+    /// Files drawbar does not open, in path order, listed by name only.
+    pub others: Vec<LibPath>,
+    /// Folders whose contents were not all listed, because the library holds more
+    /// entries than a listing looks at or the folder could not be read. The root among
+    /// them means some of its own were left out.
+    pub unwalked: Vec<LibPath>,
 }
 
 /// What opening a library found.
