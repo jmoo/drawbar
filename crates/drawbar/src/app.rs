@@ -168,8 +168,14 @@ pub struct DrawbarApp {
     pub(crate) splash: crate::splash::Splash,
     /// The About box while it is showing. Not kept between sessions.
     pub(crate) about: Option<crate::about::About>,
-    /// The library on this computer. `None` where the system names no folder for it.
+    /// The library open in this window. `None` where the system names no folder for
+    /// the default one.
     pub(crate) store: Option<Store>,
+    /// The libraries opened lately.
+    #[cfg(not(target_arch = "wasm32"))]
+    recent: crate::libraries::Recent,
+    #[cfg(not(target_arch = "wasm32"))]
+    picker: crate::libraries::Picker,
     /// Said once, over everything, until it is dismissed.
     notice: Option<String>,
     /// eframe's store still holds a library kept the old way, to empty at the first
@@ -182,7 +188,23 @@ pub struct DrawbarApp {
 }
 
 impl DrawbarApp {
-    /// The app over the default library.
+    /// The app over the library open last, or the default library.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
+        let recent = cc
+            .storage
+            .map(crate::libraries::Recent::restore)
+            .unwrap_or_default();
+        let root = recent
+            .last()
+            .map(std::path::Path::to_path_buf)
+            .or_else(crate::store::default_root);
+        let store = root.map(|root| library(&cc.egui_ctx, root));
+        DrawbarApp::with_library(cc, store)
+    }
+
+    /// The app over the browser's library.
+    #[cfg(target_arch = "wasm32")]
     pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
         let store = crate::store::default_root()
             .map(|root| Store::start(crate::store::Backend::start(&cc.egui_ctx, root)));
@@ -234,6 +256,13 @@ impl DrawbarApp {
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
             store,
+            #[cfg(not(target_arch = "wasm32"))]
+            recent: cc
+                .storage
+                .map(crate::libraries::Recent::restore)
+                .unwrap_or_default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            picker: crate::libraries::Picker::default(),
             notice,
             leaving,
             synced: 0,
@@ -246,6 +275,8 @@ impl DrawbarApp {
             #[cfg(not(target_arch = "wasm32"))]
             app.midi.restore(storage, &cc.egui_ctx);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        app.opened();
         app.synced = app.workspace.revision();
         app
     }
@@ -372,6 +403,99 @@ impl DrawbarApp {
     }
 }
 
+/// The store over the library at `root`, named for the browser unless it is the default
+/// library.
+#[cfg(not(target_arch = "wasm32"))]
+fn library(ctx: &egui::Context, root: std::path::PathBuf) -> Store {
+    let name = crate::libraries::name(&root, crate::store::default_root().as_deref());
+    let store = Store::start(crate::store::Backend::start(ctx, root));
+    match name {
+        Some(name) => store.named(name),
+        None => store,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DrawbarApp {
+    /// Run the acts that pick or open a library, and pass the rest on.
+    fn switch_libraries(
+        &mut self,
+        ctx: &egui::Context,
+        acts: Vec<browser::Act>,
+    ) -> Vec<browser::Act> {
+        let mut rest = Vec::new();
+        for act in acts {
+            match act {
+                browser::Act::PickLibrary => self.picker.pick(ctx),
+                browser::Act::OpenLibrary(root) => self.open_library(ctx, root),
+                act => rest.push(act),
+            }
+        }
+        rest
+    }
+
+    /// Open the folder at `root` as this window's library, in place of the one open now.
+    ///
+    /// The open library is written first, its unsaved edits as working copies in its own
+    /// `.drawbar/`, where they come back when it is opened again. Its assets then leave
+    /// the window; the views of slots stay.
+    ///
+    /// ⚠️ It waits for the library's saves in flight to land, as quitting does.
+    pub(crate) fn open_library(&mut self, ctx: &egui::Context, root: std::path::PathBuf) {
+        if self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.root() == root)
+        {
+            return;
+        }
+        if !root.is_dir() {
+            self.log.trouble(format!(
+                "{} is not a folder drawbar can open as the library.",
+                root.display()
+            ));
+            return;
+        }
+        if let Some(store) = self.store.take() {
+            store.hand_over(
+                &mut self.workspace,
+                &mut self.browser,
+                &self.queue,
+                &mut self.log,
+            );
+        }
+        let gone = self.workspace.close_library();
+        let unqueued = gone.iter().filter(|id| self.queue.holds(**id)).count();
+        for id in gone {
+            self.queue.forget(id);
+            self.document.forget(id);
+        }
+        if unqueued > 0 {
+            self.log.say(format!(
+                "{unqueued} waiting to be sent left the queue with the library they are in."
+            ));
+        }
+        for tag in self.browser.tags.all() {
+            self.shell.filter.forget_tag(tag.id);
+        }
+        self.browser.leave_library();
+        self.tabs.prune(&self.workspace);
+        self.store = Some(library(ctx, root));
+        self.opened();
+        self.synced = self.workspace.revision();
+    }
+
+    /// Put the library just opened first among the recent ones.
+    fn opened(&mut self) {
+        let default = crate::store::default_root();
+        let open = self.store.as_ref().map(|store| store.root().to_path_buf());
+        if let Some(open) = &open {
+            self.recent.opened(open);
+        }
+        self.browser.folders.libraries = self.recent.offered(default.as_deref(), open.as_deref());
+    }
+}
+
 impl eframe::App for DrawbarApp {
     /// How long a change may sit unwritten.
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -392,6 +516,8 @@ impl eframe::App for DrawbarApp {
             }
         }
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.recent.keep(storage);
         storage.set_string(
             crate::folders::ALL_FILES_KEY,
             self.browser.folders.all_files.to_string(),
@@ -476,6 +602,8 @@ impl eframe::App for DrawbarApp {
         // or the keyboard are dropped instead of sounding when a document comes forward.
         let played = self.midi.played(ctx.input(|input| input.time));
         arrived.extend(self.take_dropped_files(ctx));
+        #[cfg(not(target_arch = "wasm32"))]
+        arrived.extend(self.picker.picked().map(browser::Act::OpenLibrary));
         if released {
             arrived.push(browser::Act::SendAll);
         }
@@ -517,6 +645,8 @@ impl eframe::App for DrawbarApp {
             true => acts,
             false => self.hold_sends(acts),
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let acts = self.switch_libraries(ctx, acts);
         browser::apply(
             &mut self.browser,
             &mut self.shell,
@@ -839,6 +969,81 @@ mod tests {
             .collect();
         assert_eq!(names, ["untitled.ne5p"]);
         assert!(again.workspace.get(id).is_some(), "under the same id");
+    }
+
+    /// Run frames until the library just asked for has opened.
+    fn until_open(ctx: &egui::Context, app: &mut DrawbarApp) {
+        for _ in 0..500 {
+            frame(ctx, app);
+            let place = app.browser.folders.place.as_ref();
+            if place.is_some_and(|at| !at.opening) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the library did not open");
+    }
+
+    /// Switching writes the library open until then, its unsaved edit as a working copy
+    /// in its own sidecar, and opening it again brings the edit back. A view of a slot
+    /// stays in the window and leaves nothing in the library it was open over.
+    #[test]
+    fn switching_libraries_keeps_each_ones_unsaved_edits_in_its_own_folder() {
+        let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
+        let (ctx, mut app) = opened_over(&first);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        frame(&ctx, &mut app);
+        let saved = app.workspace.get(id).unwrap().bytes.clone();
+        let edit = |bytes: &[u8]| {
+            crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
+                .unwrap()
+                .1
+        };
+        let edited = edit(&saved);
+        app.workspace
+            .replace_bytes(id, edited.clone(), &mut app.log);
+        let at = nord_usb::Location { bank: 6, slot: 3 };
+        let view = app.workspace.view(
+            "Africa Split.ne5p".into(),
+            Origin::Device {
+                class: nord_usb::ObjectClass::Program,
+                at,
+            },
+            saved.clone(),
+            &mut app.log,
+        );
+        app.workspace
+            .replace_bytes(view, edited.clone(), &mut app.log);
+        app.tabs.open(view);
+
+        app.open_library(&ctx, second.0.clone());
+        until_open(&ctx, &mut app);
+        assert_eq!(
+            first.read("untitled.ne5p"),
+            saved,
+            "the file is as last saved"
+        );
+        assert_eq!(
+            first.names(".drawbar/working").len(),
+            1,
+            "the asset's edit, not the view's"
+        );
+        assert!(app.workspace.get(id).is_none(), "it left with its library");
+        assert!(app.workspace.get(view).is_some(), "the view stays");
+        assert_eq!(app.workspace.listed().count(), 0);
+        let libraries = &app.browser.folders.libraries;
+        assert_eq!(libraries[0].root, second.0, "most recent first");
+        assert!(libraries[0].open);
+
+        app.open_library(&ctx, first.0.clone());
+        until_open(&ctx, &mut app);
+        let back = app.workspace.listed().next().expect("the asset is back");
+        assert_eq!(back.bytes, edited, "with its edit");
+        assert!(back.is_unsaved());
+        assert!(back.id > view, "under an id this session has not given out");
     }
 
     fn open(storage: &dyn eframe::Storage) -> DrawbarApp {

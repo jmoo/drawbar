@@ -180,6 +180,11 @@ pub enum Act {
     CopyLog,
     /// Ask the window to close. Never reached on the web, where the tab is the window.
     Quit,
+    /// Pick a folder to open as the library. Desktop only, for now.
+    PickLibrary,
+    /// Open this folder as the library, in place of the one open now. The app runs it,
+    /// not [`apply`], once every piano plan over the open library's assets is laid out.
+    OpenLibrary(std::path::PathBuf),
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -524,6 +529,8 @@ pub fn apply(
                 .ctx()
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
+            // The app takes these before the browser's acts run.
+            Act::PickLibrary | Act::OpenLibrary(_) => {}
         }
     }
 }

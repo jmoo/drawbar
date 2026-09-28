@@ -22,6 +22,8 @@ cargo install drawbar
 - Queue your changes and send them in one go, with a review of what each one
   replaces.
 - Keep a text note beside the sounds for the set list and the cues.
+- On the desktop, open any folder as the library, such as a Sample Editor
+  project. Nothing in it changes until you change something.
 
 Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before

@@ -744,6 +744,11 @@ impl DrawbarApp {
         }
         ui.menu_button("New", |ui| new_menu(ui, acts));
         ui.separator();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::browser::library_items(ui, &self.browser.folders, acts);
+            ui.separator();
+        }
         if let Some(id) = self.tabs.active() {
             if item(ui, "Save", Some(key::SAVE)) {
                 acts.push(Act::SaveDoc(id));

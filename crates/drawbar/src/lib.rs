@@ -20,6 +20,8 @@ mod js;
 pub mod keyboard;
 pub mod knob;
 pub mod led;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod libraries;
 pub mod library;
 pub mod log;
 pub mod midi;

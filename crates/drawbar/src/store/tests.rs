@@ -620,7 +620,11 @@ fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     session.refocus();
     assert_eq!(session.said("are one name"), 1, "said once");
     session.close();
-    assert_eq!(root.names(""), [".drawbar", "C3.ne5p", "c3.ne5p"]);
+    assert_eq!(
+        root.names(""),
+        ["C3.ne5p", "c3.ne5p"],
+        "nothing renamed, and nothing added"
+    );
 }
 
 #[test]

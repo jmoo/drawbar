@@ -113,6 +113,10 @@ impl Backend {
         }
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Where the library is, as the user would look for it.
     pub fn label(&self) -> String {
         self.root.display().to_string()

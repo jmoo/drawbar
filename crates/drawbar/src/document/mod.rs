@@ -551,6 +551,12 @@ impl Document {
         workspace.mark_pending(id, self.pends(id))
     }
 
+    /// Let go of what is kept about an asset that has left the workspace.
+    pub fn forget(&mut self, id: u64) {
+        self.views.remove(&id);
+        self.piano.forget(id);
+    }
+
     /// Hold back acts that would carry a piano library's bytes while its plan is not yet
     /// applied, and start the apply they wait for.
     ///

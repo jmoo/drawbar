@@ -36,9 +36,8 @@ On the desktop, this computer is a folder of real files: `drawbar` in your Music
 folder. That is `~/Music/drawbar` on macOS and `Music\drawbar` in your user folder
 on Windows. On Linux it is in the music folder `xdg-user-dirs` names, or
 `~/drawbar` where there is none. drawbar makes the folder the first time it keeps
-something there.
-Hover **This computer** for its path, or right-click it and choose **Show the
-library folder**.
+something there. Hover **This computer** for its path, or right-click it and
+choose **Show the library folder**.
 
 Every sound is a file there, named as the browser shows it plus its extension,
 and every folder in the browser is a folder there. Finder, your backups and Nord
@@ -67,6 +66,29 @@ libraries are usually larger, so export them.
 This version of drawbar starts with an empty list. What an earlier version kept
 is not carried over, and drawbar says so once. Long-term storage is not
 guaranteed while drawbar is in alpha. Keep your own copies.
+
+## Opening another folder
+
+On the desktop, **File ▸ Open library folder…** opens any folder as the library:
+a Sample Editor project folder, a sample pack, a folder on a shared drive. A
+window has one library open at a time, and the browser calls it by its folder's
+name where it would say This computer. **File ▸ Open recent library** switches
+between the libraries opened lately, and always lists your own. The same items
+are on This computer's menu. drawbar opens the last library again when it
+starts.
+
+Switching writes the library you leave first. Edits you have not saved stay in
+its `.drawbar` folder and come back, still unsaved, when you open it again.
+Views of the instrument's slots stay open, and sounds of the library you leave
+come off the send queue.
+
+drawbar changes nothing in a folder you open until you change something there,
+and only then makes its `.drawbar` folder. A folder drawbar cannot write, or one
+another drawbar already has open, opens read-only; hover its name for the
+reason. Two files whose names differ only in case both show, marked, and drawbar
+renames neither.
+
+In the browser, the library is the browser's own, and no other folder opens yet.
 
 ## Changes made outside drawbar
 

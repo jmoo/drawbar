@@ -1303,6 +1303,15 @@ impl Workspace {
         log.say(format!("Removed “{}” from this computer.", gone.name));
     }
 
+    /// Let go of every asset on this computer, as another library takes its place, and
+    /// return their ids. The views of slots stay.
+    pub fn close_library(&mut self) -> Vec<u64> {
+        let gone = self.listed().map(|entity| entity.id).collect();
+        self.entities.retain(|entity| !entity.kept);
+        self.revision += 1;
+        gone
+    }
+
     /// The next id a new asset would take, for the store to carry over.
     pub fn next_id(&self) -> u64 {
         self.next_id
@@ -1465,12 +1474,12 @@ pub(crate) fn as_type_0(bytes: &[u8]) -> Vec<u8> {
 /// ⚠️ wasm has one thread and cannot block: the future has to go to the microtask
 /// queue, never to a thread, or the picker never resolves.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(future: F) {
+pub(crate) fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(future: F) {
     std::thread::spawn(move || nord_usb::block_on(future));
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
+pub(crate) fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
     wasm_bindgen_futures::spawn_local(future);
 }
 

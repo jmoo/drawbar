@@ -85,6 +85,11 @@ pub struct Store {
     scanning: bool,
     /// A send is waiting for the rescan in flight.
     send_waits: bool,
+    /// An unsaved view of a slot is kept here as a working copy. Off once the library is
+    /// being handed over, since the view stays in the window and not in this library.
+    keeps_views: bool,
+    /// The library's name for the browser, or `None` for This computer's own.
+    name: Option<String>,
     /// Working copies the index still names that nothing needs, to drop at the next
     /// full pass.
     stale: Vec<String>,
@@ -104,8 +109,24 @@ impl Store {
             focused: true,
             scanning: false,
             send_waits: false,
+            keeps_views: true,
+            name: None,
             stale: Vec::new(),
         }
+    }
+
+    /// The same store, heading the browser under `name` rather than as This computer.
+    pub fn named(self, name: String) -> Store {
+        Store {
+            name: Some(name),
+            ..self
+        }
+    }
+
+    /// The folder the library is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn root(&self) -> &std::path::Path {
+        self.backend.root()
     }
 
     /// Where the library is, as the user would look for it.
@@ -124,6 +145,7 @@ impl Store {
     /// Where the library is, and what state it is in, for the browser's header.
     fn place(&self) -> Where {
         Where {
+            name: self.name.clone(),
             label: self.backend.label(),
             reveal: self.backend.reveal(),
             note: match &self.phase {
@@ -320,6 +342,20 @@ impl Store {
             }
         }
         self.backend.finish();
+    }
+
+    /// Write everything, as [`Store::close`] does, before another library takes this one's
+    /// place. The views of slots stay in the window, so their working copies leave this
+    /// library.
+    pub fn hand_over(
+        mut self,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) {
+        self.keeps_views = false;
+        self.close(workspace, browser, queue, log);
     }
 
     /// A held send goes ahead unless something waiting to be sent changed on disk.
@@ -962,7 +998,7 @@ impl Store {
         // A view is kept only while it holds something the slot does not.
         let needs = match entity.kept {
             true => entity.stamp != entity.saved.stamp,
-            false => precious(entity, queue),
+            false => self.keeps_views && precious(entity, queue),
         };
         if !entity.kept && needs && !self.records.contains_key(&entity.id) {
             self.records.insert(

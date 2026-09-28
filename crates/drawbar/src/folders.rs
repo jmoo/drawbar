@@ -52,6 +52,9 @@ pub(crate) const ALL_FILES_KEY: &str = "drawbar.all_files";
 /// Where the library is, for the header of This computer.
 #[derive(Clone, Default)]
 pub struct Where {
+    /// The name the browser gives the library, or `None` for This computer's own.
+    pub name: Option<String>,
+    /// Where it is, as the user would look for it.
     pub label: String,
     /// A URL that shows the folder in the system's file manager.
     pub reveal: Option<String>,
@@ -59,6 +62,15 @@ pub struct Where {
     pub note: Option<String>,
     /// It is still being read.
     pub opening: bool,
+}
+
+/// A library a window can open, for the menus that switch between them.
+#[derive(Clone, Debug)]
+pub struct Library {
+    pub root: std::path::PathBuf,
+    pub name: String,
+    /// It is the one open now.
+    pub open: bool,
 }
 
 /// What is already in a folder under a name.
@@ -101,6 +113,8 @@ pub struct Folders {
     pub unwalked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
     pub all_files: bool,
+    /// The libraries the window can switch to, the open one among them.
+    pub libraries: Vec<Library>,
 }
 
 impl Folders {
@@ -168,6 +182,17 @@ impl Folders {
             .listed()
             .filter(|entity| self.holding(entity) == folder)
             .collect()
+    }
+
+    /// Forget the library open until now, and keep what is the window's: whether all
+    /// files are shown, and the libraries to switch between.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn leave(&mut self) {
+        *self = Folders {
+            all_files: self.all_files,
+            libraries: std::mem::take(&mut self.libraries),
+            ..Folders::default()
+        };
     }
 
     /// Every file drawbar does not hold, read or not.

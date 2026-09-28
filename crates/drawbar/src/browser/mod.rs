@@ -38,6 +38,8 @@ pub use drag::{
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
+#[cfg(not(target_arch = "wasm32"))]
+pub use tree::library_items;
 pub use tree::new_menu;
 
 use act::{will_write, write_warnings};
@@ -153,6 +155,21 @@ impl Browser {
         self.tree(ui, workspace, device, queue, filter, &mut acts);
         ghost(ui.ctx());
         acts
+    }
+
+    /// Forget everything about the library open until now: its folders, its tags, and
+    /// whatever was selected, renamed or asked about in it. Whether all files are shown
+    /// stays, since that is the window's choice.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn leave_library(&mut self) {
+        self.selection.clear();
+        self.rename = None;
+        self.ask = None;
+        self.later.clear();
+        self.folders.leave();
+        self.tags = Tags::default();
+        self.open
+            .retain(|branch| !matches!(branch, Branch::Folder(_)));
     }
 
     /// The selection, which the library table and the tree share.

@@ -151,6 +151,30 @@ fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
     acts.push(Act::Narrow(narrow));
 }
 
+/// The items that open another folder as the library, switch to a recent one, and show
+/// the open one's folder. Only the desktop opens other folders, for now, and only it has
+/// a folder to show.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn library_items(ui: &mut egui::Ui, folders: &crate::folders::Folders, acts: &mut Vec<Act>) {
+    offer(ui, "Open library folder…", None, Act::PickLibrary, acts);
+    if !folders.libraries.is_empty() {
+        ui.menu_button("Open recent library", |ui| {
+            for library in &folders.libraries {
+                if marked(ui, &library.name, library.open, None) && !library.open {
+                    acts.push(Act::OpenLibrary(library.root.clone()));
+                }
+            }
+        });
+    }
+    let reveal = folders.place.as_ref().and_then(|at| at.reveal.as_ref());
+    if let Some(url) = reveal {
+        if ui.button("Show the library folder").clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            ui.close();
+        }
+    }
+}
+
 /// A line where a branch has nothing to show.
 fn nothing(ui: &mut egui::Ui, depth: usize, said: &str) {
     row(
@@ -350,6 +374,7 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         let here = Narrow::Place(Place::Computer);
+        let place = self.folders.place.clone().unwrap_or_default();
         let drawn = row(
             ui,
             filter.on(here),
@@ -357,7 +382,8 @@ impl Browser {
                 indent: indent(0, true),
                 open: Some(self.open.contains(&Branch::Computer)),
                 glyph: Some(Glyph::LibraryBig),
-                name: "This computer",
+                name: place.name.as_deref().unwrap_or("This computer"),
+                whole: place.name.is_some(),
                 count: Some(workspace.listed().count().to_string()),
                 ..Cells::default()
             },
@@ -366,7 +392,6 @@ impl Browser {
         // can have started from.
         self.drop_zone(ui, &drawn.response, Onto::Computer, acts);
         let triangle = on_triangle(&drawn);
-        let place = self.folders.place.clone().unwrap_or_default();
         let response = match (&place.note, place.label.is_empty()) {
             (_, true) => drawn.response,
             (None, false) => drawn.response.on_hover_text(&place.label),
@@ -389,11 +414,10 @@ impl Browser {
                 if marked(ui, SHOW_ALL_FILES, all, None) {
                     browser.folders.all_files = !all;
                 }
-                if let Some(url) = &place.reveal {
-                    if ui.button("Show the library folder").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                        ui.close();
-                    }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.separator();
+                    library_items(ui, &browser.folders, acts);
                 }
             });
         });

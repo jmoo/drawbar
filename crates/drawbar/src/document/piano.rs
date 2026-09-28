@@ -1217,7 +1217,19 @@ impl State {
     /// start or join the apply that puts it there. Returns the act where it is free to
     /// run now.
     pub fn hold(&mut self, ctx: &egui::Context, act: Act, workspace: &Workspace) -> Option<Act> {
-        let Some(id) = waits_on(&act).filter(|id| self.pending(*id)) else {
+        let waits = match &act {
+            // Every asset on this computer leaves with its library, so each plan over one
+            // is laid out first, one at a time.
+            Act::OpenLibrary(_) => self
+                .plans
+                .keys()
+                .copied()
+                .filter(|id| self.pending(*id))
+                .filter(|id| workspace.get(*id).is_some_and(|entity| entity.kept))
+                .min(),
+            _ => waits_on(&act).filter(|id| self.pending(*id)),
+        };
+        let Some(id) = waits else {
             return Some(act);
         };
         self.held.push((id, act));
@@ -4705,6 +4717,27 @@ mod tests {
         assert!(
             !editor.state.pending(editor.id),
             "the bytes hold the plan now",
+        );
+    }
+
+    /// The assets of a library leave the window when another opens, so the switch waits
+    /// until every plan over one of them has reached its bytes.
+    #[test]
+    fn opening_another_library_waits_for_the_plan_to_be_laid_out() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        let elsewhere = std::path::PathBuf::from("/elsewhere");
+
+        let held = editor.state.hold(
+            &editor.ctx,
+            Act::OpenLibrary(elsewhere.clone()),
+            &editor.workspace,
+        );
+        assert!(held.is_none(), "the switch is held back");
+        let applied = editor.awaited();
+        assert!(
+            matches!(applied.acts.as_slice(), [Act::OpenLibrary(at)] if *at == elsewhere),
+            "and let go once the plan is laid out"
         );
     }
 
