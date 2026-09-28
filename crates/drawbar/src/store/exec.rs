@@ -12,6 +12,8 @@ use std::io;
 use super::sidecar::{self, Read, Sidecar};
 use super::{Cmd, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened, Stat};
 
+/// The sidecar. It is made at drawbar's first write to a library, never on open.
+pub const DIR: &str = ".drawbar";
 pub const INDEX: &str = ".drawbar/library.ron";
 pub const TMP: &str = ".drawbar/tmp";
 pub const WORKING: &str = ".drawbar/working";
@@ -37,8 +39,13 @@ pub trait Fs {
     /// Create the root, `.drawbar/`, and its `tmp/` and `working/`, where missing.
     fn prepare(&mut self) -> io::Result<()>;
     /// Hold the one-writer lock for as long as this lives. `Ok(false)` when another
-    /// drawbar holds it.
+    /// drawbar holds it. Taking a lock already held here answers `Ok(true)`.
     fn lock(&mut self) -> io::Result<bool>;
+    /// Whether a file could be written at the root, found out without leaving anything
+    /// there. A backend that cannot tell answers `Ok(())`, and the first write finds out.
+    fn probe(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     /// Every entry below the root, parents before children. A folder whose name starts
     /// with a dot is listed but not entered.
     fn list(&self) -> io::Result<Vec<Entry>>;
@@ -65,6 +72,11 @@ pub trait Fs {
 /// Run one command. Commands that answer only on failure return `None` when they
 /// succeed.
 pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
+    if !matches!(cmd, Cmd::Open | Cmd::Scan { .. }) {
+        if let Err(why) = take(fs) {
+            return Some(Event::ReadOnly(why));
+        }
+    }
     match cmd {
         Cmd::Open => Some(Event::Opened(open(fs))),
         Cmd::Scan { known } => Some(Event::Scanned(
@@ -106,16 +118,17 @@ pub fn execute(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
 }
 
 fn open(fs: &mut impl Fs) -> Result<Opened, String> {
-    let mut writable = fs
-        .prepare()
-        .map_err(|e| format!("drawbar cannot write here: {e}"))
-        .and_then(|()| match fs.lock() {
-            Ok(true) => Ok(()),
-            Ok(false) => Err("another drawbar has this library open".to_string()),
-            Err(e) => Err(format!("the library's lock could not be taken: {e}")),
-        });
+    let indexed = matches!(fs.stat(DIR), Ok(Some(_)));
+    let mut writable = match indexed {
+        // drawbar has written here before, so it takes the lock now and a second drawbar
+        // finds it taken.
+        true => take(fs),
+        false => fs
+            .probe()
+            .map_err(|e| format!("drawbar cannot write here: {e}")),
+    };
     let mut swept = 0;
-    if writable.is_ok() {
+    if indexed && writable.is_ok() {
         swept += sweep(fs, TMP, |_| true);
     }
     let sidecar = match fs.read(INDEX) {
@@ -143,7 +156,10 @@ fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         }
     };
     let (listing, temps) = listing(fs, None).map_err(|e| e.to_string())?;
-    if writable.is_ok() {
+    // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
+    // must not write keeps what a newer drawbar left.
+    let sweeps = indexed && writable.is_ok();
+    if sweeps {
         for temp in temps {
             if fs.remove_file(&temp).is_ok() {
                 swept += 1;
@@ -159,16 +175,29 @@ fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         .iter()
         .filter_map(|(name, id)| Some((*id, fs.read(&format!("{WORKING}/{name}")).ok()?)))
         .collect();
-    if writable.is_ok() {
+    if sweeps {
         swept += sweep(fs, WORKING, |name| !named.contains_key(name));
     }
     Ok(Opened {
         writable,
+        indexed,
         sidecar,
         listing,
         working,
         swept,
     })
+}
+
+/// Make the sidecar where there is none yet, and hold the library's lock, or say why
+/// nothing may be written.
+fn take(fs: &mut impl Fs) -> Result<(), String> {
+    fs.prepare()
+        .map_err(|e| format!("drawbar cannot write here: {e}"))?;
+    match fs.lock() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("another drawbar has this library open".to_string()),
+        Err(e) => Err(format!("the library's lock could not be taken: {e}")),
+    }
 }
 
 /// A working copy's file name.

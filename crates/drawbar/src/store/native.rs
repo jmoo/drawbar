@@ -59,6 +59,10 @@ fn xdg_music(text: &str, home: &Path) -> Option<PathBuf> {
 
 const LOCK: &str = ".drawbar/lock";
 
+/// What [`Fs::probe`] writes and removes at once. Named as a save's temporary, so one a
+/// crash left behind is swept as one.
+const PROBE: &str = ".drawbar-probe.drawbar-tmp";
+
 /// Where [`Fs::replace`] and [`Fs::create`] write before the rename: `.drawbar/tmp/` for
 /// the index's own files, and a hidden sibling in the same folder for a library file, so
 /// the rename never crosses a volume.
@@ -88,6 +92,7 @@ impl Backend {
         let (answers, rx) = channel();
         let mut disk = Disk {
             root: root.clone(),
+            prepared: false,
             lock: None,
         };
         let ctx = ctx.clone();
@@ -152,6 +157,8 @@ impl Drop for Backend {
 /// A library's files on this machine's disk.
 struct Disk {
     root: PathBuf,
+    /// `.drawbar/` and its folders have been made, once, for this session.
+    prepared: bool,
     /// The lock file, held open, and locked, while this library is written.
     lock: Option<File>,
 }
@@ -253,13 +260,22 @@ fn parent(path: &Path) -> &Path {
 
 impl Fs for Disk {
     fn prepare(&mut self) -> io::Result<()> {
+        if self.prepared {
+            return Ok(());
+        }
         for dir in [TMP, WORKING] {
             fs::create_dir_all(self.locate(dir)?)?;
         }
+        self.prepared = true;
         Ok(())
     }
 
     fn lock(&mut self) -> io::Result<bool> {
+        // ⚠️ A second lock on its own handle would be refused by the one this already
+        // holds.
+        if self.lock.is_some() {
+            return Ok(true);
+        }
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -275,10 +291,27 @@ impl Fs for Disk {
         }
     }
 
+    fn probe(&mut self) -> io::Result<()> {
+        // A root that is not there yet is made at the first write.
+        if !self.root.exists() {
+            return Ok(());
+        }
+        let probe = self.root.join(PROBE);
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&probe)?;
+        fs::remove_file(&probe)
+    }
+
     fn list(&self) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
-        self.walk(&self.root, "", &mut entries)?;
-        Ok(entries)
+        match self.walk(&self.root, "", &mut entries) {
+            // The default library is made at its first write.
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.exists() => Ok(entries),
+            walked => walked.map(|()| entries),
+        }
     }
 
     fn names(&self, dir: &str) -> io::Result<Vec<String>> {

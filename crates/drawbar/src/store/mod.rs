@@ -15,6 +15,9 @@
 //!   Cello/c3.wav
 //! ```
 //!
+//! `.drawbar/` is made at the first write, so any folder can be opened as a library and
+//! stays as it was until something in it is changed.
+//!
 //! The app talks to a backend in [`Cmd`]s and hears back in [`Event`]s, in order, and
 //! never waits for one: the desktop runs them on a thread, and a browser's storage
 //! answers only asynchronously. [`Store`] is the app's side of that conversation: it
@@ -231,6 +234,9 @@ pub struct Opened {
     /// `Err` with the reason when nothing may be written here. The library still opens,
     /// and every edit stays in memory.
     pub writable: Result<(), String>,
+    /// `.drawbar/` was there already. Where it was not, nothing has been written, and
+    /// the library's lock is taken at the first write.
+    pub indexed: bool,
     /// The index, or an empty one for a library that has none or one this build must not
     /// read.
     pub sidecar: Sidecar,
@@ -252,10 +258,15 @@ pub enum Failure {
 }
 
 /// What the app asks a backend to do. Each runs after the one sent before it.
+///
+/// Every command that writes first makes `.drawbar/` where there is none and takes the
+/// library's lock. Where it cannot, it runs no further and is answered by
+/// [`Event::ReadOnly`].
 #[derive(Debug)]
 pub enum Cmd {
-    /// Take the lock, sweep interrupted writes, read the index, and list and read every
-    /// file. Answered by [`Event::Opened`].
+    /// Read the index, and list and read every file. Where `.drawbar/` exists, take the
+    /// lock and sweep interrupted writes first; where it does not, write nothing. Answered
+    /// by [`Event::Opened`].
     Open,
     /// List the tree again, reading every file whose [`Stat`] is not in `known` under its
     /// path. Answered by [`Event::Scanned`].
@@ -300,6 +311,9 @@ pub enum Event {
     },
     /// A command other than a save failed: what it was doing, and why.
     Failed(String),
+    /// A write found that nothing may be written after all, and why: another drawbar
+    /// took the lock first, or the folder refused the sidecar. The write did not run.
+    ReadOnly(String),
 }
 
 /// The keys of eframe's store that held the library before it was a folder. Nothing

@@ -35,7 +35,8 @@ comes back unsaved the next time drawbar starts.
 On the desktop, this computer is a folder of real files: `drawbar` in your Music
 folder. That is `~/Music/drawbar` on macOS and `Music\drawbar` in your user folder
 on Windows. On Linux it is in the music folder `xdg-user-dirs` names, or
-`~/drawbar` where there is none. drawbar makes the folder the first time it runs.
+`~/drawbar` where there is none. drawbar makes the folder the first time it keeps
+something there.
 Hover **This computer** for its path, or right-click it and choose **Show the
 library folder**.
 
@@ -43,6 +44,7 @@ Every sound is a file there, named as the browser shows it plus its extension,
 and every folder in the browser is a folder there. Finder, your backups and Nord
 Sample Editor see what drawbar sees. A hidden `.drawbar` folder beside them keeps
 what a file cannot: tags, the slot a sound came from, and edits not yet saved.
+drawbar makes it the first time it changes something in the folder.
 
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.

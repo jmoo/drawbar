@@ -403,11 +403,110 @@ fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
 #[test]
 fn a_second_drawbar_on_one_library_only_reads_it() {
     let root = Temp::new();
-    let first = Session::open(&root);
+    let mut first = Session::open(&root);
+    first.create();
+    first.sync();
     let second = Session::open(&root);
     assert_eq!(first.store.read_only(), None);
     let why = second.store.read_only().expect("read-only");
     assert!(why.contains("another drawbar"), "{why}");
+}
+
+/// Two drawbars can open a folder neither has written, since opening takes no lock. The
+/// first to write takes it, and the other finds out at its own first write.
+#[test]
+fn a_drawbar_that_writes_second_to_a_new_library_turns_read_only() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    let mine = first.create();
+    first.sync();
+
+    let theirs = second.create();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut second.bench;
+    second.store.sync(workspace, browser, queue, Pass::Last);
+    assert!(second.next(), "the write answered");
+    let why = second.store.read_only().expect("read-only");
+    assert!(why.contains("another drawbar"), "{why}");
+    assert!(
+        second.bench.workspace.get(theirs).unwrap().is_unsaved(),
+        "its new file counts as unsaved"
+    );
+    assert_eq!(second.said("read-only now"), 1);
+    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
+    assert_eq!(root.read("untitled.ne5p"), first.bytes(mine));
+}
+
+/// Opening a folder, looking around and rescanning writes nothing: `.drawbar/` appears
+/// with the first change, here a tag.
+#[test]
+fn a_folder_opened_is_left_as_it_was_until_something_changes() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+
+    let mut session = Session::open(&root);
+    assert_eq!(session.store.read_only(), None);
+    session.refocus();
+    session.sync();
+    assert_eq!(root.names(""), ["Grand.ne5p"], "nothing was added");
+
+    let id = session
+        .bench
+        .workspace
+        .listed()
+        .next()
+        .expect("the file")
+        .id;
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.close();
+    assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"]);
+    assert_eq!(root.read("Grand.ne5p"), program, "the file is untouched");
+
+    let again = Session::open(&root);
+    assert!(again.bench.browser.tags.worn(id).contains(&tag));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_drawbar_cannot_write_opens_read_only_and_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Gives the folder back its write permission, so it can be removed.
+    struct Writable<'a>(&'a Temp);
+    impl Drop for Writable<'_> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0 .0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o555)).unwrap();
+    let _writable = Writable(&root);
+    if fs::write(root.at("written"), b"").is_ok() {
+        // Permissions do not bind this user.
+        return;
+    }
+
+    let mut session = Session::open(&root);
+    let why = session.store.read_only().expect("read-only");
+    assert!(why.contains("cannot write here"), "{why}");
+    assert_eq!(
+        session.bench.workspace.listed().count(),
+        1,
+        "it still shows"
+    );
+    session.create();
+    session.close();
+    assert_eq!(root.names(""), ["Grand.ne5p"]);
 }
 
 #[test]

@@ -76,6 +76,10 @@ pub struct Store {
     next_generation: u64,
     /// The index as last sent, so an unchanged one is not written again.
     committed: Option<Sidecar>,
+    /// `.drawbar/` exists, or drawbar has written here. Until then the index is written
+    /// only once it holds something no file does, so a folder opened and looked at is
+    /// left as it was.
+    indexed: bool,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
     scanning: bool,
@@ -96,6 +100,7 @@ impl Store {
             records: BTreeMap::new(),
             next_generation: 1,
             committed: None,
+            indexed: false,
             focused: true,
             scanning: false,
             send_waits: false,
@@ -215,6 +220,7 @@ impl Store {
             Event::Saved { id, path, result } => {
                 self.saved(id, path, result, workspace, browser, log)
             }
+            Event::ReadOnly(why) => self.refused(why, workspace, log),
             Event::Failed(why) => {
                 log.error(why.clone());
                 log.trouble(format!(
@@ -230,6 +236,33 @@ impl Store {
             }
         }
         false
+    }
+
+    /// A write found the library closed to it: another drawbar took the lock first, or
+    /// the folder refused the sidecar. Every save in flight counts as unsaved again.
+    fn refused(&mut self, why: String, workspace: &mut Workspace, log: &mut Log) {
+        if !self.open() {
+            return;
+        }
+        log.trouble(format!(
+            "This computer's library is read-only now: {why}. Edits stay in memory until \
+             you quit."
+        ));
+        for (id, record) in &mut self.records {
+            if std::mem::take(&mut record.saving) {
+                workspace.unsave(*id);
+                if let Some(entity) = workspace.get(*id) {
+                    record.saved = entity.saved.stamp;
+                }
+            }
+        }
+        self.phase = Phase::ReadOnly(why);
+    }
+
+    /// Send a command that writes. The first one makes `.drawbar/`.
+    fn write(&mut self, cmd: Cmd) {
+        self.indexed = true;
+        self.backend.send(cmd);
     }
 
     /// Rescan when the window comes back into focus, since anything may have changed
@@ -328,6 +361,7 @@ impl Store {
     ) {
         let Opened {
             writable,
+            indexed,
             sidecar,
             listing,
             mut working,
@@ -343,6 +377,7 @@ impl Store {
                 Phase::ReadOnly(why)
             }
         };
+        self.indexed = indexed;
         if swept > 0 {
             log.info(format!("removed {swept} leftovers of interrupted writes"));
         }
@@ -716,11 +751,11 @@ impl Store {
                 record.missing = false;
                 browser.folders.missing.remove(&id);
                 if record.removed {
-                    self.backend.send(Cmd::RemoveFile {
+                    self.records.remove(&id);
+                    self.write(Cmd::RemoveFile {
                         path,
                         expect: print,
                     });
-                    self.records.remove(&id);
                 }
                 return;
             }
@@ -794,9 +829,12 @@ impl Store {
         }
         if full {
             let sidecar = self.sidecar(workspace, browser);
-            if self.committed.as_ref() != Some(&sidecar) || !writes.is_empty() || !drops.is_empty()
-            {
-                self.backend.send(Cmd::Commit {
+            let wanted = self.indexed || !writes.is_empty() || beyond_files(&sidecar);
+            let changed = self.committed.as_ref() != Some(&sidecar)
+                || !writes.is_empty()
+                || !drops.is_empty();
+            if wanted && changed {
+                self.write(Cmd::Commit {
                     sidecar: sidecar.clone(),
                     working: writes,
                     drop: drops,
@@ -809,15 +847,15 @@ impl Store {
 
     fn tree_op(&mut self, op: Op) {
         match op {
-            Op::MakeDir(path) => self.backend.send(Cmd::MakeDir(path)),
-            Op::RemoveDir(path) => self.backend.send(Cmd::RemoveDir(path)),
+            Op::MakeDir(path) => self.write(Cmd::MakeDir(path)),
+            Op::RemoveDir(path) => self.write(Cmd::RemoveDir(path)),
             Op::MoveDir { from, to } => {
                 for record in self.records.values_mut() {
                     if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(&from, &to)) {
                         record.path = Some(moved);
                     }
                 }
-                self.backend.send(Cmd::Move { from, to });
+                self.write(Cmd::Move { from, to });
             }
         }
     }
@@ -848,7 +886,7 @@ impl Store {
                     ..Record::of_file(path.clone(), None)
                 },
             );
-            self.backend.send(Cmd::Save {
+            self.write(Cmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
@@ -859,36 +897,35 @@ impl Store {
         let Some(record) = self.records.get_mut(&entity.id) else {
             return true;
         };
-        if record.path.as_ref() != Some(path) && !record.missing {
-            if let Some(from) = record.path.replace(path.clone()) {
-                self.backend.send(Cmd::Move {
-                    from,
-                    to: path.clone(),
-                });
-            }
-        }
-        record.path = Some(path.clone());
-        if entity.saved.stamp == record.saved {
-            return true;
-        }
+        let missing = record.missing;
+        let from = record
+            .path
+            .replace(path.clone())
+            .filter(|from| from != path && !missing);
+        let unsaved = entity.saved.stamp != record.saved;
         // ⚠️ The file's fingerprint is known only once the save before answers, and a
         // save sent without it would be refused as a write over someone else's file.
-        if record.saving {
-            return false;
-        }
-        record.saved = entity.saved.stamp;
-        record.saving = true;
-        let expect = match record.missing {
-            true => None,
-            false => record.fingerprint,
-        };
-        self.backend.send(Cmd::Save {
-            id: entity.id,
-            path: path.clone(),
-            bytes: bytes(),
-            expect,
+        let waits = unsaved && record.saving;
+        let save = (unsaved && !record.saving).then(|| {
+            record.saved = entity.saved.stamp;
+            record.saving = true;
+            record.fingerprint.filter(|_| !missing)
         });
-        true
+        if let Some(from) = from {
+            self.write(Cmd::Move {
+                from,
+                to: path.clone(),
+            });
+        }
+        if let Some(expect) = save {
+            self.write(Cmd::Save {
+                id: entity.id,
+                path: path.clone(),
+                bytes: bytes(),
+                expect,
+            });
+        }
+        !waits
     }
 
     /// Write a working copy for an edit not yet saved, or drop the one a save made
@@ -961,12 +998,11 @@ impl Store {
             if let Some(old) = record.working.take() {
                 drops.push(working_name(id, old.generation));
             }
-            if let (Some(path), Some(expect), false) =
-                (record.path.clone(), record.fingerprint, record.missing)
-            {
-                self.backend.send(Cmd::RemoveFile { path, expect });
-            }
+            let file = (record.path.clone(), record.fingerprint, record.missing);
             self.records.remove(&id);
+            if let (Some(path), Some(expect), false) = file {
+                self.write(Cmd::RemoveFile { path, expect });
+            }
         }
     }
 
@@ -1020,6 +1056,12 @@ impl Record {
             removed: false,
         }
     }
+}
+
+/// Whether an index holds something no file in the library says: a tag, an unsaved edit,
+/// or the slot an asset came off.
+fn beyond_files(sidecar: &Sidecar) -> bool {
+    !sidecar.tags.is_empty() || sidecar.assets.values().any(Row::precious)
 }
 
 /// Flag the entries of one folder whose names are one name under [`names::key`], and
