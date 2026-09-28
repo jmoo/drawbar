@@ -930,14 +930,16 @@ impl Fs for Folder {
     /// fails to read afterwards rather than mixing old bytes with new.
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         let file = snapshot(&self.file(path).await?).await?;
-        let len = file.size() as usize;
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(len).map_err(|_| {
+        let whole = file.size() as u64;
+        let unfit = || {
             io::Error::new(
                 io::ErrorKind::OutOfMemory,
-                format!("{} does not fit in this tab's memory", size(len as u64)),
+                format!("{} does not fit in this tab's memory", size(whole)),
             )
-        })?;
+        };
+        let len = usize::try_from(whole).map_err(|_| unfit())?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(len).map_err(|_| unfit())?;
         while bytes.len() < len {
             let at = bytes.len();
             let end = len.min(at + CHUNK);
