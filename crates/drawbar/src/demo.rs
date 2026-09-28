@@ -94,22 +94,44 @@ async fn get(url: &str) -> Result<Vec<u8>, String> {
     bounded(js_sys::Uint8Array::new(&body).to_vec())
 }
 
-/// ⚠️ Through the system's `curl` rather than an HTTP crate: an HTTPS client would bring
-/// a TLS stack and its root store into the desktop build for three small files.
 #[cfg(not(target_arch = "wasm32"))]
 async fn get(url: &str) -> Result<Vec<u8>, String> {
-    let output = std::process::Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location"])
-        .args(["--proto", "=https", "--max-time", "60"])
-        .args(["--max-filesize", &crate::store::MAX_ENTITY.to_string()])
-        .arg(url)
-        .output()
-        .map_err(|e| format!("could not run curl ({e})"))?;
-    if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        return Err(said.trim().trim_start_matches("curl: ").to_string());
+    use std::time::Duration;
+    use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
+
+    // ⚠️ ureq is built without a crypto provider, so rustls has none until one is
+    // installed. Installing again once one is in place is refused, which is harmless.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let found = rustls_native_certs::load_native_certs();
+    if found.certs.is_empty() {
+        return Err(match found.errors.first() {
+            Some(why) => format!("the system's trusted certificates did not load ({why})"),
+            None => "the system trusts no certificates".to_string(),
+        });
     }
-    bounded(output.stdout)
+    let roots: Vec<Certificate<'static>> = found
+        .certs
+        .iter()
+        .map(|cert| Certificate::from_der(cert.as_ref()).to_owned())
+        .collect();
+    let tls = TlsConfig::builder()
+        .provider(TlsProvider::Rustls)
+        .root_certs(RootCerts::new_with_certs(&roots))
+        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .https_only(true)
+        .timeout_global(Some(Duration::from_secs(60)))
+        .build()
+        .into();
+    let mut response = agent.get(url).call().map_err(|e| e.to_string())?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(crate::store::MAX_ENTITY as u64 + 1)
+        .read_to_vec()
+        .map_err(|e| e.to_string())?;
+    bounded(bytes)
 }
 
 /// `bytes`, unless there are more of them than this computer keeps for one asset.
