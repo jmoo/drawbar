@@ -151,15 +151,21 @@ impl Libraries {
         self.rx.try_recv().ok()
     }
 
-    /// Put `root` first, and keep the list for the next session.
+    /// Put `root` first, and keep the list for the next session, after the folders
+    /// other tabs have kept since this one read it.
     pub fn opened(&mut self, root: &Root) {
         self.recent.retain(|held| held != root);
         self.recent.insert(0, root.clone());
         self.recent.truncate(Libraries::MOST);
-        let entries = entries(&self.recent);
+        let mut recent = self.recent.clone();
         let tx = self.tx.clone();
         crate::workspace::spawn(async move {
-            if let Err(e) = write(entries).await {
+            for kept in read().await.unwrap_or_default() {
+                if recent.len() < Libraries::MOST && !recent.contains(&kept) {
+                    recent.push(kept);
+                }
+            }
+            if let Err(e) = write(entries(&recent)).await {
                 let _ = tx.send(Heard::Trouble(format!(
                     "The list of recent libraries was not kept: {e}."
                 )));

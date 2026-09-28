@@ -118,7 +118,8 @@ always the browser's own.
 
 A second tab opens a folder read-only while the first has it open, but a
 browser tab cannot tell that the desktop app has the same folder open. Open a
-folder in one of them at a time.
+folder in one of them at a time. Two tabs that pick the same folder at the same
+moment can also both open it to write.
 
 ## Changes made outside drawbar
 
