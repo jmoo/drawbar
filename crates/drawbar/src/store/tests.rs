@@ -528,6 +528,36 @@ fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
+/// After a write fails, every working copy is written again under a new name, and the
+/// ones they replace go.
+#[test]
+fn working_copies_written_again_after_a_failure_replace_the_old_ones() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = with_gain(&session.bytes(id), "96");
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, edited, log);
+    session.sync();
+    let before = root.names(".drawbar/working");
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    fs::remove_dir_all(root.at(".drawbar/tmp")).unwrap();
+    fs::write(root.at(".drawbar/tmp"), b"not a folder").unwrap();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.sync();
+    assert_eq!(session.said("did not change as asked"), 1);
+
+    fs::remove_file(root.at(".drawbar/tmp")).unwrap();
+    fs::create_dir(root.at(".drawbar/tmp")).unwrap();
+    session.sync();
+    let after = root.names(".drawbar/working");
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_ne!(after, before, "written again under a new name");
+}
+
 #[test]
 fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
     let root = Temp::new();

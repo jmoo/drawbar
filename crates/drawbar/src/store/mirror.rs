@@ -311,10 +311,13 @@ impl Store {
                     "The library folder did not change as asked: {why}."
                 ));
                 // Whatever failed may have been the index or a working copy, so both are
-                // written again, whole, at the next full pass.
+                // written again, whole, at the next full pass, and that pass drops the
+                // copies it replaces.
                 self.committed = None;
-                for record in self.records.values_mut() {
-                    record.working = None;
+                for (id, record) in &mut self.records {
+                    if let Some(old) = record.working.take() {
+                        self.stale.push(working_name(*id, old.generation));
+                    }
                 }
                 self.rescan();
             }
