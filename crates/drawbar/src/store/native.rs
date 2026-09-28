@@ -59,9 +59,9 @@ fn xdg_music(text: &str, home: &Path) -> Option<PathBuf> {
 
 const LOCK: &str = ".drawbar/lock";
 
-/// Where [`Fs::replace`] and [`Fs::create`] write before the rename: `.drawbar/tmp/` for the index's own
-/// files, and a hidden sibling in the same folder for a library file, so the rename never
-/// crosses a volume.
+/// Where [`Fs::replace`] and [`Fs::create`] write before the rename: `.drawbar/tmp/` for
+/// the index's own files, and a hidden sibling in the same folder for a library file, so
+/// the rename never crosses a volume.
 fn temp_for(path: &str) -> String {
     let (parent, leaf) = match path.rsplit_once('/') {
         Some((parent, leaf)) => (Some(parent), leaf),
