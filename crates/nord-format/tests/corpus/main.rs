@@ -248,7 +248,7 @@ fn invariant_trials(label: &str, root: &Path, trials: &mut Vec<Trial>) {
         let Ok(entity) = nord_format::from_stream(&mut Cursor::new(&bytes)) else {
             continue;
         };
-        let kinds = invariants::kinds(&bytes, &entity);
+        let kinds = invariants::kinds(&path, &bytes, &entity);
         let name = rel(root, &path);
         for invariant in invariants::INVARIANTS
             .iter()

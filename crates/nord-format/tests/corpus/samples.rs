@@ -252,3 +252,39 @@ pub fn built_v2(
         Sample::V3(_) => Err("the narrow layout built a wide chain".into()),
     }
 }
+
+/// A v4 `map`'s per-key table, stored and as the planner would write it from the
+/// zones.
+pub struct KeyMapPlan {
+    pub kind: nsmp::zone::KeyMap,
+    pub stored: Vec<u8>,
+    pub planned: Vec<u8>,
+    pub writes: bool,
+}
+
+/// The per-key table's plan, or `None` where the `map` holds no table.
+pub fn planned_key_map(
+    sample: &nord_format::cbin::Cbin<nsmp::SampleV3>,
+) -> Result<Option<KeyMapPlan>, String> {
+    let map =
+        nsmp::section::find(&sample.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
+    let table = sample.zone_table().context("zone table")?;
+    let kind = table.key_map(&map.payload).context("per-key table")?;
+    if kind == nsmp::zone::KeyMap::Absent {
+        return Ok(None);
+    }
+    let zones = sample.zones().context("zones")?;
+    let plan = table
+        .plan_key_map(&map.payload, &zones)
+        .context("the key-map planner")?;
+    let mut planned = map.payload.clone();
+    for (at, quad) in &plan {
+        planned[*at..*at + quad.len()].copy_from_slice(quad);
+    }
+    Ok(Some(KeyMapPlan {
+        kind,
+        stored: map.payload.clone(),
+        planned,
+        writes: !plan.is_empty(),
+    }))
+}
