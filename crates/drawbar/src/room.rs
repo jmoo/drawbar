@@ -199,7 +199,10 @@ fn scaled(bytes: u64, scale: u64) -> (String, &'static str) {
     if scale < K * K {
         return (format!("{:.1}", held / K), "kB");
     }
-    (format!("{:.1}", held / (K * K)), "MB")
+    if scale < K * K * K {
+        return (format!("{:.1}", held / (K * K)), "MB");
+    }
+    (format!("{:.1}", held / (K * K * K)), "GB")
 }
 
 /// The trough, what the folder holds, and what the queue would add.
@@ -478,5 +481,14 @@ mod tests {
             Some("8.0 MB free of 192.0 MB")
         );
         assert_eq!(free_space(ObjectClass::Program, &device.state), None);
+    }
+
+    #[test]
+    fn a_size_reads_in_the_largest_unit_it_fills() {
+        assert_eq!(measure(1023), "1023 B");
+        assert_eq!(measure(1536), "1.5 kB");
+        assert_eq!(measure(5 << 20), "5.0 MB");
+        assert_eq!(measure(3 << 30), "3.0 GB");
+        assert_eq!(measure_out_of(512 << 20, 2 << 30), "0.5/2.0 GB");
     }
 }

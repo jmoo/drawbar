@@ -36,6 +36,7 @@ use web_sys::{
 use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TMP, WORKING};
 use super::{names, Cmd, Event, Failure, Stat};
 use crate::js::{describe, field};
+use crate::room::measure as size;
 
 /// Where the writer is served, beside the page. The version keeps a cached writer from
 /// an older release from answering a newer page.
@@ -124,7 +125,7 @@ struct Room {
     /// Whether the browser has promised not to evict them. `None` until it has said.
     kept: Option<bool>,
     /// Bytes the origin uses and may use, where the browser tells.
-    used: Option<(f64, f64)>,
+    used: Option<(u64, u64)>,
 }
 
 pub struct Backend {
@@ -309,7 +310,7 @@ async fn measure(room: &Rc<RefCell<Room>>) {
         return;
     };
     if let Ok(estimate) = JsFuture::from(estimate).await {
-        let get = |name| field(&estimate, name)?.as_f64();
+        let get = |name| Some(field(&estimate, name)?.as_f64()? as u64);
         if let (Some(used), Some(quota)) = (get("usage"), get("quota")) {
             room.borrow_mut().used = Some((used, quota));
         }
@@ -327,16 +328,6 @@ fn ask_to_keep(room: Rc<RefCell<Room>>) {
             room.borrow_mut().kept = kept.as_bool();
         }
     });
-}
-
-/// `bytes` in the largest unit that keeps it above one.
-fn size(bytes: f64) -> String {
-    const K: f64 = 1024.0;
-    match bytes {
-        b if b < K * K => format!("{:.0} kB", b / K),
-        b if b < K * K * K => format!("{:.1} MB", b / (K * K)),
-        b => format!("{:.1} GB", b / (K * K * K)),
-    }
 }
 
 /// An error from the browser, as the kind of I/O error it is.
@@ -944,7 +935,7 @@ impl Fs for Folder {
         bytes.try_reserve_exact(len).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::OutOfMemory,
-                format!("{} does not fit in this tab's memory", size(len as f64)),
+                format!("{} does not fit in this tab's memory", size(len as u64)),
             )
         })?;
         while bytes.len() < len {
