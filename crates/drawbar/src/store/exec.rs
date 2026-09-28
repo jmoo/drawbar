@@ -200,6 +200,27 @@ async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
     // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
     // its `.drawbar/` as that drawbar left it.
     let (sidecar, mut writable) = index(fs).await;
+    let named: BTreeMap<String, u64> = sidecar
+        .assets
+        .iter()
+        .filter_map(|(id, row)| Some((working_name(*id, row.working?), *id)))
+        .collect();
+    let mut working = BTreeMap::new();
+    for (name, id) in &named {
+        match fs.read(&format!("{WORKING}/{name}")).await {
+            Ok(bytes) => {
+                working.insert(*id, bytes);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            // ⚠️ A write would drop the edit the copy holds, and it may read next time.
+            Err(e) => {
+                writable = writable.and(Err(format!(
+                    "an unsaved edit drawbar kept could not be read ({e}), so drawbar leaves \
+                     the library as it is until it is opened again"
+                )));
+            }
+        }
+    }
     if writable.is_ok() {
         writable = match indexed {
             // drawbar has written here before, so it takes the lock now and a second
@@ -236,17 +257,6 @@ async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
             if fs.remove_file(&temp).await.is_ok() {
                 swept += 1;
             }
-        }
-    }
-    let named: BTreeMap<String, u64> = sidecar
-        .assets
-        .iter()
-        .filter_map(|(id, row)| Some((working_name(*id, row.working?), *id)))
-        .collect();
-    let mut working = BTreeMap::new();
-    for (name, id) in &named {
-        if let Ok(bytes) = fs.read(&format!("{WORKING}/{name}")).await {
-            working.insert(*id, bytes);
         }
     }
     if sweeps {

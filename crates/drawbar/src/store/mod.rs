@@ -283,8 +283,8 @@ pub struct Opened {
     /// read.
     pub sidecar: Sidecar,
     pub listing: Listing,
-    /// The working copies the index names, by asset id. One that did not read is left
-    /// out.
+    /// The working copies the index names, by asset id. One that is not there is left
+    /// out, and one that did not read leaves the library read-only.
     pub working: std::collections::BTreeMap<u64, Vec<u8>>,
     /// How many leftovers of interrupted writes were removed.
     pub swept: usize,

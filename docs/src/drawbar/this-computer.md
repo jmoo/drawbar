@@ -98,9 +98,9 @@ come off the send queue. A read-only library cannot keep what is unsaved in it,
 so leaving one asks before discarding that.
 
 drawbar changes nothing in a folder you open until you change something there,
-and only then makes its `.drawbar` folder. A folder drawbar cannot write, or one
-another drawbar already has open, opens read-only; hover its name for the
-reason. Two files whose names differ only in case both show, marked, and drawbar
+and only then makes its `.drawbar` folder. A folder drawbar cannot write, one
+another drawbar already has open, or one whose unsaved edits drawbar cannot read
+back, opens read-only; hover its name for the reason. Two files whose names differ only in case both show, marked, and drawbar
 renames neither.
 
 In Chrome and Edge, the browser asks whether drawbar may change the folder you
