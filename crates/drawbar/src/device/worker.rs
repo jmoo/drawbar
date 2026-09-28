@@ -343,7 +343,6 @@ async fn put<T: Transport>(
         )));
         match op::delete(s, at).await {
             Ok(()) => {}
-            // A status means the instrument declined before the delete landed.
             Err(e @ Error::DeviceStatus(_)) => {
                 return Ok(Err(format!(
                     "deleting {}: {}",
@@ -351,8 +350,8 @@ async fn put<T: Transport>(
                     spoil(gone, Some(at))(e)
                 )));
             }
-            // ⚠️ Any other failure may have come after the delete, and the backup is then
-            // the only copy of the slot's contents.
+            // ⚠️ A failure other than a status may have come after the delete landed, and
+            // the backup is then the only copy of the slot's contents.
             Err(e) => {
                 let why = spoil(gone, Some(at))(e);
                 emit.send(DeviceEvent::Rescued {
