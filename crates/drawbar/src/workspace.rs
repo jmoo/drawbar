@@ -125,31 +125,28 @@ pub struct Container {
 impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
-        let start = usize::try_from(info.header.generation.body_start()).ok()?;
-        let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
-        let body = start..end;
+        let body = body_of(&info)?;
         let body_crc32 = nord_usb::envelope::crc32(bytes.get(body.clone())?);
-        // `Header` omits the generation-specific checksum field, so the stored value is
-        // read here for display.
+        Some(Container::of(info, body, body_crc32))
+    }
+
+    fn of(
+        info: nord_format::cbin::Info,
+        body: std::ops::Range<usize>,
+        body_crc32: u32,
+    ) -> Container {
         let (checksum_label, checksum) = match info.header.generation {
-            Generation::V0 => {
-                let tail = bytes.get(bytes.len().checked_sub(2)?..)?;
-                let crc = u16::from_le_bytes(tail.try_into().ok()?);
-                ("crc16:", format!("{crc:#06x}"))
-            }
-            Generation::V1 => {
-                let crc = u32::from_le_bytes(bytes.get(0x18..0x1c)?.try_into().ok()?);
-                ("crc32:", format!("{crc:#010x}"))
-            }
+            Generation::V0 => ("crc16:", format!("{:#06x}", info.stored_checksum)),
+            Generation::V1 => ("crc32:", format!("{:#010x}", info.stored_checksum)),
         };
-        Some(Container {
+        Container {
             header: info.header,
             body,
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
             body_crc32,
-        })
+        }
     }
 
     pub fn tag(&self) -> String {
@@ -160,6 +157,13 @@ impl Container {
     pub fn body_len(&self) -> u64 {
         self.body.len() as u64
     }
+}
+
+/// Where the body sits in a file `inspect` read.
+fn body_of(info: &nord_format::cbin::Info) -> Option<std::ops::Range<usize>> {
+    let start = usize::try_from(info.header.generation.body_start()).ok()?;
+    let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
+    Some(start..end)
 }
 
 /// What an asset was last saved as: the bytes, and the checksum a slot holding them
