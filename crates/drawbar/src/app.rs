@@ -176,6 +176,9 @@ pub struct DrawbarApp {
     pub(crate) splash: crate::splash::Splash,
     /// The About box while it is showing. Not kept between sessions.
     pub(crate) about: Option<crate::about::About>,
+    /// The report sheet while it is showing. Not kept between sessions.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) report: Option<crate::report::Report>,
     /// Where this build runs, and who draws the window's frame on this run.
     pub(crate) platform: Platform,
     pub(crate) chrome: crate::platform::Frame,
@@ -284,6 +287,8 @@ impl DrawbarApp {
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
+            #[cfg(target_arch = "wasm32")]
+            report: None,
             platform: Platform::current(),
             chrome: crate::platform::Frame::of(Platform::current()),
             #[cfg(target_os = "macos")]
@@ -822,6 +827,8 @@ impl eframe::App for DrawbarApp {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.room = Room::of(ctx);
+        #[cfg(target_arch = "wasm32")]
+        crate::telemetry::visit(!crate::shell::too_small(ctx.screen_rect().size()));
         if crate::shell::too_small(ctx.screen_rect().size()) {
             self.gated(ctx, frame);
             return;
@@ -897,6 +904,8 @@ impl eframe::App for DrawbarApp {
         }
         let asked = self.splash.show(ctx, self.device.usb());
         crate::about::dialog(ctx, &mut self.about, &self.log);
+        #[cfg(target_arch = "wasm32")]
+        crate::report::dialog(ctx, &mut self.report, &self.log);
 
         // Before the panels, so an editor open this frame still has focus when Escape is
         // handled. An overlay takes Escape for itself: the activity log, the zoom popover,

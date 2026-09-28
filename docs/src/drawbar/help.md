@@ -12,6 +12,15 @@ the trademark disclaimer. In the browser it opens by itself the first time you
 run drawbar there. [What is supported](../getting-started/support.md) covers the
 same claims in more detail.
 
+**Help ▸ Report a problem** and **Help ▸ Send feedback** open a form that
+sends what you write straight to drawbar's developer, in the browser only. You
+choose what to attach, and the form shows exactly what will be sent. Leave an email
+address if you would like a reply.
+
+**Help ▸ Share anonymous usage** is checked while the browser version sends
+anonymous counts of visits, errors and instrument operations. Uncheck it to stop
+them. **Help ▸ Privacy** opens [Privacy](../privacy.md), which lists every field.
+
 **Help ▸ Copy activity log** puts the whole log on the clipboard, for a bug
 report. The [activity log](overview.md#the-activity-log) has the same button.
 

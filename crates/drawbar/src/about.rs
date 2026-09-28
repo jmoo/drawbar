@@ -18,7 +18,7 @@ use crate::workspace::Workspace;
 mod agent;
 mod crates;
 #[cfg(target_arch = "wasm32")]
-mod web;
+pub(crate) mod web;
 
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
@@ -176,7 +176,7 @@ const CHEVRON: f32 = 12.0;
 const SAID: f64 = 1.6;
 
 /// The most log entries [`diagnostics`] includes.
-const ENTRIES: usize = 200;
+pub(crate) const ENTRIES: usize = 200;
 
 /// The release page of a version.
 pub fn release_page(version: &str) -> String {
@@ -205,7 +205,24 @@ struct Build {
     lines: Vec<Line>,
 }
 
+/// The build lines as Copy diagnostics writes them, one per line.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn build_lines(device: &Device, workspace: &Workspace, store: Option<&Store>) -> String {
+    Build::new(device, workspace, store).written()
+}
+
 impl Build {
+    fn written(&self) -> String {
+        let mut out = String::new();
+        for line in &self.lines {
+            match line.note.is_empty() {
+                true => out.push_str(&format!("{}: {}\n", line.key, line.value)),
+                false => out.push_str(&format!("{}: {} ({})\n", line.key, line.value, line.note)),
+            }
+        }
+        out
+    }
+
     fn new(device: &Device, workspace: &Workspace, store: Option<&Store>) -> Build {
         let mut lines = vec![Line::new("Version", sheet::VERSION, "alpha"), target()];
         #[cfg(target_arch = "wasm32")]
@@ -259,13 +276,7 @@ fn files(workspace: &Workspace, store: Option<&Store>) -> Line {
 /// What Copy diagnostics puts on the clipboard: what this build is, then the tail of the
 /// activity log.
 fn diagnostics(build: &Build, log: &Log) -> String {
-    let mut out = String::new();
-    for line in &build.lines {
-        match line.note.is_empty() {
-            true => out.push_str(&format!("{}: {}\n", line.key, line.value)),
-            false => out.push_str(&format!("{}: {} ({})\n", line.key, line.value, line.note)),
-        }
-    }
+    let mut out = build.written();
     out.push('\n');
     out.push_str(&log.tail(ENTRIES));
     out

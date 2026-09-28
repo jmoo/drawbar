@@ -1,0 +1,25 @@
+# The collector behind drawbar.app's anonymous reports. See README.md.
+name = "drawbar-telemetry"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+routes = [{ pattern = "t.drawbar.app", custom_domain = true }]
+workers_dev = false
+
+[[analytics_engine_datasets]]
+binding = "EVENTS"
+dataset = "drawbar_events"
+
+[[d1_databases]]
+binding = "REPORTS"
+database_id = "9debad17-45a3-4b01-9852-cdf663c81476"
+database_name = "drawbar-reports"
+migrations_dir = "migrations"
+
+# No request is ever logged: a log line would keep the address the privacy page says is
+# never stored.
+[observability]
+enabled = false
+
+# Deletes reports older than three months.
+[triggers]
+crons = ["17 4 * * *"]

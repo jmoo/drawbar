@@ -1,0 +1,54 @@
+{
+  "visit": {
+    "fields": {
+      "version": "text",
+      "navigation": "text",
+      "first_day": "flag",
+      "first_month": "flag",
+      "webusb": "flag",
+      "fits": "flag",
+      "referrer": "text",
+      "language": "text"
+    },
+    "edge": ["browser", "os", "country"]
+  },
+  "start_failed": {
+    "fields": {
+      "version": "text",
+      "step": "text",
+      "error": "text"
+    },
+    "edge": ["browser", "os"]
+  },
+  "panic": {
+    "fields": {
+      "version": "text",
+      "location": "text",
+      "model": "text",
+      "firmware": "text"
+    },
+    "edge": ["browser", "os"]
+  },
+  "error": {
+    "fields": {
+      "version": "text",
+      "domain": "text",
+      "kind": "text",
+      "model": "text",
+      "firmware": "text"
+    },
+    "edge": ["browser", "os"]
+  },
+  "op": {
+    "fields": {
+      "version": "text",
+      "op": "text",
+      "class": "text",
+      "outcome": "text",
+      "took": "text",
+      "model": "text",
+      "firmware": "text"
+    },
+    "edge": ["browser", "os"]
+  }
+}

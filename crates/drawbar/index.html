@@ -543,8 +543,30 @@
       const foot = document.getElementById("foot");
       const version = document.getElementById("version");
 
-      if (version.textContent.startsWith("@")) {
+      const built = version.textContent.startsWith("@") ? "" : version.textContent;
+      if (!built) {
         version.remove();
+      }
+
+      /* The one row this page sends, under the app's rules: only from drawbar.app, never
+         under Do Not Track or Global Privacy Control, never once sharing is off. */
+      function beacon(step, error) {
+        let off = true;
+        try {
+          off = localStorage.getItem("drawbar.telemetry") === "off";
+        } catch {}
+        const refused =
+          navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true;
+        if (location.origin !== "https://drawbar.app" || refused || off) {
+          return;
+        }
+        const row = {
+          event: "start_failed",
+          version: built,
+          step: step,
+          error: error.name || "Error",
+        };
+        navigator.sendBeacon("https://t.drawbar.app/e", JSON.stringify([row]));
       }
 
       const bars = FOOTAGE.map((footage, i) => {
@@ -634,7 +656,9 @@
         await start(document.getElementById("drawbar"));
         splash.remove();
       } catch (e) {
-        fail(e instanceof WebAssembly.CompileError ? "start" : step, e);
+        const failed = e instanceof WebAssembly.CompileError ? "start" : step;
+        fail(failed, e);
+        beacon(failed, e);
         throw e;
       }
     </script>
