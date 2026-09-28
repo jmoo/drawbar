@@ -261,8 +261,8 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
-    /// The Advanced table's filter, selected cell, and last byte diff. One table serves
-    /// every tab; see [`Advanced::leave`].
+    /// The Advanced table's filter and selected cell. One table serves every tab; see
+    /// [`Advanced::leave`].
     advanced: Advanced,
     /// Decoded audio for zones shown in open rows, dropped when their strokes change.
     audio: sample::Cache,
@@ -437,7 +437,7 @@ impl Document {
                         // then the body, which is the longest and so goes last.
                         Face::Advanced => {
                             self.states(ui, asset, doc.as_ref());
-                            details = self.advanced.meta(ui, entity, device);
+                            details = Advanced::meta(ui, entity, device);
                             typed = self.deep(
                                 ui,
                                 asset,
@@ -1890,7 +1890,7 @@ mod tests {
         let placed = open.painted(Vec::new());
         let top = |word: &str| testing::where_(&placed, word).top();
 
-        let order = ["About this file", "Container", "Changes", "Every field"];
+        let order = ["About this file", "Container", "Every field"];
         for pair in order.windows(2) {
             assert!(
                 top(pair[0]) < top(pair[1]),
@@ -2019,7 +2019,7 @@ mod tests {
     }
 
     /// The Advanced face paints for a program with an edit and for a settings file
-    /// without one, including the container grid, the byte diff, and the folded dump.
+    /// without one, including the container grid and the folded dump.
     #[test]
     fn the_advanced_face_paints() {
         render_view(
@@ -2742,12 +2742,7 @@ mod tests {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
-        for section in ["Container", "Changes"] {
-            assert!(
-                said.iter().any(|word| word == section),
-                "{section}: {said:?}"
-            );
-        }
+        assert!(said.iter().any(|word| word == "Container"), "{said:?}");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The Advanced face: the field table and the record beside it.
 //!
-//! The table is the only control here. The record lists what the container says, which
-//! bytes changed, and, for something read from the instrument, what the instrument says
-//! about the slot it came from.
+//! The table is the only control here. The record lists what the container says and, for
+//! something read from the instrument, what the instrument says about the slot it came
+//! from.
 
 use eframe::egui;
 use nord_format::fields::Field;
@@ -12,7 +12,6 @@ use super::controls::{self, Sets};
 use super::field;
 use crate::app;
 use crate::device::{Device, DeviceCmd};
-use crate::fields::{byte_diff, DiffRow};
 use crate::icon::{icon, Glyph};
 use crate::strings;
 use crate::workspace::LocalEntity;
@@ -46,9 +45,6 @@ const HEAD_ROW: f32 = 14.0;
 /// The horizontal inset a `TextEdit` gives its text.
 const BOX_PAD: f32 = 4.0;
 
-/// How much of the page the byte diff takes before it scrolls inside itself.
-const DIFF_HEIGHT: f32 = 220.0;
-
 /// A cell being typed into, and what the library said about it last.
 #[derive(Default)]
 struct Cell {
@@ -65,13 +61,6 @@ pub struct Advanced {
     /// Narrows the table by path or label.
     filter: String,
     cell: Cell,
-    /// The asset id and the two byte stamps the cached diff compares.
-    ///
-    /// ⚠️ `byte_diff` walks both bodies. The Advanced face asks for it every frame it is
-    /// shown, and a piano library is hundreds of megabytes, so it is walked once per pair
-    /// of bodies.
-    diff_for: Option<(u64, u64, u64)>,
-    diff: Vec<DiffRow>,
 }
 
 impl Advanced {
@@ -100,23 +89,12 @@ impl Advanced {
             .iter()
             .filter(|field| self.matches(field))
             .collect();
-        let unseen = rows
-            .iter()
-            .filter(|field| !table.shows(&field.path))
-            .count();
         controls::heading(
             ui,
             "Every field",
-            "registry order · Raw is what was read; type in Writes to change it. A value is \
-             taken as spelled and refused if the field cannot hold it",
-            Some((
-                &format!(
-                    "{} of {} rows · {unseen} hidden from Basic",
-                    rows.len(),
-                    table.fields.len()
-                ),
-                quiet,
-            )),
+            "registry order · Raw is the value as last saved; type in Writes to change it. A \
+             value is taken as spelled and refused if the field cannot hold it",
+            Some((&table.count(&rows), quiet)),
         );
         ui.horizontal(|ui| {
             ui.add_space(PAD);
@@ -197,21 +175,7 @@ impl Advanced {
         if !response.hovered() {
             return;
         }
-        let accepts = match (field.spec.legal)() {
-            legal if legal.is_empty() => "its stored bits, as spelled".to_string(),
-            legal if legal.len() > 12 => format!("{} .. {}", legal[0], legal[legal.len() - 1]),
-            legal => legal.join(", "),
-        };
-        response.on_hover_text(format!(
-            "{} · accepts {accepts}",
-            match (hidden, labeled) {
-                (true, _) => "not relevant: the instrument ignores this in the state the file \
-                              holds, though it is stored, valid and writable"
-                    .to_string(),
-                (false, true) => strings::label(&field.path),
-                (false, false) => "no label in this app's table yet".to_string(),
-            }
-        ));
+        response.on_hover_text(hover(field, table, hidden, labeled));
     }
 
     /// The editable column. Clicking a value opens a box, which commits when it loses
@@ -338,15 +302,9 @@ impl Advanced {
         }
     }
 
-    /// The record, block by block: what the container states, which bytes have moved since
-    /// the asset was last saved, and what the instrument says about the slot it came off.
-    /// Each block is laid out like [`Advanced::about`].
-    pub fn meta(
-        &mut self,
-        ui: &mut egui::Ui,
-        entity: &LocalEntity,
-        device: &Device,
-    ) -> Option<SlotDetails> {
+    /// The record, block by block: what the container states and what the instrument says
+    /// about the slot it came off. Each block is laid out like [`Advanced::about`].
+    pub fn meta(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<SlotDetails> {
         controls::heading(
             ui,
             "Container",
@@ -355,20 +313,6 @@ impl Advanced {
         );
         verify(ui, entity);
         facts(ui, &container(entity));
-
-        let quiet = app::caption(ui.visuals());
-        let rows = self.changes(entity);
-        let moved = match rows.len() {
-            0 => "none".to_string(),
-            n => format!("{n} bytes"),
-        };
-        controls::heading(
-            ui,
-            "Changes",
-            "the bytes that have moved since this was last saved",
-            Some((&moved, quiet)),
-        );
-        diff(ui, entity, rows);
 
         let mut asked = None;
         if entity.origin.slot().is_some() {
@@ -381,16 +325,6 @@ impl Advanced {
             asked = slot(ui, entity, device);
         }
         asked
-    }
-
-    /// The bytes that moved since the asset was last saved.
-    fn changes(&mut self, entity: &LocalEntity) -> &[DiffRow] {
-        let against = (entity.id, entity.stamp, entity.saved.stamp);
-        if self.diff_for != Some(against) {
-            self.diff = byte_diff(&entity.saved.bytes, &entity.bytes);
-            self.diff_for = Some(against);
-        }
-        &self.diff
     }
 }
 
@@ -418,6 +352,46 @@ impl Table<'_> {
     fn shows(&self, path: &str) -> bool {
         self.doc.is_none_or(|doc| doc.shows(path))
     }
+
+    /// The count beside the heading, over the rows the filter keeps.
+    fn count(&self, rows: &[&Field]) -> String {
+        let hidden = rows.iter().filter(|field| !self.shows(&field.path)).count();
+        let changed = rows
+            .iter()
+            .filter(|field| self.changed.contains(&field.path))
+            .count();
+        let count = format!(
+            "{} of {} rows · {hidden} hidden from Basic",
+            rows.len(),
+            self.fields.len()
+        );
+        match changed {
+            0 => count,
+            n => format!("{count} · {n} changed"),
+        }
+    }
+}
+
+/// What a row says under the pointer: what the field is, the value it was saved as when
+/// Writes holds another, and what Writes accepts.
+fn hover(field: &Field, table: &Table<'_>, hidden: bool, labeled: bool) -> String {
+    let what = match (hidden, labeled) {
+        (true, _) => "not relevant: the instrument ignores this in the state the file holds, \
+                      though it is stored, valid and writable"
+            .to_string(),
+        (false, true) => strings::label(&field.path),
+        (false, false) => "no label in this app's table yet".to_string(),
+    };
+    let saved = match table.changed.contains(&field.path) {
+        true => format!(" · changed, saved as {}", table.raw(&field.path)),
+        false => String::new(),
+    };
+    let accepts = match (field.spec.legal)() {
+        legal if legal.is_empty() => "its stored bits, as spelled".to_string(),
+        legal if legal.len() > 12 => format!("{} .. {}", legal[0], legal[legal.len() - 1]),
+        legal => legal.join(", "),
+    };
+    format!("{what}{saved} · accepts {accepts}")
 }
 
 /// One cell, drawn at its column's width and left-aligned under its heading.
@@ -600,36 +574,6 @@ fn counted(half: u16) -> String {
     }
 }
 
-fn diff(ui: &mut egui::Ui, entity: &LocalEntity, rows: &[DiffRow]) {
-    if rows.is_empty() {
-        ui.label(
-            egui::RichText::new(match entity.saved.bytes.len() == entity.bytes.len() {
-                true => "nothing moved",
-                false => "the length changed, so there is nothing to line up",
-            })
-            .weak()
-            .small(),
-        );
-        return;
-    }
-    // ⚠️ A re-laid body moves thousands of bytes; only the rows on screen are drawn.
-    egui::ScrollArea::vertical()
-        .id_salt("bytediff")
-        .max_height(DIFF_HEIGHT)
-        .auto_shrink([false, true])
-        .show_rows(ui, ROW, rows.len(), |ui, range| {
-            for row in &rows[range] {
-                fact(
-                    ui,
-                    &format!("byte {:#06x}", row.at),
-                    &format!("{:#04x} → {:#04x}", row.before, row.after),
-                    row.note.trim(),
-                    ui.visuals().text_color(),
-                );
-            }
-        });
-}
-
 /// What the instrument says about the slot this came off.
 fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<SlotDetails> {
     let (class, at) = entity.origin.slot()?;
@@ -706,45 +650,60 @@ pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{Fresh, Workspace};
+    use crate::workspace::Fresh;
 
-    /// The Changes section compares the asset with its last save: an edit adds rows, and
-    /// saving clears them.
     #[test]
-    fn the_changes_rows_follow_the_bytes_and_the_baseline() {
-        let ctx = eframe::egui::Context::default();
-        let mut workspace = Workspace::new(ctx);
-        let mut log = crate::log::Log::default();
-        let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
-        let mut advanced = Advanced::default();
-        assert!(
-            advanced
-                .changes(workspace.get(id).expect("it is open"))
-                .is_empty(),
-            "nothing has moved yet"
-        );
-
-        let bytes = workspace.get(id).expect("it is open").bytes.clone();
-        let (_, edited) = crate::fields::apply(
+    fn a_changed_row_says_what_it_was_saved_as() {
+        let bytes = Fresh::Program.bytes().expect("a fresh program");
+        let (saved, _) = crate::fields::apply(&bytes, &[]).expect("a blank body reads");
+        let (fields, edited) = crate::fields::apply(
             &bytes,
             &[("center_panel.gain".to_string(), "96".to_string())],
         )
         .expect("the set is legal");
-        workspace.replace_bytes(id, edited, &mut log);
-        assert!(
-            !advanced
-                .changes(workspace.get(id).expect("it is open"))
-                .is_empty(),
-            "the edit is in the section"
-        );
+        let changed = crate::fields::changed(&bytes, &edited);
+        let table = Table {
+            fields: &fields,
+            saved: &saved,
+            changed: &changed,
+            doc: None,
+        };
+        let field = |path: &str| {
+            fields
+                .iter()
+                .find(|field| field.path == path)
+                .unwrap_or_else(|| panic!("{path} is declared"))
+        };
+        let was = table.raw("center_panel.gain");
+        assert_ne!(was, "96", "Raw holds the saved value");
 
-        workspace.mark_saved(id);
-        assert!(
-            advanced
-                .changes(workspace.get(id).expect("it is open"))
-                .is_empty(),
-            "the baseline moved onto the bytes"
-        );
+        let gain = hover(field("center_panel.gain"), &table, false, true);
+        assert!(gain.contains(&format!("saved as {was}")), "{gain}");
+        let split = hover(field("center_panel.split"), &table, false, true);
+        assert!(!split.contains("saved as"), "{split}");
+    }
+
+    #[test]
+    fn the_table_counts_its_changed_rows_only_when_there_are_some() {
+        let bytes = Fresh::Program.bytes().expect("a fresh program");
+        let (fields, edited) = crate::fields::apply(
+            &bytes,
+            &[("center_panel.gain".to_string(), "96".to_string())],
+        )
+        .expect("the set is legal");
+        let changed = crate::fields::changed(&bytes, &edited);
+        let rows: Vec<&Field> = fields.iter().collect();
+        let table = |changed| Table {
+            fields: &fields,
+            saved: &fields,
+            changed,
+            doc: None,
+        };
+
+        let edited = table(&changed).count(&rows);
+        assert!(edited.ends_with("· 1 changed"), "{edited}");
+        let untouched = table(&[]).count(&rows);
+        assert!(!untouched.contains("changed"), "{untouched}");
     }
 
     #[test]

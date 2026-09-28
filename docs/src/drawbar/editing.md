@@ -28,16 +28,17 @@ instrument holds there, so edits you have not sent are not heard.
     files with nothing to edit and bytes drawbar could not read have none.
   - **Container**: what the file's header states, and whether its checksum
     matches.
-  - **Changes**: the bytes that have moved since the file was last saved.
   - **On the instrument**, for a document read from a slot: what the
     instrument reports about that slot.
   - The body. For a program, live slot, settings file or preset this is
     **Every field**, a table that includes values the Basic face does not draw.
-    Type into the **Writes** column to set a field. A value the field cannot
-    hold is refused, with the reason. Samples and pianos list what drawbar can
-    edit in them and where each edit lands in the file. A set list shows its
-    four stored slots, and a file with nothing to edit shows its **Body bytes**.
-    A WAV and bytes drawbar could not read have no body to show.
+    **Raw** is the value as last saved. Type into the **Writes** column to set a
+    field. A value the field cannot hold is refused, with the reason. A field
+    changed since the last save is highlighted and marked with a pencil, and the
+    count above the table says how many there are. Samples and pianos list what
+    drawbar can edit in them and where each edit lands in the file. A set list
+    shows its four stored slots, and a file with nothing to edit shows its
+    **Body bytes**. A WAV and bytes drawbar could not read have no body to show.
 
 ## Programs, live slots, settings and presets
 
