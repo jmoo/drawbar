@@ -943,6 +943,7 @@ dependencies = [
  "rfd",
  "rodio",
  "ron",
+ "rustix 1.1.4",
  "serde",
  "url",
  "wasm-bindgen",

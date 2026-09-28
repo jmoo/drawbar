@@ -12,6 +12,31 @@ use nord_format::cbin::{self, Header};
 use nord_format::crc::Crc32Stream;
 use nord_format::formats::{npno, nsmp};
 
+/// Raise the soft limit on open files as far as the system lets this process, since each
+/// piano or sample instrument left in its file holds one open, and macOS starts a process
+/// at 256. Where the system refuses, the limit stays as it was.
+#[cfg(unix)]
+pub fn raise_open_files() {
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+
+    // macOS refuses a soft limit past `OPEN_MAX`, whatever the hard limit; Linux one past
+    // `fs.nr_open`, whose default this is.
+    const CEILING: u64 = match cfg!(target_os = "macos") {
+        true => 10_240,
+        false => 1 << 20,
+    };
+    let limit = getrlimit(Resource::Nofile);
+    let wanted = limit.maximum.unwrap_or(u64::MAX).min(CEILING);
+    if limit.current.is_none_or(|current| current >= wanted) {
+        return;
+    }
+    let raised = Rlimit {
+        current: Some(wanted),
+        maximum: limit.maximum,
+    };
+    let _ = setrlimit(Resource::Nofile, raised);
+}
+
 /// Where each stroke or zone's audio sits in the file.
 #[derive(Debug)]
 pub enum Index {
@@ -214,4 +239,20 @@ fn read_at(file: &File, buf: &mut [u8], at: u64) -> io::Result<usize> {
 #[cfg(not(any(unix, windows)))]
 fn read_at(_: &File, _: &mut [u8], _: u64) -> io::Result<usize> {
     Err(io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn the_open_file_limit_is_raised_as_far_as_the_system_allows() {
+        use rustix::process::{getrlimit, Resource};
+
+        super::raise_open_files();
+        let limit = getrlimit(Resource::Nofile);
+        let least = limit.maximum.unwrap_or(u64::MAX).min(10_240);
+        assert!(
+            limit.current.is_none_or(|current| current >= least),
+            "{limit:?}"
+        );
+    }
 }
