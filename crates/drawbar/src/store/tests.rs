@@ -866,3 +866,47 @@ fn a_file_past_the_most_drawbar_reads_is_shown_unread() {
         "its name is still taken"
     );
 }
+
+/// An id this session has given out already, here to views read before the library
+/// opened, is not given to an asset of the library. The asset takes a new one, and its
+/// unsaved edit moves to a working copy under it.
+#[test]
+fn an_asset_under_an_id_already_given_out_takes_a_new_one_with_its_edit() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+
+    let mut bench = Bench::new();
+    for _ in 0..3 {
+        let Bench { workspace, log, .. } = &mut bench;
+        workspace.view("seen".into(), Origin::Fresh, b"a view".to_vec(), log);
+    }
+    let floor = bench.workspace.next_id();
+    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let mut second = Session { store, bench };
+    assert!(second.next(), "opening answered");
+    let back = second
+        .bench
+        .workspace
+        .listed()
+        .next()
+        .expect("the asset")
+        .id;
+    assert!(back >= floor, "{back} is new");
+    assert_eq!(second.bytes(back), edited);
+    second.sync();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 1, "{working:?}");
+    assert!(working[0].starts_with(&format!("{back}-")), "{working:?}");
+    second.close();
+
+    let third = Session::open(&root);
+    let entity = third.bench.workspace.get(back).expect("under its new id");
+    assert_eq!(entity.bytes, edited);
+    assert!(entity.is_unsaved());
+}

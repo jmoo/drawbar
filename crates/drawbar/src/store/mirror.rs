@@ -392,10 +392,11 @@ impl Store {
         self.next_generation = sidecar.next_generation.max(1);
         let Sidecar { tags, assets, .. } = sidecar;
 
-        // An asset made while the library was opening already has an id, and a row
-        // under the same id is given the next free one.
-        let mut next = workspace
-            .next_id()
+        // A row under an id this session has already given out, to an asset made while
+        // the library was opening or one of a library open before, takes the next free
+        // one, so nothing still naming that id reaches this asset.
+        let floor = workspace.next_id();
+        let mut next = floor
             .max(sidecar.next_id)
             .max(assets.keys().max().map_or(0, |id| id.saturating_add(1)));
         let mut fresh = || {
@@ -404,18 +405,21 @@ impl Store {
             id
         };
         let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
+        // The new id of each asset that moved with a working copy, and that copy's file.
+        let mut renamed = Vec::new();
         for (id, row) in assets {
-            let id = match workspace.get(id) {
-                Some(_) => {
-                    let moved = fresh();
-                    if let Some(bytes) = working.remove(&id) {
-                        working.insert(moved, bytes);
-                    }
-                    moved
-                }
-                None => id,
-            };
-            rows.insert(id, row);
+            if id >= floor {
+                rows.insert(id, row);
+                continue;
+            }
+            let moved = fresh();
+            if let Some(bytes) = working.remove(&id) {
+                working.insert(moved, bytes);
+            }
+            if let Some(generation) = row.working {
+                renamed.push((moved, working_name(id, generation)));
+            }
+            rows.insert(moved, row);
         }
 
         let known = rows
@@ -521,6 +525,14 @@ impl Store {
             record.path = None;
             record.working = Some(Working { generation, stamp });
             self.records.insert(id, record);
+        }
+        // A working copy is named by its asset's id, so one whose asset moved is written
+        // again under the new id, and the old one dropped, at the next full pass.
+        for (id, old) in renamed {
+            if let Some(record) = self.records.get_mut(&id) {
+                record.working = None;
+            }
+            self.stale.push(old);
         }
         browser.tags.restore(
             tags,
