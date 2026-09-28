@@ -911,9 +911,12 @@ impl Fs for Folder {
                         }
                         Kind::Dir
                     }
-                    _ if exec::opens(&name) => {
-                        Kind::File(stat(&snapshot(handle.unchecked_ref()).await?))
-                    }
+                    _ if exec::opens(&name) => match snapshot(handle.unchecked_ref()).await {
+                        Ok(file) => Kind::File(stat(&file)),
+                        // Left out, not the library: a file drawbar holds is looked at
+                        // again, and listed unread when that fails too.
+                        Err(_) => continue,
+                    },
                     _ => Kind::Other,
                 };
                 into.push(Entry { path, kind });
