@@ -54,11 +54,14 @@ read, shows **not all listed**, and a file it did not read is marked **not
 read**.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so on the
-desktop they stay in their files: drawbar reads only the part it shows or plays,
-and reads a sample whole when you open it. Each one's checksum is checked in the
-background when the library opens. Its row says **checking…** until that is done,
-and **failed verification** if the file does not match its checksum. Such a file
-is not sent. What stays in its file does not count toward the 1 GiB.
+desktop they stay in their files: drawbar holds in memory only the part it shows
+or plays, and reads a sample whole when you open it. Each time the library
+opens, each one's checksum is checked in the background. Its row says
+**checking…** until that is done, and **failed verification** if the file does
+not match its checksum. Such a file is not sent. One drawbar has not seen
+before, or one changed since it last looked, is also read through once as the
+library opens, so that drawbar knows it again if it is moved. What stays in its
+file does not count toward the 1 GiB.
 
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.
@@ -101,8 +104,8 @@ drawbar changes nothing in a folder you open until you change something there,
 and only then makes its `.drawbar` folder. A library another drawbar already has
 open, or one whose unsaved edits drawbar cannot read back, opens read-only. A
 folder drawbar cannot write turns read-only when drawbar first tries to change
-it. Hover its name for the reason. Two files whose names differ only in case both show, marked, and drawbar
-renames neither.
+it. Hover its name for the reason. Two files whose names differ only in case
+both show, marked, and drawbar renames neither.
 
 In Chrome and Edge, the browser asks whether drawbar may change the folder you
 pick. It forgets that answer when you close drawbar.app, unless you told it to
