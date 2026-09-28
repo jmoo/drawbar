@@ -18,6 +18,25 @@ what was set.
 - `demo/`: instruments small enough for drawbar to ship as a demo: a looped pad
   as v2 and v4 sample instruments from `nord sample encode`, and a three-root tine
   piano library from `nord piano build`, all from synthesized WAVs.
+- `nsmp/`: a mono triangle wave encoded by `nsmp::encode` as a v3 sample
+  instrument (`.nsmp3`), the generation no other fixture covers.
+- `npno/`: the triangle wave as a piano library from `npno::encode::build`.
+- `zip/`: stored archives, one for each way the reader classifies a ZIP: an
+  Electro 5 bundle holding a program, a song, and the triangle wave as a v2
+  sample and as a piano library from `npno::encode::build`; a Drum 2 bank; a
+  Drum 3 bank; and a plain bundle of CBIN members. The members other than the
+  wave are fixtures from `ne5/` and `cbin/`. They need the `bundle` feature.
+- `sysex/` and `midi/`: the MIDI 1.0 Universal Identity Request, a public
+  standard message naming no manufacturer, as a SysEx dump and as a one-track
+  Standard MIDI File.
+- `cn3/`: the `CNE3` magic, zero-padded to the 12 bytes the sniffer reads.
+  Nothing else of that format is known.
 
-The corpus sweep checks their checksums, decoding, exact round trips, field
-isolation, and oracle sidecars.
+`cargo test -p nord-format --features bundle --test generate_fixtures --
+--ignored` writes the last six directories again.
+
+The sweep checks their checksums, decoding, exact round trips, field isolation,
+and oracle sidecars. It fails when this tree lacks a file of a type the reader
+dispatches: each container class the sweep reads and each tag in
+`nord_format::cbin_formats`. A corpus under `NORD_CORPUS_ROOT` has no such
+requirement; any tree of Nord files is one.

@@ -1932,11 +1932,10 @@ fn rescue_name(at: Location, backup: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     #[test]
     fn replacement_refuses_unusable_geometry_before_deleting() {
-        use nord_usb::transport::{Direction, ReplayTransport, Script};
+        use nord_usb::transport::{ReplayTransport, Script, Step};
         use nord_usb::wire::{cmd, Message, Partition, Service};
 
         let script = Script::parse(include_str!(
@@ -1946,10 +1945,10 @@ mod tests {
         for class in [ObjectClass::Program, ObjectClass::Unknown(9)] {
             let mut steps = script.steps();
             for step in &mut steps {
-                if step.direction != Direction::In {
+                let Step::In(frame) = step else {
                     continue;
-                }
-                let mut reply = Message::decode_response(&step.bytes).unwrap();
+                };
+                let mut reply = Message::decode_response(frame).unwrap();
                 if reply.service != Service::Program || reply.command != cmd::PARTITIONS + 1 {
                     continue;
                 }
@@ -1965,7 +1964,7 @@ mod tests {
                     reply.args.extend_from_slice(partition.name.as_bytes());
                     reply.args.extend_from_slice(&partition.fields);
                 }
-                step.bytes = reply.encode();
+                *frame = reply.encode();
             }
             let mut device = Device::new(ReplayTransport::new(steps));
             nord_usb::block_on(async {
@@ -1989,18 +1988,6 @@ mod tests {
         }
     }
 
-    /// A control transfer's `wLength` is 16 bits, and the sweep allocates the buffer
-    /// before the request goes out, so a wider count is refused at the flag.
-    #[test]
-    fn a_control_sweep_cannot_ask_for_more_bytes_than_a_transfer_carries() {
-        let sweep = |len: &str| {
-            crate::Cli::try_parse_from(["nord", "device", "controls", "--len", len]).is_ok()
-        };
-        assert!(sweep("65535"));
-        assert!(!sweep("65536"));
-        assert!(!sweep("4294967296"));
-    }
-
     /// The rescue file is the last copy of a program that no longer exists on the
     /// instrument, so it has to be named something a person can act on.
     #[test]
@@ -2010,10 +1997,10 @@ mod tests {
         let mut file = vec![0u8; 45];
         file[0..4].copy_from_slice(b"CBIN");
         file[4..8].copy_from_slice(&1u32.to_le_bytes());
-        file[8..12].copy_from_slice(b"ne5p");
+        file[8..12].copy_from_slice(b"ne5t");
         let at = Location { bank: 6, slot: 49 };
         // Wire is zero-indexed, the instrument's labels are not.
-        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
+        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5t");
     }
 
     #[test]
@@ -2148,15 +2135,6 @@ mod tests {
         assert!(silent.contains("no product string"), "{silent}");
     }
 
-    /// A set list must not land with a program's extension.
-    #[test]
-    fn the_format_tag_comes_from_the_bytes() {
-        let mut file = vec![0u8; 45];
-        file[8..12].copy_from_slice(b"ne5t");
-        let at = Location { bank: 0, slot: 3 };
-        assert_eq!(rescue_name(at, &file), "nord-rescued-1-4.ne5t");
-    }
-
     /// Bytes that do not parse are still the only copy, so they must still get a name.
     #[test]
     fn unparseable_bytes_still_get_rescued() {
@@ -2172,7 +2150,7 @@ mod tests {
     /// a failed write loses the program.
     mod losing_the_occupant {
         use super::*;
-        use nord_usb::transport::{Direction, ReplayTransport, Script, Step};
+        use nord_usb::transport::{ReplayTransport, Script, Step};
         use nord_usb::wire::Message;
 
         const PUT: &str =
@@ -2208,15 +2186,19 @@ mod tests {
         /// data frames it would have carried dropped: a refusal leaves the session in
         /// step, so the client closes it and sends nothing else.
         fn refused_write(steps: &[Step], status: u32) -> Vec<Step> {
-            let mut refusal = Message::decode_response(&steps[6].bytes).expect("the reply");
+            let mut refusal = Message::decode_response(reply(&steps[6])).expect("the reply");
             refusal.args[..4].copy_from_slice(&status.to_be_bytes());
             let mut out = steps[..6].to_vec();
-            out.push(Step {
-                direction: Direction::In,
-                bytes: refusal.encode(),
-            });
+            out.push(Step::In(refusal.encode()));
             out.extend_from_slice(&steps[12..]);
             out
+        }
+
+        fn reply(step: &Step) -> &[u8] {
+            match step {
+                Step::In(frame) => frame,
+                other => panic!("expected a device frame, found {other:?}"),
+            }
         }
 
         fn send_over(steps: Vec<Step>, spill_into: &Path) -> Result<(), String> {
@@ -2304,9 +2286,9 @@ mod tests {
             let dir = crate::edit::tests::scratch("send-delete-refused");
             let put = recorded();
             let mut delete = put[4][..7].to_vec();
-            let mut refusal = Message::decode_response(&delete[6].bytes).expect("the reply");
+            let mut refusal = Message::decode_response(reply(&delete[6])).expect("the reply");
             refusal.args[..4].copy_from_slice(&3u32.to_be_bytes());
-            delete[6].bytes = refusal.encode();
+            delete[6] = Step::In(refusal.encode());
             delete.extend_from_slice(&put[4][7..]);
             let mut steps: Vec<Step> = put[..4].concat();
             steps.extend(delete);

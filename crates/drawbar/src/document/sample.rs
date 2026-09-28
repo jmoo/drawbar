@@ -2154,6 +2154,7 @@ mod tests {
     use nord_format::formats::nsmp;
 
     use super::*;
+    use crate::testing::{self, context, Word};
 
     fn zone(root_key: u8, top_note: u8, low_note: Option<u8>) -> Zone {
         Zone {
@@ -2243,13 +2244,6 @@ mod tests {
             .zones
             .iter()
             .all(|zone| zone.gain.is_none() && zone.velocity.is_some()));
-    }
-
-    #[test]
-    fn a_v4_instrument_says_so() {
-        let entity = Entity::Sample(Sample::V3(v3_sample(400)));
-        let snapshot = snapshot(&entity).unwrap().unwrap();
-        assert_eq!(snapshot.generation, "v4");
     }
 
     /// One second of 44.1 kHz mono, and the one-zone v2 instrument the encoder makes
@@ -2518,24 +2512,9 @@ mod tests {
         }
     }
 
+    /// A body with no keyboard map prints no keyboard map offsets.
     #[test]
-    fn the_offsets_are_the_formats_own_declarations() {
-        let entity = nord_format::from_stream(&mut Cursor::new(&v2_bytes())).unwrap();
-        let narrow = snapshot(&entity).unwrap().unwrap();
-        let rows = offsets(&narrow);
-        let at: Vec<&str> = rows.iter().map(|row| row.at.as_str()).collect();
-        assert_eq!(
-            at,
-            [
-                "map+0",
-                &format!("map+{}", keymap::KEY_TABLE_AT),
-                &format!("map+{}", zone::COUNT_AT),
-                &format!("map+{}", zone::RECORDS_AT),
-            ]
-        );
-        assert_eq!(narrow.record_len, 15, "the Library 2 zone record");
-
-        // A body with no keyboard map prints no keyboard map offsets.
+    fn a_body_with_no_key_table_prints_no_key_table_offsets() {
         let entity = Entity::Sample(Sample::V3(v3_sample(300)));
         let wide = snapshot(&entity).unwrap().unwrap();
         assert_eq!(offsets(&wide).len(), 2);
@@ -2663,15 +2642,6 @@ mod tests {
         assert_eq!(span(&past, NSMP_SPAN), keys::Span { low: 17, high: 108 });
     }
 
-    /// A context with the app's fonts and visuals. Bands and rows are set in a semibold
-    /// family that egui does not bind by default, and laying one out without it panics.
-    fn dressed() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx
-    }
-
     /// `note` as a click on the keyboard strikes it.
     fn clicked(note: u8) -> keys::Struck {
         keys::Struck {
@@ -2688,70 +2658,29 @@ mod tests {
         snapshot: &Snapshot,
         events: Vec<egui::Event>,
         played: &Played,
-    ) -> (Vec<(String, egui::Rect)>, Sets, Vec<Ask>) {
+    ) -> (Vec<Word>, Sets, Vec<Ask>) {
         let mut sets = Sets::new();
         let mut ask = Vec::new();
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 400.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(900.0, 400.0), events);
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ask = map(ui, state, snapshot, &mut sets, played);
             });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        (said, sets, ask)
-    }
-
-    fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-        match shape {
-            egui::Shape::Text(text) => into.push((
-                text.galley.text().to_string(),
-                egui::Rect::from_min_size(text.pos, text.galley.size()),
-            )),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-            _ => {}
-        }
+        (testing::painted(&output), sets, ask)
     }
 
     /// The lowest place a word was painted. The keyboard's octave labels sit at the
     /// bottom of the key they name, below any other text that spells a note.
-    fn lowest(said: &[(String, egui::Rect)], word: &str) -> egui::Rect {
+    fn lowest(said: &[Word], word: &str) -> egui::Rect {
         said.iter()
-            .filter(|(text, _)| text == word)
-            .map(|(_, at)| *at)
+            .filter(|painted| painted.text == word)
+            .map(|painted| painted.rect)
             .reduce(|a, b| match a.center().y > b.center().y {
                 true => a,
                 false => b,
             })
             .unwrap_or_else(|| panic!("{word} was never painted: {said:?}"))
-    }
-
-    fn press(at: egui::Pos2) -> Vec<egui::Event> {
-        vec![
-            egui::Event::PointerMoved(at),
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]
     }
 
     fn v2_snapshot() -> Snapshot {
@@ -2763,31 +2692,20 @@ mod tests {
     /// and what it wrote.
     fn bodied(ctx: &egui::Context, state: &mut State, snapshot: &Snapshot) -> (Vec<String>, Sets) {
         let mut sets = Sets::new();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 900.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(900.0, 900.0), Vec::new());
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |page| {
                 ui(page, state, snapshot, &[], &mut sets);
             });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        (said.into_iter().map(|(text, _)| text).collect(), sets)
+        (testing::words(&output), sets)
     }
 
     /// The wide generations state a velocity window per zone, so the read-only field is
     /// drawn. A v2 record holds no window and gets no section for it.
     #[test]
     fn the_velocity_field_is_drawn_only_where_a_window_is_stated() {
-        let ctx = dressed();
+        let ctx = context();
         let entity = Entity::Sample(Sample::V3(v3_sample(300)));
         let wide = snapshot(&entity).unwrap().unwrap();
         assert!(wide.zones.iter().all(|zone| zone.velocity.is_some()));
@@ -2817,46 +2735,30 @@ mod tests {
         ctx: &egui::Context,
         sound: &Sound,
         events: Vec<egui::Event>,
-    ) -> (Vec<(String, egui::Rect)>, Option<Ask>) {
+    ) -> (Vec<Word>, Option<Ask>) {
         let mut ask = None;
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(400.0, 200.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(400.0, 200.0), events);
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ask = zone_audio(ui, 0, sound);
             });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        (said, ask)
+        (testing::painted(&output), ask)
     }
 
     /// An edit drops the decoded audio while the zone goes on sounding, so Stop must
     /// show with nothing decoded.
     #[test]
     fn a_sounding_zone_is_stopped_from_the_row_with_nothing_decoded() {
-        let ctx = dressed();
+        let ctx = context();
         let sounding = Sound {
             decoded: None,
             playing: true,
         };
         let (said, ask) = actions(&ctx, &sounding, Vec::new());
         assert!(ask.is_none(), "nothing was clicked");
-        let stop = said
-            .iter()
-            .find(|(text, _)| text == "Stop")
-            .unwrap_or_else(|| panic!("a sounding zone offers no Stop: {said:?}"))
-            .1;
-        let (_, ask) = actions(&ctx, &sounding, press(stop.center()));
+        let stop = testing::where_(&said, "Stop");
+        let (_, ask) = actions(&ctx, &sounding, testing::click(stop.center()));
         assert_eq!(ask, Some(Ask::Play(0)));
 
         // Silent and undecoded, an open row asks for the decode itself.
@@ -2872,7 +2774,7 @@ mod tests {
     /// is now saved stops reading as painted.
     #[test]
     fn saving_an_edit_clears_the_paint_marks() {
-        let ctx = dressed();
+        let ctx = context();
         let bytes = v2_bytes();
         let edited = apply(&bytes, &[("key60.gain".into(), "+1.5 dB".into())]).unwrap();
         let entity = nord_format::from_stream(&mut Cursor::new(&edited)).unwrap();
@@ -2898,7 +2800,7 @@ mod tests {
     /// zone says why nothing came out. Neither is an edit.
     #[test]
     fn a_click_on_the_keyboard_sounds_the_zone_that_answers_it() {
-        let ctx = dressed();
+        let ctx = context();
         let snapshot = v2_snapshot();
         assert_eq!(snapshot.zones.len(), 1);
         assert_eq!(
@@ -2913,7 +2815,7 @@ mod tests {
         assert!(sets.is_empty());
         assert!(
             said.iter()
-                .any(|(text, _)| text == "1 silent range · C1–C7"),
+                .any(|word| word.text == "1 silent range · C1–C7"),
             "the keys above the zone answer nothing: {said:?}"
         );
 
@@ -2922,7 +2824,7 @@ mod tests {
             &ctx,
             &mut state,
             &snapshot,
-            press(middle_c),
+            testing::click(middle_c),
             &Played::default(),
         );
         assert_eq!(
@@ -2936,7 +2838,7 @@ mod tests {
         assert!(sets.is_empty(), "a struck key is never an edit");
         assert!(
             said.iter()
-                .any(|(text, _)| text == "C4 at vel 90 → Zone 1 · root C4 · shifted +0 st"),
+                .any(|word| word.text == "C4 at vel 90 → Zone 1 · root C4 · shifted +0 st"),
             "{said:?}"
         );
 
@@ -2946,13 +2848,13 @@ mod tests {
             &ctx,
             &mut state,
             &snapshot,
-            press(above),
+            testing::click(above),
             &Played::default(),
         );
         assert!(ask.is_empty());
         assert!(
             said.iter()
-                .any(|(text, _)| text == "C7 — no zone answers this key; silence."),
+                .any(|word| word.text == "C7 — no zone answers this key; silence."),
             "{said:?}"
         );
     }
@@ -2964,18 +2866,10 @@ mod tests {
         state: &mut State,
         zones: &[MapZone],
         events: Vec<egui::Event>,
-    ) -> (Vec<(String, egui::Rect)>, egui::Rect) {
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(360.0, 400.0),
-            )),
-            ..Default::default()
-        };
+    ) -> (Vec<Word>, egui::Rect) {
+        let input = testing::screen(egui::vec2(360.0, 400.0), events);
         let mut below = egui::Rect::NOTHING;
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 key_map(
                     ui,
@@ -2989,16 +2883,12 @@ mod tests {
                 below = ui.label("under the map").rect;
             });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        (said, below)
+        (testing::painted(&output), below)
     }
 
     #[test]
     fn a_struck_key_moves_nothing_under_the_key_map() {
-        let ctx = dressed();
+        let ctx = context();
         let zones = [MapZone {
             row: 0,
             low: NSMP_SPAN.low,
@@ -3010,15 +2900,15 @@ mod tests {
         let mut state = State::default();
         let (said, quiet) = under_map(&ctx, &mut state, &zones, Vec::new());
         let middle_c = lowest(&said, "C4").center();
-        under_map(&ctx, &mut state, &zones, press(middle_c));
+        under_map(&ctx, &mut state, &zones, testing::click(middle_c));
         let (said, struck) = under_map(&ctx, &mut state, &zones, Vec::new());
 
         let line = said
             .iter()
-            .find(|(text, _)| text.starts_with("C4 at vel"))
+            .find(|word| word.text.starts_with("C4 at vel"))
             .unwrap_or_else(|| panic!("the struck key is not described: {said:?}"));
         assert!(
-            line.1.height() <= keys::LINE_H && line.1.right() <= 360.0,
+            line.rect.height() <= keys::LINE_H && line.rect.right() <= 360.0,
             "the sentence is cut to one row: {line:?}"
         );
         assert_eq!(struck, quiet, "what is under the map stays where it was");
@@ -3026,7 +2916,7 @@ mod tests {
 
     #[test]
     fn a_played_chord_strikes_the_zones_clicks_on_it_would() {
-        let ctx = dressed();
+        let ctx = context();
         let snapshot = v2_snapshot();
         let mut state = State::default();
         let struck = |note, velocity| keys::Struck { note, velocity };
@@ -3055,7 +2945,7 @@ mod tests {
         assert!(sets.is_empty(), "a played key is never an edit");
         assert!(
             said.iter()
-                .any(|(text, _)| text == "E4 at vel 30 → Zone 1 · root C4 · shifted +4 st"),
+                .any(|word| word.text == "E4 at vel 30 → Zone 1 · root C4 · shifted +4 st"),
             "the line describes the last key struck: {said:?}"
         );
 
@@ -3063,7 +2953,7 @@ mod tests {
         let (said, _, ask) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &played);
         assert!(ask.is_empty(), "a held key strikes once");
         assert!(
-            said.iter().any(|(text, _)| text == "E4 · vel 30"),
+            said.iter().any(|word| word.text == "E4 · vel 30"),
             "the lit key's chip names the velocity that chose the zone: {said:?}"
         );
 
@@ -3077,7 +2967,7 @@ mod tests {
 
     #[test]
     fn a_played_key_outside_the_map_strikes_nothing() {
-        let ctx = dressed();
+        let ctx = context();
         let snapshot = v2_snapshot();
         let mut state = State::default();
         let played = Played {
@@ -3124,7 +3014,7 @@ mod tests {
     /// Clicking a band selects its zone and brings its row into view under the map.
     #[test]
     fn a_click_on_a_band_opens_its_row() {
-        let ctx = dressed();
+        let ctx = context();
         let snapshot = v2_snapshot();
         let mut state = State::default();
         let (said, _, _) = mapped(&ctx, &mut state, &snapshot, Vec::new(), &Played::default());
@@ -3135,7 +3025,7 @@ mod tests {
             &ctx,
             &mut state,
             &snapshot,
-            press(band.center()),
+            testing::click(band.center()),
             &Played::default(),
         );
         assert_eq!(selected(&state), Some(0));

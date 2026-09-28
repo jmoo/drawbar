@@ -12,12 +12,12 @@ mod frames;
 mod scripts;
 
 use frames::{
-    changed, notify, refusal, request, response, session_close, session_open, slot_args,
+    changed, failed, notify, refusal, request, response, session_close, session_open, slot_args,
     ui_request, ui_response, words,
 };
 use nord_usb::device::Device;
 use nord_usb::transport::{ReplayTransport, Step};
-use nord_usb::wire::{cmd, ui, Bank, Message, Partition, Service};
+use nord_usb::wire::{cmd, ui, Bank, Partition};
 use nord_usb::{envelope, op, Error, Location, ObjectClass, Session};
 
 #[test]
@@ -60,41 +60,18 @@ fn a_read_bracket_closes_after_a_failed_chain_and_reports_the_chains_error() {
     );
 }
 
-/// A recording whose pipe dies once the host asks to close.
-struct DiesOnClose {
-    script: ReplayTransport,
-    closing: bool,
-}
-
-impl nord_usb::Transport for DiesOnClose {
-    async fn write(&mut self, buf: &[u8]) -> nord_usb::Result<()> {
-        let msg = Message::decode(buf)?;
-        self.closing |= msg.service == Service::Program && msg.command == cmd::SESSION_CLOSE;
-        match self.closing {
-            true => Ok(()),
-            false => self.script.write(buf).await,
-        }
-    }
-
-    async fn read(&mut self, max: usize) -> nord_usb::Result<Vec<u8>> {
-        match self.closing {
-            true => Err(Error::Transport("the cable was pulled".into())),
-            false => self.script.read(max).await,
-        }
-    }
-}
-
 #[test]
 fn a_pipe_that_fails_closing_outranks_the_chains_refusal() {
     let at = Location { bank: 0, slot: 4 };
     let mut steps = session_open(ObjectClass::Program);
     steps.push(request(cmd::INFO, &slot_args(at)));
     steps.push(refusal(cmd::INFO, 1));
+    // The cable is pulled once the host asks to close.
+    steps.push(request(cmd::SESSION_CLOSE, &[]));
+    steps.push(Step::InError);
+    steps.push(failed(ui_request(ui::GOODBYE)));
 
-    let mut device = Device::new(DiesOnClose {
-        script: ReplayTransport::new(steps),
-        closing: false,
-    });
+    let mut device = Device::new(ReplayTransport::new(steps));
     let error = pollster::block_on(device.read(ObjectClass::Program, async |s| {
         op::info(s, at).await.map(|_| ())
     }))
@@ -104,6 +81,7 @@ fn a_pipe_that_fails_closing_outranks_the_chains_refusal() {
         matches!(error, Error::Transport(_)),
         "an empty slot outranked the instrument going away: {error}"
     );
+    assert!(device.transport().is_exhausted());
 }
 
 #[test]

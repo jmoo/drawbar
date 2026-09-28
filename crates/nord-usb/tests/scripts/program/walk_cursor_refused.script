@@ -1,4 +1,5 @@
 # source: synthetic
+# device: Nord Electro 5
 # note: 0x11 is the instrument refusing a cursor request. A walk that treated it
 #   as the end-of-walk status would return an inventory that looks complete but is
 #   not. The closing exchanges are here, so the refusal must still run them.

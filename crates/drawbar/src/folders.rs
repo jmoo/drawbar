@@ -136,21 +136,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_new_folder_gets_a_name_no_other_folder_is_using() {
-        let mut folders = Folders::default();
-        let names: Vec<String> = (0..3)
-            .map(|_| {
-                let id = folders.make().unwrap();
-                folders.name_of(id).expect("it was made").to_string()
-            })
-            .collect();
-        assert_eq!(names, ["New folder", "New folder 2", "New folder 3"]);
-        // The ids are distinct too.
-        let ids: Vec<u64> = folders.all().iter().map(|folder| folder.id).collect();
-        assert_eq!(ids, vec![1, 2, 3]);
-    }
-
-    #[test]
     fn removing_a_folder_leaves_what_was_in_it_on_this_computer() {
         let mut folders = Folders::default();
         let (kept, gone) = (folders.make().unwrap(), folders.make().unwrap());
@@ -205,50 +190,5 @@ mod tests {
             .filter_map(|line| line.split('\t').next())
             .collect();
         assert_eq!(members, ["2", "7", "13", "40", "68", "91"]);
-    }
-
-    #[test]
-    fn a_malformed_line_is_dropped_and_the_rest_is_read() {
-        let read = |lines: &str| Folders::read(&format!("{VERSION}\n{lines}"));
-
-        let kept = read("f\tx\tNot a number\nf\t1\tSunday\n");
-        assert_eq!(kept.all().len(), 1, "an id that is not a number");
-        assert_eq!(kept.name_of(1), Some("Sunday"));
-
-        let short = read("f\t1\tSunday\nm\t7\n");
-        assert_eq!(short.holding(7), None, "a membership missing its folder");
-
-        let wide = read("f\t1\tSunday\nm\t7\t1\textra\n");
-        assert_eq!(wide.holding(7), None, "a line with a column too many");
-
-        let unknown = read("f\t1\tSunday\nx\t7\t1\n");
-        assert_eq!(
-            unknown.all().len(),
-            1,
-            "a line marker this build does not write"
-        );
-    }
-
-    /// Two `f` lines with one id give one folder two names. The first is kept, so loading
-    /// never silently renames a folder.
-    #[test]
-    fn a_second_folder_line_for_an_id_already_read_is_refused() {
-        let folders = Folders::read(&format!("{VERSION}\nf\t1\tSunday\nf\t1\tMonday\nm\t7\t1\n"));
-
-        assert_eq!(folders.all().len(), 1);
-        assert_eq!(folders.name_of(1), Some("Sunday"));
-        assert_eq!(folders.holding(7), Some(1));
-    }
-
-    /// Unescaped, a newline in a name would split its line in two.
-    #[test]
-    fn a_folder_named_across_two_lines_comes_back_as_one_name() {
-        let mut folders = Folders::default();
-        let id = folders.make().unwrap();
-        folders.rename(id, "Sunday\nmorning".into());
-
-        let after = Folders::read(&folders.written());
-        assert_eq!(after.name_of(id), Some("Sunday\nmorning"));
-        assert_eq!(after.all().len(), 1);
     }
 }

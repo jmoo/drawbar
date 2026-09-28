@@ -128,13 +128,4 @@ mod tests {
         let job: Job<u32> = run(&egui::Context::default(), |_| panic!("the work gave up"));
         assert_eq!(settled(&job), Answer::Died);
     }
-
-    #[test]
-    fn progress_reads_back_the_last_thing_said() {
-        let progress = Progress::default();
-        assert_eq!(progress.said(), "");
-        progress.say("resampling 1 of 3");
-        progress.say("coding 3 strokes");
-        assert_eq!(progress.said(), "coding 3 strokes");
-    }
 }

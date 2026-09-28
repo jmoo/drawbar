@@ -33,6 +33,8 @@ pub mod store;
 pub mod strings;
 pub mod tabs;
 pub mod tags;
+#[cfg(test)]
+mod testing;
 pub mod work;
 pub mod workspace;
 

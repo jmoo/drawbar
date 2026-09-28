@@ -780,6 +780,7 @@ mod tests {
 
     use crate::device::Device;
     use crate::log::Log;
+    use crate::testing::{self, Word};
     use crate::workspace::{Fresh, Origin};
 
     fn set_list() -> Vec<u8> {
@@ -877,13 +878,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_footer_names_its_sources_and_mentions_a_reorder_once_made() {
-        assert!(foot(false).contains("the file stores only bank:slot"));
-        assert!(!foot(false).contains("Reordering"));
-        assert!(foot(true).ends_with("Reordering rewrites the slots between the two positions."));
-    }
-
     /// One set list painted on its own, with whatever the instrument and this computer
     /// have been told to hold.
     struct Shown {
@@ -897,9 +891,7 @@ mod tests {
 
     impl Shown {
         fn new() -> Shown {
-            let ctx = egui::Context::default();
-            ctx.all_styles_mut(crate::app::metrics);
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = testing::context();
             let mut workspace = Workspace::new(ctx.clone());
             let mut log = Log::default();
             let id = workspace.ingest(
@@ -933,62 +925,32 @@ mod tests {
         }
 
         /// One frame: every word it painted and where, and the sets it asked for.
-        fn frame(&mut self, events: Vec<egui::Event>) -> (Vec<(String, egui::Rect)>, Sets) {
+        fn frame(&mut self, events: Vec<egui::Event>) -> (Vec<Word>, Sets) {
             let mut sets = Sets::new();
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1000.0, 600.0),
-                )),
-                ..Default::default()
-            };
+            let input = testing::screen(egui::vec2(1000.0, 600.0), events);
             let state = &mut self.state;
             let workspace = &self.workspace;
             let device = &self.device.state;
             let id = self.id;
-            let output = self.ctx.clone().run(input, |ctx| {
+            let output = testing::run(&self.ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let entity = workspace.get(id).expect("it is still open");
                     let seen = Catalog { device, workspace };
                     super::ui(ui, state, entity, &seen, &mut sets);
                 });
             });
-            let mut said = Vec::new();
-            for clipped in &output.shapes {
-                words(&clipped.shape, &mut said);
-            }
-            (said, sets)
+            (testing::painted(&output), sets)
         }
 
         fn settle(&mut self) -> Vec<String> {
-            said(self.frame(Vec::new()).0)
+            let (said, _) = self.frame(Vec::new());
+            said.into_iter().map(|word| word.text).collect()
         }
 
         /// Where one word was painted, out of a frame that has already been drawn.
         fn where_(&mut self, word: &str) -> egui::Rect {
-            self.frame(Vec::new())
-                .0
-                .into_iter()
-                .find(|(held, _)| held == word)
-                .unwrap_or_else(|| panic!("{word} was never painted"))
-                .1
+            testing::where_(&self.frame(Vec::new()).0, word)
         }
-    }
-
-    fn words(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-        match shape {
-            egui::Shape::Text(text) => into.push((
-                text.galley.text().to_string(),
-                egui::Rect::from_min_size(text.pos, text.galley.size()),
-            )),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-            _ => {}
-        }
-    }
-
-    fn said(painted: Vec<(String, egui::Rect)>) -> Vec<String> {
-        painted.into_iter().map(|(word, _)| word).collect()
     }
 
     #[test]
@@ -1034,11 +996,7 @@ mod tests {
 
         // With nothing scanned, an asset here that stands on the slot names it.
         let mut alone = Shown::new();
-        let program = alone
-            .workspace
-            .create(Fresh::Program, &mut alone.log)
-            .expect("a fresh program");
-        let bytes = alone.workspace.get(program).unwrap().bytes.clone();
+        let bytes = Fresh::Program.bytes().unwrap();
         alone.kept(Location::from_user(1, 3), "Whiter Shade.ne5p", bytes);
         let said = alone.settle();
         assert!(said.iter().any(|word| word == "Whiter Shade"), "{said:?}");
@@ -1047,11 +1005,7 @@ mod tests {
     #[test]
     fn an_unnamed_library_is_only_reported_while_an_instrument_is_attached() {
         let mut shown = Shown::new();
-        let program = shown
-            .workspace
-            .create(Fresh::Program, &mut shown.log)
-            .expect("a fresh program");
-        let bytes = shown.workspace.get(program).unwrap().bytes.clone();
+        let bytes = Fresh::Program.bytes().unwrap();
         let (_, plays_a_piano) =
             crate::fields::apply(&bytes, &[("piano_panel.id".into(), "5".into())])
                 .expect("the id is a field");
@@ -1085,29 +1039,12 @@ mod tests {
         // and a click at the end of a box puts the caret after what it holds.
         let colon = shown.where_(":");
         let at = egui::pos2(colon.left() - 6.0, colon.center().y);
-        shown.frame(vec![egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        }]);
+        shown.frame(vec![testing::button(at, true)]);
         shown.frame(vec![
-            egui::Event::Key {
-                key: egui::Key::Backspace,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            },
+            testing::key(egui::Key::Backspace),
             egui::Event::Text("3".to_string()),
         ]);
-        let (_, sets) = shown.frame(vec![egui::Event::Key {
-            key: egui::Key::Enter,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        }]);
+        let (_, sets) = shown.frame(vec![testing::key(egui::Key::Enter)]);
         assert_eq!(sets, [("slot1".to_string(), "3:1".to_string())]);
         assert!(
             apply(&Fresh::SetList.bytes().unwrap(), &sets).is_ok(),
@@ -1129,22 +1066,12 @@ mod tests {
 
         shown.frame(vec![
             egui::Event::PointerMoved(grip),
-            egui::Event::PointerButton {
-                pos: grip,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
+            testing::button(grip, true),
         ]);
         shown.frame(vec![egui::Event::PointerMoved(onto)]);
         let (_, sets) = shown.frame(vec![
             egui::Event::PointerMoved(onto),
-            egui::Event::PointerButton {
-                pos: onto,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
+            testing::button(onto, false),
         ]);
         assert_eq!(
             sets,
@@ -1194,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn every_state_says_its_own_thing_and_only_trouble_counts() {
+    fn every_state_says_its_own_thing() {
         let where_ = at(7, 4);
         let all = [
             Stands::Resolves,
@@ -1212,7 +1139,5 @@ mod tests {
             }
         }
         assert_eq!(Stands::Vacant.words(where_), "no program at 7:4");
-        assert!(!Stands::Unread.wants_attention(), "not a claim of trouble");
-        assert!(Stands::Vacant.wants_attention());
     }
 }

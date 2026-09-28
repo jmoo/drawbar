@@ -150,42 +150,33 @@ pub fn named_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context};
     use crate::workspace::Fresh;
 
     /// A section heading paints its three parts in sentence case and no background. The
     /// shell's [`crate::panel::panel_header`] is the one on `faint_bg_color`.
     #[test]
     fn a_section_heading_says_its_parts_and_paints_no_bar() {
-        fn walk(shape: &egui::Shape, into: &mut (Vec<String>, Vec<egui::Color32>)) {
-            match shape {
-                egui::Shape::Text(text) => into.0.push(text.galley.text().to_string()),
-                egui::Shape::Rect(drawn) => into.1.push(drawn.fill),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
+        let ctx = context();
         let warn = crate::app::warn(&ctx.style().visuals);
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 heading(ui, "Key map", "drag a top", Some(("1 silent range", warn)));
             });
         });
-        let mut painted = (Vec::new(), Vec::new());
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut painted);
-        }
-        assert_eq!(painted.0, ["Key map", "1 silent range", "drag a top"]);
+        assert_eq!(
+            testing::words(&output),
+            ["Key map", "1 silent range", "drag a top"]
+        );
+        let fills: Vec<egui::Color32> = testing::rects(&output)
+            .iter()
+            .map(|drawn| drawn.fill)
+            .collect();
         assert!(
-            painted
-                .1
+            fills
                 .iter()
                 .all(|fill| *fill == ctx.style().visuals.panel_fill),
-            "the heading painted its own background: {:?}",
-            painted.1,
+            "the heading painted its own background: {fills:?}",
         );
     }
 

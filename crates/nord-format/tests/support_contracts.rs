@@ -74,7 +74,7 @@ fn load(json: &str) -> Result<(), String> {
     let dir = scratch("sidecar");
     let path = dir.join("specimen.nsmp.oracle.json");
     fs::write(&path, json).unwrap();
-    let result = sidecar::load(&path, sidecar::SPECIMEN_KEYS).map(|_| ());
+    let result = sidecar::load(&path).map(|_| ());
     fs::remove_dir_all(&dir).unwrap();
     result
 }
@@ -99,6 +99,20 @@ fn a_sidecar_value_of_the_wrong_type_is_refused() {
         (r#"{"schema":1,"traits":[7]}"#, "traits"),
         (r#"{"schema":1,"same_body_as":7}"#, "same_body_as"),
         (r#"{"schema":1,"note":["a"]}"#, "note"),
+        (r#"{"schema":1,"source":["a.nsmpproj"]}"#, "source"),
+        (r#"{"schema":1,"wide_renders":"a.nsmp3"}"#, "wide_renders"),
+        (
+            r#"{"schema":1,"render":{"frames":1,"channels":3,"secondary_start":1.5}}"#,
+            "render.channels",
+        ),
+        (
+            r#"{"schema":1,"render":{"frames":1,"channels":1,"secondary_start":1.5,"differs_at":[4]}}"#,
+            "render.differs_at",
+        ),
+        (
+            r#"{"schema":1,"impulses":{"left":[-1],"right":[]}}"#,
+            "impulses.left",
+        ),
     ] {
         let error = load(json).expect_err(&format!("{json} loaded"));
         assert!(
@@ -139,7 +153,16 @@ fn a_sidecar_stating_every_key_at_its_declared_type_loads() {
         "note": "a hand-edited zone layout",
         "same_body_as": "other.nsmp",
         "fields": {"transpose": "-3", "gain": {"value": "3.4", "slack": 0.05}},
-        "traits": ["zone_top_notes_overridden"]
+        "traits": ["zone_top_notes_overridden"],
+        "source": "projects/specimen.nsmpproj",
+        "wide_renders": ["specimen.nsmp3"],
+        "edited_from": "before.nsmp",
+        "audio_differs_from": "base.nsmp",
+        "render": {"frames": 4409, "channels": 2, "secondary_start": 551.128186,
+                   "silent": true, "differs_at": [24]},
+        "impulses": {"left": [1000], "right": [2000]},
+        "recordings_from": "full.npno",
+        "refusal": "NWS"
     }"#;
     load(json).expect("a sidecar with every key");
     load(r#"{"schema":1,"unoracled":true,"note":"no capture yet"}"#)

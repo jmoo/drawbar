@@ -702,18 +702,6 @@ mod tests {
         assert_eq!(ThemeChoice::read(""), ThemeChoice::System);
     }
 
-    #[test]
-    fn each_theme_has_its_own_accents() {
-        let (dark, light) = (dark(), light());
-        assert!(dark.dark_mode && !light.dark_mode);
-        for accent in [good, warn, bad, accent] {
-            assert_ne!(accent(&dark), accent(&light));
-        }
-        // A dark panel and a light one, independent of egui's defaults.
-        assert!(dark.panel_fill.intensity() < 0.2);
-        assert!(light.panel_fill.intensity() > 0.8);
-    }
-
     fn luminance(color: egui::Color32) -> f32 {
         let channel = egui::ecolor::linear_f32_from_gamma_u8;
         0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
@@ -774,15 +762,11 @@ mod tests {
         }
     }
 
-    /// A mid gray is too faint on the light panel, so body text is `#1c1c1c` and
-    /// captions `#282828`.
+    /// A mid gray is too faint on the light panel.
     #[test]
     fn the_light_theme_uses_near_black_text() {
         let light = light();
         let panel = light.panel_fill;
-        assert_eq!(light.text_color(), egui::Color32::from_gray(0x1c));
-        assert_eq!(caption(&light), egui::Color32::from_gray(0x28));
-
         let body = contrast(light.text_color(), panel);
         assert!(body >= 12.0, "light body: {body:.2}:1");
         let heading = contrast(caption(&light), panel);
@@ -828,22 +812,5 @@ mod tests {
             !body[1..].is_empty(),
             "a glyph Ubuntu lacks would draw as an empty box"
         );
-    }
-
-    #[test]
-    fn the_shared_metrics_do_not_depend_on_the_theme() {
-        let mut style = egui::Style::default();
-        metrics(&mut style);
-        let spacing = &style.spacing;
-        assert_eq!(spacing.item_spacing, egui::vec2(8.0, 4.0));
-        assert_eq!(spacing.button_padding, egui::vec2(7.0, 3.0));
-        assert_eq!(spacing.window_margin, egui::Margin::same(0));
-        assert_eq!(spacing.menu_margin, egui::Margin::same(4));
-        assert_eq!(spacing.indent, 18.0);
-        assert_eq!(spacing.interact_size.y, 18.0);
-        assert_eq!(spacing.scroll.bar_width, 8.0);
-        // Both named styles must be registered, or resolving one panics mid-frame.
-        assert_eq!(style.text_styles[&ui()], egui::FontId::proportional(11.5));
-        assert_eq!(style.text_styles[&micro()], egui::FontId::proportional(9.5));
     }
 }

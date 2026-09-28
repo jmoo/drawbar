@@ -806,6 +806,7 @@ pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context, Word};
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project_bytes() -> Vec<u8> {
@@ -884,13 +885,15 @@ mod tests {
         assert_eq!(snapshot.velocity.attack_amount, 64);
     }
 
-    /// A bad path or an unknown id is refused before anything is encoded.
+    /// A bad path, an unknown id or an inverted key range is refused before anything is
+    /// encoded.
     #[test]
     fn unknown_paths_are_refused() {
         let bytes = project_bytes();
         for (path, value) in [
             ("zone999.root_key", "C4"),
             ("zone129.detune", "1"),
+            ("zone129.bottom_note", "C8"),
             ("file9.path", "x.wav"),
             ("file1.rate", "48000"),
             ("stroke1.nope", "1"),
@@ -906,14 +909,6 @@ mod tests {
         }
     }
 
-    /// An inverted key range cannot leave half an edit behind.
-    #[test]
-    fn an_inverted_range_is_refused_whole() {
-        let bytes = project_bytes();
-        let err = apply(&bytes, &[("zone129.bottom_note".into(), "C8".into())]);
-        assert!(err.is_err());
-    }
-
     /// Each enabled zone is drawn with the velocity window of the stroke it plays.
     #[test]
     fn the_map_shows_the_zones_that_play_a_key() {
@@ -925,17 +920,6 @@ mod tests {
             assert_eq!(shown.root, zone.root_key);
             assert!(shown.velocity.is_some(), "each zone plays one stroke");
         }
-        assert_eq!(SPAN.low, LOWEST_NOTE);
-        assert_eq!(SPAN.high, HIGHEST_NOTE);
-    }
-
-    /// A context with the app's fonts: a band is set in the semibold family, which egui
-    /// does not bind by default, and laying one out without it panics.
-    fn dressed() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx
     }
 
     /// One frame of the pinned map over `snapshot`: what it painted and where, and what
@@ -945,56 +929,15 @@ mod tests {
         state: &mut State,
         snapshot: &Snapshot,
         events: Vec<egui::Event>,
-    ) -> (Vec<(String, egui::Rect)>, Sets) {
+    ) -> (Vec<Word>, Sets) {
         let mut sets = Sets::new();
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 400.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(900.0, 400.0), events);
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 map(ui, state, snapshot, &mut sets, &Played::default());
             });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        (said, sets)
-    }
-
-    fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
-        match shape {
-            egui::Shape::Text(text) => into.push((
-                text.galley.text().to_string(),
-                egui::Rect::from_min_size(text.pos, text.galley.size()),
-            )),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-            _ => {}
-        }
-    }
-
-    fn press(at: egui::Pos2) -> Vec<egui::Event> {
-        vec![
-            egui::Event::PointerMoved(at),
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]
+        (testing::painted(&output), sets)
     }
 
     /// One frame of the body over `snapshot`: what it painted and where, and what it
@@ -1004,36 +947,24 @@ mod tests {
         state: &mut State,
         snapshot: &Snapshot,
         events: Vec<egui::Event>,
-    ) -> (Vec<(String, egui::Rect)>, Sets) {
+    ) -> (Vec<Word>, Sets) {
         let mut sets = Sets::new();
         let mut paths = HashMap::new();
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 900.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(900.0, 900.0), events);
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |page| {
                 ui(page, state, snapshot, &mut paths, &mut sets);
             });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        (said, sets)
+        (testing::painted(&output), sets)
     }
 
     /// The topmost place a word was painted. The velocity field sits above the rows, and
     /// both label a zone the same way.
-    fn highest(said: &[(String, egui::Rect)], word: &str) -> egui::Rect {
+    fn highest(said: &[Word], word: &str) -> egui::Rect {
         said.iter()
-            .filter(|(text, _)| text == word)
-            .map(|(_, at)| *at)
+            .filter(|painted| painted.text == word)
+            .map(|painted| painted.rect)
             .reduce(|a, b| match a.center().y < b.center().y {
                 true => a,
                 false => b,
@@ -1041,50 +972,36 @@ mod tests {
             .unwrap_or_else(|| panic!("{word} was never painted: {said:?}"))
     }
 
-    /// One frame of the velocity-min control on its own, and the value it returned.
-    fn velocity_box(ctx: &egui::Context, events: Vec<egui::Event>) -> Option<String> {
+    /// One frame of the velocity-min control on its own: the value it returned, and
+    /// what it painted.
+    fn velocity_box(ctx: &egui::Context, events: Vec<egui::Event>) -> (Option<String>, Vec<Word>) {
         let mut spelled = None;
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(200.0, 60.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(200.0, 60.0), events);
+        let output = testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 spelled = whole(ui, ("proj_vmin", 1), 0.0, f64::from(MAX_VELOCITY));
             });
         });
-        spelled
+        (spelled, testing::painted(&output))
     }
 
     /// ⚠️ A velocity end is a `u8`, so every value the control returns must be a whole
     /// number the format takes.
     #[test]
     fn a_dragged_velocity_end_is_spelled_as_a_whole_number() {
-        let ctx = dressed();
+        let ctx = context();
         ctx.set_pixels_per_point(1.5);
-        let at = egui::pos2(30.0, 20.0);
-        velocity_box(&ctx, Vec::new());
+        let at = testing::where_(&velocity_box(&ctx, Vec::new()).1, "0").center();
         velocity_box(
             &ctx,
-            vec![
-                egui::Event::PointerMoved(at),
-                egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
+            vec![egui::Event::PointerMoved(at), testing::button(at, true)],
         );
         let mut spelled = None;
         for step in [10.0, 3.0, 3.0] {
             let to = egui::pos2(at.x + step, at.y);
-            spelled = velocity_box(&ctx, vec![egui::Event::PointerMoved(to)]).or(spelled);
+            spelled = velocity_box(&ctx, vec![egui::Event::PointerMoved(to)])
+                .0
+                .or(spelled);
         }
 
         let spelled = spelled.expect("the drag moved the control");
@@ -1106,7 +1023,7 @@ mod tests {
     /// click on the last block must open the last row.
     #[test]
     fn clicking_a_velocity_block_opens_the_row_it_stands_for() {
-        let ctx = dressed();
+        let ctx = context();
         let mut snapshot = read_back(&project_of(&[48, 60, 72]));
         snapshot.zones[1].enabled = false;
         let bottom = snapshot.zones[2].id;
@@ -1117,7 +1034,7 @@ mod tests {
         // Below the block's name, which sits over the handle at the window's top edge.
         let at = egui::pos2(block.center().x, block.center().y + 20.0);
 
-        let (_, sets) = bodied(&ctx, &mut state, &snapshot, press(at));
+        let (_, sets) = bodied(&ctx, &mut state, &snapshot, testing::click(at));
         assert_eq!(
             sample::selected(&state),
             Some(2),
@@ -1130,7 +1047,7 @@ mod tests {
     /// band must open the last row even with a zone switched off between them.
     #[test]
     fn clicking_a_band_opens_the_row_it_stands_for() {
-        let ctx = dressed();
+        let ctx = context();
         let mut snapshot = read_back(&project_of(&[48, 60, 72]));
         snapshot.zones[1].enabled = false;
         let bottom = snapshot.zones[2].id;
@@ -1138,13 +1055,9 @@ mod tests {
         let mut state = State::default();
         let (said, _) = mapped(&ctx, &mut state, &snapshot, Vec::new());
         assert_eq!(sample::selected(&state), None);
-        let band = said
-            .iter()
-            .find(|(text, _)| *text == format!("Zone {bottom}"))
-            .unwrap_or_else(|| panic!("the bottom zone's band was never painted: {said:?}"))
-            .1;
+        let band = testing::where_(&said, &format!("Zone {bottom}"));
 
-        let (_, sets) = mapped(&ctx, &mut state, &snapshot, press(band.center()));
+        let (_, sets) = mapped(&ctx, &mut state, &snapshot, testing::click(band.center()));
         assert_eq!(
             sample::selected(&state),
             Some(2),
@@ -1176,16 +1089,8 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> Sets {
         let mut sets = Sets::new();
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 400.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let input = testing::screen(egui::vec2(900.0, 400.0), events);
+        testing::run(ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 fields(ui, snapshot, 0, paths, &mut sets);
             });
@@ -1197,7 +1102,7 @@ mod tests {
     /// commit a path the user has not finished typing.
     #[test]
     fn a_half_typed_source_path_waits_for_the_box_to_be_left() {
-        let ctx = dressed();
+        let ctx = context();
         let snapshot = read_back(&project_bytes());
         let stroke = played(&snapshot, &snapshot.zones[0]).expect("a stroke");
         let file = source(&snapshot, stroke).expect("it names a file").id;
@@ -1208,13 +1113,7 @@ mod tests {
             &ctx,
             &snapshot,
             &mut paths,
-            vec![egui::Event::Key {
-                key: egui::Key::Enter,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
+            vec![testing::key(egui::Key::Enter)],
         );
         assert!(
             sets.is_empty(),

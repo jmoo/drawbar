@@ -22,21 +22,40 @@ consumed.
 
 ## Format
 
-A frame is `O <hex>` (host → device) or `I <hex>` (device → host), one per line, and may
-carry a trailing `# label`. Any other `#` line is prose unless it reads `# <key>: <value>`
-with the key in `[a-z_]+`, which makes it a field. An unknown lowercase key is an error,
-the same rule the corpus's specimen sidecars follow.
+One step per line, in wire order. A step may carry a trailing `# label`.
+
+| Step | Meaning |
+|---|---|
+| `O <hex>` | the host sent a frame |
+| `O timeout <hex>` | the host offered a frame, and the device did not accept it within the write's limit |
+| `O error <hex>` | the transport failed sending the frame |
+| `I <hex>` | the device sent a frame |
+| `I timeout` | nothing arrived within the read's limit |
+| `I error` | the transport failed reading |
+
+Silence and failure are steps, so every read and write the host makes must meet a step
+of its own direction. A read where the script has the host speaking, or has ended, is a
+mismatch and not a timeout. A timeout answers only a transfer that carried a limit; an
+unbounded read or write would wait forever, so meeting one is a mismatch too. A mismatch
+fails the replay even when the code under test ignores the error, as the best-effort
+`GOODBYE` of a released session does.
+
+Any other `#` line is prose unless it reads `# <key>: <value>` with the key in
+`[a-z_]+`, which makes it a field. An unknown lowercase key is an error, the same rule
+the corpus's specimen sidecars follow.
 
 | Key | Scope | Value |
 |---|---|---|
 | `source` | file | `nsm`: captured from Nord Sound Manager, the oracle. `nord`: recorded by this project's CLI. `synthetic`: built by hand. |
-| `device` | file | free text: model and firmware |
+| `device` | file | free text: model and firmware, or the model a synthetic script imitates |
 | `trimmed` | file | what was left out of the capture, e.g. `ui-refresh` |
 | `note` | file | prose |
+| `driven_by` | file | for a script with no intent: the test files that drive it, comma-separated and relative to the crate |
+| `undriven` | file | for a script with no intent: why nothing drives it |
 | `intent` | section | what the host was doing: `<class> <verb> <args…>` |
 | `expect` | section | `ok` (the default) or `err <kind>`, once per section |
 
-The file-level keys must precede the first frame. `intent` opens a section that runs to
+The file-level keys must precede the first step. `intent` opens a section that runs to
 the next `intent` or to the end of the file. One command can take several transactions
 (a `put` into an occupied slot takes five), so a recording of one command is one script
 of several sections, driven in order on one transport.
@@ -90,29 +109,33 @@ a path beside the script.
 
 A walk is bounded by the banks the instrument declares, and a `put` into a library class
 reserves storage blocks of the size that partition reports. Both come from the script's
-own `device geometry` section where it has one. A script recorded without one falls back
-to the committed `device/geometry.script`, replayed on a transport of its own. The tables
-are static configuration, so the fixture stands in for the instrument the recording was
-taken from. A new recording carries its own.
+own `device geometry` section where it has one. Without one, the committed
+`device/geometry.script` stands in, replayed on a transport of its own, but only for a
+script whose `device` field names the Nord Electro 5 it was read from. Any other script
+fails. A new recording carries its own.
 
 `get` is what the CLI's own verb sends; `read` and `read-body` are the bare transfers it
 performs inside a larger operation. A file named after a read is compared byte for byte
 against what the read rebuilt. `put`'s name and timestamp are `BEGIN_WRITE` arguments the
 file does not carry, so the intent states them, and the CLI records the ones it used.
 
-A script with no intent anywhere is still a trial, and its framing is checked. A script
-that declares an intent on only some sections is an error, because the frames in between
-would belong to nothing.
+A script with no intent anywhere is still a trial, but the sweep checks only its
+framing, so it must say what else does. `driven_by` names the test files that drive it,
+and each must mention the script by its path under the tree. `undriven` says why nothing
+does, such as a capture kept as evidence of frames no command sends any more. A script
+with intents carries neither. A script that declares an intent on only some sections is
+an error, because the frames in between would belong to nothing.
 
 ## Writing one
 
-`nord … --record <path>` writes all of this itself: the header, an `intent` for every
-transaction it opens, and an `expect` under each one that failed, such as the empty slot
-a pre-check names before a `put`, or a rename the library classes refuse. A recording
-made that way is a complete replay whether the command succeeded or not; put it in a
-directory here or in the corpus and it becomes a trial.
+`nord … --record <path>` writes all of this itself: the header, every step including the
+reads that timed out, an `intent` for every transaction it opens, and an `expect` under
+each one that failed, such as the empty slot a pre-check names before a `put`, or a
+rename the library classes refuse. A recording made that way is a complete replay
+whether the command succeeded or not; put it in a directory here or in the corpus and it
+becomes a trial.
 
 The hand-built scripts under `session/` cover paths no instrument produces on request: a
-refused close, a notification flood, a session an earlier run left open. Four of them are
-driven by `tests/ops.rs` and not by an intent, because they test the session driver's
+refused close, a notification flood, a session an earlier run left open. Four of them
+name the tests that drive them with `driven_by`, because they test the session driver's
 behavior, not an exchange.

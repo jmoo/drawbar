@@ -357,26 +357,10 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     Drawn { tab, close }
 }
 
-/// Every string a frame painted, headers and button labels included.
-#[cfg(test)]
-pub(crate) fn words(output: &egui::FullOutput) -> Vec<String> {
-    fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
-        match shape {
-            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-            _ => {}
-        }
-    }
-    let mut said = Vec::new();
-    for clipped in &output.shapes {
-        walk(&clipped.shape, &mut said);
-    }
-    said
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, Bench};
 
     fn workspace() -> Workspace {
         Workspace::new(egui::Context::default())
@@ -454,36 +438,25 @@ mod tests {
     /// An unsaved document's name takes a star, as in the tree and the table.
     #[test]
     fn a_tab_over_an_unsaved_document_wears_a_star() {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        let mut ws = Workspace::new(ctx.clone());
-        let mut log = crate::log::Log::default();
+        let Bench {
+            ctx,
+            workspace: mut ws,
+            mut tabs,
+            mut log,
+            ..
+        } = Bench::new();
         let id = ws
             .create(crate::workspace::Fresh::Program, &mut log)
             .unwrap();
         ws.rename(id, "Africa Split".into());
-        let mut tabs = Tabs::default();
         tabs.open(id);
 
-        let strip = |tabs: &mut Tabs, ws: &Workspace| {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(600.0, 300.0),
-                )),
-                ..Default::default()
-            };
-            let output = ctx.run(input, |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::new())
-                    .show(ctx, |ui| {
-                        tabs.ui(ui, ws, &mut Vec::new());
-                    });
-            });
-            words(&output)
+        let words = |tabs: &mut Tabs, ws: &Workspace| {
+            let input = testing::screen(egui::vec2(600.0, 300.0), Vec::new());
+            testing::words(&strip(&ctx, input, tabs, ws))
         };
 
-        let said = strip(&mut tabs, &ws);
+        let said = words(&mut tabs, &ws);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
 
         let bytes = ws.get(id).unwrap().bytes.clone();
@@ -491,7 +464,7 @@ mod tests {
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         ws.replace_bytes(id, edited, &mut log);
 
-        let said = strip(&mut tabs, &ws);
+        let said = words(&mut tabs, &ws);
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
@@ -605,58 +578,38 @@ mod tests {
     /// A release after a drag is a drop, not a click, so nothing is activated.
     #[test]
     fn dragging_a_tab_across_its_neighbor_swaps_them() {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        let mut ws = Workspace::new(ctx.clone());
-        let mut log = crate::log::Log::default();
+        let Bench {
+            ctx,
+            workspace: mut ws,
+            mut tabs,
+            mut log,
+            ..
+        } = Bench::new();
         let first = ws
             .create(crate::workspace::Fresh::Program, &mut log)
             .unwrap();
         let second = ws.create(crate::workspace::Fresh::Live, &mut log).unwrap();
         // Long enough that the tab extends well past the library's tab, which a drag may
         // not start on.
-        ws.rename(
-            first,
-            "Africa Split, the one with the long tail".to_string(),
-        );
-        let mut tabs = Tabs::default();
+        let long = "Africa Split, the one with the long tail";
+        ws.rename(first, long.to_string());
         tabs.open(first);
         tabs.open(second);
 
-        // Inside the first document's tab, and far past the right of the last one.
-        let (from, to) = (
-            egui::pos2(200.0, HEIGHT / 2.0),
-            egui::pos2(4_000.0, HEIGHT / 2.0),
-        );
-        let button = |pos, pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
+        let size = egui::vec2(600.0, 300.0);
+        let painted = strip(&ctx, testing::screen(size, Vec::new()), &mut tabs, &ws);
+        // On the first document's name, and far past the right of the last tab.
+        let from = testing::where_(&testing::painted(&painted), long).center();
+        let to = egui::pos2(4_000.0, from.y);
         let frames: [Vec<egui::Event>; 5] = [
             vec![egui::Event::PointerMoved(from)],
-            vec![button(from, true)],
+            vec![testing::button(from, true)],
             vec![egui::Event::PointerMoved(to)],
-            vec![button(to, false)],
+            vec![testing::button(to, false)],
             Vec::new(),
         ];
         for events in frames {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(600.0, 300.0),
-                )),
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::new())
-                    .show(ctx, |ui| {
-                        tabs.ui(ui, &ws, &mut Vec::new());
-                    });
-            });
+            strip(&ctx, testing::screen(size, events), &mut tabs, &ws);
         }
 
         assert_eq!(
@@ -669,6 +622,22 @@ mod tests {
             Some(Spot::Document(second)),
             "a drop is not a click, so what was in front stayed in front"
         );
+    }
+
+    /// One frame of the strip across the top of a screen.
+    fn strip(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        tabs: &mut Tabs,
+        ws: &Workspace,
+    ) -> egui::FullOutput {
+        testing::run(ctx, input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    tabs.ui(ui, ws, &mut Vec::new());
+                });
+        })
     }
 
     /// The library and keyboard tabs show no single asset, so pruning never removes them.

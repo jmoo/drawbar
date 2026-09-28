@@ -1703,6 +1703,7 @@ fn strokes(ui: &egui::Ui, rect: egui::Rect, span: Span) -> Vec<(u8, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context, fills, words};
 
     /// What a sample instrument covers, and what a piano library covers.
     const NSMP: Span = Span { low: 24, high: 96 };
@@ -1718,15 +1719,6 @@ mod tests {
         }
     }
 
-    /// A context with the app's fonts: without the bold family, laying out a band's name
-    /// panics.
-    fn dressed() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx
-    }
-
     /// One frame of `body`, returning what it painted, the rect the widget claims, and
     /// what `body` returned. The rect lets the next frame point at a key.
     fn frame<R>(
@@ -1735,14 +1727,8 @@ mod tests {
         height: f32,
         mut body: impl FnMut(&mut egui::Ui) -> R,
     ) -> (egui::FullOutput, egui::Rect, R) {
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
-            ..Default::default()
-        };
         let mut answer = None;
-        let output = ctx.run(input, |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        let output = testing::run(ctx, testing::screen(SCREEN, events), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let at = egui::Rect::from_min_size(
                     ui.next_widget_position(),
@@ -1753,68 +1739,6 @@ mod tests {
         });
         let (at, answer) = answer.expect("the panel drew");
         (output, at, answer)
-    }
-
-    /// The fills a frame painted at `rect`, in paint order.
-    fn fills(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Color32> {
-        fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Color32>) {
-            match shape {
-                egui::Shape::Rect(drawn) if drawn.rect == rect => into.push(drawn.fill),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, rect, into)),
-                _ => {}
-            }
-        }
-        let mut found = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, rect, &mut found);
-        }
-        found
-    }
-
-    /// Every word a frame painted, with the ink it was painted in.
-    fn words(output: &egui::FullOutput) -> Vec<(String, egui::Color32)> {
-        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Color32)>) {
-            match shape {
-                egui::Shape::Text(text) => {
-                    let ink = text.override_text_color.or_else(|| {
-                        text.galley
-                            .job
-                            .sections
-                            .first()
-                            .map(|section| section.format.color)
-                    });
-                    into.push((
-                        text.galley.text().to_string(),
-                        ink.unwrap_or(text.fallback_color),
-                    ));
-                }
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut said);
-        }
-        said
-    }
-
-    fn press(at: egui::Pos2) -> Vec<egui::Event> {
-        vec![
-            egui::Event::PointerMoved(at),
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]
     }
 
     /// Every hit test in the map depends on this: the key under a point is the key whose
@@ -1846,31 +1770,21 @@ mod tests {
 
     /// The key rects a keyboard frame painted, in the order it painted them.
     fn key_shapes(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Rect> {
-        fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Rect>) {
-            match shape {
-                egui::Shape::Rect(drawn)
-                    if drawn.rect.top() == rect.top()
-                        && (drawn.rect.height() == KEYBOARD_H
-                            || drawn.rect.height() == BLACK_H) =>
-                {
-                    into.push(drawn.rect)
-                }
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, rect, into)),
-                _ => {}
-            }
-        }
-        let mut found = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, rect, &mut found);
-        }
-        found
+        testing::rects(output)
+            .iter()
+            .map(|drawn| drawn.rect)
+            .filter(|drawn| {
+                drawn.top() == rect.top()
+                    && (drawn.height() == KEYBOARD_H || drawn.height() == BLACK_H)
+            })
+            .collect()
     }
 
     /// The lane and the keyboard share one geometry. If they drifted apart, every band
     /// would sit off the key it names.
     #[test]
     fn a_keys_cell_is_the_key_the_keyboard_paints() {
-        let ctx = dressed();
+        let ctx = context();
         for span in [NSMP, NPNO] {
             let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
                 keyboard(ui, span, &[], None, &[])
@@ -1901,7 +1815,7 @@ mod tests {
     /// after both, or the white key beside it would cover the part that overlaps.
     #[test]
     fn a_black_key_is_centered_on_the_boundary_and_painted_over_the_whites_it_hangs_between() {
-        let ctx = dressed();
+        let ctx = context();
         for span in [NSMP, NPNO] {
             let (output, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
                 keyboard(ui, span, &[], None, &[])
@@ -2010,24 +1924,24 @@ mod tests {
     /// The only words on the keyboard are the octaves, and there is one per C.
     #[test]
     fn the_keyboard_labels_every_c_and_nothing_else() {
-        let ctx = dressed();
+        let ctx = context();
         let (output, _, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
             keyboard(ui, NSMP, &[], None, &[])
         });
-        let said: Vec<String> = words(&output).into_iter().map(|(text, _)| text).collect();
+        let said: Vec<String> = words(&output);
         assert_eq!(said, ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
     }
 
     /// A click on a black key drawn over two white keys plays the black key.
     #[test]
     fn a_click_lands_on_the_key_under_it_black_keys_first() {
-        let ctx = dressed();
+        let ctx = context();
         let (_, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
             keyboard(ui, NSMP, &[], None, &[])
         });
         for note in [60u8, 61, NSMP.low, NSMP.high] {
             let at = key_rect(rect, NSMP, note).center();
-            let (_, _, struck) = frame(&ctx, press(at), KEYBOARD_H, |ui| {
+            let (_, _, struck) = frame(&ctx, testing::click(at), KEYBOARD_H, |ui| {
                 keyboard(ui, NSMP, &[], None, &[])
             });
             assert_eq!(struck, Some(clicked(note)), "at {at:?}");
@@ -2037,7 +1951,7 @@ mod tests {
     /// A lit white key takes the selection color, and a lit black key the accent.
     #[test]
     fn every_lit_key_lights_and_the_others_keep_their_own_color() {
-        let ctx = dressed();
+        let ctx = context();
         let visuals = ctx.style().visuals.clone();
         let (_, rect, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
             keyboard(ui, NSMP, &[], None, &[])
@@ -2063,7 +1977,7 @@ mod tests {
     /// no room for all their names.
     #[test]
     fn a_root_marker_carries_its_name_only_when_it_was_given_one() {
-        let ctx = dressed();
+        let ctx = context();
         let marks = [
             Mark {
                 note: 72,
@@ -2077,7 +1991,7 @@ mod tests {
         let (output, _, _) = frame(&ctx, Vec::new(), KEYBOARD_H, |ui| {
             keyboard(ui, NSMP, &[], None, &marks)
         });
-        let said: Vec<String> = words(&output).into_iter().map(|(text, _)| text).collect();
+        let said: Vec<String> = words(&output);
         assert_eq!(
             said.iter().filter(|text| *text == "C5").count(),
             2,
@@ -2190,7 +2104,7 @@ mod tests {
     /// Clicking a band opens its row. With no handles, its ends pick it too.
     #[test]
     fn a_click_on_a_band_picks_it() {
-        let ctx = dressed();
+        let ctx = context();
         let zones = bands_of(&[(61, 96), (41, 60), (24, 40)]);
         let lane = |ui: &mut egui::Ui| bands(ui, NSMP, &zones, None, None, Edges::TopOnly);
         let (_, rect, _) = frame(&ctx, Vec::new(), BANDS_H, lane);
@@ -2199,7 +2113,7 @@ mod tests {
             (NSMP.x_of(rect, 41) + NSMP.x_after(rect, 60)) / 2.0,
             rect.center().y,
         );
-        let (_, _, act) = frame(&ctx, press(middle), BANDS_H, lane);
+        let (_, _, act) = frame(&ctx, testing::click(middle), BANDS_H, lane);
         assert_eq!(act, Some(BandAct::Pick(1)));
 
         // With no edges to grab, the whole band takes a click, including the ends a
@@ -2210,7 +2124,7 @@ mod tests {
             NSMP.x_after(rect, 60) - HANDLE_W / 2.0 - 1.0,
             rect.center().y,
         );
-        let (_, _, act) = frame(&ctx, press(end), BANDS_H, fixed);
+        let (_, _, act) = frame(&ctx, testing::click(end), BANDS_H, fixed);
         assert_eq!(act, Some(BandAct::Pick(1)));
 
         // A click on the hatch over a gap picks nothing.
@@ -2218,7 +2132,7 @@ mod tests {
         let lane = |ui: &mut egui::Ui| bands(ui, NSMP, &holed, None, None, Edges::Both);
         let (_, rect, _) = frame(&ctx, Vec::new(), BANDS_H, lane);
         let over_gap = egui::pos2(NSMP.x_of(rect, 30), rect.center().y);
-        let (_, _, act) = frame(&ctx, press(over_gap), BANDS_H, lane);
+        let (_, _, act) = frame(&ctx, testing::click(over_gap), BANDS_H, lane);
         assert_eq!(act, None);
     }
 
@@ -2238,14 +2152,14 @@ mod tests {
     /// would overlap its neighbor's.
     #[test]
     fn a_cells_size_is_printed_only_where_it_fits() {
-        let ctx = dressed();
+        let ctx = context();
         let span = Span { low: 48, high: 95 };
         for (keys, shown) in [(3u8, false), (4, true)] {
             let cells = [size_cell(60, 60 + keys - 1, 1.0, 1.0)];
             let (output, _, _) = frame(&ctx, Vec::new(), CELLS_H, |ui| {
                 size_cells(ui, span, &cells, None, None, Edges::Fixed)
             });
-            let said: Vec<String> = words(&output).into_iter().map(|(text, _)| text).collect();
+            let said: Vec<String> = words(&output);
             assert_eq!(
                 said.contains(&"1.0".to_string()),
                 shown,
@@ -2259,18 +2173,18 @@ mod tests {
     /// opening a row.
     #[test]
     fn a_trimmed_root_prints_its_size_in_warn_ink() {
-        let ctx = dressed();
+        let ctx = context();
         let visuals = ctx.style().visuals.clone();
         let span = Span { low: 48, high: 95 };
         let cells = [size_cell(60, 71, 0.5, 2.0), size_cell(72, 83, 2.0, 2.0)];
         let (output, _, _) = frame(&ctx, Vec::new(), CELLS_H, |ui| {
             size_cells(ui, span, &cells, None, None, Edges::Fixed)
         });
-        let said = words(&output);
+        let said = testing::painted(&output);
         let ink = |text: &str| {
             said.iter()
-                .find(|(painted, _)| painted == text)
-                .map(|(_, ink)| *ink)
+                .find(|word| word.text == text)
+                .map(|word| word.ink)
         };
         assert_eq!(ink("0.5"), Some(crate::app::warn(&visuals)));
         assert_eq!(ink("2.0"), Some(crate::app::caption(&visuals)));
@@ -2279,7 +2193,7 @@ mod tests {
     /// Clicking a cell opens that root's row.
     #[test]
     fn a_click_on_a_cell_picks_its_root() {
-        let ctx = dressed();
+        let ctx = context();
         let span = Span { low: 48, high: 95 };
         let cells = [size_cell(48, 59, 1.0, 1.0), size_cell(60, 71, 1.0, 1.0)];
         let lane = |ui: &mut egui::Ui| size_cells(ui, span, &cells, None, None, Edges::Both);
@@ -2288,7 +2202,7 @@ mod tests {
             (span.x_of(rect, 60) + span.x_after(rect, 71)) / 2.0,
             rect.center().y,
         );
-        let (_, _, picked) = frame(&ctx, press(at), CELLS_H, lane);
+        let (_, _, picked) = frame(&ctx, testing::click(at), CELLS_H, lane);
         assert_eq!(picked, Some(BandAct::Pick(1)));
     }
 
@@ -2370,7 +2284,7 @@ mod tests {
     /// pointer can move.
     #[test]
     fn a_click_on_a_velocity_block_picks_it() {
-        let ctx = dressed();
+        let ctx = context();
         let blocks = vel_blocks(&[(61, 96, (1, 127)), (24, 60, (1, 64))]);
         let field = |ui: &mut egui::Ui| velocity(ui, NSMP, &blocks, None, Handles::Fixed);
         let (_, rect, act) = frame(&ctx, Vec::new(), FIELD_H, field);
@@ -2384,7 +2298,7 @@ mod tests {
             (NSMP.x_of(lane, 24) + NSMP.x_after(lane, 60)) / 2.0,
             lane.bottom() - 4.0,
         );
-        let (_, _, act) = frame(&ctx, press(at), FIELD_H, field);
+        let (_, _, act) = frame(&ctx, testing::click(at), FIELD_H, field);
         assert_eq!(act, Some(VelocityAct::Pick(1)));
     }
 
@@ -2435,7 +2349,7 @@ mod tests {
     /// at.
     #[test]
     fn a_drag_across_the_lane_paints_the_keys_it_crossed() {
-        let ctx = dressed();
+        let ctx = context();
         let span = Span { low: 60, high: 62 };
         let values = [0.0_f32; 3];
         let painted = [false; 3];
@@ -2448,44 +2362,27 @@ mod tests {
         let start = at(60, rect.center().y);
         let events = vec![
             egui::Event::PointerMoved(start),
-            egui::Event::PointerButton {
-                pos: start,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
+            testing::button(start, true),
             egui::Event::PointerMoved(at(61, rect.top() + 9.5)),
             egui::Event::PointerMoved(at(62, rect.top() + 28.5)),
         ];
         let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
         assert_eq!(drawn, vec![(60, 0.0), (61, 0.5), (62, -0.5)]);
 
-        let release = |button| {
-            vec![egui::Event::PointerButton {
-                pos: start,
-                button,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            }]
-        };
-        frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
+        let release = || vec![testing::button(start, false)];
+        frame(&ctx, release(), LANE_H, lane_of);
 
         // The pointer crossing the lane on its way to the key it presses paints nothing:
         // a stroke starts where the button goes down.
         let events = vec![
             egui::Event::PointerMoved(at(62, rect.top() + 28.5)),
             egui::Event::PointerMoved(start),
-            egui::Event::PointerButton {
-                pos: start,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
+            testing::button(start, true),
             egui::Event::PointerMoved(at(61, rect.top() + 9.5)),
         ];
         let (_, _, drawn) = frame(&ctx, events, LANE_H, lane_of);
         assert_eq!(drawn, vec![(60, 0.0), (61, 0.5)]);
-        frame(&ctx, release(egui::PointerButton::Primary), LANE_H, lane_of);
+        frame(&ctx, release(), LANE_H, lane_of);
 
         // Only the primary button paints. A secondary drag is someone reaching for a
         // menu, not an edit to every key it crosses.
@@ -2507,7 +2404,7 @@ mod tests {
     /// it.
     #[test]
     fn a_hatch_paints_no_further_than_the_rect_it_fills() {
-        let ctx = dressed();
+        let ctx = context();
         let over = egui::Rect::from_min_size(egui::pos2(40.0, 30.0), egui::vec2(60.0, 17.0));
         let (output, _, _) = frame(&ctx, Vec::new(), 1.0, |ui| {
             hatch(ui.painter(), over, egui::Color32::RED, 0.55);

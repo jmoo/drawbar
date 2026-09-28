@@ -86,11 +86,30 @@ canon="$(jq -r '[.[].license] | unique[]' <<<"$entries" |
     jq -n --arg id "$id" --rawfile text "$licenses/$id.txt" '{($id): $text}'
   done | jq -s 'add')"
 
+# The registry packages drawbar reaches in Cargo.lock, so a lock change that only
+# another crate sees does not ask for this script.
 locked="$(awk -F' = ' '
-  $0 == "[[package]]" { name = version = "" }
-  $1 == "name" { name = $2 }
-  $1 == "version" { version = $2 }
-  $1 == "source" && $2 ~ /^"registry\+/ { print "(" name ", " version ")," }
+  $0 == "[[package]]" { n++; listing = 0; next }
+  listing && $0 == "]" { listing = 0; next }
+  listing { gsub(/^ *"|",?$/, ""); deps[n] = deps[n] "\n" $0; next }
+  $1 == "name" { name[n] = $2; gsub(/"/, "", $2); bare[n] = $2 }
+  $1 == "version" { version[n] = $2; gsub(/"/, "", $2); plain[n] = $2 }
+  $1 == "source" && $2 ~ /^"registry\+/ { registry[n] = 1 }
+  $0 == "dependencies = [" { listing = 1 }
+  END {
+    for (i = 1; i <= n; i++) if (bare[i] == "drawbar") queue[++tail] = i
+    for (head = 1; head <= tail; head++) {
+      at = queue[head]
+      if (seen[at]++) continue
+      count = split(substr(deps[at], 2), wanted, "\n")
+      for (d = 1; d <= count; d++) {
+        split(wanted[d], word, " ")
+        for (i = 1; i <= n; i++)
+          if (bare[i] == word[1] && (word[2] == "" || plain[i] == word[2])) queue[++tail] = i
+      }
+    }
+    for (i = 1; i <= n; i++) if (seen[i] && registry[i]) print "(" name[i] ", " version[i] "),"
+  }
 ' "$repo/crates/Cargo.lock")"
 
 rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '

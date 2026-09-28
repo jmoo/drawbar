@@ -957,21 +957,30 @@ mod tests {
 
     #[test]
     fn the_vendored_crate_licenses_match_the_lockfile() {
-        let locked: BTreeSet<_> = registry_packages(include_str!("../../Cargo.lock"));
+        let locked = reached(include_str!("../../Cargo.lock"), "drawbar");
         let vendored: BTreeSet<_> = crates::LOCKED.iter().copied().collect();
         let added: Vec<_> = locked.difference(&vendored).collect();
         let removed: Vec<_> = vendored.difference(&locked).collect();
         assert!(
             added.is_empty() && removed.is_empty(),
-            "Cargo.lock's registry packages changed since the crate licenses were vendored; \
-             run scripts/licenses.bash.\nadded: {added:?}\nremoved: {removed:?}"
+            "the registry packages drawbar reaches in Cargo.lock changed since the crate \
+             licenses were vendored; run scripts/licenses.bash.\nadded: {added:?}\nremoved: {removed:?}"
         );
     }
 
-    /// `(name, version)` of each `[[package]]` in a Cargo.lock whose source is a registry.
-    fn registry_packages(lock: &str) -> BTreeSet<(&str, &str)> {
-        lock.split("[[package]]")
-            .filter_map(|block| {
+    /// `(name, version)` of each registry package in a Cargo.lock that `root` depends on,
+    /// directly or through another package.
+    fn reached<'a>(lock: &'a str, root: &str) -> BTreeSet<(&'a str, &'a str)> {
+        struct Package<'a> {
+            name: &'a str,
+            version: &'a str,
+            registry: bool,
+            dependencies: Vec<&'a str>,
+        }
+        let packages: Vec<Package> = lock
+            .split("[[package]]")
+            .skip(1)
+            .map(|block| {
                 let field = |key: &str| {
                     block.lines().find_map(|line| {
                         line.strip_prefix(key)?
@@ -979,15 +988,51 @@ mod tests {
                             .strip_suffix('"')
                     })
                 };
-                field("source")?
-                    .starts_with("registry+")
-                    .then_some((field("name")?, field("version")?))
+                let dependencies = block
+                    .split_once("dependencies = [")
+                    .and_then(|(_, rest)| rest.split_once(']'))
+                    .map_or(Vec::new(), |(list, _)| {
+                        list.lines()
+                            .map(|line| line.trim().trim_end_matches(',').trim_matches('"'))
+                            .filter(|dependency| !dependency.is_empty())
+                            .collect()
+                    });
+                Package {
+                    name: field("name").expect("a package has a name"),
+                    version: field("version").expect("a package has a version"),
+                    registry: field("source").is_some_and(|source| source.starts_with("registry+")),
+                    dependencies,
+                }
             })
+            .collect();
+
+        // A dependency is written `name`, or `name version` where the name is ambiguous.
+        let named = |dependency: &str| -> Vec<usize> {
+            let mut words = dependency.split(' ');
+            let (name, version) = (words.next(), words.next());
+            (0..packages.len())
+                .filter(|&at| {
+                    Some(packages[at].name) == name
+                        && version.is_none_or(|v| packages[at].version == v)
+                })
+                .collect()
+        };
+        let mut seen = BTreeSet::new();
+        let mut queue = named(root);
+        while let Some(at) = queue.pop() {
+            if seen.insert(at) {
+                queue.extend(packages[at].dependencies.iter().flat_map(|d| named(d)));
+            }
+        }
+        seen.into_iter()
+            .map(|at| &packages[at])
+            .filter(|package| package.registry)
+            .map(|package| (package.name, package.version))
             .collect()
     }
 
     #[test]
-    fn a_lockfile_yields_only_its_registry_packages() {
+    fn a_lockfile_yields_the_registry_packages_its_root_reaches() {
         let lock = r#"version = 4
 
 [[package]]
@@ -995,22 +1040,53 @@ name = "drawbar"
 version = "0.5.0"
 dependencies = [
  "egui",
+ "nord-format",
+ "rand 0.9.0",
 ]
+
+[[package]]
+name = "clap"
+version = "4.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "egui"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0000"
+dependencies = [
+ "forked",
+]
 
 [[package]]
 name = "forked"
 version = "1.0.0"
 source = "git+https://example.com/forked#0000"
+
+[[package]]
+name = "nord-format"
+version = "0.1.0"
+dependencies = [
+ "zip",
+]
+
+[[package]]
+name = "rand"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "rand"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "zip"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 "#;
         assert_eq!(
-            registry_packages(lock),
-            BTreeSet::from([("egui", "0.32.3")])
+            reached(lock, "drawbar"),
+            BTreeSet::from([("egui", "0.32.3"), ("rand", "0.9.0"), ("zip", "2.0.0")])
         );
     }
 

@@ -1,0 +1,254 @@
+//! What the sample-instrument checks share: typed access to a decoded specimen,
+//! edits through the generation-neutral accessors, and the codec's derived values.
+
+use crate::Context;
+use nord_format::cbin::{Cbin, Generation};
+use nord_format::formats::{nsmp, nsmpproj};
+use nord_format::{Entity, Sample};
+use std::io::Cursor;
+use std::path::Path;
+
+pub fn parse(bytes: &[u8]) -> Result<Entity, String> {
+    nord_format::from_stream(&mut Cursor::new(bytes)).context("parse")
+}
+
+/// The file at `name`, relative to the directory of `beside`, read and parsed.
+pub fn related(beside: &Path, name: &str) -> Result<(Vec<u8>, Entity), String> {
+    let path = beside.parent().unwrap().join(name);
+    let bytes = std::fs::read(&path).context(name)?;
+    let entity = parse(&bytes).context(name)?;
+    Ok((bytes, entity))
+}
+
+pub fn sample(entity: &Entity) -> Result<&Sample, String> {
+    match entity {
+        Entity::Sample(sample) => Ok(sample),
+        other => Err(format!(
+            "{} is not a sample instrument",
+            other.identity().kind
+        )),
+    }
+}
+
+pub fn narrow(entity: &Entity) -> Result<&Cbin<nsmp::Sample>, String> {
+    match sample(entity)? {
+        Sample::V2(sample) => Ok(sample),
+        Sample::V3(_) => Err("a wide instrument, not a narrow one".into()),
+    }
+}
+
+pub fn wide(entity: &Entity) -> Result<&Cbin<nsmp::SampleV3>, String> {
+    match sample(entity)? {
+        Sample::V3(sample) => Ok(sample),
+        Sample::V2(_) => Err("a narrow instrument, not a wide one".into()),
+    }
+}
+
+pub fn project(entity: &Entity) -> Result<&nsmpproj::Project, String> {
+    match entity {
+        Entity::SampleProject(project) => Ok(project),
+        other => Err(format!(
+            "{} is not a Sample Editor project",
+            other.identity().kind
+        )),
+    }
+}
+
+/// The four counts a walked stream states about its own shape: the fields it
+/// covers, the 1:1 fields it opens with, the field its second 1:1 run starts at,
+/// and how many fields that run covers.
+pub fn landmarks(stream: &nsmp::codec::Stream) -> Result<[usize; 4], String> {
+    let warmup = stream
+        .records
+        .iter()
+        .take_while(|record| record.one_to_one)
+        .map(|record| record.values.len())
+        .sum::<usize>();
+    let resync_at = stream
+        .records
+        .iter()
+        .skip_while(|record| record.one_to_one)
+        .find(|record| record.one_to_one)
+        .ok_or("the stream does not return to 1:1 records after its lattice content")?
+        .first_field;
+    let resync = stream
+        .records
+        .iter()
+        .filter(|record| record.one_to_one && record.first_field >= resync_at)
+        .map(|record| record.values.len())
+        .sum::<usize>();
+    Ok([stream.fields, warmup, resync_at, resync])
+}
+
+pub fn planned(plan: &nsmp::encode::Plan) -> [usize; 4] {
+    [plan.fields, plan.warmup, plan.resync_at, plan.resync]
+}
+
+/// Every stroke's decoded fields, in file order.
+pub fn audio(sample: &Sample) -> Result<Vec<Vec<i16>>, String> {
+    let layout = sample.layout().context("layout")?;
+    sample
+        .stroke_streams()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (at, stream))| {
+            nsmp::codec::decode(stream, at, layout)
+                .map(|audio| audio.samples)
+                .context(format!("stroke {index}"))
+        })
+        .collect()
+}
+
+/// `bytes` re-encoded after `edit`. The edit may not resize the file, and the result
+/// must read back, which proves the container checksum was recomputed.
+pub fn edited(
+    bytes: &[u8],
+    edit: impl FnOnce(&mut Sample) -> Result<(), String>,
+) -> Result<Vec<u8>, String> {
+    let mut entity = parse(bytes)?;
+    let Entity::Sample(sample) = &mut entity else {
+        return Err("not a sample instrument".into());
+    };
+    edit(sample)?;
+    let after = nord_format::to_bytes(&entity).context("re-encode")?;
+    ensure!(
+        after.len() == bytes.len(),
+        "the edit resized the file from {} to {} bytes",
+        bytes.len(),
+        after.len()
+    );
+    parse(&after).context("reading the edit back")?;
+    Ok(after)
+}
+
+/// The offsets an edit changed, less the container checksum, which follows any
+/// change to the body: a V1 header's CRC-32, or the CRC-16 after a V0 body.
+pub fn moved(before: &[u8], after: &[u8]) -> Vec<usize> {
+    let checksum = match nord_format::cbin::inspect(&mut Cursor::new(before)) {
+        Ok(info) if info.header.generation == Generation::V0 => before.len() - 2..before.len(),
+        _ => 0x18..0x1c,
+    };
+    (0..before.len())
+        .filter(|&i| before[i] != after[i] && !checksum.contains(&i))
+        .collect()
+}
+
+/// Converts decibels to a linear gain with [`nsmp::zone::GAIN_BITS`] fractional bits,
+/// computed at higher precision than the field and rounded once, as the writer does.
+/// Silence (`-inf`) and a negative gain (NaN) both convert to zero.
+pub fn gain_units(decibels: f32) -> u64 {
+    (10f64.powf(f64::from(decibels) / 20.0) * f64::from(nsmp::zone::GAIN_UNITY)).round() as u64
+}
+
+/// A stroke's statistic A is the reciprocal of the file peak, scaled by the stroke's
+/// gain and stored mod `2^24`.
+///
+/// Inferred from specimens; not confirmed on hardware.
+pub fn statistic_a(stroke: &[u8], peak: u64, gain: u64) -> Result<(), String> {
+    let peak = peak.max(1);
+    let bits = 64 - peak.leading_zeros();
+    let exact_power = u32::from(peak.is_power_of_two());
+    let reciprocal = (1u64 << (21 + bits + (1 - exact_power))) / peak;
+    let mantissa = (reciprocal * gain) >> (nsmp::zone::GAIN_BITS + 3);
+    let want = ((mantissa % (1 << 24)) as u32).to_be_bytes();
+    ensure!(
+        stroke[9..12] == want[1..],
+        "stroke {} statistic A is {:02x?}, and peak {peak} at gain {gain} gives {:02x?}",
+        stroke[3],
+        &stroke[9..12],
+        &want[1..]
+    );
+    Ok(())
+}
+
+/// The file peak over every stroke, as statistic A measures it.
+pub fn peak(streams: &[(usize, &[u8])], layout: nsmp::codec::Layout) -> u64 {
+    streams
+        .iter()
+        .filter_map(|(_, s)| nsmp::codec::peak(s, layout))
+        .map(|p| u64::from(p.unsigned_abs()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The gain stroke `id` was built with, read from a wide render's decibel field.
+pub fn wide_stroke_gain(wide: &Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
+    let layout = nsmp::codec::Layout::from_version(wide.header.version)?;
+    let (_, stroke) = wide
+        .stroke_streams()
+        .into_iter()
+        .find(|(_, s)| s[3] == id)?;
+    Some(gain_units(nsmp::codec::zone_gain_db(stroke, layout)?))
+}
+
+/// A project zone, with generated audio of the length the project gives it.
+///
+/// The editor's WAVs are not corpus material, so the audio is generated. Only the frame
+/// count affects what is compared: a stroke's field count comes from its length, and
+/// every other field compared is metadata.
+pub struct BuiltZone {
+    global_id: u32,
+    root_key: u8,
+    top_note: u8,
+    pub audio: Vec<i16>,
+    pub secondary_start: f64,
+}
+
+pub fn built_zones(project: &nsmpproj::Project) -> Result<Vec<BuiltZone>, String> {
+    let strokes = project.strokes().context("project strokes")?;
+    project
+        .zones()
+        .context("project zones")?
+        .iter()
+        .map(|zone| {
+            let layer = &zone.strokes[0];
+            let stroke = strokes
+                .iter()
+                .find(|s| s.global_id == layer.global_id)
+                .ok_or_else(|| format!("the project has no stroke {}", layer.global_id))?;
+            let frames = (stroke.stop - stroke.start) as usize;
+            Ok(BuiltZone {
+                global_id: layer.global_id,
+                root_key: zone.root_key,
+                top_note: zone.top_note,
+                audio: (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect(),
+                secondary_start: stroke.encoded_secondary_start() - stroke.start,
+            })
+        })
+        .collect()
+}
+
+/// A narrow instrument built from a project's zones, with the editor's predictor
+/// choice.
+pub fn built_v2(
+    project: &nsmpproj::Project,
+    zones: &[BuiltZone],
+) -> Result<Cbin<nsmp::Sample>, String> {
+    let new_zones: Vec<_> = zones
+        .iter()
+        .map(|zone| nsmp::encode::NewZone {
+            source: &zone.audio,
+            channels: 1,
+            root_key: zone.root_key,
+            top_note: zone.top_note,
+            global_id: zone.global_id,
+            loops: None,
+            secondary_start: zone.secondary_start,
+            shift: None,
+            gain: 1.0,
+            loop_decay: nsmp::encode::DEFAULT_LOOP_DECAY,
+        })
+        .collect();
+    let name = project.name().context("project name")?;
+    let instrument = nsmp::encode::Instrument {
+        name: &name,
+        map_gain: 1.0,
+        predictor: nsmp::encode::Predictor::Minimizing,
+        layout: nsmp::codec::Layout::V2,
+        preset: nsmp::encode::Preset::default(),
+    };
+    match nsmp::encode::multi_zone(instrument, &new_zones).context("build")? {
+        Sample::V2(file) => Ok(file),
+        Sample::V3(_) => Err("the narrow layout built a wide chain".into()),
+    }
+}

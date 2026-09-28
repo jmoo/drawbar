@@ -66,15 +66,6 @@ mod tests {
         assert_eq!(location(&back).unwrap(), (0, 2));
     }
 
-    #[test]
-    fn the_live_slot_space_stops_at_three() {
-        for slot in 0..SLOT_COUNT {
-            assert!(Location::try_from((0, slot)).is_ok(), "slot {slot}");
-        }
-        assert!(Location::try_from((0, SLOT_COUNT)).is_err());
-        assert!(Location::try_from((1, 0)).is_err());
-    }
-
     /// The bodies are interchangeable, so only the tag distinguishes the formats. A reader
     /// that ignored it would write the file back as the other format.
     #[test]

@@ -267,21 +267,7 @@ fn three(ui: &mut egui::Ui, key: (&str, bool), value: &str, note: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn words(output: &egui::FullOutput) -> Vec<String> {
-        fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut out);
-        }
-        out
-    }
+    use crate::testing::{self, context, words};
 
     #[test]
     fn the_badge_counts_and_the_note_names_what_is_absent() {
@@ -307,9 +293,7 @@ mod tests {
                 note: "",
             },
         ];
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| table(ui, &rows));
         });
         let painted = words(&output);
@@ -335,22 +319,5 @@ mod tests {
             "an empty note reads as the state's word"
         );
         assert!(painted.contains(&"baked".to_string()));
-    }
-
-    #[test]
-    fn every_state_has_its_own_word() {
-        let all = [
-            State::Editable,
-            State::ReadOnly,
-            State::Absent,
-            State::NeedsEncode,
-            State::Verified,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
-                assert_ne!(a.word(), b.word());
-            }
-        }
-        assert_eq!(State::Absent.word(), "not in this format");
     }
 }

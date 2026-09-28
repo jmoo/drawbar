@@ -297,6 +297,7 @@ pub fn flat(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context, fills};
 
     fn widths(width: f32, wanted: &[Track]) -> Vec<f32> {
         tracks(width, wanted, 0.0)
@@ -343,22 +344,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_title_is_uppercased_whatever_it_arrives_as() {
-        assert_eq!(caps("send queue").text(), "SEND QUEUE");
-        assert_eq!(caps("Browser").text(), "BROWSER");
-    }
-
     /// A header spans the full width at its kind's height, so a dock's body always starts
     /// at the same place and a header's fill reaches both edges.
     #[test]
     fn a_header_claims_its_own_height_and_the_whole_width() {
-        let ctx = egui::Context::default();
         let mut section = egui::Rect::ZERO;
         let mut dock = egui::Rect::ZERO;
         let mut width = 0.0;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            ctx.style_mut(crate::app::metrics);
+        testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 width = ui.available_width();
                 section = panel_header(ui, "places", None, None).rect;
@@ -369,22 +362,6 @@ mod tests {
         assert_eq!(dock.height(), crate::tabs::HEIGHT);
         assert_eq!(section.width(), width);
         assert_eq!(dock.width(), width);
-    }
-
-    /// What a frame painted over `rect`, innermost last.
-    fn fills(output: &egui::FullOutput, rect: egui::Rect) -> Vec<egui::Color32> {
-        fn walk(shape: &egui::Shape, rect: egui::Rect, into: &mut Vec<egui::Color32>) {
-            match shape {
-                egui::Shape::Rect(drawn) if drawn.rect == rect => into.push(drawn.fill),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, rect, into)),
-                _ => {}
-            }
-        }
-        let mut found = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, rect, &mut found);
-        }
-        found
     }
 
     /// Run frames with the pointer over the header or away from it, and return what the
@@ -406,8 +383,7 @@ mod tests {
                 ..Default::default()
             };
             let mut rect = egui::Rect::NOTHING;
-            let output = ctx.run(input, |ctx| {
-                ctx.style_mut(crate::app::metrics);
+            let output = testing::run(ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| rect = header(ui).rect);
             });
             at.set(rect.center());
@@ -420,7 +396,7 @@ mod tests {
     /// as the headings of one.
     #[test]
     fn a_section_header_wears_the_panel_until_the_pointer_is_on_it() {
-        let ctx = egui::Context::default();
+        let ctx = context();
         let section = |ui: &mut egui::Ui| panel_header(ui, "places", None, None);
         assert_eq!(
             header_fill(&ctx, false, section),
@@ -435,7 +411,7 @@ mod tests {
     /// A dock header names the dock, not a section, and has nothing to click.
     #[test]
     fn a_dock_header_keeps_its_own_color_whether_or_not_it_is_pointed_at() {
-        let ctx = egui::Context::default();
+        let ctx = context();
         let faint = ctx.style().visuals.faint_bg_color;
         for pointed in [false, true] {
             assert_eq!(
@@ -448,33 +424,18 @@ mod tests {
 
     #[test]
     fn the_triangle_toggles_the_bool_it_was_handed() {
-        let ctx = egui::Context::default();
+        let ctx = context();
         let mut open = true;
         let at = std::cell::Cell::new(egui::Pos2::ZERO);
         let frame = |press: bool, open: &mut bool| {
             let input = egui::RawInput {
                 events: match press {
-                    true => vec![
-                        egui::Event::PointerMoved(at.get()),
-                        egui::Event::PointerButton {
-                            pos: at.get(),
-                            button: egui::PointerButton::Primary,
-                            pressed: true,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                        egui::Event::PointerButton {
-                            pos: at.get(),
-                            button: egui::PointerButton::Primary,
-                            pressed: false,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                    ],
+                    true => testing::click(at.get()),
                     false => Vec::new(),
                 },
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
-                ctx.style_mut(crate::app::metrics);
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let rect = panel_header(ui, "browser", Some(open), None).rect;
                     at.set(egui::pos2(

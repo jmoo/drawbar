@@ -131,28 +131,22 @@ pub fn sized(glyph: Glyph, size: f32, tint: egui::Color32) -> egui::Image<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing;
     use egui::load::{ImagePoll, SizeHint};
 
     /// A 10 px glyph on a 2x display, the smallest raster the shell requests.
     const RASTER: u32 = 20;
 
     fn headless() -> (egui::Context, egui::RawInput) {
-        let ctx = egui::Context::default();
+        let ctx = testing::context();
         egui_extras::install_image_loaders(&ctx);
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 540.0),
-            )),
-            ..Default::default()
-        };
-        (ctx, input)
+        (ctx, testing::screen(egui::vec2(900.0, 540.0), Vec::new()))
     }
 
     #[test]
     fn every_glyph_rasterizes_to_something_that_can_be_seen() {
         let (ctx, input) = headless();
-        let _ = ctx.run(input, |ctx| {
+        testing::run(&ctx, input, |ctx| {
             for glyph in Glyph::ALL.iter().copied() {
                 let source = glyph.source();
                 let egui::ImageSource::Bytes { uri, bytes } = source else {
@@ -192,7 +186,7 @@ mod tests {
     #[test]
     fn the_widget_takes_exactly_the_box_it_was_asked_for() {
         let (ctx, input) = headless();
-        let _ = ctx.run(input, |ctx| {
+        testing::run(&ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 for glyph in Glyph::ALL.iter().copied() {
                     for size in [10.0_f32, 15.0] {

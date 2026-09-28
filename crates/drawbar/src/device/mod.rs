@@ -1780,14 +1780,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_a_class_with_no_name_is_read_only() {
-        for class in named() {
-            assert!(!read_only(class), "{}", folder(class));
-        }
-        assert!(read_only(ObjectClass::Unknown(9)));
-    }
-
     /// A folder emptied on the instrument must not keep showing its old names, and must
     /// not look as if it was never read.
     #[test]

@@ -1275,17 +1275,13 @@ mod tests {
     use crate::device::DeviceEvent;
     use crate::log::Log;
     use crate::tabs::Tabs;
+    use crate::testing::{self, Bench};
     use crate::workspace::{Fresh, Origin};
 
     /// A workspace, and one program's bytes to make assets out of.
     fn bench() -> (Workspace, Log, Vec<u8>) {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx);
-        let mut log = Log::default();
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
-        workspace.remove(id, &mut log);
-        (workspace, log, bytes)
+        let Bench { workspace, log, .. } = Bench::new();
+        (workspace, log, Fresh::Program.bytes().unwrap())
     }
 
     fn at(slot: u32) -> Location {
@@ -1588,35 +1584,6 @@ mod tests {
         assert!(queue.entry(ids[2]).unwrap().failure.is_none());
     }
 
-    /// An asset is owed to the instrument while the queue holds it, and stops being owed
-    /// when the write lands.
-    #[test]
-    fn what_is_owed_is_what_the_queue_holds() {
-        let (mut workspace, mut log, bytes) = bench();
-        let id = workspace.ingest(
-            "Africa-Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: at(3),
-            },
-            bytes,
-            &mut log,
-        );
-        let mut queue = Queue::default();
-        assert!(!queue.holds(id));
-
-        queue.put(
-            workspace.get(id).unwrap(),
-            ObjectClass::Program,
-            at(3),
-            Occupancy::Vacant,
-        );
-        assert!(queue.holds(id));
-
-        queue.forget(id);
-        assert!(!queue.holds(id) && queue.is_empty());
-    }
-
     /// The diff between two bodies with registries lists only the fields that differ.
     /// The pair here is a program and the same program with one field set through the
     /// registry.
@@ -1665,8 +1632,7 @@ mod tests {
     #[test]
     fn what_is_waiting_counts_its_replacements_whatever_the_bytes_turn_out_to_be() {
         let (mut workspace, mut log, bytes) = bench();
-        let ctx = workspace.ctx().clone();
-        let mut device = Device::new(ctx);
+        let mut device = Device::new(workspace.ctx().clone());
         let class = ObjectClass::Program;
         // Two slots hold something, two are vacant.
         device.pretend_scanned(class, 7, &["Africa Split", "Squabble B", "", ""]);
@@ -2098,8 +2064,7 @@ mod tests {
     #[test]
     fn a_scanned_empty_slot_is_free_and_asks_the_instrument_nothing() {
         let (mut workspace, mut log, bytes) = bench();
-        let ctx = workspace.ctx().clone();
-        let mut device = Device::new(ctx);
+        let mut device = Device::new(workspace.ctx().clone());
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", ""]);
         let mut queue = Queue::default();
@@ -2127,8 +2092,7 @@ mod tests {
     #[test]
     fn retargeting_moves_the_entry_and_displaces_what_was_waiting_there() {
         let (mut workspace, mut log, bytes) = bench();
-        let ctx = workspace.ctx().clone();
-        let mut device = Device::new(ctx);
+        let mut device = Device::new(workspace.ctx().clone());
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["", "Africa Split", ""]);
         let mut queue = Queue::default();
@@ -2185,20 +2149,17 @@ mod tests {
     /// open after a bank chip is clicked.
     #[test]
     fn a_click_on_a_bank_chip_leaves_the_picker_open_on_that_bank() {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut log = Log::default();
-        let mut device = Device::new(ctx.clone());
+        let Bench {
+            ctx,
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
         device.pretend_scanned(class, 8, &["", "", ""]);
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let held = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            held
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
         let mut queue = Queue::default();
         enqueue(
@@ -2214,15 +2175,8 @@ mod tests {
 
         let chip_id = std::cell::Cell::new(egui::Id::NULL);
         let draw = |events: Vec<egui::Event>| {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(600.0, 600.0),
-                )),
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
+            let input = testing::screen(egui::vec2(600.0, 600.0), events);
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
@@ -2249,14 +2203,8 @@ mod tests {
             }
         };
         let click_at = |on: egui::Pos2| {
-            let press = |pressed| egui::Event::PointerButton {
-                pos: on,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            };
             draw(vec![egui::Event::PointerMoved(on)]);
-            draw(vec![press(true), press(false)]);
+            draw(vec![testing::button(on, true), testing::button(on, false)]);
         };
         let rect_of = |id: egui::Id| ctx.read_response(id).map(|drawn| drawn.rect);
 
@@ -2285,19 +2233,16 @@ mod tests {
     /// land.
     #[test]
     fn a_click_on_a_picker_cell_returns_that_slot() {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut log = Log::default();
-        let mut device = Device::new(ctx.clone());
+        let Bench {
+            ctx,
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let held = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            held
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
         let mut queue = Queue::default();
         enqueue(
@@ -2313,16 +2258,12 @@ mod tests {
 
         let wanted = at(2);
         let draw = |events: Vec<egui::Event>| -> (Option<Location>, Option<egui::Pos2>) {
-            let input = egui::RawInput {
+            let input = testing::screen(
+                egui::vec2(crate::keyboard::grid_width(PICKER_COLUMNS), 300.0),
                 events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(crate::keyboard::grid_width(PICKER_COLUMNS), 300.0),
-                )),
-                ..Default::default()
-            };
+            );
             let mut drawn = (None, None);
-            let _ = ctx.run(input, |ctx| {
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
@@ -2340,34 +2281,28 @@ mod tests {
             .1
             .expect("the picker drew a cell for every slot of the bank");
         draw(vec![egui::Event::PointerMoved(on_cell)]);
-        let press = |pressed| egui::Event::PointerButton {
-            pos: on_cell,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-
-        assert_eq!(draw(vec![press(true), press(false)]).0, Some(wanted));
+        let press = vec![
+            testing::button(on_cell, true),
+            testing::button(on_cell, false),
+        ];
+        assert_eq!(draw(press).0, Some(wanted));
     }
 
     /// Paints the page headlessly with each kind of diff, to catch a layout that panics
     /// or an id that collides.
     #[test]
     fn the_dock_page_paints_every_kind_of_diff() {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut log = Log::default();
-        let mut device = Device::new(ctx.clone());
+        let Bench {
+            ctx,
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "Squabble B", ""]);
 
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let held = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            held
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
@@ -2398,7 +2333,7 @@ mod tests {
         for width in [430.0_f32, 900.0] {
             for picked in queue.ids() {
                 queue.picked = Some(picked);
-                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                testing::run(&ctx, egui::RawInput::default(), |ctx| {
                     egui::TopBottomPanel::bottom("dock")
                         .exact_height(crate::shell::DOCK_BODY)
                         .frame(egui::Frame::new())

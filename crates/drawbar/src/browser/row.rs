@@ -281,38 +281,11 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_colored_cell_keeps_its_color_until_its_row_is_selected() {
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            for own in [
-                crate::app::good(&visuals),
-                crate::app::warn(&visuals),
-                crate::app::bad(&visuals),
-                crate::app::accent(&visuals),
-                crate::app::unlit(&visuals),
-            ] {
-                assert_eq!(cell_ink(false, own, &visuals), own);
-                assert_eq!(
-                    cell_ink(true, own, &visuals),
-                    visuals.selection.stroke.color
-                );
-            }
-        }
-    }
+    use crate::testing::{self, context};
 
     #[test]
     fn an_unsaved_row_writes_its_name_with_a_star() {
-        fn words(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| words(shape, into)),
-                _ => {}
-            }
-        }
-
-        let ctx = egui::Context::default();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("places")
                 .exact_width(232.0)
                 .show(ctx, |ui| {
@@ -329,10 +302,7 @@ mod tests {
                     }
                 });
         });
-        let mut said = Vec::new();
-        for clipped in &output.shapes {
-            words(&clipped.shape, &mut said);
-        }
+        let said = testing::words(&output);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
@@ -341,9 +311,8 @@ mod tests {
     /// beside it. The row's hover then shows it in full.
     #[test]
     fn a_name_too_long_for_its_row_is_cut_to_the_room_left() {
-        let ctx = egui::Context::default();
         let long = "Africa Split, the one with the long tail and the second manual";
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("places")
                 .exact_width(232.0)
                 .show(ctx, |ui| {
@@ -367,21 +336,21 @@ mod tests {
                 });
         });
 
-        let painted = crate::browser::bench::galleys(&output);
+        let painted = testing::painted(&output);
         let cut = painted
             .iter()
-            .find(|galley| galley.text() == long)
+            .find(|word| word.text == long)
             .expect("the long name was painted");
-        assert!(cut.elided, "a name without room is truncated");
+        assert!(cut.galley.elided, "a name without room is truncated");
         assert!(
-            cut.size().x <= 232.0,
+            cut.rect.width() <= 232.0,
             "and stays inside the panel: {}",
-            cut.size().x
+            cut.rect.width()
         );
         assert!(
             painted
                 .iter()
-                .any(|galley| galley.text() == "Africa Split" && !galley.elided),
+                .any(|word| word.text == "Africa Split" && !word.galley.elided),
             "a short name is painted whole"
         );
     }

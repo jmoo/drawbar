@@ -429,17 +429,9 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::apply;
-    use crate::log::Log;
-    use crate::tabs::Tabs;
+    use crate::testing::{self, context, Bench};
     use crate::workspace::Fresh;
     use nord_usb::wire::{Dependency, Status};
-
-    fn context() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        ctx
-    }
 
     /// An instrument that has counted a library, holds a program, and has answered which
     /// libraries one slot needs: one named and one not.
@@ -502,7 +494,7 @@ mod tests {
         let mut said = Vec::new();
         // Twice: the second pass runs with the widget state the first left behind.
         for _ in 0..2 {
-            let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
@@ -511,7 +503,7 @@ mod tests {
                         tags(panel, &[7, 8], &labels, &mut Vec::new());
                     });
             });
-            said = crate::browser::bench::words(&output);
+            said = testing::words(&output);
         }
         said
     }
@@ -545,7 +537,11 @@ mod tests {
             info_open: false,
             ..Shell::default()
         };
-        paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
+        let shut = paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
+        for header in ["ROOM", "INFO"] {
+            assert!(shut.iter().any(|word| word == header), "{header}: {shut:?}");
+        }
+        assert!(shut.len() < held.len(), "{shut:?}");
     }
 
     #[test]
@@ -602,7 +598,7 @@ mod tests {
     fn a_fact_too_long_for_the_dock_wraps_rather_than_truncating() {
         let ctx = context();
         let lines = |said: &str| {
-            let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |ui| {
@@ -616,10 +612,10 @@ mod tests {
                         );
                     });
             });
-            crate::browser::bench::galleys(&output)
+            testing::painted(&output)
                 .iter()
-                .find(|galley| galley.text() == said)
-                .map(|galley| galley.rows.len())
+                .find(|word| word.text == said)
+                .map(|word| word.galley.rows.len())
         };
 
         assert_eq!(lines("2.0 kB"), Some(1), "a short value keeps its one line");
@@ -703,12 +699,12 @@ mod tests {
         assert!(wearing(&[9], &labels).is_empty(), "picked, with no tags");
 
         let painted = |picked: &[u64]| {
-            let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| tags(panel, picked, &labels, &mut Vec::new()));
             });
-            crate::browser::bench::words(&output)
+            testing::words(&output)
         };
         let said = painted(&[7, 8]);
         for name in ["Sunday", "Loud"] {
@@ -719,50 +715,39 @@ mod tests {
 
     #[test]
     fn a_tag_goes_on_the_whole_selection_and_comes_off_it_again() {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut browser = Browser::default();
-        let mut queue = Queue::default();
-        let mut tabs = Tabs::default();
-        let mut log = Log::default();
-        let mut shell = Shell::default();
+        let mut bench = Bench::new();
         let ids: Vec<u64> = (0..2)
-            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .map(|_| {
+                bench
+                    .workspace
+                    .create(Fresh::Program, &mut bench.log)
+                    .unwrap()
+            })
             .collect();
 
-        let mut run = |browser: &mut Browser, acts| {
-            apply(
-                browser,
-                &mut shell,
-                acts,
-                &mut workspace,
-                &mut device,
-                &mut tabs,
-                &mut queue,
-                &mut log,
-            )
-        };
-        run(&mut browser, vec![Act::NewTag("Sunday".into())]);
-        let tag = browser.tags().all()[0].id;
-        assert!(!browser.tags().on_all(&ids, tag), "hollow to begin with");
-
-        run(
-            &mut browser,
-            vec![Act::Tag {
-                ids: ids.clone(),
-                tag,
-            }],
+        bench.act(vec![Act::NewTag("Sunday".into())]);
+        let tag = bench.browser.tags().all()[0].id;
+        assert!(
+            !bench.browser.tags().on_all(&ids, tag),
+            "hollow to begin with"
         );
-        assert!(browser.tags().on_all(&ids, tag), "a hollow one goes on all");
 
-        run(
-            &mut browser,
-            vec![Act::Untag {
-                ids: ids.clone(),
-                tag,
-            }],
+        bench.act(vec![Act::Tag {
+            ids: ids.clone(),
+            tag,
+        }]);
+        assert!(
+            bench.browser.tags().on_all(&ids, tag),
+            "a hollow one goes on all"
         );
-        assert!(!browser.tags().on_all(&ids, tag), "a solid one comes off");
+
+        bench.act(vec![Act::Untag {
+            ids: ids.clone(),
+            tag,
+        }]);
+        assert!(
+            !bench.browser.tags().on_all(&ids, tag),
+            "a solid one comes off"
+        );
     }
 }

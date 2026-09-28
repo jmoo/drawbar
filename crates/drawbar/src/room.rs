@@ -246,9 +246,9 @@ pub fn bar(ui: &mut egui::Ui, meter: Meter) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{pretend_allocation_unit, Device};
-    use crate::log::Log;
+    use crate::device::pretend_allocation_unit;
     use crate::queue::enqueue;
+    use crate::testing::Bench;
     use crate::workspace::{Fresh, Origin};
     use nord_usb::Location;
 
@@ -269,17 +269,14 @@ mod tests {
 
     #[test]
     fn a_slot_folder_meters_items_and_counts_only_what_would_fill_a_slot() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let held = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            held
-        };
+        let bytes = Fresh::Program.bytes().unwrap();
         // 100 of 400 slots, each program costing 121 bytes of the partition's count.
         let inventory = [status(class, 100, 300 * 121, 100 * 121)];
         // Two vacant destinations and one that is taken.
@@ -316,10 +313,12 @@ mod tests {
 
     #[test]
     fn a_library_meters_blocks_and_has_no_meter_at_all_without_its_unit() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Sample;
         let inventory = [status(class, 84, 64, 1472)];
         device.pretend_scanned(class, 1, &[""]);
@@ -349,9 +348,9 @@ mod tests {
 
     #[test]
     fn a_partition_that_counts_nothing_at_all_has_no_meter() {
-        let ctx = egui::Context::default();
-        let workspace = Workspace::new(ctx);
-        let queue = Queue::default();
+        let Bench {
+            workspace, queue, ..
+        } = Bench::new();
         let class = ObjectClass::Piano;
         let unit = Some(pretend_allocation_unit(class, 261_632));
         let inventory = [
@@ -366,10 +365,12 @@ mod tests {
 
     #[test]
     fn only_a_partition_that_can_fill_gets_a_meter() {
-        let ctx = egui::Context::default();
-        let mut device = Device::new(ctx.clone());
-        let workspace = Workspace::new(ctx);
-        let queue = Queue::default();
+        let Bench {
+            workspace,
+            mut device,
+            queue,
+            ..
+        } = Bench::new();
         let (one, many, library) = (ObjectClass::Live, ObjectClass::Program, ObjectClass::Sample);
         let inventory = [
             status(one, 1, 4, 1),
@@ -422,10 +423,12 @@ mod tests {
 
     #[test]
     fn the_binding_constraint_is_the_largest_thing_waiting_against_the_room_left() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Sample;
         let mut queue = Queue::default();
         assert_eq!(constraint(&queue, &workspace, &device.state), None);

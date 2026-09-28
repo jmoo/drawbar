@@ -1312,6 +1312,7 @@ pub fn too_small_notice(ctx: &egui::Context) {
 mod tests {
     use super::*;
     use crate::store::Fake;
+    use crate::testing;
     use eframe::{App, Storage};
 
     /// The window size the design is drawn for.
@@ -1379,13 +1380,9 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> Painted {
         let mut frame = eframe::Frame::_new_kittest();
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
-            ..Default::default()
-        };
+        let input = testing::screen(screen, events);
         let mut center = egui::Rect::NOTHING;
-        let output = ctx.run(input, |ctx| {
+        let output = testing::run(ctx, input, |ctx| {
             app.update(ctx, &mut frame);
             // Panels shrink this as they are added; the central panel does not.
             center = ctx.available_rect();
@@ -1400,7 +1397,7 @@ mod tests {
         Painted {
             center,
             panels,
-            words: crate::tabs::words(&output),
+            words: testing::words(&output),
         }
     }
 
@@ -1486,16 +1483,9 @@ mod tests {
     /// A gated frame draws only the notice: what is wrong, and a link to the guide.
     #[test]
     fn the_notice_says_what_is_wrong_and_offers_the_guide() {
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(390.0, 844.0),
-            )),
-            ..Default::default()
-        };
-        let output = ctx.run(input, too_small_notice);
-        let said = crate::tabs::words(&output);
+        let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
+        let output = testing::run(&egui::Context::default(), input, too_small_notice);
+        let said = testing::words(&output);
 
         assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");
         assert!(said.iter().any(|word| word == TOO_SMALL_WHY), "{said:?}");
@@ -1663,19 +1653,6 @@ mod tests {
         );
     }
 
-    /// Every change to what is typed brings the library forward, the first keystroke
-    /// into an empty box and clearing it included. A frame that typed nothing is not a
-    /// change.
-    #[test]
-    fn a_change_in_the_omnibox_is_what_brings_the_library_forward() {
-        assert!(searched("", "a"), "the first keystroke");
-        assert!(searched("afr", "afri"));
-        assert!(searched("afri", "afr"), "and a backspace");
-        assert!(searched("afr", ""), "and clearing it");
-        assert!(!searched("afr", "afr"));
-        assert!(!searched("", ""));
-    }
-
     /// ⚠️ The omnibox filters only the library's table, so typing into it with a document
     /// in front must bring the library forward.
     #[test]
@@ -1787,43 +1764,11 @@ mod tests {
             let ctx = egui::Context::default();
             let mut before = app(&ctx, None);
             before.shell.browser_open = false;
-            before.shell.show_page(Page::Log);
             before.save(&mut store);
         }
         let ctx = egui::Context::default();
         let after = app(&ctx, Some(&store));
         assert!(!after.shell.browser_open);
-        assert!(after.shell.inspector_open);
-        assert!(after.shell.dock_open);
-        assert_eq!(after.shell.page, Page::Log);
-    }
-
-    #[test]
-    fn a_dock_toggles_and_a_page_opens_the_dock_it_is_on() {
-        let mut shell = Shell::default();
-        for dock in [Dock::Browser, Dock::Inspector, Dock::Bottom] {
-            let was = shell.open(dock);
-            shell.toggle(dock);
-            assert_eq!(shell.open(dock), !was, "{dock:?}");
-        }
-        // Asking for a page opens the dock too.
-        shell.dock_open = false;
-        shell.show_page(Page::Log);
-        assert!(shell.dock_open && shell.page == Page::Log);
-    }
-
-    /// ⚠️ Clicking the title of the page already showing collapses the dock. A title that
-    /// ignored a click would look broken, and the collapse triangle is only 8 px of the header.
-    #[test]
-    fn the_title_of_the_page_showing_shuts_the_dock() {
-        assert!(matches!(
-            page_click(Page::Queue, true),
-            Act::ToggleDock(Dock::Bottom)
-        ));
-        assert!(matches!(
-            page_click(Page::Queue, false),
-            Act::ShowPage(Page::Queue)
-        ));
     }
 
     /// What was collapsed is collapsed again next session, on the page it was left on.

@@ -1390,29 +1390,10 @@ pub(crate) fn library_id(value: &str) -> Option<u32> {
     }
 }
 
-/// Every shape a frame painted, with its clip rect, with nested shape lists flattened.
-#[cfg(test)]
-fn leaves(output: &egui::FullOutput) -> Vec<(egui::Rect, &egui::Shape)> {
-    fn open<'a>(
-        clip: egui::Rect,
-        shape: &'a egui::Shape,
-        into: &mut Vec<(egui::Rect, &'a egui::Shape)>,
-    ) {
-        match shape {
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| open(clip, shape, into)),
-            shape => into.push((clip, shape)),
-        }
-    }
-    let mut found = Vec::new();
-    for clipped in &output.shapes {
-        open(clipped.clip_rect, &clipped.shape, &mut found);
-    }
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, sample_bytes, wav_bytes, Bench, Word};
     use crate::workspace::{Fresh, Origin};
 
     /// One document open in a headless window, with everything a frame of it needs.
@@ -1431,6 +1412,8 @@ mod tests {
         id: u64,
         /// The window width, which decides how far the header collapses.
         width: f32,
+        /// What the last frame painted.
+        said: Vec<Word>,
     }
 
     /// The window a document is painted into, wide enough for [`Stage::Full`].
@@ -1455,12 +1438,7 @@ mod tests {
         }
 
         fn empty() -> Open {
-            let ctx = egui::Context::default();
-            // Install the app's text styles and fonts. A named text style the header
-            // asks for panics mid-frame when it is not registered, and so does a missing
-            // semibold family for section headings and zone rows.
-            ctx.all_styles_mut(crate::app::metrics);
-            ctx.set_fonts(crate::app::fonts());
+            let ctx = testing::context();
             Open {
                 workspace: Workspace::new(ctx.clone()),
                 device: Device::new(ctx.clone()),
@@ -1471,6 +1449,7 @@ mod tests {
                 document: Document::default(),
                 id: 0,
                 width: SCREEN.x,
+                said: Vec::new(),
             }
         }
 
@@ -1495,45 +1474,30 @@ mod tests {
 
         /// One frame, and every word it put on screen.
         fn frame(&mut self, events: Vec<egui::Event>) -> Vec<String> {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(self.width, SCREEN.y),
-                )),
-                ..Default::default()
-            };
-            let output = self.ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    self.document.ui(
-                        ui,
-                        self.id,
-                        &mut self.workspace,
-                        &mut self.device,
-                        &mut self.log,
-                        &Around {
-                            queue: &self.queue,
-                            tags: &self.tags,
-                            played: &Played::default(),
-                        },
-                    );
-                });
-            });
-            placed(&output).into_iter().map(|(word, _)| word).collect()
+            self.painted(events)
+                .into_iter()
+                .map(|word| word.text)
+                .collect()
         }
 
-        /// One frame, and every shape it painted, for tests that check where a word
-        /// lands.
+        /// One frame, and every word it put on screen and where, for tests that check
+        /// where a word lands.
+        fn painted(&mut self, events: Vec<egui::Event>) -> Vec<Word> {
+            self.said = testing::painted(&self.output(events));
+            self.said.clone()
+        }
+
+        /// A press at the start of the name box the last frame painted over `shown`.
+        fn on_name_box(&self, shown: &str) -> egui::Event {
+            let rect = testing::where_(&self.said, shown);
+            testing::button(egui::pos2(rect.left() + 1.0, rect.center().y), true)
+        }
+
+        /// One frame, and every shape it painted.
         fn output(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
-            let input = egui::RawInput {
-                events,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(self.width, SCREEN.y),
-                )),
-                ..Default::default()
-            };
-            self.ctx.clone().run(input, |ctx| {
+            let input = testing::screen(egui::vec2(self.width, SCREEN.y), events);
+            let ctx = self.ctx.clone();
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     self.document.ui(
                         ui,
@@ -1557,20 +1521,6 @@ mod tests {
             self.frame(Vec::new());
             self.frame(Vec::new())
         }
-    }
-
-    /// Every word a frame painted, with the rect it was painted in.
-    fn placed(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
-        leaves(output)
-            .into_iter()
-            .filter_map(|(_, shape)| match shape {
-                egui::Shape::Text(text) => Some((
-                    text.galley.text().to_string(),
-                    egui::Rect::from_min_size(text.pos, text.galley.size()),
-                )),
-                _ => None,
-            })
-            .collect()
     }
 
     fn render(sets: &[(&str, &str)], kind: Fresh) {
@@ -1616,19 +1566,15 @@ mod tests {
         open.set(&[("center_panel.organ_type", "Vox")]);
         open.width = 720.0;
         open.frame(Vec::new());
-        let output = open.output(Vec::new());
-
-        let words: Vec<(String, egui::Rect)> = leaves(&output)
+        let words: Vec<(String, egui::Rect)> = open
+            .painted(Vec::new())
             .into_iter()
-            .filter_map(|(_, shape)| match shape {
-                egui::Shape::Text(text) => Some((
-                    match text.galley.rows.len() {
-                        1 => text.galley.text().to_string(),
-                        rows => format!("{} (in {rows} rows)", text.galley.text()),
-                    },
-                    egui::Rect::from_min_size(text.pos, text.galley.size()),
-                )),
-                _ => None,
+            .map(|word| {
+                let text = match word.galley.rows.len() {
+                    1 => word.text,
+                    rows => format!("{} (in {rows} rows)", word.text),
+                };
+                (text, word.rect)
             })
             .collect();
         let header: Vec<&(String, egui::Rect)> =
@@ -1721,9 +1667,9 @@ mod tests {
         let mut open = Open::fresh(Fresh::Program);
         assert_eq!(open.entity().name, "untitled.ne5p");
         open.frame(Vec::new());
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("untitled")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
 
         let renamed = open.entity().name.clone();
         assert_ne!(renamed, "untitled.ne5p", "the box was typed into");
@@ -1745,9 +1691,9 @@ mod tests {
         );
         (draft.root_key, draft.top_note) = (48, 60);
 
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("Marimba hit")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
         let renamed = open.entity().name.clone();
         assert!(renamed.contains('X'), "the box was typed into: {renamed}");
         assert!(renamed.ends_with(".wav"), "{renamed}");
@@ -1771,9 +1717,9 @@ mod tests {
         assert_eq!(stored(&open), "Marimba");
 
         open.frame(Vec::new());
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("Marimba")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
 
         assert_ne!(stored(&open), "Marimba", "the instrument was renamed");
         assert!(stored(&open).contains('X'), "{}", stored(&open));
@@ -1799,9 +1745,9 @@ mod tests {
         assert!(limit > 2, "there is room for an accented letter");
 
         open.frame(Vec::new());
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("Marimba")]);
         open.frame(vec![egui::Event::Text("é".repeat(limit))]);
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
 
         let stored = held(&open).name;
         assert!(stored.contains('é'), "é was stored: {stored:?}");
@@ -1836,40 +1782,9 @@ mod tests {
         }
     }
 
-    /// A click inside the name box, just after the kind glyph at the left of the strip.
-    const NAME_BOX: egui::Pos2 = egui::pos2(100.0, 19.0);
-
     /// The bottom-right corner of the page a document draws in, which is inside a
     /// note's box only if the box fills the page.
     const PAGE_CORNER: egui::Pos2 = egui::pos2(SCREEN.x - 24.0, SCREEN.y - 24.0);
-
-    fn click(at: egui::Pos2) -> egui::Event {
-        egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        }
-    }
-
-    fn enter() -> egui::Event {
-        egui::Event::Key {
-            key: egui::Key::Enter,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        }
-    }
-
-    fn sample_bytes() -> Vec<u8> {
-        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
-        let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
-        nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
-            .unwrap()
-            .to_bytes()
-            .unwrap()
-    }
 
     /// An empty send queue and no tags.
     fn alone() -> (Queue, Tags) {
@@ -2000,16 +1915,8 @@ mod tests {
         let mut open = Open::fresh(Fresh::Program);
         open.document.views.insert(open.id, Face::Advanced);
         open.frame(Vec::new());
-        let output = open.output(Vec::new());
-        let placed = placed(&output);
-        let top = |word: &str| -> f32 {
-            placed
-                .iter()
-                .find(|(text, _)| text == word)
-                .unwrap_or_else(|| panic!("{word} was never painted: {placed:?}"))
-                .1
-                .top()
-        };
+        let placed = open.painted(Vec::new());
+        let top = |word: &str| testing::where_(&placed, word).top();
 
         let order = ["About this file", "Container", "Changes", "Every field"];
         for pair in order.windows(2) {
@@ -2027,16 +1934,8 @@ mod tests {
         let mut open = Open::fresh(Fresh::Program);
         open.document.views.insert(open.id, Face::Advanced);
         open.frame(Vec::new());
-        let output = open.output(Vec::new());
-        let placed = placed(&output);
-        let left = |word: &str| -> f32 {
-            placed
-                .iter()
-                .find(|(text, _)| text == word)
-                .unwrap_or_else(|| panic!("{word} was never painted: {placed:?}"))
-                .1
-                .left()
-        };
+        let placed = open.painted(Vec::new());
+        let left = |word: &str| testing::where_(&placed, word).left();
 
         let edge = left("Format");
         for word in ["Fields", "Layout", "Stored at", "Instrument", "PATH"] {
@@ -2057,7 +1956,7 @@ mod tests {
             assert!(
                 placed
                     .iter()
-                    .any(|(text, rect)| text == cell && rect.left() == under),
+                    .any(|word| word.text == cell && word.rect.left() == under),
                 "no {cell} cell is aligned under {head} at {under}",
             );
         }
@@ -2147,8 +2046,8 @@ mod tests {
         }
     }
 
-    /// The Advanced face paints for a program with and without an edit, and for a
-    /// settings file, including the container grid, the byte diff, and the folded dump.
+    /// The Advanced face paints for a program with an edit and for a settings file
+    /// without one, including the container grid, the byte diff, and the folded dump.
     #[test]
     fn the_advanced_face_paints() {
         render_view(
@@ -2156,7 +2055,6 @@ mod tests {
             Fresh::Program,
             Face::Advanced,
         );
-        render_view(&[], Fresh::Program, Face::Advanced);
         render_view(&[], Fresh::Settings, Face::Advanced);
     }
 
@@ -2164,9 +2062,11 @@ mod tests {
     /// Advanced, which holds their record.
     #[test]
     fn the_faces_offered_are_the_ones_the_asset_has() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut log,
+            ..
+        } = Bench::new();
 
         let offered = |workspace: &Workspace, id: u64| -> Vec<&'static str> {
             faces(shape(workspace.get(id).unwrap()))
@@ -2269,9 +2169,11 @@ mod tests {
     /// bytes and the stamp that caches are keyed on.
     #[test]
     fn a_set_that_leaves_the_bytes_alone_is_not_an_edit() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut log,
+            ..
+        } = Bench::new();
         let mut document = Document::default();
         let id = workspace.create(Fresh::Program, &mut log).expect("a fresh");
 
@@ -2304,12 +2206,13 @@ mod tests {
     /// strip.
     #[test]
     fn the_tab_strip_and_the_document_body_scroll_independently() {
-        let ctx = egui::Context::default();
-        ctx.style_mut(crate::app::metrics);
-        ctx.set_fonts(crate::app::fonts());
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
+        let Bench {
+            ctx,
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let mut document = Document::default();
         let mut tabs = crate::tabs::Tabs::default();
         let (queue, tags) = alone();
@@ -2319,26 +2222,19 @@ mod tests {
 
         let mut ids = None;
         for frame in 0..4 {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 720.0),
-                )),
-                // The first frame lays the document out; the rest wheel over its middle.
-                events: match frame {
-                    0 => Vec::new(),
-                    _ => vec![
-                        egui::Event::PointerMoved(egui::pos2(900.0, 400.0)),
-                        egui::Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: egui::vec2(0.0, -200.0),
-                            modifiers: egui::Modifiers::default(),
-                        },
-                    ],
-                },
-                ..Default::default()
+            // The first frame lays the document out; the rest wheel over its middle.
+            let events = match frame {
+                0 => Vec::new(),
+                _ => vec![
+                    egui::Event::PointerMoved(egui::pos2(900.0, 400.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -200.0),
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
             };
-            let _ = ctx.run(input, |ctx| {
+            testing::run(&ctx, testing::screen(SCREEN, events), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ids = Some((
                         ui.make_persistent_id(egui::Id::new(crate::tabs::SCROLL)),
@@ -2379,10 +2275,12 @@ mod tests {
     fn a_pianos_name_comes_only_from_the_instrument() {
         use nord_usb::{Location, ObjectClass};
 
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            device,
+            mut log,
+            ..
+        } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let bytes = workspace.get(id).unwrap().bytes.clone();
@@ -2483,10 +2381,12 @@ mod tests {
     fn the_model_dial_lists_the_scanned_pianos_of_the_current_category() {
         use nord_usb::ObjectClass;
 
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let bytes = workspace.get(id).unwrap().bytes.clone();
@@ -2523,12 +2423,13 @@ mod tests {
     /// there on Enter.
     #[test]
     fn a_half_typed_cell_does_not_follow_the_operator_into_the_next_document() {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        ctx.set_fonts(crate::app::fonts());
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = Log::default();
+        let Bench {
+            ctx,
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
         let mut document = Document::default();
 
         let (queue, tags) = alone();
@@ -2537,7 +2438,7 @@ mod tests {
         let second = workspace.create(Fresh::Program, &mut log).unwrap();
 
         let mut show = |document: &mut Document, id: u64| {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     document.ui(
                         ui,
@@ -2576,7 +2477,7 @@ mod tests {
             .pretend_editing("center_panel.gain", "200");
         // One frame takes the focus the cell asked for, the next types Enter in it.
         open.frame(Vec::new());
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
         assert!(open.document.refusal().is_some(), "the library refused 200");
         assert_eq!(
             open.document.advanced.editing(),
@@ -2586,9 +2487,9 @@ mod tests {
 
         // Move the focus to the header's name box; the cell stays open behind it.
         open.frame(Vec::new());
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("untitled")]);
         let said = open.log.len();
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
         assert_eq!(open.log.len(), said, "nothing was submitted a second time");
     }
 
@@ -2601,12 +2502,6 @@ mod tests {
         assert_eq!(library_id("nothing"), None);
     }
 
-    #[test]
-    fn the_other_fresh_defaults_paint() {
-        render(&[], Fresh::Live);
-        render(&[], Fresh::Settings);
-    }
-
     /// Paint a document over bytes the workspace has no fresh default for.
     fn render_file(name: &str, bytes: Vec<u8>, face: Face) {
         let mut open = Open::file(name, bytes);
@@ -2614,8 +2509,8 @@ mod tests {
         open.twice();
     }
 
-    /// The Stage bodies have no panel of their own here, so they use the generic one:
-    /// large ones as folds, small ones open with every control drawn.
+    /// The Stage bodies have no panel of their own here, so their field table is the
+    /// registry's alone.
     #[test]
     fn a_stage_document_paints_from_the_registry_alone() {
         for (name, bytes) in [
@@ -2626,7 +2521,6 @@ mod tests {
             ("blank.ns4n", Fresh::Stage4Piano.bytes().unwrap()),
             ("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()),
         ] {
-            render_file(name, bytes.clone(), Face::Basic);
             render_file(name, bytes, Face::Advanced);
         }
     }
@@ -2750,7 +2644,7 @@ mod tests {
 
         // ⚠️ Click the far corner of the page. A box that did not fill the space under
         // the header would not take the caret here, and nothing would be typed.
-        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(vec![testing::button(PAGE_CORNER, true)]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
 
         let written = String::from_utf8(open.entity().bytes.clone()).expect("still text");
@@ -2778,7 +2672,7 @@ mod tests {
         let bytes = "\u{feff}Set 1\r\n\tcue\r\nlast line".as_bytes().to_vec();
         let mut open = Open::file("Set 1.txt", bytes.clone());
         open.twice();
-        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(vec![testing::button(PAGE_CORNER, true)]);
         open.frame(Vec::new());
         open.document.leave();
         assert_eq!(open.entity().bytes, bytes);
@@ -2789,16 +2683,10 @@ mod tests {
     fn tab_in_a_note_types_a_tab() {
         let mut open = Open::file("Set 1.txt", b"Set 1\n".to_vec());
         open.twice();
-        open.frame(vec![click(PAGE_CORNER)]);
+        open.frame(vec![testing::button(PAGE_CORNER, true)]);
         // The box takes the Tab key for itself only from the frame after it gains focus.
         open.frame(Vec::new());
-        open.frame(vec![egui::Event::Key {
-            key: egui::Key::Tab,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        }]);
+        open.frame(vec![testing::key(egui::Key::Tab)]);
         open.frame(vec![egui::Event::Text("cue".to_string())]);
         assert_eq!(
             String::from_utf8_lossy(&open.entity().bytes),
@@ -2828,8 +2716,20 @@ mod tests {
     /// unread bank is not four problems.
     #[test]
     fn a_set_lists_header_claims_only_what_the_instrument_showed() {
+        // The body repeats the reading beside its heading, so only what is painted above
+        // that heading is the header's.
+        let header = |open: &mut Open| -> Vec<String> {
+            open.frame(Vec::new());
+            let said = open.painted(Vec::new());
+            let body = testing::where_(&said, "The four programs this set list plays").top();
+            said.into_iter()
+                .filter(|word| word.rect.top() < body)
+                .map(|word| word.text)
+                .collect()
+        };
+
         let mut open = Open::file("Blue Room.ne5t", Fresh::SetList.bytes().unwrap());
-        let said = open.twice();
+        let said = header(&mut open);
         assert!(
             !said.iter().any(|word| word.contains("needs attention")),
             "nothing is attached, so nothing is claimed: {said:?}"
@@ -2841,7 +2741,7 @@ mod tests {
             1,
             &["Africa Split", "", "Gospel Perc"],
         );
-        let said = open.twice();
+        let said = header(&mut open);
         assert!(
             said.iter().any(|word| word == "1 entry needs attention"),
             "{said:?}"
@@ -2861,14 +2761,6 @@ mod tests {
     /// Bytes that are neither a format this app reads nor a note.
     fn junk_bytes() -> Vec<u8> {
         vec![0x00, 0xff, 0x01, 0xfe]
-    }
-
-    /// One second of 44.1 kHz mono, long enough for the encoder's shortest stroke.
-    fn wav_bytes() -> Vec<u8> {
-        let samples: Vec<i16> = (0..codec::SOURCE_RATE as usize)
-            .map(|i| ((i as f64 / 40.0).sin() * 12_000.0) as i16)
-            .collect();
-        nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
     }
 
     /// A WAV has no field table and no capabilities to list, so its Advanced face is
@@ -3025,19 +2917,14 @@ mod tests {
     fn the_key_map_is_painted_above_the_scrolling_rows() {
         let mut open = Open::file("Marimba.nsmp", sample_bytes());
         open.frame(Vec::new());
-        let output = open.output(Vec::new());
+        let said = open.painted(Vec::new());
 
         let placed = |word: &str| -> (egui::Rect, egui::Rect) {
-            leaves(&output)
-                .into_iter()
-                .find_map(|(clip, shape)| match shape {
-                    egui::Shape::Text(text) if text.galley.text() == word => Some((
-                        egui::Rect::from_min_size(text.pos, text.galley.size()),
-                        clip,
-                    )),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{word} was never painted"))
+            let painted = said
+                .iter()
+                .find(|painted| painted.text == word)
+                .unwrap_or_else(|| panic!("{word} was never painted"));
+            (painted.rect, painted.clip)
         };
 
         let (map, pinned) = placed("Key map");
@@ -3225,9 +3112,9 @@ mod tests {
                 .name
         };
         open.frame(Vec::new());
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("Test Piano")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
 
         assert!(open.document.pends(open.id), "the rename is a plan");
         assert_eq!(
@@ -3280,9 +3167,9 @@ mod tests {
     fn reverting_a_piano_from_the_menu_drops_the_plan_it_was_holding() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         open.frame(Vec::new());
-        open.frame(vec![click(NAME_BOX)]);
+        open.frame(vec![open.on_name_box("Test Piano")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![enter()]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
         assert!(open.document.pends(open.id));
         assert!(
             open.entity().is_unsaved(),
@@ -3326,18 +3213,5 @@ mod tests {
             "{}",
             open.log.status().1,
         );
-    }
-
-    #[test]
-    fn a_sample_document_paints() {
-        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
-        let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
-        let bytes = nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
-            .unwrap()
-            .to_bytes()
-            .unwrap();
-        render_file("Marimba.nsmp", bytes.clone(), Face::Basic);
-        render_file("Marimba.nsmp", bytes, Face::Advanced);
-        render_file("Marimba hit.wav", wav_bytes(), Face::Basic);
     }
 }

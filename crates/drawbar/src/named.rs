@@ -153,4 +153,55 @@ mod tests {
         assert_eq!(list.all().len(), 1, "nothing was added");
         assert_eq!(list.name_of(u64::MAX), Some("Sunday"));
     }
+
+    #[test]
+    fn a_new_one_gets_a_name_nothing_else_is_using() {
+        let mut list = List::default();
+        let ids: Vec<u64> = (0..3).map(|_| list.make("Sunday").unwrap()).collect();
+        assert_eq!(ids, [1, 2, 3]);
+        let names: Vec<&str> = ids.iter().map(|id| list.name_of(*id).unwrap()).collect();
+        assert_eq!(names, ["Sunday", "Sunday 2", "Sunday 3"]);
+    }
+
+    /// Two rows with one id give one thing two names. The first is kept, so loading
+    /// never silently renames it.
+    #[test]
+    fn a_second_row_for_an_id_already_read_is_refused() {
+        let mut list = List::default();
+        list.restore(1, "Sunday".into());
+        list.restore(1, "Monday".into());
+        assert_eq!(list.all().len(), 1);
+        assert_eq!(list.name_of(1), Some("Sunday"));
+    }
+
+    #[test]
+    fn a_malformed_line_is_dropped_and_the_rest_is_read() {
+        for (line, why) in [
+            ("t\tx\tNot a number", "an id that is not a number"),
+            ("m\t7", "a membership missing its group"),
+            ("m\t7\t1\textra", "a line with a column too many"),
+            ("x\t7\t1", "a line marker this build does not write"),
+        ] {
+            let read = read(&format!("v\n{line}\nt\t1\tSunday\n"), "v", "t");
+            assert!(
+                matches!(read.as_slice(), [Line::Named { id: 1, name }] if name == "Sunday"),
+                "{why}"
+            );
+        }
+    }
+
+    /// Unescaped, a newline in a name would split its line in two.
+    #[test]
+    fn a_name_across_two_lines_comes_back_as_one_name() {
+        let mut list = List::default();
+        let id = list.make("Sunday").unwrap();
+        list.rename(id, "Sunday\nmorning".into());
+
+        let read = read(&written("v", "t", &list), "v", "t");
+        assert!(
+            matches!(read.as_slice(), [Line::Named { id: 1, name }] if name == "Sunday\nmorning"),
+            "{}",
+            read.len()
+        );
+    }
 }

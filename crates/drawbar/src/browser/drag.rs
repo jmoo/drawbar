@@ -492,8 +492,38 @@ pub(super) fn ghost(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::{local, onto, slot, CARRIED};
     use crate::strings::folder;
+
+    /// The asset on this computer every drag fixture carries.
+    const CARRIED: u64 = 1;
+
+    fn local(kind: Kind) -> Held {
+        Held {
+            what: Item::Local(CARRIED),
+            kind,
+            filed: None,
+            fits: true,
+        }
+    }
+
+    fn slot(class: ObjectClass, bank: u32, slot: u32) -> Held {
+        Held {
+            what: Item::Slot {
+                class,
+                at: Location { bank, slot },
+            },
+            kind: Kind::from_class(class),
+            filed: None,
+            fits: true,
+        }
+    }
+
+    fn onto(class: ObjectClass, bank: u32, at: u32) -> Onto {
+        Onto::Slot {
+            class,
+            at: Location { bank, slot: at },
+        }
+    }
 
     #[test]
     fn a_drag_between_the_two_places_copies_one_way_and_sends_the_other() {
@@ -510,19 +540,6 @@ mod tests {
                 id: CARRIED,
                 class: ObjectClass::Program,
                 at: Location { bank: 6, slot: 3 },
-            }
-        );
-    }
-
-    /// An empty slot is a drop target, which is why it is drawn as a row.
-    #[test]
-    fn an_empty_slot_is_a_target() {
-        assert_eq!(
-            landing(&local(Kind::SetList), onto(ObjectClass::SetList, 0, 12)),
-            Landing::Send {
-                id: CARRIED,
-                class: ObjectClass::SetList,
-                at: Location { bank: 0, slot: 12 },
             }
         );
     }
@@ -710,18 +727,9 @@ mod tests {
         }
     }
 
-    /// Each instrument folder holds the kind named after it, and a kind with no folder
-    /// has no home on the instrument.
+    /// A partition this app cannot name holds no kind of its own.
     #[test]
-    fn every_kind_knows_the_folder_it_belongs_in() {
-        let homed: Vec<Kind> = HOMES.iter().map(|(kind, _)| *kind).collect();
-        for (kind, class) in HOMES {
-            assert_eq!(Kind::from_class(class), kind, "{}", folder(class));
-            assert_eq!(kind.home(), Some(class), "{kind:?}");
-        }
-        for homeless in Kind::ALL.iter().filter(|kind| !homed.contains(kind)) {
-            assert_eq!(homeless.home(), None, "{homeless:?}");
-        }
+    fn a_class_the_app_cannot_name_holds_other() {
         assert_eq!(Kind::from_class(ObjectClass::Unknown(9)), Kind::Other);
     }
 

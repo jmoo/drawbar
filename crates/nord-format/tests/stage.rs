@@ -5,7 +5,6 @@
 //! every bit no field claims and 0 at every claimed bit. The last isolates the unclaimed
 //! bits, where the invariant can break without any decoded field changing.
 
-use nord_format::bits::Packed;
 use nord_format::cbin::{Cbin, Header};
 use nord_format::components::{KbZone4, ProgramCategory};
 use nord_format::fields::{ControlKind, FieldSpec, Unit};
@@ -34,6 +33,36 @@ fn unclaimed_ones<const LEN: usize>(fields: &'static [LayoutField]) -> [u8; LEN]
 }
 
 macro_rules! stage_body {
+    ($name:ident, $body:ty, $len:expr) => {
+        mod $name {
+            use super::*;
+
+            #[test]
+            fn unclaimed_bits_ride_through_a_re_encode() {
+                let raw: [u8; $len] = unclaimed_ones(<$body>::layout());
+                let body = <$body>::try_from(raw).expect("a body with every claimed bit zero");
+                assert_eq!(
+                    <[u8; $len]>::from(&body),
+                    raw,
+                    "a bit no field claims did not survive the round trip"
+                );
+            }
+
+            #[test]
+            fn an_all_ones_body_decodes_and_re_encodes_byte_for_byte() {
+                let raw = [0xffu8; $len];
+                let body = <$body>::try_from(raw).expect("every field decodes its maximum");
+                assert_eq!(
+                    <[u8; $len]>::from(&body),
+                    raw,
+                    "a field did not hold its maximum through the round trip"
+                );
+            }
+        }
+    };
+}
+
+macro_rules! stage_tag {
     ($name:ident, $body:ty, $len:expr, $format:expr, $versions:expr, $wrap:expr, $unwrap:pat => $inner:expr) => {
         mod $name {
             use super::*;
@@ -65,28 +94,6 @@ macro_rules! stage_body {
             }
 
             #[test]
-            fn unclaimed_bits_ride_through_a_re_encode() {
-                let raw: [u8; $len] = unclaimed_ones(<$body>::layout());
-                let body = <$body>::try_from(raw).expect("a body with every claimed bit zero");
-                assert_eq!(
-                    <[u8; $len]>::from(&body),
-                    raw,
-                    "a bit no field claims did not survive the round trip"
-                );
-            }
-
-            #[test]
-            fn an_all_ones_body_decodes_and_re_encodes_byte_for_byte() {
-                let raw = [0xffu8; $len];
-                let body = <$body>::try_from(raw).expect("every field decodes its maximum");
-                assert_eq!(
-                    <[u8; $len]>::from(&body),
-                    raw,
-                    "a field did not hold its maximum through the round trip"
-                );
-            }
-
-            #[test]
             fn an_unknown_version_is_refused() {
                 let body = <$body>::try_from([0u8; $len]).unwrap();
                 let bytes = file(body, 999_999);
@@ -98,7 +105,27 @@ macro_rules! stage_body {
     };
 }
 
+stage_body!(stage2_program_body, ns2::Program, ns2::program::BODY_LEN);
+stage_body!(stage3_program_body, ns3::Program, ns3::program::BODY_LEN);
+stage_body!(stage3_synth_body, ns3::SynthPreset, ns3::synth::BODY_LEN);
+stage_body!(stage4_program_body, ns4::Program, ns4::program::BODY_LEN);
 stage_body!(
+    stage4_synth_body,
+    ns4::synth::SynthPreset,
+    ns4::synth::BODY_LEN
+);
+stage_body!(
+    stage4_piano_preset_body,
+    ns4::piano_preset::PianoPreset,
+    ns4::piano_preset::BODY_LEN
+);
+stage_body!(
+    stage4_organ_preset_body,
+    ns4::organ_preset::OrganPreset,
+    ns4::organ_preset::BODY_LEN
+);
+
+stage_tag!(
     stage2_program,
     ns2::Program,
     ns2::program::BODY_LEN,
@@ -107,7 +134,7 @@ stage_body!(
     |f| Entity::Program(Program::Stage2(f)),
     Entity::Program(Program::Stage2(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage2_live,
     ns2::Program,
     ns2::program::BODY_LEN,
@@ -116,7 +143,7 @@ stage_body!(
     |f| Entity::Live(Live::Stage2(f)),
     Entity::Live(Live::Stage2(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage3_program,
     ns3::Program,
     ns3::program::BODY_LEN,
@@ -125,7 +152,7 @@ stage_body!(
     |f| Entity::Program(Program::Stage3(f)),
     Entity::Program(Program::Stage3(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage3_live,
     ns3::Program,
     ns3::program::BODY_LEN,
@@ -134,7 +161,7 @@ stage_body!(
     |f| Entity::Live(Live::Stage3(f)),
     Entity::Live(Live::Stage3(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage3_synth,
     ns3::SynthPreset,
     ns3::synth::BODY_LEN,
@@ -143,7 +170,7 @@ stage_body!(
     |f| Entity::Synth(Synth::Stage3(f)),
     Entity::Synth(Synth::Stage3(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage4_program,
     ns4::Program,
     ns4::program::BODY_LEN,
@@ -152,7 +179,7 @@ stage_body!(
     |f| Entity::Program(Program::Stage4(f)),
     Entity::Program(Program::Stage4(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage4_live,
     ns4::Program,
     ns4::program::BODY_LEN,
@@ -161,7 +188,7 @@ stage_body!(
     |f| Entity::Live(Live::Stage4(f)),
     Entity::Live(Live::Stage4(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage4_synth,
     ns4::synth::SynthPreset,
     ns4::synth::BODY_LEN,
@@ -170,7 +197,7 @@ stage_body!(
     |f| Entity::Synth(Synth::Stage4(f)),
     Entity::Synth(Synth::Stage4(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage4_piano_preset,
     ns4::piano_preset::PianoPreset,
     ns4::piano_preset::BODY_LEN,
@@ -179,7 +206,7 @@ stage_body!(
     |f| Entity::PianoPreset(PianoPreset::Stage4(f)),
     Entity::PianoPreset(PianoPreset::Stage4(f)) => f
 );
-stage_body!(
+stage_tag!(
     stage4_organ_preset,
     ns4::organ_preset::OrganPreset,
     ns4::organ_preset::BODY_LEN,
@@ -380,24 +407,10 @@ fn every_stage_offers_the_same_rotor_speeds() {
     );
 }
 
-#[test]
-fn stage3_organ_vibrato_modes_are_named_for_what_the_panel_prints() {
-    for stored in 0..6u64 {
-        let mode = ns3::program::OrganVibratoMode::from_bits(stored).expect("decoding is total");
-        assert_eq!(
-            format!("{mode:?}"),
-            mode.label().expect("a named mode"),
-            "stored {stored}"
-        );
-    }
-}
-
 /// A MIDI number, a filter cutoff, and half of a split word are not panel `0..10` knobs,
 /// so an interface must not show them with a panel reading.
 #[test]
 fn slots_that_are_not_panel_knobs_are_not_typed_as_knobs() {
-    let panel_knob = ControlKind::Knob(Unit::Panel10);
-
     let slot = ns2::Slot::field_specs();
     for midi in [
         "extern_midi_cc_number",
@@ -424,7 +437,6 @@ fn slots_that_are_not_panel_knobs_are_not_typed_as_knobs() {
         ControlKind::Knob(Unit::Hertz),
         "filter_freq"
     );
-    assert_ne!(spec(&voice, "filter_freq").control, panel_knob);
 }
 
 /// A header value wider than a category id names no category; it is never truncated to

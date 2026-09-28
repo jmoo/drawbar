@@ -1,5 +1,4 @@
-//! ⚠️ The corpus suites (`corpus_behaviors.rs`, `codec_behaviors.rs`,
-//! `coverage.rs`, and the corpus half of `tests/corpus`) need `--features
+//! ⚠️ `coverage.rs` and the corpus half of `tests/corpus` need `--features
 //! corpus`. Without it they compile out, and `cargo test` passes without having
 //! checked them. Setting `NORD_CORPUS_ROOT` says the caller meant to run them.
 

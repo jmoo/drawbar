@@ -89,26 +89,33 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context};
 
-    /// Drive one lamp by pointer or keyboard.
-    fn press(events: Vec<egui::Event>, focus: bool) -> Option<bool> {
-        let ctx = egui::Context::default();
+    /// Drive one lamp by pointer or keyboard. `events` is handed the lamp's middle.
+    fn press(events: impl Fn(egui::Pos2) -> Vec<egui::Event>, focus: bool) -> Option<bool> {
+        let ctx = context();
         let mut answer = None;
+        let mut lamp = egui::Id::NULL;
         // Two passes: the first lays the lamp out, the second delivers the input to the
         // rect the first one claimed.
         for pass in 0..2 {
             let input = egui::RawInput {
                 events: match pass {
                     0 => Vec::new(),
-                    _ => events.clone(),
+                    _ => events(
+                        ctx.read_response(lamp)
+                            .expect("the lamp was drawn")
+                            .rect
+                            .center(),
+                    ),
                 },
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    lamp = ui.next_auto_id();
                     if focus {
-                        let id = ui.next_auto_id();
-                        ui.memory_mut(|m| m.request_focus(id));
+                        ui.memory_mut(|m| m.request_focus(lamp));
                     }
                     if let Some(want) = super::ui(ui, false, "vibrato") {
                         answer = Some(want);
@@ -119,25 +126,14 @@ mod tests {
         answer
     }
 
-    fn at(pos: egui::Pos2, pressed: bool) -> egui::Event {
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::default(),
-        }
-    }
-
     #[test]
     fn a_click_switches_the_lamp() {
-        let on = egui::pos2(20.0, 18.0);
         let switched = press(
-            vec![
-                egui::Event::PointerMoved(on),
-                at(on, true),
-                at(on, false),
-                egui::Event::PointerGone,
-            ],
+            |on| {
+                let mut clicked = testing::click(on);
+                clicked.push(egui::Event::PointerGone);
+                clicked
+            },
             false,
         );
         assert_eq!(switched, Some(true), "a click lights a dark lamp");
@@ -145,16 +141,7 @@ mod tests {
 
     #[test]
     fn space_switches_the_focused_lamp() {
-        let switched = press(
-            vec![egui::Event::Key {
-                key: egui::Key::Space,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::default(),
-            }],
-            true,
-        );
+        let switched = press(|_| vec![testing::key(egui::Key::Space)], true);
         assert_eq!(switched, Some(true));
     }
 }

@@ -1021,32 +1021,24 @@ fn nothing(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::apply;
-    use crate::log::Log;
     use crate::queue::enqueue;
-    use crate::shell::Shell;
     use crate::strings::folder;
-    use crate::tabs::{Spot, Tabs};
+    use crate::tabs::Spot;
+    use crate::testing::{self, Bench};
     use crate::workspace::{Fresh, Origin};
     use nord_usb::wire::Status;
 
-    /// A context set up as `DrawbarApp::new` sets one up, with the named text styles a
-    /// band resolves installed in both themes.
-    fn context() -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.all_styles_mut(crate::app::metrics);
-        ctx
-    }
-
     /// An instrument with every folder the tab can switch to, and local copies of a set
     /// list and a settings object.
-    #[allow(clippy::type_complexity)]
-    fn bench() -> (Keyboard, Browser, Workspace, Device, Tabs, Queue, Log) {
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
-        let mut queue = Queue::default();
+    fn bench() -> Bench {
+        let mut bench = Bench::new();
+        let Bench {
+            workspace,
+            device,
+            queue,
+            log,
+            ..
+        } = &mut bench;
 
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", "", "Squabble B"]);
         device.pretend_scanned(ObjectClass::Program, 8, &["Bass Manual"]);
@@ -1075,72 +1067,45 @@ mod tests {
             (Fresh::SetList, ObjectClass::SetList, 0),
             (Fresh::Settings, ObjectClass::Settings, 0),
         ] {
-            let made = workspace.create(kind, &mut log).unwrap();
-            let bytes = workspace.get(made).unwrap().bytes.clone();
-            workspace.remove(made, &mut log);
             let at = Location { bank: 0, slot };
             let id = workspace.ingest(
                 format!("{}.file", crate::strings::place(class, at)),
                 Origin::Device { class, at },
-                bytes,
-                &mut log,
+                kind.bytes().unwrap(),
+                log,
             );
             if class == ObjectClass::Settings {
-                enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
+                enqueue(workspace, device, queue, log, id, class, at);
             }
         }
-
-        (
-            Keyboard::default(),
-            Browser::default(),
-            workspace,
-            device,
-            Tabs::default(),
-            queue,
-            log,
-        )
+        bench
     }
 
-    /// Draw the tab for `class` and run whatever it asked for, `frames` times.
-    #[allow(clippy::too_many_arguments)]
+    /// Draw the tab for the shown class and run whatever it asked for.
     fn draw(
-        ctx: &egui::Context,
         width: f32,
         events: Vec<egui::Event>,
         keyboard: &mut Keyboard,
-        browser: &mut Browser,
-        workspace: &mut Workspace,
-        device: &mut Device,
-        tabs: &mut Tabs,
-        queue: &mut Queue,
-        log: &mut Log,
-    ) {
-        let input = egui::RawInput {
-            events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(width, 540.0),
-            )),
-            ..Default::default()
-        };
-        let _ = ctx.run(input, |ctx| {
+        bench: &mut Bench,
+    ) -> egui::FullOutput {
+        let ctx = bench.ctx.clone();
+        let input = testing::screen(egui::vec2(width, 540.0), events);
+        testing::run(&ctx, input, |ctx| {
             // The frame the center uses: panels handle their own padding.
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
                 .show(ctx, |ui| {
-                    let acts = keyboard.ui(ui, browser, workspace, device, queue, tabs);
-                    apply(
-                        browser,
-                        &mut Shell::default(),
-                        acts,
-                        workspace,
-                        device,
-                        tabs,
-                        queue,
-                        log,
+                    let acts = keyboard.ui(
+                        ui,
+                        &mut bench.browser,
+                        &bench.workspace,
+                        &bench.device,
+                        &bench.queue,
+                        &bench.tabs,
                     );
+                    bench.act(acts);
                 });
-        });
+        })
     }
 
     /// Each folder is drawn at the center's width with both docks open and with none.
@@ -1149,32 +1114,20 @@ mod tests {
     /// a row that paints past its track.
     #[test]
     fn every_folder_paints_its_own_layout_at_every_width_the_center_has() {
-        let ctx = context();
-        let (mut keyboard, mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) =
-            bench();
-        tabs.show(Spot::Keyboard);
+        let mut bench = bench();
+        let mut keyboard = Keyboard::default();
+        bench.tabs.show(Spot::Keyboard);
 
-        for class in device.state.classes() {
-            tabs.keyboard_on(class);
+        for class in bench.device.state.classes() {
+            bench.tabs.keyboard_on(class);
             for width in [430.0_f32, 900.0] {
                 // Twice: the second pass runs with the widget state the first left.
                 for _ in 0..2 {
-                    draw(
-                        &ctx,
-                        width,
-                        Vec::new(),
-                        &mut keyboard,
-                        &mut browser,
-                        &mut workspace,
-                        &mut device,
-                        &mut tabs,
-                        &mut queue,
-                        &mut log,
-                    );
+                    draw(width, Vec::new(), &mut keyboard, &mut bench);
                 }
             }
             assert_eq!(
-                tabs.keyboard_class(),
+                bench.tabs.keyboard_class(),
                 Some(class),
                 "{} stayed shown",
                 folder(class)
@@ -1186,51 +1139,35 @@ mod tests {
     /// make the player wait on the instrument to see a folder.
     #[test]
     fn the_switcher_changes_the_folder_without_asking_the_instrument_for_anything() {
-        let ctx = context();
-        let (mut keyboard, mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) =
-            bench();
-        tabs.show(Spot::Keyboard);
-        tabs.keyboard_on(ObjectClass::SetList);
+        let mut bench = bench();
+        let mut keyboard = Keyboard::default();
+        bench.tabs.show(Spot::Keyboard);
+        bench.tabs.keyboard_on(ObjectClass::SetList);
         // Requests already made by the queued settings write, so any later ones came
         // from the click.
-        let asked = device.queued().len();
+        let asked = bench.device.queued().len();
 
         // The first chip of the switcher is the first folder the instrument declares.
-        let on_programs = egui::pos2(20.0, HEADER + SWITCHER / 2.0);
-        let press = |pressed| egui::Event::PointerButton {
-            pos: on_programs,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let frames: [Vec<egui::Event>; 4] = [
-            Vec::new(),
-            vec![egui::Event::PointerMoved(on_programs)],
-            vec![press(true), press(false)],
+        let first = bench.device.state.classes()[0];
+        let name = bench.device.state.folder_name(first).to_string();
+        let drawn = draw(900.0, Vec::new(), &mut keyboard, &mut bench);
+        let on_first = testing::where_(&testing::painted(&drawn), &name).center();
+        let frames: [Vec<egui::Event>; 3] = [
+            vec![egui::Event::PointerMoved(on_first)],
+            vec![
+                testing::button(on_first, true),
+                testing::button(on_first, false),
+            ],
             Vec::new(),
         ];
         for events in frames {
-            draw(
-                &ctx,
-                900.0,
-                events,
-                &mut keyboard,
-                &mut browser,
-                &mut workspace,
-                &mut device,
-                &mut tabs,
-                &mut queue,
-                &mut log,
-            );
+            draw(900.0, events, &mut keyboard, &mut bench);
         }
 
+        assert_eq!(bench.tabs.keyboard_class(), Some(first));
+        assert_eq!(bench.tabs.showing(), Some(Spot::Keyboard));
         assert_eq!(
-            tabs.keyboard_class(),
-            device.state.classes().first().copied()
-        );
-        assert_eq!(tabs.showing(), Some(Spot::Keyboard));
-        assert_eq!(
-            device.queued().len(),
+            bench.device.queued().len(),
             asked,
             "the click asked the instrument for nothing"
         );

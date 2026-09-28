@@ -2,28 +2,49 @@
 //!
 //! Two trees feed it. `tests/fixtures/` holds files written by this crate's own
 //! writers, committed so the sweep has files to read in any checkout. With
-//! `--features corpus`, the private corpus under `NORD_CORPUS_ROOT` joins it.
+//! `--features corpus`, the tree under `NORD_CORPUS_ROOT` joins it: any tree of
+//! Nord files is a corpus.
 //!
 //! Every file the reader recognizes, wherever it sits, is a specimen. Each one
 //! must pass its container checksum, parse, re-encode to the same bytes, decode
 //! no value its components cannot name, and match its `<file>.oracle.json`
 //! sidecar if it has one. On a sample (every fixture, every specimen with a
 //! sidecar, and one of each container shape among the rest), every registry
-//! field must also take a new value without changing another. Nothing here names
-//! a model or a directory.
+//! field must also take a new value without changing another. The fixtures must
+//! hold a file of every type the reader dispatches. In the corpus, each claim
+//! about every specimen of a kind runs once per specimen of that kind, so a tree
+//! without that kind runs none. A file ending `.kernel.tsv` is an oracle for the
+//! sample codec's interpolation kernel. Nothing here names a model, a directory,
+//! or a file in the corpus.
 //!
 //! ```sh
 //! cargo test -p nord-format --test corpus                        # the fixtures
-//! NORD_CORPUS_ROOT=/path/to/nord-corpus \
-//!   cargo test -p nord-format --features corpus --test corpus    # and the corpus
+//! NORD_CORPUS_ROOT=/path/to/nord/files \
+//!   cargo test -p nord-format --features corpus --test corpus    # and a corpus
 //! ```
 //!
 //! Filter like any other test: `--test corpus ne5/settings` runs the trials
 //! whose path contains the string.
 
+/// Returns an error made of the format arguments unless `$cond` holds.
+macro_rules! ensure {
+    ($cond:expr, $($message:tt)+) => {
+        if !$cond {
+            return Err(format!($($message)+));
+        }
+    };
+}
+
+#[cfg(feature = "corpus")]
+mod invariants;
+mod kernel;
 mod lookup;
 mod oracle;
+mod samples;
 
+#[cfg(feature = "corpus")]
+#[path = "../support/format_table.rs"]
+mod format_table;
 #[path = "../support/registry.rs"]
 mod registry;
 #[path = "../support/scan.rs"]
@@ -33,11 +54,24 @@ mod sidecar;
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use nord_format::cbin::{self, Generation};
-#[cfg(feature = "bundle")]
+use nord_format::util::{peek, FileType};
 use nord_format::Entity;
+use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+
+/// Prefixes an error with what was being done.
+trait Context<T> {
+    fn context(self, what: impl Display) -> Result<T, String>;
+}
+
+impl<T, E: Display> Context<T> for Result<T, E> {
+    fn context(self, what: impl Display) -> Result<T, String> {
+        self.map_err(|e| format!("{what}: {e}"))
+    }
+}
 
 /// The path under its root, joined with `/` on every platform so filters and trial
 /// kinds are the same everywhere.
@@ -112,11 +146,24 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         }
     }
 
+    // Sample instruments and piano libraries decode their framing, not named fields.
+    let decoded = info.is_some()
+        && entity.raw().is_none()
+        && !matches!(entity, Entity::Sample(_) | Entity::Piano(_));
+    if decoded && registry::fields(&entity).is_none() {
+        return Err(format!(
+            "{} decodes named fields, and with_registry! in tests/support/registry.rs has no \
+             arm for it",
+            entity.identity().kind
+        )
+        .into());
+    }
+
     if mutate {
         registry::each_field_moves_alone(&bytes)?;
     }
 
-    oracle::check_specimen(path, &bytes, &entity)
+    oracle::check_specimen(path, &bytes, &entity).map_err(Failed::from)
 }
 
 /// Out-of-table values the corpus is known to hold, exempted by field and
@@ -132,7 +179,7 @@ fn known_unexplained(field: &str, value: &str) -> bool {
 /// check runs on the whole tree when `mutate_all`, else on [`scan::sampled`].
 fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial>) {
     let (specimens, sidecars) = scan::walk(root);
-    let mut shapes_seen = std::collections::BTreeSet::new();
+    let mut shapes_seen = BTreeSet::new();
     if specimens.is_empty() {
         let missing = format!("no specimen under {}", root.display());
         trials.push(Trial::test(format!("{label}: present"), move || {
@@ -149,21 +196,60 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
         );
     }
 
-    // A sidecar without its specimen is an error.
+    // A sidecar without its specimen is an error, and one stating a refusal is
+    // checked here, since the sweep does not read a file the reader refuses.
     for sidecar in sidecars {
         let name = format!("{label}/{}", rel(root, &sidecar));
-        let target = sidecar::specimen_of(&sidecar);
         trials.push(Trial::test(name, move || {
-            if target.exists() {
-                Ok(())
-            } else {
-                Err(format!(
+            let target = sidecar::specimen_of(&sidecar);
+            if !target.exists() {
+                return Err(format!(
                     "sidecar for {}, which does not exist",
                     target.file_name().unwrap().to_string_lossy()
                 )
-                .into())
+                .into());
+            }
+            match sidecar::load(&sidecar)?.refusal {
+                Some(refusal) => oracle::check_refusal(&target, &refusal).map_err(Failed::from),
+                None => Ok(()),
             }
         }));
+    }
+
+    for table in scan::kernel_tables(root) {
+        let name = format!("{label}/{}", rel(root, &table));
+        trials.push(Trial::test(name, move || {
+            kernel::check(&table).map_err(Failed::from)
+        }));
+    }
+}
+
+/// One trial per specimen under `root` for each claim its kinds carry, named
+/// `<label>/<path under root>: <claim>`. A file that does not parse has none; its
+/// sweep trial reports it.
+#[cfg(feature = "corpus")]
+fn invariant_trials(label: &str, root: &Path, trials: &mut Vec<Trial>) {
+    for path in scan::walk(root).0 {
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(entity) = nord_format::from_stream(&mut Cursor::new(&bytes)) else {
+            continue;
+        };
+        let kinds = invariants::kinds(&bytes, &entity);
+        let name = rel(root, &path);
+        for invariant in invariants::INVARIANTS
+            .iter()
+            .filter(|invariant| kinds.contains(&invariant.kind))
+        {
+            let path = path.clone();
+            trials.push(
+                Trial::test(format!("{label}/{name}: {}", invariant.name), move || {
+                    let bytes = fs::read(&path).map_err(|e| Failed::from(format!("read: {e}")))?;
+                    let entity = samples::parse(&bytes)?;
+                    (invariant.check)(&bytes, &entity).map_err(Failed::from)
+                })
+                .with_kind("invariant"),
+            );
+        }
     }
 }
 
@@ -197,16 +283,57 @@ fn lookup_trial(fixtures: &Path) -> Trial {
     )
 }
 
+/// The fixtures hold a file of every class `from_stream` reads and of every CBIN tag
+/// it dispatches.
+fn coverage_trial(fixtures: &Path) -> Trial {
+    let fixtures = fixtures.to_path_buf();
+    Trial::test(
+        "fixtures: every file type the reader dispatches has one",
+        move || {
+            let mut classes = BTreeSet::new();
+            let mut tags = BTreeSet::new();
+            for path in scan::walk(&fixtures).0 {
+                let mut file = fs::File::open(&path).map_err(|e| Failed::from(e.to_string()))?;
+                let peeked = peek(&mut file).map_err(|e| Failed::from(e.to_string()))?;
+                classes.insert(peeked.file_type.as_str().to_string());
+                if matches!(peeked.file_type, FileType::Cbin) {
+                    tags.insert(peeked.format);
+                }
+            }
+            let mut missing: Vec<String> = scan::READ
+                .iter()
+                .map(|class| class.as_str().to_string())
+                .filter(|class| !classes.contains(class))
+                .collect();
+            missing.extend(
+                nord_format::cbin_formats()
+                    .filter(|tag| !tags.contains(*tag))
+                    .map(|tag| format!("CBIN {tag:?}")),
+            );
+            if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("no fixture for: {}", missing.join(", ")).into())
+            }
+        },
+    )
+}
+
 fn main() {
     let args = Arguments::from_args();
     let mut trials = Vec::new();
 
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     trials.push(lookup_trial(&fixtures));
+    trials.push(coverage_trial(&fixtures));
     trials_for("fixtures", &fixtures, true, &mut trials);
 
     #[cfg(feature = "corpus")]
-    trials_for("corpus", &scan::root(), false, &mut trials);
+    {
+        let corpus = scan::root();
+        trials_for("corpus", &corpus, false, &mut trials);
+        invariant_trials("corpus", &corpus, &mut trials);
+    }
 
     libtest_mimic::run(&args, trials).exit();
 }

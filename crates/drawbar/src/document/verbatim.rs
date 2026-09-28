@@ -236,6 +236,7 @@ fn readable(byte: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing;
 
     /// The page shows the same body the wire carries. Bytes whose container could not be
     /// read have no body range, so the page shows the whole file.
@@ -275,22 +276,10 @@ mod tests {
     #[test]
     fn the_dump_lays_out_only_the_rows_it_was_asked_for() {
         let body: Vec<u8> = (0..64 * 1024).map(|byte| byte as u8).collect();
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::app::fonts());
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = testing::run(&testing::context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| hex(ui, &body, 100..103));
         });
-        fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
-                _ => {}
-            }
-        }
-        let mut painted = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut painted);
-        }
+        let painted = testing::words(&output);
         let offsets: Vec<&String> = painted
             .iter()
             .filter(|word| word.len() == 4 && word.chars().all(|c| c.is_ascii_hexdigit()))

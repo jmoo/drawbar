@@ -991,6 +991,41 @@ fn verify(ui: &Ui, files: &[PathBuf]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// The slot nouns are one class of storage addressed one way, so each carries every
+    /// verb `raw` has.
+    #[test]
+    fn every_slot_noun_carries_the_slot_verbs() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        let verbs = |noun: &str| -> Vec<String> {
+            cli.find_subcommand(noun)
+                .unwrap_or_else(|| panic!("no noun {noun}"))
+                .get_subcommands()
+                .map(|verb| verb.get_name().to_string())
+                .collect()
+        };
+        let slot = verbs("raw");
+        assert!(slot.iter().any(|verb| verb == "get"), "{slot:?}");
+        for noun in ["program", "setlist", "sample", "piano"] {
+            let has = verbs(noun);
+            let missing: Vec<_> = slot.iter().filter(|verb| !has.contains(verb)).collect();
+            assert!(missing.is_empty(), "nord {noun} lacks {missing:?}");
+        }
+    }
+
+    #[test]
+    fn raw_is_callable_and_absent_from_the_top_level_help() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        assert!(cli
+            .find_subcommand("raw")
+            .is_some_and(|raw| raw.is_hide_set()));
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains(" raw "), "{help}");
+    }
+
     #[test]
     fn the_class_help_names_the_settings_singleton() {
         let help = class_help();

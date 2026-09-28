@@ -1,7 +1,9 @@
 //! A recording tap over a live transport: every frame in either direction is appended
 //! to a script file in the format [`crate::transport::replay`] reads back.
 //!
-//! Frames are written in wire order, byte for byte. Each bulk read adds one line.
+//! Frames are written in wire order, byte for byte. Each bulk transfer adds one line,
+//! including a read that timed out, a write the device did not accept, and one the
+//! transport failed, so a replay meets the same silence and failures.
 //!
 //! Writes are unbuffered, so a session that wedges or is killed still leaves everything
 //! that reached the wire on disk. That is usually the case a recording is for.
@@ -10,7 +12,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Appends directed frames to a replay script.
 ///
@@ -38,7 +40,8 @@ impl Recorder {
         writeln!(
             file,
             "# nord-usb replay script, recorded from hardware.\n\
-             # Format: '<O|I> <hex>' -- O = host->device, I = device->host.\n\
+             # Format: '<O|I> <hex>', 'O timeout|error <hex>', 'I timeout|error' -- \
+             O = host->device, I = device->host.\n\
              # source: nord"
         )?;
         if let Some(device) = device {
@@ -54,35 +57,45 @@ impl Recorder {
     /// moving anything), so this is written per transaction. Each one opens a section
     /// the replay sweep drives on its own.
     pub fn intent(&mut self, intent: &str) {
-        if self.failed.is_some() {
-            return;
-        }
-        if let Err(e) = writeln!(self.file, "\n# intent: {intent}") {
-            self.failed = Some(e);
-        }
+        self.line(format_args!("\n# intent: {intent}"));
     }
 
     /// Record a frame the host sent.
     pub fn out(&mut self, bytes: &[u8]) {
-        self.line('O', bytes);
+        self.line(format_args!("O {}", Hex(bytes)));
+    }
+
+    /// Record a frame the device did not accept within the write's limit.
+    pub fn out_timeout(&mut self, bytes: &[u8]) {
+        self.line(format_args!("O timeout {}", Hex(bytes)));
+    }
+
+    /// Record a frame the transport failed to send.
+    pub fn out_error(&mut self, bytes: &[u8], e: &Error) {
+        self.line(format_args!("O error {}  # {}", Hex(bytes), Label(e)));
     }
 
     /// Record a frame the device sent.
     pub fn r#in(&mut self, bytes: &[u8]) {
-        self.line('I', bytes);
+        self.line(format_args!("I {}", Hex(bytes)));
+    }
+
+    /// Record a read whose limit passed with nothing sent.
+    pub fn in_timeout(&mut self) {
+        self.line(format_args!("I timeout"));
+    }
+
+    /// Record a read the transport failed.
+    pub fn in_error(&mut self, e: &Error) {
+        self.line(format_args!("I error  # {}", Label(e)));
     }
 
     /// Declare that the transaction just recorded failed, and how.
     ///
     /// Written after its frames, because the outcome is only known once the operation is
     /// over. A script that says nothing claims the operation succeeded.
-    pub fn expect(&mut self, e: &crate::error::Error) {
-        if self.failed.is_some() {
-            return;
-        }
-        if let Err(io) = writeln!(self.file, "# expect: err {}", e.expect_kind()) {
-            self.failed = Some(io);
-        }
+    pub fn expect(&mut self, e: &Error) {
+        self.line(format_args!("# expect: err {}", e.expect_kind()));
     }
 
     /// The first I/O error the recorder hit, if any. Recording pauses from that error
@@ -94,17 +107,30 @@ impl Recorder {
         }
     }
 
-    fn line(&mut self, tag: char, bytes: &[u8]) {
+    fn line(&mut self, text: std::fmt::Arguments) {
         if self.failed.is_some() {
             return;
         }
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            hex.push_str(&format!("{b:02x}"));
-        }
-        if let Err(e) = writeln!(self.file, "{tag} {hex}") {
+        if let Err(e) = writeln!(self.file, "{text}") {
             self.failed = Some(e);
         }
+    }
+}
+
+struct Hex<'a>(&'a [u8]);
+
+impl std::fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
+/// An error as a trailing label, which must stay on its step's line.
+struct Label<'a>(&'a Error);
+
+impl std::fmt::Display for Label<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.to_string().replace(['\n', '\r'], " "))
     }
 }
 
@@ -128,7 +154,7 @@ mod tests {
             .check()
             .expect_err("the frame never reached the script");
 
-        assert!(matches!(err, crate::error::Error::Io(_)), "{err}");
+        assert!(matches!(err, Error::Io(_)), "{err}");
         assert!(
             recorder.check().is_ok(),
             "a reported failure is not reported twice"

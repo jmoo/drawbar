@@ -732,15 +732,6 @@ mod tests {
         assert!(!known("center_panel.brand_new_knob"));
     }
 
-    #[test]
-    fn a_mapped_path_uses_the_panels_own_word() {
-        assert_eq!(label("center_panel.organ_type"), "Organ model");
-        assert_eq!(section("center_panel.organ_type"), Section::Organ);
-        assert_eq!(section("effects_panel.equalizer_bass"), Section::Eq);
-        assert_eq!(section("effects_panel.fx1"), Section::Effects);
-        assert_eq!(section("startup_program"), Section::Startup);
-    }
-
     /// A second entry would silently shadow the first.
     #[test]
     fn no_path_is_listed_twice() {

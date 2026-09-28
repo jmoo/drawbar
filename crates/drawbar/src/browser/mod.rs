@@ -24,8 +24,6 @@ use crate::tags::{self, Tags};
 use crate::workspace::Workspace;
 
 mod act;
-#[cfg(test)]
-pub(crate) mod bench;
 mod drag;
 mod instrument;
 mod row;
@@ -604,31 +602,29 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::bench::{bench, context};
-    use crate::shell::Shell;
-    use crate::tabs::Tabs;
+    use crate::testing::{self, Bench};
     use crate::workspace::Fresh;
 
     /// Paint the tree headlessly, to catch a layout that panics or an id that collides.
     fn paint(with_device: bool) {
-        use crate::workspace::{Fresh, Origin};
+        use crate::workspace::Origin;
 
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx.clone());
-        let mut log = crate::log::Log::default();
-        let mut tabs = Tabs::default();
-        let mut browser = Browser::default();
-        let mut queue = Queue::default();
-
+        let mut bench = Bench::new();
+        let Bench {
+            browser,
+            workspace,
+            device,
+            log,
+            ..
+        } = &mut bench;
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
-            workspace.create(kind, &mut log).unwrap();
+            workspace.create(kind, log).unwrap();
         }
         // A folder with something in it, an empty folder, and a view of a slot: row
         // shapes the list has no other way to reach.
         let full = browser.folders.make().unwrap();
         browser.folders.make().unwrap();
-        let filed = workspace.create(Fresh::Program, &mut log).unwrap();
+        let filed = workspace.create(Fresh::Program, log).unwrap();
         browser.folders.file(filed, Some(full));
         // A tag on something, and one on nothing: the two shapes the section holds.
         let sunday = browser.tags.make("Sunday").unwrap();
@@ -642,7 +638,7 @@ mod tests {
                 at: Location { bank: 6, slot: 0 },
             },
             bytes,
-            &mut log,
+            log,
         );
         if with_device {
             // Every row shape a list can hold: a named slot, a vacant one, the slot the
@@ -665,22 +661,20 @@ mod tests {
         }
 
         // Twice: the second pass runs with the widget state the first left behind.
+        let ctx = bench.ctx.clone();
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::left("places")
                     .exact_width(crate::shell::BROWSER)
                     .show(ctx, |ui| {
-                        let acts = browser.ui(ui, &workspace, &device, &queue, &Filter::default());
-                        apply(
-                            &mut browser,
-                            &mut Shell::default(),
-                            acts,
-                            &mut workspace,
-                            &mut device,
-                            &mut tabs,
-                            &mut queue,
-                            &mut log,
+                        let acts = bench.browser.ui(
+                            ui,
+                            &bench.workspace,
+                            &bench.device,
+                            &bench.queue,
+                            &Filter::default(),
                         );
+                        bench.act(acts);
                     });
             });
         }
@@ -713,7 +707,13 @@ mod tests {
     /// A drag from an unselected row carries only that row.
     #[test]
     fn a_drag_from_a_picked_row_carries_the_whole_selection() {
-        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let Bench {
+            mut browser,
+            mut workspace,
+            device,
+            mut log,
+            ..
+        } = Bench::new();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -746,7 +746,12 @@ mod tests {
     /// fail.
     #[test]
     fn an_empty_slot_is_not_something_a_drag_carries() {
-        let (mut browser, workspace, mut device, _tabs, _queue, _log) = bench();
+        let Bench {
+            mut browser,
+            workspace,
+            mut device,
+            ..
+        } = Bench::new();
         device.pretend_scanned(ObjectClass::Program, 7, &["Africa Split", ""]);
         let slot = |slot| Item::Slot {
             class: ObjectClass::Program,
@@ -773,7 +778,13 @@ mod tests {
     /// in turn, so a single destination takes only the pressed row.
     #[test]
     fn a_drop_of_many_repeats_only_where_one_destination_does_not() {
-        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let Bench {
+            mut browser,
+            mut workspace,
+            device,
+            mut log,
+            ..
+        } = Bench::new();
         let ids: Vec<u64> = (0..3)
             .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
             .collect();
@@ -815,7 +826,13 @@ mod tests {
     /// folder.
     #[test]
     fn a_drop_onto_a_row_inside_a_folder_never_unfiles_it() {
-        let (mut browser, mut workspace, device, _tabs, _queue, mut log) = bench();
+        let Bench {
+            mut browser,
+            mut workspace,
+            device,
+            mut log,
+            ..
+        } = Bench::new();
         let folder = browser.folders.make().unwrap();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         browser.folders.file(id, Some(folder));
@@ -845,7 +862,7 @@ mod tests {
     /// would look like it applies to all of them, and only one would change.
     #[test]
     fn f2_renames_only_while_its_row_is_the_only_one_picked() {
-        let (mut browser, _workspace, _device, _tabs, _queue, _log) = bench();
+        let Bench { mut browser, .. } = Bench::new();
         let row = Item::Local(1);
         browser.selection.only(row);
         assert!(browser.sole_is(row));
@@ -862,21 +879,15 @@ mod tests {
     /// ⚠️ Escape during a rename cancels only the rename, and the selection stays.
     #[test]
     fn escape_lets_go_of_the_selection_unless_a_name_is_being_typed() {
-        let ctx = context();
+        let ctx = testing::context();
         let mut browser = Browser::default();
         let escape = egui::RawInput {
-            events: vec![egui::Event::Key {
-                key: egui::Key::Escape,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
+            events: vec![testing::key(egui::Key::Escape)],
             ..Default::default()
         };
 
         browser.start_rename(Item::Local(1), "Africa Split");
-        let _ = ctx.run(escape.clone(), |ctx| browser.let_go(ctx));
+        testing::run(&ctx, escape.clone(), |ctx| browser.let_go(ctx));
         assert_eq!(
             browser.picked().items().count(),
             1,
@@ -884,7 +895,7 @@ mod tests {
         );
 
         browser.rename = None;
-        let _ = ctx.run(escape, |ctx| browser.let_go(ctx));
+        testing::run(&ctx, escape, |ctx| browser.let_go(ctx));
         assert_eq!(browser.picked().items().count(), 0);
     }
 
@@ -893,29 +904,23 @@ mod tests {
     /// is the part that is easy to get wrong.
     #[test]
     fn typing_a_name_and_pressing_enter_renames_the_row() {
-        use crate::workspace::Fresh;
-
-        let ctx = context();
-        let mut workspace = Workspace::new(ctx.clone());
-        let device = Device::new(ctx.clone());
-        let mut log = crate::log::Log::default();
-        let mut browser = Browser::default();
-        let queue = Queue::default();
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
 
-        let key = |key| egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::default(),
-        };
         // Frame one opens the editor, focused with the name selected; frame two types
         // over the name; frame three commits.
         let frames: [Vec<egui::Event>; 3] = [
             Vec::new(),
             vec![egui::Event::Text("LA Grand".into())],
-            vec![key(egui::Key::Enter)],
+            vec![testing::key(egui::Key::Enter)],
         ];
         browser.start_rename(Item::Local(id), "Africa Split");
 
@@ -925,7 +930,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            testing::run(&ctx, input, |ctx| {
                 egui::SidePanel::left("places").show(ctx, |ui| {
                     for act in browser.ui(ui, &workspace, &device, &queue, &Filter::default()) {
                         if let Act::RenameLocal { name, .. } = act {
@@ -961,7 +966,12 @@ mod tests {
     /// leave its membership behind for as long as the app is installed.
     #[test]
     fn a_grouping_forgets_the_assets_the_list_came_back_without() {
-        let (mut browser, mut workspace, _device, _tabs, _queue, mut log) = bench();
+        let Bench {
+            mut browser,
+            mut workspace,
+            mut log,
+            ..
+        } = Bench::new();
         let here = workspace.create(Fresh::Program, &mut log).unwrap();
         let folder = browser.folders.make().unwrap();
         browser.folders.file(here, Some(folder));
@@ -979,39 +989,35 @@ mod tests {
     /// does not. An asset missing from the restored list leaves no membership behind.
     #[test]
     fn a_tag_put_on_a_multi_selection_comes_back_next_session() {
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
+        let mut bench = Bench::new();
         let ids: Vec<u64> = (0..3)
-            .map(|_| workspace.create(Fresh::Program, &mut log).unwrap())
+            .map(|_| {
+                bench
+                    .workspace
+                    .create(Fresh::Program, &mut bench.log)
+                    .unwrap()
+            })
             .collect();
-        browser.selection.toggle(Item::Local(ids[0]));
-        browser.selection.toggle(Item::Local(ids[1]));
+        bench.browser.selection.toggle(Item::Local(ids[0]));
+        bench.browser.selection.toggle(Item::Local(ids[1]));
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::SaveAsGig],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-        let Some(Item::Tag(tag)) = browser.rename.as_ref().map(|r| r.what) else {
+        bench.act(vec![Act::SaveAsGig]);
+        let Some(Item::Tag(tag)) = bench.browser.rename.as_ref().map(|r| r.what) else {
             panic!("a new gig opens its editor");
         };
-        assert!(browser.tags.on_all(&ids[..2], tag));
-        assert!(!browser.tags.worn(ids[2]).contains(&tag));
+        assert!(bench.browser.tags.on_all(&ids[..2], tag));
+        assert!(!bench.browser.tags.worn(ids[2]).contains(&tag));
 
         let mut store = Fake::default();
-        browser.keep(&mut store);
+        bench.browser.keep(&mut store);
         let mut after = Browser::default();
         after.restore(&store);
-        after.settle(&workspace);
+        after.settle(&bench.workspace);
         assert_eq!(after.tags.name_of(tag), Some("New gig"));
         assert!(after.tags.on_all(&ids[..2], tag));
 
-        workspace.remove(ids[0], &mut log);
-        after.settle(&workspace);
+        bench.workspace.remove(ids[0], &mut bench.log);
+        after.settle(&bench.workspace);
         assert_eq!(after.tags.count(tag), 1, "the one still on the list");
     }
 
@@ -1022,38 +1028,24 @@ mod tests {
     fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
         use crate::workspace::Origin;
 
-        let (mut browser, mut workspace, mut device, mut tabs, mut queue, mut log) = bench();
-        let bytes = {
-            let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
-            workspace.remove(id, &mut log);
-            bytes
-        };
-        let id = workspace.view(
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench.workspace.view(
             "Africa-Split.ne5p".into(),
             Origin::Device {
                 class: ObjectClass::Program,
                 at: Location { bank: 6, slot: 0 },
             },
             bytes,
-            &mut log,
+            &mut bench.log,
         );
-        let tag = browser.tags.make("Sunday").unwrap();
-        assert!(workspace.is_view(id));
+        let tag = bench.browser.tags.make("Sunday").unwrap();
+        assert!(bench.workspace.is_view(id));
 
-        apply(
-            &mut browser,
-            &mut Shell::default(),
-            vec![Act::Tag { ids: vec![id], tag }],
-            &mut workspace,
-            &mut device,
-            &mut tabs,
-            &mut queue,
-            &mut log,
-        );
-        assert!(!workspace.is_view(id), "it is kept on this computer");
-        assert!(browser.tags.worn(id).contains(&tag));
-        let said = log.transcript();
+        bench.act(vec![Act::Tag { ids: vec![id], tag }]);
+        assert!(!bench.workspace.is_view(id), "it is kept on this computer");
+        assert!(bench.browser.tags.worn(id).contains(&tag));
+        let said = bench.log.transcript();
         assert!(said.contains("Kept a copy on this computer"), "{said}");
     }
 
@@ -1067,16 +1059,21 @@ mod tests {
     fn the_modal_says_when_a_batch_is_of_another_model() {
         use crate::workspace::Origin;
 
-        let (mut browser, mut workspace, mut device, _tabs, mut queue, mut log) = bench();
+        let Bench {
+            mut browser,
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Africa Split", "Squabble B"]);
         device.pretend_attached_as("unnamed device");
 
         let mut ids = Vec::new();
         for slot in 0..2 {
-            let stage = workspace.create(Fresh::Stage4Program, &mut log).unwrap();
-            let bytes = workspace.get(stage).unwrap().bytes.clone();
-            workspace.remove(stage, &mut log);
+            let bytes = Fresh::Stage4Program.bytes().unwrap();
             let at = Location { bank: 6, slot };
             let id = workspace.ingest(
                 format!("stage-{slot}.ns4p"),

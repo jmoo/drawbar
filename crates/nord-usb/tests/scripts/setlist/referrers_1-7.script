@@ -1,4 +1,5 @@
 # source: synthetic
+# device: Nord Electro 5
 # note: the set-list scan a program move runs first. Four set-list banks are
 #   declared, only the first holding anything, and one of its two set lists
 #   points at the program being moved.

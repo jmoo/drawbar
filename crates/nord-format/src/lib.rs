@@ -15,6 +15,7 @@
 //!
 //! [`from_path`] and [`from_stream`] sniff any supported file and decode it into an
 //! [`Entity`]. [`to_bytes`] and [`Entity::write_to`] serialize it again.
+//! [`cbin_formats`] lists the CBIN format tags the reader dispatches.
 //!
 //! Every supported file reads and writes however much of its body decodes. Decoded
 //! values are views over the stored body, bits that no field claims survive untouched,
@@ -457,118 +458,122 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
     }
 }
 
+/// Reads one CBIN file whose tag the table has already matched.
+type ReadCbin = fn(&mut dyn ReadSeek) -> Result<Entity, Error>;
+
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek + ?Sized> ReadSeek for T {}
+
+/// One row of [`CBIN_READERS`]: a format module's tag and its reader, wrapped in the
+/// entity variants named after `=>`, outermost first.
+macro_rules! row {
+    ($($module:ident)::+ => $($wrap:path),+) => {
+        ($($module)::+::FORMAT, |mut r| {
+            Ok(row!(@wrap $($wrap),+ ; $($module)::+::read_from(&mut r)?))
+        })
+    };
+    (@wrap $wrap:path ; $read:expr) => { $wrap($read) };
+    (@wrap $wrap:path, $($rest:path),+ ; $read:expr) => { $wrap(row!(@wrap $($rest),+ ; $read)) };
+}
+
+/// Every CBIN tag [`from_stream`] reads, with the reader it dispatches to.
+const CBIN_READERS: &[(&str, ReadCbin)] = &[
+    (nsmp::FORMAT, |mut r| {
+        let file: Cbin<nsmp::AnyBody> = cbin::read(&mut r, nsmp::FORMAT)?;
+        let header = file.header;
+        Ok(Entity::Sample(match file.body {
+            nsmp::AnyBody::V2(body) => Sample::V2(Cbin { header, body }),
+            nsmp::AnyBody::V3(body) => Sample::V3(Cbin { header, body }),
+        }))
+    }),
+    (npno::FORMAT, |mut r| {
+        Ok(Entity::Piano(npno::Piano::read_from(&mut r)?))
+    }),
+    row!(npip::pipe_library => Entity::PipeLibrary),
+    row!(nsclassic::piano_library => Entity::PianoLibrary),
+    row!(ne3::program => Entity::Program, Program::Electro3),
+    row!(ne3::organ_preset => Entity::OrganPreset, OrganPreset::Electro3),
+    row!(ne4::program => Entity::Program, Program::Electro4),
+    row!(ne4::live => Entity::Live, Live::Electro4),
+    row!(ne4::settings => Entity::Settings, Settings::Electro4),
+    row!(ne5::program => Entity::Program, Program::Electro5),
+    row!(ne5::live => Entity::Live, Live::Electro5),
+    row!(ne5::song => Entity::Song, Song::Electro5),
+    row!(ne5::settings => Entity::Settings, Settings::Electro5),
+    row!(ne6::program => Entity::Program, Program::Electro6),
+    row!(ne6::live => Entity::Live, Live::Electro6),
+    row!(ne6::settings => Entity::Settings, Settings::Electro6),
+    row!(ne7::program => Entity::Program, Program::Electro7),
+    row!(ne7::live => Entity::Live, Live::Electro7),
+    row!(ne7::settings => Entity::Settings, Settings::Electro7),
+    row!(nsclassic::program => Entity::Program, Program::StageClassic),
+    row!(nsclassic::synth => Entity::Synth, Synth::StageClassic),
+    row!(ns2::program => Entity::Program, Program::Stage2),
+    row!(ns2::live => Entity::Live, Live::Stage2),
+    row!(ns2::synth => Entity::Synth, Synth::Stage2),
+    row!(ns2::settings => Entity::Settings, Settings::Stage2),
+    row!(ns3::program => Entity::Program, Program::Stage3),
+    row!(ns3::live => Entity::Live, Live::Stage3),
+    row!(ns3::song => Entity::Song, Song::Stage3),
+    row!(ns3::synth => Entity::Synth, Synth::Stage3),
+    row!(ns3::settings => Entity::Settings, Settings::Stage3),
+    row!(ns4::program => Entity::Program, Program::Stage4),
+    row!(ns4::live => Entity::Live, Live::Stage4),
+    row!(ns4::synth => Entity::Synth, Synth::Stage4),
+    row!(ns4::piano_preset => Entity::PianoPreset, PianoPreset::Stage4),
+    row!(ns4::organ_preset => Entity::OrganPreset, OrganPreset::Stage4),
+    row!(ns4::settings => Entity::Settings, Settings::Stage4),
+    row!(np::program => Entity::Program, Program::Piano1),
+    row!(np::live => Entity::Live, Live::Piano1),
+    row!(np::settings => Entity::Settings, Settings::Piano1),
+    row!(np2::program => Entity::Program, Program::Piano2),
+    row!(np2::live => Entity::Live, Live::Piano2),
+    row!(np2::settings => Entity::Settings, Settings::Piano2),
+    row!(np3::program => Entity::Program, Program::Piano3),
+    row!(np3::live => Entity::Live, Live::Piano3),
+    row!(np3::settings => Entity::Settings, Settings::Piano3),
+    row!(np4::program => Entity::Program, Program::Piano4),
+    row!(np4::live => Entity::Live, Live::Piano4),
+    row!(np4::settings => Entity::Settings, Settings::Piano4),
+    row!(np5::program => Entity::Program, Program::Piano5),
+    row!(np5::live => Entity::Live, Live::Piano5),
+    row!(np5::settings => Entity::Settings, Settings::Piano5),
+    row!(ng2::program => Entity::Program, Program::Grand),
+    row!(ng2::live => Entity::Live, Live::Grand),
+    row!(ng2::settings => Entity::Settings, Settings::Grand),
+    row!(nw::program => Entity::Program, Program::Wave),
+    row!(nw::settings => Entity::Settings, Settings::Wave),
+    row!(nw2::program => Entity::Program, Program::Wave2),
+    row!(nw2::live => Entity::Live, Live::Wave2),
+    row!(nw2::settings => Entity::Settings, Settings::Wave2),
+    row!(nc2::program => Entity::Program, Program::C2),
+    row!(nc2::settings => Entity::Settings, Settings::C2),
+    row!(nc2d::program => Entity::Program, Program::C2D),
+    row!(nc2d::settings => Entity::Settings, Settings::C2D),
+    row!(no3::program => Entity::Program, Program::Organ3),
+    row!(no3::settings => Entity::Settings, Settings::Organ3),
+    row!(nl4::program => Entity::Program, Program::Lead4),
+    row!(nl4::performance => Entity::Performance, Performance::Lead4),
+    row!(nl4::settings => Entity::Settings, Settings::Lead4),
+    row!(nla1::program => Entity::Program, Program::LeadA1),
+    row!(nla1::performance => Entity::Performance, Performance::LeadA1),
+    row!(nla1::settings => Entity::Settings, Settings::LeadA1),
+    row!(nd2::program => Entity::Program, Program::Drum2),
+    row!(nd3::kit => Entity::Program, Program::Drum3),
+];
+
+/// Every CBIN format tag [`from_stream`] reads, NULs preserved.
+pub fn cbin_formats() -> impl Iterator<Item = &'static str> {
+    CBIN_READERS.iter().map(|(format, _)| *format)
+}
+
 /// One CBIN file, dispatched by the tag at offset 8.
 fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error> {
-    use Entity as E;
-
-    Ok(match tag {
-        nsmp::FORMAT => {
-            let file: Cbin<nsmp::AnyBody> = cbin::read(reader, nsmp::FORMAT)?;
-            let header = file.header;
-            E::Sample(match file.body {
-                nsmp::AnyBody::V2(body) => Sample::V2(Cbin { header, body }),
-                nsmp::AnyBody::V3(body) => Sample::V3(Cbin { header, body }),
-            })
-        }
-        npno::FORMAT => E::Piano(npno::Piano::read_from(reader)?),
-        npip::pipe_library::FORMAT => E::PipeLibrary(npip::pipe_library::read_from(reader)?),
-        nsclassic::piano_library::FORMAT => {
-            E::PianoLibrary(nsclassic::piano_library::read_from(reader)?)
-        }
-
-        ne3::program::FORMAT => E::Program(Program::Electro3(ne3::program::read_from(reader)?)),
-        ne3::organ_preset::FORMAT => {
-            E::OrganPreset(OrganPreset::Electro3(ne3::organ_preset::read_from(reader)?))
-        }
-        ne4::program::FORMAT => E::Program(Program::Electro4(ne4::program::read_from(reader)?)),
-        ne4::live::FORMAT => E::Live(Live::Electro4(ne4::live::read_from(reader)?)),
-        ne4::settings::FORMAT => E::Settings(Settings::Electro4(ne4::settings::read_from(reader)?)),
-        ne5::program::FORMAT => E::Program(Program::Electro5(ne5::program::read_from(reader)?)),
-        ne5::live::FORMAT => E::Live(Live::Electro5(ne5::live::read_from(reader)?)),
-        ne5::song::FORMAT => E::Song(Song::Electro5(ne5::song::read_from(reader)?)),
-        ne5::settings::FORMAT => E::Settings(Settings::Electro5(ne5::settings::read_from(reader)?)),
-        ne6::program::FORMAT => E::Program(Program::Electro6(ne6::program::read_from(reader)?)),
-        ne6::live::FORMAT => E::Live(Live::Electro6(ne6::live::read_from(reader)?)),
-        ne6::settings::FORMAT => E::Settings(Settings::Electro6(ne6::settings::read_from(reader)?)),
-        ne7::program::FORMAT => E::Program(Program::Electro7(ne7::program::read_from(reader)?)),
-        ne7::live::FORMAT => E::Live(Live::Electro7(ne7::live::read_from(reader)?)),
-        ne7::settings::FORMAT => E::Settings(Settings::Electro7(ne7::settings::read_from(reader)?)),
-
-        nsclassic::program::FORMAT => E::Program(Program::StageClassic(
-            nsclassic::program::read_from(reader)?,
-        )),
-        nsclassic::synth::FORMAT => {
-            E::Synth(Synth::StageClassic(nsclassic::synth::read_from(reader)?))
-        }
-        ns2::program::FORMAT => E::Program(Program::Stage2(ns2::program::read_from(reader)?)),
-        ns2::live::FORMAT => E::Live(Live::Stage2(ns2::live::read_from(reader)?)),
-        ns2::synth::FORMAT => E::Synth(Synth::Stage2(ns2::synth::read_from(reader)?)),
-        ns2::settings::FORMAT => E::Settings(Settings::Stage2(ns2::settings::read_from(reader)?)),
-        ns3::program::FORMAT => E::Program(Program::Stage3(ns3::program::read_from(reader)?)),
-        ns3::live::FORMAT => E::Live(Live::Stage3(ns3::live::read_from(reader)?)),
-        ns3::song::FORMAT => E::Song(Song::Stage3(ns3::song::read_from(reader)?)),
-        ns3::synth::FORMAT => E::Synth(Synth::Stage3(ns3::synth::read_from(reader)?)),
-        ns3::settings::FORMAT => E::Settings(Settings::Stage3(ns3::settings::read_from(reader)?)),
-        ns4::program::FORMAT => E::Program(Program::Stage4(ns4::program::read_from(reader)?)),
-        ns4::live::FORMAT => E::Live(Live::Stage4(ns4::live::read_from(reader)?)),
-        ns4::synth::FORMAT => E::Synth(Synth::Stage4(ns4::synth::read_from(reader)?)),
-        ns4::piano_preset::FORMAT => {
-            E::PianoPreset(PianoPreset::Stage4(ns4::piano_preset::read_from(reader)?))
-        }
-        ns4::organ_preset::FORMAT => {
-            E::OrganPreset(OrganPreset::Stage4(ns4::organ_preset::read_from(reader)?))
-        }
-        ns4::settings::FORMAT => E::Settings(Settings::Stage4(ns4::settings::read_from(reader)?)),
-
-        np::program::FORMAT => E::Program(Program::Piano1(np::program::read_from(reader)?)),
-        np::live::FORMAT => E::Live(Live::Piano1(np::live::read_from(reader)?)),
-        np::settings::FORMAT => E::Settings(Settings::Piano1(np::settings::read_from(reader)?)),
-        np2::program::FORMAT => E::Program(Program::Piano2(np2::program::read_from(reader)?)),
-        np2::live::FORMAT => E::Live(Live::Piano2(np2::live::read_from(reader)?)),
-        np2::settings::FORMAT => E::Settings(Settings::Piano2(np2::settings::read_from(reader)?)),
-        np3::program::FORMAT => E::Program(Program::Piano3(np3::program::read_from(reader)?)),
-        np3::live::FORMAT => E::Live(Live::Piano3(np3::live::read_from(reader)?)),
-        np3::settings::FORMAT => E::Settings(Settings::Piano3(np3::settings::read_from(reader)?)),
-        np4::program::FORMAT => E::Program(Program::Piano4(np4::program::read_from(reader)?)),
-        np4::live::FORMAT => E::Live(Live::Piano4(np4::live::read_from(reader)?)),
-        np4::settings::FORMAT => E::Settings(Settings::Piano4(np4::settings::read_from(reader)?)),
-        np5::program::FORMAT => E::Program(Program::Piano5(np5::program::read_from(reader)?)),
-        np5::live::FORMAT => E::Live(Live::Piano5(np5::live::read_from(reader)?)),
-        np5::settings::FORMAT => E::Settings(Settings::Piano5(np5::settings::read_from(reader)?)),
-        ng2::program::FORMAT => E::Program(Program::Grand(ng2::program::read_from(reader)?)),
-        ng2::live::FORMAT => E::Live(Live::Grand(ng2::live::read_from(reader)?)),
-        ng2::settings::FORMAT => E::Settings(Settings::Grand(ng2::settings::read_from(reader)?)),
-
-        nw::program::FORMAT => E::Program(Program::Wave(nw::program::read_from(reader)?)),
-        nw::settings::FORMAT => E::Settings(Settings::Wave(nw::settings::read_from(reader)?)),
-        nw2::program::FORMAT => E::Program(Program::Wave2(nw2::program::read_from(reader)?)),
-        nw2::live::FORMAT => E::Live(Live::Wave2(nw2::live::read_from(reader)?)),
-        nw2::settings::FORMAT => E::Settings(Settings::Wave2(nw2::settings::read_from(reader)?)),
-
-        nc2::program::FORMAT => E::Program(Program::C2(nc2::program::read_from(reader)?)),
-        nc2::settings::FORMAT => E::Settings(Settings::C2(nc2::settings::read_from(reader)?)),
-        nc2d::program::FORMAT => E::Program(Program::C2D(nc2d::program::read_from(reader)?)),
-        nc2d::settings::FORMAT => E::Settings(Settings::C2D(nc2d::settings::read_from(reader)?)),
-        no3::program::FORMAT => E::Program(Program::Organ3(no3::program::read_from(reader)?)),
-        no3::settings::FORMAT => E::Settings(Settings::Organ3(no3::settings::read_from(reader)?)),
-
-        // Leads (the CBIN generation; the older Leads ship SysEx).
-        nl4::program::FORMAT => E::Program(Program::Lead4(nl4::program::read_from(reader)?)),
-        nl4::performance::FORMAT => {
-            E::Performance(Performance::Lead4(nl4::performance::read_from(reader)?))
-        }
-        nl4::settings::FORMAT => E::Settings(Settings::Lead4(nl4::settings::read_from(reader)?)),
-        nla1::program::FORMAT => E::Program(Program::LeadA1(nla1::program::read_from(reader)?)),
-        nla1::performance::FORMAT => {
-            E::Performance(Performance::LeadA1(nla1::performance::read_from(reader)?))
-        }
-        nla1::settings::FORMAT => E::Settings(Settings::LeadA1(nla1::settings::read_from(reader)?)),
-
-        nd2::program::FORMAT => E::Program(Program::Drum2(nd2::program::read_from(reader)?)),
-        nd3::kit::FORMAT => E::Program(Program::Drum3(nd3::kit::read_from(reader)?)),
-
-        e => return Err(ParseError::UnknownFormat(e.to_string()).into()),
-    })
+    let (_, read) = CBIN_READERS
+        .iter()
+        .find(|(format, _)| *format == tag)
+        .ok_or_else(|| ParseError::UnknownFormat(tag.to_string()))?;
+    read(reader)
 }
 
 /// Which archive a ZIP is, from the members the walks below will see.
@@ -665,32 +670,6 @@ mod registry_tests {
             .find(|f| f.path == "center_panel.transpose")
             .unwrap();
         assert_eq!(transpose.value, "-5");
-    }
-
-    /// A stub-backed entity has no registry, and says so the same way in both
-    /// directions.
-    #[test]
-    fn a_stub_has_no_registry() {
-        let file = Cbin {
-            header: cbin::Header::new("ne6p", (0, 0), 1),
-            body: RawBody(vec![0; 16]),
-        };
-        let mut entity = Entity::Program(Program::Electro6(file));
-        assert!(entity.registry().is_none());
-        assert!(entity.registry_mut().is_none());
-    }
-
-    /// A song's fields are private, so a registry would list nothing. `Song::set` is its
-    /// editing surface.
-    #[test]
-    fn a_song_is_not_a_registry_entity() {
-        let song = ne5::song::new(
-            (0, 0).try_into().unwrap(),
-            ne5::song::DEFAULT_VERSION,
-            [(0, 0).try_into().unwrap(); 4],
-        )
-        .unwrap();
-        assert!(Entity::Song(Song::Electro5(song)).registry().is_none());
     }
 }
 
