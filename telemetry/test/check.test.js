@@ -123,6 +123,10 @@ test("the user agent is reduced to a family, a major version and an os", () => {
       "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36",
       { browser: "chrome 141", os: "android" },
     ],
+    [
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0.0.0 Mobile/15E148 Safari/604.1",
+      { browser: "chrome 141", os: "ios" },
+    ],
     ["", { browser: "other", os: "other" }],
   ];
   for (const [ua, expected] of cases) {
@@ -139,9 +143,9 @@ test("the privacy page names every row and field", () => {
   }
 });
 
-test("only drawbar.app, or a request that names no origin, is accepted", () => {
+test("only drawbar.app is accepted", () => {
   assert.ok(allowed("https://drawbar.app"));
-  assert.ok(allowed(null));
+  assert.ok(!allowed(null));
   assert.ok(!allowed("http://127.0.0.1:8765"));
   assert.ok(!allowed("https://fork.example"));
 });

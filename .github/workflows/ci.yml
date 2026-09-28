@@ -15,7 +15,7 @@
 #   telemetry: master pushes only, after check. Applies the D1 migrations and
 #              deploys the collector in telemetry/ with the Cloudflare token of the
 #              drawbar-telemetry-deploy environment, which only master can use.
-#   pages: every master push once release has run. The app comes from the newest
+#   pages: every master push once release and telemetry have run. The app comes from the newest
 #          `drawbar-v*` tag and the guide from master. It hangs off release
 #          because a tag GITHUB_TOKEN creates fires no workflow event, so
 #          `on: push: tags:` would never deploy one.
@@ -174,7 +174,7 @@ jobs:
   # the build job's.
   pages:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-    needs: [release]
+    needs: [release, telemetry]
     runs-on: ubuntu-latest
     permissions:
       actions: write # cache-nix-action purges superseded caches
@@ -214,8 +214,7 @@ jobs:
       - uses: actions/deploy-pages@v4
         id: deployment
 
-  # Before any app that reports is published: the app goes live only once a release
-  # tags it, and this runs as soon as check passes.
+  # Pages waits on this, so no app that reports is published before its collector.
   telemetry:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [check]

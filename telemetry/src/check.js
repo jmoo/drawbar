@@ -1,10 +1,10 @@
 // What the collector accepts. Anything that does not match exactly is dropped, since
 // anyone can post to a public endpoint.
 
-// Whether a request's `Origin` header allows it. Only drawbar.app sends; a request
-// with no `Origin` is let through, since not every browser sends one with a beacon.
+// Whether a request's `Origin` header allows it. Browsers send one with every
+// cross-origin POST, beacons included; only drawbar.app's is accepted.
 export function allowed(origin) {
-  return origin === null || origin === "https://drawbar.app";
+  return origin === "https://drawbar.app";
 }
 
 // Rows in one beacon.
@@ -126,8 +126,8 @@ function browser(ua) {
     ["edge", /Edg\/(\d+)/],
     ["opera", /OPR\/(\d+)/],
     ["samsung", /SamsungBrowser\/(\d+)/],
-    ["chrome", /Chrome\/(\d+)/],
-    ["firefox", /Firefox\/(\d+)/],
+    ["chrome", /(?:Chrome|CriOS)\/(\d+)/],
+    ["firefox", /(?:Firefox|FxiOS)\/(\d+)/],
     ["safari", /Version\/(\d+)[^ ]* (?:Mobile\/\S+ )?Safari\//],
   ].find(([, pattern]) => pattern.test(ua));
   if (!found) {

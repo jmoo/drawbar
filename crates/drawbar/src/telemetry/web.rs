@@ -1,6 +1,7 @@
 //! The browser half: whether this page may report, the queue, and the beacon.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
@@ -24,7 +25,7 @@ const HELD: usize = 50;
 const EVERY: i32 = 30_000;
 
 thread_local! {
-    static QUEUE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static QUEUE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
     static VISITED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -50,9 +51,14 @@ pub fn sharing() -> Sharing {
     if refused(&window.navigator()) {
         return Sharing::Refused;
     }
-    match storage().and_then(|storage| storage.get_item(SWITCH).ok().flatten()) {
-        Some(value) if value == "off" => Sharing::Off,
-        _ => Sharing::On,
+    // ⚠️ Off when storage is blocked: the switch could not be kept, so it could not be
+    // turned off.
+    let Some(storage) = storage() else {
+        return Sharing::Off;
+    };
+    match storage.get_item(SWITCH) {
+        Ok(None) => Sharing::On,
+        Ok(Some(_)) | Err(_) => Sharing::Off,
     }
 }
 
@@ -94,9 +100,9 @@ pub(super) fn queue(event: &Event) {
             return;
         };
         if queue.len() == HELD {
-            queue.remove(0);
+            queue.pop_front();
         }
-        queue.push(event.json());
+        queue.push_back(event.json());
     });
 }
 
@@ -119,7 +125,7 @@ fn flush() {
     if rows.is_empty() {
         return;
     }
-    let body = format!("[{}]", rows.join(","));
+    let body = format!("[{}]", Vec::from(rows).join(","));
     let _ = navigator.send_beacon_with_opt_str(&format!("{ENDPOINT}/e"), Some(&body));
 }
 
@@ -264,10 +270,12 @@ pub async fn submit(body: String) -> Result<(), Undelivered> {
 /// to quote when asking for it to be deleted.
 pub fn report_id() -> String {
     const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
-    (0..10)
-        .map(|_| {
-            let at = (js_sys::Math::random() * ALPHABET.len() as f64) as usize;
-            ALPHABET[at.min(ALPHABET.len() - 1)] as char
-        })
+    let mut random = [0u8; 10];
+    if let Some(crypto) = web_sys::window().and_then(|window| window.crypto().ok()) {
+        let _ = crypto.get_random_values_with_u8_array(&mut random);
+    }
+    random
+        .iter()
+        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
         .collect()
 }
