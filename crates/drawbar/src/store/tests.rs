@@ -496,6 +496,8 @@ fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
     fs::create_dir(root.at(".drawbar")).unwrap();
     let future = "(version: 99, next_id: 3, something_new: [1, 2])";
     fs::write(root.at(exec::INDEX), future).unwrap();
+    fs::create_dir(root.at(exec::TMP)).unwrap();
+    fs::write(root.at(".drawbar/tmp/theirs"), b"in flight").unwrap();
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
 
@@ -518,6 +520,12 @@ fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
         [".drawbar", "Grand.ne5p"],
         "nothing was added"
     );
+    assert_eq!(
+        root.names(".drawbar"),
+        ["library.ron", "tmp"],
+        "no lock taken"
+    );
+    assert_eq!(root.names(exec::TMP), ["theirs"], "nothing swept");
 }
 
 #[test]

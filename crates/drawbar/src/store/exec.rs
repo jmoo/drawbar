@@ -191,43 +191,27 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
 
 async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
     let indexed = matches!(fs.stat(DIR).await, Ok(Some(_)));
-    let mut writable = match indexed {
-        // drawbar has written here before, so it takes the lock now and a second drawbar
-        // finds it taken.
-        true => take(fs).await,
-        false => fs
-            .probe()
-            .await
-            .map_err(|e| format!("drawbar cannot write here: {e}")),
-    };
+    // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
+    // its `.drawbar/` as that drawbar left it.
+    let (sidecar, mut writable) = index(fs).await;
+    if writable.is_ok() {
+        writable = match indexed {
+            // drawbar has written here before, so it takes the lock now and a second
+            // drawbar finds it taken.
+            true => take(fs).await,
+            false => fs
+                .probe()
+                .await
+                .map_err(|e| format!("drawbar cannot write here: {e}")),
+        };
+    }
+    // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
+    // must not write keeps what a newer drawbar left.
+    let sweeps = indexed && writable.is_ok();
     let mut swept = 0;
-    if indexed && writable.is_ok() {
+    if sweeps {
         swept += sweep(fs, TMP, |_| true).await;
     }
-    let sidecar = match fs.read(INDEX).await {
-        Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
-            Read::Known(sidecar) => sidecar,
-            Read::Newer(version) => {
-                writable = Err(format!(
-                    "a newer drawbar wrote this library's index (version {version}), so this \
-                     one only reads the library"
-                ));
-                Sidecar::default()
-            }
-            Read::Unreadable(why) => {
-                writable = Err(format!(
-                    "the library's index does not read ({why}), so drawbar leaves the \
-                     library as it is"
-                ));
-                Sidecar::default()
-            }
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Sidecar::default(),
-        Err(e) => {
-            writable = Err(format!("the library's index could not be read: {e}"));
-            Sidecar::default()
-        }
-    };
     let held = sidecar
         .assets
         .values()
@@ -241,9 +225,6 @@ async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
     let (listing, temps) = listing(fs, &held, &BTreeSet::new(), &prints)
         .await
         .map_err(|e| e.to_string())?;
-    // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
-    // must not write keeps what a newer drawbar left.
-    let sweeps = indexed && writable.is_ok();
     if sweeps {
         for temp in temps {
             if fs.remove_file(&temp).await.is_ok() {
@@ -273,6 +254,27 @@ async fn open(fs: &mut impl Fs) -> Result<Opened, String> {
         working,
         swept,
     })
+}
+
+/// The index, or an empty one and why nothing may be written where the index is one this
+/// build must not read or rewrite.
+async fn index(fs: &impl Fs) -> (Sidecar, Result<(), String>) {
+    let why = match fs.read(INDEX).await {
+        Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
+            Read::Known(sidecar) => return (sidecar, Ok(())),
+            Read::Newer(version) => format!(
+                "a newer drawbar wrote this library's index (version {version}), so this one \
+                 only reads the library"
+            ),
+            Read::Unreadable(why) => format!(
+                "the library's index does not read ({why}), so drawbar leaves the library as \
+                 it is"
+            ),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return (Sidecar::default(), Ok(())),
+        Err(e) => format!("the library's index could not be read: {e}"),
+    };
+    (Sidecar::default(), Err(why))
 }
 
 /// Make the sidecar where there is none yet, and hold the library's lock, or say why
