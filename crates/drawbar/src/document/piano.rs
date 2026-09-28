@@ -4856,6 +4856,7 @@ mod tests {
 
     /// The assets of a library leave the window when another opens, so the switch waits
     /// until every plan over one of them has reached its bytes.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn opening_another_library_waits_for_the_plan_to_be_laid_out() {
         let mut editor = Editor::new(facts().total * 2);
