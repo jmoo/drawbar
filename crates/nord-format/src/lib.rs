@@ -16,6 +16,9 @@
 //! [`from_path`] and [`from_stream`] sniff any supported file and decode it into an
 //! [`Entity`]. [`to_bytes`] and [`Entity::write_to`] serialize it again.
 //! [`cbin_formats`] lists the CBIN format tags the reader dispatches.
+//! [`formats::npno::Index`] and [`formats::nsmp::Index`] locate each stroke of a large
+//! piano library or sample instrument without reading its audio, so one stroke can be
+//! read by range.
 //!
 //! Every supported file reads and writes however much of its body decodes. Decoded
 //! values are views over the stored body, bits that no field claims survive untouched,
