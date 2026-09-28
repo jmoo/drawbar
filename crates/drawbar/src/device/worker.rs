@@ -336,17 +336,36 @@ async fn put<T: Transport>(
         None => None,
     };
 
-    if backup.is_some() && !class.overwrites_in_place() {
+    if let (Some(backup), false) = (&backup, class.overwrites_in_place()) {
         emit.send(DeviceEvent::Note(format!(
             "deleting {} to make room",
             shown(at)
         )));
-        if let Err(e) = op::delete(s, at).await {
-            return Ok(Err(format!(
-                "deleting {}: {}",
-                shown(at),
-                spoil(gone, Some(at))(e)
-            )));
+        match op::delete(s, at).await {
+            Ok(()) => {}
+            // A status means the instrument declined before the delete landed.
+            Err(e @ Error::DeviceStatus(_)) => {
+                return Ok(Err(format!(
+                    "deleting {}: {}",
+                    shown(at),
+                    spoil(gone, Some(at))(e)
+                )));
+            }
+            // ⚠️ Any other failure may have come after the delete, and the backup is then
+            // the only copy of the slot's contents.
+            Err(e) => {
+                let why = spoil(gone, Some(at))(e);
+                emit.send(DeviceEvent::Rescued {
+                    at,
+                    name: envelope::rescue_name(at, backup),
+                    bytes: backup.clone(),
+                });
+                return Ok(Err(format!(
+                    "{} may have been deleted: {why}; its former contents are in the local \
+                     list as a rescued entity. Put it back.",
+                    shown(at)
+                )));
+            }
         }
     }
 
@@ -1009,6 +1028,7 @@ mod wire_tests {
         focus: Option<Location>,
         refuses_first_write: bool,
         refuses_every_write: bool,
+        hangs_up_on_delete: bool,
     }
 
     /// The Electro 5's bank division, which a default Puppet uses.
@@ -1038,6 +1058,7 @@ mod wire_tests {
                 focus: None,
                 refuses_first_write: false,
                 refuses_every_write: false,
+                hangs_up_on_delete: false,
             }
         }
 
@@ -1085,6 +1106,12 @@ mod wire_tests {
         /// local list.
         fn refusing_every_write(mut self) -> Puppet {
             self.refuses_every_write = true;
+            self
+        }
+
+        /// Stops answering once it hears a delete, which leaves the delete's fate unknown.
+        fn hanging_up_on_delete(mut self) -> Puppet {
+            self.hangs_up_on_delete = true;
             self
         }
 
@@ -1266,6 +1293,9 @@ mod wire_tests {
                     Message::new(msg.service, msg.subsystem, msg.command + 1, args).encode(),
                 );
             }
+            self.deaf |= self.hangs_up_on_delete
+                && matches!(msg.service, Service::Program)
+                && msg.command == cmd::DELETE;
             self.heard.push(msg);
             Ok(())
         }
@@ -1515,6 +1545,38 @@ mod wire_tests {
             "one refusal is one failure: {:?}",
             failures(&said)
         );
+    }
+
+    #[test]
+    fn an_occupant_whose_delete_went_unanswered_is_rescued() {
+        let at = Location { bank: 0, slot: 3 };
+        let mut device =
+            Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).hanging_up_on_delete();
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                bytes: a_program(),
+            },
+        );
+        assert!(flow == Flow::Lost, "the instrument stopped answering");
+
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let rescued: Vec<&str> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Rescued { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rescued, ["nord-rescued-1-4.ne5p"]);
+        let failed = failures(&said);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("may have been deleted"), "{}", failed[0]);
+        assert_eq!(counted(&device, cmd::BEGIN_WRITE), 0, "nothing was written");
     }
 
     /// Every item logs its own line, but the batch reports success once.
