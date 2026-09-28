@@ -315,13 +315,14 @@ pub fn read_raw(r: &mut (impl Read + Seek)) -> Result<Cbin<RawBody>, Error> {
     read_inner(r, None)
 }
 
-/// Read a container's header and scope a reader to the rest of the stream as its body.
-/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
-/// type-0 file.
-fn open<'a, R: Read + Seek>(
-    r: &'a mut R,
+/// Read a container's header and find its body in the rest of the stream, reading no
+/// body byte. With `format`, the file must carry that tag. Returns the stored crc32,
+/// zero for a type-0 file, and the body's position in the stream, the type-0 trailer
+/// excluded.
+fn locate<R: Read + Seek>(
+    r: &mut R,
     format: Option<&'static str>,
-) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
+) -> Result<(Header, u32, Range<u64>), Error> {
     let start = r.stream_position()?;
     let (header, stored_crc32) = read_header(r)?;
     if let Some(expected) = format {
@@ -334,25 +335,62 @@ fn open<'a, R: Read + Seek>(
         }
     }
 
-    let end = stream_end(r)?;
+    // The header was read from `start`, so the stream ends past it.
+    let len = stream_end(r)? - start;
     let overhead = header.generation.body_start() + header.generation.trailer_len();
-    if end < start + overhead {
+    if len < overhead {
         return Err(ParseError::AssertFail(format!(
-            "{}: {} bytes is shorter than the {overhead}-byte container",
+            "{}: {len} bytes is shorter than the {overhead}-byte container",
             name(&header, format),
-            end - start,
         ))
         .into());
     }
+    let body_start = start + header.generation.body_start();
+    let body_end = start + len - header.generation.trailer_len();
+    Ok((header, stored_crc32, body_start..body_end))
+}
+
+/// Read a container's header and scope a reader to the rest of the stream as its body.
+/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
+/// type-0 file.
+fn open<'a, R: Read + Seek>(
+    r: &'a mut R,
+    format: Option<&'static str>,
+) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
+    let (header, stored_crc32, body) = locate(r, format)?;
     let reader = BodyReader {
         inner: r,
-        start: start + header.generation.body_start(),
-        len: end - start - overhead,
+        start: body.start,
+        len: body.end - body.start,
         pos: 0,
         hashed: 0,
         hash: Hash::primed(&header),
     };
     Ok((header, stored_crc32, reader))
+}
+
+/// Read the header of a `format` file and find its body, reading no body byte: the
+/// body's position in the stream, the type-0 trailer excluded.
+///
+/// ⚠️ Nothing is verified past the header. The checksum covers every body byte, so
+/// only [`inspect`] or a whole read checks it.
+pub(crate) fn locate_body(
+    r: &mut (impl Read + Seek),
+    format: &'static str,
+) -> Result<(Header, Range<u64>), Error> {
+    let (header, _, body) = locate(r, Some(format))?;
+    Ok((header, body))
+}
+
+/// The stream position of offset `at` into a body at `body`, or `None` past its end.
+pub(crate) fn body_position(body: &Range<u64>, at: u64) -> Option<u64> {
+    body.start.checked_add(at).filter(|&pos| pos <= body.end)
+}
+
+/// Fill `buf` from position `at` of the stream.
+pub(crate) fn read_at(r: &mut (impl Read + Seek), at: u64, buf: &mut [u8]) -> io::Result<()> {
+    r.seek(SeekFrom::Start(at))?;
+    r.read_exact(buf)
 }
 
 /// The format to name in an error: the expected tag when one was asked for, and the

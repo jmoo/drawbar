@@ -43,7 +43,9 @@
 //! [`Library`] therefore only re-lay spans.
 //!
 //! ⚠️ Real libraries are tens of megabytes, and reading one allocates the whole body.
-//! [`crate::cbin::inspect`] answers container questions in O(1).
+//! [`Index`] reads the prefix and the directory alone and says where each stroke's
+//! audio sits, so one stroke can be read by range. [`crate::cbin::inspect`] answers
+//! container questions in O(1).
 //!
 //! ⚠️ The header's `location` and `aux` are not checked. In a library these words hold
 //! something other than a bank and slot, and no specimen shows what. Checking them
@@ -51,10 +53,13 @@
 
 pub mod codec;
 pub mod encode;
+mod index;
 /// A library laid out from a description. Test-only: behind the `synthetic` feature,
 /// and always available to this crate's own tests.
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
+
+pub use index::Index;
 
 use crate::cbin::{self, Cbin, Header, RawBody};
 use crate::error::{try_vec, Error, ParseError};
