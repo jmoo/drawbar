@@ -24,7 +24,7 @@
 //! the panel, with the change verified on the display, moves no bit of the body.
 //! Confirmed on hardware. Neither is decoded.
 
-use crate::cbin::{self, Cbin, Header};
+use crate::cbin::{Cbin, Header};
 use crate::components::sparse_enum;
 use crate::error::{Error, ParseError};
 use crate::formats::ne5::{program, song};
@@ -51,8 +51,7 @@ pub fn new() -> Cbin<Settings> {
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Settings>, Error> {
-    let file: Cbin<Settings> = cbin::read(reader, FORMAT)?;
-    program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
+    let file: Cbin<Settings> = crate::formats::read_known(reader, FORMAT, KNOWN_VERSIONS)?;
     program::unset_aux(FORMAT, &file.header)?;
     // The instrument holds one settings file, and every specimen addresses it to bank 0
     // slot 0.

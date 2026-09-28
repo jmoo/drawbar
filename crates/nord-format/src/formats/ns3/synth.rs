@@ -5,18 +5,16 @@
 //! found by locating preset content inside programs and confirmed by the selector
 //! check. Panel B's copy sits 263 bytes later.
 //!
-//! Field names match [`super::panel::Panel`]'s, so the same parameter reads the
-//! same either side of the tag.
+//! [`super::panel::Panel`] places this body as its `synth` field, so the same
+//! parameter reads the same either side of the tag.
 
 use super::program::{
     SynthAmpEnvVelocity, SynthArpPattern, SynthArpRange, SynthFilterDrive, SynthFilterKbTrack,
     SynthFilterType, SynthLfoWave, SynthOscillatorConfig, SynthOscillatorType, SynthUnison,
     SynthVibrato, SynthVoice,
 };
-use crate::cbin::{self, Cbin};
-use crate::components::{
-    Frequency, Interval, Level, MorphTarget, Rate, SampleRef, Time, WideSelector,
-};
+use crate::cbin::Cbin;
+use crate::components::{Frequency, Interval, Level, MorphTarget, Rate, SampleRef, Selector, Time};
 use crate::error::Error;
 use std::io::{Read, Seek};
 
@@ -84,7 +82,7 @@ pub struct SynthPreset {
     #[bits(150..=152)]
     pub synth_oscillator_type: SynthOscillatorType,
     #[bits(153..=161)]
-    pub synth_oscillator_1_wave_form: WideSelector<9>,
+    pub synth_oscillator_1_wave_form: Selector<9>,
     #[bits(163..=166)]
     pub synth_oscillator_config: SynthOscillatorConfig,
     #[bits(167..=172)]
@@ -152,7 +150,5 @@ pub struct SynthPreset {
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<SynthPreset>, Error> {
-    let file: Cbin<SynthPreset> = cbin::read(reader, FORMAT)?;
-    crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    Ok(file)
+    crate::formats::read_known(reader, FORMAT, KNOWN_VERSIONS)
 }

@@ -2,6 +2,8 @@
 
 use wasm_bindgen::JsValue;
 
+use crate::js::field;
+
 /// How many characters of an unrecognized user agent are kept. The string can run to a
 /// paragraph of version numbers, and the sheet has one line.
 const MOST: usize = 60;
@@ -34,12 +36,6 @@ pub fn agent() -> String {
 
 fn navigator() -> Option<JsValue> {
     Some(web_sys::window()?.navigator().into())
-}
-
-/// A property of a JavaScript object, unless it is undefined or null.
-fn field(object: &JsValue, name: &str) -> Option<JsValue> {
-    let held = js_sys::Reflect::get(object, &JsValue::from_str(name)).ok()?;
-    (!held.is_undefined() && !held.is_null()).then_some(held)
 }
 
 /// `Google Chrome 141 · macOS`, from `navigator.userAgentData`, which only Chromium

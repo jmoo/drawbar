@@ -221,15 +221,11 @@ impl Shell {
                 _ => {}
             }
         }
-        self.browser_open = held.browser_open;
-        self.inspector_open = held.inspector_open;
-        self.dock_open = held.dock_open;
-        self.room_open = held.room_open;
-        self.info_open = held.info_open;
-        self.browser_width = held.browser_width;
-        self.inspector_width = held.inspector_width;
-        self.dock_body = held.dock_body;
-        self.page = held.page;
+        *self = Shell {
+            omnibox: std::mem::take(&mut self.omnibox),
+            filter: std::mem::take(&mut self.filter),
+            ..held
+        };
     }
 
     pub fn keep(&self, storage: &mut dyn eframe::Storage) {
@@ -337,6 +333,65 @@ mod key {
 /// click alone.
 const WINDOWED: bool = !cfg!(target_arch = "wasm32");
 
+/// A key, whether it may be taken, and what it does once taken.
+///
+/// ⚠️ The key is consumed only when the first test passes, so a key it refuses goes on to
+/// whatever else binds it. The act may still decline a key it was given.
+type Keyed = (
+    egui::KeyboardShortcut,
+    fn(&DrawbarApp) -> bool,
+    fn(&DrawbarApp) -> Option<Act>,
+);
+
+fn always(_: &DrawbarApp) -> bool {
+    true
+}
+
+fn windowed(_: &DrawbarApp) -> bool {
+    WINDOWED
+}
+
+/// The shortcuts, in the order they are matched.
+const SHORTCUTS: [Keyed; 12] = [
+    (key::OPEN, always, |_| Some(Act::OpenFiles)),
+    (key::EXPORT, always, |app| {
+        app.tabs.active().map(Act::Export)
+    }),
+    (key::BROWSER, always, |_| {
+        Some(Act::ToggleDock(Dock::Browser))
+    }),
+    (key::INSPECTOR, always, |_| {
+        Some(Act::ToggleDock(Dock::Inspector))
+    }),
+    (key::DOCK, always, |_| Some(Act::ToggleDock(Dock::Bottom))),
+    // ⚠️ Consumed whether or not an instrument is attached, and before ⌘S below. egui
+    // matches a shortcut's modifiers logically, so an unconsumed ⌘⇧S would go on to
+    // match ⌘S and save instead of showing the queue.
+    (key::QUEUE, always, |app| {
+        app.attached().then_some(Act::ShowPage(Page::Queue))
+    }),
+    // ⚠️ Likewise: an unconsumed ⌘R reloads the browser tab this build runs in.
+    (key::RESYNC, always, |app| {
+        app.attached().then_some(Act::Resync)
+    }),
+    (key::CLOSE, windowed, |_| Some(Act::CloseTab)),
+    (key::QUIT, windowed, |_| Some(Act::Quit)),
+    (
+        key::KEYBOARD,
+        |app| WINDOWED && app.attached(),
+        |_| Some(Act::ShowTab(Spot::Keyboard)),
+    ),
+    (key::DOCUMENT, windowed, |app| {
+        app.tabs
+            .last_document()
+            .map(|id| Act::ShowTab(Spot::Document(id)))
+    }),
+    // ⚠️ Never a file export. ⌘S means "save what I did", which for a view of a slot
+    // is the write back to that slot. The library and the keyboard are views of
+    // what is already there, so neither has anything to save.
+    (key::SAVE, always, |app| app.tabs.active().map(Act::SaveDoc)),
+];
+
 /// The user guide, published beside the browser build.
 ///
 /// Relative in a browser tab, so the guide comes from whichever host serves the app. A
@@ -352,15 +407,6 @@ fn keyed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> String {
         true => ctx.format_shortcut(&shortcut),
         false => String::new(),
     }
-}
-
-/// Whether an omnibox frame must bring the library forward.
-///
-/// Any change to the text does, including the first keystroke into an empty box. The box
-/// filters only the library's table, so a search behind a document tab would be
-/// invisible.
-fn searched(before: &str, after: &str) -> bool {
-    before != after
 }
 
 /// One of the title bar's drop-down menus, at least [`MENU`] wide.
@@ -515,6 +561,24 @@ fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, accented: bool) -> egui:
     .inner
 }
 
+/// A title bar reading: a glyph, a label, and a lamp. The inner response is the lamp's.
+fn lamp_chip(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    label: &str,
+    lamp: egui::Color32,
+) -> egui::InnerResponse<egui::Response> {
+    let ink = ui.visuals().widgets.inactive.fg_stroke.color;
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            icon(ui, glyph, GLYPH, ink);
+            ui.label(egui::RichText::new(label).text_style(ui_text()).color(ink));
+            crate::app::dot(ui, lamp, 9.0)
+        })
+}
+
 /// The New menu behind a glyph button. The toolbar and the tab strip share this button,
 /// so New offers one list from both places.
 pub(crate) fn new_button(ui: &mut egui::Ui, glyph: Glyph, ink: egui::Color32, acts: &mut Vec<Act>) {
@@ -598,21 +662,10 @@ impl DrawbarApp {
         let Some(product) = self.device.state.product() else {
             return;
         };
-        let visuals = ui.visuals();
-        let ink = visuals.widgets.inactive.fg_stroke.color;
-        let lit = crate::app::good(visuals);
-        egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(6, 2))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
-                icon(ui, Glyph::Keyboard, GLYPH, ink);
-                ui.label(
-                    egui::RichText::new(product)
-                        .text_style(ui_text())
-                        .color(ink),
-                );
-                crate::app::dot(ui, lit, 9.0).on_hover_text("attached");
-            });
+        let lit = crate::app::good(ui.visuals());
+        lamp_chip(ui, Glyph::Keyboard, product, lit)
+            .inner
+            .on_hover_text("attached");
     }
 
     /// The MIDI controllers being listened to and whether they answer, with details on
@@ -621,15 +674,7 @@ impl DrawbarApp {
         let Some((label, lamp, detail)) = midi_reading(&self.midi.state(), ui.visuals()) else {
             return;
         };
-        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-        egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(6, 2))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
-                icon(ui, Glyph::Piano, GLYPH, ink);
-                ui.label(egui::RichText::new(label).text_style(ui_text()).color(ink));
-                crate::app::dot(ui, lamp, 9.0);
-            })
+        lamp_chip(ui, Glyph::Piano, &label, lamp)
             .response
             .on_hover_text(detail);
     }
@@ -639,19 +684,7 @@ impl DrawbarApp {
             true => Glyph::Moon,
             false => Glyph::Sun,
         };
-        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-        let picked = ui
-            .add(
-                egui::Button::image_and_text(
-                    sized(glyph, GLYPH, ink),
-                    egui::RichText::new(self.theme.label())
-                        .text_style(ui_text())
-                        .color(ink),
-                )
-                .image_tint_follows_text_color(false)
-                .corner_radius(2.0)
-                .min_size(egui::vec2(0.0, BUTTON)),
-            )
+        let picked = action(ui, glyph, self.theme.label(), false)
             .on_hover_text(self.theme.hint())
             .clicked();
         if picked {
@@ -671,56 +704,9 @@ impl DrawbarApp {
 
     /// Handle every key a menu item binds, whether or not a menu is open.
     fn shortcuts(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-        let hit = |shortcut: &egui::KeyboardShortcut| {
-            ui.input_mut(|input| input.consume_shortcut(shortcut))
-        };
-        if hit(&key::OPEN) {
-            acts.push(Act::OpenFiles);
-        }
-        if hit(&key::EXPORT) {
-            if let Some(id) = self.tabs.active() {
-                acts.push(Act::Export(id));
-            }
-        }
-        if hit(&key::BROWSER) {
-            acts.push(Act::ToggleDock(Dock::Browser));
-        }
-        if hit(&key::INSPECTOR) {
-            acts.push(Act::ToggleDock(Dock::Inspector));
-        }
-        if hit(&key::DOCK) {
-            acts.push(Act::ToggleDock(Dock::Bottom));
-        }
-        // ⚠️ Consumed whether or not an instrument is attached, and before ⌘S below. egui
-        // matches a shortcut's modifiers logically, so an unconsumed ⌘⇧S would go on to
-        // match ⌘S and save instead of showing the queue.
-        if hit(&key::QUEUE) && self.attached() {
-            acts.push(Act::ShowPage(Page::Queue));
-        }
-        // ⚠️ Likewise: an unconsumed ⌘R reloads the browser tab this build runs in.
-        if hit(&key::RESYNC) && self.attached() {
-            acts.push(Act::Resync);
-        }
-        if WINDOWED && hit(&key::CLOSE) {
-            acts.push(Act::CloseTab);
-        }
-        if WINDOWED && hit(&key::QUIT) {
-            acts.push(Act::Quit);
-        }
-        if WINDOWED && self.attached() && hit(&key::KEYBOARD) {
-            acts.push(Act::ShowTab(Spot::Keyboard));
-        }
-        if WINDOWED && hit(&key::DOCUMENT) {
-            if let Some(id) = self.tabs.last_document() {
-                acts.push(Act::ShowTab(Spot::Document(id)));
-            }
-        }
-        // ⚠️ Never a file export. ⌘S means "save what I did", which for a view of a slot
-        // is the write back to that slot. The library and the keyboard are views of
-        // what is already there, so neither has anything to save.
-        if hit(&key::SAVE) {
-            if let Some(id) = self.tabs.active() {
-                acts.push(Act::SaveDoc(id));
+        for (shortcut, may, act) in SHORTCUTS {
+            if may(self) && ui.input_mut(|input| input.consume_shortcut(&shortcut)) {
+                acts.extend(act(self));
             }
         }
     }
@@ -774,10 +760,7 @@ impl DrawbarApp {
             }
             ui.separator();
         }
-        let closable = self
-            .tabs
-            .showing()
-            .is_some_and(|spot| spot != Spot::Library);
+        let closable = self.tabs.showing() != Spot::Library;
         if closable && item(ui, "Close tab", Some(key::CLOSE)) {
             acts.push(Act::CloseTab);
         }
@@ -794,7 +777,7 @@ impl DrawbarApp {
             && marked(
                 ui,
                 "Keyboard",
-                showing == Some(Spot::Keyboard),
+                showing == Spot::Keyboard,
                 Some(key::KEYBOARD),
             )
         {
@@ -804,7 +787,7 @@ impl DrawbarApp {
             if marked(
                 ui,
                 "Document",
-                showing == Some(Spot::Document(id)),
+                showing == Spot::Document(id),
                 Some(key::DOCUMENT),
             ) {
                 acts.push(Act::ShowTab(Spot::Document(id)));
@@ -1001,7 +984,9 @@ impl DrawbarApp {
                     .hint_text(egui::RichText::new("Search…").text_style(ui_text())),
             );
         });
-        if searched(&before, &self.shell.omnibox) {
+        // The box filters only the library's table, so any change to the text, the first
+        // keystroke included, brings the library forward.
+        if before != self.shell.omnibox {
             acts.push(Act::ShowTab(Spot::Library));
         }
     }
@@ -1085,7 +1070,13 @@ impl DrawbarApp {
                 return;
             }
             match self.page() {
-                Page::Queue => self.queue_page(ui, acts),
+                Page::Queue => crate::queue::page(
+                    ui,
+                    &mut self.queue,
+                    &self.workspace,
+                    &self.device.state,
+                    acts,
+                ),
                 Page::Log => self.log.ui(ui),
             }
         });
@@ -1153,17 +1144,6 @@ impl DrawbarApp {
             true => self.shell.page,
             false => Page::Log,
         }
-    }
-
-    /// The send queue page.
-    fn queue_page(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-        crate::queue::page(
-            ui,
-            &mut self.queue,
-            &self.workspace,
-            &self.device.state,
-            acts,
-        );
     }
 
     /// The browser dock: this computer and the instrument, under one header.
@@ -1665,7 +1645,7 @@ mod tests {
             .unwrap();
         app.tabs.open(id);
         let _ = drawn(&ctx, &mut app);
-        assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
+        assert_eq!(app.tabs.showing(), Spot::Document(id));
 
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH)));
         let _ = frame_of(
@@ -1675,12 +1655,12 @@ mod tests {
             vec![egui::Event::Text("afr".into())],
         );
         assert_eq!(app.shell.omnibox, "afr");
-        assert_eq!(app.tabs.showing(), Some(Spot::Library));
+        assert_eq!(app.tabs.showing(), Spot::Library);
 
         // The next frame types nothing and leaves the tab where the user put it.
         app.tabs.show(Spot::Document(id));
         let _ = drawn(&ctx, &mut app);
-        assert_eq!(app.tabs.showing(), Some(Spot::Document(id)));
+        assert_eq!(app.tabs.showing(), Spot::Document(id));
     }
 
     /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and

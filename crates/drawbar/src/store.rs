@@ -171,10 +171,7 @@ pub fn load(storage: &dyn eframe::Storage, workspace: &mut Workspace, log: &mut 
         log.warn(format!("{unreadable} saved line(s) did not read"));
     }
     if count > 0 {
-        log.say(match count {
-            1 => "1 sound is back from last time.".to_string(),
-            n => format!("{n} sounds are back from last time."),
-        });
+        log.say(plural(count, "back from last time"));
     }
 }
 

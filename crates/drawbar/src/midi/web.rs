@@ -18,6 +18,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{MidiAccess, MidiInput, MidiMessageEvent};
 
 use super::{Note, Queue, State, Stream};
+use crate::js;
 
 /// One input port, and the handler the page calls when it sends a message.
 struct Attached {
@@ -28,17 +29,24 @@ struct Attached {
 }
 
 #[derive(Default)]
+enum Phase {
+    #[default]
+    Off,
+    Asking,
+    /// The access the user granted, kept so the ports can be listed again when one is
+    /// connected or disconnected.
+    On(MidiAccess),
+    Failed(String),
+}
+
+#[derive(Default)]
 struct Inner {
     queue: Queue,
     names: Vec<String>,
     attached: Vec<Attached>,
-    /// The access the user granted, kept so the ports can be listed again when one is
-    /// connected or disconnected.
-    access: Option<MidiAccess>,
+    phase: Phase,
     /// ⚠️ Kept as long as the access that holds it.
     watch: Option<Closure<dyn FnMut()>>,
-    asking: bool,
-    failed: Option<String>,
 }
 
 #[derive(Default)]
@@ -59,15 +67,11 @@ impl Ports {
         let request = match request() {
             Ok(request) => request,
             Err(e) => {
-                self.inner.borrow_mut().failed = Some(describe(&e));
+                self.inner.borrow_mut().phase = Phase::Failed(js::describe(&e));
                 return;
             }
         };
-        {
-            let mut inner = self.inner.borrow_mut();
-            inner.asking = true;
-            inner.failed = None;
-        }
+        self.inner.borrow_mut().phase = Phase::Asking;
 
         let held = self.inner.clone();
         let ctx = ctx.clone();
@@ -75,24 +79,19 @@ impl Ports {
             let answer = JsFuture::from(request).await;
             // ⚠️ The user may have turned MIDI off while the browser was asking; an
             // answer that arrives after that is ignored.
-            if !held.borrow().asking {
+            if !matches!(held.borrow().phase, Phase::Asking) {
                 return;
             }
-            match answer {
+            let phase = match answer {
                 Ok(granted) => {
                     let access: MidiAccess = granted.unchecked_into();
                     attach(&held, &access, &ctx);
                     watch(&held, &access, &ctx);
-                    let mut inner = held.borrow_mut();
-                    inner.access = Some(access);
-                    inner.asking = false;
+                    Phase::On(access)
                 }
-                Err(e) => {
-                    let mut inner = held.borrow_mut();
-                    inner.failed = Some(describe(&e));
-                    inner.asking = false;
-                }
-            }
+                Err(e) => Phase::Failed(js::describe(&e)),
+            };
+            held.borrow_mut().phase = phase;
             ctx.request_repaint();
         });
     }
@@ -100,25 +99,23 @@ impl Ports {
     pub fn stop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         detach(&mut inner);
-        if let Some(access) = inner.access.take() {
+        if let Phase::On(access) = std::mem::take(&mut inner.phase) {
             access.set_onstatechange(None);
         }
         inner.watch = None;
         inner.queue = Queue::default();
-        inner.asking = false;
-        inner.failed = None;
     }
 
     pub fn state(&self) -> State {
         let inner = self.inner.borrow();
-        match (&inner.failed, inner.asking, inner.access.is_some()) {
-            (Some(why), _, _) => State::Failed(why.clone()),
-            (None, true, _) => State::Asking,
-            (None, false, false) => State::Off,
-            (None, false, true) => State::On {
+        match &inner.phase {
+            Phase::Off => State::Off,
+            Phase::Asking => State::Asking,
+            Phase::On(_) => State::On {
                 ports: inner.names.clone(),
                 refused: Vec::new(),
             },
+            Phase::Failed(why) => State::Failed(why.clone()),
         }
     }
 
@@ -169,12 +166,7 @@ fn attach(inner: &Rc<RefCell<Inner>>, access: &MidiAccess, ctx: &egui::Context) 
                     return;
                 };
                 let at = event.time_stamp() / 1000.0;
-                let mut heard = false;
-                stream.feed(&bytes, |note| {
-                    heard = true;
-                    held.borrow_mut().queue.push(at, note);
-                });
-                if heard {
+                if held.borrow_mut().queue.feed(&mut stream, at, &bytes) {
                     ctx.request_repaint();
                 }
             });
@@ -216,19 +208,4 @@ fn page_time() -> f64 {
     web_sys::window()
         .and_then(|window| window.performance())
         .map_or(0.0, |performance| performance.now() / 1000.0)
-}
-
-/// A rejected promise carries a `DOMException`, whose text must be read from its fields;
-/// it does not downcast to `Error`.
-fn describe(err: &JsValue) -> String {
-    let field = |k: &str| {
-        js_sys::Reflect::get(err, &JsValue::from_str(k))
-            .ok()
-            .and_then(|v| v.as_string())
-    };
-    match (field("name"), field("message")) {
-        (Some(name), Some(message)) => format!("{name}: {message}"),
-        (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => err.as_string().unwrap_or_else(|| format!("{err:?}")),
-    }
 }

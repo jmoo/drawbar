@@ -13,13 +13,86 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use nord_format::accept::{Acceptance, Family};
+use nord_usb::envelope;
 use nord_usb::op;
 use nord_usb::transport::{Transport, UsbTransport};
 use nord_usb::wire::{Bank, Location, ProgramInfo, Status};
-use nord_usb::{op as usb_op, Device, Geometry, ObjectClass, Session};
+use nord_usb::{op as usb_op, Device, Geometry, ObjectClass, ReadOnly, Session};
 
 use crate::slot::{addr, noun, shown};
 use crate::ui::Ui;
+
+#[derive(clap::Args)]
+pub struct ControlsArgs {
+    /// Lowest bRequest to try.
+    #[arg(long, default_value_t = 0)]
+    from: u8,
+
+    /// Highest bRequest to try, inclusive.
+    #[arg(long, default_value_t = 15)]
+    to: u8,
+
+    /// Bytes to request from each. A control transfer's wLength is 16 bits.
+    #[arg(long, default_value_t = 64)]
+    len: u16,
+
+    /// Address the interface instead of the device.
+    #[arg(long)]
+    interface: bool,
+
+    /// wValue sent with each request.
+    #[arg(long, default_value_t = 0)]
+    value: u16,
+
+    /// wIndex sent with each request. For --interface this is the interface number.
+    #[arg(long, default_value_t = 0)]
+    index: u16,
+}
+
+#[derive(clap::Args)]
+pub struct ProbeArgs {
+    /// Command code, decimal or 0x-prefixed, e.g. 0x20.
+    #[arg(value_name = "OP", value_parser = parse_u32)]
+    op: u32,
+
+    /// Argument words, appended in order as big-endian u32s: --arg 1 --arg 0.
+    #[arg(long = "arg", value_name = "N", value_parser = parse_u32)]
+    args: Vec<u32>,
+
+    /// Seconds to wait for a reply before giving up.
+    #[arg(long, default_value_t = 5)]
+    wait: u64,
+
+    /// Required. A probe is not read-only: the instrument's response to an unknown
+    /// code is unknown.
+    #[arg(long)]
+    yes: bool,
+
+    /// Send with no session: no HELLO, no session open, no close.
+    ///
+    /// A wedged instrument refuses to open a session, so an ordinary probe fails
+    /// before its command is sent. This is the only way to reach a command then.
+    #[arg(long)]
+    bare: bool,
+
+    /// Service number. 12 is the object/file service, 6 the UI session.
+    #[arg(long, default_value_t = 12)]
+    service: u32,
+
+    /// Subsystem number. 10 for service 12, 1 for service 6.
+    #[arg(long, default_value_t = 10)]
+    subsystem: u32,
+}
+
+/// Accepts `0x2a` as well as `42`, since command codes are usually written in hex.
+fn parse_u32(s: &str) -> Result<u32, String> {
+    let s = s.trim();
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse(),
+    }
+    .map_err(|e| format!("{s}: {e}"))
+}
 
 /// Where to get the exchange from.
 pub enum Source {
@@ -45,7 +118,7 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
             let mut transport = nord_usb::ReplayTransport::from_script(&text)
                 .map_err(|e| e.to_string())?
                 .lenient();
-            collect(&mut transport)?
+            nord_usb::block_on(op::inventory(&mut transport)).map_err(|e| e.to_string())?
         }
     };
 
@@ -134,10 +207,6 @@ pub fn info(ui: &Ui) -> Result<(), String> {
     }
 }
 
-fn collect<T: Transport>(transport: &mut T) -> Result<Vec<Status>, String> {
-    nord_usb::block_on(op::inventory(transport)).map_err(|e| e.to_string())
-}
-
 fn print_table(ui: &Ui, report: &[Status]) {
     ui.out(ui.dim(format!(
         "{:<10} {:>20} {:>7} {:>14}  {}",
@@ -224,18 +293,15 @@ fn print_json(ui: &Ui, report: &[Status]) {
 }
 
 /// Turn the instrument's bare status code into something actionable.
-///
-/// `0x1` answers a vacant slot, `0x3` an address past the instrument's geometry, and
-/// `0x4` a write aimed at an occupied slot. Confirmed on hardware.
 fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
-        nord_usb::Error::DeviceStatus(1) => {
+        nord_usb::Error::DeviceStatus(usb_op::VACANT) => {
             format!("{} is empty", shown(at))
         }
-        nord_usb::Error::DeviceStatus(3) => {
+        nord_usb::Error::DeviceStatus(usb_op::OUT_OF_RANGE) => {
             format!("{} is out of range for this instrument", shown(at))
         }
-        nord_usb::Error::DeviceStatus(4) => {
+        nord_usb::Error::DeviceStatus(usb_op::OCCUPIED) => {
             format!(
                 "{} is occupied, and the instrument does not overwrite in place",
                 shown(at)
@@ -249,9 +315,9 @@ fn explain(e: nord_usb::Error, at: Location) -> String {
 /// the source, an occupied one only the destination.
 fn explain_pair(e: nord_usb::Error, from: Location, to: Location) -> String {
     match e {
-        nord_usb::Error::DeviceStatus(1) => explain(e, from),
-        nord_usb::Error::DeviceStatus(4) => explain(e, to),
-        nord_usb::Error::DeviceStatus(3) => format!(
+        nord_usb::Error::DeviceStatus(usb_op::VACANT) => explain(e, from),
+        nord_usb::Error::DeviceStatus(usb_op::OCCUPIED) => explain(e, to),
+        nord_usb::Error::DeviceStatus(usb_op::OUT_OF_RANGE) => format!(
             "{} or {} is out of range for this instrument",
             shown(from),
             shown(to)
@@ -353,6 +419,22 @@ fn transact<T: Transport + Recorded, R>(
     }
     let recorded = device.transport().finish_recording();
     outcome.and_then(|value| recorded.map(|()| value))
+}
+
+/// One read-only operation on one slot, in its own session, recorded under the intent
+/// `<noun> <verb> <slot>`.
+fn read_at<T: Transport + Recorded, R>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+    verb: &str,
+    at: Location,
+    op: impl AsyncFnOnce(&mut Session<'_, T, ReadOnly>, Location) -> nord_usb::Result<R>,
+) -> nord_usb::Result<R> {
+    transact(
+        device,
+        format!("{} {verb} {}", noun(class), addr(at)),
+        |d| nord_usb::block_on(d.read(class, async |s| op(s, at).await)),
+    )
 }
 
 fn open_usb() -> Result<Device<UsbTransport>, String> {
@@ -662,7 +744,7 @@ pub fn put(
 ) -> Result<(), String> {
     let file = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Fail before touching the device if the file is not what it claims to be.
-    nord_usb::envelope::unwrap(&file).map_err(|e| e.to_string())?;
+    envelope::unwrap(&file).map_err(|e| e.to_string())?;
     // The write carries the slot's name, and the file has none, so the stem supplies it.
     let stem = path
         .file_stem()
@@ -772,13 +854,11 @@ fn send_with<T: Transport + Recorded>(
 
     // Name what is about to be destroyed before destroying it. An empty destination is
     // not a failure: status 1 means the slot is vacant, so there is nothing to report.
-    let existing = transact(device, format!("{} info {}", noun(class), addr(at)), |d| {
-        nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await))
-    });
+    let existing = peek_info(device, class, at);
 
     let existing = match existing {
         Ok(info) => Some(info),
-        Err(nord_usb::Error::DeviceStatus(1)) => None,
+        Err(nord_usb::Error::DeviceStatus(usb_op::VACANT)) => None,
         Err(e) => return Err(explain(e, at)),
     };
 
@@ -835,7 +915,7 @@ fn send_with<T: Transport + Recorded>(
     // The file names its model in its tag and the instrument names its own in the
     // product string, so this is the last check before the write. Bytes with no tag
     // cannot be checked, and `put` has already refused those.
-    if let Some(tag) = tag(file) {
+    if let Some(tag) = envelope::unchecked_tag(file) {
         match admit(device.transport().product(), class, &tag) {
             Admit::Takes => {}
             Admit::Warn(why) => ui.warn(why),
@@ -933,7 +1013,7 @@ fn send_with<T: Transport + Recorded>(
                 device,
                 put_intent(
                     class,
-                    &rescue_name(at, &backup),
+                    &envelope::rescue_name(at, &backup),
                     at,
                     &restore_name,
                     timestamp,
@@ -991,7 +1071,7 @@ fn fail_after_delete() -> bool {
 /// have landed before its transaction failed, and a write whose restore also failed), so
 /// the next step is worded once.
 fn spill(ui: &Ui, dir: &Path, at: Location, backup: &[u8], lost: String) -> String {
-    let path = dir.join(rescue_name(at, backup));
+    let path = dir.join(envelope::rescue_name(at, backup));
     match crate::edit::replace_file(&path, backup) {
         Ok(()) => {
             ui.warn(format!("wrote the original to {}", path.display()));
@@ -1032,16 +1112,13 @@ fn aftermath(class: ObjectClass, at: Location) -> String {
     }
 }
 
-/// Read one slot's metadata in a short read-only session, to show what a mutation will
-/// affect before it happens.
+/// Read one slot's metadata in a short read-only session.
 fn peek_info<T: Transport + Recorded>(
     device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
 ) -> nord_usb::Result<ProgramInfo> {
-    transact(device, format!("{} info {}", noun(class), addr(at)), |d| {
-        nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await))
-    })
+    read_at(device, class, "info", at, usb_op::info)
 }
 
 /// The same, reduced to the name and the refusal a caller prints.
@@ -1087,7 +1164,9 @@ fn peek_dest<T: Transport + Recorded>(
             format!("{} {:?}", ui.danger("OVERWRITING"), info.name)
         }
         (Ok(info), DestFate::Swapped) => format!("{} {:?}", ui.bold("SWAPPING WITH"), info.name),
-        (Err(nord_usb::Error::DeviceStatus(1)), _) => "destination reads as empty".into(),
+        (Err(nord_usb::Error::DeviceStatus(usb_op::VACANT)), _) => {
+            "destination reads as empty".into()
+        }
         (Err(e), _) => format!("destination could not be read: {}", explain(e, at)),
     }
 }
@@ -1322,12 +1401,7 @@ pub fn duplicate(
 /// It changes nothing stored, so no confirmation is needed.
 pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
-    transact(
-        &mut device,
-        format!("{} select {}", noun(class), addr(at)),
-        |d| nord_usb::block_on(d.read(class, async |s| usb_op::select(s, at).await)),
-    )
-    .map_err(|e| explain(e, at))?;
+    read_at(&mut device, class, "select", at, usb_op::select).map_err(|e| explain(e, at))?;
     ui.note(format!("selected {} on the instrument", shown(at)));
     Ok(())
 }
@@ -1364,12 +1438,8 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
 /// List the piano and sample library objects an object depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
-    let deps = transact(
-        &mut device,
-        format!("{} deps {}", noun(class), addr(at)),
-        |d| nord_usb::block_on(d.read(class, async |s| usb_op::dependencies(s, at).await)),
-    )
-    .map_err(|e| explain(e, at))?;
+    let deps = read_at(&mut device, class, "deps", at, usb_op::dependencies)
+        .map_err(|e| explain(e, at))?;
 
     // Unrouted sections still report rows, but they are not live dependencies.
     let (live, idle): (Vec<_>, Vec<_>) = deps.iter().partition(|d| d.flag == 1);
@@ -1519,15 +1589,15 @@ pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
 /// endpoint, which arrives as an error and is shown as a dash.
 ///
 /// `len` is the transfer's 16-bit `wLength`.
-pub fn controls(
-    ui: &Ui,
-    from: u8,
-    to: u8,
-    len: u16,
-    interface: bool,
-    value: u16,
-    index: u16,
-) -> Result<(), String> {
+pub fn controls(ui: &Ui, args: ControlsArgs) -> Result<(), String> {
+    let ControlsArgs {
+        from,
+        to,
+        len,
+        interface,
+        value,
+        index,
+    } = args;
     if from > to {
         return Err(format!(
             "--from {from:#04x} is above --to {to:#04x}; nothing to sweep"
@@ -1590,7 +1660,7 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
             // An empty focused slot is possible and is not an error.
             let info = match usb_op::info(s, at).await {
                 Ok(i) => Some(i),
-                Err(nord_usb::Error::DeviceStatus(1)) => None,
+                Err(nord_usb::Error::DeviceStatus(usb_op::VACANT)) => None,
                 Err(e) => return Err(e),
             };
             Ok((at, info))
@@ -1619,7 +1689,7 @@ pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
                 // The cursor may return an empty starting address; status 1 is harmless.
                 match usb_op::info(s, at).await {
                     Ok(info) => rows.push((at, info)),
-                    Err(nord_usb::Error::DeviceStatus(1)) => {}
+                    Err(nord_usb::Error::DeviceStatus(usb_op::VACANT)) => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -1656,20 +1726,18 @@ pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 /// Nothing is interpreted: for an unknown command, the status word and payload are the
 /// result, so both are printed as they arrived. An instrument that ignores the command
 /// is reported as a timeout.
-#[allow(clippy::too_many_arguments)]
-pub fn probe(
-    ui: &Ui,
-    class: ObjectClass,
-    op: u32,
-    args: &[u32],
-    wait: u64,
-    yes: bool,
-    bare: bool,
-    service: u32,
-    subsystem: u32,
-) -> Result<(), String> {
+pub fn probe(ui: &Ui, class: ObjectClass, request: ProbeArgs) -> Result<(), String> {
+    let ProbeArgs {
+        op,
+        args,
+        wait,
+        yes,
+        bare,
+        service,
+        subsystem,
+    } = request;
     let mut words = Vec::with_capacity(args.len() * 4);
-    for a in args {
+    for a in &args {
         words.extend_from_slice(&a.to_be_bytes());
     }
 
@@ -1849,12 +1917,7 @@ fn dump(bytes: &[u8]) -> (String, String) {
 /// fields a transfer leaves out, plus the name, which no `.ne5p` or `.ne5t` file stores.
 pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
     let mut device = open_usb()?;
-    let info = transact(
-        &mut device,
-        format!("{} info {}", noun(class), addr(at)),
-        |d| nord_usb::block_on(d.read(class, async |s| usb_op::info(s, at).await)),
-    )
-    .map_err(|e| explain(e, at))?;
+    let info = peek_info(&mut device, class, at).map_err(|e| explain(e, at))?;
 
     let row = |label: &str, value: String| {
         ui.out(format!("  {}{value}", ui.dim(format!("{label:<11}"))));
@@ -1889,12 +1952,7 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
 /// Read one object's bytes with no printing, for `edit`'s read-modify-write.
 pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
     let mut device = open_usb()?;
-    transact(
-        &mut device,
-        format!("{} read {}", noun(class), addr(at)),
-        |d| nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await)),
-    )
-    .map_err(|e| explain(e, at))
+    read_at(&mut device, class, "read", at, usb_op::read_program).map_err(|e| explain(e, at))
 }
 
 /// The intent line for a write: the file beside the script, the slot, and the two
@@ -1906,27 +1964,6 @@ fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| what.to_string());
     format!("{} put {file} {} {name:?} {stamp}", noun(class), addr(at))
-}
-
-/// The four-character format tag in a body, if those bytes are one.
-///
-/// ⚠️ Read from the header bytes without parsing: this must work for a body whose
-/// checksum is bad, because that body may be a slot's last remaining copy.
-fn tag(body: &[u8]) -> Option<String> {
-    body.get(8..12)
-        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
-        .map(|tag| String::from_utf8_lossy(tag).into_owned())
-}
-
-/// Filename for a rescued slot: the location as the instrument labels it, and the
-/// object's own format tag so the file can be handed straight back to `put`.
-fn rescue_name(at: Location, backup: &[u8]) -> String {
-    let format = tag(backup).unwrap_or_else(|| "bin".to_string());
-    format!(
-        "nord-rescued-{}-{}.{format}",
-        at.user_bank(),
-        at.user_slot()
-    )
 }
 
 #[cfg(test)]
@@ -1986,21 +2023,6 @@ mod tests {
                 "{class:?}: the geometry session must close"
             );
         }
-    }
-
-    /// The rescue file is the last copy of a program that no longer exists on the
-    /// instrument, so it has to be named something a person can act on.
-    #[test]
-    fn a_rescued_slot_is_named_for_its_location_and_format() {
-        // A minimal CBIN: magic, header type, tag. The checksum is left wrong, because
-        // naming must not depend on the backup being intact.
-        let mut file = vec![0u8; 45];
-        file[0..4].copy_from_slice(b"CBIN");
-        file[4..8].copy_from_slice(&1u32.to_le_bytes());
-        file[8..12].copy_from_slice(b"ne5t");
-        let at = Location { bank: 6, slot: 49 };
-        // Wire is zero-indexed, the instrument's labels are not.
-        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5t");
     }
 
     #[test]
@@ -2133,13 +2155,6 @@ mod tests {
 
         let silent = warning(None, ObjectClass::Program, "ne5p");
         assert!(silent.contains("no product string"), "{silent}");
-    }
-
-    /// Bytes that do not parse are still the only copy, so they must still get a name.
-    #[test]
-    fn unparseable_bytes_still_get_rescued() {
-        let at = Location { bank: 0, slot: 0 };
-        assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
     }
 
     /// The write path driven by the recorded `nord program put`, with one step made to

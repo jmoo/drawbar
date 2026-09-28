@@ -253,7 +253,7 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
         .show(ui, |ui| {
             ui.add_space(GAP * 4.5);
             sheet::section(ui, |ui| {
-                sheet::masthead(ui, true);
+                sheet::masthead(ui);
                 ui.add_space(GAP * 3.5);
                 risk(ui);
                 sheet::heading(ui, "What works today", None);
@@ -965,69 +965,47 @@ pub fn classify(line: &str) -> Line<'_> {
 /// `url`, when it is `https`. Only these are offered as links: the body is fetched text,
 /// and `scripts/release.bash` writes only https URLs.
 fn https(url: &str) -> Option<&str> {
-    match url
-        .strip_prefix("https://")
+    url.strip_prefix("https://")
         .is_some_and(|rest| !rest.is_empty())
-    {
-        true => Some(url),
-        false => None,
-    }
+        .then_some(url)
 }
 
 /// The trailing `([sha](url))`, and the item with it taken off.
 fn split_commit(item: &str) -> (&str, Option<Commit<'_>>) {
-    const OPEN: &str = " ([";
-
-    let Some(at) = item.rfind(OPEN) else {
-        return (item, None);
-    };
-    let Some(inner) = item[at + OPEN.len()..].strip_suffix("))") else {
-        return (item, None);
-    };
-    let Some((sha, url)) = inner.split_once("](") else {
-        return (item, None);
-    };
-    if sha.is_empty() {
-        return (item, None);
+    fn commit(item: &str) -> Option<(&str, Commit<'_>)> {
+        const OPEN: &str = " ([";
+        let at = item.rfind(OPEN)?;
+        let inner = item[at + OPEN.len()..].strip_suffix("))")?;
+        let (sha, url) = inner.split_once("](").filter(|(sha, _)| !sha.is_empty())?;
+        let url = https(url)?;
+        Some((&item[..at], Commit { sha, url }))
     }
-    let Some(url) = https(url) else {
-        return (item, None);
-    };
-    (&item[..at], Some(Commit { sha, url }))
+    commit(item).map_or((item, None), |(item, commit)| (item, Some(commit)))
 }
 
 /// The `(#NN)` a squashed pull request leaves at the end of a subject, and the text
 /// without it. A `#NN` anywhere else is part of what the item says.
 pub fn split_pr(text: &str) -> (&str, Option<&str>) {
-    const OPEN: &str = " (#";
-
-    let Some(rest) = text.strip_suffix(')') else {
-        return (text, None);
-    };
-    let Some(at) = rest.rfind(OPEN) else {
-        return (text, None);
-    };
-    let number = &rest[at + OPEN.len()..];
-    match !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+    fn pr(text: &str) -> Option<(&str, &str)> {
+        const OPEN: &str = " (#";
+        let rest = text.strip_suffix(')')?;
+        let at = rest.rfind(OPEN)?;
+        let number = &rest[at + OPEN.len()..];
         // Keep the `#`, as GitHub writes the reference.
-        true => (&rest[..at], Some(&rest[at + OPEN.len() - 1..])),
-        false => (text, None),
+        (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| (&rest[..at], &rest[at + OPEN.len() - 1..]))
     }
+    pr(text).map_or((text, None), |(text, pr)| (text, Some(pr)))
 }
 
 /// The `**scope:**` an item may open with, and the description after it.
 fn split_scope(item: &str) -> (Option<&str>, &str) {
-    let Some(rest) = item.strip_prefix("**") else {
-        return (None, item);
-    };
-    let Some((scope, text)) = rest.split_once(":** ") else {
-        return (None, item);
-    };
     // A description of its own can hold `:** `; a scope never holds a star.
-    match scope.contains('*') {
-        true => (None, item),
-        false => (Some(scope), text),
-    }
+    let scope = item
+        .strip_prefix("**")
+        .and_then(|rest| rest.split_once(":** "))
+        .filter(|(scope, _)| !scope.contains('*'));
+    scope.map_or((None, item), |(scope, text)| (Some(scope), text))
 }
 
 #[cfg(test)]

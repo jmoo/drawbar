@@ -7,7 +7,7 @@
 
 use std::io::{Read, Seek};
 
-use crate::cbin::{self, Cbin, Header};
+use crate::cbin::{Cbin, Header};
 use crate::error::Error;
 use crate::formats::ne5::program::{self, Program};
 use crate::types::RangedU16Pair;
@@ -41,11 +41,7 @@ pub fn new(location: Location) -> Cbin<Program> {
 }
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-    let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-    program::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    program::unset_aux(FORMAT, &file.header)?;
-    location(&file)?;
-    Ok(file)
+    program::read_slotted::<_, Location>(reader, FORMAT, KNOWN_VERSIONS)
 }
 
 #[cfg(test)]

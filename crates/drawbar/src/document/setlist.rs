@@ -20,6 +20,7 @@ use crate::browser::{Item, Kind};
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{wanted, Needs};
+use crate::panel::cut;
 use crate::strings::{display_name, place, shown};
 use crate::workspace::{LocalEntity, Workspace};
 
@@ -527,41 +528,20 @@ fn plays_cell(ui: &mut egui::Ui, (left, width): (f32, f32), rect: egui::Rect, ro
             },
         ),
     };
-    let ink = format.color;
     // Only a vacant slot gets a note; the State column covers the rest.
     let sub = match row.stands {
         Stands::Vacant => "nothing plays here",
         _ => "",
     };
-    let mut job = egui::text::LayoutJob::default();
-    job.append(&text, 0.0, format);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
-    let name = painter.layout_job(job);
-    let top = rect.center().y - name.size().y / 2.0;
-    painter.galley(egui::pos2(left, top), name.clone(), ink);
-    if sub.is_empty() {
-        return;
-    }
-    let room = width - name.size().x - 8.0;
-    if room <= 0.0 {
-        return;
-    }
-    let quiet = app::caption(&visuals);
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
+    let middle = rect.center().y;
+    let name = cut(&painter, left, middle, width, &text, format).x;
+    cut(
+        &painter,
+        left + name + 8.0,
+        middle,
+        width - name - 8.0,
         sub,
-        0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(SUB_TEXT), quiet),
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-    let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(
-            left + name.size().x + 8.0,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        quiet,
+        egui::TextFormat::simple(egui::FontId::proportional(SUB_TEXT), app::caption(&visuals)),
     );
 }
 
@@ -675,19 +655,13 @@ fn state_cell(
         ),
         ink,
     );
-    let painter = ui.painter().clone();
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
+    cut(
+        ui.painter(),
+        left + MARK + 5.0,
+        rect.center().y,
+        width - MARK - 5.0,
         &row.stands.words(row.at),
-        0.0,
         egui::TextFormat::simple(egui::FontId::proportional(STATE_TEXT), ink),
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width((width - MARK - 5.0).max(0.0));
-    let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(left + MARK + 5.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        ink,
     );
     let cell = egui::Rect::from_min_size(
         egui::pos2(left, rect.top()),

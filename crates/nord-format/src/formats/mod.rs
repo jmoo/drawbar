@@ -89,6 +89,17 @@ pub(crate) fn known_version(
     }
 }
 
+/// Read one `format` container, refusing a schema version outside `supported`.
+pub(crate) fn read_known<B: crate::cbin::Body>(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    format: &'static str,
+    supported: &'static [u32],
+) -> Result<crate::cbin::Cbin<B>, Error> {
+    let file: crate::cbin::Cbin<B> = crate::cbin::read(reader, format)?;
+    known_version(format, file.header.version, supported)?;
+    Ok(file)
+}
+
 /// One ZIP member, read under the length its directory entry declares.
 ///
 /// ⚠️ A member's decompressed length is chosen by the archive's author and can far
@@ -128,6 +139,13 @@ pub(crate) fn zip_member_bytes(file: &mut zip::read::ZipFile<'_>) -> Result<Vec<
     }
 }
 
+/// Whether a ZIP entry is a member entity. Directories are not, by the same test as
+/// `zip`'s own `is_dir`, and neither is a backup manifest, which describes the archive.
+#[cfg(feature = "bundle")]
+pub(crate) fn is_member(name: &str) -> bool {
+    !(name.ends_with('/') || name.ends_with('\\') || name.ends_with("meta.xml"))
+}
+
 /// Every member of a ZIP archive, each parsed as a CBIN file of `format`.
 ///
 /// For the drum banks, whose archives hold nothing else. A member that is not a
@@ -137,19 +155,7 @@ pub(crate) fn zip_members(
     reader: &mut (impl std::io::Read + std::io::Seek),
     format: &'static str,
 ) -> Result<Vec<(String, crate::cbin::Cbin<crate::cbin::RawBody>)>, Error> {
-    let mut zip = zip::ZipArchive::new(reader)?;
-    let mut members = Vec::new();
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i)?;
-        if file.is_dir() {
-            continue;
-        }
-        let name = file.name().to_string();
-        let buffer = zip_member_bytes(&mut file)?;
-        let member = crate::cbin::read(&mut std::io::Cursor::new(buffer), format)?;
-        members.push((name, member));
-    }
-    Ok(members)
+    zip_walk(reader, |member| crate::cbin::read(member, format))
 }
 
 /// Every member of a ZIP archive as a container-verified CBIN file, tags mixed.
@@ -163,18 +169,27 @@ pub(crate) fn zip_members(
 pub(crate) fn zip_raw_members(
     reader: &mut (impl std::io::Read + std::io::Seek),
 ) -> Result<Vec<(String, crate::cbin::Cbin<crate::cbin::RawBody>)>, Error> {
+    zip_walk(reader, crate::cbin::read_raw)
+}
+
+/// Every member of a ZIP archive, in directory order, each read by `read`.
+#[cfg(feature = "bundle")]
+fn zip_walk(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    read: impl Fn(
+        &mut std::io::Cursor<Vec<u8>>,
+    ) -> Result<crate::cbin::Cbin<crate::cbin::RawBody>, Error>,
+) -> Result<Vec<(String, crate::cbin::Cbin<crate::cbin::RawBody>)>, Error> {
     let mut zip = zip::ZipArchive::new(reader)?;
     let mut members = Vec::new();
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
-        // A backup manifest describes the archive; it is not a member entity.
-        if file.is_dir() || file.name().ends_with("meta.xml") {
+        if !is_member(file.name()) {
             continue;
         }
         let name = file.name().to_string();
         let buffer = zip_member_bytes(&mut file)?;
-        let member = crate::cbin::read_raw(&mut std::io::Cursor::new(buffer))?;
-        members.push((name, member));
+        members.push((name, read(&mut std::io::Cursor::new(buffer))?));
     }
     Ok(members)
 }

@@ -5,6 +5,7 @@ use std::ops::Range;
 
 use eframe::egui;
 
+use crate::browser::cell_ink;
 use crate::icon::{icon, Glyph};
 
 /// How tall a section header is, wherever it is drawn.
@@ -121,6 +122,88 @@ pub fn tracks(width: f32, wanted: &[Track], gap: f32) -> Vec<Range<f32>> {
         .collect()
 }
 
+/// `text` on one line, truncated to `width` with an ellipsis, painted from `left` and
+/// centered on `middle`. Returns the size painted, which is zero without text or room.
+pub fn cut(
+    painter: &egui::Painter,
+    left: f32,
+    middle: f32,
+    width: f32,
+    text: &str,
+    format: egui::TextFormat,
+) -> egui::Vec2 {
+    if width <= 0.0 || text.is_empty() {
+        return egui::Vec2::ZERO;
+    }
+    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), format);
+    job.break_on_newline = false;
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+    let galley = painter.layout_job(job);
+    let size = galley.size();
+    painter.galley(
+        egui::pos2(left, middle - size.y / 2.0),
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    size
+}
+
+/// Where a row's cell sits in one of the tracks [`tracks`] laid out across it.
+pub fn cell(rect: egui::Rect, track: &Range<f32>) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(rect.left() + track.start, rect.top()),
+        egui::pos2(rect.left() + track.end, rect.bottom()),
+    )
+}
+
+/// A child `Ui` for a table, inset from the left by [`PAD`] so its heads and rows start
+/// where a tree row starts and the scroll bar stays at the panel's edge.
+///
+/// ⚠️ Without it the first track starts at the panel's edge, and a mark's left stroke is
+/// painted half outside the window.
+pub fn inset(ui: &mut egui::Ui) -> egui::Ui {
+    let room = ui.available_rect_before_wrap();
+    ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(room.with_min_x(room.left() + PAD))
+            .layout(*ui.layout()),
+    )
+}
+
+/// The width a table's head and `rows` rows share: all that is available, less the
+/// scroll bar when the rows overflow the height left under the head.
+pub fn list_width(ui: &egui::Ui, rows: usize, row: f32, head: f32) -> f32 {
+    let scrolls = rows as f32 * row > ui.available_height() - head;
+    let bar = match scrolls {
+        true => ui.spacing().scroll.bar_width,
+        false => 0.0,
+    };
+    (ui.available_width() - bar).max(0.0)
+}
+
+/// Paint a list row's fill for its selection and hover, and return the row's text inks:
+/// the body's, and the quiet one.
+pub fn row_ink(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    selected: bool,
+    hovered: bool,
+    visuals: &egui::Visuals,
+) -> (egui::Color32, egui::Color32) {
+    let fill = match (selected, hovered) {
+        (true, _) => Some(visuals.selection.bg_fill),
+        (false, true) => Some(visuals.faint_bg_color),
+        (false, false) => None,
+    };
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, 3.0, fill);
+    }
+    (
+        cell_ink(selected, visuals.text_color(), visuals),
+        cell_ink(selected, visuals.weak_text_color(), visuals),
+    )
+}
+
 /// A bordered glyph and a word: a filter in the library's bar, or a tag on the
 /// selection.
 ///
@@ -160,33 +243,16 @@ pub fn caps(text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase()).text_style(crate::app::micro())
 }
 
-/// A section header: a collapse triangle, a [`caps`] title, and an optional badge.
+/// A section header: a collapse triangle and a [`caps`] title.
 ///
 /// It takes the color of the panel it is on, changing to `faint_bg_color` only under the
 /// pointer. A dock's own header is [`dock_header`], which is not a control.
-pub fn panel_header(
-    ui: &mut egui::Ui,
-    title: &str,
-    open: Option<&mut bool>,
-    badge: Option<(&str, egui::Color32)>,
-) -> egui::Response {
+pub fn panel_header(ui: &mut egui::Ui, title: &str, open: &mut bool) -> egui::Response {
     bar(ui, HEADER, egui::Color32::TRANSPARENT, |ui| {
-        if let Some(open) = open {
-            if chevron(ui, *open).clicked() {
-                *open = !*open;
-            }
+        if chevron(ui, *open).clicked() {
+            *open = !*open;
         }
         ui.label(caps(title).color(crate::app::caption(ui.visuals())));
-        let Some((badge, tint)) = badge else {
-            return;
-        };
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(badge)
-                    .text_style(crate::app::micro())
-                    .color(tint),
-            );
-        });
     })
 }
 
@@ -354,7 +420,7 @@ mod tests {
         testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 width = ui.available_width();
-                section = panel_header(ui, "places", None, None).rect;
+                section = panel_header(ui, "places", &mut true).rect;
                 dock = dock_header(ui, "browser").rect;
             });
         });
@@ -397,7 +463,7 @@ mod tests {
     #[test]
     fn a_section_header_wears_the_panel_until_the_pointer_is_on_it() {
         let ctx = context();
-        let section = |ui: &mut egui::Ui| panel_header(ui, "places", None, None);
+        let section = |ui: &mut egui::Ui| panel_header(ui, "places", &mut true);
         assert_eq!(
             header_fill(&ctx, false, section),
             vec![egui::Color32::TRANSPARENT],
@@ -437,7 +503,7 @@ mod tests {
             };
             testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let rect = panel_header(ui, "browser", Some(open), None).rect;
+                    let rect = panel_header(ui, "browser", open).rect;
                     at.set(egui::pos2(
                         rect.left() + PAD + CHEVRON / 2.0,
                         rect.center().y,

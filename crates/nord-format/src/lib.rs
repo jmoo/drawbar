@@ -85,139 +85,224 @@ pub enum Bundle {
     Members(Vec<(String, Cbin<RawBody>)>),
 }
 
-/// A stored program, one variant per model. Only the Electro 5 and Stage 2, 3 and 4
-/// bodies decode; the rest are container-verified stubs.
-///
-/// Left unboxed for the reason [`Entity`] gives.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-pub enum Program {
-    C2(Cbin<RawBody>),
-    C2D(Cbin<RawBody>),
-    /// A Nord Drum 2 program (`nd2p`), usually met inside a bank archive.
-    Drum2(Cbin<RawBody>),
-    /// A Nord Drum 3P kit (`nd3k`), the model's equivalent of a program.
-    Drum3(Cbin<RawBody>),
-    /// Electro 3 and 3HP. The file does not say which.
-    Electro3(Cbin<RawBody>),
-    /// Electro 4 and 4D. The file does not say which.
-    Electro4(Cbin<RawBody>),
-    Electro5(Cbin<ne5::Program>),
-    Electro6(Cbin<RawBody>),
-    Electro7(Cbin<RawBody>),
-    Grand(Cbin<RawBody>),
-    Lead4(Cbin<RawBody>),
-    LeadA1(Cbin<RawBody>),
-    Organ3(Cbin<RawBody>),
-    Piano1(Cbin<RawBody>),
-    Piano2(Cbin<RawBody>),
-    Piano3(Cbin<RawBody>),
-    Piano4(Cbin<RawBody>),
-    Piano5(Cbin<RawBody>),
-    /// Stage 2 and 2 EX.
-    Stage2(Cbin<ns2::Program>),
-    Stage3(Cbin<ns3::Program>),
-    Stage4(Cbin<ns4::Program>),
-    /// Stage Classic and Stage EX.
-    StageClassic(Cbin<RawBody>),
-    Wave(Cbin<RawBody>),
-    Wave2(Cbin<RawBody>),
+/// Declare the per-role entity enums, one row per CBIN format: the variant, its body,
+/// the module that reads and tags it, and the label [`Identity::kind`] prints.
+macro_rules! roles {
+    ($(
+        $(#[$meta:meta])*
+        $role:ident {
+            $(
+                $(#[$doc:meta])*
+                $variant:ident($body:ty) = $($module:ident)::+, $kind:literal;
+            )*
+        }
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[derive(Debug)]
+            pub enum $role {
+                $($(#[$doc])* $variant(Cbin<$body>),)*
+            }
+
+            impl Role for $role {
+                fn identity(&self) -> Identity {
+                    match self {
+                        $($role::$variant(_) => Identity {
+                            kind: $kind,
+                            format: $($module)::+::FORMAT,
+                        },)*
+                    }
+                }
+
+                fn raw(&self) -> Option<&Cbin<RawBody>> {
+                    match self {
+                        $($role::$variant(f) => f.as_raw(),)*
+                    }
+                }
+
+                fn write_to(&self, w: &mut (impl std::io::Write + Seek)) -> Result<(), Error> {
+                    match self {
+                        $($role::$variant(f) => f.write_to(w),)*
+                    }
+                }
+            }
+        )*
+
+        /// Every CBIN tag a role enum holds, with the reader it dispatches to.
+        const ROLE_READERS: &[(&str, ReadCbin)] = &[
+            $($(($($module)::+::FORMAT, |mut r| {
+                Ok(Entity::$role($role::$variant($($module)::+::read_from(&mut r)?)))
+            }),)*)*
+        ];
+    };
 }
 
-/// The live buffer: the panel's current state, as opposed to a saved program. It has the
-/// same body as [`Program`] under its own format tag.
-///
-/// Left unboxed for the reason [`Entity`] gives.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-pub enum Live {
-    Electro4(Cbin<RawBody>),
-    Electro5(Cbin<ne5::Program>),
-    Electro6(Cbin<RawBody>),
-    Electro7(Cbin<RawBody>),
-    Grand(Cbin<RawBody>),
-    Piano1(Cbin<RawBody>),
-    Piano2(Cbin<RawBody>),
-    Piano3(Cbin<RawBody>),
-    Piano4(Cbin<RawBody>),
-    Piano5(Cbin<RawBody>),
-    Stage2(Cbin<ns2::Program>),
-    Stage3(Cbin<ns3::Program>),
-    Stage4(Cbin<ns4::Program>),
-    Wave2(Cbin<RawBody>),
+/// What the role enums answer for each of their variants.
+trait Role {
+    fn identity(&self) -> Identity;
+    fn raw(&self) -> Option<&Cbin<RawBody>>;
+    fn write_to(&self, w: &mut (impl std::io::Write + Seek)) -> Result<(), Error>;
 }
 
-/// A stored song or set list, one variant per model that has them. Only the Electro 5
-/// body decodes; the Stage 3 body is container-verified and kept raw.
-#[derive(Debug)]
-pub enum Song {
-    Electro5(Cbin<ne5::Song>),
-    Stage3(Cbin<RawBody>),
+/// The container of an undecoded body, or `None` for a decoded one.
+trait AsRaw {
+    fn as_raw(&self) -> Option<&Cbin<RawBody>> {
+        None
+    }
 }
 
-/// The instrument's global settings, one variant per model. Only the Electro 5
-/// body decodes; the rest are container-verified stubs.
-#[derive(Debug)]
-pub enum Settings {
-    C2(Cbin<RawBody>),
-    C2D(Cbin<RawBody>),
-    Electro4(Cbin<RawBody>),
-    Electro5(Cbin<ne5::Settings>),
-    Electro6(Cbin<RawBody>),
-    Electro7(Cbin<RawBody>),
-    Grand(Cbin<RawBody>),
-    Lead4(Cbin<RawBody>),
-    LeadA1(Cbin<RawBody>),
-    Organ3(Cbin<RawBody>),
-    Piano1(Cbin<RawBody>),
-    Piano2(Cbin<RawBody>),
-    Piano3(Cbin<RawBody>),
-    Piano4(Cbin<RawBody>),
-    Piano5(Cbin<RawBody>),
-    Stage2(Cbin<RawBody>),
-    Stage3(Cbin<RawBody>),
-    Stage4(Cbin<RawBody>),
-    Wave(Cbin<RawBody>),
-    Wave2(Cbin<RawBody>),
+impl AsRaw for Cbin<RawBody> {
+    fn as_raw(&self) -> Option<&Cbin<RawBody>> {
+        Some(self)
+    }
 }
 
-/// A synth patch, on the models that bank them separately from programs. The Stage 3
-/// and Stage 4 bodies decode.
-///
-/// Left unboxed for the reason [`Entity`] gives.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-pub enum Synth {
-    Stage2(Cbin<RawBody>),
-    Stage3(Cbin<ns3::SynthPreset>),
-    Stage4(Cbin<ns4::synth::SynthPreset>),
-    StageClassic(Cbin<RawBody>),
+macro_rules! decoded_bodies {
+    ($($body:ty),* $(,)?) => {$(
+        impl AsRaw for Cbin<$body> {}
+    )*};
 }
 
-/// A Lead performance, the multi-slot layer above that family's programs.
-#[derive(Debug)]
-pub enum Performance {
-    Lead4(Cbin<RawBody>),
-    LeadA1(Cbin<RawBody>),
-}
+decoded_bodies!(
+    ne5::Program,
+    ne5::Settings,
+    ne5::Song,
+    ns2::Program,
+    ns3::Program,
+    ns3::SynthPreset,
+    ns4::Program,
+    ns4::organ_preset::OrganPreset,
+    ns4::piano_preset::PianoPreset,
+    ns4::synth::SynthPreset,
+);
 
-/// A stored organ preset, on the models that keep them as files.
-///
-/// Left unboxed for the reason [`Entity`] gives.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-pub enum OrganPreset {
-    /// Electro 3 and 3HP (`neop`).
-    Electro3(Cbin<RawBody>),
-    /// Stage 4 (`ns4o`).
-    Stage4(Cbin<ns4::organ_preset::OrganPreset>),
-}
+roles! {
+    /// A stored program, one variant per model. Only the Electro 5 and Stage 2, 3 and 4
+    /// bodies decode; the rest are container-verified stubs.
+    ///
+    /// Left unboxed for the reason [`Entity`] gives.
+    #[allow(clippy::large_enum_variant)]
+    Program {
+        C2(RawBody) = nc2::program, "C2 program";
+        C2D(RawBody) = nc2d::program, "C2D program";
+        /// A Nord Drum 2 program (`nd2p`), usually met inside a bank archive.
+        Drum2(RawBody) = nd2::program, "Drum 2 program";
+        /// A Nord Drum 3P kit (`nd3k`), the model's equivalent of a program.
+        Drum3(RawBody) = nd3::kit, "Drum 3P kit";
+        /// Electro 3 and 3HP. The file does not say which.
+        Electro3(RawBody) = ne3::program, "Electro 3 program";
+        /// Electro 4 and 4D. The file does not say which.
+        Electro4(RawBody) = ne4::program, "Electro 4 program";
+        Electro5(ne5::Program) = ne5::program, "Electro 5 program";
+        Electro6(RawBody) = ne6::program, "Electro 6 program";
+        Electro7(RawBody) = ne7::program, "Electro 7 program";
+        Grand(RawBody) = ng2::program, "Grand program";
+        Lead4(RawBody) = nl4::program, "Lead 4 program";
+        LeadA1(RawBody) = nla1::program, "Lead A1 program";
+        Organ3(RawBody) = no3::program, "no3 organ program";
+        Piano1(RawBody) = np::program, "Piano program";
+        Piano2(RawBody) = np2::program, "Piano 2 program";
+        Piano3(RawBody) = np3::program, "Piano 3 program";
+        Piano4(RawBody) = np4::program, "Piano 4 program";
+        Piano5(RawBody) = np5::program, "Piano 5 program";
+        /// Stage 2 and 2 EX.
+        Stage2(ns2::Program) = ns2::program, "Stage 2 program";
+        Stage3(ns3::Program) = ns3::program, "Stage 3 program";
+        Stage4(ns4::Program) = ns4::program, "Stage 4 program";
+        /// Stage Classic and Stage EX.
+        StageClassic(RawBody) = nsclassic::program, "Stage Classic program";
+        Wave(RawBody) = nw::program, "Wave program";
+        Wave2(RawBody) = nw2::program, "Wave 2 program";
+    }
 
-/// A stored piano preset, on the models that keep them as files.
-#[derive(Debug)]
-pub enum PianoPreset {
-    /// Stage 4 (`ns4n`).
-    Stage4(Cbin<ns4::piano_preset::PianoPreset>),
+    /// The live buffer: the panel's current state, as opposed to a saved program. It has the
+    /// same body as [`Program`] under its own format tag.
+    ///
+    /// Left unboxed for the reason [`Entity`] gives.
+    #[allow(clippy::large_enum_variant)]
+    Live {
+        Electro4(RawBody) = ne4::live, "Electro 4 live slot";
+        Electro5(ne5::Program) = ne5::live, "Electro 5 live slot";
+        Electro6(RawBody) = ne6::live, "Electro 6 live slot";
+        Electro7(RawBody) = ne7::live, "Electro 7 live slot";
+        Grand(RawBody) = ng2::live, "Grand live slot";
+        Piano1(RawBody) = np::live, "Piano live slot";
+        Piano2(RawBody) = np2::live, "Piano 2 live slot";
+        Piano3(RawBody) = np3::live, "Piano 3 live slot";
+        Piano4(RawBody) = np4::live, "Piano 4 live slot";
+        Piano5(RawBody) = np5::live, "Piano 5 live slot";
+        Stage2(ns2::Program) = ns2::live, "Stage 2 live slot";
+        Stage3(ns3::Program) = ns3::live, "Stage 3 live slot";
+        Stage4(ns4::Program) = ns4::live, "Stage 4 live slot";
+        Wave2(RawBody) = nw2::live, "Wave 2 live slot";
+    }
+
+    /// A stored song or set list, one variant per model that has them. Only the Electro 5
+    /// body decodes; the Stage 3 body is container-verified and kept raw.
+    Song {
+        Electro5(ne5::Song) = ne5::song, "Electro 5 song / set";
+        Stage3(RawBody) = ns3::song, "Stage 3 song";
+    }
+
+    /// The instrument's global settings, one variant per model. Only the Electro 5
+    /// body decodes; the rest are container-verified stubs.
+    Settings {
+        C2(RawBody) = nc2::settings, "C2 settings";
+        C2D(RawBody) = nc2d::settings, "C2D settings";
+        Electro4(RawBody) = ne4::settings, "Electro 4 settings";
+        Electro5(ne5::Settings) = ne5::settings, "Electro 5 settings";
+        Electro6(RawBody) = ne6::settings, "Electro 6 settings";
+        Electro7(RawBody) = ne7::settings, "Electro 7 settings";
+        Grand(RawBody) = ng2::settings, "Grand settings";
+        Lead4(RawBody) = nl4::settings, "Lead 4 settings";
+        LeadA1(RawBody) = nla1::settings, "Lead A1 settings";
+        Organ3(RawBody) = no3::settings, "no3 organ settings";
+        Piano1(RawBody) = np::settings, "Piano settings";
+        Piano2(RawBody) = np2::settings, "Piano 2 settings";
+        Piano3(RawBody) = np3::settings, "Piano 3 settings";
+        Piano4(RawBody) = np4::settings, "Piano 4 settings";
+        Piano5(RawBody) = np5::settings, "Piano 5 settings";
+        Stage2(RawBody) = ns2::settings, "Stage 2 settings";
+        Stage3(RawBody) = ns3::settings, "Stage 3 settings";
+        Stage4(RawBody) = ns4::settings, "Stage 4 settings";
+        Wave(RawBody) = nw::settings, "Wave settings";
+        Wave2(RawBody) = nw2::settings, "Wave 2 settings";
+    }
+
+    /// A synth patch, on the models that bank them separately from programs. The Stage 3
+    /// and Stage 4 bodies decode.
+    ///
+    /// Left unboxed for the reason [`Entity`] gives.
+    #[allow(clippy::large_enum_variant)]
+    Synth {
+        Stage2(RawBody) = ns2::synth, "Stage 2 synth patch";
+        Stage3(ns3::SynthPreset) = ns3::synth, "Stage 3 synth patch";
+        Stage4(ns4::synth::SynthPreset) = ns4::synth, "Stage 4 synth preset";
+        StageClassic(RawBody) = nsclassic::synth, "Stage Classic synth patch";
+    }
+
+    /// A Lead performance, the multi-slot layer above that family's programs.
+    Performance {
+        Lead4(RawBody) = nl4::performance, "Lead 4 performance";
+        LeadA1(RawBody) = nla1::performance, "Lead A1 performance";
+    }
+
+    /// A stored organ preset, on the models that keep them as files.
+    ///
+    /// Left unboxed for the reason [`Entity`] gives.
+    #[allow(clippy::large_enum_variant)]
+    OrganPreset {
+        /// Electro 3 and 3HP (`neop`).
+        Electro3(RawBody) = ne3::organ_preset, "Electro 3 organ preset";
+        /// Stage 4 (`ns4o`).
+        Stage4(ns4::organ_preset::OrganPreset) = ns4::organ_preset, "Stage 4 organ preset";
+    }
+
+    /// A stored piano preset, on the models that keep them as files.
+    PianoPreset {
+        /// Stage 4 (`ns4n`).
+        Stage4(ns4::piano_preset::PianoPreset) = ns4::piano_preset, "Stage 4 piano preset";
+    }
 }
 
 /// A sample instrument, decoded by generation. All three generations share the `nsmp`
@@ -464,20 +549,8 @@ type ReadCbin = fn(&mut dyn ReadSeek) -> Result<Entity, Error>;
 trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 
-/// One row of [`CBIN_READERS`]: a format module's tag and its reader, wrapped in the
-/// entity variants named after `=>`, outermost first.
-macro_rules! row {
-    ($($module:ident)::+ => $($wrap:path),+) => {
-        ($($module)::+::FORMAT, |mut r| {
-            Ok(row!(@wrap $($wrap),+ ; $($module)::+::read_from(&mut r)?))
-        })
-    };
-    (@wrap $wrap:path ; $read:expr) => { $wrap($read) };
-    (@wrap $wrap:path, $($rest:path),+ ; $read:expr) => { $wrap(row!(@wrap $($rest),+ ; $read)) };
-}
-
-/// Every CBIN tag [`from_stream`] reads, with the reader it dispatches to.
-const CBIN_READERS: &[(&str, ReadCbin)] = &[
+/// Every CBIN tag outside the role enums, with the reader it dispatches to.
+const LIBRARY_READERS: &[(&str, ReadCbin)] = &[
     (nsmp::FORMAT, |mut r| {
         let file: Cbin<nsmp::AnyBody> = cbin::read(&mut r, nsmp::FORMAT)?;
         let header = file.header;
@@ -489,88 +562,29 @@ const CBIN_READERS: &[(&str, ReadCbin)] = &[
     (npno::FORMAT, |mut r| {
         Ok(Entity::Piano(npno::Piano::read_from(&mut r)?))
     }),
-    row!(npip::pipe_library => Entity::PipeLibrary),
-    row!(nsclassic::piano_library => Entity::PianoLibrary),
-    row!(ne3::program => Entity::Program, Program::Electro3),
-    row!(ne3::organ_preset => Entity::OrganPreset, OrganPreset::Electro3),
-    row!(ne4::program => Entity::Program, Program::Electro4),
-    row!(ne4::live => Entity::Live, Live::Electro4),
-    row!(ne4::settings => Entity::Settings, Settings::Electro4),
-    row!(ne5::program => Entity::Program, Program::Electro5),
-    row!(ne5::live => Entity::Live, Live::Electro5),
-    row!(ne5::song => Entity::Song, Song::Electro5),
-    row!(ne5::settings => Entity::Settings, Settings::Electro5),
-    row!(ne6::program => Entity::Program, Program::Electro6),
-    row!(ne6::live => Entity::Live, Live::Electro6),
-    row!(ne6::settings => Entity::Settings, Settings::Electro6),
-    row!(ne7::program => Entity::Program, Program::Electro7),
-    row!(ne7::live => Entity::Live, Live::Electro7),
-    row!(ne7::settings => Entity::Settings, Settings::Electro7),
-    row!(nsclassic::program => Entity::Program, Program::StageClassic),
-    row!(nsclassic::synth => Entity::Synth, Synth::StageClassic),
-    row!(ns2::program => Entity::Program, Program::Stage2),
-    row!(ns2::live => Entity::Live, Live::Stage2),
-    row!(ns2::synth => Entity::Synth, Synth::Stage2),
-    row!(ns2::settings => Entity::Settings, Settings::Stage2),
-    row!(ns3::program => Entity::Program, Program::Stage3),
-    row!(ns3::live => Entity::Live, Live::Stage3),
-    row!(ns3::song => Entity::Song, Song::Stage3),
-    row!(ns3::synth => Entity::Synth, Synth::Stage3),
-    row!(ns3::settings => Entity::Settings, Settings::Stage3),
-    row!(ns4::program => Entity::Program, Program::Stage4),
-    row!(ns4::live => Entity::Live, Live::Stage4),
-    row!(ns4::synth => Entity::Synth, Synth::Stage4),
-    row!(ns4::piano_preset => Entity::PianoPreset, PianoPreset::Stage4),
-    row!(ns4::organ_preset => Entity::OrganPreset, OrganPreset::Stage4),
-    row!(ns4::settings => Entity::Settings, Settings::Stage4),
-    row!(np::program => Entity::Program, Program::Piano1),
-    row!(np::live => Entity::Live, Live::Piano1),
-    row!(np::settings => Entity::Settings, Settings::Piano1),
-    row!(np2::program => Entity::Program, Program::Piano2),
-    row!(np2::live => Entity::Live, Live::Piano2),
-    row!(np2::settings => Entity::Settings, Settings::Piano2),
-    row!(np3::program => Entity::Program, Program::Piano3),
-    row!(np3::live => Entity::Live, Live::Piano3),
-    row!(np3::settings => Entity::Settings, Settings::Piano3),
-    row!(np4::program => Entity::Program, Program::Piano4),
-    row!(np4::live => Entity::Live, Live::Piano4),
-    row!(np4::settings => Entity::Settings, Settings::Piano4),
-    row!(np5::program => Entity::Program, Program::Piano5),
-    row!(np5::live => Entity::Live, Live::Piano5),
-    row!(np5::settings => Entity::Settings, Settings::Piano5),
-    row!(ng2::program => Entity::Program, Program::Grand),
-    row!(ng2::live => Entity::Live, Live::Grand),
-    row!(ng2::settings => Entity::Settings, Settings::Grand),
-    row!(nw::program => Entity::Program, Program::Wave),
-    row!(nw::settings => Entity::Settings, Settings::Wave),
-    row!(nw2::program => Entity::Program, Program::Wave2),
-    row!(nw2::live => Entity::Live, Live::Wave2),
-    row!(nw2::settings => Entity::Settings, Settings::Wave2),
-    row!(nc2::program => Entity::Program, Program::C2),
-    row!(nc2::settings => Entity::Settings, Settings::C2),
-    row!(nc2d::program => Entity::Program, Program::C2D),
-    row!(nc2d::settings => Entity::Settings, Settings::C2D),
-    row!(no3::program => Entity::Program, Program::Organ3),
-    row!(no3::settings => Entity::Settings, Settings::Organ3),
-    row!(nl4::program => Entity::Program, Program::Lead4),
-    row!(nl4::performance => Entity::Performance, Performance::Lead4),
-    row!(nl4::settings => Entity::Settings, Settings::Lead4),
-    row!(nla1::program => Entity::Program, Program::LeadA1),
-    row!(nla1::performance => Entity::Performance, Performance::LeadA1),
-    row!(nla1::settings => Entity::Settings, Settings::LeadA1),
-    row!(nd2::program => Entity::Program, Program::Drum2),
-    row!(nd3::kit => Entity::Program, Program::Drum3),
+    (npip::pipe_library::FORMAT, |mut r| {
+        Ok(Entity::PipeLibrary(npip::pipe_library::read_from(&mut r)?))
+    }),
+    (nsclassic::piano_library::FORMAT, |mut r| {
+        Ok(Entity::PianoLibrary(nsclassic::piano_library::read_from(
+            &mut r,
+        )?))
+    }),
 ];
+
+/// Every CBIN tag [`from_stream`] reads, with the reader it dispatches to.
+fn cbin_readers() -> impl Iterator<Item = &'static (&'static str, ReadCbin)> {
+    LIBRARY_READERS.iter().chain(ROLE_READERS)
+}
 
 /// Every CBIN format tag [`from_stream`] reads, NULs preserved.
 pub fn cbin_formats() -> impl Iterator<Item = &'static str> {
-    CBIN_READERS.iter().map(|(format, _)| *format)
+    cbin_readers().map(|(format, _)| *format)
 }
 
 /// One CBIN file, dispatched by the tag at offset 8.
 fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error> {
-    let (_, read) = CBIN_READERS
-        .iter()
+    let (_, read) = cbin_readers()
         .find(|(format, _)| *format == tag)
         .ok_or_else(|| ParseError::UnknownFormat(tag.to_string()))?;
     read(reader)
@@ -592,12 +606,11 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     let start = reader.stream_position()?;
     let kind = {
         let zip = zip::ZipArchive::new(&mut *reader)?;
-        // Directories and the backup manifest are not members. Counting them would make
-        // an archive of directories an empty bundle, and a `kits/` entry would stop a
-        // drum bank from classifying as one.
+        // Counting a directory or the manifest would make an archive of directories an
+        // empty bundle, and a `kits/` entry would stop a drum bank from classifying as one.
         let names: Vec<&str> = zip
             .file_names()
-            .filter(|name| !is_dir_entry(name) && !name.ends_with("meta.xml"))
+            .filter(|name| formats::is_member(name))
             .collect();
         // An archive with nothing in it would satisfy the all-members checks below
         // vacuously and read as a drum bank holding no programs.
@@ -632,13 +645,6 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
     }))
 }
 
-/// A directory entry, by the same test as `zip`'s own `is_dir`. It takes the name alone
-/// because classification reads the archive's names, not its entries.
-#[cfg(feature = "bundle")]
-fn is_dir_entry(name: &str) -> bool {
-    name.ends_with('/') || name.ends_with('\\')
-}
-
 /// [`from_stream`] over a buffered read of the file at `path`.
 pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
     from_stream(&mut BufReader::new(File::open(path)?))
@@ -670,6 +676,28 @@ mod registry_tests {
             .find(|f| f.path == "center_panel.transpose")
             .unwrap();
         assert_eq!(transpose.value, "-5");
+    }
+
+    /// Each class the Electro 5 keeps a default for makes a file under that class's tag,
+    /// and a set list points at the programs it is given.
+    #[test]
+    fn a_new_electro_5_file_has_its_class_and_its_set_list() {
+        use accept::{Family, Slot};
+        let programs = [0, 1, 2, 3].map(|slot| ne5::program::Location::new(0, slot).unwrap());
+        for class in Slot::ALL {
+            let made = Entity::electro5(class, programs).map(Result::unwrap);
+            let tag = Family::Electro5.tag(class);
+            match class {
+                Slot::Piano | Slot::Sample => assert!(made.is_none(), "{class:?}"),
+                _ => assert_eq!(made.map(|e| e.identity().format), tag, "{class:?}"),
+            }
+        }
+        let Some(Ok(Entity::Song(Song::Electro5(song)))) =
+            Entity::electro5(Slot::SetList, programs)
+        else {
+            panic!("a set list is a song");
+        };
+        assert_eq!(song.programs(), programs);
     }
 }
 
@@ -756,6 +784,20 @@ mod bundle_tests {
             "a `kits/` entry left it classified as {}",
             entity.identity().kind,
         );
+    }
+
+    /// A drum bank carrying a backup manifest reads as the bank; the manifest is not
+    /// read as one of its programs.
+    #[test]
+    fn a_manifest_does_not_break_a_drum_bank() {
+        let program = member("nd2p");
+        let bytes = archive(&[("meta.xml", b"<meta/>"), ("One.nd2p", &program)]);
+        let entity = from_stream(&mut Cursor::new(bytes)).unwrap();
+        let Entity::Bundle(Bundle::Drum2Bank(bank)) = entity else {
+            panic!("classified as {}", entity.identity().kind);
+        };
+        assert_eq!(bank.programs.len(), 1);
+        assert_eq!(bank.programs[0].0, "One.nd2p");
     }
 
     /// A ZIP holding anything that is not a CBIN file is not a bundle.
@@ -873,71 +915,42 @@ impl Entity {
     /// The container of a stub-backed entity, one whose body is container-verified but
     /// undecoded. `None` for the decoded formats and the non-CBIN carriers.
     pub fn raw(&self) -> Option<&Cbin<RawBody>> {
-        use {Live as L, OrganPreset as OP, Program as P, Settings as St, Synth as Sy};
         match self {
-            Entity::Program(
-                P::C2(f)
-                | P::C2D(f)
-                | P::Drum2(f)
-                | P::Drum3(f)
-                | P::Electro3(f)
-                | P::Electro4(f)
-                | P::Electro6(f)
-                | P::Electro7(f)
-                | P::Grand(f)
-                | P::Lead4(f)
-                | P::LeadA1(f)
-                | P::Organ3(f)
-                | P::Piano1(f)
-                | P::Piano2(f)
-                | P::Piano3(f)
-                | P::Piano4(f)
-                | P::Piano5(f)
-                | P::StageClassic(f)
-                | P::Wave(f)
-                | P::Wave2(f),
-            )
-            | Entity::Live(
-                L::Electro4(f)
-                | L::Electro6(f)
-                | L::Electro7(f)
-                | L::Grand(f)
-                | L::Piano1(f)
-                | L::Piano2(f)
-                | L::Piano3(f)
-                | L::Piano4(f)
-                | L::Piano5(f)
-                | L::Wave2(f),
-            )
-            | Entity::Settings(
-                St::C2(f)
-                | St::C2D(f)
-                | St::Electro4(f)
-                | St::Electro6(f)
-                | St::Electro7(f)
-                | St::Grand(f)
-                | St::Lead4(f)
-                | St::LeadA1(f)
-                | St::Organ3(f)
-                | St::Piano1(f)
-                | St::Piano2(f)
-                | St::Piano3(f)
-                | St::Piano4(f)
-                | St::Piano5(f)
-                | St::Stage2(f)
-                | St::Stage3(f)
-                | St::Stage4(f)
-                | St::Wave(f)
-                | St::Wave2(f),
-            )
-            | Entity::Song(Song::Stage3(f))
-            | Entity::Synth(Sy::Stage2(f) | Sy::StageClassic(f))
-            | Entity::Performance(Performance::Lead4(f) | Performance::LeadA1(f))
-            | Entity::OrganPreset(OP::Electro3(f))
-            | Entity::PianoLibrary(f)
-            | Entity::PipeLibrary(f) => Some(f),
+            Entity::Live(e) => e.raw(),
+            Entity::OrganPreset(e) => e.raw(),
+            Entity::Performance(e) => e.raw(),
+            Entity::PianoPreset(e) => e.raw(),
+            Entity::Program(e) => e.raw(),
+            Entity::Settings(e) => e.raw(),
+            Entity::Song(e) => e.raw(),
+            Entity::Synth(e) => e.raw(),
+            Entity::PianoLibrary(f) | Entity::PipeLibrary(f) => Some(f),
             _ => None,
         }
+    }
+
+    /// A new Electro 5 file of one class: the default body, addressed to the first slot. A
+    /// set list points its four entries at `set_list`. `None` for the piano and sample
+    /// libraries, which have no default.
+    pub fn electro5(
+        class: accept::Slot,
+        set_list: [ne5::program::Location; ne5::song::PROGRAM_COUNT],
+    ) -> Option<Result<Entity, Error>> {
+        use accept::Slot;
+        Some(match class {
+            Slot::Program => Ok(Entity::Program(Program::Electro5(ne5::program::new(
+                Default::default(),
+            )))),
+            Slot::Live => Ok(Entity::Live(Live::Electro5(ne5::live::new(
+                Default::default(),
+            )))),
+            Slot::Settings => Ok(Entity::Settings(Settings::Electro5(ne5::settings::new()))),
+            Slot::SetList => {
+                ne5::song::new(Default::default(), ne5::song::DEFAULT_VERSION, set_list)
+                    .map(|song| Entity::Song(Song::Electro5(song)))
+            }
+            Slot::Piano | Slot::Sample => return None,
+        })
     }
 
     /// The generated field registry behind this entity, for reading.
@@ -954,96 +967,16 @@ impl Entity {
 
     /// The entity's [`Identity`]: its human label and the tag its file carries.
     pub fn identity(&self) -> Identity {
-        use {Live as L, Program as P, Settings as St};
         let id = |kind, format| Identity { kind, format };
         match self {
-            Entity::Program(p) => match p {
-                P::C2(_) => id("C2 program", nc2::program::FORMAT),
-                P::C2D(_) => id("C2D program", nc2d::program::FORMAT),
-                P::Drum2(_) => id("Drum 2 program", nd2::program::FORMAT),
-                P::Drum3(_) => id("Drum 3P kit", nd3::kit::FORMAT),
-                P::Electro3(_) => id("Electro 3 program", ne3::program::FORMAT),
-                P::Electro4(_) => id("Electro 4 program", ne4::program::FORMAT),
-                P::Electro5(_) => id("Electro 5 program", ne5::program::FORMAT),
-                P::Electro6(_) => id("Electro 6 program", ne6::program::FORMAT),
-                P::Electro7(_) => id("Electro 7 program", ne7::program::FORMAT),
-                P::Grand(_) => id("Grand program", ng2::program::FORMAT),
-                P::Lead4(_) => id("Lead 4 program", nl4::program::FORMAT),
-                P::LeadA1(_) => id("Lead A1 program", nla1::program::FORMAT),
-                P::Organ3(_) => id("no3 organ program", no3::program::FORMAT),
-                P::Piano1(_) => id("Piano program", np::program::FORMAT),
-                P::Piano2(_) => id("Piano 2 program", np2::program::FORMAT),
-                P::Piano3(_) => id("Piano 3 program", np3::program::FORMAT),
-                P::Piano4(_) => id("Piano 4 program", np4::program::FORMAT),
-                P::Piano5(_) => id("Piano 5 program", np5::program::FORMAT),
-                P::Stage2(_) => id("Stage 2 program", ns2::program::FORMAT),
-                P::Stage3(_) => id("Stage 3 program", ns3::program::FORMAT),
-                P::Stage4(_) => id("Stage 4 program", ns4::program::FORMAT),
-                P::StageClassic(_) => id("Stage Classic program", nsclassic::program::FORMAT),
-                P::Wave(_) => id("Wave program", nw::program::FORMAT),
-                P::Wave2(_) => id("Wave 2 program", nw2::program::FORMAT),
-            },
-            Entity::Live(l) => match l {
-                L::Electro4(_) => id("Electro 4 live slot", ne4::live::FORMAT),
-                L::Electro5(_) => id("Electro 5 live slot", ne5::live::FORMAT),
-                L::Electro6(_) => id("Electro 6 live slot", ne6::live::FORMAT),
-                L::Electro7(_) => id("Electro 7 live slot", ne7::live::FORMAT),
-                L::Grand(_) => id("Grand live slot", ng2::live::FORMAT),
-                L::Piano1(_) => id("Piano live slot", np::live::FORMAT),
-                L::Piano2(_) => id("Piano 2 live slot", np2::live::FORMAT),
-                L::Piano3(_) => id("Piano 3 live slot", np3::live::FORMAT),
-                L::Piano4(_) => id("Piano 4 live slot", np4::live::FORMAT),
-                L::Piano5(_) => id("Piano 5 live slot", np5::live::FORMAT),
-                L::Stage2(_) => id("Stage 2 live slot", ns2::live::FORMAT),
-                L::Stage3(_) => id("Stage 3 live slot", ns3::live::FORMAT),
-                L::Stage4(_) => id("Stage 4 live slot", ns4::live::FORMAT),
-                L::Wave2(_) => id("Wave 2 live slot", nw2::live::FORMAT),
-            },
-            Entity::Settings(s) => match s {
-                St::C2(_) => id("C2 settings", nc2::settings::FORMAT),
-                St::C2D(_) => id("C2D settings", nc2d::settings::FORMAT),
-                St::Electro4(_) => id("Electro 4 settings", ne4::settings::FORMAT),
-                St::Electro5(_) => id("Electro 5 settings", ne5::settings::FORMAT),
-                St::Electro6(_) => id("Electro 6 settings", ne6::settings::FORMAT),
-                St::Electro7(_) => id("Electro 7 settings", ne7::settings::FORMAT),
-                St::Grand(_) => id("Grand settings", ng2::settings::FORMAT),
-                St::Lead4(_) => id("Lead 4 settings", nl4::settings::FORMAT),
-                St::LeadA1(_) => id("Lead A1 settings", nla1::settings::FORMAT),
-                St::Organ3(_) => id("no3 organ settings", no3::settings::FORMAT),
-                St::Piano1(_) => id("Piano settings", np::settings::FORMAT),
-                St::Piano2(_) => id("Piano 2 settings", np2::settings::FORMAT),
-                St::Piano3(_) => id("Piano 3 settings", np3::settings::FORMAT),
-                St::Piano4(_) => id("Piano 4 settings", np4::settings::FORMAT),
-                St::Piano5(_) => id("Piano 5 settings", np5::settings::FORMAT),
-                St::Stage2(_) => id("Stage 2 settings", ns2::settings::FORMAT),
-                St::Stage3(_) => id("Stage 3 settings", ns3::settings::FORMAT),
-                St::Stage4(_) => id("Stage 4 settings", ns4::settings::FORMAT),
-                St::Wave(_) => id("Wave settings", nw::settings::FORMAT),
-                St::Wave2(_) => id("Wave 2 settings", nw2::settings::FORMAT),
-            },
-            Entity::Song(Song::Electro5(_)) => id("Electro 5 song / set", ne5::song::FORMAT),
-            Entity::Song(Song::Stage3(_)) => id("Stage 3 song", ns3::song::FORMAT),
-            Entity::Synth(Synth::Stage2(_)) => id("Stage 2 synth patch", ns2::synth::FORMAT),
-            Entity::Synth(Synth::Stage3(_)) => id("Stage 3 synth patch", ns3::synth::FORMAT),
-            Entity::Synth(Synth::Stage4(_)) => id("Stage 4 synth preset", ns4::synth::FORMAT),
-            Entity::Synth(Synth::StageClassic(_)) => {
-                id("Stage Classic synth patch", nsclassic::synth::FORMAT)
-            }
-            Entity::Performance(Performance::Lead4(_)) => {
-                id("Lead 4 performance", nl4::performance::FORMAT)
-            }
-            Entity::Performance(Performance::LeadA1(_)) => {
-                id("Lead A1 performance", nla1::performance::FORMAT)
-            }
-            Entity::OrganPreset(OrganPreset::Electro3(_)) => {
-                id("Electro 3 organ preset", ne3::organ_preset::FORMAT)
-            }
-            Entity::OrganPreset(OrganPreset::Stage4(_)) => {
-                id("Stage 4 organ preset", ns4::organ_preset::FORMAT)
-            }
-            Entity::PianoPreset(PianoPreset::Stage4(_)) => {
-                id("Stage 4 piano preset", ns4::piano_preset::FORMAT)
-            }
+            Entity::Live(e) => e.identity(),
+            Entity::OrganPreset(e) => e.identity(),
+            Entity::Performance(e) => e.identity(),
+            Entity::PianoPreset(e) => e.identity(),
+            Entity::Program(e) => e.identity(),
+            Entity::Settings(e) => e.identity(),
+            Entity::Song(e) => e.identity(),
+            Entity::Synth(e) => e.identity(),
             Entity::Piano(_) => id("piano library", npno::FORMAT),
             Entity::PianoLibrary(_) => id(
                 "Stage Classic piano library",
@@ -1067,90 +1000,21 @@ impl Entity {
     /// archive would not match its source.
     pub fn write_to(&self, w: &mut (impl std::io::Write + Seek)) -> Result<(), Error> {
         match self {
+            Entity::Live(e) => e.write_to(w),
+            Entity::OrganPreset(e) => e.write_to(w),
+            Entity::Performance(e) => e.write_to(w),
+            Entity::PianoPreset(e) => e.write_to(w),
+            Entity::Program(e) => e.write_to(w),
+            Entity::Settings(e) => e.write_to(w),
+            Entity::Song(e) => e.write_to(w),
+            Entity::Synth(e) => e.write_to(w),
             Entity::Cne3(f) => f.write_to(w),
-            Entity::Live(l) => match l {
-                Live::Electro4(f)
-                | Live::Electro6(f)
-                | Live::Electro7(f)
-                | Live::Grand(f)
-                | Live::Piano1(f)
-                | Live::Piano2(f)
-                | Live::Piano3(f)
-                | Live::Piano4(f)
-                | Live::Piano5(f)
-                | Live::Wave2(f) => f.write_to(w),
-                Live::Electro5(f) => f.write_to(w),
-                Live::Stage4(f) => f.write_to(w),
-                Live::Stage2(f) => f.write_to(w),
-                Live::Stage3(f) => f.write_to(w),
-            },
             Entity::Midi(f) => f.write_to(w),
-            Entity::OrganPreset(OrganPreset::Electro3(f))
-            | Entity::PianoLibrary(f)
-            | Entity::PipeLibrary(f) => f.write_to(w),
-            Entity::OrganPreset(OrganPreset::Stage4(f)) => f.write_to(w),
-            Entity::PianoPreset(PianoPreset::Stage4(f)) => f.write_to(w),
+            Entity::PianoLibrary(f) | Entity::PipeLibrary(f) => f.write_to(w),
             Entity::Piano(f) => f.write_to(w),
-            Entity::Performance(Performance::Lead4(f))
-            | Entity::Performance(Performance::LeadA1(f)) => f.write_to(w),
-            Entity::Program(p) => match p {
-                Program::C2(f)
-                | Program::C2D(f)
-                | Program::Drum2(f)
-                | Program::Drum3(f)
-                | Program::Electro3(f)
-                | Program::Electro4(f)
-                | Program::Electro6(f)
-                | Program::Electro7(f)
-                | Program::Grand(f)
-                | Program::Lead4(f)
-                | Program::LeadA1(f)
-                | Program::Organ3(f)
-                | Program::Piano1(f)
-                | Program::Piano2(f)
-                | Program::Piano3(f)
-                | Program::Piano4(f)
-                | Program::Piano5(f)
-                | Program::StageClassic(f)
-                | Program::Wave(f)
-                | Program::Wave2(f) => f.write_to(w),
-                Program::Electro5(f) => f.write_to(w),
-                Program::Stage2(f) => f.write_to(w),
-                Program::Stage3(f) => f.write_to(w),
-                Program::Stage4(f) => f.write_to(w),
-            },
             Entity::Sample(Sample::V2(f)) => f.write_to(w),
             Entity::Sample(Sample::V3(f)) => f.write_to(w),
             Entity::SampleProject(f) => f.write_to(w),
-            Entity::Settings(s) => match s {
-                Settings::C2(f)
-                | Settings::C2D(f)
-                | Settings::Electro4(f)
-                | Settings::Electro6(f)
-                | Settings::Electro7(f)
-                | Settings::Grand(f)
-                | Settings::Lead4(f)
-                | Settings::LeadA1(f)
-                | Settings::Organ3(f)
-                | Settings::Piano1(f)
-                | Settings::Piano2(f)
-                | Settings::Piano3(f)
-                | Settings::Piano4(f)
-                | Settings::Piano5(f)
-                | Settings::Stage2(f)
-                | Settings::Stage3(f)
-                | Settings::Stage4(f)
-                | Settings::Wave(f)
-                | Settings::Wave2(f) => f.write_to(w),
-                Settings::Electro5(f) => f.write_to(w),
-            },
-            Entity::Song(Song::Electro5(f)) => f.write_to(w),
-            Entity::Song(Song::Stage3(f)) => f.write_to(w),
-            Entity::Synth(Synth::Stage2(f)) | Entity::Synth(Synth::StageClassic(f)) => {
-                f.write_to(w)
-            }
-            Entity::Synth(Synth::Stage3(f)) => f.write_to(w),
-            Entity::Synth(Synth::Stage4(f)) => f.write_to(w),
             Entity::Sysex(f) => f.write_to(w),
             #[cfg(feature = "bundle")]
             Entity::Bundle(_) => Err(ParseError::AssertFail(

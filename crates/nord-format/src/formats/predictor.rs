@@ -13,14 +13,15 @@
 /// Highest backward-difference order a header can ask for.
 pub const MAX_ORDER: usize = 4;
 
-/// `C(n, k)`, for the small orders a header can express.
-pub fn binomial(n: usize, k: usize) -> i64 {
-    let mut c = 1i64;
-    for i in 0..k {
-        c = c * (n - i) as i64 / (i + 1) as i64;
-    }
-    c
-}
+/// `(−1)^j C(order, j)`, the coefficients of the `order`th backward difference, by
+/// order.
+pub(crate) const DIFFERENCE: [&[i64]; MAX_ORDER + 1] = [
+    &[1],
+    &[1, -1],
+    &[1, -2, 1],
+    &[1, -3, 3, -1],
+    &[1, -4, 6, -4, 1],
+];
 
 /// One sample: `residual` integrated against `history`, which then carries it.
 ///
@@ -29,17 +30,24 @@ pub fn binomial(n: usize, k: usize) -> i64 {
 /// indistinguishable from signal.
 pub fn predict(history: &mut [i64; MAX_ORDER], order: usize, residual: i64) -> i64 {
     let mut value = residual;
-    for j in 1..=order {
-        let term = binomial(order, j).saturating_mul(history[j - 1]);
-        value = if j.is_multiple_of(2) {
-            value.saturating_sub(term)
-        } else {
+    for (&c, &past) in DIFFERENCE[order][1..].iter().zip(history.iter()) {
+        let term = c.abs().saturating_mul(past);
+        value = if c < 0 {
             value.saturating_add(term)
+        } else {
+            value.saturating_sub(term)
         };
     }
     history.copy_within(0..MAX_ORDER - 1, 1);
     history[0] = value;
     value
+}
+
+/// `value` saturated to `i16`, adding one to `clipped` when it had to be clamped.
+pub fn saturate_i16(value: i64, clipped: &mut usize) -> i16 {
+    let narrow = value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+    *clipped += usize::from(i64::from(narrow) != value);
+    narrow
 }
 
 #[cfg(test)]
@@ -56,15 +64,12 @@ mod tests {
     #[test]
     fn each_order_integrates_the_differences_it_names() {
         // Δ^order of a run of samples, coded back into the run it came from.
-        for order in 0..=MAX_ORDER {
+        for (order, row) in DIFFERENCE.iter().enumerate() {
             let samples: Vec<i64> = (0..12).map(|n: i64| n * n * n - 4 * n).collect();
             let residual = |n: usize| -> i64 {
-                (0..=order)
-                    .map(|j| {
-                        let sign = if j.is_multiple_of(2) { 1 } else { -1 };
-                        let at = n as isize - j as isize;
-                        sign * binomial(order, j) * usize::try_from(at).map_or(0, |at| samples[at])
-                    })
+                row.iter()
+                    .enumerate()
+                    .map(|(j, &c)| c * n.checked_sub(j).map_or(0, |at| samples[at]))
                     .sum()
             };
             let mut history = [0i64; MAX_ORDER];
@@ -82,12 +87,21 @@ mod tests {
     }
 
     #[test]
-    fn the_binomials_are_the_rows_the_orders_name() {
-        let row = |n| (0..=n).map(|k| binomial(n, k)).collect::<Vec<_>>();
-        assert_eq!(row(0), [1]);
-        assert_eq!(row(1), [1, 1]);
-        assert_eq!(row(2), [1, 2, 1]);
-        assert_eq!(row(3), [1, 3, 3, 1]);
-        assert_eq!(row(MAX_ORDER), [1, 4, 6, 4, 1]);
+    fn each_difference_row_annihilates_lower_powers_and_scales_its_own() {
+        // Δ^n of k^m is 0 for m < n and n! for m = n, whatever k.
+        for (order, row) in DIFFERENCE.iter().enumerate() {
+            assert_eq!(row.len(), order + 1, "order {order}");
+            let delta = |m: u32| -> i64 {
+                row.iter()
+                    .enumerate()
+                    .map(|(j, &c)| c * (10 - j as i64).pow(m))
+                    .sum()
+            };
+            for m in 0..order as u32 {
+                assert_eq!(delta(m), 0, "order {order}, power {m}");
+            }
+            let factorial: i64 = (1..=order as i64).product();
+            assert_eq!(delta(order as u32), factorial, "order {order}");
+        }
     }
 }

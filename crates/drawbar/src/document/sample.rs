@@ -21,15 +21,16 @@ use nord_format::formats::nsmp::{keymap, zone, KeyTable, Level, Sty};
 use nord_format::note;
 use nord_format::{Entity, Sample};
 
-use super::capability::{Fact, Offset, Row, State as Cap};
+use super::capability::{self, Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
 use super::header::{Body, Cell};
 use super::keys;
-use super::table::{self, Width, NAME_TEXT, PAD};
+use super::table::{self, GRID, INDENT, NAME_TEXT, PAD};
 use crate::app;
 use crate::audio::Finger;
 use crate::icon::{icon, Glyph};
 use crate::midi::Played;
+use crate::panel::cut;
 use crate::room;
 use crate::workspace::Baseline;
 
@@ -227,7 +228,7 @@ fn sound(sample: &Sample) -> Vec<(&'static str, String)> {
                     },
                 ),
             ],
-            Ok(Sty::V2(_)) | Err(_) => Vec::new(),
+            Err(_) => Vec::new(),
         },
     }
 }
@@ -540,12 +541,7 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
 /// opened on.
 #[derive(Default)]
 pub struct State {
-    selected: Option<usize>,
-    /// Whether the selected row's own fields are unfolded. Only the selected row has a
-    /// body, so there is never a second one to remember.
-    open: bool,
-    /// A row to bring up under the pinned map, once the body draws it.
-    reveal: Option<usize>,
+    rows: Rows,
     /// Whether the 128-key table is unfolded.
     table: bool,
     audition: Option<keys::Audition>,
@@ -577,20 +573,37 @@ struct Answer {
     sounded: bool,
 }
 
-impl State {
-    /// Select a zone, and open its row.
+/// Which row of a list is selected, and whether its body is unfolded. Only the selected
+/// row has a body, so there is never a second one to remember.
+#[derive(Default)]
+pub(super) struct Rows {
+    pub(super) selected: Option<usize>,
+    pub(super) open: bool,
+    /// A row to bring up under the pinned map, once the body draws it.
+    pub(super) reveal: Option<usize>,
+}
+
+impl Rows {
+    /// Select a row, and open it.
     ///
     /// Clicking the row that is already open and selected closes it; picking from the
     /// map always opens, and asks for the row to be brought into view.
-    fn pick(&mut self, zone: usize, reveal: bool) {
-        let close = !reveal && self.selected == Some(zone) && self.open;
-        self.selected = Some(zone);
+    pub(super) fn pick(&mut self, row: usize, reveal: bool) {
+        let close = !reveal && self.selected == Some(row) && self.open;
+        self.selected = Some(row);
         self.open = !close;
         if reveal {
-            self.reveal = Some(zone);
+            self.reveal = Some(row);
         }
     }
 
+    /// Whether `row` is drawn with its body unfolded.
+    pub(super) fn opened(&self, row: usize) -> bool {
+        self.open && self.selected == Some(row)
+    }
+}
+
+impl State {
     /// The zone a live audition is sounding.
     fn lit(&self) -> Option<usize> {
         self.answer.as_ref().and_then(|answer| answer.zone)
@@ -599,13 +612,13 @@ impl State {
 
 /// The row the editor has selected, for a widget whose order differs from the row order.
 pub fn selected(state: &State) -> Option<usize> {
-    state.selected
+    state.rows.selected
 }
 
 /// Select a row and bring it into view under the map, as a pick from outside the row
 /// list does.
 pub fn pick_row(state: &mut State, row: usize) {
-    state.pick(row, true);
+    state.rows.pick(row, true);
 }
 
 /// One zone as the key map draws it, whichever format states it.
@@ -699,13 +712,13 @@ pub fn key_map(
     let bounds: Vec<(u8, u8)> = zones.iter().map(|zone| (zone.low, zone.top)).collect();
     let silent = keys::gaps(&bounds, span);
     let visuals = ui.visuals().clone();
-    let (cover, ink) = match silent.len() {
-        0 => ("every key answered".to_string(), app::good(&visuals)),
-        1 => ("1 silent range".to_string(), app::warn(&visuals)),
-        n => (format!("{n} silent ranges"), app::warn(&visuals)),
+    let ink = match silent.is_empty() {
+        true => app::good(&visuals),
+        false => app::warn(&visuals),
     };
     let reading = format!(
-        "{cover} · {}–{}",
+        "{} · {}–{}",
+        keys::coverage(silent.len()),
         note::name(span.low),
         note::name(span.high)
     );
@@ -749,11 +762,11 @@ pub fn key_map(
         ui,
         span,
         &lane,
-        band_of(state.selected),
+        band_of(state.rows.selected),
         band_of(state.lit()),
         edges,
     ) {
-        Some(keys::BandAct::Pick(band)) => state.pick(zones[band].row, true),
+        Some(keys::BandAct::Pick(band)) => state.rows.pick(zones[band].row, true),
         Some(keys::BandAct::Drag { bounds, .. }) => acts.push(MapAct::Bounds(bounds)),
         None => {}
     }
@@ -953,24 +966,12 @@ pub struct RowSpec {
 
 const ROW_H: f32 = 26.0;
 const MARK: f32 = 6.0;
-/// How far an open row's body is indented, measured from the page's edge.
-const INDENT: f32 = 68.0;
 /// The column that holds the size, the only one aligned right.
 const SIZE_COLUMN: usize = 3;
 const ROW_MONO: f32 = 11.0;
 const FACTS_TEXT: f32 = 11.0;
 const SIZE_TEXT: f32 = 10.5;
 const CHEVRON: f32 = 12.0;
-
-/// The five columns of the row grid: the name, what the zone answers, what it is made
-/// of, its size, and the chevron.
-const GRID: [Width; 5] = [
-    Width::Fixed(56.0),
-    Width::Share(1.1),
-    Width::Share(1.5),
-    Width::Fixed(74.0),
-    Width::Fixed(20.0),
-];
 
 /// The zone list: the column heads, one row per zone, and the body of each open row
 /// drawn by `open`.
@@ -995,17 +996,17 @@ pub fn rows(
 
     let lit = state.lit();
     for (index, spec) in specs.iter().enumerate() {
-        let picked = state.selected == Some(index);
+        let picked = state.rows.selected == Some(index);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ROW_H),
             egui::Sense::click(),
         );
-        if state.reveal == Some(index) {
-            state.reveal = None;
+        if state.rows.reveal == Some(index) {
+            state.rows.reveal = None;
             response.scroll_to_me(Some(egui::Align::TOP));
         }
         if response.clicked() {
-            state.pick(index, false);
+            state.rows.pick(index, false);
         }
         let painter = ui.painter();
         if picked {
@@ -1037,46 +1038,38 @@ pub fn rows(
                 egui::FontId::new(NAME_TEXT, app::bold()),
                 cells[0].0 + MARK + 6.0,
                 cells[0].1 - MARK - 6.0,
-                false,
             ),
             (
                 spec.answers.as_str(),
                 egui::FontId::monospace(ROW_MONO),
                 cells[1].0,
                 cells[1].1,
-                false,
             ),
             (
                 spec.facts.as_str(),
                 egui::FontId::proportional(FACTS_TEXT),
                 cells[2].0,
                 cells[2].1,
-                false,
-            ),
-            (
-                spec.size.as_str(),
-                egui::FontId::monospace(SIZE_TEXT),
-                cells[3].0,
-                cells[3].1,
-                true,
             ),
         ];
-        for (text, font, left, width, right) in written {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(text, 0.0, egui::TextFormat::simple(font, ink));
-            job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
-            let galley = painter.layout_job(job);
-            let at = match right {
-                true => left + width - galley.size().x,
-                false => left,
-            };
-            painter.galley(
-                egui::pos2(at, rect.center().y - galley.size().y / 2.0),
-                galley,
-                ink,
+        for (text, font, left, width) in written {
+            cut(
+                painter,
+                left,
+                rect.center().y,
+                width,
+                text,
+                egui::TextFormat::simple(font, ink),
             );
         }
-        let glyph = match state.open && picked {
+        painter.text(
+            egui::pos2(cells[3].0 + cells[3].1, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            &spec.size,
+            egui::FontId::monospace(SIZE_TEXT),
+            ink,
+        );
+        let glyph = match state.rows.opened(index) {
             true => Glyph::ChevronDown,
             false => Glyph::ChevronRight,
         };
@@ -1093,7 +1086,7 @@ pub fn rows(
             response.on_hover_text(&spec.hint);
         }
 
-        if state.open && picked {
+        if state.rows.opened(index) {
             let body = egui::Frame::new()
                 .fill(visuals.window_fill)
                 .inner_margin(egui::Margin {
@@ -1182,8 +1175,8 @@ pub fn read_cell(ui: &mut egui::Ui, label: &str, value: &str, note: &str) {
     });
 }
 
-/// One outlined action of an open row. `accent` is whether its glyph is the loud one.
-pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, accent: bool) -> bool {
+/// One outlined action of an open row, its glyph painted in `mark`.
+pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, mark: egui::Color32) -> bool {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let ink = visuals.weak_text_color();
@@ -1212,10 +1205,7 @@ pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, accent: bool) -> boo
             egui::pos2(rect.left() + 8.0 + ACTION_GLYPH / 2.0, rect.center().y),
             egui::Vec2::splat(ACTION_GLYPH),
         ),
-        match accent {
-            true => app::accent(&visuals),
-            false => app::caption(&visuals),
-        },
+        mark,
     );
     painter.galley(
         egui::pos2(
@@ -1403,10 +1393,10 @@ fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
         &blocks,
         &rows,
         keys::Handles::Fixed,
-        state.selected,
+        state.rows.selected,
     );
     match asked {
-        Some(VelocityAsk::Open(row)) => state.pick(row, true),
+        Some(VelocityAsk::Open(row)) => state.rows.pick(row, true),
         // Fixed handles never move: nothing here writes a wide zone's window.
         Some(VelocityAsk::Window { .. }) | None => {}
     }
@@ -1438,8 +1428,10 @@ pub(super) fn velocity_field(
     let visuals = ui.visuals().clone();
     let (cover, ink) = match keys::velocity_holes(blocks).len() {
         0 => ("fully covered".to_string(), app::good(&visuals)),
-        1 => ("1 hole".to_string(), app::warn(&visuals)),
-        n => (format!("{n} holes"), app::warn(&visuals)),
+        n => (
+            crate::strings::counted(n, "hole", "holes"),
+            app::warn(&visuals),
+        ),
     };
     controls::heading(ui, "Velocity", note, Some((&cover, ink)));
     let picked = selected.and_then(|row| rows.iter().position(|held| *held == row));
@@ -1503,7 +1495,7 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
             // ⚠️ Stopping cannot wait on a decode: an edit drops the audio of a zone
             // that goes on sounding, and this is the only control that stops it.
             (true, _) => {
-                if action(ui, "Stop", Glyph::X, true) {
+                if action(ui, "Stop", Glyph::X, app::accent(ui.visuals())) {
                     ask = Some(Ask::Play(index));
                 }
             }
@@ -1521,12 +1513,14 @@ fn zone_audio(ui: &mut egui::Ui, index: usize, sound: &Sound) -> Option<Ask> {
                 );
             }
             (false, Some(Ok(_))) => {
-                if action(ui, "Play", Glyph::AudioLines, true) {
+                if action(ui, "Play", Glyph::AudioLines, app::accent(ui.visuals())) {
                     ask = Some(Ask::Play(index));
                 }
             }
         }
-        if matches!(sound.decoded, Some(Ok(_))) && action(ui, "Save WAV…", Glyph::Waves, false) {
+        if matches!(sound.decoded, Some(Ok(_)))
+            && action(ui, "Save WAV…", Glyph::Waves, app::caption(ui.visuals()))
+        {
             ask = Some(Ask::Save(index));
         }
     });
@@ -1594,52 +1588,15 @@ fn per_key(
                 None => false,
             })
             .collect();
-        let edited = painted.iter().filter(|edited| **edited).count();
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.allocate_ui(egui::vec2(LANE_LABEL_W, LANE_H), |ui| {
-                ui.label(
-                    egui::RichText::new(label)
-                        .size(FACTS_TEXT)
-                        .color(ui.visuals().weak_text_color()),
-                );
-            });
-            axis(ui, scale);
-            let room = (ui.available_width() - LANE_SUMMARY_W - 8.0).max(64.0);
-            let drawn = ui
-                .allocate_ui(egui::vec2(room, LANE_H), |ui| {
-                    ui.push_id(field, |ui| keys::lane(ui, span, &values, &painted, scale))
-                        .inner
-                })
-                .inner;
-            for (note, value) in drawn {
-                sets.push((format!("key{note}.{field}"), scale.format(value)));
-            }
-            let summary = format!(
-                "{} keys · ±{}{}",
-                span.keys(),
-                match scale {
-                    keys::Scale::Db(full) => format!("{full:.1} dB"),
-                    keys::Scale::Cents(full) => format!("{full} c"),
-                },
-                match edited {
-                    0 => String::new(),
-                    n => format!(" · {n} edited"),
-                }
-            );
-            let ink = match edited {
-                0 => app::caption(ui.visuals()),
-                _ => app::warn(ui.visuals()),
-            };
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(summary)
-                        .font(egui::FontId::monospace(SUMMARY_TEXT))
-                        .color(ink),
-                );
-            });
-        });
+        let drawn = ui
+            .horizontal(|ui| {
+                ui.add_space(PAD);
+                lane_row(ui, label, field, span, &values, &painted, scale)
+            })
+            .inner;
+        for (note, value) in drawn {
+            sets.push((format!("key{note}.{field}"), scale.format(value)));
+        }
         ui.add_space(8.0);
     }
     key_table(ui, state, table);
@@ -1659,6 +1616,66 @@ fn held(table: &KeyTable, note: u8, scale: keys::Scale) -> f32 {
         true => value.clamp(-1.0, 1.0) as f32,
         false => -1.0,
     }
+}
+
+/// One per-key lane: its label, its axis, the lane itself under `id_salt`, and a summary
+/// of its reach that turns to warn ink once a key is edited. Returns the keys a drag
+/// painted this frame, with their values on the lane's scale.
+pub(super) fn lane_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    id_salt: impl std::hash::Hash,
+    span: keys::Span,
+    values: &[f32],
+    painted: &[bool],
+    scale: keys::Scale,
+) -> Vec<(u8, f32)> {
+    let edited = painted.iter().filter(|edited| **edited).count();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add_sized(
+            egui::vec2(LANE_LABEL_W, LANE_H),
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .size(FACTS_TEXT)
+                    .color(ui.visuals().weak_text_color()),
+            )
+            .halign(egui::Align::LEFT),
+        );
+        axis(ui, scale);
+        let room = (ui.available_width() - LANE_SUMMARY_W - 8.0).max(64.0);
+        let drawn = ui
+            .allocate_ui(egui::vec2(room, LANE_H), |ui| {
+                ui.push_id(id_salt, |ui| keys::lane(ui, span, values, painted, scale))
+                    .inner
+            })
+            .inner;
+        let summary = format!(
+            "{} keys · ±{}{}",
+            span.keys(),
+            match scale {
+                keys::Scale::Db(full) => format!("{full:.1} dB"),
+                keys::Scale::Cents(full) => format!("{full} c"),
+            },
+            match edited {
+                0 => String::new(),
+                n => format!(" · {n} edited"),
+            }
+        );
+        let ink = match edited {
+            0 => app::caption(ui.visuals()),
+            _ => app::warn(ui.visuals()),
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(summary)
+                    .font(egui::FontId::monospace(SUMMARY_TEXT))
+                    .color(ink),
+            );
+        });
+        drawn
+    })
+    .inner
 }
 
 /// The lane's own axis column: the two ends of its scale, and the zero between them.
@@ -1685,36 +1702,45 @@ const TABLE_TEXT: f32 = 10.5;
 const TABLE_COLUMNS: usize = 4;
 const TABLE_KEY_W: f32 = 34.0;
 
-/// Every key's record, four columns across, behind a fold.
-fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
-    ui.horizontal(|ui| {
-        ui.add_space(PAD);
+/// The fold over a per-key table: a chevron and a clickable label, which reads `shown`
+/// while the table is shut. Returns whether the table is open.
+pub(super) fn fold(ui: &mut egui::Ui, open: &mut bool, shown: &str) -> bool {
+    let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let glyph = match state.table {
+        let glyph = match *open {
             true => Glyph::ChevronDown,
             false => Glyph::ChevronRight,
         };
-        let quiet = app::caption(ui.visuals());
-        icon(ui, glyph, CHEVRON, quiet);
-        let label = match state.table {
+        icon(ui, glyph, CHEVRON, app::caption(ui.visuals()));
+        let label = match *open {
             true => "Hide the per-key table",
-            false => "Show the 128-key gain and detune table",
+            false => shown,
         };
-        if ui
-            .add(
-                egui::Label::new(
-                    egui::RichText::new(label)
-                        .size(FACTS_TEXT)
-                        .color(ui.visuals().weak_text_color()),
-                )
-                .sense(egui::Sense::click()),
-            )
-            .clicked()
-        {
-            state.table = !state.table;
-        }
+        ui.label(
+            egui::RichText::new(label)
+                .size(FACTS_TEXT)
+                .color(ui.visuals().weak_text_color()),
+        );
     });
-    if !state.table {
+    if row.response.interact(egui::Sense::click()).clicked() {
+        *open = !*open;
+    }
+    *open
+}
+
+/// Every key's record, four columns across, behind a fold.
+fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
+    let open = ui
+        .horizontal(|ui| {
+            ui.add_space(PAD);
+            fold(
+                ui,
+                &mut state.table,
+                "Show the 128-key gain and detune table",
+            )
+        })
+        .inner;
+    if !open {
         return;
     }
     let per_column = keymap::KEYS.div_ceil(TABLE_COLUMNS);
@@ -1817,7 +1843,6 @@ pub fn stated(entity: &Entity) -> Option<Cell> {
                 false => Some(Cell {
                     label: "Category",
                     body: Body::Read(categories.join(", ")),
-                    note: None,
                     hint: "the cat section, as the file holds it",
                 }),
             }
@@ -1829,7 +1854,6 @@ pub fn stated(entity: &Entity) -> Option<Cell> {
                 false => Some(Cell {
                     label: "Sub name",
                     body: Body::Read(sub),
-                    note: None,
                     hint: "the vendor's second name",
                 }),
             }
@@ -1839,12 +1863,6 @@ pub fn stated(entity: &Entity) -> Option<Cell> {
 
 /// What the file says about itself.
 pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
-    controls::heading(
-        ui,
-        "About this file",
-        "what the file says about itself, read here and written back unchanged",
-        None,
-    );
     let mut rows = vec![
         Fact {
             key: "Format",
@@ -1890,7 +1908,7 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
             note: "gain and detune per key, ahead of the zone table",
         });
     }
-    super::capability::facts(ui, &rows);
+    capability::about(ui, &rows);
 }
 
 /// The nineteen capabilities of the instrument editor, and where this generation stands
@@ -1900,133 +1918,104 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
 /// `ReadOnly` a field the format states that this app does not write, and `Absent` a
 /// field the format does not have. The tests check the table against the paths [`set`]
 /// accepts.
-pub fn capabilities(generation: &str) -> Vec<Row> {
+pub fn capabilities(generation: &str) -> Stands {
     let v2 = generation == "v2";
-    let row = |name: &'static str, state: Cap, note: &'static str| Row { name, state, note };
-    vec![
-        row(
-            "name",
-            Cap::Editable,
-            match v2 {
-                true => "32 B in the hdr section",
-                false => "66 B in the hdr section",
-            },
+    let by = |two: (Cap, &'static str), wide: (Cap, &'static str)| match v2 {
+        true => two,
+        false => wide,
+    };
+    [
+        by(
+            (Cap::Editable, "32 B in the hdr section"),
+            (Cap::Editable, "66 B in the hdr section"),
         ),
-        row(
-            "category / sub",
-            Cap::ReadOnly,
-            match v2 {
-                true => "the cat section, on the identity row",
-                false => "the sub name, on the identity row",
-            },
+        by(
+            (Cap::ReadOnly, "the cat section, on the identity row"),
+            (Cap::ReadOnly, "the sub name, on the identity row"),
         ),
-        row(
-            "key zones: root / top / low",
-            Cap::Editable,
-            match v2 {
-                true => "the zone table; each low is derived from the zone below",
-                false => "the wide zone record states all three",
-            },
+        by(
+            (
+                Cap::Editable,
+                "the zone table; each low is derived from the zone below",
+            ),
+            (Cap::Editable, "the wide zone record states all three"),
         ),
-        row(
-            "velocity layers",
-            match v2 {
-                true => Cap::Absent,
-                false => Cap::ReadOnly,
-            },
-            match v2 {
-                true => "dropped by v2",
-                false => "one wide window per zone, and no setter for it",
-            },
+        by(
+            (Cap::Absent, "dropped by v2"),
+            (
+                Cap::ReadOnly,
+                "one wide window per zone, and no setter for it",
+            ),
         ),
-        row(
-            "per-zone gain / detune",
-            Cap::ReadOnly,
-            match v2 {
-                true => "a u24 gain in the record, and no detune beside it",
-                false => "a dB float in the stroke header, which is not read here",
-            },
+        by(
+            (
+                Cap::ReadOnly,
+                "a u24 gain in the record, and no detune beside it",
+            ),
+            (
+                Cap::ReadOnly,
+                "a dB float in the stroke header, which is not read here",
+            ),
         ),
-        row(
-            "per-key table",
-            match v2 {
-                true => Cap::Editable,
-                false => Cap::ReadOnly,
-            },
-            match v2 {
-                true => "128 records of gain and detune",
-                false => "128 records of gain and detune in the wide map, not read here",
-            },
+        by(
+            (Cap::Editable, "128 records of gain and detune"),
+            (
+                Cap::ReadOnly,
+                "128 records of gain and detune in the wide map, not read here",
+            ),
         ),
-        row(
-            "instrument gain",
-            Cap::ReadOnly,
-            match v2 {
-                true => "the map's own record, read on the Per key heading",
-                false => "the map's own record, which is not read here",
-            },
+        by(
+            (
+                Cap::ReadOnly,
+                "the map's own record, read on the Per key heading",
+            ),
+            (
+                Cap::ReadOnly,
+                "the map's own record, which is not read here",
+            ),
         ),
-        row(
-            "loop points / crossfade",
+        (
             Cap::Absent,
             "baked into the stroke, with no mark this editor reads",
         ),
-        row(
-            "loop decay / detune",
-            Cap::Absent,
-            match v2 {
-                true => "dropped by v2",
-                false => "in the stroke header, which is written back unchanged",
-            },
+        by(
+            (Cap::Absent, "dropped by v2"),
+            (
+                Cap::Absent,
+                "in the stroke header, which is written back unchanged",
+            ),
         ),
-        row("release samples", Cap::Absent, "a piano library's bank 2"),
-        row(
-            "pedal resonance samples",
-            Cap::Absent,
-            "a piano library's bank 1",
-        ),
-        row(
-            "sound parameters",
+        (Cap::Absent, "a piano library's bank 2"),
+        (Cap::Absent, "a piano library's bank 1"),
+        (
             Cap::ReadOnly,
             "the sty preset the loader installs for this category",
         ),
-        row(
-            "stereo / channels",
+        (
             Cap::ReadOnly,
             "per stroke, and known once the zone is decoded",
         ),
-        row(
-            "replace / add a stroke",
-            Cap::NeedsEncode,
-            match v2 {
-                true => "encode a WAV; played on hardware",
-                false => "encode a WAV; byte-exact, never played here",
-            },
+        by(
+            (Cap::NeedsEncode, "encode a WAV; played on hardware"),
+            (
+                Cap::NeedsEncode,
+                "encode a WAV; byte-exact, never played here",
+            ),
         ),
-        row(
-            "cut / move / drop strokes",
+        (
             Cap::ReadOnly,
             "the zone table is read; nothing here removes a zone",
         ),
-        row("decode / audition", Cap::Editable, "click a key, or a zone"),
-        row(
-            "size trim",
+        (Cap::Editable, "click a key, or a zone"),
+        (
             Cap::ReadOnly,
             "each zone's bytes are read; nothing here drops one",
         ),
-        row(
-            "write to the instrument",
-            Cap::Editable,
-            match v2 {
-                true => "the header's Queue send, a class 3 write",
-                false => "the header's Queue send",
-            },
+        by(
+            (Cap::Editable, "the header's Queue send, a class 3 write"),
+            (Cap::Editable, "the header's Queue send"),
         ),
-        row(
-            "byte-exact round trip",
-            Cap::Verified,
-            "every stroke is written back byte for byte",
-        ),
+        (Cap::Verified, "every stroke is written back byte for byte"),
     ]
 }
 
@@ -2454,7 +2443,7 @@ mod tests {
     fn every_editable_capability_names_a_path_the_editor_accepts() {
         let bytes = v2_bytes();
         for generation in ["v2", "v3", "v4"] {
-            for row in capabilities(generation) {
+            for row in capability::rows(&capabilities(generation)) {
                 if row.state != Cap::Editable {
                     continue;
                 }
@@ -2477,8 +2466,7 @@ mod tests {
         }
         // Nothing here writes a velocity window, so the wide generations list it as
         // read-only.
-        assert!(capabilities("v3")
-            .iter()
+        assert!(capability::rows(&capabilities("v3"))
             .all(|row| row.name != "velocity layers" || row.state == Cap::ReadOnly));
     }
 
@@ -2525,21 +2513,25 @@ mod tests {
     #[test]
     fn picking_a_zone_opens_its_row_and_clicking_it_again_closes_it() {
         let mut state = State::default();
-        state.pick(1, true);
-        assert_eq!(state.selected, Some(1));
-        assert!(state.open);
-        assert_eq!(state.reveal, Some(1), "the map asked for it to be shown");
+        state.rows.pick(1, true);
+        assert_eq!(state.rows.selected, Some(1));
+        assert!(state.rows.open);
+        assert_eq!(
+            state.rows.reveal,
+            Some(1),
+            "the map asked for it to be shown"
+        );
 
-        state.reveal = None;
-        state.pick(1, false);
-        assert!(!state.open, "the same row closes");
-        assert_eq!(state.reveal, None);
+        state.rows.reveal = None;
+        state.rows.pick(1, false);
+        assert!(!state.rows.open, "the same row closes");
+        assert_eq!(state.rows.reveal, None);
 
         // Clicking another row opens it.
-        state.pick(0, false);
-        assert_eq!((state.selected, state.open), (Some(0), true));
-        state.pick(1, false);
-        assert_eq!((state.selected, state.open), (Some(1), true));
+        state.rows.pick(0, false);
+        assert_eq!((state.rows.selected, state.rows.open), (Some(0), true));
+        state.rows.pick(1, false);
+        assert_eq!((state.rows.selected, state.rows.open), (Some(1), true));
     }
 
     /// What a struck key does: the zone that answers it, or why nothing does.
@@ -3029,7 +3021,7 @@ mod tests {
             &Played::default(),
         );
         assert_eq!(selected(&state), Some(0));
-        assert_eq!(state.reveal, Some(0));
+        assert_eq!(state.rows.reveal, Some(0));
         assert!(sets.is_empty() && ask.is_empty(), "a pick is not an edit");
     }
 

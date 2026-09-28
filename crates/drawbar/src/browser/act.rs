@@ -21,6 +21,7 @@ use crate::workspace::{Fresh, LocalEntity, Workspace};
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
 
 /// What the browser asks the rest of the app to do.
+#[derive(PartialEq, Eq, Debug)]
 pub enum Act {
     Connect,
     Disconnect,
@@ -481,9 +482,7 @@ pub fn apply(
             }
             Act::Narrow(narrow) => shell.filter.narrow(narrow),
             Act::CloseTab => {
-                if let Some(spot) = tabs.showing() {
-                    tabs.close(spot);
-                }
+                tabs.close(tabs.showing());
             }
             Act::ToggleDock(dock) => shell.toggle(dock),
             Act::ShowPage(page) => shell.show_page(page),
@@ -640,6 +639,18 @@ pub(super) enum Bound {
     Nowhere,
 }
 
+/// The first slot of a folder that a scan found empty and nothing in the queue is waiting
+/// for: where a duplicate of a slot lands, and where an unlinked asset is queued.
+///
+/// ⚠️ Two writes to one address would leave only one.
+pub(super) fn spare_slot(
+    state: &DeviceState,
+    class: ObjectClass,
+    queue: &Queue,
+) -> Option<Location> {
+    state.first_free(class, &queue.waiting_in(class))
+}
+
 /// The slot an asset belongs to ([`owed`]), or else the first free slot of its folder
 /// that nothing in the queue is waiting for.
 ///
@@ -657,7 +668,7 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
     else {
         return Bound::Nowhere;
     };
-    match state.first_free(class, &queue.waiting_in(class)) {
+    match spare_slot(state, class, queue) {
         Some(at) => Bound::At(class, at),
         None => Bound::Full(class),
     }
@@ -1283,11 +1294,11 @@ mod tests {
         let onto = crate::browser::Onto::Slot { class, at: at(3) };
         assert_eq!(
             crate::browser::landing(&carried, onto),
-            crate::browser::Landing::Send {
+            Ok(Act::Send {
                 id,
                 class,
                 at: at(3)
-            }
+            })
         );
 
         bench.act(vec![Act::Send {

@@ -9,6 +9,7 @@ use eframe::egui;
 use super::controls;
 use crate::app;
 use crate::icon::{painted, Glyph};
+use crate::panel::cut;
 
 /// How one capability stands in one format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +54,43 @@ impl State {
     }
 }
 
+/// The capabilities of the instrument editor, in the order every format's table lists
+/// them.
+pub const NAMES: [&str; 19] = [
+    "name",
+    "category / sub",
+    "key zones: root / top / low",
+    "velocity layers",
+    "per-zone gain / detune",
+    "per-key table",
+    "instrument gain",
+    "loop points / crossfade",
+    "loop decay / detune",
+    "release samples",
+    "pedal resonance samples",
+    "sound parameters",
+    "stereo / channels",
+    "replace / add a stroke",
+    "cut / move / drop strokes",
+    "decode / audition",
+    "size trim",
+    "write to the instrument",
+    "byte-exact round trip",
+];
+
+/// How one format stands on each of [`NAMES`], in the same order, with the format's own
+/// note.
+pub type Stands = [(State, &'static str); 19];
+
+/// Each of [`NAMES`] with how `stands` has it.
+pub fn rows(stands: &Stands) -> impl Iterator<Item = Row> + '_ {
+    NAMES.iter().zip(stands).map(|(name, (state, note))| Row {
+        name,
+        state: *state,
+        note,
+    })
+}
+
 /// One capability as one format holds it. `note` is the format's own detail (an offset,
 /// a limit, a bank) and may be empty.
 pub struct Row {
@@ -84,7 +122,8 @@ const NOTE: f32 = 10.0;
 
 /// The capability table under its heading: `live · read · absent` at the right, the
 /// absent ones named in the note, the rows in as many columns as the width allows.
-pub fn table(ui: &mut egui::Ui, rows: &[Row]) {
+pub fn table(ui: &mut egui::Ui, stands: &Stands) {
+    let rows: Vec<Row> = rows(stands).collect();
     let count = |state: State| rows.iter().filter(|row| row.state == state).count();
     let live = count(State::Editable) + count(State::Verified);
     let absent: Vec<&str> = rows
@@ -159,26 +198,18 @@ fn capability(ui: &mut egui::Ui, cell: egui::Rect, row: &Row) {
         ink,
     );
     let after = left + name.size().x + 7.0;
-    let room = cell.right() - after;
     let detail = match row.note.is_empty() {
         true => row.state.word(),
         false => row.note,
     };
-    if room > 0.0 {
-        let mut job = egui::text::LayoutJob::default();
-        job.append(
-            detail,
-            0.0,
-            egui::TextFormat::simple(egui::FontId::proportional(NOTE), app::caption(&visuals)),
-        );
-        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-        let note = painter.layout_job(job);
-        painter.galley(
-            egui::pos2(after, cell.center().y - note.size().y / 2.0),
-            note,
-            app::caption(&visuals),
-        );
-    }
+    cut(
+        &painter,
+        after,
+        cell.center().y,
+        cell.right() - after,
+        detail,
+        egui::TextFormat::simple(egui::FontId::proportional(NOTE), app::caption(&visuals)),
+    );
     let hint = match row.note.is_empty() {
         true => row.state.word().to_string(),
         false => format!("{} — {}", row.state.word(), row.note),
@@ -202,6 +233,17 @@ pub fn offsets(ui: &mut egui::Ui, rows: &[Offset]) {
     for row in rows {
         three(ui, (&row.at, true), &row.holds, row.note);
     }
+}
+
+/// What the file says about itself, under its heading.
+pub fn about(ui: &mut egui::Ui, rows: &[Fact]) {
+    controls::heading(
+        ui,
+        "About this file",
+        "what the file says about itself, read here and written back unchanged",
+        None,
+    );
+    facts(ui, rows);
 }
 
 /// What the file says about itself: the same three columns, with the key in proportional
@@ -252,14 +294,13 @@ fn three(ui: &mut egui::Ui, key: (&str, bool), value: &str, note: &str) {
         ),
     ];
     for (text, font, ink, left) in cells {
-        let mut job = egui::text::LayoutJob::default();
-        job.append(text, 0.0, egui::TextFormat::simple(font, ink));
-        job.wrap = egui::text::TextWrapping::truncate_at_width((inner.right() - left).max(0.0));
-        let galley = painter.layout_job(job);
-        painter.galley(
-            egui::pos2(left, rect.center().y - galley.size().y / 2.0),
-            galley,
-            ink,
+        cut(
+            painter,
+            left,
+            rect.center().y,
+            inner.right() - left,
+            text,
+            egui::TextFormat::simple(font, ink),
         );
     }
 }
@@ -271,34 +312,16 @@ mod tests {
 
     #[test]
     fn the_badge_counts_and_the_note_names_what_is_absent() {
-        let rows = [
-            Row {
-                name: "name",
-                state: State::Editable,
-                note: "",
-            },
-            Row {
-                name: "loop points",
-                state: State::ReadOnly,
-                note: "baked",
-            },
-            Row {
-                name: "release samples",
-                state: State::Absent,
-                note: "",
-            },
-            Row {
-                name: "round trip",
-                state: State::Verified,
-                note: "",
-            },
-        ];
+        let mut stands: Stands = [(State::Editable, ""); 19];
+        stands[7] = (State::ReadOnly, "baked");
+        stands[9] = (State::Absent, "");
+        stands[18] = (State::Verified, "");
         let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| table(ui, &rows));
+            egui::CentralPanel::default().show(ctx, |ui| table(ui, &stands));
         });
         let painted = words(&output);
         assert!(
-            painted.contains(&"2 live · 1 read · 1 absent".to_string()),
+            painted.contains(&"17 live · 1 read · 1 absent".to_string()),
             "{painted:?}"
         );
         assert!(
@@ -307,7 +330,7 @@ mod tests {
                 .any(|word| word.starts_with("not in this format: release samples")),
             "{painted:?}"
         );
-        for row in &rows {
+        for row in rows(&stands) {
             assert!(
                 painted.contains(&row.name.to_string()),
                 "{} not painted",

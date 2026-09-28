@@ -21,7 +21,7 @@ use crate::library::{keyboard_mark, mark_words, Mark};
 use crate::panel::caps;
 use crate::queue::Queue;
 use crate::room;
-use crate::strings::{display_name, folder, kind_word, place, shown, tagged};
+use crate::strings::{counted, display_name, folder, kind_word, place, shown, tagged};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Origin};
 
@@ -209,8 +209,6 @@ pub struct Extras {
 pub struct Cell {
     pub label: &'static str,
     pub body: Body,
-    /// A note drawn in the row instead of on hover, for a constraint the field enforces.
-    pub note: Option<String>,
     pub hint: &'static str,
 }
 
@@ -366,7 +364,7 @@ fn left(
                 .color
                 .gamma_multiply(0.85),
             mono: true,
-            stroke: Some(visuals.widgets.noninteractive.bg_stroke.color),
+            stroke: visuals.widgets.noninteractive.bg_stroke.color,
             dashed: false,
             pad: 6.0,
             height: CONTROL,
@@ -452,7 +450,7 @@ fn right(
             label: Some(label),
             ink,
             mono: false,
-            stroke: Some(stroke),
+            stroke,
             dashed: loud.tone == Tone::Idle,
             pad: 8.0,
             height: CONTROL,
@@ -479,7 +477,7 @@ fn right(
                 label: words.then_some(label),
                 ink: quiet,
                 mono: false,
-                stroke: Some(visuals.widgets.noninteractive.bg_stroke.color),
+                stroke: visuals.widgets.noninteractive.bg_stroke.color,
                 dashed: false,
                 pad: match words {
                     true => 7.0,
@@ -508,24 +506,13 @@ fn right(
         ))
         .clicked();
     let unsaved = entity.is_unsaved();
-    let revert = quiet_pill(ui, Glyph::RotateCcw, "Revert", unsaved);
-    act.revert = match unsaved {
-        true => revert
-            .on_hover_text(hint(
-                "Revert",
-                "back to the bytes it was last saved as",
-                words,
-            ))
-            .clicked(),
-        false => {
-            revert.on_hover_text(hint(
-                "Revert",
-                "nothing has changed since it was saved",
-                words,
-            ));
-            false
-        }
+    let why = match unsaved {
+        true => "back to the bytes it was last saved as",
+        false => "nothing has changed since it was saved",
     };
+    act.revert = quiet_pill(ui, Glyph::RotateCcw, "Revert", unsaved)
+        .on_hover_text(hint("Revert", why, words))
+        .clicked();
 
     rule(ui);
     act.face = segments(ui, facts, stage);
@@ -628,31 +615,21 @@ fn row(ui: &mut egui::Ui, cells: &[Cell], stage: Stage) {
         ui.spacing_mut().item_spacing = egui::vec2(18.0, 4.0);
         ui.add_space(indent);
         for cell in cells {
-            let response = ui
-                .horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 7.0;
-                    ui.label(caps(cell.label).color(caption(ui.visuals())));
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    match &cell.body {
-                        Body::Chips(chips) => {
-                            for text in chips {
-                                chip(ui, text);
-                            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 7.0;
+                ui.label(caps(cell.label).color(caption(ui.visuals())));
+                ui.spacing_mut().item_spacing.x = 4.0;
+                match &cell.body {
+                    Body::Chips(chips) => {
+                        for text in chips {
+                            chip(ui, text);
                         }
-                        Body::Read(value) => read(ui, value),
                     }
-                    if let Some(note) = &cell.note {
-                        ui.label(
-                            egui::RichText::new(note)
-                                .size(10.0)
-                                .color(caption(ui.visuals())),
-                        );
-                    }
-                })
-                .response;
-            if !cell.hint.is_empty() {
-                response.on_hover_text(cell.hint);
-            }
+                    Body::Read(value) => read(ui, value),
+                }
+            })
+            .response
+            .on_hover_text(cell.hint);
         }
     };
     match stage {
@@ -683,7 +660,7 @@ fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
             label: Some(text),
             ink,
             mono: false,
-            stroke: Some(ink),
+            stroke: ink,
             dashed: false,
             pad: 6.0,
             height: CHIP,
@@ -700,7 +677,7 @@ struct Pill<'a> {
     label: Option<&'a str>,
     ink: egui::Color32,
     mono: bool,
-    stroke: Option<egui::Color32>,
+    stroke: egui::Color32,
     dashed: bool,
     pad: f32,
     height: f32,
@@ -733,13 +710,11 @@ fn pill(ui: &mut egui::Ui, held: Pill<'_>) -> egui::Response {
     if held.live && response.hovered() {
         painter.rect_filled(rect, RADIUS, visuals.widgets.hovered.weak_bg_fill);
     }
-    if let Some(color) = held.stroke {
-        let stroke = egui::Stroke::new(1.0_f32, color);
-        match held.dashed {
-            true => crate::panel::dashed_rect(&painter, rect.shrink(0.5), stroke),
-            false => {
-                painter.rect_stroke(rect, RADIUS, stroke, egui::StrokeKind::Inside);
-            }
+    let stroke = egui::Stroke::new(1.0_f32, held.stroke);
+    match held.dashed {
+        true => crate::panel::dashed_rect(&painter, rect.shrink(0.5), stroke),
+        false => {
+            painter.rect_stroke(rect, RADIUS, stroke, egui::StrokeKind::Inside);
         }
     }
     let mut x = rect.left() + held.pad;
@@ -1075,10 +1050,7 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
     if kind == Kind::Text {
         return Some(match text::read(&entity.bytes).map(text::lines) {
             Ok(lines) => SizeLine {
-                text: match lines {
-                    1 => "1 line".to_string(),
-                    lines => format!("{lines} lines"),
-                },
+                text: counted(lines, "line", "lines"),
                 warn: false,
                 hint: format!("{} bytes", entity.bytes.len()),
             },
@@ -1092,10 +1064,7 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
     if kind == Kind::SetList {
         let entries = setlist::entries(entity.entity.as_ref()?)?;
         return Some(SizeLine {
-            text: match entries {
-                1 => "1 entry".to_string(),
-                entries => format!("{entries} entries"),
-            },
+            text: counted(entries, "entry", "entries"),
             warn: false,
             hint: "the programs this set list orders".to_string(),
         });
@@ -1266,7 +1235,6 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
             cells.push(Cell {
                 label: "Tags",
                 body: Body::Chips(worn),
-                note: None,
                 hint: "what this computer's list labels it with",
             });
         }

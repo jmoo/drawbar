@@ -17,9 +17,9 @@ use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, Glyph};
 use crate::log::Log;
-use crate::panel::Track;
+use crate::panel::{cell, cut, inset, row_ink, Track, GAP, GLYPH, PAD};
 use crate::strings::{label, place};
-use crate::workspace::{LocalEntity, Workspace};
+use crate::workspace::{first_difference, wire_body, LocalEntity, Workspace};
 
 /// One asset waiting to be written, and the slot it is waiting for.
 pub struct Queued {
@@ -605,32 +605,18 @@ impl Queue {
 /// them, without their file containers, because two containers of one body can differ
 /// in their headers alone.
 fn compare(here: &[u8], there: &[u8]) -> Diff {
-    let body = |bytes: &[u8]| {
-        nord_usb::envelope::unwrap(bytes)
-            .ok()
-            .map(|read| read.body.0)
-    };
-    let (mine, held) = match (body(here), body(there)) {
+    let (mine, held) = match (wire_body(here), wire_body(there)) {
         (Some(mine), Some(held)) => (mine, held),
         // Not a container this app can unwrap, so the whole input is compared.
         _ => (here.to_vec(), there.to_vec()),
     };
-    let Some(first_at) = parted(&mine, &held) else {
+    let Some(first_at) = first_difference(&mine, &held) else {
         return Diff::Identical;
     };
     match apart(here, there) {
         Some(fields) => Diff::Fields(fields),
         None => Diff::Bytes { first_at },
     }
-}
-
-/// The offset of the first byte where the two differ, if they differ.
-fn parted(here: &[u8], there: &[u8]) -> Option<usize> {
-    if let Some(first_at) = here.iter().zip(there).position(|(mine, held)| mine != held) {
-        return Some(first_at);
-    }
-    // One is a prefix of the other; the first difference is where the shorter one ends.
-    (here.len() != there.len()).then(|| here.len().min(there.len()))
 }
 
 /// The registered fields two bodies disagree on, if both decode into a registry and any
@@ -653,15 +639,10 @@ fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
     (!differing.is_empty()).then_some(differing)
 }
 
-/// The height of one waiting item, and the list's padding at each end.
+/// The height of one waiting item.
 const ROW: f32 = 22.0;
-const PAD: f32 = 8.0;
 
-/// The gap between a row's parts.
-const GAP: f32 = 6.0;
-
-/// A kind glyph in a row, and the state glyph at the end of it.
-const GLYPH: f32 = 13.0;
+/// The state glyph at the end of a row.
 const SMALL: f32 = 11.0;
 
 /// The destination chip's height, and its padding at each end.
@@ -821,19 +802,7 @@ fn item(
     );
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    let fill = match (selected, response.hovered()) {
-        (true, _) => Some(visuals.selection.bg_fill),
-        (false, true) => Some(visuals.faint_bg_color),
-        (false, false) => None,
-    };
-    if let Some(fill) = fill {
-        painter.rect_filled(rect, 3.0, fill);
-    }
-    let ink = match selected {
-        true => visuals.selection.stroke.color,
-        false => visuals.text_color(),
-    };
-    let quiet = cell_ink(selected, visuals.weak_text_color(), &visuals);
+    let (ink, quiet) = row_ink(&painter, rect, selected, response.hovered(), &visuals);
 
     // Lay out the right end first, so the name is truncated to the room left.
     let box_ = |right: f32| {
@@ -890,17 +859,13 @@ fn item(
         ink,
     );
     let name_at = left + GLYPH + GAP;
-    let mut job = egui::text::LayoutJob::simple_singleline(
-        crate::strings::display_name(&entity.name).to_string(),
-        egui::FontId::proportional(NAME),
-        ink,
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width((right - name_at).max(0.0));
-    let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(name_at, rect.center().y - galley.size().y / 2.0),
-        galley,
-        egui::Color32::PLACEHOLDER,
+    cut(
+        &painter,
+        name_at,
+        rect.center().y,
+        right - name_at,
+        crate::strings::display_name(&entity.name),
+        egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
 
     // Double-click opens the asset's document, as it does in the tree.
@@ -953,32 +918,13 @@ fn destination(
         egui::FontId::monospace(MONO),
         ink,
     );
+    let size = chip_size(&galley);
     let box_ = egui::Rect::from_min_size(
-        egui::pos2(
-            right - galley.size().x - 2.0 * CHIP_PAD,
-            row.center().y - CHIP / 2.0,
-        ),
-        egui::vec2(galley.size().x + 2.0 * CHIP_PAD, CHIP),
+        egui::pos2(right - size.x, row.center().y - CHIP / 2.0),
+        size,
     );
-    // Flat: no fill behind the address until the pointer is over it.
-    let chip = ui.interact(
-        box_,
-        ui.id().with(("destination", held.id)),
-        egui::Sense::click(),
-    );
-    if chip.hovered() {
-        ui.painter()
-            .rect_filled(box_, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
-    }
-    ui.painter().galley(
-        egui::pos2(
-            box_.left() + CHIP_PAD,
-            box_.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        egui::Color32::PLACEHOLDER,
-    );
-    let chip = chip.on_hover_text("change where this goes");
+    let id = ui.id().with(("destination", held.id));
+    let chip = flat_chip(ui, box_, id, galley, false).on_hover_text("change where this goes");
     // ⚠️ A menu closes on any click, and switching banks is a click. The picker stays
     // open until a cell is picked or a click lands outside it.
     egui::Popup::menu(&chip)
@@ -1081,23 +1027,34 @@ fn picker(
 }
 
 /// One bank chip in the picker: the bank number, highlighted while that bank is shown.
-///
-/// Painted by hand, so it senses under its own id and looks like the row's flat
-/// destination chip.
 fn bank_chip(ui: &mut egui::Ui, id: egui::Id, bank: u32, on: bool) -> egui::Response {
-    let visuals = ui.visuals().clone();
     let ink = match on {
-        true => visuals.selection.stroke.color,
-        false => visuals.text_color(),
+        true => ui.visuals().selection.stroke.color,
+        false => ui.visuals().text_color(),
     };
     let galley = ui
         .painter()
         .layout_no_wrap(bank.to_string(), egui::FontId::monospace(MONO), ink);
-    let (box_, _) = ui.allocate_exact_size(
-        egui::vec2(galley.size().x + 2.0 * CHIP_PAD, CHIP),
-        egui::Sense::hover(),
-    );
+    let (box_, _) = ui.allocate_exact_size(chip_size(&galley), egui::Sense::hover());
+    flat_chip(ui, box_, id, galley, on)
+}
+
+/// The box a chip needs around `galley`.
+fn chip_size(galley: &egui::Galley) -> egui::Vec2 {
+    egui::vec2(galley.size().x + 2.0 * CHIP_PAD, CHIP)
+}
+
+/// A chip painted by hand, so it senses under its own id: `galley` in `box_`, with no
+/// fill until the pointer is over it, or the selection's fill while `on`.
+fn flat_chip(
+    ui: &mut egui::Ui,
+    box_: egui::Rect,
+    id: egui::Id,
+    galley: std::sync::Arc<egui::Galley>,
+    on: bool,
+) -> egui::Response {
     let response = ui.interact(box_, id, egui::Sense::click());
+    let visuals = ui.visuals();
     let fill = match (on, response.hovered()) {
         (true, _) => Some(visuals.selection.bg_fill),
         (false, true) => Some(visuals.widgets.hovered.weak_bg_fill),
@@ -1115,18 +1072,6 @@ fn bank_chip(ui: &mut egui::Ui, id: egui::Id, bank: u32, on: bool) -> egui::Resp
         egui::Color32::PLACEHOLDER,
     );
     response
-}
-
-/// A child `Ui` inset from the left by the padding rows keep at the right, so the head
-/// and rows line up with a row of the tree. The inset is taken once here so the whole
-/// grid moves together.
-fn inset(ui: &mut egui::Ui) -> egui::Ui {
-    let room = ui.available_rect_before_wrap();
-    ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(room.with_min_x(room.left() + PAD))
-            .layout(*ui.layout()),
-    )
 }
 
 /// The diff's four columns: the field, what is here, the sign between them, and what
@@ -1149,11 +1094,12 @@ fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
         .zip(tracks)
     {
         cut(
-            ui,
-            box_of(rect, track),
+            ui.painter(),
+            rect.left() + track.start,
+            rect.center().y,
+            track.end - track.start,
             &head.to_uppercase(),
-            egui::FontId::proportional(9.5),
-            ink,
+            egui::TextFormat::simple(egui::FontId::proportional(9.5), ink),
         );
     }
 }
@@ -1164,30 +1110,38 @@ fn field_row(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], field: &Field
         ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
     let visuals = ui.visuals().clone();
     let mono = egui::FontId::monospace(DIFF_MONO);
-    let strong = visuals.widgets.active.fg_stroke.color;
-    let quiet = visuals.weak_text_color();
     let name = label(&field.path);
-    cut(
-        ui,
-        box_of(rect, &tracks[0]),
-        &name,
-        egui::FontId::proportional(DIFF_MONO),
-        visuals.text_color(),
-    );
-    cut(
-        ui,
-        box_of(rect, &tracks[1]),
-        &field.here,
-        mono.clone(),
-        strong,
-    );
+    let cells = [
+        (
+            &name,
+            egui::FontId::proportional(DIFF_MONO),
+            visuals.text_color(),
+            &tracks[0],
+        ),
+        (
+            &field.here,
+            mono.clone(),
+            visuals.widgets.active.fg_stroke.color,
+            &tracks[1],
+        ),
+        (&field.there, mono, visuals.weak_text_color(), &tracks[3]),
+    ];
+    for (text, font, ink, track) in cells {
+        cut(
+            ui.painter(),
+            rect.left() + track.start,
+            rect.center().y,
+            track.end - track.start,
+            text,
+            egui::TextFormat::simple(font, ink),
+        );
+    }
     sign(
         ui,
-        box_of(rect, &tracks[2]),
+        cell(rect, &tracks[2]),
         Glyph::ArrowRight,
         warn(&visuals),
     );
-    cut(ui, box_of(rect, &tracks[3]), &field.there, mono, quiet);
     let _ = response.on_hover_text(format!("{name}: {} → {}", field.there, field.here));
 }
 
@@ -1201,33 +1155,14 @@ fn one_row(
     said: &str,
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
-    sign(ui, box_of(rect, &tracks[2]), glyph, tint);
+    sign(ui, cell(rect, &tracks[2]), glyph, tint);
     cut(
-        ui,
-        box_of(rect, &tracks[0]),
+        ui.painter(),
+        rect.left() + tracks[0].start,
+        rect.center().y,
+        tracks[0].end - tracks[0].start,
         said,
-        egui::FontId::proportional(DIFF_MONO),
-        tint,
-    );
-}
-
-/// The rect of a row's cell in one track.
-fn box_of(rect: egui::Rect, track: &Range<f32>) -> egui::Rect {
-    egui::Rect::from_min_max(
-        egui::pos2(rect.left() + track.start, rect.top()),
-        egui::pos2(rect.left() + track.end, rect.bottom()),
-    )
-}
-
-/// One cell, cut to its track with an ellipsis.
-fn cut(ui: &egui::Ui, box_: egui::Rect, text: &str, font: egui::FontId, tint: egui::Color32) {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, tint);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(box_.width());
-    let galley = ui.painter().layout_job(job);
-    ui.painter().galley(
-        egui::pos2(box_.left(), box_.center().y - galley.size().y / 2.0),
-        galley,
-        egui::Color32::PLACEHOLDER,
+        egui::TextFormat::simple(egui::FontId::proportional(DIFF_MONO), tint),
     );
 }
 
@@ -1572,7 +1507,7 @@ mod tests {
         );
         let slot = crate::browser::Onto::Slot { class, at: at(1) };
         let entity = workspace.get(id).unwrap();
-        assert!(crate::browser::landing(&carried(entity, &device.state).head, slot).allowed());
+        assert!(crate::browser::landing(&carried(entity, &device.state).head, slot).is_ok());
 
         device.pretend_attached_as("Nord Stage 4");
         refit(&workspace, &device.state, &mut queue, &mut log);
@@ -1580,7 +1515,7 @@ mod tests {
         let dragged = carried(entity, &device.state).head;
         assert!(!dragged.fits);
         match crate::browser::landing(&dragged, slot) {
-            crate::browser::Landing::No(why) => assert!(why.contains("format"), "{why}"),
+            Err(why) => assert!(why.contains("format"), "{why}"),
             other => panic!("{other:?} should have been refused"),
         }
     }

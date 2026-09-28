@@ -21,79 +21,83 @@ pub type OctaveShift<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<
 /// Half-step transposition. As with [`OctaveShift`], the model fixes the parameters.
 pub type Transpose<const OFFSET: u8, const MIN: i8, const MAX: i8> = RangedI8<OFFSET, MIN, MAX>;
 
-/// A continuous control on the panel's own `0..10`: level, compression, gain, tone.
+/// A continuous knob: a stored `0..=MAX` read in the unit whose code is `UNIT`.
 ///
-/// `FULL` is the stored value the panel reads as 10, and so also fixes the slot's width.
-/// Use the [`Level`] and [`Level6`] aliases. Nearly every one of these is the seven-bit
-/// `0..=127`, and the Stage 4 puts a few of the same knobs in six bits.
-///
-/// ⚠️ A `0..=127` slot is not automatically one of these. An envelope stage reads in
-/// milliseconds, a filter cutoff in hertz, and an equalizer band in decibels either side
-/// of a center; see [`Time`], [`Frequency`], [`Rate`] and [`Bipolar`]. Typing one of
-/// those as a `Level` makes the panel reading wrong, where the right type would leave it
-/// absent.
+/// `MAX` also fixes the slot's width. Name the type through its aliases: [`Level`] and
+/// [`Level6`] on the panel's own `0..10`, and [`Time`], [`Frequency`], [`Rate`] and
+/// [`Pan`] in their units. `Display` prints the panel reading only on `0..10`, where the
+/// transform is known. The other units read over a curve no manual publishes, so those
+/// print the stored byte. The unit still lets an interface label the control and pick a
+/// taper without its own table of field names.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LevelOf<const FULL: u8> {
+pub struct KnobOf<const MAX: u8, const UNIT: u8> {
     inner: u8,
 }
 
-impl<const FULL: u8> LevelOf<FULL> {
-    const VALID: () = assert!(FULL > 0, "a level needs a nonzero full-scale value");
+impl<const MAX: u8, const UNIT: u8> KnobOf<MAX, UNIT> {
+    const VALID: () = assert!(MAX > 0, "a knob needs a nonzero full-scale value");
 
     pub const MAX: u8 = {
         let () = Self::VALID;
-        FULL
+        MAX
     };
 
     pub fn new(value: u8) -> Result<Self, ParseError> {
         value.try_into()
     }
 
-    /// The stored value, `0..=FULL`.
+    /// The stored value, `0..=MAX`.
     pub fn as_u8(&self) -> u8 {
         let () = Self::VALID;
         self.inner
     }
+}
 
+/// The panel's 0..10 reading of a stored value on a knob whose full scale is `max`.
+fn panel_reading(value: u8, max: u8) -> f32 {
+    f32::from(value) / f32::from(max) * 10.0
+}
+
+impl<const FULL: u8> KnobOf<FULL, { Unit::Panel10.code() }> {
     /// The panel's 0..10 reading.
     ///
     /// Confirmed on hardware. Reverb wet stores `43` and the panel shows 3.4:
     /// `43 / 127 * 10 = 3.39`.
     pub fn as_panel(&self) -> f32 {
         let () = Self::VALID;
-        f32::from(self.inner) / f32::from(FULL) * 10.0
+        panel_reading(self.inner, FULL)
     }
 }
 
-impl<const FULL: u8> Default for LevelOf<FULL> {
+impl<const MAX: u8, const UNIT: u8> Default for KnobOf<MAX, UNIT> {
     fn default() -> Self {
         let () = Self::VALID;
         Self { inner: 0 }
     }
 }
 
-impl<const FULL: u8> TryFrom<u8> for LevelOf<FULL> {
+impl<const MAX: u8, const UNIT: u8> TryFrom<u8> for KnobOf<MAX, UNIT> {
     type Error = ParseError;
 
     fn try_from(value: u8) -> Result<Self, ParseError> {
         let () = Self::VALID;
-        if value > FULL {
+        if value > MAX {
             return Err(ParseError::OutOfBounds {
                 value: format!("{value}"),
-                bound: format!("0..={FULL}"),
+                bound: format!("0..={MAX}"),
             });
         }
-        Ok(LevelOf { inner: value })
+        Ok(KnobOf { inner: value })
     }
 }
 
-impl<const FULL: u8> Packed for LevelOf<FULL> {
+impl<const MAX: u8, const UNIT: u8> Packed for KnobOf<MAX, UNIT> {
     const MAX_BITS: u32 = {
         let () = Self::VALID;
-        bits_for(FULL as u64)
+        bits_for(MAX as u64)
     };
     const DECODE_BITS: u32 = u8::BITS;
-    const CONTROL: ControlKind = ControlKind::Knob(Unit::Panel10);
+    const CONTROL: ControlKind = ControlKind::Knob(Unit::expect_code(UNIT));
     type Error = ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, ParseError> {
@@ -105,24 +109,41 @@ impl<const FULL: u8> Packed for LevelOf<FULL> {
     }
 }
 
-impl<const FULL: u8> Display for LevelOf<FULL> {
-    /// Stored byte and panel reading: `96 (7.6)`.
+impl<const MAX: u8, const UNIT: u8> Display for KnobOf<MAX, UNIT> {
+    /// The stored byte, then the panel reading where the transform is known: `96 (7.6)`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({:.1})", self.inner, self.as_panel())
+        write!(f, "{}", self.inner)?;
+        if UNIT == Unit::Panel10.code() {
+            write!(f, " ({:.1})", panel_reading(self.inner, MAX))?;
+        }
+        Ok(())
     }
 }
 
-impl<const FULL: u8> Debug for LevelOf<FULL> {
+impl<const MAX: u8, const UNIT: u8> Debug for KnobOf<MAX, UNIT> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner)
     }
 }
 
-impl<const FULL: u8> PartialEq<u8> for LevelOf<FULL> {
+impl<const MAX: u8, const UNIT: u8> PartialEq<u8> for KnobOf<MAX, UNIT> {
     fn eq(&self, other: &u8) -> bool {
         self.inner == *other
     }
 }
+
+/// A continuous control on the panel's own `0..10`: level, compression, gain, tone.
+///
+/// `FULL` is the stored value the panel reads as 10. Use the [`Level`] and [`Level6`]
+/// aliases. Nearly every one of these is the seven-bit `0..=127`, and the Stage 4 puts a
+/// few of the same knobs in six bits.
+///
+/// ⚠️ A `0..=127` slot is not automatically one of these. An envelope stage reads in
+/// milliseconds, a filter cutoff in hertz, and an equalizer band in decibels either side
+/// of a center; see [`Time`], [`Frequency`], [`Rate`] and [`Bipolar`]. Typing one of
+/// those as a `Level` makes the panel reading wrong, where the right type would leave it
+/// absent.
+pub type LevelOf<const FULL: u8> = KnobOf<FULL, { Unit::Panel10.code() }>;
 
 /// The seven-bit panel knob, which is nearly every one of them.
 pub type Level = LevelOf<127>;
@@ -130,139 +151,102 @@ pub type Level = LevelOf<127>;
 /// The same knob in a six-bit slot, as a few Stage 4 parameters store it.
 pub type Level6 = LevelOf<63>;
 
-/// Declare a 0..=127 knob whose panel reading is in `$unit` over a curve no manual
-/// publishes.
+/// An envelope stage or a delay time. The panel reads it in milliseconds through
+/// seconds, over a curve no manual publishes.
+pub type Time = KnobOf<127, { Unit::Milliseconds.code() }>;
+
+/// A filter cutoff or an equalizer sweep. The panel reads it in hertz. The Stage
+/// manuals give the endpoints of the mid sweep (200 Hz to 8 kHz) but not the taper.
+pub type Frequency = KnobOf<127, { Unit::Hertz.code() }>;
+
+/// A modulation or LFO rate, read in hertz.
 ///
-/// [`Level`] is the same slot on the panel's own `0..10`, where the transform is known.
-/// Here it is not: an envelope stage reads in milliseconds and a filter cutoff in hertz,
-/// but no published table converts the stored byte, so these print the byte. The unit
-/// still lets an interface label the control and pick a taper without its own table of
-/// field names.
-macro_rules! knob {
-    ($(#[$meta:meta])* $name:ident, $unit:expr) => {
-        knob!($(#[$meta])* $name, 127, 7, ControlKind::Knob($unit));
-    };
-    ($(#[$meta:meta])* $name:ident, $max:expr, $bits:expr, $control:expr) => {
-        $(#[$meta])*
-        #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name {
-            inner: u8,
-        }
+/// ⚠️ Under a live master clock the same slot reads as a subdivision; see
+/// [`ClockDivision`]. The flag that switches it is a sibling field, so neither field
+/// answers alone.
+pub type Rate = KnobOf<127, { Unit::Hertz.code() }>;
 
-        impl $name {
-            pub const MAX: u8 = $max;
+/// A stereo position in a six-bit slot.
+///
+/// ⚠️ The mapping is not established. Over the Stage 4 factory programs the slot's
+/// most common value is 0, where a center-encoded pan would show the mid-scale 32. So
+/// this makes no claim about where center sits, prints the stored value, and records
+/// only that the control is a pan. Inferred from specimens; not confirmed on
+/// hardware.
+pub type Pan = KnobOf<63, { Unit::Pan.code() }>;
 
-            pub fn new(value: u8) -> Result<Self, ParseError> {
-                value.try_into()
-            }
-
-            #[doc = concat!("The stored value, 0..=", stringify!($max), ".")]
-            pub fn as_u8(&self) -> u8 {
-                self.inner
-            }
-        }
-
-        impl TryFrom<u8> for $name {
-            type Error = ParseError;
-
-            fn try_from(value: u8) -> Result<Self, ParseError> {
-                if value > Self::MAX {
-                    return Err(ParseError::OutOfBounds {
-                        value: format!("{value}"),
-                        bound: format!("0..={}", Self::MAX),
-                    });
-                }
-                Ok($name { inner: value })
-            }
-        }
-
-        impl Packed for $name {
-            const MAX_BITS: u32 = $bits;
-            const DECODE_BITS: u32 = u8::BITS;
-            const CONTROL: ControlKind = $control;
-            type Error = ParseError;
-
-            fn from_bits(bits: u64) -> Result<Self, ParseError> {
-                (bits as u8).try_into()
-            }
-
-            fn to_bits(&self) -> u64 {
-                self.inner as u64
-            }
-        }
-
-        /// The stored byte. There is no published transform to the unit, so printing one
-        /// would invent precision the file does not carry.
-        impl Debug for $name {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", self.inner)
-            }
-        }
-
-        impl Display for $name {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", self.inner)
-            }
-        }
-
-        impl PartialEq<u8> for $name {
-            fn eq(&self, other: &u8) -> bool {
-                self.inner == *other
-            }
-        }
-    };
+/// A pitch offset in semitones.
+///
+/// The Stage 4's coarse oscillator pitch holds 0, 7, 12, 24 and 40 (unison, a
+/// fifth, an octave, two octaves), which identifies the unit. Inferred from
+/// specimens; not confirmed on hardware. The Stage 3 manual gives the same control
+/// as "semitone steps, ranging from 0 to 48".
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Interval {
+    inner: u8,
 }
 
-knob!(
-    /// An envelope stage or a delay time. The panel reads it in milliseconds through
-    /// seconds, over a curve no manual publishes.
-    Time,
-    Unit::Milliseconds
-);
+impl Interval {
+    pub const MAX: u8 = 63;
 
-knob!(
-    /// A filter cutoff or an equalizer sweep. The panel reads it in hertz. The Stage
-    /// manuals give the endpoints of the mid sweep (200 Hz to 8 kHz) but not the taper.
-    Frequency,
-    Unit::Hertz
-);
+    pub fn new(value: u8) -> Result<Self, ParseError> {
+        value.try_into()
+    }
 
-knob!(
-    /// A modulation or LFO rate, read in hertz.
-    ///
-    /// ⚠️ Under a live master clock the same slot reads as a subdivision; see
-    /// [`ClockDivision`]. The flag that switches it is a sibling field, so neither field
-    /// answers alone.
-    Rate,
-    Unit::Hertz
-);
+    /// The stored value, 0..=63.
+    pub fn as_u8(&self) -> u8 {
+        self.inner
+    }
+}
 
-knob!(
-    /// A stereo position in a six-bit slot.
-    ///
-    /// ⚠️ The mapping is not established. Over the Stage 4 factory programs the slot's
-    /// most common value is 0, where a center-encoded pan would show the mid-scale 32. So
-    /// this makes no claim about where center sits, prints the stored value, and records
-    /// only that the control is a pan. Inferred from specimens; not confirmed on
-    /// hardware.
-    Pan,
-    63,
-    6,
-    ControlKind::Knob(Unit::Pan)
-);
+impl TryFrom<u8> for Interval {
+    type Error = ParseError;
 
-knob!(
-    /// A pitch offset in semitones.
-    ///
-    /// The Stage 4's coarse oscillator pitch holds 0, 7, 12, 24 and 40 (unison, a
-    /// fifth, an octave, two octaves), which identifies the unit. Inferred from
-    /// specimens; not confirmed on hardware. The Stage 3 manual gives the same control
-    /// as "semitone steps, ranging from 0 to 48".
-    Interval,
-    63,
-    6,
-    ControlKind::Shift(Unit::Semitones)
-);
+    fn try_from(value: u8) -> Result<Self, ParseError> {
+        if value > Self::MAX {
+            return Err(ParseError::OutOfBounds {
+                value: format!("{value}"),
+                bound: format!("0..={}", Self::MAX),
+            });
+        }
+        Ok(Interval { inner: value })
+    }
+}
+
+impl Packed for Interval {
+    const MAX_BITS: u32 = 6;
+    const DECODE_BITS: u32 = u8::BITS;
+    const CONTROL: ControlKind = ControlKind::Shift(Unit::Semitones);
+    type Error = ParseError;
+
+    fn from_bits(bits: u64) -> Result<Self, ParseError> {
+        (bits as u8).try_into()
+    }
+
+    fn to_bits(&self) -> u64 {
+        self.inner as u64
+    }
+}
+
+/// The stored byte. No published transform gives the semitones, so printing them would
+/// invent precision the file does not carry.
+impl Debug for Interval {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl Display for Interval {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl PartialEq<u8> for Interval {
+    fn eq(&self, other: &u8) -> bool {
+        self.inner == *other
+    }
+}
 
 /// A 0..=127 slot whose musical zero is its center, reading `±LIMIT` either side in the
 /// unit whose code is `UNIT`.
@@ -390,13 +374,25 @@ pub struct MorphOf<const BITS: u32> {
     inner: u8,
 }
 
+/// The value a morph slot `bits` wide holds when it does not morph its parameter: the
+/// slot's midpoint. `None` for a width outside `1..=8`, which no morph slot has.
+///
+/// Inferred from specimens; not confirmed on hardware. Only the eight-bit value is
+/// confirmed by specimens.
+pub const fn morph_neutral(bits: u32) -> Option<u8> {
+    if bits == 0 || bits > u8::BITS {
+        return None;
+    }
+    Some(((1u16 << bits) / 2 - 1) as u8)
+}
+
 impl<const BITS: u32> MorphOf<BITS> {
     const VALID: () = assert!(BITS > 0 && BITS <= 8, "a morph must fit in a byte");
 
-    /// The slot's midpoint. Only the eight-bit value is confirmed by specimens.
-    pub const NEUTRAL: u8 = {
-        let () = Self::VALID;
-        ((1u16 << BITS) / 2 - 1) as u8
+    /// The slot's midpoint; see [`morph_neutral`].
+    pub const NEUTRAL: u8 = match morph_neutral(BITS) {
+        Some(neutral) => neutral,
+        None => panic!("a morph must fit in a byte"),
     };
 
     pub fn as_u8(&self) -> u8 {
@@ -470,66 +466,6 @@ pub type DrawbarMorph = MorphOf<5>;
 
 /// The morph slot beside a three-position switch, such as the Stage 3's rotary speed.
 pub type SwitchMorph = MorphOf<3>;
-
-/// A [`Selector`] over a list too long for a byte, such as a waveform or a sample slot.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WideSelector<const BITS: u32> {
-    inner: u16,
-}
-
-impl<const BITS: u32> WideSelector<BITS> {
-    const VALID: () = assert!(BITS > 0 && BITS <= 16, "a wide selector must fit in a u16");
-
-    /// The stored index.
-    pub fn raw(&self) -> u16 {
-        let () = Self::VALID;
-        self.inner
-    }
-}
-
-impl<const BITS: u32> Default for WideSelector<BITS> {
-    fn default() -> Self {
-        let () = Self::VALID;
-        Self { inner: 0 }
-    }
-}
-
-impl<const BITS: u32> Packed for WideSelector<BITS> {
-    const MAX_BITS: u32 = {
-        let () = Self::VALID;
-        BITS
-    };
-    const DECODE_BITS: u32 = u16::BITS;
-    const CONTROL: ControlKind = ControlKind::Selector;
-    type Error = ::core::convert::Infallible;
-
-    fn from_bits(bits: u64) -> Result<Self, Self::Error> {
-        let () = Self::VALID;
-        Ok(WideSelector { inner: bits as u16 })
-    }
-
-    fn to_bits(&self) -> u64 {
-        self.inner as u64
-    }
-}
-
-impl<const BITS: u32> Debug for WideSelector<BITS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
-
-impl<const BITS: u32> Display for WideSelector<BITS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
-
-impl<const BITS: u32> PartialEq<u16> for WideSelector<BITS> {
-    fn eq(&self, other: &u16) -> bool {
-        self.inner == *other
-    }
-}
 
 /// One drawbar, in the four-bit slot the Stage models give it.
 ///
@@ -675,17 +611,18 @@ impl PartialEq<i8> for OctaveShiftNibble {
 /// A selector whose positions are known to be a fixed set, but whose table is not.
 ///
 /// This preserves the control shape without inventing labels for positions that are not
-/// yet identified. Use `sparse_enum!` once the value table is known.
+/// yet identified. Use `sparse_enum!` once the value table is known. `BITS` reaches 16
+/// for a list too long for a byte, such as a waveform or a sample slot.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Selector<const BITS: u32> {
-    inner: u8,
+    inner: u16,
 }
 
 impl<const BITS: u32> Selector<BITS> {
-    const VALID: () = assert!(BITS > 0 && BITS <= 8, "a selector must fit in a byte");
+    const VALID: () = assert!(BITS > 0 && BITS <= 16, "a selector must fit in a u16");
 
     /// The stored index.
-    pub fn raw(&self) -> u8 {
+    pub fn raw(&self) -> u16 {
         let () = Self::VALID;
         self.inner
     }
@@ -703,13 +640,19 @@ impl<const BITS: u32> Packed for Selector<BITS> {
         let () = Self::VALID;
         BITS
     };
-    const DECODE_BITS: u32 = u8::BITS;
+    // A selector that fits a byte decodes only a byte, so a field wider than that is
+    // still refused at compile time.
+    const DECODE_BITS: u32 = if BITS <= u8::BITS {
+        u8::BITS
+    } else {
+        u16::BITS
+    };
     const CONTROL: ControlKind = ControlKind::Selector;
     type Error = ::core::convert::Infallible;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
         let () = Self::VALID;
-        Ok(Selector { inner: bits as u8 })
+        Ok(Selector { inner: bits as u16 })
     }
 
     fn to_bits(&self) -> u64 {
@@ -730,8 +673,8 @@ impl<const BITS: u32> Display for Selector<BITS> {
     }
 }
 
-impl<const BITS: u32> PartialEq<u8> for Selector<BITS> {
-    fn eq(&self, other: &u8) -> bool {
+impl<const BITS: u32> PartialEq<u16> for Selector<BITS> {
+    fn eq(&self, other: &u16) -> bool {
         self.inner == *other
     }
 }
@@ -832,57 +775,6 @@ pub enum PercSpeed {
     Soft,
     Fast,
     Both,
-}
-
-/// A keyboard split point as the 73-key models store it: one of six keys, or
-/// the whole keyboard as Upper / Lower.
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
-pub enum SplitPoint73 {
-    #[default]
-    C3,
-    F3,
-    C4,
-    F4,
-    C5,
-    F5,
-    Upper,
-    Lower,
-}
-
-impl TryFrom<u8> for SplitPoint73 {
-    type Error = ParseError;
-
-    fn try_from(value: u8) -> Result<SplitPoint73, ParseError> {
-        match value {
-            0 => Ok(SplitPoint73::C3),
-            1 => Ok(SplitPoint73::F3),
-            2 => Ok(SplitPoint73::C4),
-            3 => Ok(SplitPoint73::F4),
-            4 => Ok(SplitPoint73::C5),
-            5 => Ok(SplitPoint73::F5),
-            6 => Ok(SplitPoint73::Upper),
-            7 => Ok(SplitPoint73::Lower),
-            _ => Err(ParseError::OutOfBounds {
-                value: format!("{value}"),
-                bound: "0..=7 (SplitPoint73)".to_string(),
-            }),
-        }
-    }
-}
-
-impl Packed for SplitPoint73 {
-    const MAX_BITS: u32 = 3;
-    const DECODE_BITS: u32 = u8::BITS;
-    const CONTROL: ControlKind = ControlKind::Selector;
-    type Error = ParseError;
-
-    fn from_bits(bits: u64) -> Result<Self, ParseError> {
-        (bits as u8).try_into()
-    }
-
-    fn to_bits(&self) -> u64 {
-        *self as u64
-    }
 }
 
 /// A vibrato (`V`) or chorus (`C`) organ modulation at one of three depths.
@@ -1080,6 +972,71 @@ macro_rules! sparse_enum {
 }
 
 pub(crate) use sparse_enum;
+
+/// Declare a model's index into a shared enumeration.
+///
+/// The slot holds an index into a table of its own, because the modes an organ offers,
+/// and their order, differ by model and by instrument. An index the table does not use
+/// decodes to `None` and round-trips unchanged.
+macro_rules! model_index {
+    ($(#[$meta:meta])* $name:ident, $bits:expr, $of:ty, [$($variant:ident),+ $(,)?]) => {
+        $(#[$meta])*
+        #[derive(Copy, Clone, Default, PartialEq, Eq)]
+        pub struct $name(u8);
+
+        impl $name {
+            /// What this model offers at the stored index, or `None` if it offers
+            /// nothing there.
+            pub fn get(&self) -> Option<$of> {
+                Self::TABLE.get(self.0 as usize).copied()
+            }
+
+            /// The index this model stores `value` at, or `None` if it does not offer it.
+            pub fn select(value: $of) -> Option<Self> {
+                Self::TABLE.iter().position(|&v| v == value).map(|i| $name(i as u8))
+            }
+
+            /// The stored index, named or not.
+            pub fn raw(&self) -> u8 {
+                self.0
+            }
+
+            const TABLE: &'static [$of] = &[$(<$of>::$variant),+];
+        }
+
+        impl $crate::bits::Packed for $name {
+            const MAX_BITS: u32 = $bits;
+            const DECODE_BITS: u32 = u8::BITS;
+            const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
+            type Error = ::core::convert::Infallible;
+
+            fn from_bits(bits: u64) -> Result<Self, Self::Error> {
+                Ok($name(bits as u8))
+            }
+
+            fn to_bits(&self) -> u64 {
+                self.0 as u64
+            }
+        }
+
+        impl ::core::fmt::Debug for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                match self.get() {
+                    Some(value) => write!(f, "{value:?}"),
+                    None => write!(f, "unknown ({})", self.0),
+                }
+            }
+        }
+
+        impl ::core::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                write!(f, "{self:?}")
+            }
+        }
+    };
+}
+
+pub(crate) use model_index;
 
 /// Declare a one-bit field whose two states have names.
 ///
@@ -1392,6 +1349,21 @@ sparse_enum!(
 );
 
 sparse_enum!(
+    /// A keyboard split point as the 73-key models store it: one of six keys, or
+    /// the whole keyboard as Upper / Lower.
+    SplitPoint73, 3, {
+        0 => C3, "C3";
+        1 => F3, "F3";
+        2 => C4, "C4";
+        3 => F4, "F4";
+        4 => C5, "C5";
+        5 => F5, "F5";
+        6 => Upper, "Upper";
+        7 => Lower, "Lower";
+    }
+);
+
+sparse_enum!(
     /// A Stage 3 split crossfade width, in semitones.
     ///
     /// Reported by public documentation; not confirmed on hardware.
@@ -1501,6 +1473,18 @@ mod tests {
         for bits in 0..16u64 {
             assert_eq!(OctaveShiftNibble::from_bits(bits).unwrap().to_bits(), bits);
         }
+    }
+
+    /// A slot's neutral is its midpoint at every width a morph slot has, and a width
+    /// outside a byte has none.
+    #[test]
+    fn a_morph_slot_of_each_width_rests_at_its_midpoint() {
+        assert_eq!(morph_neutral(8), Some(MorphTarget::NEUTRAL));
+        assert_eq!(morph_neutral(5), Some(DrawbarMorph::NEUTRAL));
+        assert_eq!(morph_neutral(3), Some(3));
+        assert_eq!(morph_neutral(1), Some(0));
+        assert_eq!(morph_neutral(0), None);
+        assert_eq!(morph_neutral(9), None);
     }
 
     /// Every pattern survives; the specimen mode at 127 is displayed as neutral.

@@ -11,8 +11,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use crate::edit::{editor_for, print_byte_diff, write_edit, SetArgs};
-use crate::editors;
+use crate::edit::{staged_bytes, write_edit, SetArgs};
 use crate::ui::Ui;
 
 #[derive(Args)]
@@ -32,29 +31,9 @@ pub fn run(ui: &Ui, args: FileEditArgs) -> Result<(), String> {
     let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
         .map_err(|e| format!("{}: {e}", path.display()))?;
 
-    // The editor's mutable borrow ends here, before `to_bytes` reads the whole entity.
-    let staged = editors::stage(
-        ui,
-        args.common.fields,
-        &args.common.set,
-        editor_for(&mut entity)?.as_mut(),
-    )?;
-    let Some(changed) = staged else {
+    let Some(edited) = staged_bytes(ui, &mut entity, &original, &args.common)? else {
         return Ok(());
     };
-    if changed == 0 {
-        ui.note("no field changed; writing nothing");
-        return Ok(());
-    }
-
-    let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
-    print_byte_diff(ui, &original, &edited);
-
-    if args.common.dry_run {
-        ui.note("--dry-run: nothing written");
-        return Ok(());
-    }
-
     write_edit(ui, path, args.common.out, args.common.yes, &edited)
 }
 

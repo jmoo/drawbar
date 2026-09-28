@@ -8,14 +8,13 @@ use super::organ_layers::OrganLayer;
 use super::piano_layers::PianoLayer;
 use super::synth_performance::SynthPerformance;
 use super::synth_voice::SynthVoice;
-use crate::cbin::{self, Cbin};
+use crate::cbin::Cbin;
 use crate::components::{Level, MorphTarget, Pan, RotorSpeed, Selector};
 use crate::error::Error;
 use crate::types::RangedU8;
 use std::io::{Read, Seek};
 
-mod panel;
-pub use panel::PANEL;
+pub use super::program_panel::PANEL;
 
 pub const FORMAT: &str = "ns4p";
 /// Schema versions whose field offsets have been validated, stored ×100. Specimens
@@ -30,6 +29,9 @@ pub const BODY_LEN: usize = 824;
 /// on [`KNOWN_VERSIONS`], and range-checks every field; unclaimed bits survive a
 /// re-encode. Placements are derived from ns4decode's published tables, and values
 /// are raw. Inferred from specimens; not confirmed on hardware.
+///
+/// The header's [`slot`](crate::cbin::Header::slot) holds bank 0..=5 for the six
+/// program banks and location 0..=63 on current exports. A read does not validate it.
 #[nord_bits_derive::bitbody(824)]
 pub struct Program {
     #[bits(24..=31)]
@@ -225,16 +227,6 @@ pub struct Program {
     pub synth_c_fx: FxChain,
 }
 
-/// The `(bank, location)` pair from the header, uninterpreted: bank 0..=5 for
-/// the six program banks and location 0..=63 on current exports. Not validated;
-/// see [`crate::formats::ns3::program::location`] on out-of-range locations in old
-/// files.
-pub fn location(file: &Cbin<Program>) -> (u16, u16) {
-    file.header.slot()
-}
-
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-    let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-    crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    Ok(file)
+    crate::formats::read_known(reader, FORMAT, KNOWN_VERSIONS)
 }

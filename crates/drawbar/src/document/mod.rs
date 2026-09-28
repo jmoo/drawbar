@@ -236,7 +236,7 @@ impl Opened {
             wav: match asset.shape {
                 Shape::Wav => Some((
                     encode::Draft::new(&entity.name),
-                    encode::Source::read(&entity.bytes),
+                    encode::read(&entity.bytes),
                 )),
                 Shape::Fields
                 | Shape::SetList
@@ -464,7 +464,9 @@ impl Document {
                     self.views.insert(id, Face::Advanced);
                 }
                 Asked::Export => self.export(ui.ctx(), id, workspace),
-                asked => self.answer(id, asked, workspace, log),
+                Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
+                Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
+                Asked::Encode => self.encode(id, workspace, log),
             }
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
@@ -756,13 +758,17 @@ impl Document {
                 }
             }
             Shape::Piano => self.piano.meta(ui),
-            Shape::SetList
-            | Shape::Sample
-            | Shape::Project
-            | Shape::Verbatim
-            | Shape::Text
-            | Shape::Wav
-            | Shape::Undecoded => record(ui, asset),
+            Shape::Sample => {
+                if let Some(Ok(snapshot)) = asset.decoded().and_then(sample::snapshot) {
+                    sample::metadata(ui, &snapshot);
+                }
+            }
+            Shape::Project => {
+                if let Some(Ok(snapshot)) = asset.decoded().and_then(project::snapshot) {
+                    project::metadata(ui, &snapshot);
+                }
+            }
+            Shape::SetList | Shape::Verbatim | Shape::Text | Shape::Wav | Shape::Undecoded => {}
         }
     }
 
@@ -795,16 +801,31 @@ impl Document {
                 self.piano.advanced(ui);
                 false
             }
-            Shape::SetList
-            | Shape::Sample
-            | Shape::Project
-            | Shape::Text
-            | Shape::Verbatim
-            | Shape::Wav
-            | Shape::Undecoded => {
-                capabilities(ui, asset);
+            Shape::Sample => {
+                if let Some(Ok(snapshot)) = asset.decoded().and_then(sample::snapshot) {
+                    capability::table(ui, &sample::capabilities(snapshot.generation));
+                    capability::offsets(ui, &sample::offsets(&snapshot));
+                }
                 false
             }
+            Shape::Project => {
+                if let Some(Ok(snapshot)) = asset.decoded().and_then(project::snapshot) {
+                    capability::table(ui, &project::CAPABILITIES);
+                    capability::offsets(ui, &project::offsets(&snapshot));
+                }
+                false
+            }
+            Shape::SetList => {
+                if let Some(decoded) = asset.decoded() {
+                    setlist::stored(ui, decoded);
+                }
+                false
+            }
+            Shape::Verbatim => {
+                verbatim::bytes(ui, asset.entity);
+                false
+            }
+            Shape::Text | Shape::Wav | Shape::Undecoded => false,
         }
     }
 
@@ -859,82 +880,57 @@ impl Document {
         Vec::new()
     }
 
-    /// Do what the Basic view asked for, now that nothing is borrowing the asset.
-    fn answer(&mut self, id: u64, asked: Asked, workspace: &mut Workspace, log: &mut Log) {
-        match asked {
-            Asked::Zone(sample::Ask::Decode(zone)) => {
+    /// Decode, play, strike, or save one zone of a sample instrument.
+    fn zone_audio(&mut self, id: u64, ask: sample::Ask, workspace: &mut Workspace, log: &mut Log) {
+        let entity = workspace.get(id).and_then(|e| e.entity.as_ref());
+        let (zone, ask) = match ask {
+            sample::Ask::Decode(zone) => {
                 if !self.audio.due(zone) {
                     return;
                 }
-                if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
+                if let Some(decoded) = entity {
                     self.audio.decode(decoded, zone);
                 }
+                return;
             }
-            Asked::Zone(sample::Ask::Strike {
+            // ⚠️ An edit drops the decoded audio of a zone that is still sounding,
+            // so stopping a sounding zone must not depend on decoded audio.
+            sample::Ask::Play(zone) if self.player.sounds((id, zone)) => {
+                self.player.silence((id, zone));
+                return;
+            }
+            sample::Ask::Play(zone) => (zone, Hear::Play),
+            sample::Ask::Strike {
                 zone,
                 semitones,
                 finger,
-            }) => {
-                if let Some(decoded) = workspace.get(id).and_then(|e| e.entity.as_ref()) {
+            } => {
+                if let Some(decoded) = entity {
                     self.audio.decode(decoded, zone);
                 }
-                let Some(Ok(decoded)) = self.audio.get(zone) else {
-                    return;
-                };
-                let rate = crate::audio::rate(semitones);
-                if let Err(why) = self.player.strike(
-                    finger,
-                    (id, zone),
-                    &decoded.audio.samples,
-                    decoded.audio.channels,
-                    rate,
-                ) {
-                    log.error(why);
-                    log.trouble("This computer would not play that zone.");
-                }
+                (zone, Hear::Strike { semitones, finger })
             }
-            Asked::Zone(sample::Ask::Play(zone)) => {
-                // ⚠️ An edit drops the decoded audio of a zone that is still sounding,
-                // so stopping a sounding zone must not depend on decoded audio.
-                if self.player.sounds((id, zone)) {
-                    self.player.silence((id, zone));
-                } else if let Some(Ok(decoded)) = self.audio.get(zone) {
-                    if let Err(why) = self.player.toggle(
-                        (id, zone),
-                        &decoded.audio.samples,
-                        decoded.audio.channels,
-                    ) {
-                        log.error(why);
-                        log.trouble("This computer would not play that zone.");
-                    }
-                }
+            sample::Ask::Save(zone) => {
+                let name = self.instrument_name(id, workspace);
+                (
+                    zone,
+                    Hear::Save(crate::workspace::zone_wav_name(&name, zone + 1)),
+                )
             }
-            Asked::Zone(sample::Ask::Save(zone)) => {
-                let Some(Ok(decoded)) = self.audio.get(zone) else {
-                    return;
-                };
-                let audio = &decoded.audio;
-                match nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels) {
-                    Ok(bytes) => workspace.save_bytes(
-                        crate::workspace::zone_wav_name(
-                            &self.instrument_name(id, workspace),
-                            zone + 1,
-                        ),
-                        bytes,
-                    ),
-                    Err(e) => {
-                        log.error(e.to_string());
-                        log.trouble("That zone could not be written as a WAV.");
-                    }
-                }
-            }
-            Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
-            Asked::Encode => self.encode(id, workspace, log),
-            // ⚠️ Handled in `ui`, where the frame collects its wants: the browser opens
-            // tabs, the frame switches faces, and an export waits for the plan. See
-            // [`Document::export`].
-            Asked::Export | Asked::Open(_) | Asked::Advanced => {}
-        }
+        };
+        let Some(Ok(decoded)) = self.audio.get(zone) else {
+            return;
+        };
+        let audio = &decoded.audio;
+        hear(
+            &mut self.player,
+            workspace,
+            log,
+            (id, zone),
+            (&audio.samples, audio.channels, codec::FIELD_RATE),
+            ask,
+            "zone",
+        );
     }
 
     /// Show, play, or save one root of a piano library. The stroke is decoded first,
@@ -959,42 +955,23 @@ impl Document {
         let Some(sound) = self.piano.sound(root) else {
             return;
         };
-        match ask {
-            piano::Ask::Show(_) => {}
-            piano::Ask::Play(_) => {
-                if let Err(why) =
-                    self.player
-                        .toggle((id, usize::from(root)), sound.samples, sound.channels)
-                {
-                    log.error(why);
-                    log.trouble("This computer would not play that root.");
-                }
-            }
+        let ask = match ask {
+            piano::Ask::Show(_) => return,
+            piano::Ask::Play(_) => Hear::Play,
             piano::Ask::Strike {
                 semitones, finger, ..
-            } => {
-                let rate = crate::audio::rate(semitones);
-                if let Err(why) = self.player.strike(
-                    finger,
-                    (id, usize::from(root)),
-                    sound.samples,
-                    sound.channels,
-                    rate,
-                ) {
-                    log.error(why);
-                    log.trouble("This computer would not play that root.");
-                }
-            }
-            piano::Ask::Save(_) => {
-                match nord_format::wav::pcm16(sound.samples, sound.rate, sound.channels) {
-                    Ok(bytes) => workspace.save_bytes(sound.name, bytes),
-                    Err(e) => {
-                        log.error(e.to_string());
-                        log.trouble("That root could not be written as a WAV.");
-                    }
-                }
-            }
-        }
+            } => Hear::Strike { semitones, finger },
+            piano::Ask::Save(_) => Hear::Save(sound.name),
+        };
+        hear(
+            &mut self.player,
+            workspace,
+            log,
+            (id, usize::from(root)),
+            (sound.samples, sound.channels, sound.rate),
+            ask,
+            "root",
+        );
     }
 
     /// The name a zone's WAV file is based on: the instrument's name, or the asset's
@@ -1188,55 +1165,51 @@ fn showing(faces: &[Face], remembered: Face) -> Face {
     }
 }
 
-/// The file's own metadata, shown ahead of the container record every asset has.
-fn record(ui: &mut egui::Ui, asset: Asset<'_>) {
-    let Some(decoded) = asset.decoded() else {
-        return;
-    };
-    match asset.shape {
-        Shape::Sample => {
-            if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-                sample::metadata(ui, &snapshot);
-            }
-        }
-        Shape::Project => {
-            if let Some(Ok(snapshot)) = project::snapshot(decoded) {
-                project::metadata(ui, &snapshot);
-            }
-        }
-        Shape::Fields
-        | Shape::SetList
-        | Shape::Piano
-        | Shape::Text
-        | Shape::Verbatim
-        | Shape::Wav
-        | Shape::Undecoded => {}
-    }
+/// What to do with a decoded zone or root.
+enum Hear {
+    Play,
+    Strike {
+        semitones: i16,
+        finger: crate::audio::Finger,
+    },
+    /// Write it as a WAV file with this name.
+    Save(String),
 }
 
-/// The Advanced face of a body with no field registry: the format's capabilities and
-/// field offsets, the addresses a set list stores, or the raw bytes of a body no
-/// registry describes.
-fn capabilities(ui: &mut egui::Ui, asset: Asset<'_>) {
-    let Some(decoded) = asset.decoded() else {
-        return;
+/// Play, strike, or save decoded audio. `what` names the zone or root in the trouble
+/// line.
+fn hear(
+    player: &mut crate::audio::Player,
+    workspace: &Workspace,
+    log: &mut Log,
+    key: crate::audio::Zone,
+    (samples, channels, rate): (&[i16], u16, u32),
+    ask: Hear,
+    what: &str,
+) {
+    let played = match ask {
+        Hear::Play => player.toggle(key, samples, channels),
+        Hear::Strike { semitones, finger } => player.strike(
+            finger,
+            key,
+            samples,
+            channels,
+            crate::audio::rate(semitones),
+        ),
+        Hear::Save(name) => {
+            match nord_format::wav::pcm16(samples, rate, channels) {
+                Ok(bytes) => workspace.save_bytes(name, bytes),
+                Err(e) => {
+                    log.error(e.to_string());
+                    log.trouble(format!("That {what} could not be written as a WAV."));
+                }
+            }
+            return;
+        }
     };
-    match asset.shape {
-        Shape::Sample => {
-            if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-                capability::table(ui, &sample::capabilities(snapshot.generation));
-                capability::offsets(ui, &sample::offsets(&snapshot));
-            }
-        }
-        Shape::Project => {
-            if let Some(Ok(snapshot)) = project::snapshot(decoded) {
-                capability::table(ui, &project::capabilities());
-                capability::offsets(ui, &project::offsets(&snapshot));
-            }
-        }
-        Shape::SetList => setlist::stored(ui, decoded),
-        Shape::Verbatim => verbatim::bytes(ui, asset.entity),
-        Shape::Fields | Shape::Piano | Shape::Text | Shape::Wav | Shape::Undecoded => {}
+    if let Err(why) = played {
+        log.error(why);
+        log.trouble(format!("This computer would not play that {what}."));
     }
 }
 
@@ -1379,18 +1352,14 @@ fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
 fn current_model(fields: &[Field]) -> Option<u32> {
     fields
         .iter()
-        .find(|field| field.path == "piano_panel.piano_model")
+        .find(|field| field.path == panel::PIANO_MODEL)
         .and_then(|field| field.value.trim().parse().ok())
 }
 
 /// Parse a library id: decimal as the field list spells it, or hex as a person may type
 /// it.
 pub(crate) fn library_id(value: &str) -> Option<u32> {
-    let text = value.trim();
-    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        Some(hex) => u32::from_str_radix(hex, 16).ok(),
-        None => text.parse().ok(),
-    }
+    fields::number(value).and_then(|number| u32::try_from(number).ok())
 }
 
 #[cfg(test)]
@@ -2801,7 +2770,7 @@ mod tests {
             id,
             ..
         } = open;
-        document.answer(id, Asked::Encode, &mut workspace, &mut log);
+        document.encode(id, &mut workspace, &mut log);
 
         assert!(document.refusal().is_none(), "{:?}", document.refusal());
         assert_eq!(workspace.get(id).unwrap().bytes, bytes, "the WAV is intact");
@@ -2836,9 +2805,9 @@ mod tests {
             "nothing decodes until asked"
         );
         for _ in 0..2 {
-            open.document.answer(
+            open.document.zone_audio(
                 id,
-                Asked::Zone(sample::Ask::Decode(0)),
+                sample::Ask::Decode(0),
                 &mut open.workspace,
                 &mut open.log,
             );

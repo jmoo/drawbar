@@ -24,10 +24,10 @@ use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
-use super::capability::{self, Offset, Row, State as Cap};
+use super::capability::{self, Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
 use super::keys::{self, Audition, Scale, SizeCell, Span, Struck};
-use super::sample;
+use super::{sample, table};
 use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::audio::Finger;
@@ -36,13 +36,11 @@ use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
 use crate::midi;
+use crate::panel::cut;
 use crate::room;
+use crate::strings;
 use crate::work;
 use crate::workspace::{LocalEntity, Workspace};
-
-pub fn is_piano(entity: &Entity) -> bool {
-    matches!(entity, Entity::Piano(_))
-}
 
 fn piano(entity: &Entity) -> Option<&npno::Piano> {
     match entity {
@@ -112,34 +110,14 @@ pub struct Plan {
 
 impl Plan {
     /// Whether it edits nothing. The baseline it is measured against is not an edit.
+    ///
+    /// ⚠️ Every other field's default must be "no edit".
     pub fn is_empty(&self) -> bool {
-        let Plan {
-            against: _,
-            banks,
-            layers,
-            roots,
-            range,
-            name,
-            variant,
-            fine_tune,
-            gain,
-            damper_top,
-            kind,
-            trims,
-            key_roots,
-        } = self;
-        banks.is_empty()
-            && layers.is_empty()
-            && roots.is_empty()
-            && range.is_none()
-            && name.is_none()
-            && variant.is_none()
-            && fine_tune.is_empty()
-            && gain.is_none()
-            && damper_top.is_none()
-            && kind.is_none()
-            && trims.is_empty()
-            && key_roots.is_empty()
+        *self
+            == Plan {
+                against: self.against,
+                ..Plan::default()
+            }
     }
 
     /// Whether one root keeps one layer: its own exception, or what the switch says.
@@ -153,10 +131,7 @@ impl Plan {
     /// A bank code the format does not name is kept: no row of the trim section
     /// selects it, so nothing can have asked for it to go.
     fn keeps_bank(&self, bank: Option<Bank>) -> bool {
-        match bank {
-            Some(bank) => !self.banks.contains(&bank),
-            None => true,
-        }
+        bank.is_none_or(|bank| !self.banks.contains(&bank))
     }
 
     /// The keys the plan routes to the root at `index`, in no order: the ones the
@@ -561,12 +536,13 @@ fn kept_bytes(facts: &Facts, plan: &Plan) -> u64 {
     )
 }
 
-/// Bytes the cells `pick` selects still hold, which is what dropping them would shed.
-fn shed_bytes(facts: &Facts, plan: &Plan, pick: impl Fn(&Cell) -> bool) -> u64 {
+/// Bytes the cells `pick` selects hold, or still keep where a plan is given: what
+/// dropping them would shed.
+fn cell_bytes(facts: &Facts, plan: Option<&Plan>, pick: impl Fn(&Cell) -> bool) -> u64 {
     facts
         .cells
         .iter()
-        .filter(|cell| plan.keeps(facts, cell) && pick(cell))
+        .filter(|cell| pick(cell) && plan.is_none_or(|plan| plan.keeps(facts, cell)))
         .map(|cell| cell.bytes)
         .sum()
 }
@@ -597,7 +573,7 @@ const CUT_ITEMS: usize = 12;
 /// no strokes at all.
 fn cheapest_cut(facts: &Facts, plan: &Plan, over: u64) -> Option<Cut> {
     let items = droppable(facts, plan);
-    let live = shed_bytes(facts, plan, |_| true);
+    let live = cell_bytes(facts, Some(plan), |_| true);
     let mut best: Option<(u64, usize, usize, Vec<String>)> = None;
     for mask in 1..(1u32 << items.len()) {
         let pick: Vec<&(String, What)> = items
@@ -612,7 +588,7 @@ fn cheapest_cut(facts: &Facts, plan: &Plan, over: u64) -> Option<Cut> {
                 What::Bank(bank) => cell.bank == Some(*bank),
             })
         };
-        let shed = shed_bytes(facts, plan, selects);
+        let shed = cell_bytes(facts, Some(plan), selects);
         // A cut that sheds every stroke still kept would leave nothing to play.
         if shed < over || shed >= live {
             continue;
@@ -646,7 +622,7 @@ fn droppable(facts: &Facts, plan: &Plan) -> Vec<(String, What)> {
         }
     }
     for (rank, layer) in facts.shown_layers() {
-        if shed_bytes(facts, plan, |cell| cell.layer == layer) > 0 {
+        if cell_bytes(facts, Some(plan), |cell| cell.layer == layer) > 0 {
             items.push((
                 format!("{} layer", layer_name(rank, facts.layers.len())),
                 What::Layer(layer),
@@ -655,16 +631,6 @@ fn droppable(facts: &Facts, plan: &Plan) -> Vec<(String, What)> {
     }
     items.truncate(CUT_ITEMS);
     items
-}
-
-/// A list of switches as a sentence names them: `the soft layer, medium layer and
-/// release samples`.
-fn listed(names: &[String]) -> String {
-    match names.split_last() {
-        None => String::new(),
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-    }
 }
 
 /// What a layer is called, by its rank among the layers the file holds; rank 0 is the
@@ -734,28 +700,23 @@ fn bank_word(code: u8) -> String {
     }
 }
 
-fn kind_word(kind: Kind) -> &'static str {
-    match kind {
-        Kind::ElectricGrand => "Electric grand",
-        Kind::ElectricPiano => "Electric piano",
-        Kind::Wurlitzer => "Reed piano",
-        Kind::Clavinet => "Clavinet",
-        Kind::Grand => "Grand",
-        Kind::Upright => "Upright",
-        Kind::Harpsichord => "Harpsichord",
-        Kind::DigitalPiano => "Digital piano",
-        Kind::Hybrid => "Hybrid",
-        Kind::Mallet => "Mallet",
-    }
-}
-
 /// What the panel calls the kind a library files itself under, including a code the
 /// format does not name.
 fn kind_name(code: u8) -> String {
-    match Kind::from_code(code) {
-        Some(kind) => kind_word(kind).to_string(),
-        None => format!("kind {code}"),
-    }
+    let word = match Kind::from_code(code) {
+        Some(Kind::ElectricGrand) => "Electric grand",
+        Some(Kind::ElectricPiano) => "Electric piano",
+        Some(Kind::Wurlitzer) => "Reed piano",
+        Some(Kind::Clavinet) => "Clavinet",
+        Some(Kind::Grand) => "Grand",
+        Some(Kind::Upright) => "Upright",
+        Some(Kind::Harpsichord) => "Harpsichord",
+        Some(Kind::DigitalPiano) => "Digital piano",
+        Some(Kind::Hybrid) => "Hybrid",
+        Some(Kind::Mallet) => "Mallet",
+        None => return format!("kind {code}"),
+    };
+    word.to_string()
 }
 
 fn bank_note(bank: Bank) -> &'static str {
@@ -997,10 +958,7 @@ pub struct Sound<'a> {
 /// switch resets all of it, but never the plan, which is the edit.
 #[derive(Default)]
 struct View {
-    picked: Option<usize>,
-    open_rows: BTreeSet<usize>,
-    /// A row to scroll into view under the map next frame, once it has a rect.
-    reveal: Option<usize>,
+    rows: sample::Rows,
     key_table: bool,
     audition: Option<Audition>,
 }
@@ -1076,7 +1034,7 @@ impl State {
     /// [`Extras::default`] for anything that is not a piano library, which leaves the
     /// header's own rules in charge.
     pub fn begin(&mut self, id: u64, entity: &LocalEntity, device: &DeviceState) -> Extras {
-        if !entity.entity.as_ref().is_some_and(is_piano) {
+        if entity.entity.as_ref().and_then(piano).is_none() {
             self.open = None;
             return Extras::default();
         }
@@ -1473,11 +1431,9 @@ const RADIUS: f32 = 2.0;
 const PAD: f32 = 12.0;
 const GAP: f32 = 10.0;
 
-/// A switch row and a root's row are one height; a lane of segments and a head row are
-/// shorter.
+/// A switch row and a root's row are one height; a lane of segments is shorter.
 const ROW: f32 = 26.0;
 const LANE: f32 = 20.0;
-const HEAD: f32 = 20.0;
 
 /// Text sizes: a row's name, the note beside it, the mono figures, a caps label.
 const NAME: f32 = 11.5;
@@ -1487,30 +1443,6 @@ const MICRO: f32 = 9.5;
 
 /// A lamp's box, which a cell must leave room for.
 const LAMP: egui::Vec2 = egui::vec2(30.0, 20.0);
-
-/// `text` laid out to at most `width`, with an ellipsis where it does not fit, painted
-/// from `left` and centered on `middle`. Returns its width.
-fn cell(
-    painter: &egui::Painter,
-    left: f32,
-    middle: f32,
-    width: f32,
-    text: &str,
-    font: egui::FontId,
-    ink: egui::Color32,
-) -> f32 {
-    let mut job = egui::text::LayoutJob::default();
-    job.append(text, 0.0, egui::TextFormat::simple(font, ink));
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
-    let galley = painter.layout_job(job);
-    let wide = galley.size().x;
-    painter.galley(
-        egui::pos2(left, middle - galley.size().y / 2.0),
-        galley,
-        ink,
-    );
-    wide
-}
 
 /// A figure ending at `right`, struck through where it is a former size. Returns its
 /// left edge.
@@ -1566,46 +1498,6 @@ fn lamp(ui: &mut egui::Ui, box_: egui::Rect, on: bool, salt: impl std::hash::Has
     led::ui(&mut child, on, "")
 }
 
-/// One outlined action of an open row.
-fn action(ui: &mut egui::Ui, glyph: Glyph, label: &str, mark: egui::Color32) -> bool {
-    let visuals = ui.visuals().clone();
-    let painter = ui.painter().clone();
-    let word = painter.layout_no_wrap(
-        label.to_string(),
-        egui::FontId::proportional(11.0),
-        visuals.weak_text_color(),
-    );
-    let width = 8.0 * 2.0 + 12.0 + 5.0 + word.size().x;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, LANE), egui::Sense::click());
-    if response.hovered() {
-        painter.rect_filled(rect, RADIUS, visuals.widgets.hovered.weak_bg_fill);
-    }
-    painter.rect_stroke(
-        rect,
-        RADIUS,
-        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
-        egui::StrokeKind::Inside,
-    );
-    painted(
-        ui,
-        glyph,
-        egui::Rect::from_center_size(
-            egui::pos2(rect.left() + 8.0 + 6.0, rect.center().y),
-            egui::Vec2::splat(12.0),
-        ),
-        mark,
-    );
-    painter.galley(
-        egui::pos2(
-            rect.left() + 8.0 + 12.0 + 5.0,
-            rect.center().y - word.size().y / 2.0,
-        ),
-        word,
-        visuals.weak_text_color(),
-    );
-    response.clicked()
-}
-
 /// A read-only fact of an open row: the caps label, and the value under an eye.
 fn read_only(ui: &mut egui::Ui, label: &str, value: &str, hint: &str) {
     let response = ui
@@ -1628,16 +1520,6 @@ fn read_only(ui: &mut egui::Ui, label: &str, value: &str, hint: &str) {
     }
 }
 
-/// What one root holds, or what it keeps where a plan is given.
-fn root_bytes(facts: &Facts, plan: Option<&Plan>, index: usize) -> u64 {
-    facts
-        .cells
-        .iter()
-        .filter(|cell| cell.root == index && plan.is_none_or(|plan| plan.keeps(facts, cell)))
-        .map(|cell| cell.bytes)
-        .sum()
-}
-
 /// The keys the plan leaves answering something, given what each root keeps.
 fn covered(facts: &Facts, plan: &Plan, roots: &[RootLine]) -> Vec<u8> {
     (0..npno::NOTES as u8)
@@ -1652,17 +1534,10 @@ fn covered(facts: &Facts, plan: &Plan, roots: &[RootLine]) -> Vec<u8> {
 
 /// The stretches of [`SPAN`] the covered keys leave out, low to high.
 fn gaps(covered: &[u8]) -> Vec<(u8, u8)> {
-    let mut out: Vec<(u8, u8)> = Vec::new();
-    for key in SPAN.low..=SPAN.high {
-        if covered.contains(&key) {
-            continue;
-        }
-        match out.last_mut() {
-            Some((_, top)) if *top + 1 == key => *top = key,
-            _ => out.push((key, key)),
-        }
-    }
-    out
+    let uncovered: Vec<u8> = (SPAN.low..=SPAN.high)
+        .filter(|key| !covered.contains(key))
+        .collect();
+    runs(&uncovered)
 }
 
 /// What every section of a frame reads off the plan.
@@ -1713,8 +1588,8 @@ impl Summary {
                     note: root.note,
                     answers: answered(&runs),
                     runs,
-                    kept: root_bytes(facts, Some(plan), index),
-                    held: root_bytes(facts, None, index),
+                    kept: cell_bytes(facts, Some(plan), |cell| cell.root == index),
+                    held: cell_bytes(facts, None, |cell| cell.root == index),
                     in_range: plan.in_range(facts, index),
                 }
             })
@@ -1885,15 +1760,6 @@ fn reroute(facts: &Facts, plan: &mut Plan, of_root: &[usize], was: &[(u8, u8)], 
     }
 }
 
-/// How many silent stretches the map leaves, as the heading reads it.
-fn coverage(gaps: &[(u8, u8)]) -> String {
-    match gaps.len() {
-        0 => "every key answered".to_string(),
-        1 => "1 silent range".to_string(),
-        n => format!("{n} silent ranges"),
-    }
-}
-
 impl State {
     /// The key map, pinned above the body: one cell per root over a clickable keyboard,
     /// and a line saying what the last key played.
@@ -1945,7 +1811,7 @@ impl State {
         };
         let reading = format!(
             "{}  {}–{}",
-            coverage(&summary.silent),
+            keys::coverage(summary.silent.len()),
             note::name(SPAN.low),
             note::name(SPAN.high)
         );
@@ -1977,7 +1843,8 @@ impl State {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         let picked = view
-            .picked
+            .rows
+            .selected
             .and_then(|root| of_root.iter().position(|held| *held == root));
         let cell_lit = answering.and_then(|root| of_root.iter().position(|held| *held == root));
         let acted = keys::size_cells(
@@ -2018,9 +1885,7 @@ impl State {
         match acted {
             Some(keys::BandAct::Pick(index)) => {
                 let root = of_root[index];
-                view.picked = Some(root);
-                view.open_rows.insert(root);
-                view.reveal = Some(root);
+                view.rows.pick(root, true);
             }
             Some(keys::BandAct::Drag { bounds, .. }) => {
                 let was: Vec<(u8, u8)> = summary
@@ -2095,20 +1960,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
     let whole = spans(&facts.layers);
     let mut rows: Vec<Switch> = Vec::new();
     for (rank, layer) in facts.shown_layers() {
-        let on_roots = facts
-            .roots
-            .iter()
-            .enumerate()
-            .filter(|(index, root)| {
-                facts
-                    .cells
-                    .iter()
-                    .any(|cell| cell.root == *index && cell.layer == layer)
-                    && plan.in_range(facts, *index)
-                    && plan.keeps_layer(root.note, layer)
-            })
-            .count();
-        let holds = facts
+        let holding: Vec<(usize, &Root)> = facts
             .roots
             .iter()
             .enumerate()
@@ -2118,9 +1970,16 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
                     .iter()
                     .any(|cell| cell.root == *index && cell.layer == layer)
             })
+            .collect();
+        let holds = holding.len();
+        let on_roots = holding
+            .iter()
+            .filter(|(index, root)| {
+                plan.in_range(facts, *index) && plan.keeps_layer(root.note, layer)
+            })
             .count();
-        let kept = layer_bytes(facts, Some(plan), layer);
-        let held = layer_bytes(facts, None, layer);
+        let kept = cell_bytes(facts, Some(plan), |cell| cell.layer == layer);
+        let held = cell_bytes(facts, None, |cell| cell.layer == layer);
         let partial = on_roots > 0 && on_roots < holds;
         rows.push(Switch {
             on: on_roots > 0,
@@ -2148,8 +2007,8 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
         if *bank == Bank::Attack {
             continue;
         }
-        let kept = bank_bytes(facts, Some(plan), *bank);
-        let held = bank_bytes(facts, None, *bank);
+        let kept = cell_bytes(facts, Some(plan), |cell| cell.bank == Some(*bank));
+        let held = cell_bytes(facts, None, |cell| cell.bank == Some(*bank));
         rows.push(Switch {
             on: plan.keeps_bank(Some(*bank)),
             name: bank_name(*bank).to_string(),
@@ -2209,26 +2068,6 @@ fn range_switch(facts: &Facts, plan: &Plan, kept: usize) -> Switch {
     }
 }
 
-/// What one layer holds, or what it keeps where a plan is given.
-fn layer_bytes(facts: &Facts, plan: Option<&Plan>, layer: u8) -> u64 {
-    facts
-        .cells
-        .iter()
-        .filter(|cell| cell.layer == layer && plan.is_none_or(|plan| plan.keeps(facts, cell)))
-        .map(|cell| cell.bytes)
-        .sum()
-}
-
-/// What one bank holds, or what it keeps where a plan is given.
-fn bank_bytes(facts: &Facts, plan: Option<&Plan>, bank: Bank) -> u64 {
-    facts
-        .cells
-        .iter()
-        .filter(|cell| cell.bank == Some(bank) && plan.is_none_or(|plan| plan.keeps(facts, cell)))
-        .map(|cell| cell.bytes)
-        .sum()
-}
-
 /// A lamp, a name, a note and a size, with a hairline under them.
 fn switch_row(ui: &mut egui::Ui, index: usize, row: &Switch) -> Option<bool> {
     const SIZE_W: f32 = 92.0;
@@ -2260,27 +2099,25 @@ fn switch_row(ui: &mut egui::Ui, index: usize, row: &Switch) -> Option<bool> {
     );
     let painter = ui.painter().clone();
     let left = rect.left() + LAMP.x + GAP;
-    cell(
+    cut(
         &painter,
         left,
         middle,
         name_w,
         &row.name,
-        egui::FontId::proportional(NAME),
-        ink,
+        egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
     let note_ink = match row.loud {
         true => app::warn(&visuals),
         false => app::caption(&visuals),
     };
-    cell(
+    cut(
         &painter,
         left + name_w + GAP,
         middle,
         rest - name_w,
         &row.note,
-        egui::FontId::proportional(NOTE),
-        note_ink,
+        egui::TextFormat::simple(egui::FontId::proportional(NOTE), note_ink),
     );
     let mono = egui::FontId::monospace(MONO);
     let back = figure(
@@ -2419,7 +2256,7 @@ fn constraint(plan: &Plan, summary: &Summary) -> (String, bool) {
     let rest = match &summary.cut {
         Some(cut) => format!(
             "Dropping {} sheds {}, the cheapest cut left that fits.",
-            listed(&cut.picked),
+            strings::listed(&cut.picked),
             room::measure(cut.shed)
         ),
         None if plan.range.is_some() => {
@@ -2580,14 +2417,13 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
             thrown = Some((layer, keep));
         }
         let painter = ui.painter().clone();
-        cell(
+        cut(
             &painter,
             rect.left() + LAMP.x + GAP,
             rect.center().y,
             LEFT - LAMP.x - GAP,
             word,
-            egui::FontId::proportional(NOTE),
-            ink,
+            egui::TextFormat::simple(egui::FontId::proportional(NOTE), ink),
         );
 
         let lane = egui::Rect::from_min_max(
@@ -2637,17 +2473,19 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
                 .map(|(_, span)| span_text(span))
                 .unwrap_or_default();
             if seg.width() >= SPAN_W && !span.is_empty() {
-                cell(
+                cut(
                     &painter,
                     seg.left() + 4.0,
                     seg.center().y,
                     seg.width() - 8.0,
                     &span,
-                    egui::FontId::monospace(MICRO),
-                    match kept {
-                        true => visuals.weak_text_color(),
-                        false => app::unlit(&visuals),
-                    },
+                    egui::TextFormat::simple(
+                        egui::FontId::monospace(MICRO),
+                        match kept {
+                            true => visuals.weak_text_color(),
+                            false => app::unlit(&visuals),
+                        },
+                    ),
                 );
             }
             if !pointer.is_some_and(|at| seg.contains(at)) {
@@ -2661,7 +2499,8 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
                     true => "kept · click to drop",
                     false => "dropped · click to keep",
                 },
-                room::measure(root_layer_bytes(facts, index, layer)),
+                room::measure(cell_bytes(facts, None, |cell| cell.root == index
+                    && cell.layer == layer)),
             );
             if !span.is_empty() {
                 said.push_str(&format!(" · {span}"));
@@ -2681,8 +2520,8 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
             }
         }
 
-        let kept = layer_bytes(facts, Some(plan), layer);
-        let held = layer_bytes(facts, None, layer);
+        let kept = cell_bytes(facts, Some(plan), |cell| cell.layer == layer);
+        let held = cell_bytes(facts, None, |cell| cell.layer == layer);
         figure(
             &painter,
             rect.right(),
@@ -2753,16 +2592,6 @@ fn segment_trim(facts: &Facts, plan: &Plan, root: usize, layer: u8) -> Option<u1
         .map(|strike| trim_of(facts, plan, strike))
 }
 
-/// What one root's layer holds, across every bank that records it.
-fn root_layer_bytes(facts: &Facts, root: usize, layer: u8) -> u64 {
-    facts
-        .cells
-        .iter()
-        .filter(|cell| cell.root == root && cell.layer == layer)
-        .map(|cell| cell.bytes)
-        .sum()
-}
-
 /// The ink for every cell of a row.
 ///
 /// ⚠️ A selected row is one color throughout, warn text included: a row lit by the
@@ -2812,47 +2641,12 @@ fn roots(
     audio: &Cache,
     sounding: &[u8],
 ) -> Option<Ask> {
-    const COL_A: f32 = 56.0;
-    const SIZE_W: f32 = 74.0;
-    const CHEVRON: f32 = 20.0;
-
-    let head = ui
-        .allocate_exact_size(egui::vec2(ui.available_width(), HEAD), egui::Sense::hover())
-        .0;
-    hairline(ui, head);
-    let quiet = app::caption(ui.visuals());
-    let rest = (head.width() - COL_A - SIZE_W - CHEVRON - GAP * 4.0).max(0.0);
-    let answers_w = rest / 2.6 * 1.1;
-    let layers_w = rest - answers_w;
-    {
-        let painter = ui.painter().clone();
-        let mut at = head.left() + PAD;
-        for (label, width) in [
-            ("ROOT", COL_A),
-            ("ANSWERS", answers_w),
-            ("LAYERS", layers_w),
-        ] {
-            cell(
-                &painter,
-                at,
-                head.center().y,
-                width,
-                label,
-                egui::FontId::proportional(9.0),
-                quiet,
-            );
-            at += width + GAP;
-        }
-        figure(
-            &painter,
-            head.right() - PAD - CHEVRON - GAP,
-            head.center().y,
-            "SIZE",
-            egui::FontId::proportional(9.0),
-            quiet,
-            false,
-        );
-    }
+    table::heads(
+        ui,
+        table::GRID,
+        ["Root", "Answers", "Layers", "Size", ""],
+        &[3],
+    );
 
     let mut ask = None;
     let mut clicked: Option<usize> = None;
@@ -2861,8 +2655,8 @@ fn roots(
     let layers = facts.shown_layers();
     for (index, root) in facts.roots.iter().enumerate() {
         let line = &summary.roots[index];
-        let picked = view.picked == Some(index);
-        let open = picked && view.open_rows.contains(&index);
+        let picked = view.rows.selected == Some(index);
+        let open = view.rows.opened(index);
         let in_range = line.in_range;
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::hover());
@@ -2882,7 +2676,8 @@ fn roots(
         }
         hairline(ui, rect);
         let middle = rect.center().y;
-        let left = rect.left() + PAD;
+        let cells = table::columns(rect, table::GRID);
+        let left = cells[0].0;
         painter.circle_filled(
             egui::pos2(left + 3.0, middle),
             3.0,
@@ -2891,26 +2686,24 @@ fn roots(
                 false => app::unlit(&visuals),
             },
         );
-        cell(
+        cut(
             &painter,
             left + 12.0,
             middle,
-            COL_A - 12.0,
+            cells[0].1 - 12.0,
             &note::name(root.note),
-            egui::FontId::new(NAME, app::bold()),
-            ink.text,
+            egui::TextFormat::simple(egui::FontId::new(NAME, app::bold()), ink.text),
         );
-        cell(
+        cut(
             &painter,
-            left + COL_A + GAP,
+            cells[1].0,
             middle,
-            answers_w,
+            cells[1].1,
             &line.answers,
-            egui::FontId::monospace(11.0),
-            ink.text,
+            egui::TextFormat::simple(egui::FontId::monospace(11.0), ink.text),
         );
 
-        let mut at = left + COL_A + GAP + answers_w + GAP;
+        let mut at = cells[2].0;
         let lamps = layers.len() <= ROW_LAMPS;
         if lamps {
             for (rank, layer) in &layers {
@@ -2924,15 +2717,15 @@ fn roots(
                     excepted = Some((root.note, *layer, keep));
                 }
                 at += LAMP.x + 2.0;
-                at += cell(
+                at += cut(
                     &painter,
                     at,
                     middle,
                     12.0,
                     &layer_short(*rank, facts.layers.len()),
-                    egui::FontId::proportional(MICRO),
-                    ink.text,
-                ) + GAP;
+                    egui::TextFormat::simple(egui::FontId::proportional(MICRO), ink.text),
+                )
+                .x + GAP;
             }
         }
         let on = layers
@@ -2944,21 +2737,23 @@ fn roots(
             (true, false) => format!("{on} of {}", layers.len()),
             (true, true) => String::new(),
         };
-        cell(
+        cut(
             &painter,
             at,
             middle,
-            (left + COL_A + GAP + answers_w + GAP + layers_w - at).max(0.0),
+            cells[2].0 + cells[2].1 - at,
             &said,
-            egui::FontId::proportional(11.0),
-            match in_range {
-                true => ink.loud,
-                false => ink.quiet,
-            },
+            egui::TextFormat::simple(
+                egui::FontId::proportional(11.0),
+                match in_range {
+                    true => ink.loud,
+                    false => ink.quiet,
+                },
+            ),
         );
 
         let (kept, held) = (line.kept, line.held);
-        let right = rect.right() - PAD - CHEVRON - GAP;
+        let right = cells[3].0 + cells[3].1;
         let mono = egui::FontId::monospace(MONO);
         let back = figure(
             &painter,
@@ -2987,7 +2782,7 @@ fn roots(
                 false => Glyph::ChevronRight,
             },
             egui::Rect::from_center_size(
-                egui::pos2(rect.right() - PAD - CHEVRON / 2.0, middle),
+                egui::pos2(cells[4].0 + cells[4].1 / 2.0, middle),
                 egui::Vec2::splat(12.0),
             ),
             ink.quiet,
@@ -2995,7 +2790,7 @@ fn roots(
         if response.clicked() {
             clicked = Some(index);
         }
-        if view.reveal == Some(index) {
+        if view.rows.reveal == Some(index) {
             ui.scroll_to_rect(rect, Some(egui::Align::TOP));
         }
 
@@ -3008,17 +2803,9 @@ fn roots(
             }
         }
     }
-    view.reveal = None;
+    view.rows.reveal = None;
     if let Some(index) = clicked {
-        match view.picked == Some(index) && view.open_rows.contains(&index) {
-            true => {
-                view.open_rows.remove(&index);
-            }
-            false => {
-                view.open_rows.insert(index);
-            }
-        }
-        view.picked = Some(index);
+        view.rows.pick(index, false);
     }
     if let Some((root, layer, keep)) = excepted {
         plan.except(root, layer, keep);
@@ -3057,8 +2844,8 @@ fn open_row(
     egui::Frame::new()
         .fill(ui.visuals().window_fill)
         .inner_margin(egui::Margin {
-            left: 68,
-            right: 12,
+            left: table::INDENT as i8,
+            right: table::PAD as i8,
             top: 10,
             bottom: 12,
         })
@@ -3155,13 +2942,13 @@ fn open_row(
                     true => (Glyph::X, "Stop"),
                     false => (Glyph::AudioLines, "Audition"),
                 };
-                if action(ui, glyph, label, app::accent(ui.visuals())) {
+                if sample::action(ui, label, glyph, app::accent(ui.visuals())) {
                     asked = Some(Opened::Audio(Ask::Play(root.note)));
                 }
-                if action(ui, Glyph::Waves, "Save WAV…", app::caption(ui.visuals())) {
+                if sample::action(ui, "Save WAV…", Glyph::Waves, app::caption(ui.visuals())) {
                     asked = Some(Opened::Audio(Ask::Save(root.note)));
                 }
-                if action(ui, Glyph::X, "Drop this root", app::warn(ui.visuals())) {
+                if sample::action(ui, "Drop this root", Glyph::X, app::warn(ui.visuals())) {
                     asked = Some(Opened::Drop);
                 }
             });
@@ -3216,67 +3003,21 @@ fn units(reach: f32) -> i8 {
 
 /// The fine tune lane: one bar per key, drawn over by a drag across it.
 fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
-    const LABEL: f32 = 80.0;
-    const AXIS: f32 = 34.0;
-    const RIGHT: f32 = 150.0;
-
     let values: Vec<f32> = (SPAN.low..=SPAN.high)
         .map(|key| reach(plan.tune(facts, key)))
         .collect();
     let edited: Vec<bool> = (SPAN.low..=SPAN.high)
         .map(|key| plan.tune(facts, key) != facts.tune(key))
         .collect();
-    let count = edited.iter().filter(|held| **held).count();
-
-    let painted_keys = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_sized(
-                egui::vec2(LABEL, LANE),
-                egui::Label::new(
-                    egui::RichText::new("Fine tune")
-                        .size(11.0)
-                        .color(ui.visuals().weak_text_color()),
-                )
-                .halign(egui::Align::LEFT),
-            );
-            let (top, bottom) = Scale::Cents(TUNE_CENTS).axis_labels();
-            ui.allocate_ui(egui::vec2(AXIS, 38.0), |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
-                    for label in [top.as_str(), "0", bottom.as_str()] {
-                        ui.label(
-                            egui::RichText::new(label)
-                                .font(egui::FontId::monospace(9.0))
-                                .color(app::caption(ui.visuals())),
-                        );
-                    }
-                });
-            });
-            let lane = ui.available_width() - RIGHT - 8.0;
-            let drawn = ui
-                .allocate_ui(egui::vec2(lane.max(1.0), 38.0), |ui| {
-                    keys::lane(ui, SPAN, &values, &edited, Scale::Cents(TUNE_CENTS))
-                })
-                .inner;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let said = match count {
-                    0 => format!("{} keys · ±{TUNE_CENTS} c", SPAN.keys()),
-                    n => format!("{} keys · ±{TUNE_CENTS} c · {n} edited", SPAN.keys()),
-                };
-                ui.label(
-                    egui::RichText::new(said)
-                        .font(egui::FontId::monospace(10.0))
-                        .color(match count {
-                            0 => app::caption(ui.visuals()),
-                            _ => app::warn(ui.visuals()),
-                        }),
-                );
-            });
-            drawn
-        })
-        .inner;
-
+    let painted_keys = sample::lane_row(
+        ui,
+        "Fine tune",
+        "fine_tune",
+        SPAN,
+        &values,
+        &edited,
+        Scale::Cents(TUNE_CENTS),
+    );
     for (key, reach) in painted_keys {
         let units = units(reach);
         match units == facts.tune(key) {
@@ -3286,31 +3027,7 @@ fn per_key(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, view: &mut View) {
     }
 
     ui.add_space(8.0);
-    let chevron = match view.key_table {
-        true => Glyph::ChevronDown,
-        false => Glyph::ChevronRight,
-    };
-    let label = match view.key_table {
-        true => "Hide the per-key table",
-        false => "Show the 128-key fine tune table",
-    };
-    if ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            icon(ui, chevron, 12.0, app::caption(ui.visuals()));
-            ui.label(
-                egui::RichText::new(label)
-                    .size(11.0)
-                    .color(app::caption(ui.visuals())),
-            )
-        })
-        .response
-        .interact(egui::Sense::click())
-        .clicked()
-    {
-        view.key_table = !view.key_table;
-    }
-    if !view.key_table {
+    if !sample::fold(ui, &mut view.key_table, "Show the 128-key fine tune table") {
         return;
     }
     egui::Frame::new()
@@ -3456,7 +3173,7 @@ impl State {
         ui.horizontal_top(|ui| {
             ui.add_space(PAD);
             column(ui, width - PAD * 2.0, |ui| {
-                lanes(ui, facts, draft, view.picked)
+                lanes(ui, facts, draft, view.rows.selected)
             });
         });
         ui.add_space(12.0);
@@ -3492,82 +3209,41 @@ impl State {
         let Some(facts) = self.facts() else {
             return;
         };
-        controls::heading(
+        let fact = |key, value, note| Fact { key, value, note };
+        capability::about(
             ui,
-            "About this file",
-            "what the file says about itself, read here and written back unchanged",
-            None,
+            &[
+                fact("Format", "npno".to_string(), "a piano library"),
+                fact(
+                    "Stream version",
+                    format!("{:#05x}", facts.stream),
+                    "which decides the capability struct",
+                ),
+                fact("Size", room::measure(facts.total), "before any trim"),
+                fact(
+                    "Name",
+                    format!("{}#{}", facts.name, facts.variant),
+                    "Name#Variant at 0x1c",
+                ),
+                fact("Channels", facts.channel_word().to_string(), "per file"),
+                fact(
+                    "Strokes",
+                    format!("{} in {} roots", facts.strokes, facts.roots.len()),
+                    "one recorded note each",
+                ),
+                fact(
+                    "Keys answered",
+                    format!("{} of 128", facts.covered.len()),
+                    "the key map at 0x8c",
+                ),
+                fact("Kind", kind_name(facts.kind), "0x18"),
+                fact(
+                    "Gain",
+                    format!("{:+.1} dB", f32::from(facts.gain) / 10.0),
+                    "0x40c, tenths of a decibel",
+                ),
+            ],
         );
-        let rows = [
-            ("Format", "npno".to_string(), "a piano library"),
-            (
-                "Stream version",
-                format!("{:#05x}", facts.stream),
-                "which decides the capability struct",
-            ),
-            ("Size", room::measure(facts.total), "before any trim"),
-            (
-                "Name",
-                format!("{}#{}", facts.name, facts.variant),
-                "Name#Variant at 0x1c",
-            ),
-            ("Channels", facts.channel_word().to_string(), "per file"),
-            (
-                "Strokes",
-                format!("{} in {} roots", facts.strokes, facts.roots.len()),
-                "one recorded note each",
-            ),
-            (
-                "Keys answered",
-                format!("{} of 128", facts.covered.len()),
-                "the key map at 0x8c",
-            ),
-            ("Kind", kind_name(facts.kind), "0x18"),
-            (
-                "Gain",
-                format!("{:+.1} dB", f32::from(facts.gain) / 10.0),
-                "0x40c, tenths of a decibel",
-            ),
-        ];
-        for (label, value, note) in rows {
-            let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
-            ui.painter().hline(
-                rect.x_range(),
-                rect.top() + 0.5,
-                egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
-            );
-            let painter = ui.painter().clone();
-            let inner = rect.shrink2(egui::vec2(PAD, 0.0));
-            let track = inner.width() / 3.8;
-            cell(
-                &painter,
-                inner.left(),
-                rect.center().y,
-                track,
-                label,
-                egui::FontId::proportional(11.0),
-                ui.visuals().weak_text_color(),
-            );
-            cell(
-                &painter,
-                inner.left() + track,
-                rect.center().y,
-                track,
-                &value,
-                egui::FontId::monospace(11.0),
-                ui.visuals().text_color(),
-            );
-            cell(
-                &painter,
-                inner.left() + track * 2.0,
-                rect.center().y,
-                inner.right() - inner.left() - track * 2.0,
-                note,
-                egui::FontId::proportional(NOTE),
-                app::caption(ui.visuals()),
-            );
-        }
         ui.add_space(10.0);
         ui.horizontal_top(|ui| {
             ui.add_space(PAD);
@@ -3591,108 +3267,50 @@ impl State {
         if self.facts().is_none() {
             return;
         }
-        capability::table(ui, CAPABILITIES);
+        capability::table(ui, &CAPABILITIES);
         capability::offsets(ui, &offsets());
     }
 }
 
 /// What a piano library holds, and how far this editor can change each part.
-const CAPABILITIES: &[Row] = &[
-    Row {
-        name: "name",
-        state: Cap::Editable,
-        note: "Name#Variant at 0x1c",
-    },
-    Row {
-        name: "category / sub",
-        state: Cap::Absent,
-        note: "no category in a piano library",
-    },
-    Row {
-        name: "key zones: root / top / low",
-        state: Cap::Editable,
-        note: "a root per key at 0x8c; the boundaries are dragged on the key map",
-    },
-    Row {
-        name: "velocity layers",
-        state: Cap::Editable,
-        note: "per root; the index is the file's",
-    },
-    Row {
-        name: "per-zone gain / detune",
-        state: Cap::Editable,
-        note: "trim per stroke at +0x34 (1 dB a unit); fine tune per key at 0x18c",
-    },
-    Row {
-        name: "per-key table",
-        state: Cap::Editable,
-        note: "128 × fine tune at 0x18c",
-    },
-    Row {
-        name: "instrument gain",
-        state: Cap::Editable,
-        note: "0x40c, signed tenths of a dB",
-    },
-    Row {
-        name: "loop points / crossfade",
-        state: Cap::ReadOnly,
-        note: "marks in the stroke record, carried unchanged; meaning unknown",
-    },
-    Row {
-        name: "loop decay / detune",
-        state: Cap::ReadOnly,
-        note: "the applied-decay ladder at +0x36, carried as read",
-    },
-    Row {
-        name: "release samples",
-        state: Cap::Editable,
-        note: "bank 2: drop or keep",
-    },
-    Row {
-        name: "pedal resonance samples",
-        state: Cap::Editable,
-        note: "bank 1: what the Small library leaves out",
-    },
-    Row {
-        name: "sound parameters",
-        state: Cap::Absent,
-        note: "panel-side: acoustics, touch",
-    },
-    Row {
-        name: "stereo / channels",
-        state: Cap::ReadOnly,
-        note: "per file",
-    },
-    Row {
-        name: "replace / add a stroke",
-        state: Cap::Editable,
-        note: "File › New › Piano library… builds one from WAVs; a template is optional",
-    },
-    Row {
-        name: "cut / move / drop strokes",
-        state: Cap::Editable,
-        note: "strokes are self-contained",
-    },
-    Row {
-        name: "decode / audition",
-        state: Cap::Editable,
-        note: "one stroke at a time, on request",
-    },
-    Row {
-        name: "size trim",
-        state: Cap::Editable,
-        note: "banks, layers, range",
-    },
-    Row {
-        name: "write to the instrument",
-        state: Cap::Editable,
-        note: "class 1",
-    },
-    Row {
-        name: "byte-exact round trip",
-        state: Cap::Verified,
-        note: "directory and audio re-laid, checksum recomputed",
-    },
+const CAPABILITIES: Stands = [
+    (Cap::Editable, "Name#Variant at 0x1c"),
+    (Cap::Absent, "no category in a piano library"),
+    (
+        Cap::Editable,
+        "a root per key at 0x8c; the boundaries are dragged on the key map",
+    ),
+    (Cap::Editable, "per root; the index is the file's"),
+    (
+        Cap::Editable,
+        "trim per stroke at +0x34 (1 dB a unit); fine tune per key at 0x18c",
+    ),
+    (Cap::Editable, "128 × fine tune at 0x18c"),
+    (Cap::Editable, "0x40c, signed tenths of a dB"),
+    (
+        Cap::ReadOnly,
+        "marks in the stroke record, carried unchanged; meaning unknown",
+    ),
+    (
+        Cap::ReadOnly,
+        "the applied-decay ladder at +0x36, carried as read",
+    ),
+    (Cap::Editable, "bank 2: drop or keep"),
+    (Cap::Editable, "bank 1: what the Small library leaves out"),
+    (Cap::Absent, "panel-side: acoustics, touch"),
+    (Cap::ReadOnly, "per file"),
+    (
+        Cap::Editable,
+        "File › New › Piano library… builds one from WAVs; a template is optional",
+    ),
+    (Cap::Editable, "strokes are self-contained"),
+    (Cap::Editable, "one stroke at a time, on request"),
+    (Cap::Editable, "banks, layers, range"),
+    (Cap::Editable, "class 1"),
+    (
+        Cap::Verified,
+        "directory and audio re-laid, checksum recomputed",
+    ),
 ];
 
 /// Where the fields this editor writes land in the body.
@@ -3844,7 +3462,7 @@ mod tests {
         );
         assert_eq!(
             kept_bytes(&facts, &plan),
-            facts.total - bank_bytes(&facts, None, Bank::Release)
+            facts.total - cell_bytes(&facts, None, |cell| cell.bank == Some(Bank::Release))
         );
     }
 
@@ -4223,7 +3841,7 @@ mod tests {
         assert_eq!(kept_bytes(&facts, &plan), facts.total);
 
         let softest = *LAYERS.last().unwrap();
-        let layer = layer_bytes(&facts, None, softest);
+        let layer = cell_bytes(&facts, None, |cell| cell.layer == softest);
         assert!(layer > 0);
         plan.switch_layer(softest, false);
         assert_eq!(kept_bytes(&facts, &plan), facts.total - layer);
@@ -4250,7 +3868,7 @@ mod tests {
         assert!(plan.in_range(&facts, 1));
         assert_eq!(
             kept_bytes(&facts, &plan),
-            facts.total - root_bytes(&facts, None, 0)
+            facts.total - cell_bytes(&facts, None, |cell| cell.root == 0)
         );
         assert!(Summary::of(&facts, &plan, None)
             .covered
@@ -4264,8 +3882,8 @@ mod tests {
     fn the_cheapest_cut_is_the_smallest_set_of_switches_that_clears_the_overage() {
         let facts = facts();
         let plan = plan();
-        let release = bank_bytes(&facts, None, Bank::Release);
-        let resonance = bank_bytes(&facts, None, Bank::Resonance);
+        let release = cell_bytes(&facts, None, |cell| cell.bank == Some(Bank::Release));
+        let resonance = cell_bytes(&facts, None, |cell| cell.bank == Some(Bank::Resonance));
         assert!(release < resonance, "the release bank is the cheaper cut");
 
         // An overage the release bank alone covers is the release bank alone.
@@ -4292,24 +3910,6 @@ mod tests {
         // And a cut that would leave nothing at all to play is not a cut.
         let audio: u64 = facts.cells.iter().map(|cell| cell.bytes).sum();
         assert!(cheapest_cut(&facts, &plan, audio).is_none());
-    }
-
-    #[test]
-    fn a_list_of_switches_reads_as_a_sentence_would_name_them() {
-        let one = vec!["release samples".to_string()];
-        assert_eq!(listed(&one), "release samples");
-        let two = vec!["soft layer".to_string(), "release samples".to_string()];
-        assert_eq!(listed(&two), "soft layer and release samples");
-        let three = vec![
-            "soft layer".to_string(),
-            "medium layer".to_string(),
-            "release samples".to_string(),
-        ];
-        assert_eq!(
-            listed(&three),
-            "soft layer, medium layer and release samples"
-        );
-        assert_eq!(listed(&[]), "");
     }
 
     /// Three layers are the panel's own three words; any other count is named by its
@@ -4561,15 +4161,15 @@ mod tests {
         let mut plan = plan();
         assert!(Summary::of(&facts, &plan, None).silent.is_empty());
         assert_eq!(
-            coverage(&Summary::of(&facts, &plan, None).silent),
+            keys::coverage(Summary::of(&facts, &plan, None).silent.len()),
             "every key answered"
         );
 
         plan.range = Some(36..=96);
         let gaps = Summary::of(&facts, &plan, None).silent;
         assert_eq!(gaps, [(21, 35), (97, 108)]);
-        assert_eq!(coverage(&gaps), "2 silent ranges");
-        assert_eq!(coverage(&gaps[..1]), "1 silent range");
+        assert_eq!(keys::coverage(gaps.len()), "2 silent ranges");
+        assert_eq!(keys::coverage(1), "1 silent range");
     }
 
     /// A map that splits a root's keys gets one cell per run.
@@ -4587,7 +4187,7 @@ mod tests {
     fn every_editable_capability_is_something_the_editor_does() {
         let saved = bytes();
         let facts = facts();
-        for row in CAPABILITIES.iter().filter(|row| row.state == Cap::Editable) {
+        for row in capability::rows(&CAPABILITIES).filter(|row| row.state == Cap::Editable) {
             let Some(edit) = plan_for(row.name) else {
                 match row.name {
                     "decode / audition" => {}
@@ -4932,7 +4532,11 @@ mod tests {
         let opened = editor.frame(Vec::new());
         assert!(opened.said("ANSWERS FROM"), "{:?}", opened.words);
         assert!(opened.said("Audition") && opened.said("Drop this root"));
-        assert_eq!(editor.state.view.picked, Some(2), "root C5 is the third");
+        assert_eq!(
+            editor.state.view.rows.selected,
+            Some(2),
+            "root C5 is the third"
+        );
     }
 
     /// A lamp on a root's row takes that layer off that root alone, and leaves the row
@@ -4950,7 +4554,7 @@ mod tests {
         assert_eq!(plan.roots.get(&(ROOTS[0], LAYERS[2])), Some(&false));
         assert!(plan.layers.is_empty(), "every other root keeps it");
         assert!(
-            editor.state.view.open_rows.is_empty(),
+            !editor.state.view.rows.open,
             "the row under the lamp did not open"
         );
     }
@@ -5055,8 +4659,7 @@ mod tests {
 
         let mut editor = Editor::of(saved, facts().total * 2);
         editor.frame(Vec::new());
-        editor.state.view.picked = Some(2);
-        editor.state.view.open_rows.insert(2);
+        editor.state.view.rows.pick(2, false);
         let opened = editor.frame(Vec::new());
 
         assert!(opened.said("ANSWERS FROM"), "the row is open");
@@ -5395,8 +4998,7 @@ mod tests {
     fn an_open_root_asks_for_its_waveform_once_and_again_when_its_stroke_changes() {
         let mut editor = Editor::of(coded(), u64::from(u32::MAX));
         editor.frame(Vec::new());
-        editor.state.view.picked = Some(0);
-        editor.state.view.open_rows.insert(0);
+        editor.state.view.rows.pick(0, false);
         assert_eq!(
             editor.frame(Vec::new()).asked,
             [Ask::Show(ROOTS[0])],
@@ -5447,8 +5049,7 @@ mod tests {
     fn an_open_rows_action_goes_before_its_request_for_a_waveform() {
         let mut editor = Editor::of(coded(), u64::from(u32::MAX));
         editor.frame(Vec::new());
-        editor.state.view.picked = Some(0);
-        editor.state.view.open_rows.insert(0);
+        editor.state.view.rows.pick(0, false);
         let waiting = editor.frame(Vec::new());
         assert!(waiting.said("reading the stroke…"), "{:?}", waiting.words);
         assert_eq!(waiting.asked, [Ask::Show(ROOTS[0])]);

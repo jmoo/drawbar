@@ -70,16 +70,15 @@ fn fills(class: ObjectClass, unit: Option<AllocationUnit>, banks: usize) -> bool
 /// there, so an empty trough would misrepresent it.
 pub fn meter(
     class: ObjectClass,
-    inventory: &[Status],
-    unit: Option<AllocationUnit>,
-    banks: usize,
+    device: &DeviceState,
     queue: &Queue,
     workspace: &Workspace,
 ) -> Option<Meter> {
-    if !fills(class, unit, banks) {
+    let unit = device.allocation_unit(class);
+    if !fills(class, unit, device.banks(class)) {
         return None;
     }
-    let status = inventory.iter().find(|status| status.class == class)?;
+    let status = counted(class, device)?;
     if status.total() == 0 {
         return None;
     }
@@ -123,14 +122,10 @@ fn incoming(
 
 /// The free space in a class's partition: in bytes when the allocation unit is known,
 /// otherwise in bare units.
-pub fn free_space(
-    class: ObjectClass,
-    inventory: &[Status],
-    unit: Option<AllocationUnit>,
-) -> Option<String> {
-    let status = inventory.iter().find(|status| status.class == class)?;
+pub fn free_space(class: ObjectClass, device: &DeviceState) -> Option<String> {
+    let status = counted(class, device)?;
     let (free, total) = (status.available(), status.total());
-    Some(match unit {
+    Some(match device.allocation_unit(class) {
         Some(unit) => format!(
             "{} free of {}",
             measure(free.saturating_mul(u64::from(unit.get()))),
@@ -146,11 +141,13 @@ pub fn free_space(
 /// of units, which cannot be converted to bytes without it.
 pub fn free_bytes(class: ObjectClass, device: &DeviceState) -> Option<u64> {
     let unit = device.allocation_unit(class)?;
-    let status = device
-        .inventory
-        .iter()
-        .find(|status| status.class == class)?;
+    let status = counted(class, device)?;
     Some(status.available().saturating_mul(u64::from(unit.get())))
+}
+
+/// The counters the instrument last reported for a class's partition.
+fn counted(class: ObjectClass, device: &DeviceState) -> Option<&Status> {
+    device.inventory.iter().find(|status| status.class == class)
 }
 
 /// The largest item in the queue, and whether it fits in the free space.
@@ -246,7 +243,7 @@ pub fn bar(ui: &mut egui::Ui, meter: Meter) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::pretend_allocation_unit;
+    use crate::device::Device;
     use crate::queue::enqueue;
     use crate::testing::Bench;
     use crate::workspace::{Fresh, Origin};
@@ -278,7 +275,11 @@ mod tests {
         let class = ObjectClass::Program;
         let bytes = Fresh::Program.bytes().unwrap();
         // 100 of 400 slots, each program costing 121 bytes of the partition's count.
-        let inventory = [status(class, 100, 300 * 121, 100 * 121)];
+        device
+            .state
+            .inventory
+            .push(status(class, 100, 300 * 121, 100 * 121));
+        device.pretend_geometry(class, &[("1", 100), ("2", 100), ("3", 100), ("4", 100)]);
         // Two vacant destinations and one that is taken.
         device.pretend_scanned(class, 1, &["", "", "Africa Split"]);
 
@@ -301,8 +302,7 @@ mod tests {
             );
         }
 
-        let held =
-            meter(class, &inventory, None, 4, &queue, &workspace).expect("the class was read");
+        let held = meter(class, &device.state, &queue, &workspace).expect("the class was read");
         assert_eq!(held.used, 100);
         assert_eq!(held.total, 400);
         assert_eq!(held.queued, 2, "the third replaces what is there");
@@ -320,7 +320,7 @@ mod tests {
             ..
         } = Bench::new();
         let class = ObjectClass::Sample;
-        let inventory = [status(class, 84, 64, 1472)];
+        device.state.inventory.push(status(class, 84, 64, 1472));
         device.pretend_scanned(class, 1, &[""]);
 
         let id = workspace.ingest("a sample".into(), Origin::Fresh, vec![0; 300_000], &mut log);
@@ -335,10 +335,10 @@ mod tests {
             at(0),
         );
 
-        assert_eq!(meter(class, &inventory, None, 1, &queue, &workspace), None);
+        assert_eq!(meter(class, &device.state, &queue, &workspace), None);
 
-        let unit = pretend_allocation_unit(class, 131_064);
-        let known = meter(class, &inventory, Some(unit), 1, &queue, &workspace).unwrap();
+        device.pretend_partitions(&[(class, "Samp Lib", 131_064)]);
+        let known = meter(class, &device.state, &queue, &workspace).unwrap();
         assert_eq!(known.used, 1472);
         assert_eq!(known.total, 1536);
         // 300 000 / 131 064 = 2.29, and a partial block still costs a whole one.
@@ -349,18 +349,22 @@ mod tests {
     #[test]
     fn a_partition_that_counts_nothing_at_all_has_no_meter() {
         let Bench {
-            workspace, queue, ..
+            workspace,
+            mut device,
+            queue,
+            ..
         } = Bench::new();
         let class = ObjectClass::Piano;
-        let unit = Some(pretend_allocation_unit(class, 261_632));
-        let inventory = [
+        device.pretend_partitions(&[(class, "Piano", 261_632)]);
+        device.pretend_geometry(ObjectClass::Program, &[("1", 5), ("2", 5)]);
+        device.state.inventory = vec![
             status(class, 0, 0, 0),
             status(ObjectClass::Program, 1, 9, 1),
         ];
 
-        let drawn = |class, unit, banks| meter(class, &inventory, unit, banks, &queue, &workspace);
-        assert_eq!(drawn(class, unit, 1), None);
-        assert!(drawn(ObjectClass::Program, None, 4).is_some());
+        let drawn = |class| meter(class, &device.state, &queue, &workspace);
+        assert_eq!(drawn(class), None);
+        assert!(drawn(ObjectClass::Program).is_some());
     }
 
     #[test]
@@ -372,7 +376,7 @@ mod tests {
             ..
         } = Bench::new();
         let (one, many, library) = (ObjectClass::Live, ObjectClass::Program, ObjectClass::Sample);
-        let inventory = [
+        device.state.inventory = vec![
             status(one, 1, 4, 1),
             status(many, 100, 300, 100),
             status(library, 84, 64, 1472),
@@ -380,27 +384,23 @@ mod tests {
         device.pretend_geometry(one, &[("Live", 5)]);
         device.pretend_geometry(many, &[("1", 50), ("2", 50), ("3", 50), ("4", 50)]);
         device.pretend_geometry(library, &[("Samp Lib", 1)]);
-        let unit = |class| Some(pretend_allocation_unit(class, 1));
-        let drawn = |class, unit| {
-            meter(
-                class,
-                &inventory,
-                unit,
-                device.state.banks(class),
-                &queue,
-                &workspace,
-            )
-            .is_some()
-        };
+        let drawn =
+            |device: &Device, class| meter(class, &device.state, &queue, &workspace).is_some();
 
-        assert!(!drawn(one, unit(one)), "one bank of fixed slots");
-        assert!(drawn(many, unit(many)), "more than one bank");
-        assert!(drawn(many, None), "a bank division needs no unit");
+        assert!(drawn(&device, many), "a bank division needs no unit");
         assert!(
-            drawn(library, unit(library)),
-            "one bank, and counted in bytes"
+            !drawn(&device, library),
+            "nothing counts bytes without a unit"
         );
-        assert!(!drawn(library, None), "nothing counts bytes without a unit");
+
+        device.pretend_partitions(&[
+            (one, "Live", 1),
+            (many, "Program", 1),
+            (library, "Samp Lib", 1),
+        ]);
+        assert!(!drawn(&device, one), "one bank of fixed slots");
+        assert!(drawn(&device, many), "more than one bank");
+        assert!(drawn(&device, library), "one bank, and counted in bytes");
     }
 
     #[test]
@@ -465,21 +465,18 @@ mod tests {
 
     #[test]
     fn free_space_reads_in_bytes_only_once_the_allocation_unit_has_arrived() {
+        let mut device = Device::new(egui::Context::default());
         let class = ObjectClass::Sample;
-        let inventory = [status(class, 84, 64, 1472)];
+        device.state.inventory.push(status(class, 84, 64, 1472));
         assert_eq!(
-            free_space(class, &inventory, None).as_deref(),
+            free_space(class, &device.state).as_deref(),
             Some("64 of 1536 units free")
         );
+        device.pretend_partitions(&[(class, "Samp Lib", 131_064)]);
         assert_eq!(
-            free_space(
-                class,
-                &inventory,
-                Some(pretend_allocation_unit(class, 131_064))
-            )
-            .as_deref(),
+            free_space(class, &device.state).as_deref(),
             Some("8.0 MB free of 192.0 MB")
         );
-        assert_eq!(free_space(ObjectClass::Program, &inventory, None), None);
+        assert_eq!(free_space(ObjectClass::Program, &device.state), None);
     }
 }

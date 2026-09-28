@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use eframe::egui;
 use nord_usb::device::Device;
+use nord_usb::envelope;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo};
+use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::{DeviceCmd, DeviceEvent, Outgoing, Partition};
@@ -168,10 +169,10 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::SlotInfo { class, at } => {
-            let info = match slot_info(device, class, at).await {
+            let info = match device.read(class, async |s| op::info(s, at).await).await {
                 Ok(info) => Some(info),
                 // Status 1 is a vacant slot, not a failure.
-                Err(Error::DeviceStatus(1)) => None,
+                Err(Error::DeviceStatus(op::VACANT)) => None,
                 Err(e) => return Err(spoil(gone, Some(at))(e)),
             };
             emit.send(DeviceEvent::SlotInfo { class, at, info });
@@ -179,7 +180,8 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::Deps { class, at } => {
-            let deps = dependencies(device, class, at)
+            let deps = device
+                .read(class, async |s| op::dependencies(s, at).await)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             let note = format!("{}: {} dependencies", shown(at), deps.len());
@@ -191,7 +193,7 @@ async fn execute<T: Transport>(
             let (info, bytes) = match read_object(device, class, at).await {
                 Ok(read) => read,
                 // Status 1 is a vacant slot, not a failure.
-                Err(Error::DeviceStatus(1)) => {
+                Err(Error::DeviceStatus(op::VACANT)) => {
                     emit.send(DeviceEvent::Vacant { class, at, why });
                     return Ok(None);
                 }
@@ -235,7 +237,8 @@ async fn execute<T: Transport>(
         DeviceCmd::SendAll { class, items } => send_all(device, class, items, emit, gone).await,
 
         DeviceCmd::Select { class, at } => {
-            select(device, class, at)
+            device
+                .read(class, async |s| op::select(s, at).await)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             // `select` puts the panel on the slot, so this is the answer a `FOCUS` read
@@ -258,28 +261,32 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::Rename { class, at, name } => {
-            rename(device, class, at, &name)
+            device
+                .destructive(class, async |s| op::rename(s, at, &name).await)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             Ok(Some(format!("renamed {} to {name:?}", shown(at))))
         }
 
         DeviceCmd::Move { class, from, to } => {
-            move_object(device, class, from, to)
+            device
+                .destructive(class, async |s| op::move_object(s, from, to).await)
                 .await
                 .map_err(spoil(gone, Some(from)))?;
             Ok(Some(format!("moved {} -> {}", shown(from), shown(to))))
         }
 
         DeviceCmd::Duplicate { class, from, to } => {
-            duplicate(device, class, from, to)
+            device
+                .destructive(class, async |s| op::duplicate(s, from, to).await)
                 .await
                 .map_err(spoil(gone, Some(from)))?;
             Ok(Some(format!("duplicated {} -> {}", shown(from), shown(to))))
         }
 
         DeviceCmd::Delete { class, at } => {
-            delete(device, class, at)
+            device
+                .destructive(class, async |s| op::delete(s, at).await)
                 .await
                 .map_err(spoil(gone, Some(at)))?;
             Ok(Some(format!("deleted {}", shown(at))))
@@ -305,7 +312,7 @@ async fn put<T: Transport>(
 
     let existing = match op::info(s, at).await {
         Ok(info) => Some(info),
-        Err(Error::DeviceStatus(1)) => None,
+        Err(Error::DeviceStatus(op::VACANT)) => None,
         Err(e) => return Ok(Err(spoil(gone, Some(at))(e))),
     };
     // Confirmed on hardware.
@@ -365,7 +372,7 @@ async fn put<T: Transport>(
                 )),
                 Err(restore) => {
                     *gone |= hung_up(&restore);
-                    let name = rescue_name(at, &backup);
+                    let name = envelope::rescue_name(at, &backup);
                     emit.send(DeviceEvent::Rescued {
                         at,
                         name,
@@ -521,22 +528,16 @@ async fn batch<T: Transport>(
 // Confirmed on hardware.
 fn explain(e: Error, at: Location) -> String {
     match e {
-        Error::DeviceStatus(1) => format!("{} is empty", shown(at)),
-        Error::DeviceStatus(3) => format!("{} is out of range for this instrument", shown(at)),
-        Error::DeviceStatus(4) => format!(
+        Error::DeviceStatus(op::VACANT) => format!("{} is empty", shown(at)),
+        Error::DeviceStatus(op::OUT_OF_RANGE) => {
+            format!("{} is out of range for this instrument", shown(at))
+        }
+        Error::DeviceStatus(op::OCCUPIED) => format!(
             "{} is occupied, and the instrument does not overwrite in place",
             shown(at)
         ),
         other => other.to_string(),
     }
-}
-
-async fn slot_info<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    at: Location,
-) -> Result<ProgramInfo, Error> {
-    device.read(class, async |s| op::info(s, at).await).await
 }
 
 /// A shorter per-frame limit for metadata walks; transfers keep the session default.
@@ -568,30 +569,48 @@ async fn scan_bank<T: Transport>(
                 class.label()
             ))
         })?;
-    let capacity = declared.is_bounded().then_some(declared.slots);
-    if capacity.is_some_and(|capacity| capacity > MOST_OCCUPIED) {
-        return Err(Error::ScanLimit {
-            bank: bank.saturating_sub(1),
-            limit: MOST_OCCUPIED,
-        });
+    let extent = Extent::of(declared);
+    if matches!(extent, Extent::Known(slots) if slots > MOST_OCCUPIED) {
+        return Err(scan_limit(bank.saturating_sub(1)));
     }
     device
         .read(class, async |s| {
             s.set_read_limit(SCAN_READ_LIMIT);
-            match capacity {
-                Some(capacity) => walk_bank(s, bank, capacity).await,
-                None => walk_open_bank(s, bank, MOST_OCCUPIED).await,
-            }
+            walk(s, bank, extent, MOST_OCCUPIED).await
         })
         .await
+}
+
+/// `bank` is the zero-based index, as the error reports it.
+fn scan_limit(bank: u32) -> Error {
+    Error::ScanLimit {
+        bank,
+        limit: MOST_OCCUPIED,
+    }
+}
+
+/// How many slots a bank holds, as its instrument declares it.
+#[derive(Clone, Copy)]
+enum Extent {
+    Known(u32),
+    /// The unbounded sentinel: the bank ends where the instrument refuses a slot.
+    Open,
+}
+
+impl Extent {
+    fn of(bank: &Bank) -> Extent {
+        match bank.is_bounded() {
+            true => Extent::Known(bank.slots),
+            false => Extent::Open,
+        }
+    }
 }
 
 /// One bank a walk will read.
 struct Planned {
     /// The bank number the panel labels it with.
     bank: NonZeroU32,
-    /// Slots the device says it holds. `None` where it reported the unbounded sentinel.
-    slots: Option<u32>,
+    extent: Extent,
 }
 
 struct Walked {
@@ -632,7 +651,9 @@ async fn scan_class<T: Transport>(
                     class,
                     at: Some(at),
                 }),
-                Err(Error::DeviceStatus(1)) => emit.send(DeviceEvent::Focus { class, at: None }),
+                Err(Error::DeviceStatus(op::VACANT)) => {
+                    emit.send(DeviceEvent::Focus { class, at: None })
+                }
                 Err(Error::DeviceStatus(_)) => {}
                 Err(e) => return Err(e),
             }
@@ -640,7 +661,10 @@ async fn scan_class<T: Transport>(
             // Cursor enumeration wins for sparse or unbounded storage.
             let capacity = plan
                 .iter()
-                .try_fold(0u32, |sum, planned| sum.checked_add(planned.slots?));
+                .try_fold(0u32, |sum, planned| match planned.extent {
+                    Extent::Known(slots) => sum.checked_add(slots),
+                    Extent::Open => None,
+                });
             let sparse = capacity.is_none_or(|capacity| worth_the_cursor(held, capacity));
             let found = match sparse {
                 true => occupied(s, &declared).await?,
@@ -656,24 +680,12 @@ async fn scan_class<T: Transport>(
             for planned in &plan {
                 let slots = match &found {
                     Some(found) => shape(found, planned, remaining)?,
-                    None => match planned.slots {
-                        Some(capacity) if capacity <= remaining => {
-                            walk_bank(s, planned.bank.get(), capacity).await?
-                        }
-                        Some(_) => {
-                            return Err(Error::ScanLimit {
-                                bank: planned.bank.get() - 1,
-                                limit: MOST_OCCUPIED,
-                            })
-                        }
-                        None => walk_open_bank(s, planned.bank.get(), remaining).await?,
-                    },
+                    None => walk(s, planned.bank.get(), planned.extent, remaining).await?,
                 };
                 let taken = u32::try_from(slots.len()).unwrap_or(u32::MAX);
-                remaining = remaining.checked_sub(taken).ok_or(Error::ScanLimit {
-                    bank: planned.bank.get() - 1,
-                    limit: MOST_OCCUPIED,
-                })?;
+                remaining = remaining
+                    .checked_sub(taken)
+                    .ok_or_else(|| scan_limit(planned.bank.get() - 1))?;
                 items += slots.iter().filter(|slot| slot.is_some()).count();
                 emit.send(DeviceEvent::BankScanned {
                     class,
@@ -694,17 +706,13 @@ fn planned(declared: &[Bank]) -> Result<Vec<Planned>, Error> {
     let mut total = 0u32;
     let mut plan = Vec::with_capacity(declared.len());
     for bank in declared {
-        let slots = bank.is_bounded().then_some(bank.slots);
-        if let Some(slots) = slots {
-            total = total.checked_add(slots).ok_or(Error::ScanLimit {
-                bank: bank.index,
-                limit: MOST_OCCUPIED,
-            })?;
+        let extent = Extent::of(bank);
+        if let Extent::Known(slots) = extent {
+            total = total
+                .checked_add(slots)
+                .ok_or_else(|| scan_limit(bank.index))?;
             if total > MOST_OCCUPIED {
-                return Err(Error::ScanLimit {
-                    bank: bank.index,
-                    limit: MOST_OCCUPIED,
-                });
+                return Err(scan_limit(bank.index));
             }
         }
         plan.push(Planned {
@@ -713,7 +721,7 @@ fn planned(declared: &[Bank]) -> Result<Vec<Planned>, Error> {
                 .checked_add(1)
                 .and_then(NonZeroU32::new)
                 .expect("a decoded bank index fits its panel number"),
-            slots,
+            extent,
         });
     }
     Ok(plan)
@@ -735,17 +743,14 @@ async fn occupied<T: Transport, C>(
         Err(e) => return Err(e),
     };
     if let Some(at) = found.iter().find(|at| at.slot >= MOST_OCCUPIED) {
-        return Err(Error::ScanLimit {
-            bank: at.bank,
-            limit: MOST_OCCUPIED,
-        });
+        return Err(scan_limit(at.bank));
     }
     let mut out = Vec::with_capacity(found.len());
     for at in found {
         match op::info(s, at).await {
             Ok(info) => out.push((at, info)),
             // A cursor hit may be emptied before INFO; keep the rest of the scan.
-            Err(Error::DeviceStatus(1)) => {}
+            Err(Error::DeviceStatus(op::VACANT)) => {}
             Err(e) => return Err(e),
         }
     }
@@ -765,8 +770,8 @@ fn shape(
     let bank = planned.bank.get() - 1;
     let mine: Vec<&(Location, ProgramInfo)> =
         found.iter().filter(|(at, _)| at.bank == bank).collect();
-    let len = match planned.slots {
-        Some(slots) => {
+    let len = match planned.extent {
+        Extent::Known(slots) => {
             if let Some((answered, _)) = mine.iter().find(|(at, _)| at.slot >= slots) {
                 return Err(Error::Enumeration {
                     bank,
@@ -776,13 +781,10 @@ fn shape(
             }
             slots
         }
-        None => mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0),
+        Extent::Open => mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0),
     };
     if len > limit {
-        return Err(Error::ScanLimit {
-            bank,
-            limit: MOST_OCCUPIED,
-        });
+        return Err(scan_limit(bank));
     }
     let mut slots = vec![None; len as usize];
     for (at, info) in mine {
@@ -793,62 +795,48 @@ fn shape(
     Ok(slots)
 }
 
-async fn walk_bank<T: Transport, C>(
+/// Read a bank slot by slot, taking at most `limit` slots.
+///
+/// A bank of known extent that refuses one of its own slots is [`Error::Enumeration`].
+/// An open bank ends at its first refused slot, less the empty slots before it, and one
+/// that has not ended within `limit` is [`Error::ScanLimit`].
+async fn walk<T: Transport, C>(
     s: &mut Session<'_, T, C>,
     bank: u32,
-    slots: u32,
+    extent: Extent,
+    limit: u32,
 ) -> Result<Vec<Option<ProgramInfo>>, Error> {
-    if slots == 0 {
-        return Ok(Vec::new());
-    }
+    let last = match extent {
+        Extent::Known(slots) if slots > limit => return Err(scan_limit(bank.saturating_sub(1))),
+        Extent::Known(slots) => slots,
+        Extent::Open => limit,
+    };
     let mut out = Vec::new();
-    for slot in 1..=slots {
+    for slot in 1..=last {
         let at = Location::from_user(bank, slot);
-        match op::info(s, at).await {
-            Ok(info) => out.push(Some(info)),
-            Err(Error::DeviceStatus(1)) => out.push(None),
-            Err(Error::DeviceStatus(3)) => {
+        match (op::info(s, at).await, extent) {
+            (Ok(info), _) => out.push(Some(info)),
+            (Err(Error::DeviceStatus(op::VACANT)), _) => out.push(None),
+            (Err(Error::DeviceStatus(op::OUT_OF_RANGE)), Extent::Known(slots)) => {
                 return Err(Error::Enumeration {
                     bank: at.bank,
                     answered: at,
                     slots,
                 })
             }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(out)
-}
-
-async fn walk_open_bank<T: Transport, C>(
-    s: &mut Session<'_, T, C>,
-    bank: u32,
-    limit: u32,
-) -> Result<Vec<Option<ProgramInfo>>, Error> {
-    if limit == 0 {
-        return Err(Error::ScanLimit {
-            bank: bank.saturating_sub(1),
-            limit: MOST_OCCUPIED,
-        });
-    }
-    let mut out = Vec::new();
-    for slot in 1..=limit {
-        match op::info(s, Location::from_user(bank, slot)).await {
-            Ok(info) => out.push(Some(info)),
-            Err(Error::DeviceStatus(1)) => out.push(None),
-            Err(Error::DeviceStatus(3)) => {
+            (Err(Error::DeviceStatus(op::OUT_OF_RANGE)), Extent::Open) => {
                 while matches!(out.last(), Some(None)) {
                     out.pop();
                 }
                 return Ok(out);
             }
-            Err(e) => return Err(e),
+            (Err(e), _) => return Err(e),
         }
     }
-    Err(Error::ScanLimit {
-        bank: bank.saturating_sub(1),
-        limit: MOST_OCCUPIED,
-    })
+    match extent {
+        Extent::Known(_) => Ok(out),
+        Extent::Open => Err(scan_limit(bank.saturating_sub(1))),
+    }
 }
 
 /// Read a slot's metadata and a complete CBIN file of what it holds.
@@ -866,24 +854,6 @@ async fn read_object<T: Transport>(
         .await
 }
 
-async fn dependencies<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    at: Location,
-) -> Result<Vec<Dependency>, Error> {
-    device
-        .read(class, async |s| op::dependencies(s, at).await)
-        .await
-}
-
-async fn select<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    at: Location,
-) -> Result<(), Error> {
-    device.read(class, async |s| op::select(s, at).await).await
-}
-
 /// Select the panel's slot again where it is one of `written`, and say where the
 /// panel is.
 async fn reload<T: Transport>(
@@ -896,7 +866,7 @@ async fn reload<T: Transport>(
             // Status 1 means supported but empty.
             let focus = match op::focus(s).await {
                 Ok(at) => Some(at),
-                Err(Error::DeviceStatus(1)) => None,
+                Err(Error::DeviceStatus(op::VACANT)) => None,
                 Err(e) => return Err(e),
             };
             if let Some(at) = focus.filter(|at| written.contains(at)) {
@@ -907,73 +877,11 @@ async fn reload<T: Transport>(
         .await
 }
 
-async fn rename<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    at: Location,
-    name: &str,
-) -> Result<(), Error> {
-    device
-        .destructive(class, async |s| op::rename(s, at, name).await)
-        .await
-}
-
-async fn move_object<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    from: Location,
-    to: Location,
-) -> Result<(), Error> {
-    device
-        .destructive(class, async |s| op::move_object(s, from, to).await)
-        .await
-}
-
-async fn duplicate<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    from: Location,
-    to: Location,
-) -> Result<(), Error> {
-    device
-        .destructive(class, async |s| op::duplicate(s, from, to).await)
-        .await
-}
-
-async fn delete<T: Transport>(
-    device: &mut Device<T>,
-    class: ObjectClass,
-    at: Location,
-) -> Result<(), Error> {
-    device
-        .destructive(class, async |s| op::delete(s, at).await)
-        .await
-}
-
 /// Unix seconds, for the timestamp word `BEGIN_WRITE` carries.
-///
-/// ⚠️ `SystemTime::now()` traps on `wasm32-unknown-unknown`, so the web build reads the
-/// browser's clock.
-#[cfg(not(target_arch = "wasm32"))]
 fn unix_now() -> Result<u32, Error> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| {
-            Error::InvalidArgument(format!("system clock is before the Unix epoch: {e}"))
-        })?;
-    u32::try_from(elapsed.as_secs())
-        .map_err(|_| Error::InvalidArgument("system time does not fit the device protocol".into()))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn unix_now() -> Result<u32, Error> {
-    let seconds = js_sys::Date::now() / 1000.0;
-    if !(0.0..=f64::from(u32::MAX)).contains(&seconds) {
-        return Err(Error::InvalidArgument(
-            "system time does not fit the device protocol".into(),
-        ));
-    }
-    Ok(seconds as u32)
+    crate::work::unix_seconds().ok_or_else(|| {
+        Error::InvalidArgument("system time does not fit the device protocol".into())
+    })
 }
 
 /// Name a fetched entity after the name its slot reports.
@@ -985,39 +893,9 @@ fn entity_name(info: &ProgramInfo) -> String {
     }
 }
 
-/// Name rescued bytes without requiring their last copy to pass checksum validation.
-fn rescue_name(at: Location, backup: &[u8]) -> String {
-    let format = backup
-        .get(8..12)
-        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
-        .map(|tag| String::from_utf8_lossy(tag).into_owned())
-        .unwrap_or_else(|| "bin".to_string());
-    format!(
-        "nord-rescued-{}-{}.{format}",
-        at.user_bank(),
-        at.user_slot()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_rescued_slot_is_named_for_its_location_and_format() {
-        let mut file = vec![0u8; 45];
-        file[0..4].copy_from_slice(b"CBIN");
-        file[4..8].copy_from_slice(&1u32.to_le_bytes());
-        file[8..12].copy_from_slice(b"ne5p");
-        let at = Location { bank: 6, slot: 49 };
-        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
-    }
-
-    #[test]
-    fn unparseable_bytes_still_get_rescued() {
-        let at = Location { bank: 0, slot: 0 };
-        assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
-    }
 
     #[test]
     fn a_slot_is_named_what_this_computer_calls_the_object() {
@@ -1084,12 +962,12 @@ mod tests {
                 name: "Africa Split".into(),
             },
         )];
-        let planned = |slots| Planned {
+        let planned = |extent| Planned {
             bank: NonZeroU32::new(1).expect("bank 1"),
-            slots,
+            extent,
         };
 
-        match shape(&found, &planned(Some(4)), MOST_OCCUPIED) {
+        match shape(&found, &planned(Extent::Known(4)), MOST_OCCUPIED) {
             Err(Error::Enumeration {
                 bank,
                 answered,
@@ -1100,7 +978,8 @@ mod tests {
                 other.map(|slots| slots.len())
             ),
         }
-        let open = shape(&found, &planned(None), MOST_OCCUPIED).expect("an open bank takes it");
+        let open =
+            shape(&found, &planned(Extent::Open), MOST_OCCUPIED).expect("an open bank takes it");
         assert_eq!(open.len(), 8, "through the last item and no further");
     }
 }

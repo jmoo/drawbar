@@ -53,61 +53,47 @@ impl Draft {
     }
 }
 
-/// The read of a WAV the panel works over, decoded once per set of bytes.
-pub enum Source {
-    Read(Pcm16),
-    Unreadable(String),
+/// The read of a WAV the panel works over, decoded once per set of bytes: its audio, or
+/// why it did not read.
+pub type Source = Result<Pcm16, String>;
+
+pub fn read(bytes: &[u8]) -> Source {
+    nord_format::wav::read_pcm16(bytes).map_err(|e| e.to_string())
 }
 
-impl Source {
-    pub fn read(bytes: &[u8]) -> Source {
-        match nord_format::wav::read_pcm16(bytes) {
-            Ok(pcm) => Source::Read(pcm),
-            Err(e) => Source::Unreadable(e.to_string()),
-        }
-    }
-}
-
-/// Why this WAV cannot become an instrument, in the operator's words.
+/// The audio this WAV makes an instrument from, or why it cannot, in the operator's
+/// words.
 ///
 /// The three limits are the encoder's: the field lattice is defined at one rate, a stroke
 /// carries one or two channels, and a stroke shorter than [`encode::MIN_FRAMES`] has an
 /// opening the encoder does not model.
-pub fn refusal(source: &Source) -> Option<String> {
-    let pcm = match source {
-        Source::Unreadable(why) => return Some(why.clone()),
-        Source::Read(pcm) => pcm,
-    };
+pub fn encodable(source: &Source) -> Result<&Pcm16, String> {
+    let pcm = source.as_ref().map_err(String::clone)?;
     if pcm.rate != SOURCE_RATE {
-        return Some(format!(
+        return Err(format!(
             "{} Hz: the encoder takes only {SOURCE_RATE} Hz, so resample the file first",
             pcm.rate
         ));
     }
     if pcm.channels != 1 && pcm.channels != 2 {
-        return Some(format!(
+        return Err(format!(
             "{} channels: an instrument's audio holds one or two channels",
             pcm.channels
         ));
     }
     if pcm.frames() < encode::MIN_FRAMES {
-        return Some(format!(
+        return Err(format!(
             "{} frames: the encoder needs at least {}",
             pcm.frames(),
             encode::MIN_FRAMES
         ));
     }
-    None
+    Ok(pcm)
 }
 
 /// The instrument this draft makes out of `source`.
 pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
-    if let Some(why) = refusal(source) {
-        return Err(why);
-    }
-    let Source::Read(pcm) = source else {
-        return Err("this file did not read as a WAV".into());
-    };
+    let pcm = encodable(source)?;
     let options = encode::Options::new(&draft.name)
         .root_key(draft.root_key)
         .top_note(draft.top_note)
@@ -140,6 +126,17 @@ fn generation_note(layout: Layout) -> &'static str {
     }
 }
 
+/// The width of the panel's row labels, which its controls line up after.
+const LABEL: f32 = 120.0;
+
+/// A row's label, in the column the panel's controls line up after.
+fn label(ui: &mut egui::Ui, text: &str) {
+    ui.add_sized(
+        [LABEL, ui.spacing().interact_size.y],
+        egui::Label::new(text).halign(egui::Align::LEFT),
+    );
+}
+
 /// Draw the panel. `true` once the operator has asked for the instrument to be made.
 pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
     ui.label(egui::RichText::new("This is a WAV, not a Nord file.").strong());
@@ -155,7 +152,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
     );
     ui.add_space(6.0);
 
-    if let Source::Read(pcm) = source {
+    if let Ok(pcm) = source {
         ui.label(
             egui::RichText::new(format!(
                 "{} Hz, {}, {} frames ({:.3} s)",
@@ -173,21 +170,15 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
         );
     }
 
-    let refusal = refusal(source);
+    let refusal = encodable(source).err();
     ui.add_enabled_ui(refusal.is_none(), |ui| {
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [120.0, ui.spacing().interact_size.y],
-                egui::Label::new("Name").halign(egui::Align::LEFT),
-            );
+            label(ui, "Name");
             ui.add(egui::TextEdit::singleline(&mut draft.name).desired_width(200.0));
             controls::fits(&mut draft.name, MAX_NAME_LEN);
         });
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [120.0, ui.spacing().interact_size.y],
-                egui::Label::new("Zone").halign(egui::Align::LEFT),
-            );
+            label(ui, "Zone");
             ui.label("root key");
             if let Some(note) = note_picker(ui, ("encode_root", 0), draft.root_key) {
                 draft.root_key = note;
@@ -198,10 +189,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
             }
         });
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [120.0, ui.spacing().interact_size.y],
-                egui::Label::new("Generation").halign(egui::Align::LEFT),
-            );
+            label(ui, "Generation");
             for layout in [Layout::V2, Layout::V3, Layout::V4] {
                 ui.selectable_value(&mut draft.layout, layout, generation_label(layout))
                     .on_hover_text(generation_note(layout));
@@ -209,7 +197,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
         });
         if draft.layout != Layout::V2 {
             ui.horizontal(|ui| {
-                ui.add_space(120.0);
+                ui.add_space(LABEL);
                 ui.label(
                     egui::RichText::new(generation_note(draft.layout))
                         .small()
@@ -218,7 +206,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
             });
         }
         ui.horizontal(|ui| {
-            ui.add_space(120.0);
+            ui.add_space(LABEL);
             ui.checkbox(&mut draft.plain, "Plain records")
                 .on_hover_text(
                     "write every content field in full instead of using the editor's \
@@ -273,7 +261,7 @@ mod tests {
 
     #[test]
     fn every_refusal_says_which_limit_it_hit() {
-        let refused = |bytes: Vec<u8>| refusal(&Source::read(&bytes));
+        let refused = |bytes: Vec<u8>| encodable(&read(&bytes)).err();
 
         let ok = wav(SOURCE_RATE, 1, encode::MIN_FRAMES);
         assert_eq!(refused(ok), None);
@@ -296,7 +284,7 @@ mod tests {
 
     #[test]
     fn a_stereo_wav_encodes_to_a_stereo_stroke() {
-        let source = Source::read(&wav(SOURCE_RATE, 2, encode::MIN_FRAMES));
+        let source = read(&wav(SOURCE_RATE, 2, encode::MIN_FRAMES));
         let bytes = instrument(&Draft::new("Pad.wav"), &source).expect("it encodes");
         let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
         let nord_format::Entity::Sample(nord_format::Sample::V2(sample)) = entity else {
@@ -314,7 +302,7 @@ mod tests {
 
     #[test]
     fn an_encode_makes_the_instrument_the_panel_describes() {
-        let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
+        let source = read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
         let mut draft = Draft::new("Marimba hit.wav");
         assert_eq!(draft.name, "Marimba hit");
         draft.root_key = 48;
@@ -335,7 +323,7 @@ mod tests {
 
     #[test]
     fn the_panel_opens_on_the_played_generation_and_encodes_the_chosen_one() {
-        let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
+        let source = read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
         assert_eq!(Draft::new("Marimba.wav").layout, Layout::V2);
 
         for (layout, generation) in [(Layout::V2, "v2"), (Layout::V3, "v3"), (Layout::V4, "v4")] {
@@ -352,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_refused_wav_is_not_encoded_anyway() {
-        let source = Source::read(&wav(48_000, 1, encode::MIN_FRAMES));
+        let source = read(&wav(48_000, 1, encode::MIN_FRAMES));
         assert!(instrument(&Draft::new("x.wav"), &source).is_err());
     }
 
@@ -360,7 +348,7 @@ mod tests {
     fn a_long_filename_opens_the_panel_on_a_name_that_fits() {
         let draft = Draft::new("an extremely long marimba sample name.wav");
         assert_eq!(draft.name.len(), MAX_NAME_LEN);
-        let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
+        let source = read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
         assert!(instrument(&draft, &source).is_ok());
     }
 
@@ -369,7 +357,7 @@ mod tests {
         let draft = Draft::new(&format!("{}.wav", "é".repeat(MAX_NAME_LEN)));
         assert!(draft.name.len() <= MAX_NAME_LEN, "{:?}", draft.name);
         assert_eq!(draft.name.chars().count(), MAX_NAME_LEN / 2);
-        let source = Source::read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
+        let source = read(&wav(SOURCE_RATE, 1, encode::MIN_FRAMES));
         assert!(instrument(&draft, &source).is_ok());
     }
 }

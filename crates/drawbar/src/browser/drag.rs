@@ -8,6 +8,7 @@ use nord_format::accept::Family;
 use nord_format::Entity;
 use nord_usb::{Location, ObjectClass};
 
+use super::Act;
 use crate::device::{read_only, DeviceState};
 use crate::icon::Glyph;
 use crate::strings::folder;
@@ -324,7 +325,7 @@ pub struct Held {
 ///
 /// ⚠️ `head` is the row the pointer was pressed on, and `rest` is the selection it
 /// brought along. The verdict is [`landing`] on the head alone; `rest` follows only when
-/// that verdict [`Landing::repeats`].
+/// that verdict is a copy or a filing.
 #[derive(Clone)]
 pub struct Carried {
     pub head: Held,
@@ -352,93 +353,41 @@ pub enum Onto {
     },
 }
 
-/// What a drop would do, with everything needed to run it, or the reason it would do
-/// nothing. Nothing downstream re-derives the verdict from the drag.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Landing {
-    /// Instrument to this computer: a copy comes back.
-    Copy {
-        class: ObjectClass,
-        at: Location,
-    },
-    /// This computer to a slot.
-    Send {
-        id: u64,
-        class: ObjectClass,
-        at: Location,
-    },
-    /// Slot to slot inside one folder. The instrument swaps them.
-    Rearrange {
-        class: ObjectClass,
-        from: Location,
-        to: Location,
-    },
-    /// Into one of this computer's folders. Nothing leaves this computer.
-    File {
-        id: u64,
-        folder: u64,
-    },
-    /// Out of the folder it is in, back to the loose part of the list.
-    Unfile {
-        id: u64,
-    },
-    No(&'static str),
-}
-
-impl Landing {
-    pub fn allowed(self) -> bool {
-        !matches!(self, Landing::No(_))
-    }
-
-    /// Whether the rest of what the drag carries follows the pressed row.
-    ///
-    /// ⚠️ A send and a rearrange name one destination, and several rows sent to one slot
-    /// would overwrite each other, so those take only the pressed row.
-    pub(super) fn repeats(self) -> bool {
-        matches!(
-            self,
-            Landing::Copy { .. } | Landing::File { .. } | Landing::Unfile { .. }
-        )
-    }
-
-    /// Whether two verdicts are the same variant, whatever each names.
-    pub(super) fn same(self, other: Landing) -> bool {
-        std::mem::discriminant(&self) == std::mem::discriminant(&other)
-    }
-}
-
-/// Whether a drag can end where the pointer is, and what it would mean if it did.
-pub fn landing(carried: &Held, onto: Onto) -> Landing {
+/// The act a drop where the pointer is would run, or why it would do nothing.
+pub fn landing(carried: &Held, onto: Onto) -> Result<Act, &'static str> {
     match (carried.what, onto) {
         // A folder or a tag groups the list; it is not a row that moves.
-        (Item::Folder(_) | Item::Tag(_), _) => Landing::No("that is a list, not a sound"),
+        (Item::Folder(_) | Item::Tag(_), _) => Err("that is a list, not a sound"),
         // The loose part of the list takes a drop only from something in a folder, which
         // takes it out of the folder.
         (Item::Local(id), Onto::Computer) => match carried.filed {
-            Some(_) => Landing::Unfile { id },
-            None => Landing::No("it is already on this computer"),
+            Some(_) => Ok(Act::File { id, folder: None }),
+            None => Err("it is already on this computer"),
         },
         (Item::Local(id), Onto::Group(folder)) => match carried.filed == Some(folder) {
-            true => Landing::No("it is already in that folder"),
-            false => Landing::File { id, folder },
+            true => Err("it is already in that folder"),
+            false => Ok(Act::File {
+                id,
+                folder: Some(folder),
+            }),
         },
         // A copy lands when the instrument answers, after the pointer is released, so
         // there is nothing yet to file.
         (Item::Slot { .. }, Onto::Group(_)) => {
-            Landing::No("copy it to this computer first, then drag it into the folder")
+            Err("copy it to this computer first, then drag it into the folder")
         }
         // A folder this app cannot name is no kind's home, so the kind check also keeps
         // drops out of it.
         (Item::Local(id), Onto::Slot { class, at }) => {
             if carried.kind.home() != Some(class) {
-                Landing::No("that folder holds a different kind of thing")
+                Err("that folder holds a different kind of thing")
             } else if !carried.fits {
-                Landing::No("the instrument does not take files of that format")
+                Err("the instrument does not take files of that format")
             } else {
-                Landing::Send { id, class, at }
+                Ok(Act::Send { id, class, at })
             }
         }
-        (Item::Slot { class, at }, Onto::Computer) => Landing::Copy { class, at },
+        (Item::Slot { class, at }, Onto::Computer) => Ok(Act::Copy { class, at }),
         (
             Item::Slot {
                 class: from,
@@ -447,17 +396,17 @@ pub fn landing(carried: &Held, onto: Onto) -> Landing {
             Onto::Slot { class, at },
         ) => {
             if from != class {
-                Landing::No("things only move within their own folder")
+                Err("things only move within their own folder")
             } else if read_only(class) {
-                Landing::No("drawbar does not know what that folder holds")
+                Err("drawbar does not know what that folder holds")
             } else if was == at {
-                Landing::No("it is already there")
+                Err("it is already there")
             } else {
-                Landing::Rearrange {
+                Ok(Act::Rearrange {
                     class,
                     from: was,
                     to: at,
-                }
+                })
             }
         }
     }
@@ -529,18 +478,18 @@ mod tests {
     fn a_drag_between_the_two_places_copies_one_way_and_sends_the_other() {
         assert_eq!(
             landing(&slot(ObjectClass::Program, 6, 3), Onto::Computer),
-            Landing::Copy {
+            Ok(Act::Copy {
                 class: ObjectClass::Program,
                 at: Location { bank: 6, slot: 3 },
-            }
+            })
         );
         assert_eq!(
             landing(&local(Kind::Program), onto(ObjectClass::Program, 6, 3)),
-            Landing::Send {
+            Ok(Act::Send {
                 id: CARRIED,
                 class: ObjectClass::Program,
                 at: Location { bank: 6, slot: 3 },
-            }
+            })
         );
     }
 
@@ -553,16 +502,16 @@ mod tests {
             ..local(Kind::Program)
         };
         match landing(&refused, onto(ObjectClass::Program, 6, 3)) {
-            Landing::No(why) => assert!(why.contains("format"), "{why}"),
+            Err(why) => assert!(why.contains("format"), "{why}"),
             other => panic!("{other:?} should have been refused"),
         }
         // It is still a row of this computer's list, so filing it is untouched.
         assert_eq!(
             landing(&refused, Onto::Group(1)),
-            Landing::File {
+            Ok(Act::File {
                 id: CARRIED,
-                folder: 1
-            }
+                folder: Some(1)
+            })
         );
     }
 
@@ -594,7 +543,7 @@ mod tests {
     #[test]
     fn a_thing_cannot_be_dropped_into_a_folder_for_another_kind() {
         for kind in [Kind::SetList, Kind::Sample, Kind::Other] {
-            assert!(!landing(&local(kind), onto(ObjectClass::Program, 0, 0)).allowed());
+            assert!(!landing(&local(kind), onto(ObjectClass::Program, 0, 0)).is_ok());
         }
     }
 
@@ -611,7 +560,7 @@ mod tests {
         ] {
             let kind = Kind::from_class(class);
             assert!(
-                landing(&local(kind), onto(class, 0, 0)).allowed(),
+                landing(&local(kind), onto(class, 0, 0)).is_ok(),
                 "{}",
                 folder(class)
             );
@@ -620,7 +569,7 @@ mod tests {
             &local(Kind::from_class(ObjectClass::Piano)),
             onto(ObjectClass::Unknown(9), 0, 0)
         )
-        .allowed());
+        .is_ok());
     }
 
     /// Slot to slot is the instrument's swap, and only inside one folder.
@@ -631,17 +580,17 @@ mod tests {
                 &slot(ObjectClass::Program, 6, 3),
                 onto(ObjectClass::Program, 7, 12)
             ),
-            Landing::Rearrange {
+            Ok(Act::Rearrange {
                 class: ObjectClass::Program,
                 from: Location { bank: 6, slot: 3 },
                 to: Location { bank: 7, slot: 12 },
-            }
+            })
         );
         assert!(!landing(
             &slot(ObjectClass::Program, 6, 3),
             onto(ObjectClass::SetList, 0, 0)
         )
-        .allowed());
+        .is_ok());
     }
 
     /// Dropping something back where it came from is not a move.
@@ -651,8 +600,8 @@ mod tests {
             &slot(ObjectClass::Program, 6, 3),
             onto(ObjectClass::Program, 6, 3)
         )
-        .allowed());
-        assert!(!landing(&local(Kind::Program), Onto::Computer).allowed());
+        .is_ok());
+        assert!(!landing(&local(Kind::Program), Onto::Computer).is_ok());
     }
 
     /// Every refusal carries a reason for the status strip.
@@ -672,7 +621,7 @@ mod tests {
         ];
         for case in cases {
             match case {
-                Landing::No(why) => assert!(!why.is_empty()),
+                Err(why) => assert!(!why.is_empty()),
                 other => panic!("{other:?} should have been refused"),
             }
         }
@@ -687,15 +636,18 @@ mod tests {
             filed: folder,
             ..local(Kind::Program)
         };
-        let into = Landing::File {
+        let into = Ok(Act::File {
             id: CARRIED,
-            folder: 1,
-        };
+            folder: Some(1),
+        });
         assert_eq!(landing(&filed(None), Onto::Group(1)), into);
         assert_eq!(landing(&filed(Some(2)), Onto::Group(1)), into);
         assert_eq!(
             landing(&filed(Some(1)), Onto::Computer),
-            Landing::Unfile { id: CARRIED }
+            Ok(Act::File {
+                id: CARRIED,
+                folder: None
+            })
         );
 
         for refused in [
@@ -704,7 +656,7 @@ mod tests {
             landing(&slot(ObjectClass::Program, 6, 3), Onto::Group(1)),
         ] {
             match refused {
-                Landing::No(why) => assert!(!why.is_empty()),
+                Err(why) => assert!(!why.is_empty()),
                 other => panic!("{other:?} should have been refused"),
             }
         }
@@ -723,7 +675,7 @@ mod tests {
             Onto::Group(2),
             onto(ObjectClass::Program, 6, 3),
         ] {
-            assert!(!landing(&carried, onto).allowed());
+            assert!(!landing(&carried, onto).is_ok());
         }
     }
 

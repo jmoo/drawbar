@@ -132,6 +132,23 @@ impl Layout {
     const fn word_bits(self) -> usize {
         self.word() * 8
     }
+
+    /// Words one channel's half of a split record occupies.
+    pub(super) const fn half_span(self, count: usize, width: u8) -> usize {
+        (count / 2 * width as usize).div_ceil(self.word_bits())
+    }
+
+    /// Words a record of `count` fields `width` bits wide occupies, header included.
+    ///
+    /// A `split` record gives each channel its own words and pads them apart. Otherwise
+    /// the fields run on from the first bit after the header.
+    pub(super) const fn record_span(self, count: usize, width: u8, split: bool) -> usize {
+        if split {
+            1 + 2 * self.half_span(count, width)
+        } else {
+            (self.word_bits() + count * width as usize).div_ceil(self.word_bits())
+        }
+    }
 }
 
 /// Statistic A's mantissa: a 24-bit big-endian value in front of its exponent byte.
@@ -178,8 +195,57 @@ pub const SOURCE_RATE: u32 = 44_100;
 pub const FIELD_RATE: u32 = SOURCE_RATE * PITCH_DEN / PITCH_NUM;
 const _: () = assert!((SOURCE_RATE * PITCH_DEN).is_multiple_of(PITCH_NUM));
 
-/// Mask for the 14-bit count in `[flag][width−1][reserved][mark][order][count]`.
-const COUNT_MASK: u32 = 0x3fff;
+/// A record's header, the low 24 bits of its first word: from the top bit down,
+/// `[flag][width−1 ×4][mark][reserved][order ×3][count ×14]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Head {
+    /// The flag: the record states its fields outright, whatever its order.
+    pub one_to_one: bool,
+    /// Bits per field, 1 to 16.
+    pub width: u8,
+    /// Set on the record a loop starts at.
+    pub mark: bool,
+    pub reserved: bool,
+    pub order: u8,
+    pub count: usize,
+}
+
+impl Head {
+    pub(super) const fn from_word(raw: u32) -> Head {
+        Head {
+            one_to_one: (raw >> 23) & 1 != 0,
+            width: ((raw >> 19) & 0xf) as u8 + 1,
+            mark: (raw >> 18) & 1 != 0,
+            reserved: (raw >> 17) & 1 != 0,
+            order: ((raw >> 14) & 0x7) as u8,
+            count: (raw & 0x3fff) as usize,
+        }
+    }
+
+    /// The header word. The fields must be in range: `width` 1 to 16, `order` below 8
+    /// and `count` below `2^14`.
+    pub(super) const fn to_word(self) -> u32 {
+        (self.one_to_one as u32) << 23
+            | ((self.width - 1) as u32) << 19
+            | (self.mark as u32) << 18
+            | (self.reserved as u32) << 17
+            | (self.order as u32) << 14
+            | self.count as u32
+    }
+
+    /// The header that ends a chain: a 1:1 record of width 1 whose count is the cell
+    /// size, and with it the channel count.
+    pub(super) const fn terminator(count: usize) -> Head {
+        Head {
+            one_to_one: true,
+            width: 1,
+            mark: false,
+            reserved: false,
+            order: 0,
+            count,
+        }
+    }
+}
 
 /// Field values the predictor keeps. The order field is three bits wide, but only
 /// 0 to 4 occur and a fourth-order difference reaches no further back than this.
@@ -429,21 +495,11 @@ impl Directory {
 
 /// Return the mono or stereo cell count when `raw` is a valid terminator.
 fn terminator_cell(raw: u32, cell: usize) -> Option<usize> {
-    let v = raw & 0x00ff_ffff;
-    let one_to_one = v >> 23 != 0;
-    let width = ((v >> 19) & 0xf) + 1;
-    let mark = (v >> 18) & 1 != 0;
-    let reserved = (v >> 17) & 1 != 0;
-    let order = (v >> 14) & 0x7;
-    let count = (v & COUNT_MASK) as usize;
-    let ok = one_to_one
-        && width == 1
-        && raw >> 24 == 0
-        && !mark
-        && !reserved
-        && order == 0
-        && (count == cell || count == 2 * cell);
-    ok.then_some(count)
+    let head = Head::from_word(raw);
+    let ok = raw >> 24 == 0
+        && head == Head::terminator(head.count)
+        && (head.count == cell || head.count == 2 * cell);
+    ok.then_some(head.count)
 }
 
 /// Walk signed record fields from the directory opening to the terminator.
@@ -496,12 +552,14 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         // A wide word's top byte is not part of the record header, and no specimen
         // sets it; a narrow word has no top byte.
         let over = raw >> 24;
-        let v = raw & 0x00ff_ffff;
-        let one_to_one = v >> 23 != 0;
-        let width = (((v >> 19) & 0xf) + 1) as u8;
-        let mark = (v >> 18) & 1 != 0;
-        let order = ((v >> 14) & 0x7) as u8;
-        let count = (v & COUNT_MASK) as usize;
+        let Head {
+            one_to_one,
+            width,
+            mark,
+            reserved,
+            order,
+            count,
+        } = Head::from_word(raw);
 
         let terminal_cell = terminator_cell(raw, cell);
         let ends_here = terminal_cell.is_some();
@@ -519,7 +577,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             });
         }
         if over != 0
-            || (v >> 17) & 1 != 0
+            || reserved
             || usize::from(order) > MAX_ORDER
             || count == 0
             || (stereo && !count.is_multiple_of(2))
@@ -528,12 +586,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             return Err(Unsupported::Malformed { word: i });
         }
 
-        let span = if wide_openings && one_to_one {
-            // Each channel half is word-padded independently.
-            1 + 2 * (count / 2 * usize::from(width)).div_ceil(word_bits)
-        } else {
-            (word_bits + count * usize::from(width)).div_ceil(word_bits)
-        };
+        let span = layout.record_span(count, width, wide_openings && one_to_one);
         if i + span > last.unwrap_or(words) {
             return Err(Unsupported::Desync { word: i });
         }
@@ -545,7 +598,7 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
         } else if wide_openings {
             // Gather each channel's alternating words into a contiguous bitstream.
             let per = count / 2;
-            let channel_words = (per * usize::from(width)).div_ceil(word_bits);
+            let channel_words = layout.half_span(count, width);
             let mut values = Vec::with_capacity(count);
             for channel in 0..2 {
                 gathered.clear();
@@ -626,10 +679,7 @@ pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, 
             } else {
                 value >> -shift
             };
-            *slot = wide.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
-            if i64::from(*slot) != wide {
-                clipped += 1;
-            }
+            *slot = predictor::saturate_i16(wide, &mut clipped);
         }
     }
     Ok(Audio {
@@ -1363,6 +1413,23 @@ mod tests {
         );
         assert_eq!(Layout::from_version(V5_FROM_VERSION), None);
         assert_eq!(Layout::from_version(u32::MAX), None);
+    }
+
+    #[test]
+    fn each_record_header_field_owns_its_own_bits() {
+        let head = Head {
+            one_to_one: true,
+            width: 5,
+            mark: true,
+            reserved: false,
+            order: 3,
+            count: 100,
+        };
+        // 0x800000 flag, 4 << 19 width, 0x40000 mark, 3 << 14 order, 100 count.
+        assert_eq!(head.to_word(), 0x00a4_c064);
+        assert_eq!(Head::from_word(0x00a4_c064), head);
+        assert!(Head::from_word(0x0002_0000).reserved);
+        assert_eq!(Head::from_word(0xff00_0000), Head::from_word(0));
     }
 
     #[test]

@@ -165,31 +165,7 @@ enum DeviceAction {
     /// or wedge a session. An unrecognized request stalls the endpoint and has no other
     /// effect. These requests are reported to carry the model, firmware version, build
     /// and maximum transfer size.
-    Controls {
-        /// Lowest bRequest to try.
-        #[arg(long, default_value_t = 0)]
-        from: u8,
-
-        /// Highest bRequest to try, inclusive.
-        #[arg(long, default_value_t = 15)]
-        to: u8,
-
-        /// Bytes to request from each. A control transfer's wLength is 16 bits.
-        #[arg(long, default_value_t = 64)]
-        len: u16,
-
-        /// Address the interface instead of the device.
-        #[arg(long)]
-        interface: bool,
-
-        /// wValue sent with each request.
-        #[arg(long, default_value_t = 0)]
-        value: u16,
-
-        /// wIndex sent with each request. For --interface this is the interface number.
-        #[arg(long, default_value_t = 0)]
-        index: u16,
-    },
+    Controls(device::ControlsArgs),
 
     /// Report what the instrument stores, per object class.
     ///
@@ -460,28 +436,9 @@ enum SettingsAction {
 enum SettingsSlotAction {
     /// Read the settings from the instrument or a `.ne5s` file. Read-only.
     ///
-    /// Prints a summary, or with `--out` writes the file.
-    Get {
-        /// 1:1 for the instrument's settings, or a file.
-        #[arg(value_name = "FILE|BANK:SLOT")]
-        at: String,
-
-        /// Write the object to this file instead of printing a summary. With `--sweep`,
-        /// the directory every capture lands in.
-        #[arg(short, long, value_name = "FILE|DIR")]
-        out: Option<PathBuf>,
-
-        /// Save the body as sent over USB, without a CBIN header. Needs `--out`.
-        #[arg(long)]
-        body: bool,
-
-        /// Read the settings repeatedly, once per prompt, into the `--out` directory.
-        ///
-        /// Change one menu setting on the instrument, then type what you changed, and the
-        /// capture is saved under that name. A blank line stops.
-        #[arg(long, requires = "out")]
-        sweep: bool,
-    },
+    /// Prints a summary, or with `--out` writes the file. The instrument's settings are
+    /// slot 1:1, and `--sweep` captures one menu setting per prompt.
+    Get(GetArgs),
 
     /// Report everything the instrument knows about the settings singleton, or a
     /// `.ne5s` file's header. Read-only.
@@ -497,28 +454,10 @@ enum SettingsSlotAction {
 enum LiveSlotAction {
     /// Read a live slot from the instrument or a `.ne5l` file. Read-only.
     ///
-    /// Prints a summary, or with `--out` writes the file.
-    Get {
-        /// Slot to read (1:1, 1:2 or 1:3), or a file.
-        #[arg(value_name = "FILE|BANK:SLOT")]
-        at: String,
-
-        /// Write the object to this file instead of printing a summary. With `--sweep`,
-        /// the directory every capture lands in.
-        #[arg(short, long, value_name = "FILE|DIR")]
-        out: Option<PathBuf>,
-
-        /// Save the body as sent over USB, without a CBIN header. Needs `--out`.
-        #[arg(long)]
-        body: bool,
-
-        /// Read the slot repeatedly, once per prompt, into the `--out` directory.
-        ///
-        /// The live slot is the panel itself, so each step can capture one change without
-        /// storing a program.
-        #[arg(long, requires = "out")]
-        sweep: bool,
-    },
+    /// Prints a summary, or with `--out` writes the file. Live slots are 1:1, 1:2 and
+    /// 1:3. The live slot is the panel itself, so each `--sweep` step can capture one
+    /// change without storing a program.
+    Get(GetArgs),
 
     /// Report everything the instrument knows about a live slot, or a `.ne5l` file's
     /// header. Read-only.
@@ -541,31 +480,9 @@ enum LiveSlotAction {
 enum SlotAction {
     /// Read an object from the instrument or a file. Read-only.
     ///
-    /// Prints a summary, or with `--out` writes the file.
-    Get {
-        /// Slot to read, e.g. 7:4, or a file to read with no instrument attached.
-        #[arg(value_name = "FILE|BANK:SLOT")]
-        at: String,
-
-        /// Write the object to this file instead of printing a summary. With `--sweep`,
-        /// the directory every capture lands in.
-        #[arg(short, long, value_name = "FILE|DIR")]
-        out: Option<PathBuf>,
-
-        /// Save the body as sent over USB, without a CBIN header. Use this for classes
-        /// whose header layout is unknown, where a header would be wrong. On a file,
-        /// strips the header. Needs `--out`.
-        #[arg(long)]
-        body: bool,
-
-        /// Read the slot repeatedly, once per prompt, into the `--out` directory.
-        ///
-        /// Change one thing on the instrument, then type what you changed, and the capture
-        /// is saved under that name. A blank line stops. Comparing the captures shows
-        /// which bytes each control changes.
-        #[arg(long, requires = "out")]
-        sweep: bool,
-    },
+    /// Prints a summary, or with `--out` writes the file. A slot is `BANK:SLOT`, such as
+    /// 7:4.
+    Get(GetArgs),
 
     /// Write a file into a slot, OVERWRITING it. Requires --yes.
     Put {
@@ -684,49 +601,33 @@ enum SlotAction {
     /// command can leave the instrument needing a power cycle, and a command that writes
     /// will destroy whatever object it reaches. Send only codes that read, and back up
     /// first.
-    Probe {
-        /// Command code, decimal or 0x-prefixed, e.g. 0x20.
-        #[arg(value_name = "OP", value_parser = parse_u32)]
-        op: u32,
-
-        /// Argument words, appended in order as big-endian u32s: --arg 1 --arg 0.
-        #[arg(long = "arg", value_name = "N", value_parser = parse_u32)]
-        args: Vec<u32>,
-
-        /// Seconds to wait for a reply before giving up.
-        #[arg(long, default_value_t = 5)]
-        wait: u64,
-
-        /// Required. A probe is not read-only: the instrument's response to an unknown
-        /// code is unknown.
-        #[arg(long)]
-        yes: bool,
-
-        /// Send with no session: no HELLO, no session open, no close.
-        ///
-        /// A wedged instrument refuses to open a session, so an ordinary probe fails
-        /// before its command is sent. This is the only way to reach a command then.
-        #[arg(long)]
-        bare: bool,
-
-        /// Service number. 12 is the object/file service, 6 the UI session.
-        #[arg(long, default_value_t = 12)]
-        service: u32,
-
-        /// Subsystem number. 10 for service 12, 1 for service 6.
-        #[arg(long, default_value_t = 10)]
-        subsystem: u32,
-    },
+    Probe(device::ProbeArgs),
 }
 
-/// Accepts `0x2a` as well as `42`, since command codes are usually written in hex.
-fn parse_u32(s: &str) -> Result<u32, String> {
-    let s = s.trim();
-    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(hex) => u32::from_str_radix(hex, 16),
-        None => s.parse(),
-    }
-    .map_err(|e| format!("{s}: {e}"))
+#[derive(Args)]
+struct GetArgs {
+    /// Slot to read, or a file to read with no instrument attached.
+    #[arg(value_name = "FILE|BANK:SLOT")]
+    at: String,
+
+    /// Write the object to this file instead of printing a summary. With `--sweep`,
+    /// the directory every capture lands in.
+    #[arg(short, long, value_name = "FILE|DIR")]
+    out: Option<PathBuf>,
+
+    /// Save the body as sent over USB, without a CBIN header. Use this for classes
+    /// whose header layout is unknown, where a header would be wrong. On a file,
+    /// strips the header. Needs `--out`.
+    #[arg(long)]
+    body: bool,
+
+    /// Read the slot repeatedly, once per prompt, into the `--out` directory.
+    ///
+    /// Change one thing on the instrument, then type what you changed, and the capture
+    /// is saved under that name. A blank line stops. Comparing the captures shows
+    /// which bytes each control changes.
+    #[arg(long, requires = "out")]
+    sweep: bool,
 }
 
 #[derive(Args)]
@@ -769,14 +670,7 @@ fn main() -> ExitCode {
             DeviceAction::Wedge { class, yes } => {
                 device::wedge(&ui, ObjectClass::from_raw(class), yes)
             }
-            DeviceAction::Controls {
-                from,
-                to,
-                len,
-                interface,
-                value,
-                index,
-            } => device::controls(&ui, from, to, len, interface, value, index),
+            DeviceAction::Controls(args) => device::controls(&ui, args),
         },
         Command::Program { action } => match action {
             ProgramAction::Slot(action) => slot_action(&ui, action, ObjectClass::Program),
@@ -784,7 +678,14 @@ fn main() -> ExitCode {
         },
         Command::Sample { action } => match action {
             SampleAction::Slot(action) => slot_action(&ui, action, ObjectClass::Sample),
-            SampleAction::Edit(args) => sample::run(&ui, args),
+            SampleAction::Edit(args) => edit::run(
+                &ui,
+                EditArgs {
+                    target: Some(args.target),
+                    common: args.common,
+                },
+                ObjectClass::Sample,
+            ),
             SampleAction::Decode(args) => sample::decode(&ui, args),
             SampleAction::Encode(args) => sample::encode(&ui, args),
             SampleAction::Build(args) => sample::build(&ui, args),
@@ -831,17 +732,7 @@ fn main() -> ExitCode {
 impl From<SettingsSlotAction> for SlotAction {
     fn from(action: SettingsSlotAction) -> SlotAction {
         match action {
-            SettingsSlotAction::Get {
-                at,
-                out,
-                body,
-                sweep,
-            } => SlotAction::Get {
-                at,
-                out,
-                body,
-                sweep,
-            },
+            SettingsSlotAction::Get(args) => SlotAction::Get(args),
             SettingsSlotAction::Info { at } => SlotAction::Info { at },
         }
     }
@@ -850,17 +741,7 @@ impl From<SettingsSlotAction> for SlotAction {
 impl From<LiveSlotAction> for SlotAction {
     fn from(action: LiveSlotAction) -> SlotAction {
         match action {
-            LiveSlotAction::Get {
-                at,
-                out,
-                body,
-                sweep,
-            } => SlotAction::Get {
-                at,
-                out,
-                body,
-                sweep,
-            },
+            LiveSlotAction::Get(args) => SlotAction::Get(args),
             LiveSlotAction::Info { at } => SlotAction::Info { at },
             LiveSlotAction::Deps { at } => SlotAction::Deps { at },
         }
@@ -884,12 +765,12 @@ fn class_help() -> String {
 /// device storage, which no file stands in for.
 fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), String> {
     match action {
-        SlotAction::Get {
+        SlotAction::Get(GetArgs {
             at,
             out,
             body,
             sweep,
-        } => match slot::target(&at)? {
+        }) => match slot::target(&at)? {
             slot::Target::File(path) if sweep => Err(format!(
                 "--sweep re-reads the instrument as the panel changes; {} has only one state",
                 path.display()
@@ -925,38 +806,21 @@ fn slot_action(ui: &Ui, action: SlotAction, class: ObjectClass) -> Result<(), St
         },
         SlotAction::Focus => device::focus(ui, class),
         SlotAction::List => device::list(ui, class),
-        SlotAction::Probe {
-            op,
-            args,
-            wait,
-            yes,
-            bare,
-            service,
-            subsystem,
-        } => device::probe(ui, class, op, &args, wait, yes, bare, service, subsystem),
+        SlotAction::Probe(args) => device::probe(ui, class, args),
     }
 }
 
 fn inspect(ui: &Ui, files: &[PathBuf], raw: bool) -> Result<(), String> {
-    let mut failed = 0usize;
-    for (i, path) in files.iter().enumerate() {
-        if i > 0 {
-            ui.out("");
+    let heading = |path: &PathBuf| path.display().to_string();
+    file::report_each(ui, files, "file(s) did not parse", heading, |path| {
+        let entity = nord_format::from_path(path).map_err(|e| e.to_string())?;
+        if raw {
+            ui.out(format!("{entity:#?}"));
+        } else {
+            summary::print(ui, &entity);
         }
-        ui.out(path.display());
-        match nord_format::from_path(path) {
-            Ok(entity) if raw => ui.out(format!("{entity:#?}")),
-            Ok(entity) => summary::print(ui, &entity),
-            Err(e) => {
-                ui.note(format!("  error: {e}"));
-                failed += 1;
-            }
-        }
-    }
-    match failed {
-        0 => Ok(()),
-        n => Err(format!("{n} of {} file(s) did not parse", files.len())),
-    }
+        Ok(())
+    })
 }
 
 /// Decode each file and re-encode it, checking that the bytes match.

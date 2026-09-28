@@ -98,6 +98,27 @@ pub fn run<T: Send + 'static>(
     Job { rx, progress }
 }
 
+/// Seconds since the Unix epoch, or `None` when the clock reads before it or past what a
+/// `u32` holds.
+///
+/// ⚠️ `SystemTime::now()` traps on `wasm32-unknown-unknown`, so the web build reads the
+/// browser's clock.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn unix_seconds() -> Option<u32> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    u32::try_from(elapsed.as_secs()).ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn unix_seconds() -> Option<u32> {
+    let seconds = js_sys::Date::now() / 1000.0;
+    (0.0..=f64::from(u32::MAX))
+        .contains(&seconds)
+        .then_some(seconds as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

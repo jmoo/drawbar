@@ -13,10 +13,10 @@
 //! Values are raw except where the documentation enumerates them.
 
 use super::panel::Panel;
-use crate::cbin::{self, Cbin};
+use crate::cbin::Cbin;
 use crate::components::{
-    sparse_enum, Level, MasterTempo, RotorSpeed, Selector, SplitNote, SplitWidth, StageTranspose,
-    SwitchMorph,
+    model_index, sparse_enum, Level, MasterTempo, RotorSpeed, Selector, SplitNote, SplitWidth,
+    StageTranspose, SwitchMorph, VibChorus,
 };
 use crate::error::Error;
 use std::io::{Read, Seek};
@@ -66,6 +66,10 @@ sparse_enum!(
 /// re-encode. Placements come from the community byte maps, and values are raw except
 /// where those maps enumerate them. Inferred from specimens; not confirmed on
 /// hardware.
+///
+/// The header's [`slot`](crate::cbin::Header::slot) holds bank 0..=15 and location
+/// 0..=24 on current exports. A read does not validate it, because some v3.00 files
+/// hold out-of-range locations (norduserforum.com t=14414).
 ///
 /// ⚠️ The three split notes can be stored out of order; the panel reorders them for
 /// display (documented with specimens in the ns3-program-viewer sources). The
@@ -137,19 +141,8 @@ pub struct Program {
     pub panel_b: Panel,
 }
 
-/// The `(bank, location)` pair from the header, uninterpreted.
-///
-/// Not validated: current exports hold bank 0..=15 and location 0..=24, but some v3.00
-/// files hold out-of-range locations (norduserforum.com t=14414), so validating would
-/// refuse real files.
-pub fn location(file: &Cbin<Program>) -> (u16, u16) {
-    file.header.slot()
-}
-
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-    let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-    crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    Ok(file)
+    crate::formats::read_known(reader, FORMAT, KNOWN_VERSIONS)
 }
 
 sparse_enum!(
@@ -188,20 +181,11 @@ sparse_enum!(
     }
 );
 
-sparse_enum!(
+model_index!(
     /// The organ's vibrato/chorus selection: the six [`VibChorus`] modes, in the order
     /// the `ns3-organ-vibrato-mode` table in the Stage byte-map docs stores them.
     /// Inferred from specimens; not confirmed on hardware.
-    ///
-    /// [`VibChorus`]: crate::components::VibChorus
-    OrganVibratoMode, 3, {
-        0 => V1, "V1";
-        1 => C1, "C1";
-        2 => V2, "V2";
-        3 => C2, "C2";
-        4 => V3, "V3";
-        5 => C3, "C3";
-    }
+    OrganVibratoMode, 3, VibChorus, [V1, C1, V2, C2, V3, C3]
 );
 
 sparse_enum!(
@@ -216,15 +200,19 @@ sparse_enum!(
 );
 
 sparse_enum!(
-    /// From the `ns3-piano-layer-detune` table in the Stage byte-map docs. Inferred from
-    /// specimens; not confirmed on hardware.
-    PianoLayerDetune, 2, {
+    /// Off, then three steps: the table the Stage byte-map docs give for piano layer
+    /// detune, amp envelope velocity, filter drive and unison.
+    OffTo3, 2, {
         0 => V0, "Off";
         1 => V1, "1";
         2 => V2, "2";
         3 => V3, "3";
     }
 );
+
+/// From the `ns3-piano-layer-detune` table in the Stage byte-map docs. Inferred from
+/// specimens; not confirmed on hardware.
+pub type PianoLayerDetune = OffTo3;
 
 sparse_enum!(
     /// From the `ns3-piano-timbre` table in the Stage byte-map docs. Inferred from
@@ -254,16 +242,9 @@ sparse_enum!(
     }
 );
 
-sparse_enum!(
-    /// From the `ns3-synth-amp-env-velocity` table in the Stage byte-map docs. Inferred from
-    /// specimens; not confirmed on hardware.
-    SynthAmpEnvVelocity, 2, {
-        0 => V0, "Off";
-        1 => V1, "1";
-        2 => V2, "2";
-        3 => V3, "3";
-    }
-);
+/// From the `ns3-synth-amp-env-velocity` table in the Stage byte-map docs. Inferred from
+/// specimens; not confirmed on hardware.
+pub type SynthAmpEnvVelocity = OffTo3;
 
 sparse_enum!(
     /// From the `ns3-synth-arp-pattern` table in the Stage byte-map docs. Inferred from
@@ -287,16 +268,9 @@ sparse_enum!(
     }
 );
 
-sparse_enum!(
-    /// From the `ns3-synth-filter-drive` table in the Stage byte-map docs. Inferred from
-    /// specimens; not confirmed on hardware.
-    SynthFilterDrive, 2, {
-        0 => V0, "Off";
-        1 => V1, "1";
-        2 => V2, "2";
-        3 => V3, "3";
-    }
-);
+/// From the `ns3-synth-filter-drive` table in the Stage byte-map docs. Inferred from
+/// specimens; not confirmed on hardware.
+pub type SynthFilterDrive = OffTo3;
 
 sparse_enum!(
     /// From the `ns3-synth-filter-kb-track` table in the Stage byte-map docs. Inferred from
@@ -368,16 +342,9 @@ sparse_enum!(
     }
 );
 
-sparse_enum!(
-    /// From the `ns3-synth-unison` table in the Stage byte-map docs. Inferred from
-    /// specimens; not confirmed on hardware.
-    SynthUnison, 2, {
-        0 => V0, "Off";
-        1 => V1, "1";
-        2 => V2, "2";
-        3 => V3, "3";
-    }
-);
+/// From the `ns3-synth-unison` table in the Stage byte-map docs. Inferred from
+/// specimens; not confirmed on hardware.
+pub type SynthUnison = OffTo3;
 
 sparse_enum!(
     /// From the `ns3-synth-vibrato` table in the Stage byte-map docs. Inferred from

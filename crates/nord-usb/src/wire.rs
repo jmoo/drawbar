@@ -74,6 +74,9 @@ impl Service {
 /// come from captured traffic unless their documentation says otherwise. Most requests
 /// are even, but [`cmd::SELECT`] is odd, so parity carries no meaning.
 pub mod cmd {
+    /// Subsystem paired with [`Service::Program`](super::Service::Program). The device
+    /// reads it as a protocol version.
+    pub const SUBSYSTEM: u32 = 10;
     /// Open the transaction (the `O22 I26` that starts every operation).
     pub const SESSION_OPEN: u32 = 0x04;
     /// Close the transaction.
@@ -277,13 +280,7 @@ impl ProgramInfo {
     const NAME_LEN_AT: usize = 28;
 
     pub fn decode(msg: &Message) -> Result<Self> {
-        // A message decoded as a request keeps the status word, shifting every field.
-        if !msg.is_response() {
-            return Err(Error::InvalidArgument(
-                "object info must be decoded from a response (use Message::decode_response)".into(),
-            ));
-        }
-        let p = msg.payload();
+        let p = msg.response_payload("object info")?;
         if p.len() < Self::NAME_LEN_AT + 4 {
             return Err(Error::Truncated {
                 got: p.len(),
@@ -310,10 +307,7 @@ impl ProgramInfo {
         };
 
         Ok(Self {
-            location: Location {
-                bank: word(0),
-                slot: word(4),
-            },
+            location: Location::read(p, 0)?,
             body_len: word(8),
             format: String::from_utf8_lossy(&p[12..16]).into_owned(),
             version: word(16),
@@ -337,6 +331,29 @@ pub(crate) fn read_u32(buf: &[u8], at: usize) -> Result<u32> {
             got: buf.len(),
             need: end,
         })
+}
+
+/// `count` records from `at`, each `[u32 name_len][name][trailer bytes]`: the name
+/// with trailing whitespace trimmed, and the trailer.
+fn named_records(
+    p: &[u8],
+    mut at: usize,
+    count: usize,
+    trailer: usize,
+) -> Result<Vec<(String, &[u8])>> {
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_u32(p, at)? as usize;
+        let name_start = at + 4;
+        let name_end = checked_end(p, name_start, len)?;
+        let end = checked_end(p, name_end, trailer)?;
+        let name = String::from_utf8_lossy(&p[name_start..name_end])
+            .trim_end()
+            .to_string();
+        out.push((name, &p[name_end..end]));
+        at = end;
+    }
+    Ok(out)
 }
 
 fn checked_end(buf: &[u8], start: usize, len: usize) -> Result<usize> {
@@ -396,32 +413,18 @@ impl Partition {
     /// ⚠️ The length prefix is a `u32`. Read as a `u16`, the first record still parses
     /// and every later one lands mid-field, which looks like corruption.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
-        if !msg.is_response() {
-            return Err(Error::InvalidArgument(
-                "partitions must be decoded from a response".into(),
-            ));
-        }
-        let p = msg.payload();
-        let count = *p.first().ok_or(Error::Truncated { got: 0, need: 1 })? as usize;
-        let mut out = Vec::with_capacity(count);
-        let mut at = 1;
-        for index in 0..count {
-            let len = read_u32(p, at)? as usize;
-            let name_start = checked_end(p, at, 4)?;
-            let end = checked_end(p, name_start, len)?;
-            let fields_end = checked_end(p, end, PARTITION_FIELDS)?;
-            let name = String::from_utf8_lossy(&p[name_start..end])
-                .trim_end()
-                .to_string();
-            out.push(Partition {
-                index: index as u32,
+        let p = msg.response_payload("partitions")?;
+        let count = *p.first().ok_or(Error::Truncated { got: 0, need: 1 })?;
+        let records = named_records(p, 1, count.into(), PARTITION_FIELDS)?;
+        Ok((0..)
+            .zip(records)
+            .map(|(index, (name, fields))| Partition {
+                index,
                 native: name.contains("(Native)"),
                 name,
-                fields: p[end..fields_end].to_vec(),
-            });
-            at = fields_end;
-        }
-        Ok(out)
+                fields: fields.to_vec(),
+            })
+            .collect())
     }
 
     /// The partition's allocation granularity in net bytes: the payload one unit of
@@ -496,33 +499,22 @@ impl Bank {
     /// Decode a [`cmd::BANKS`] reply: the echoed partition, a count, then
     /// `[u32 name_len][name][u32 slots]` records.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
-        if !msg.is_response() {
-            return Err(Error::InvalidArgument(
-                "banks must be decoded from a response".into(),
-            ));
-        }
-        let p = msg.payload();
+        let p = msg.response_payload("banks")?;
         let count = *p.get(4).ok_or(Error::Truncated {
             got: p.len(),
             need: 5,
-        })? as usize;
-        let mut out = Vec::with_capacity(count);
-        let mut at = 5;
-        for index in 0..count {
-            let len = read_u32(p, at)? as usize;
-            let name_start = checked_end(p, at, 4)?;
-            let end = checked_end(p, name_start, len)?;
-            let name = String::from_utf8_lossy(&p[name_start..end])
-                .trim_end()
-                .to_string();
-            out.push(Bank {
-                index: index as u32,
-                name,
-                slots: read_u32(p, end)?,
-            });
-            at = end + 4;
-        }
-        Ok(out)
+        })?;
+        let records = named_records(p, 5, count.into(), 4)?;
+        (0..)
+            .zip(records)
+            .map(|(index, (name, slots))| {
+                Ok(Bank {
+                    index,
+                    name,
+                    slots: read_u32(slots, 0)?,
+                })
+            })
+            .collect()
     }
 
     /// The sentinel the `(Native)` partitions report instead of a real capacity.
@@ -587,14 +579,7 @@ impl Dependency {
     /// `[u8 flag][u32 reserved][u32 class][u32 id][u32 name_len][name][u32 has_location][u32 bank][u32 slot]`
     /// with no alignment padding, so an entry is `29 + name_len` bytes.
     pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
-        // A message decoded as a request keeps the status word, shifting every entry.
-        if !msg.is_response() {
-            return Err(Error::InvalidArgument(
-                "dependency list must be decoded from a response (use Message::decode_response)"
-                    .into(),
-            ));
-        }
-        let p = msg.payload();
+        let p = msg.response_payload("dependency list")?;
         if p.len() < 12 {
             return Err(Error::Truncated {
                 got: p.len(),
@@ -617,11 +602,10 @@ impl Dependency {
             let name_end = checked_end(p, name_start, name_len)?;
             let record_end = checked_end(p, name_end, 12)?;
             let name = String::from_utf8_lossy(&p[name_start..name_end]).into_owned();
-            let has_location = word(name_end) != 0;
-            let location = has_location.then(|| Location {
-                bank: word(name_end + 4),
-                slot: word(name_end + 8),
-            });
+            let location = match word(name_end) {
+                0 => None,
+                _ => Some(Location::read(p, name_end + 4)?),
+            };
             out.push(Self {
                 flag,
                 class,
@@ -635,22 +619,12 @@ impl Dependency {
     }
 }
 
-/// CRC-16/CCITT-FALSE: poly `0x1021`, init `0xFFFF`, no reflection, no xorout.
+/// CRC-16/CCITT-FALSE: poly `0x1021`, init `0xFFFF`, no reflection, no xorout. The
+/// type-0 container checksum, [`nord_format::crc::crc16`], is the same algorithm.
 ///
 /// Identified from known message/trailer pairs and checked across the capture corpus.
 pub fn crc16(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0xFFFF;
-    for &byte in data {
-        crc ^= (byte as u16) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x1021
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc
+    nord_format::crc::crc16(data)
 }
 
 /// One protocol message, decoded.
@@ -702,6 +676,11 @@ impl Message {
         }
     }
 
+    /// A [`Service::Program`] request.
+    pub fn program(command: u32, args: impl Into<Vec<u8>>) -> Self {
+        Self::new(Service::Program, cmd::SUBSYSTEM, command, args.into())
+    }
+
     /// Whether this message was decoded as a device response.
     ///
     /// Direction is recorded at decode time because the command code's parity does not
@@ -722,11 +701,23 @@ impl Message {
 
     /// Arguments with an ordinary response's status stripped. Notifications are unchanged.
     pub fn payload(&self) -> &[u8] {
-        if self.is_response && self.command != cmd::CHANGED && self.args.len() >= 4 {
-            &self.args[4..]
-        } else {
-            &self.args
+        match self.status() {
+            Some(_) => &self.args[4..],
+            None => &self.args,
         }
+    }
+
+    /// The payload of a message decoded as a response, for a decoder of `what`.
+    ///
+    /// A message decoded as a request keeps the status word, which would shift every
+    /// field by four bytes, so it is refused.
+    pub(crate) fn response_payload(&self, what: &str) -> Result<&[u8]> {
+        if !self.is_response {
+            return Err(Error::InvalidArgument(format!(
+                "{what} must be decoded from a response (use Message::decode_response)"
+            )));
+        }
+        Ok(self.payload())
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -1015,13 +1006,7 @@ impl Status {
     /// first three words are required; a shorter reply decodes with the missing words as
     /// zero.
     pub fn decode(class: ObjectClass, msg: &Message) -> Result<Self> {
-        // A message decoded as a request keeps the status word, shifting every counter.
-        if !msg.is_response() {
-            return Err(Error::InvalidArgument(
-                "status must be decoded from a response (use Message::decode_response)".into(),
-            ));
-        }
-        let p = msg.payload();
+        let p = msg.response_payload("status")?;
         if p.len() < 12 {
             return Err(Error::Truncated {
                 got: p.len(),
@@ -1079,9 +1064,24 @@ impl Location {
         u64::from(self.slot) + 1
     }
 
+    /// The address as the wire spells it: bank, then slot, each a big-endian `u32`.
+    pub fn to_bytes(self) -> [u8; 8] {
+        let mut out = [0; 8];
+        out[..4].copy_from_slice(&self.bank.to_be_bytes());
+        out[4..].copy_from_slice(&self.slot.to_be_bytes());
+        out
+    }
+
     pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.bank.to_be_bytes());
-        out.extend_from_slice(&self.slot.to_be_bytes());
+        out.extend_from_slice(&self.to_bytes());
+    }
+
+    /// The address spelled at `at` in `buf`, as [`Self::to_bytes`] writes it.
+    pub(crate) fn read(buf: &[u8], at: usize) -> Result<Self> {
+        Ok(Self {
+            bank: read_u32(buf, at)?,
+            slot: read_u32(buf, at + 4)?,
+        })
     }
 }
 

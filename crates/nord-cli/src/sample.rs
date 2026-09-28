@@ -1,9 +1,8 @@
 //! `nord sample`: the verbs that apply only to a sample instrument.
 //!
-//! `edit` mirrors `nord program edit`, but its fields come from
-//! [`editors::SampleEditor`]'s accessors instead of a declarative panel. Only what
-//! the format crate can patch in place is settable: always the name, plus each
-//! zone's root key and boundaries when its keyboard map can be read and recomputed.
+//! `edit` runs [`crate::edit::run`] with the class fixed. Only what the format crate
+//! can patch in place is settable: always the name, plus each zone's root key and
+//! boundaries when its keyboard map can be read and recomputed.
 //!
 //! `decode` turns the audio back into WAV, and `verify --deep` walks the encoded
 //! stream as well as the container. Both take a slot wherever they take a file.
@@ -28,8 +27,7 @@ use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
-use crate::edit::{print_byte_diff, write_edit, write_file};
-use crate::editors;
+use crate::edit::write_file;
 use crate::slot::Target;
 use crate::ui::Ui;
 
@@ -42,61 +40,6 @@ pub struct EditArgs {
 
     #[command(flatten)]
     pub common: crate::edit::SetArgs,
-}
-
-pub fn run(ui: &Ui, args: EditArgs) -> Result<(), String> {
-    let target = crate::slot::target(&args.target)?;
-
-    let original = match &target {
-        Target::File(path) => {
-            std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?
-        }
-        Target::Slot(at) => crate::device::fetch(*at, ObjectClass::Sample)?,
-    };
-
-    let mut entity = nord_format::from_stream(&mut std::io::Cursor::new(&original))
-        .map_err(|e| e.to_string())?;
-    if !matches!(entity, Entity::Sample(_)) {
-        return Err(crate::edit::mismatch(&mut entity, ObjectClass::Sample));
-    }
-
-    let staged = editors::stage(
-        ui,
-        args.common.fields,
-        &args.common.set,
-        crate::edit::editor_for(&mut entity)?.as_mut(),
-    )?;
-    let Some(changed) = staged else {
-        return Ok(());
-    };
-    if changed == 0 {
-        ui.note("no field changed; writing nothing");
-        return Ok(());
-    }
-
-    let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
-    print_byte_diff(ui, &original, &edited);
-
-    if args.common.dry_run {
-        ui.note("--dry-run: nothing written");
-        return Ok(());
-    }
-
-    match (target, args.common.out) {
-        (Target::File(path), out) => write_edit(ui, &path, out, args.common.yes, &edited),
-        // An explicit destination is the unambiguous case, whatever the source was.
-        (_, Some(out)) => write_file(ui, &out, &edited),
-        (Target::Slot(at), None) => crate::device::send(
-            ui,
-            &edited,
-            at,
-            ObjectClass::Sample,
-            args.common.yes,
-            "the edited sample",
-            None,
-            None,
-        ),
-    }
 }
 
 #[derive(Args)]
@@ -153,6 +96,13 @@ pub struct EncodeArgs {
     )]
     pub loop_crossfade: usize,
 
+    #[command(flatten)]
+    pub coding: CodingArgs,
+}
+
+/// How `encode` and `build` code the audio, and which generation they write.
+#[derive(Args)]
+pub struct CodingArgs {
     /// Store every content field directly, in order-zero records, instead of the
     /// editor's record coding. The file is larger and differs from the editor's, but
     /// decodes to the same audio.
@@ -175,6 +125,37 @@ pub struct EncodeArgs {
     pub unverified: bool,
 }
 
+impl CodingArgs {
+    /// The generation `--generation` names, once `--unverified` admits it.
+    ///
+    /// v2 has no gate: mono, stereo and looped v2 encodes play on an Electro 5. Confirmed
+    /// on hardware.
+    fn layout(&self) -> Result<codec::Layout, String> {
+        let layout = match self.generation {
+            2 => codec::Layout::V2,
+            3 => codec::Layout::V3,
+            4 => codec::Layout::V4,
+            n => return Err(format!("--generation {n}: the format has 2, 3 and 4")),
+        };
+        if layout == codec::Layout::V2 || self.unverified {
+            return Ok(layout);
+        }
+        Err(format!(
+            "no v{} encode has been played on an instrument, so the file is known only to \
+             match what Nord Sample Editor renders. Pass --unverified to write it anyway.",
+            self.generation
+        ))
+    }
+
+    fn predictor(&self) -> encode::Predictor {
+        if self.plain {
+            encode::Predictor::Plain
+        } else {
+            encode::Predictor::Minimizing
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct BuildArgs {
     /// A Nord Sample Editor project (`.nsmpproj`). Relative audio paths in it
@@ -192,26 +173,8 @@ pub struct BuildArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Store every content field directly, in order-zero records, instead of the
-    /// editor's record coding. The file is larger and differs from the editor's, but
-    /// decodes to the same audio.
-    #[arg(long)]
-    pub plain: bool,
-
-    /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
-    /// audio is the same in all three. The container and the stream's units differ.
-    /// Only v2 has been played on hardware, so 3 and 4 need `--unverified`.
-    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
-    pub generation: u8,
-
-    /// Quantize every stroke at this shift instead of the computed one. Experimental.
-    #[arg(long, hide = true, value_name = "BITS", value_parser = clap::value_parser!(u8).range(0..=15))]
-    pub shift: Option<u8>,
-
-    /// Acknowledge that no v3 or v4 encode has been played on an instrument.
-    /// Required with `--generation 3` and `--generation 4`.
-    #[arg(long)]
-    pub unverified: bool,
+    #[command(flatten)]
+    pub coding: CodingArgs,
 }
 
 #[derive(Args)]
@@ -292,7 +255,7 @@ fn body(bytes: &[u8]) -> Result<nord_format::Sample, String> {
         Entity::Sample(sample) => Ok(sample),
         other => Err(format!(
             "a {} file, not a sample instrument",
-            crate::file::entity_tag(&other)
+            other.identity().format
         )),
     }
 }
@@ -328,13 +291,12 @@ fn stem(origin: &Target, body: &nord_format::Sample) -> String {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "sample".into()),
-        Target::Slot(at) => match body {
-            nord_format::Sample::V2(s) => s.name().ok(),
-            nord_format::Sample::V3(s) => s.name().ok(),
-        }
-        .map(|name| sanitized(&name))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("{}-{}", at.user_bank(), at.user_slot())),
+        Target::Slot(at) => body
+            .name()
+            .ok()
+            .map(|name| sanitized(&name))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("{}-{}", at.user_bank(), at.user_slot())),
     }
 }
 
@@ -374,27 +336,21 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
         written: BTreeSet::new(),
     });
     let mut coverage = Coverage::default();
-    let mut failed = 0usize;
-    for spec in &args.targets {
-        ui.out(ui.bold(spec));
-        match decode_target(ui, spec, wavs.as_mut(), &mut coverage) {
-            Ok(()) => coverage.files += 1,
-            Err(e) => {
-                failed += 1;
-                // A file that will not open is not a codec gap, so it is reported
-                // but not counted in the coverage line.
-                ui.note(format!("  {} {e}", ui.danger("error")));
-            }
-        }
-    }
+    let decoded = crate::file::report_each(
+        ui,
+        &args.targets,
+        "target(s) did not decode",
+        String::clone,
+        |spec| {
+            // A file that will not open is not a codec gap, so it is reported but not
+            // counted in the coverage line.
+            decode_target(ui, spec, wavs.as_mut(), &mut coverage)?;
+            coverage.files += 1;
+            Ok(())
+        },
+    );
     ui.note(coverage.line());
-    match failed {
-        0 => Ok(()),
-        n => Err(format!(
-            "{n} of {} target(s) did not decode",
-            args.targets.len()
-        )),
-    }
+    decoded
 }
 
 fn decode_target(
@@ -461,21 +417,6 @@ fn decode_target(
     Ok(())
 }
 
-/// The gate in front of v3 and v4.
-///
-/// v2 has no gate: mono, stereo and looped v2 encodes play on an Electro 5. Confirmed
-/// on hardware.
-fn unverified_generation(generation: u8, acknowledged: bool) -> Result<(), String> {
-    if generation == 2 || acknowledged {
-        return Ok(());
-    }
-    Err(format!(
-        "no v{generation} encode has been played on an instrument, so the file is known \
-         only to match what Nord Sample Editor renders. Pass --unverified to write it \
-         anyway."
-    ))
-}
-
 /// One WAV as this encoder needs it: [`crate::wav::pcm16`] at [`codec::SOURCE_RATE`].
 ///
 /// Unlike a piano build, this does not resample: the field lattice is defined against
@@ -492,24 +433,6 @@ fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
         ));
     }
     Ok(source)
-}
-
-/// The generation a `--generation` number names.
-fn layout(generation: u8) -> Result<codec::Layout, String> {
-    match generation {
-        2 => Ok(codec::Layout::V2),
-        3 => Ok(codec::Layout::V3),
-        4 => Ok(codec::Layout::V4),
-        n => Err(format!("--generation {n}: the format has 2, 3 and 4")),
-    }
-}
-
-fn predictor(plain: bool) -> encode::Predictor {
-    if plain {
-        encode::Predictor::Plain
-    } else {
-        encode::Predictor::Minimizing
-    }
 }
 
 /// What one encoded stroke came out as, for the report.
@@ -550,8 +473,7 @@ fn loop_points(text: &str, crossfade: f64) -> Result<encode::Loop, String> {
 
 /// `nord sample encode`: a WAV into a one-zone instrument of the selected generation.
 pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
-    unverified_generation(args.generation, args.unverified)?;
-    let layout = layout(args.generation)?;
+    let layout = args.coding.layout()?;
     let source = pcm_source(&args.wav)?;
 
     let stem = args
@@ -563,7 +485,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let mut options = encode::Options::new(&name)
         .root_key(note::parse(&args.root_key)?)
         .channels(source.channels)
-        .predictor(predictor(args.plain))
+        .predictor(args.coding.predictor())
         .layout(layout);
     if let Some(top) = &args.top_note {
         options = options.top_note(note::parse(top)?);
@@ -571,7 +493,7 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     if let Some(points) = &args.loop_points {
         options = options.loops(loop_points(points, args.loop_crossfade as f64)?);
     }
-    if let Some(bits) = args.shift {
+    if let Some(bits) = args.coding.shift {
         options = options.shift(bits);
     }
 
@@ -625,8 +547,7 @@ const WRAPPING_ZONE_GAIN: f64 = 16.0;
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
-    unverified_generation(args.generation, args.unverified)?;
-    let layout = layout(args.generation)?;
+    let layout = args.coding.layout()?;
 
     let project = match nord_format::from_path(&args.project)
         .map_err(|e| format!("{}: {e}", args.project.display()))?
@@ -636,7 +557,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             return Err(format!(
                 "{}: a {} file, not a Sample Editor project",
                 args.project.display(),
-                crate::file::entity_tag(&other)
+                other.identity().format
             ))
         }
     };
@@ -667,7 +588,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             global_id: z.global_id,
             loops: z.loops,
             secondary_start: z.secondary_start,
-            shift: args.shift,
+            shift: args.coding.shift,
             gain: z.gain,
             loop_decay: z.loop_decay,
         })
@@ -677,7 +598,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         encode::Instrument {
             name: &name,
             map_gain,
-            predictor: predictor(args.plain),
+            predictor: args.coding.predictor(),
             layout,
             preset,
         },
@@ -1319,10 +1240,12 @@ mod tests {
             top_note: None,
             loop_points: None,
             loop_crossfade: 0,
-            plain: false,
-            generation,
-            shift: None,
-            unverified,
+            coding: CodingArgs {
+                plain: false,
+                generation,
+                shift: None,
+                unverified,
+            },
         }
     }
 
@@ -1478,8 +1401,8 @@ mod tests {
         .unwrap();
         std::fs::write(&path, project.render()).unwrap();
 
-        let args = EditArgs {
-            target: path.display().to_string(),
+        let args = crate::EditArgs {
+            target: Some(path.display().to_string()),
             common: crate::edit::SetArgs {
                 set: vec!["name=Vibes".into()],
                 dry_run: false,
@@ -1488,7 +1411,7 @@ mod tests {
                 yes: false,
             },
         };
-        let err = run(&Ui::piped(), args).unwrap_err();
+        let err = crate::edit::run(&Ui::piped(), args, ObjectClass::Sample).unwrap_err();
         assert!(err.contains(nsmpproj::FORMAT), "{err}");
         assert!(err.contains("nord edit"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();

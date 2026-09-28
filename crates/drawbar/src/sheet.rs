@@ -68,8 +68,8 @@ pub(crate) fn section<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R
         .inner
 }
 
-/// The mark, the name, the version, and the alpha pill. `tagline` adds [`WHAT`] below.
-pub(crate) fn masthead(ui: &mut egui::Ui, tagline: bool) {
+/// The mark, the name, the version, and the alpha pill, with [`WHAT`] below.
+pub(crate) fn masthead(ui: &mut egui::Ui) {
     ui.horizontal_top(|ui| {
         let accent = crate::app::accent(ui.visuals());
         ui.add_space(-2.0);
@@ -88,10 +88,8 @@ pub(crate) fn masthead(ui: &mut egui::Ui, tagline: bool) {
                 );
                 pill(ui, "ALPHA", crate::app::warn(ui.visuals()));
             });
-            if tagline {
-                ui.add_space(GAP);
-                ui.add(egui::Label::new(egui::RichText::new(WHAT).weak()).wrap());
-            }
+            ui.add_space(GAP);
+            ui.add(egui::Label::new(egui::RichText::new(WHAT).weak()).wrap());
         });
     });
 }
@@ -249,7 +247,7 @@ mod tests {
     fn every_helper_draws() {
         let ctx = headless();
         drawn_at(&ctx, egui::vec2(660.0, 430.0), |ui| {
-            masthead(ui, true);
+            masthead(ui);
             heading(ui, "This build", Some("an aside"));
             section(ui, |ui| {
                 ui.label("a section");

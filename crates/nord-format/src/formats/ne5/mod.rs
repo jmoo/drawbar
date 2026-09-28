@@ -1,7 +1,13 @@
 //! Nord Electro 5: program (`ne5p`), live slot (`ne5l`), song / set
 //! (`ne5t`), settings (`ne5s`), and the ZIP backup bundle.
 
+mod center_panel;
+mod effects_panel;
 pub mod live;
+mod organ_panel;
+mod piano_panel;
+mod program_panel;
+mod sample_panel;
 pub mod settings;
 pub use settings::Settings;
 pub mod song;
@@ -32,12 +38,6 @@ pub enum Instrument {
     Sample,
 }
 
-impl Instrument {
-    pub fn as_u8(&self) -> u8 {
-        *self as u8
-    }
-}
-
 impl crate::bits::Packed for Instrument {
     const MAX_BITS: u32 = 2;
     const DECODE_BITS: u32 = u8::BITS;
@@ -45,26 +45,18 @@ impl crate::bits::Packed for Instrument {
     type Error = crate::error::ParseError;
 
     fn from_bits(bits: u64) -> Result<Self, Self::Error> {
-        Instrument::try_from(bits as u8).map_err(|_| crate::error::ParseError::OutOfBounds {
-            value: format!("{bits}"),
-            bound: "0..=2 (Instrument)".to_string(),
-        })
-    }
-
-    fn to_bits(&self) -> u64 {
-        self.as_u8() as u64
-    }
-}
-
-impl TryFrom<u8> for Instrument {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Instrument, Self::Error> {
-        match value {
+        match bits {
             0 => Ok(Instrument::Organ),
             1 => Ok(Instrument::Piano),
             2 => Ok(Instrument::Sample),
-            _ => Err("Value is out of range for instrument"),
+            _ => Err(crate::error::ParseError::OutOfBounds {
+                value: format!("{bits}"),
+                bound: "0..=2 (Instrument)".to_string(),
+            }),
         }
+    }
+
+    fn to_bits(&self) -> u64 {
+        *self as u64
     }
 }

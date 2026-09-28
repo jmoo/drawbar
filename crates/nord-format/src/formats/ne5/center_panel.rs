@@ -109,9 +109,9 @@ impl OrganType {
 
 #[cfg(test)]
 mod tests {
-    use super::super::OrganModel;
     use super::*;
     use crate::bits::Packed;
+    use crate::formats::ne5::program::OrganModel;
 
     /// Zeroed bytes are not a valid panel: an octave shift of zero is stored as 7, so
     /// all-zero bits decode as -7, which is out of range.

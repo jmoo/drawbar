@@ -20,7 +20,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
 use crate::queue::Queue;
-use crate::strings::{folder, place, shown};
+use crate::strings::{counted, folder, place, shown};
 use crate::tabs::Tabs;
 use crate::workspace::{LocalEntity, Origin, Workspace};
 
@@ -248,10 +248,11 @@ impl DeviceCmd {
             ),
             DeviceCmd::SendAll { class, items } => words(
                 ("Sending", "Sent", "send"),
-                match items.len() {
-                    1 => format!("1 sound to {}", folder(*class)),
-                    n => format!("{n} sounds to {}", folder(*class)),
-                },
+                format!(
+                    "{} to {}",
+                    counted(items.len(), "sound", "sounds"),
+                    folder(*class)
+                ),
             ),
             DeviceCmd::Move { class, from, to } => words(
                 ("Moving", "Moved", "move"),
@@ -637,13 +638,21 @@ impl DeviceState {
             .map(move |(held, slot)| (Location::from_user(bank, slot), held))
     }
 
+    /// Every scanned slot of `class`, in address order.
+    fn all_slots(
+        &self,
+        class: ObjectClass,
+    ) -> impl Iterator<Item = (Location, &Option<ProgramInfo>)> + '_ {
+        self.banks_of(class)
+            .into_iter()
+            .flat_map(move |bank| self.slots_of(class, bank))
+    }
+
     /// Every slot of `class` a walk found vacant, in address order.
     pub fn free_slots(&self, class: ObjectClass) -> impl Iterator<Item = Location> + '_ {
-        self.banks_of(class).into_iter().flat_map(move |bank| {
-            self.slots_of(class, bank)
-                .filter(|(_, held)| held.is_none())
-                .map(|(at, _)| at)
-        })
+        self.all_slots(class)
+            .filter(|(_, held)| held.is_none())
+            .map(|(at, _)| at)
     }
 
     /// The first slot of `class` known to be vacant and not in `taken`: where a duplicate
@@ -878,16 +887,9 @@ fn occupied(
     state: &DeviceState,
     class: ObjectClass,
 ) -> impl Iterator<Item = (Location, &ProgramInfo)> + '_ {
-    state.banks_of(class).into_iter().flat_map(move |bank| {
-        state
-            .bank(class, bank)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .filter_map(move |(slot, held)| {
-                Some((Location::from_user(bank, slot as u32 + 1), held.as_ref()?))
-            })
-    })
+    state
+        .all_slots(class)
+        .filter_map(|(at, held)| Some((at, held.as_ref()?)))
 }
 
 /// Every slot of `class` whose scanned checksum is `crc`, lowest address first.
@@ -993,24 +995,28 @@ pub struct Device {
     link: Link,
     /// What the user asked for. Always dispatched ahead of the background scan.
     pending: VecDeque<DeviceCmd>,
-    /// The class the running command is walking, so a scan that fails stops showing as
-    /// running.
-    reading: Option<ObjectClass>,
-    /// The banks the running mutation touches, to be read again once it finishes.
-    rescan: Vec<(ObjectClass, u32)>,
-    /// The [`DeviceCmd::Reload`] to send once the running write has landed.
-    reload: Option<DeviceCmd>,
-    /// The class the running command writes into, so a refusal can be recorded against the
-    /// queue entry it stopped on.
-    writing: Option<ObjectClass>,
+    /// What the command in flight leaves to do when it finishes or fails.
+    running: Option<Running>,
     /// The slot [`Device::read_deps`] last asked about, and the outcome.
     asked_deps: Option<((ObjectClass, Location), Asked)>,
-    /// The slot the running `DEPENDENCIES` read is about, so a refusal is recorded against
-    /// it.
-    reading_deps: Option<(ObjectClass, Location)>,
     /// The list revision every link was last derived from. A link depends on both sides,
     /// so it is recomputed when either changes, and not every frame.
     linked: u64,
+}
+
+/// The follow-up owed by the command in flight, set when it is dispatched.
+struct Running {
+    /// The class the command is walking, so a scan that fails stops showing as running.
+    reading: Option<ObjectClass>,
+    /// The banks the command mutates, to be read again once it finishes.
+    rescan: Vec<(ObjectClass, u32)>,
+    /// The [`DeviceCmd::Reload`] to send once the write has landed.
+    reload: Option<DeviceCmd>,
+    /// The class the command writes into, so a refusal can be recorded against the queue
+    /// entry it stopped on.
+    writing: Option<ObjectClass>,
+    /// The slot a `DEPENDENCIES` read is about, so a refusal is recorded against it.
+    deps: Option<(ObjectClass, Location)>,
 }
 
 impl Device {
@@ -1023,12 +1029,8 @@ impl Device {
             from_worker: sender.clone(),
             link: Link::new(ctx, sender),
             pending: VecDeque::new(),
-            reading: None,
-            rescan: Vec::new(),
-            reload: None,
-            writing: None,
+            running: None,
             asked_deps: None,
-            reading_deps: None,
             linked: 0,
         }
     }
@@ -1129,55 +1131,46 @@ impl Device {
             return;
         }
         if let Some(cmd) = self.pending.pop_front() {
-            self.reading = None;
             return self.dispatch(cmd);
         }
         let Some(class) = self.state.scan.take() else {
             return;
         };
-        self.reading = Some(class);
         self.dispatch(DeviceCmd::ScanClass { class });
     }
 
     fn dispatch(&mut self, cmd: DeviceCmd) {
         // Drop affected banks before a mutation so confirmations never quote stale names.
-        self.rescan = match &cmd {
+        let touched = match &cmd {
             DeviceCmd::Delete { class, at }
             | DeviceCmd::Rename { class, at, .. }
-            | DeviceCmd::Put { class, at, .. } => user_bank(at.bank)
-                .map(|bank| (*class, bank))
-                .into_iter()
-                .collect(),
+            | DeviceCmd::Put { class, at, .. } => Some((*class, vec![*at])),
             DeviceCmd::Move { class, from, to } | DeviceCmd::Duplicate { class, from, to } => {
-                [from, to]
-                    .into_iter()
-                    .filter_map(|at| Some((*class, user_bank(at.bank)?)))
-                    .collect()
+                Some((*class, vec![*from, *to]))
             }
             DeviceCmd::SendAll { class, items } => {
-                let mut banks: Vec<(ObjectClass, u32)> = items
-                    .iter()
-                    .filter_map(|item| Some((*class, user_bank(item.at.bank)?)))
-                    .collect();
-                banks.sort_unstable_by_key(|(class, bank)| (class.to_raw(), *bank));
-                banks.dedup();
-                banks
+                Some((*class, items.iter().map(|item| item.at).collect()))
             }
-            _ => Vec::new(),
+            _ => None,
         };
-        for (class, bank) in &self.rescan {
+        let rescan: Vec<(ObjectClass, u32)> = touched
+            .map(|(class, touched)| {
+                let mut banks: Vec<u32> =
+                    touched.iter().filter_map(|at| user_bank(at.bank)).collect();
+                banks.sort_unstable();
+                banks.dedup();
+                banks.into_iter().map(|bank| (class, bank)).collect()
+            })
+            .unwrap_or_default();
+        for (class, bank) in &rescan {
             self.state.forget_bank(*class, *bank);
         }
         let rewritten = |((class, at), _): &((ObjectClass, Location), Asked)| {
-            user_bank(at.bank).is_some_and(|bank| self.rescan.contains(&(*class, bank)))
+            user_bank(at.bank).is_some_and(|bank| rescan.contains(&(*class, bank)))
         };
         if self.asked_deps.as_ref().is_some_and(rewritten) {
             self.asked_deps = None;
         }
-        self.reading_deps = match &cmd {
-            DeviceCmd::Deps { class, at } => Some((*class, *at)),
-            _ => None,
-        };
         // Confirmed on hardware.
         // Writing the loaded slot requires SELECT to reload it.
         let written = match &cmd {
@@ -1189,13 +1182,25 @@ impl Device {
             }
             _ => None,
         };
-        self.reload = written
+        let reload = written
             .filter(|(class, _)| self.state.has_focus(*class))
             .map(|(class, written)| DeviceCmd::Reload { class, written });
-        self.writing = match &cmd {
-            DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
-            _ => None,
-        };
+        self.running = Some(Running {
+            reading: match &cmd {
+                DeviceCmd::ScanClass { class } => Some(*class),
+                _ => None,
+            },
+            rescan,
+            reload,
+            writing: match &cmd {
+                DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
+                _ => None,
+            },
+            deps: match &cmd {
+                DeviceCmd::Deps { class, at } => Some((*class, *at)),
+                _ => None,
+            },
+        });
         self.state.in_flight = Some(cmd.words());
         self.link.send(cmd);
     }
@@ -1337,7 +1342,8 @@ impl Device {
         workspace.relink(|entity| link(state, entity));
     }
 
-    /// Drop everything the last instrument said, the links included.
+    /// Drop everything the last instrument said, the links included, and whatever its
+    /// command in flight was owed.
     ///
     /// A link is a fact about an attached instrument, so a new or absent instrument clears
     /// every link. An empty cache alone does not, because [`stands`] keeps a link through
@@ -1345,7 +1351,7 @@ impl Device {
     fn forget(&mut self, workspace: &mut Workspace) {
         self.state.forget_everything();
         self.asked_deps = None;
-        self.reading_deps = None;
+        self.running = None;
         workspace.relink(|_| None);
         workspace.forget_writes();
     }
@@ -1422,24 +1428,23 @@ impl Device {
                     self.state.in_flight = None;
                     self.forget(workspace);
                     self.pending.clear();
-                    self.reading = None;
-                    self.rescan.clear();
-                    self.reload = None;
-                    self.writing = None;
                 }
                 DeviceEvent::Started(what) => log.info(what),
                 DeviceEvent::Finished => {
-                    if let Some(class) = self.reading.take() {
-                        self.state.scan.finished(class);
-                        self.state.scan.heard(class, now);
+                    if let Some(running) = self.running.take() {
+                        if let Some(class) = running.reading {
+                            self.state.scan.finished(class);
+                            self.state.scan.heard(class, now);
+                        }
+                        // The panel is still playing what it read before the write.
+                        self.pending.extend(running.reload);
+                        self.pending.extend(
+                            running
+                                .rescan
+                                .into_iter()
+                                .map(|(class, bank)| DeviceCmd::ScanBank { class, bank }),
+                        );
                     }
-                    // The panel is still playing what it read before the write.
-                    self.pending.extend(self.reload.take());
-                    self.reading_deps = None;
-                    for (class, bank) in std::mem::take(&mut self.rescan) {
-                        self.pending.push_back(DeviceCmd::ScanBank { class, bank });
-                    }
-                    self.writing = None;
                     self.state.in_flight = None;
                 }
                 DeviceEvent::ClassStatus {
@@ -1546,14 +1551,16 @@ impl Device {
                 // A refused write left its slot as it was, or empty after a rescue, so
                 // the panel has nothing new to play there.
                 DeviceEvent::OpFailed(text) => {
-                    self.reload = None;
-                    if let Some(slot) = self.reading_deps.take() {
-                        if self.asked_deps == Some((slot, Asked::Sent)) {
-                            self.asked_deps = Some((slot, Asked::Refused));
+                    if let Some(running) = self.running.as_mut() {
+                        running.reload = None;
+                        if let Some(slot) = running.deps.take() {
+                            if self.asked_deps == Some((slot, Asked::Sent)) {
+                                self.asked_deps = Some((slot, Asked::Refused));
+                            }
                         }
-                    }
-                    if let Some(class) = self.writing {
-                        queue.stumbled(class, &text);
+                        if let Some(class) = running.writing {
+                            queue.stumbled(class, &text);
+                        }
                     }
                     log.error(text);
                     match &self.state.in_flight {
@@ -2514,6 +2521,41 @@ mod tests {
         assert_eq!(owed(true, false), Some((class, vec![at])));
         assert_eq!(owed(true, true), None, "the refused write changed nothing");
         assert_eq!(owed(false, false), None, "this panel loads no programs");
+    }
+
+    #[test]
+    fn a_move_within_one_bank_reads_that_bank_again_once() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        device.pretend_attached();
+        let class = ObjectClass::Program;
+        device.send(
+            DeviceCmd::Move {
+                class,
+                from: Location { bank: 4, slot: 2 },
+                to: Location { bank: 4, slot: 7 },
+            },
+            &mut log,
+        );
+        device.pump();
+        device.pretend(DeviceEvent::Finished);
+        device.poll(
+            &mut log,
+            &mut workspace,
+            &mut Tabs::default(),
+            &mut Queue::default(),
+        );
+        let rescans: Vec<(ObjectClass, u32)> = device
+            .queued()
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DeviceCmd::ScanBank { class, bank } => Some((*class, *bank)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rescans, vec![(class, 5)]);
     }
 
     /// A slot's dependencies are read once however often they are wanted. A refused

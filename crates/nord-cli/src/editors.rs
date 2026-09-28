@@ -5,7 +5,7 @@
 
 use nord_format::cbin::Cbin;
 use nord_format::formats::ne5::{program, song, Song};
-use nord_format::formats::nsmpproj::{Project, StrokeField, MAX_VELOCITY};
+use nord_format::formats::nsmpproj::{PathError, Project, MAX_VELOCITY};
 use nord_format::note;
 use nord_format::Sample;
 
@@ -116,12 +116,6 @@ const SWITCH_ACCEPTS: &str = "on or off";
 
 fn switch(v: bool) -> String {
     v.to_string()
-}
-
-fn number<T: std::str::FromStr>(path: &str, value: &str, accepts: &str) -> Result<T, String> {
-    value
-        .parse()
-        .map_err(|_| format!("{path}: expected {accepts}, got {value:?}"))
 }
 
 /// The sample instrument: its name, plus each zone's root key and boundaries
@@ -368,49 +362,13 @@ impl Fields for ProjectEditor<'_> {
     }
 
     fn set(&mut self, path: &str, value: &str) -> Result<(), String> {
-        let project = &mut self.0;
-        if path == "name" {
-            return project.set_name(value).map_err(|e| e.to_string());
-        }
-        let (block, field) = path.split_once('.').ok_or_else(|| unknown(path))?;
-        if let Some(id) = indexed(block, "file") {
-            if field != "path" {
-                return Err(unknown(path));
+        self.0.set_path(path, value).map_err(|e| match e {
+            PathError::Unknown => unknown(path),
+            PathError::NoZone(id) => {
+                format!("no zone {id}; --fields lists the ids this project holds")
             }
-            return project.set_audio_path(id, value).map_err(|e| e.to_string());
-        }
-        if let Some(id) = indexed(block, "stroke") {
-            let field = StrokeField::parse(field, value).map_err(|e| format!("{path}: {e}"))?;
-            return project
-                .set_stroke_field(id, field)
-                .map_err(|e| e.to_string());
-        }
-        if block == "velocity" {
-            let mut defaults = project.velocity_defaults().map_err(|e| e.to_string())?;
-            match field {
-                "attack_amount" => defaults.attack_amount = number(path, value, STORED)?,
-                "amplitude" => defaults.amplitude = number(path, value, STORED)?,
-                "timbre" => defaults.timbre = number(path, value, STORED)?,
-                _ => return Err(unknown(path)),
-            }
-            return project
-                .set_velocity_defaults(defaults)
-                .map_err(|e| e.to_string());
-        }
-        let id = indexed(block, "zone").ok_or_else(|| unknown(path))?;
-        let zones = project.zones().map_err(|e| e.to_string())?;
-        let zone = zones
-            .iter()
-            .find(|z| z.zone_id == id)
-            .ok_or_else(|| format!("no zone {id}; --fields lists the ids this project holds"))?;
-        let note = note::parse(value)?;
-        match field {
-            "root_key" => project.set_root_key(id, note),
-            "bottom_note" => project.set_key_range(id, note, zone.top_note),
-            "top_note" => project.set_key_range(id, zone.bottom_note, note),
-            _ => return Err(unknown(path)),
-        }
-        .map_err(|e| e.to_string())
+            PathError::Refused(e) => format!("{path}: {e}"),
+        })
     }
 }
 
@@ -504,7 +462,7 @@ mod tests {
         let Sample::V3(mut body) = sample_with_key_map() else {
             unreachable!()
         };
-        section::find_mut4(&mut body.body.sections, section::MAP4)
+        section::find_mut(&mut body.body.sections, section::MAP4)
             .unwrap()
             .payload = vec![0; 8];
         Sample::V3(body)

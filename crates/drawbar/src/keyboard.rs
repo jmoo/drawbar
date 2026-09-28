@@ -16,7 +16,7 @@ use crate::browser::{cell_ink, Act, Browser, Held, Item, Kind, Onto};
 use crate::device::{occupancy, read_only, Device};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::Needs;
-use crate::panel::{caps, Track};
+use crate::panel::{caps, cut, inset, list_width, row_ink, Track, GAP, GLYPH, PAD};
 use crate::queue::{Queue, Queued};
 use crate::room;
 use crate::strings::{place, shown};
@@ -40,10 +40,6 @@ const CELL_GAP: f32 = 4.0;
 /// [`grid`].
 pub const COLUMNS: usize = 5;
 
-/// A band's padding at each end, and the gap between its parts.
-const PAD: f32 = 8.0;
-const GAP: f32 = 6.0;
-
 /// A chip's height and its padding at each end.
 const CHIP: f32 = 19.0;
 const CHIP_PAD: f32 = 6.0;
@@ -51,8 +47,7 @@ const CHIP_PAD: f32 = 6.0;
 /// A cell's padding inside its border, and the gap between a chip's parts.
 const INSET: f32 = 5.0;
 
-/// The size of a glyph in a band, and of the smaller one at the end of a row.
-const GLYPH: f32 = 13.0;
+/// The size of the glyph at the end of a row.
 const SMALL: f32 = 11.0;
 
 /// Font sizes for this view. It paints its text directly, so the sizes are set here
@@ -553,23 +548,8 @@ fn list(
         .map(|(at, _)| Item::Slot { class, at: *at })
         .collect();
 
-    // The head and every row are inset like a tree row, so the grid moves as one and the
-    // scroll bar stays at the panel's edge.
-    let room = ui.available_rect_before_wrap();
-    let mut inset = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(room.with_min_x(room.left() + PAD))
-            .layout(*ui.layout()),
-    );
-    let ui = &mut inset;
-
-    let body = ui.available_height() - HEAD;
-    let scrolls = slots.len() as f32 * ROW > body;
-    let bar = match scrolls {
-        true => ui.spacing().scroll.bar_width,
-        false => 0.0,
-    };
-    let width = (ui.available_width() - bar).max(0.0);
+    let ui = &mut inset(ui);
+    let width = list_width(ui, slots.len(), ROW, HEAD);
     let tracks = crate::panel::tracks(width, &LIST, LIST_GAP);
     head(ui, class, width, &tracks);
 
@@ -645,19 +625,10 @@ fn row(
 
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    let fill = match (selected, state == State::Loaded, response.hovered()) {
-        (true, _, _) | (_, true, _) => Some(visuals.selection.bg_fill),
-        (false, false, true) => Some(visuals.faint_bg_color),
-        (false, false, false) => None,
-    };
-    if let Some(fill) = fill {
-        painter.rect_filled(rect, 3.0, fill);
-    }
     // ⚠️ The loaded row uses the selection fill, so every cell on it switches text color
     // too: the signal colors are not legible on that fill.
     let lit = selected || state == State::Loaded;
-    let ink = cell_ink(lit, visuals.text_color(), &visuals);
-    let quiet = cell_ink(lit, visuals.weak_text_color(), &visuals);
+    let (ink, quiet) = row_ink(&painter, rect, lit, response.hovered(), &visuals);
 
     let text = cells(view, at, info);
     let faces = [
@@ -788,16 +759,7 @@ fn footer(
     queue: &Queue,
     workspace: &Workspace,
 ) {
-    let unit = device.state.allocation_unit(class);
-    let banks = device.state.banks(class);
-    let Some(held) = room::meter(
-        class,
-        &device.state.inventory,
-        unit,
-        banks,
-        queue,
-        workspace,
-    ) else {
+    let Some(held) = room::meter(class, &device.state, queue, workspace) else {
         return;
     };
     egui::Frame::new()
@@ -805,10 +767,11 @@ fn footer(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
+                let unit = device.state.allocation_unit(class);
                 if let Some(room) = occupancy(class, &device.state.inventory, unit) {
                     ui.label(egui::RichText::new(room).monospace().size(MONO));
                 }
-                if let Some(free) = room::free_space(class, &device.state.inventory, unit) {
+                if let Some(free) = room::free_space(class, &device.state) {
                     ui.label(egui::RichText::new(free).text_style(ui_text()).weak());
                 }
             });
@@ -981,29 +944,6 @@ fn chip(
     response
 }
 
-/// One cell of text, truncated to `width` with an ellipsis and centered on `middle`.
-fn cut(
-    painter: &egui::Painter,
-    left: f32,
-    middle: f32,
-    width: f32,
-    text: &str,
-    format: egui::TextFormat,
-) {
-    if width <= 0.0 || text.is_empty() {
-        return;
-    }
-    let mut job = egui::text::LayoutJob::default();
-    job.append(text, 0.0, format);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
-    let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(left, middle - galley.size().y / 2.0),
-        galley,
-        egui::Color32::PLACEHOLDER,
-    );
-}
-
 /// The line a folder shows when there is nothing to draw.
 fn nothing(ui: &mut egui::Ui, said: &str) {
     ui.add_space(GAP);
@@ -1165,7 +1105,7 @@ mod tests {
         }
 
         assert_eq!(bench.tabs.keyboard_class(), Some(first));
-        assert_eq!(bench.tabs.showing(), Some(Spot::Keyboard));
+        assert_eq!(bench.tabs.showing(), Spot::Keyboard);
         assert_eq!(
             bench.device.queued().len(),
             asked,

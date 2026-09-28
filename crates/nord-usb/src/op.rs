@@ -23,12 +23,7 @@ use crate::wire::{
 pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Status> {
     let class = session.class();
     let resp = session
-        .request(
-            Service::Program,
-            10,
-            cmd::STATUS,
-            &class.to_raw().to_be_bytes(),
-        )
+        .request(&Message::program(cmd::STATUS, class.to_raw().to_be_bytes()))
         .await?;
     Status::decode(class, &resp)
 }
@@ -65,10 +60,8 @@ pub async fn info<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<ProgramInfo> {
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     let resp = session
-        .request(Service::Program, 10, cmd::INFO, &args)
+        .request(&Message::program(cmd::INFO, at.to_bytes()))
         .await?;
     let info = ProgramInfo::decode(&resp)?;
     if info.location != at {
@@ -153,25 +146,20 @@ fn chunk_override(name: &str, default: u64) -> Result<u64> {
     }
 }
 
-#[cfg(feature = "fault-injection")]
+#[cfg(not(feature = "fault-injection"))]
+fn chunk_override(_name: &str, default: u64) -> Result<u64> {
+    Ok(default)
+}
+
 fn read_chunk() -> Result<u32> {
     let size = chunk_override("NORD_READ_CHUNK", READ_CHUNK.into())?;
     u32::try_from(size).map_err(|_| Error::InvalidArgument("NORD_READ_CHUNK exceeds u32".into()))
 }
-#[cfg(not(feature = "fault-injection"))]
-fn read_chunk() -> Result<u32> {
-    Ok(READ_CHUNK)
-}
 
-#[cfg(feature = "fault-injection")]
 fn write_chunk() -> Result<usize> {
     let size = chunk_override("NORD_WRITE_CHUNK", WRITE_CHUNK as u64)?;
     usize::try_from(size)
         .map_err(|_| Error::InvalidArgument("NORD_WRITE_CHUNK exceeds usize".into()))
-}
-#[cfg(not(feature = "fault-injection"))]
-fn write_chunk() -> Result<usize> {
-    Ok(WRITE_CHUNK)
 }
 
 /// Read the metadata and body through the device's chunked transfer sequence.
@@ -184,10 +172,8 @@ async fn transfer_out<T: Transport, C>(
 
     session.notify(&ui::label("Uploading...")?).await?;
 
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     session
-        .request(Service::Program, 10, cmd::BEGIN_READ, &args)
+        .request(&Message::program(cmd::BEGIN_READ, at.to_bytes()))
         .await?;
 
     // Clamp allocation from the device-supplied length; large valid bodies grow by chunk.
@@ -197,12 +183,13 @@ async fn transfer_out<T: Transport, C>(
         let offset = body.len() as u32;
         let want = chunk_size.min(meta.body_len - offset);
 
-        let mut req = args.clone();
-        req.extend_from_slice(&offset.to_be_bytes());
-        req.extend_from_slice(&want.to_be_bytes());
-        let resp = session
-            .request(Service::Program, 10, cmd::READ, &req)
-            .await?;
+        let req = [
+            &at.to_bytes()[..],
+            &offset.to_be_bytes(),
+            &want.to_be_bytes(),
+        ]
+        .concat();
+        let resp = session.request(&Message::program(cmd::READ, req)).await?;
 
         let chunk = read_payload(resp.payload(), at, offset, want)?;
         body.extend_from_slice(chunk);
@@ -221,7 +208,7 @@ async fn transfer_out<T: Transport, C>(
         session.notify(&ui::percent(100)).await?;
     }
     session
-        .request(Service::Program, 10, cmd::END_TRANSFER, &args)
+        .request(&Message::program(cmd::END_TRANSFER, at.to_bytes()))
         .await?;
     Ok((meta, body))
 }
@@ -263,12 +250,7 @@ async fn clean_library<T: Transport>(
     session.notify(&ui::label("Cleaning...")?).await?;
     session.notify(&ui::percent(0)).await?;
     session
-        .request(
-            Service::Program,
-            10,
-            cmd::WRITE_PREPARE,
-            &blocks.to_be_bytes(),
-        )
+        .request(&Message::program(cmd::WRITE_PREPARE, blocks.to_be_bytes()))
         .await?;
 
     let mut painted = Some(0);
@@ -277,7 +259,7 @@ async fn clean_library<T: Transport>(
             crate::sleep::sleep(CLEANING_POLL_SPACING).await;
         }
         let resp = session
-            .request(Service::Program, 10, cmd::WRITE_PREPARE_2, &[])
+            .request(&Message::program(cmd::WRITE_PREPARE_2, Vec::new()))
             .await?;
         let (requested, done, running) = cleaning_progress(resp.payload())?;
         // Ready is `running` returning to 0; `done` can end above the request, so the
@@ -374,17 +356,23 @@ pub fn begin_write_args(
 ) -> Result<Vec<u8>> {
     let body_len = u32::try_from(body_len)
         .map_err(|_| Error::InvalidArgument("the body is larger than the wire format".into()))?;
-    let name_len = u32::try_from(name.len())
-        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
-    let mut args = Vec::new();
-    at.write_to(&mut args);
+    let mut args = at.to_bytes().to_vec();
     args.extend_from_slice(&body_len.to_be_bytes());
     args.extend_from_slice(tag);
     args.extend_from_slice(&timestamp.to_be_bytes());
     args.extend_from_slice(&u32::MAX.to_be_bytes());
-    args.extend_from_slice(&name_len.to_be_bytes());
-    args.extend_from_slice(name.as_bytes());
+    put_name(&mut args, name)?;
     Ok(args)
+}
+
+/// Append a name as every string on the wire is sent: a big-endian `u32` length, then
+/// the bytes, unpadded.
+fn put_name(args: &mut Vec<u8>, name: &str) -> Result<()> {
+    let len = u32::try_from(name.len())
+        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
+    args.extend_from_slice(&len.to_be_bytes());
+    args.extend_from_slice(name.as_bytes());
+    Ok(())
 }
 
 /// A [`cmd::WRITE_DATA`] argument block: the address, the chunk's offset and length,
@@ -394,8 +382,7 @@ pub fn write_data_args(at: Location, offset: usize, chunk: &[u8]) -> Result<Vec<
         .map_err(|_| Error::InvalidArgument("the offset is larger than the wire format".into()))?;
     let len = u32::try_from(chunk.len())
         .map_err(|_| Error::InvalidArgument("the chunk is larger than the wire format".into()))?;
-    let mut args = Vec::new();
-    at.write_to(&mut args);
+    let mut args = at.to_bytes().to_vec();
     args.extend_from_slice(&offset.to_be_bytes());
     args.extend_from_slice(&len.to_be_bytes());
     args.extend_from_slice(chunk);
@@ -417,22 +404,22 @@ async fn transfer_in<T: Transport>(
 
     let begin = begin_write_args(at, body.len(), &file.header.tag, timestamp, name)?;
     session
-        .request(Service::Program, 10, cmd::BEGIN_WRITE, &begin)
+        .request(&Message::program(cmd::BEGIN_WRITE, begin))
         .await?;
 
     let mut offset = 0usize;
     let mut painted = None;
     while offset < body.len() {
         let end = offset.saturating_add(chunk_size).min(body.len());
-        let data = write_data_args(at, offset, &body[offset..end])?;
+        let data = Message::program(
+            cmd::WRITE_DATA,
+            write_data_args(at, offset, &body[offset..end])?,
+        );
+        // Only the final chunk is acknowledged.
         if end == body.len() {
-            // Only the final chunk is acknowledged.
-            session
-                .request(Service::Program, 10, cmd::WRITE_DATA, &data)
-                .await?;
+            session.request(&data).await?;
         } else {
-            let msg = Message::new(Service::Program, 10, cmd::WRITE_DATA, data);
-            session.notify(&msg).await?;
+            session.notify(&data).await?;
         }
         offset = end;
 
@@ -447,10 +434,8 @@ async fn transfer_in<T: Transport>(
         session.notify(&ui::percent(100)).await?;
     }
 
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     session
-        .request(Service::Program, 10, cmd::END_TRANSFER, &args)
+        .request(&Message::program(cmd::END_TRANSFER, at.to_bytes()))
         .await?;
     Ok(())
 }
@@ -461,10 +446,8 @@ async fn transfer_in<T: Transport>(
 /// **Non-destructive.** Nothing stored changes, so this needs no [`ReadWrite`] session.
 /// This is the only command with inverted parity (`0x2f` request, `0x30` response).
 pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Location) -> Result<()> {
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     session
-        .request(Service::Program, 10, cmd::SELECT, &args)
+        .request(&Message::program(cmd::SELECT, at.to_bytes()))
         .await?;
     Ok(())
 }
@@ -521,7 +504,7 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
         .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
         .await?;
 
-    let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
+    let close = Message::program(cmd::SESSION_CLOSE, Vec::new());
     send_recovery(transport, &close, "SESSION_CLOSE").await?;
     let _ = transport
         .read_timeout(crate::transport::READ_BUFFER, RECOVER_DRAIN_LIMIT)
@@ -538,7 +521,7 @@ pub async fn partitions<T: Transport, C>(
     session: &mut Session<'_, T, C>,
 ) -> Result<Vec<Partition>> {
     let resp = session
-        .request(Service::Program, 10, cmd::PARTITIONS, &[])
+        .request(&Message::program(cmd::PARTITIONS, Vec::new()))
         .await?;
     Partition::decode_all(&resp)
 }
@@ -549,16 +532,9 @@ pub async fn banks<T: Transport, C>(
     partition: u32,
 ) -> Result<Vec<Bank>> {
     let resp = session
-        .request(Service::Program, 10, cmd::BANKS, &partition.to_be_bytes())
+        .request(&Message::program(cmd::BANKS, partition.to_be_bytes()))
         .await?;
-    let payload = resp.payload();
-    if payload.len() < 4 {
-        return Err(Error::Truncated {
-            got: payload.len(),
-            need: 4,
-        });
-    }
-    let reported = u32::from_be_bytes(payload[..4].try_into().unwrap());
+    let reported = read_u32(resp.payload(), 0)?;
     if reported != partition {
         return Err(Error::UnexpectedPartition {
             requested: partition,
@@ -615,24 +591,28 @@ pub(crate) fn address_refusal(banks: &[Bank], at: Location) -> Option<String> {
 /// The read half of [`select`].
 pub async fn focus<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Location> {
     let resp = session
-        .request(Service::Program, 10, cmd::FOCUS, &[])
+        .request(&Message::program(cmd::FOCUS, Vec::new()))
         .await?;
-    let p = resp.payload();
-    if p.len() < 8 {
-        return Err(Error::Truncated {
-            got: p.len(),
-            need: 8,
-        });
-    }
-    Ok(Location {
-        bank: u32::from_be_bytes(p[0..4].try_into().unwrap()),
-        slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
-    })
+    Location::read(resp.payload(), 0)
 }
 
 /// Device status refusing a [`cmd::NEXT_SLOT`] without the direction word. It is
 /// reported as an error so a refused walk cannot return a partial list.
 pub const ENUMERATION_DISABLED: u32 = 0x11;
+
+/// Device status refusing a request aimed at an empty slot. Confirmed on hardware.
+///
+/// It also ends a [`next_occupied`] walk, and answers [`focus`] when nothing of the
+/// session's class is loaded.
+pub const VACANT: u32 = 0x1;
+
+/// Device status refusing an address past the instrument's geometry. Confirmed on
+/// hardware.
+pub const OUT_OF_RANGE: u32 = 0x3;
+
+/// Device status refusing a write into an occupied slot of a class that does not
+/// [overwrite in place](ObjectClass::overwrites_in_place). Confirmed on hardware.
+pub const OCCUPIED: u32 = 0x4;
 
 /// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
 /// walking forward, its last when walking backward.
@@ -650,30 +630,16 @@ pub async fn next_occupied<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Option<Location>> {
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     // Direction, 0 = forward. Omitting it is refused after any write since power-up.
-    args.extend_from_slice(&0u32.to_be_bytes());
+    let args = [&at.to_bytes()[..], &0u32.to_be_bytes()].concat();
     match session
-        .request(Service::Program, 10, cmd::NEXT_SLOT, &args)
+        .request(&Message::program(cmd::NEXT_SLOT, args))
         .await
     {
-        Ok(resp) => {
-            let p = resp.payload();
-            if p.len() < 8 {
-                return Err(Error::Truncated {
-                    got: p.len(),
-                    need: 8,
-                });
-            }
-            Ok(Some(Location {
-                bank: u32::from_be_bytes(p[0..4].try_into().unwrap()),
-                slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
-            }))
-        }
-        // Status 1 means the position is past the end, which ends the walk. A refusal
-        // leaves the session in step, so the caller may continue.
-        Err(Error::DeviceStatus(1)) => Ok(None),
+        Ok(resp) => Location::read(resp.payload(), 0).map(Some),
+        // Past the end, which ends the walk. A refusal leaves the session in step, so
+        // the caller may continue.
+        Err(Error::DeviceStatus(VACANT)) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -746,17 +712,11 @@ pub async fn dependencies<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Vec<Dependency>> {
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     let resp = session
-        .request(Service::Program, 10, cmd::DEPENDENCIES, &args)
+        .request(&Message::program(cmd::DEPENDENCIES, at.to_bytes()))
         .await?;
     let dependencies = Dependency::decode_all(&resp)?;
-    let p = resp.payload();
-    let reported = Location {
-        bank: u32::from_be_bytes(p[0..4].try_into().unwrap()),
-        slot: u32::from_be_bytes(p[4..8].try_into().unwrap()),
-    };
+    let reported = Location::read(resp.payload(), 0)?;
     if reported != at {
         return Err(Error::UnexpectedLocation {
             requested: at,
@@ -861,12 +821,8 @@ pub async fn move_object<T: Transport>(
     from: Location,
     to: Location,
 ) -> Result<()> {
-    let mut args = Vec::new();
-    from.write_to(&mut args);
-    to.write_to(&mut args);
-    session
-        .request(Service::Program, 10, cmd::MOVE, &args)
-        .await?;
+    let args = [from.to_bytes(), to.to_bytes()].concat();
+    session.request(&Message::program(cmd::MOVE, args)).await?;
     Ok(())
 }
 
@@ -879,10 +835,8 @@ pub async fn delete<T: Transport>(
     at: Location,
 ) -> Result<()> {
     session.notify(&ui::label("Deleting...")?).await?;
-    let mut args = Vec::new();
-    at.write_to(&mut args);
     session
-        .request(Service::Program, 10, cmd::DELETE, &args)
+        .request(&Message::program(cmd::DELETE, at.to_bytes()))
         .await?;
     Ok(())
 }
@@ -896,14 +850,10 @@ pub async fn rename<T: Transport>(
     at: Location,
     name: &str,
 ) -> Result<()> {
-    let mut args = Vec::new();
-    at.write_to(&mut args);
-    let name_len = u32::try_from(name.len())
-        .map_err(|_| Error::InvalidArgument("the name is larger than the wire format".into()))?;
-    args.extend_from_slice(&name_len.to_be_bytes());
-    args.extend_from_slice(name.as_bytes());
+    let mut args = at.to_bytes().to_vec();
+    put_name(&mut args, name)?;
     session
-        .request(Service::Program, 10, cmd::RENAME, &args)
+        .request(&Message::program(cmd::RENAME, args))
         .await?;
     Ok(())
 }
@@ -918,12 +868,8 @@ pub async fn duplicate<T: Transport>(
     from: Location,
     to: Location,
 ) -> Result<()> {
-    let mut args = Vec::new();
-    from.write_to(&mut args);
-    to.write_to(&mut args);
-    session
-        .request(Service::Program, 10, cmd::COPY, &args)
-        .await?;
+    let args = [from.to_bytes(), to.to_bytes()].concat();
+    session.request(&Message::program(cmd::COPY, args)).await?;
     Ok(())
 }
 

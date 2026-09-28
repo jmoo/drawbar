@@ -12,8 +12,6 @@ use std::rc::Rc;
 use eframe::egui;
 use nord_format::fields::Field;
 
-use crate::strings;
-
 /// What every cell needs and none of them should compute twice.
 ///
 /// ⚠️ Asking a field for its legal values walks every bit pattern it can hold (4,096 at
@@ -115,36 +113,6 @@ pub fn heading(ui: &mut egui::Ui, title: &str, note: &str, right: Option<(&str, 
         });
     });
     ui.add_space(4.0);
-}
-
-/// A cell whose control is the caller's, with the panel's name for it over the top.
-///
-/// `path` names the caption. A path the strings table does not know gets a prettified
-/// fallback in italics, with the path on hover.
-pub fn named_cell(
-    ui: &mut egui::Ui,
-    path: &str,
-    width: f32,
-    body: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
-    ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            let rough = !strings::known(path);
-            let mut text = egui::RichText::new(strings::label(path).to_uppercase()).small();
-            if rough {
-                text = text.italics();
-            }
-            let response = ui.add(egui::Label::new(
-                text.color(crate::app::caption(ui.visuals())),
-            ));
-            if rough {
-                response.on_hover_text(format!("{path}: this app has no name for it yet"));
-            }
-            body(ui);
-        });
-    })
-    .response
 }
 
 #[cfg(test)]

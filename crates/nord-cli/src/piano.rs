@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Args, ValueEnum};
 use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem};
 use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Library, UNCOVERED};
@@ -27,23 +28,30 @@ use nord_format::Entity;
 use crate::edit::{write_edit, write_file};
 use crate::ui::Ui;
 
-/// The banks a trim can drop by name. Dropping the attack bank would leave silence, so
-/// it is not offered.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum DroppableBank {
-    /// The pedal-down resonance set, which the larger libraries add.
-    Resonance,
-    /// The note-off sample.
-    Release,
+/// A bank named as [`Bank::name`] spells it, from the names `offered`.
+fn bank_parser(
+    offered: impl IntoIterator<Item = PossibleValue>,
+) -> impl TypedValueParser<Value = Bank> {
+    PossibleValuesParser::new(offered).try_map(|name| {
+        Bank::ALL
+            .into_iter()
+            .find(|bank| bank.name() == name)
+            .ok_or_else(|| format!("{name} is not a bank"))
+    })
 }
 
-impl From<DroppableBank> for Bank {
-    fn from(bank: DroppableBank) -> Bank {
-        match bank {
-            DroppableBank::Resonance => Bank::Resonance,
-            DroppableBank::Release => Bank::Release,
-        }
-    }
+fn any_bank() -> impl TypedValueParser<Value = Bank> {
+    bank_parser(Bank::ALL.map(|bank| PossibleValue::new(bank.name())))
+}
+
+/// The banks a trim can drop. Dropping the attack bank would leave silence, so it is
+/// not offered.
+fn droppable_bank() -> impl TypedValueParser<Value = Bank> {
+    bank_parser([
+        PossibleValue::new(Bank::Resonance.name())
+            .help("The pedal-down resonance set, which the larger libraries add"),
+        PossibleValue::new(Bank::Release.name()).help("The note-off sample"),
+    ])
 }
 
 #[derive(Args)]
@@ -80,30 +88,13 @@ pub struct DecodeArgs {
     #[arg(long, value_name = "N", requires = "key")]
     pub layer: Option<u8>,
 
-    #[arg(long, value_enum, requires = "key")]
-    pub bank: Option<BankName>,
+    #[arg(long, value_name = "BANK", value_parser = any_bank(), requires = "key")]
+    pub bank: Option<Bank>,
 
     /// Where to write the WAV. Frames come out at the rate the instrument plays
     /// them, with no gain applied.
     #[arg(short, long, value_name = "WAV")]
     pub out: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum BankName {
-    Attack,
-    Resonance,
-    Release,
-}
-
-impl From<BankName> for Bank {
-    fn from(bank: BankName) -> Bank {
-        match bank {
-            BankName::Attack => Bank::Attack,
-            BankName::Resonance => Bank::Resonance,
-            BankName::Release => Bank::Release,
-        }
-    }
 }
 
 #[derive(Args)]
@@ -153,8 +144,8 @@ pub struct TrimArgs {
 
     /// Drop every stroke of one bank. Dropping the resonance set is what turns a
     /// large library into a small one.
-    #[arg(long, value_enum, value_name = "BANK")]
-    pub drop_bank: Vec<DroppableBank>,
+    #[arg(long, value_name = "BANK", value_parser = droppable_bank())]
+    pub drop_bank: Vec<Bank>,
 
     /// `N` keeps the N loudest layers of each root and bank; `=0,3,7` keeps only
     /// those layer values. The layers kept keep their numbers.
@@ -316,7 +307,7 @@ fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
         other => Err(format!(
             "{}: a {} file, not a piano library ({})",
             path.display(),
-            crate::file::entity_tag(&other),
+            other.identity().format,
             npno::FORMAT,
         )),
     }
@@ -325,11 +316,7 @@ fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
 /// A trim or a split writes a new library. Overwriting its input would leave
 /// nothing to compare against, and there is no flag to ask for that.
 fn refuse_in_place(input: &Path, output: &Path) -> Result<(), String> {
-    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    };
-    if same(input, output) {
+    if crate::edit::same_file(input, output) {
         return Err(format!(
             "{} is the input; give -o another path",
             output.display()
@@ -354,24 +341,10 @@ fn split_pair<'a>(spec: &'a str, flag: &str) -> Result<(u8, &'a str), String> {
 }
 
 pub fn inspect(ui: &Ui, args: InspectArgs) -> Result<(), String> {
-    let mut failed = 0usize;
-    for (i, path) in args.files.iter().enumerate() {
-        if i > 0 {
-            ui.out("");
-        }
-        ui.out(ui.bold(path.display()));
-        match inspect_one(ui, path, &args) {
-            Ok(()) => {}
-            Err(e) => {
-                failed += 1;
-                ui.note(format!("  {} {e}", ui.danger("error")));
-            }
-        }
-    }
-    match failed {
-        0 => Ok(()),
-        n => Err(format!("{n} of {} file(s) did not read", args.files.len())),
-    }
+    let heading = |path: &PathBuf| path.display().to_string();
+    crate::file::report_each(ui, &args.files, "file(s) did not read", heading, |path| {
+        inspect_one(ui, path, &args)
+    })
 }
 
 fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
@@ -573,10 +546,7 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
                 .enumerate()
                 .filter(|(_, s)| s.root == root)
                 .filter(|(_, s)| args.layer.is_none_or(|l| s.layer() == l))
-                .filter(|(_, s)| {
-                    args.bank
-                        .is_none_or(|b| s.bank_code() == Bank::from(b).code())
-                })
+                .filter(|(_, s)| args.bank.is_none_or(|b| s.bank_code() == b.code()))
                 .collect();
             match matching.len() {
                 0 => {
@@ -734,8 +704,7 @@ pub fn trim(ui: &Ui, args: TrimArgs) -> Result<(), String> {
     }
 
     let mut total = Change::default();
-    for bank in &args.drop_bank {
-        let bank = Bank::from(*bank);
+    for &bank in &args.drop_bank {
         let present = library.strokes().iter().any(|s| s.bank() == Some(bank));
         if !present {
             return Err(format!("this library has no {bank} strokes to drop"));
@@ -1263,6 +1232,38 @@ pub fn rebuild(ui: &Ui, args: RebuildArgs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    fn piano(argv: &[&str]) -> Result<crate::PianoAction, clap::error::ErrorKind> {
+        match crate::Cli::try_parse_from([&["nord", "piano"], argv].concat()) {
+            Ok(crate::Cli {
+                command: crate::Command::Piano { action },
+                ..
+            }) => Ok(action),
+            Ok(_) => panic!("{argv:?} parsed as another noun"),
+            Err(e) => Err(e.kind()),
+        }
+    }
+
+    #[test]
+    fn a_bank_is_named_as_the_format_spells_it_and_attack_is_never_dropped() {
+        let trim = |bank| match piano(&["trim", "in.npno", "-o", "out.npno", "--drop-bank", bank]) {
+            Ok(crate::PianoAction::Trim(args)) => Ok(args.drop_bank),
+            Ok(_) => panic!("--drop-bank {bank} parsed as another verb"),
+            Err(kind) => Err(kind),
+        };
+        assert_eq!(trim("resonance"), Ok(vec![Bank::Resonance]));
+        assert_eq!(trim("release"), Ok(vec![Bank::Release]));
+        assert_eq!(trim("attack"), Err(clap::error::ErrorKind::InvalidValue));
+
+        for bank in Bank::ALL {
+            let decode = ["decode", "in.npno", "--key", "C4", "-o", "a.wav"];
+            match piano(&[&decode[..], &["--bank", bank.name()]].concat()) {
+                Ok(crate::PianoAction::Decode(args)) => assert_eq!(args.bank, Some(bank)),
+                _ => panic!("--bank {bank} did not parse"),
+            }
+        }
+    }
 
     fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile {
         StrokeFile {

@@ -32,6 +32,7 @@
 use crate::crc::{Crc16Stream, Crc32Stream};
 use crate::error::{try_vec, Error, ParseError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 
 pub const MAGIC: &[u8; 4] = b"CBIN";
 
@@ -59,6 +60,18 @@ impl Generation {
         match self {
             Generation::V0 => 2,
             Generation::V1 => 0,
+        }
+    }
+
+    /// Where a file of `len` bytes keeps its checksum, or `None` for a file too short
+    /// to hold one.
+    ///
+    /// ⚠️ A type-0 file holds body data at `0x18`, where a type-1 file holds its crc32.
+    /// Reading the range of the wrong generation reports body bytes as a checksum.
+    pub fn checksum_range(self, len: usize) -> Option<Range<usize>> {
+        match self {
+            Generation::V0 => len.checked_sub(2).map(|at| at..len),
+            Generation::V1 => (len >= 0x1c).then_some(0x18..0x1c),
         }
     }
 }
@@ -212,9 +225,17 @@ enum Hash {
 }
 
 impl Hash {
-    fn new(generation: Generation) -> Hash {
-        match generation {
-            Generation::V0 => Hash::V0(Crc16Stream::new()),
+    /// The accumulator for `header`'s generation, having seen whatever of the header
+    /// that generation's checksum covers.
+    fn primed(header: &Header) -> Hash {
+        match header.generation {
+            // The crc16 covers the header too. Re-encoding is exact: the magic is
+            // verified and the other header bytes are held in `header`.
+            Generation::V0 => {
+                let mut hash = Crc16Stream::new();
+                hash.update(&header.head_bytes());
+                Hash::V0(hash)
+            }
             Generation::V1 => Hash::V1(Crc32Stream::new()),
         }
     }
@@ -294,10 +315,13 @@ pub fn read_raw(r: &mut (impl Read + Seek)) -> Result<Cbin<RawBody>, Error> {
     read_inner(r, None)
 }
 
-fn read_inner<B: Body>(
-    r: &mut (impl Read + Seek),
+/// Read a container's header and scope a reader to the rest of the stream as its body.
+/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
+/// type-0 file.
+fn open<'a, R: Read + Seek>(
+    r: &'a mut R,
     format: Option<&'static str>,
-) -> Result<Cbin<B>, Error> {
+) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
     let start = r.stream_position()?;
     let (header, stored_crc32) = read_header(r)?;
     if let Some(expected) = format {
@@ -309,62 +333,64 @@ fn read_inner<B: Body>(
             .into());
         }
     }
-    // In errors below, name the format by its expected tag when one was asked
-    // for, and by the file's own tag on a raw read.
-    let format = format.map_or_else(|| tag_str(&header.tag), str::to_string);
 
     let end = stream_end(r)?;
     let overhead = header.generation.body_start() + header.generation.trailer_len();
     if end < start + overhead {
         return Err(ParseError::AssertFail(format!(
-            "{format}: {} bytes is shorter than the {overhead}-byte container",
+            "{}: {} bytes is shorter than the {overhead}-byte container",
+            name(&header, format),
             end - start,
         ))
         .into());
     }
-    let body_start = start + header.generation.body_start();
-    let body_len = end - body_start - header.generation.trailer_len();
+    let reader = BodyReader {
+        inner: r,
+        start: start + header.generation.body_start(),
+        len: end - start - overhead,
+        pos: 0,
+        hashed: 0,
+        hash: Hash::primed(&header),
+    };
+    Ok((header, stored_crc32, reader))
+}
+
+/// The format to name in an error: the expected tag when one was asked for, and the
+/// file's own tag on a raw read.
+fn name(header: &Header, format: Option<&'static str>) -> String {
+    format.map_or_else(|| tag_str(&header.tag), str::to_string)
+}
+
+fn read_inner<B: Body>(
+    r: &mut (impl Read + Seek),
+    format: Option<&'static str>,
+) -> Result<Cbin<B>, Error> {
+    let (header, stored_crc32, mut reader) = open(r, format)?;
+    let format = name(&header, format);
     if let Some(expected) = B::LEN {
-        if body_len != expected {
+        if reader.len() != expected {
             return Err(ParseError::WrongBodyLength {
                 format,
-                got: body_len,
+                got: reader.len(),
                 expected,
             }
             .into());
         }
     }
-
-    let mut hash = Hash::new(header.generation);
-    if header.generation == Generation::V0 {
-        // The crc16 covers the header too. Re-encoding is exact: the magic is
-        // verified and the other header bytes are held in `header`.
-        hash.update(&header.head_bytes());
-    }
-    let mut reader = BodyReader {
-        inner: r,
-        start: body_start,
-        len: body_len,
-        pos: 0,
-        hashed: 0,
-        hash,
-    };
     let body = B::read(&mut reader, &header)?;
-    reader.verify(stored_crc32, &format)?;
+    reader.verify(header.generation, stored_crc32, &format)?;
     Ok(Cbin { header, body })
 }
 
 impl<B: Body> Cbin<B> {
     pub fn write_to(&self, w: &mut (impl Write + Seek)) -> Result<(), Error> {
         let start = w.stream_position()?;
-        let head = self.header.head_bytes();
-        let mut hash = Hash::new(self.header.generation);
-        w.write_all(&head)?;
-        match self.header.generation {
+        let hash = Hash::primed(&self.header);
+        w.write_all(&self.header.head_bytes())?;
+        if self.header.generation == Generation::V1 {
             // The crc32 is not known yet; a placeholder holds its word until the
             // body has streamed past, then one seek patches it.
-            Generation::V1 => w.write_all(&[0u8; 20])?,
-            Generation::V0 => hash.update(&head),
+            w.write_all(&[0u8; 20])?;
         }
 
         let body_start = start + self.header.generation.body_start();
@@ -436,49 +462,21 @@ pub struct Info {
     /// Whether the stored checksum matches the bytes. A mismatch is reported here, not
     /// raised as an error, because [`inspect`] exists to report bad files.
     pub checksum_ok: bool,
+    /// The checksum the file stores: the type-1 crc32, or the type-0 crc16 widened.
+    pub stored_checksum: u32,
 }
 
 /// One streaming pass over any CBIN file, with no knowledge of the body. It runs in
 /// O(1) memory, so it serves formats too large to decode or not yet mapped.
 pub fn inspect(r: &mut (impl Read + Seek)) -> Result<Info, Error> {
-    let start = r.stream_position()?;
-    let (header, stored_crc32) = read_header(r)?;
-    let end = stream_end(r)?;
-    let overhead = header.generation.body_start() + header.generation.trailer_len();
-    if end < start + overhead {
-        return Err(ParseError::AssertFail(format!(
-            "{}: {} bytes is shorter than the {overhead}-byte container",
-            tag_str(&header.tag),
-            end - start,
-        ))
-        .into());
-    }
-    let body_len = end - start - overhead;
-
-    let mut hash = Hash::new(header.generation);
-    if header.generation == Generation::V0 {
-        hash.update(&header.head_bytes());
-    }
-    let mut remaining = body_len;
-    let mut scratch = [0u8; 8192];
-    while remaining > 0 {
-        let take = remaining.min(scratch.len() as u64) as usize;
-        r.read_exact(&mut scratch[..take])?;
-        hash.update(&scratch[..take]);
-        remaining -= take as u64;
-    }
-    let checksum_ok = match hash {
-        Hash::V1(h) => h.value() == stored_crc32,
-        Hash::V0(h) => {
-            let mut trailer = [0u8; 2];
-            r.read_exact(&mut trailer)?;
-            h.value() == u16::from_le_bytes(trailer)
-        }
-    };
+    let (header, stored_crc32, reader) = open(r, None)?;
+    let body_len = reader.len();
+    let (computed, stored) = reader.finish(stored_crc32)?;
     Ok(Info {
         header,
         body_len,
-        checksum_ok,
+        checksum_ok: computed == stored,
+        stored_checksum: stored,
     })
 }
 
@@ -515,35 +513,38 @@ impl<R: Read + Seek> BodyReader<'_, R> {
         self.len - self.pos
     }
 
-    /// Drain to the end, then check the checksum against the stored one.
-    fn verify(mut self, stored_crc32: u32, format: &str) -> Result<(), Error> {
+    /// Drain to the end and return the computed and the stored checksum. `stored_crc32`
+    /// is the header's word for a type-1 file; a type-0 file's crc16 is read from the
+    /// trailer.
+    fn finish(mut self, stored_crc32: u32) -> io::Result<(u32, u32)> {
         self.seek(SeekFrom::Start(self.len))?;
         match self.hash {
-            Hash::V1(h) => {
-                let computed = h.value();
-                if computed != stored_crc32 {
-                    return Err(ParseError::AssertFail(format!(
-                        "{format}: stored checksum {stored_crc32:#010x} does not match the \
-                         body's {computed:#010x}"
-                    ))
-                    .into());
-                }
-            }
+            Hash::V1(h) => Ok((h.value(), stored_crc32)),
             Hash::V0(h) => {
                 let mut trailer = [0u8; 2];
                 self.inner.read_exact(&mut trailer)?;
-                let stored = u16::from_le_bytes(trailer);
-                let computed = h.value();
-                if computed != stored {
-                    return Err(ParseError::AssertFail(format!(
-                        "{format}: stored checksum {stored:#06x} does not match the \
-                         file's {computed:#06x}"
-                    ))
-                    .into());
-                }
+                Ok((h.value().into(), u16::from_le_bytes(trailer).into()))
             }
         }
-        Ok(())
+    }
+
+    /// Drain to the end, then check the checksum against the stored one.
+    fn verify(self, generation: Generation, stored_crc32: u32, format: &str) -> Result<(), Error> {
+        let (computed, stored) = self.finish(stored_crc32)?;
+        if computed == stored {
+            return Ok(());
+        }
+        Err(ParseError::AssertFail(match generation {
+            Generation::V1 => format!(
+                "{format}: stored checksum {stored:#010x} does not match the body's \
+                 {computed:#010x}"
+            ),
+            Generation::V0 => format!(
+                "{format}: stored checksum {stored:#06x} does not match the file's \
+                 {computed:#06x}"
+            ),
+        })
+        .into())
     }
 }
 
@@ -831,14 +832,19 @@ mod tests {
 
     #[test]
     fn inspect_reports_both_generations_without_a_body() {
-        for (bytes, generation) in [
-            (v1_file(&[1, 2, 3]), Generation::V1),
-            (v0_file(&[1, 2, 3]), Generation::V0),
+        let v0 = v0_file(&[1, 2, 3]);
+        let v0_crc = crc16(&v0[..v0.len() - 2]).into();
+        for (bytes, generation, stored) in [
+            (v1_file(&[1, 2, 3]), Generation::V1, crc32(&[1, 2, 3])),
+            (v0, Generation::V0, v0_crc),
         ] {
             let info = inspect(&mut Cursor::new(&bytes)).unwrap();
             assert_eq!(info.header.generation, generation);
             assert_eq!(info.body_len, 3);
             assert!(info.checksum_ok);
+            assert_eq!(info.stored_checksum, stored);
+            let at = generation.checksum_range(bytes.len()).unwrap();
+            assert_eq!(bytes[at.clone()], stored.to_le_bytes()[..at.len()]);
 
             let mut corrupt = bytes.clone();
             let at = corrupt.len() - 3;
@@ -846,6 +852,15 @@ mod tests {
             let info = inspect(&mut Cursor::new(&corrupt)).unwrap();
             assert!(!info.checksum_ok, "inspect reports, it does not refuse");
         }
+    }
+
+    /// A type-0 crc16 trails the file, and a type-1 crc32 follows the shared header.
+    #[test]
+    fn each_generation_keeps_its_checksum_in_its_own_place() {
+        assert_eq!(Generation::V0.checksum_range(0x40), Some(0x3e..0x40));
+        assert_eq!(Generation::V1.checksum_range(0x40), Some(0x18..0x1c));
+        assert_eq!(Generation::V0.checksum_range(1), None);
+        assert_eq!(Generation::V1.checksum_range(0x1b), None);
     }
 
     /// A header type other than 0 or 1 is refused, not read with one of the two known

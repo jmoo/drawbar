@@ -252,17 +252,14 @@ fn wide_sample_path(
         "sty.dynamics_enabled" => match sty()? {
             Sty::V3(p) => p.dynamics_enabled().to_string(),
             Sty::V4(p) => p.dynamics_enabled().to_string(),
-            Sty::V2(_) => return Err("a wide chain read a narrow preset".into()),
         },
         "sty.dynamics_curve" => match sty()? {
             Sty::V3(p) => p.dynamics_curve().to_string(),
             Sty::V4(p) => format!("{:?}", p.dynamics_curve()),
-            Sty::V2(_) => return Err("a wide chain read a narrow preset".into()),
         },
         "sty.dynamics_response" => match sty()? {
             Sty::V3(p) => p.dynamics_response().to_string(),
             Sty::V4(p) => format!("{:?}", p.dynamics_response()),
-            Sty::V2(_) => return Err("a wide chain read a narrow preset".into()),
         },
         "sty.eq" => match sty()? {
             Sty::V4(p) => {

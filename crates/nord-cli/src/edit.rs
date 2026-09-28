@@ -1,11 +1,13 @@
-//! `nord program edit`, `nord live edit`, `nord setlist edit` and `nord
-//! settings edit`: change fields in an Electro 5 body.
+//! `nord program edit`, `nord live edit`, `nord setlist edit`, `nord settings
+//! edit` and `nord sample edit`: change fields in an Electro 5 body or a sample
+//! instrument.
 //!
 //! Field paths and values come from the registry `#[bitbody]` generates, so
 //! `--fields` cannot go stale and a field becomes settable by being declared.
 //! The live buffer is the program body under another tag, so both nouns run
-//! this command with the class fixed. The set list has no registry; its four
-//! slots are set through [`editors::SongEditor`], with the same `--set` syntax.
+//! this command with the class fixed. The set list and the sample instrument have
+//! no registry; they are set through [`editors::SongEditor`] and
+//! [`editors::SampleEditor`], with the same `--set` syntax.
 //!
 //! A file and a slot are the same command. The slot form reads, changes and
 //! writes back over USB, so it follows the rule for every mutation: describe the
@@ -16,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use nord_format::cbin::Generation;
 use nord_format::fields::{ControlKind, Field, Registry, Unit};
-use nord_format::formats::ne5;
 use nord_format::{Entity, Live, Program, Settings, Song};
 use nord_usb::ObjectClass;
 
@@ -53,29 +54,12 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
         (Entity::Live(Live::Electro5(_)), ObjectClass::Live) => "the edited live slot",
         (Entity::Settings(Settings::Electro5(_)), ObjectClass::Settings) => "the edited settings",
         (Entity::Song(Song::Electro5(_)), ObjectClass::SetList) => "the edited set list",
+        (Entity::Sample(_), ObjectClass::Sample) => "the edited sample",
         _ => return Err(mismatch(&mut entity, class)),
     };
-    let staged = editors::stage(
-        ui,
-        args.common.fields,
-        &args.common.set,
-        editor_for(&mut entity)?.as_mut(),
-    )?;
-    let Some(changed) = staged else {
+    let Some(edited) = staged_bytes(ui, &mut entity, &original, &args.common)? else {
         return Ok(());
     };
-    if changed == 0 {
-        ui.note("no field changed; writing nothing");
-        return Ok(());
-    }
-
-    let edited = nord_format::to_bytes(&entity).map_err(|e| e.to_string())?;
-    print_byte_diff(ui, &original, &edited);
-
-    if args.common.dry_run {
-        ui.note("--dry-run: nothing written");
-        return Ok(());
-    }
 
     match (target, args.common.out) {
         (Some(Target::File(path)), out) => write_edit(ui, &path, out, args.common.yes, &edited),
@@ -89,6 +73,35 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
             Err("editing a fresh default needs -o: there is nothing to write back to".into())
         }
     }
+}
+
+/// Apply `args` to `entity` and print the bytes that change, returning the edited file,
+/// or `None` when there is nothing to write: `--fields`, no field changed, or
+/// `--dry-run`.
+pub(crate) fn staged_bytes(
+    ui: &Ui,
+    entity: &mut Entity,
+    original: &[u8],
+    args: &SetArgs,
+) -> Result<Option<Vec<u8>>, String> {
+    // The editor's mutable borrow ends here, before `to_bytes` reads the whole entity.
+    let staged = editors::stage(ui, args.fields, &args.set, editor_for(entity)?.as_mut())?;
+    let Some(changed) = staged else {
+        return Ok(None);
+    };
+    if changed == 0 {
+        ui.note("no field changed; writing nothing");
+        return Ok(None);
+    }
+
+    let edited = nord_format::to_bytes(entity).map_err(|e| e.to_string())?;
+    print_byte_diff(ui, original, &edited);
+
+    if args.dry_run {
+        ui.note("--dry-run: nothing written");
+        return Ok(None);
+    }
+    Ok(Some(edited))
 }
 
 /// The flags an `edit` takes wherever it is reached from: the nouns, the file verb,
@@ -140,7 +153,7 @@ pub(crate) fn editable(entity: &mut Entity) -> bool {
 }
 
 /// [`editor`], or the error to print when nothing is settable.
-pub(crate) fn editor_for(entity: &mut Entity) -> Result<Box<dyn Fields + '_>, String> {
+fn editor_for(entity: &mut Entity) -> Result<Box<dyn Fields + '_>, String> {
     let id = entity.identity();
     editor(entity).ok_or_else(|| {
         format!(
@@ -153,25 +166,11 @@ pub(crate) fn editor_for(entity: &mut Entity) -> Result<Box<dyn Fields + '_>, St
 /// The bytes of a default object, which `--fields` and `-o` use when no target is
 /// given.
 fn fresh(class: ObjectClass) -> Result<Vec<u8>, String> {
-    let first = |e| format!("{e}");
-    let entity = match class {
-        ObjectClass::Program => Entity::Program(Program::Electro5(ne5::program::new(
-            (0, 0).try_into().map_err(first)?,
-        ))),
-        ObjectClass::Live => Entity::Live(Live::Electro5(ne5::live::new(
-            (0, 0).try_into().map_err(first)?,
-        ))),
-        ObjectClass::Settings => Entity::Settings(Settings::Electro5(ne5::settings::new())),
-        ObjectClass::SetList => Entity::Song(Song::Electro5(
-            ne5::song::new(
-                (0, 0).try_into().map_err(first)?,
-                ne5::song::DEFAULT_VERSION,
-                [(0, 0).try_into().map_err(first)?; 4],
-            )
-            .map_err(|e| e.to_string())?,
-        )),
-        other => return Err(format!("edit does not exist for {}", other.label())),
-    };
+    let entity = class
+        .storage()
+        .and_then(|slot| Entity::electro5(slot, [Default::default(); 4]))
+        .ok_or_else(|| format!("edit does not exist for {}", class.label()))?
+        .map_err(|e| e.to_string())?;
     nord_format::to_bytes(&entity).map_err(|e| e.to_string())
 }
 
@@ -181,7 +180,7 @@ pub(crate) fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
         "this command edits {} ({}); the target holds {}{}",
         class.label(),
         crate::file::tag(class).unwrap_or("?"),
-        crate::file::entity_tag(entity),
+        entity.identity().format,
         steer(entity),
     )
 }
@@ -189,7 +188,7 @@ pub(crate) fn mismatch(entity: &mut Entity, class: ObjectClass) -> String {
 /// The `edit` command for this entity's files, or empty when nothing edits it, so
 /// the message never points at a command that does not exist.
 fn steer(entity: &mut Entity) -> String {
-    match crate::file::noun(crate::file::entity_tag(entity)) {
+    match crate::file::noun(entity.identity().format) {
         Some(noun) => format!(" — try `nord {noun} edit`"),
         // Everything else editable (the Stage bodies, the Sample Editor project)
         // has no noun and is edited with the file verb.
@@ -368,24 +367,20 @@ pub(crate) fn warn_on_sticky_pairs(ui: &Ui, sets: &[String]) {
 
 /// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
 /// are not a CBIN file.
-///
-/// The generation comes from the header parser and the range from
-/// [`crate::file::checksum_range`], so the CLI has one definition of where a checksum
-/// sits.
 fn checksum_bytes(file: &[u8]) -> Option<(std::ops::Range<usize>, &'static str)> {
-    let header = nord_usb::envelope::unwrap(file).ok()?.header;
-    let at = crate::file::checksum_range(header.generation, file.len())?;
-    Some(match header.generation {
-        Generation::V0 => (at, "  (file crc16)"),
-        Generation::V1 => (at, "  (body crc32)"),
-    })
+    let generation = nord_usb::envelope::unwrap(file).ok()?.header.generation;
+    let label = match generation {
+        Generation::V0 => "  (file crc16)",
+        Generation::V1 => "  (body crc32)",
+    };
+    Some((generation.checksum_range(file.len())?, label))
 }
 
 /// Print the bytes that changed.
 ///
 /// The checksum changes with any body edit, so its rows are labeled to keep them from
 /// reading as unexplained edits.
-pub(crate) fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
+fn print_byte_diff(ui: &Ui, before: &[u8], after: &[u8]) {
     if before.len() != after.len() {
         ui.warn(format!(
             "length changed: {} -> {} bytes",
@@ -444,6 +439,7 @@ fn control(kind: ControlKind) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use nord_format::formats::ne5;
 
     /// A wrong-format target points to the noun whose `edit` reads it, or to the file
     /// verb for a format with no noun, and never to a command that does not exist.

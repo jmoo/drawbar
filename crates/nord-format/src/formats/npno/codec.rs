@@ -44,7 +44,7 @@
 //! spans were moved at that size still plays. Confirmed on hardware.
 
 use super::Stroke;
-use crate::error::{Error, ParseError};
+use crate::error::{try_with_capacity, Error, ParseError};
 use crate::formats::predictor;
 
 /// u16 words in one block, per channel, the header included.
@@ -209,14 +209,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
     }
     let mut out: Vec<Vec<i16>> = Vec::with_capacity(channels);
     for _ in 0..channels {
-        let mut channel = Vec::new();
-        channel
-            .try_reserve_exact(frames)
-            .map_err(|_| ParseError::OutOfBounds {
-                value: format!("{frames} frames"),
-                bound: "an allocation that fits memory".into(),
-            })?;
-        out.push(channel);
+        out.push(try_with_capacity(frames, "frames")?);
     }
 
     let seeds = stroke.seeds();
@@ -308,11 +301,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
 
         for (channel, decoded) in out.iter_mut().zip(&block) {
             for &sample in &decoded[..owned] {
-                let narrow = sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                if i32::from(narrow) != sample {
-                    clipped += 1;
-                }
-                channel.push(narrow);
+                channel.push(predictor::saturate_i16(sample.into(), &mut clipped));
             }
         }
     }
@@ -330,11 +319,7 @@ pub fn decode(stroke: &Stroke<'_>, channels: u16) -> Result<Audio, Error> {
         narrowed.push(
             channel
                 .iter()
-                .map(|&sample| {
-                    let narrow = sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                    clipped += usize::from(i32::from(narrow) != sample);
-                    narrow
-                })
+                .map(|&sample| predictor::saturate_i16(sample.into(), &mut clipped))
                 .collect(),
         );
     }

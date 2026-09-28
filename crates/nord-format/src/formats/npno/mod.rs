@@ -160,34 +160,26 @@ pub const FINE_TUNE_CENTS_PER_UNIT: f32 = 0.7;
 ///
 /// Confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
 pub enum Bank {
     /// Played at note-on. Every library has these.
-    Attack,
+    Attack = 0,
     /// Played in place of the attack when the sustain pedal is down at note-on, which
     /// the panel's acoustics bit 0 enables. Only the larger libraries carry them.
-    Resonance,
+    Resonance = 1,
     /// Played at note-off.
-    Release,
+    Release = 2,
 }
 
 impl Bank {
     pub const ALL: [Bank; 3] = [Bank::Attack, Bank::Resonance, Bank::Release];
 
     pub fn from_code(code: u8) -> Option<Bank> {
-        match code {
-            0 => Some(Bank::Attack),
-            1 => Some(Bank::Resonance),
-            2 => Some(Bank::Release),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|bank| bank.code() == code)
     }
 
     pub fn code(self) -> u8 {
-        match self {
-            Bank::Attack => 0,
-            Bank::Resonance => 1,
-            Bank::Release => 2,
-        }
+        self as u8
     }
 
     pub fn name(self) -> &'static str {
@@ -467,6 +459,29 @@ fn be32(bytes: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
+fn put16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_be_bytes());
+}
+
+fn put32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+/// Where a directory of `count` stroke records ends.
+fn directory_end(count: usize) -> Result<usize, Error> {
+    RECORD
+        .checked_mul(count)
+        .and_then(|len| DIRECTORY_AT.checked_add(len))
+        .ok_or_else(|| overflow("the stroke directory"))
+}
+
+/// The audio bytes `blocks` blocks of `block` bytes span.
+fn audio_span(blocks: u16, block: usize) -> Result<usize, Error> {
+    usize::from(blocks)
+        .checked_mul(block)
+        .ok_or_else(|| overflow("a stroke's audio span"))
+}
+
 /// Where the first audio span starts, given the directory's end and the block size.
 ///
 /// The grid is whole blocks offset by [`AUDIO_ALIGN_BIAS`]. The bytes between the
@@ -667,10 +682,7 @@ impl<'a> Library<'a> {
             .into());
         }
 
-        let directory_end = RECORD
-            .checked_mul(count)
-            .and_then(|len| DIRECTORY_AT.checked_add(len))
-            .ok_or_else(|| overflow("the stroke directory"))?;
+        let directory_end = directory_end(count)?;
         let records = body
             .get(DIRECTORY_AT..directory_end)
             .ok_or_else(|| short("the stroke directory"))?;
@@ -706,9 +718,7 @@ impl<'a> Library<'a> {
                 ))
                 .into());
             }
-            let span = usize::from(be16(&record, REC_BLOCKS))
-                .checked_mul(block)
-                .ok_or_else(|| overflow("a stroke's audio span"))?;
+            let span = audio_span(be16(&record, REC_BLOCKS), block)?;
             let end = at.checked_add(span).ok_or_else(|| overflow("the audio"))?;
             let audio = body
                 .get(at..end)
@@ -798,7 +808,7 @@ impl<'a> Library<'a> {
                 value: format!("stroke {index}"),
                 bound: format!("the {count} strokes the directory holds"),
             })?;
-        stroke.record[REC_TRIM..REC_TRIM + 2].copy_from_slice(&decibels.to_be_bytes());
+        put16(&mut stroke.record, REC_TRIM, decibels);
         Ok(())
     }
 
@@ -999,7 +1009,7 @@ impl<'a> Library<'a> {
     /// where the source library plays a release tail. Confirmed on hardware.
     pub fn drop_bank(&mut self, bank: Bank) -> Change {
         let code = bank.code();
-        self.retain(|s| s.bank_code() != code)
+        self.retain_strokes(|s| s.bank_code() != code)
     }
 
     /// Keep only the layers `keep` selects, per root and bank.
@@ -1008,10 +1018,7 @@ impl<'a> Library<'a> {
     /// softest one left at the velocities they had, and is unchanged at loud ones.
     pub fn keep_layers(&mut self, keep: &Layers) -> Change {
         match keep {
-            Layers::Only(layers) => {
-                let layers = layers.clone();
-                self.retain(|s| layers.contains(&s.layer()))
-            }
+            Layers::Only(layers) => self.retain_strokes(|s| layers.contains(&s.layer())),
             Layers::Loudest(n) => {
                 let mut groups: BTreeMap<(u8, u8), BTreeSet<u8>> = BTreeMap::new();
                 for stroke in &self.strokes {
@@ -1026,7 +1033,7 @@ impl<'a> Library<'a> {
                         layers.into_iter().take(*n).map(move |l| (root, bank, l))
                     })
                     .collect();
-                self.retain(|s| kept.contains(&(s.root, s.bank_code(), s.layer())))
+                self.retain_strokes(|s| kept.contains(&(s.root, s.bank_code(), s.layer())))
             }
         }
     }
@@ -1042,7 +1049,22 @@ impl<'a> Library<'a> {
     /// Inferred from specimens; not confirmed on hardware. The hardware results cover
     /// only [`Library::drop_bank`] and [`Library::keep_layers`].
     pub fn retain_strokes(&mut self, keep: impl FnMut(&Stroke<'a>) -> bool) -> Change {
-        self.retain(keep)
+        let strokes_before = self.strokes.len();
+        let roots_before = self.roots().len();
+        self.strokes.retain(keep);
+        let roots = self.roots();
+        let mut keys_uncovered = 0;
+        for slot in self.key_map_mut() {
+            if *slot != UNCOVERED && !roots.contains(slot) {
+                *slot = UNCOVERED;
+                keys_uncovered += 1;
+            }
+        }
+        Change {
+            strokes_removed: strokes_before - self.strokes.len(),
+            roots_removed: roots_before - roots.len(),
+            keys_uncovered,
+        }
     }
 
     /// Uncover every key outside `range`, then drop the roots nothing plays anymore.
@@ -1081,29 +1103,9 @@ impl<'a> Library<'a> {
             }
         }
         let live: BTreeSet<u8> = self.key_map().iter().copied().collect();
-        let mut change = self.retain(|s| live.contains(&s.root));
+        let mut change = self.retain_strokes(|s| live.contains(&s.root));
         change.keys_uncovered += uncovered;
         change
-    }
-
-    /// Drop the strokes `keep` rejects, then uncover the keys whose root has gone.
-    fn retain(&mut self, mut keep: impl FnMut(&Stroke<'a>) -> bool) -> Change {
-        let strokes_before = self.strokes.len();
-        let roots_before = self.roots().len();
-        self.strokes.retain(|s| keep(s));
-        let roots = self.roots();
-        let mut keys_uncovered = 0;
-        for slot in self.key_map_mut() {
-            if *slot != UNCOVERED && !roots.contains(slot) {
-                *slot = UNCOVERED;
-                keys_uncovered += 1;
-            }
-        }
-        Change {
-            strokes_removed: strokes_before - self.strokes.len(),
-            roots_removed: roots_before - roots.len(),
-            keys_uncovered,
-        }
     }
 
     /// Bytes the body would occupy.
@@ -1117,17 +1119,11 @@ impl<'a> Library<'a> {
     /// A stroke whose audio is not the `blocks × block_bytes` its record states is
     /// refused, because a read of the resulting body would reject it.
     fn extent(&self) -> Result<(usize, usize), Error> {
-        let directory_end = RECORD
-            .checked_mul(self.strokes.len())
-            .and_then(|len| DIRECTORY_AT.checked_add(len))
-            .ok_or_else(|| overflow("the stroke directory"))?;
         let block = self.block_bytes();
-        let first = first_audio_offset(directory_end, block)?;
+        let first = first_audio_offset(directory_end(self.strokes.len())?, block)?;
         let mut len = first;
         for (index, stroke) in self.strokes.iter().enumerate() {
-            let span = usize::from(stroke.blocks())
-                .checked_mul(block)
-                .ok_or_else(|| overflow("a stroke's audio span"))?;
+            let span = audio_span(stroke.blocks(), block)?;
             if stroke.audio.len() != span {
                 return Err(ParseError::AssertFail(format!(
                     "stroke {index} holds {} audio bytes where the {} block(s) its record \
@@ -1166,8 +1162,8 @@ impl<'a> Library<'a> {
         let (first, len) = self.extent()?;
         let mut out = try_vec(len)?;
         out[..DIRECTORY_AT].copy_from_slice(&self.prefix);
-        out[CHANNELS_AT..CHANNELS_AT + 2].copy_from_slice(&self.channels.to_be_bytes());
-        out[STROKE_COUNT_AT..STROKE_COUNT_AT + 2].copy_from_slice(&count.to_be_bytes());
+        put16(&mut out, CHANNELS_AT, self.channels);
+        put16(&mut out, STROKE_COUNT_AT, count);
         for note in 0..NOTES {
             let n = self
                 .strokes
@@ -1176,7 +1172,7 @@ impl<'a> Library<'a> {
                 .count();
             let n = u16::try_from(n).expect("a per-root count is at most the stroke count");
             let at = ROOT_COUNTS_AT + note * 2;
-            out[at..at + 2].copy_from_slice(&n.to_be_bytes());
+            put16(&mut out, at, n);
         }
 
         let mut at = first;
@@ -1187,7 +1183,7 @@ impl<'a> Library<'a> {
             })?;
             let record = DIRECTORY_AT + i * RECORD;
             out[record..record + RECORD].copy_from_slice(&stroke.record);
-            out[record + REC_START..record + REC_START + 4].copy_from_slice(&start.to_be_bytes());
+            put32(&mut out, record + REC_START, start);
             out[at..at + stroke.audio.len()].copy_from_slice(&stroke.audio);
             at += stroke.audio.len();
         }
@@ -1300,7 +1296,7 @@ mod tests {
         let mut piano = Build::new().piano();
         let second = DIRECTORY_AT + RECORD;
         let start = be32(&piano.file.body.0, second + REC_START);
-        piano.file.body.0[second..second + 4].copy_from_slice(&(start + 2).to_be_bytes());
+        put32(&mut piano.file.body.0, second, start + 2);
         let error = piano.library().unwrap_err().to_string();
         assert!(error.contains("stroke 1 starts at"), "{error}");
     }
@@ -1317,7 +1313,7 @@ mod tests {
     fn a_count_table_that_does_not_sum_to_the_stroke_count_is_refused() {
         let mut piano = Build::new().piano();
         let at = ROOT_COUNTS_AT + 60 * 2;
-        piano.file.body.0[at..at + 2].copy_from_slice(&5u16.to_be_bytes());
+        put16(&mut piano.file.body.0, at, 5);
         let error = piano.library().unwrap_err().to_string();
         assert!(error.contains("per-root counts sum to"), "{error}");
     }

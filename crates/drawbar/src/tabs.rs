@@ -34,7 +34,7 @@ pub struct Tabs {
     /// ⚠️ [`Spot::Library`] is first and stays there: the center falls back to it, so
     /// nothing closes or moves it.
     open: Vec<Spot>,
-    active: Option<Spot>,
+    active: Spot,
     /// The class the keyboard tab shows, as the tree last set it. There is one keyboard
     /// tab, so the class is its state, not a separate tab.
     keyboard: Option<ObjectClass>,
@@ -44,7 +44,7 @@ impl Default for Tabs {
     fn default() -> Tabs {
         Tabs {
             open: vec![Spot::Library],
-            active: Some(Spot::Library),
+            active: Spot::Library,
             keyboard: None,
         }
     }
@@ -56,7 +56,7 @@ impl Tabs {
         if !self.holds(id) {
             self.open.push(Spot::Document(id));
         }
-        self.active = Some(Spot::Document(id));
+        self.active = Spot::Document(id);
     }
 
     /// Bring a tab forward, opening the keyboard if needed.
@@ -70,7 +70,7 @@ impl Tabs {
             (false, Spot::Keyboard) => self.open.push(Spot::Keyboard),
             (false, Spot::Library | Spot::Document(_)) => return,
         }
-        self.active = Some(spot);
+        self.active = spot;
     }
 
     /// Switch the keyboard tab to a class. [`Tabs::show`] brings the tab forward; this
@@ -106,21 +106,26 @@ impl Tabs {
             return;
         }
         self.open.retain(|held| *held != spot);
-        if self.active == Some(spot) {
-            self.active = self.open.last().copied();
+        if self.active == spot {
+            self.active = self.fallback();
         }
     }
 
     /// What the center is drawing.
-    pub fn showing(&self) -> Option<Spot> {
+    pub fn showing(&self) -> Spot {
         self.active
+    }
+
+    /// The last tab in the strip, which is the library when nothing else is open.
+    fn fallback(&self) -> Spot {
+        self.open.last().copied().unwrap_or(Spot::Library)
     }
 
     /// The document the center shows, if any.
     pub fn active(&self) -> Option<u64> {
         match self.active {
-            Some(Spot::Document(id)) => Some(id),
-            _ => None,
+            Spot::Document(id) => Some(id),
+            Spot::Library | Spot::Keyboard => None,
         }
     }
 
@@ -145,8 +150,8 @@ impl Tabs {
             Spot::Document(id) => workspace.entities().iter().any(|e| e.id == *id),
             Spot::Library | Spot::Keyboard => true,
         });
-        if self.active.is_some_and(|spot| !self.open.contains(&spot)) {
-            self.active = self.open.last().copied();
+        if !self.open.contains(&self.active) {
+            self.active = self.fallback();
         }
     }
 
@@ -180,7 +185,7 @@ impl Tabs {
                         let Some(face) = face(spot, workspace) else {
                             continue;
                         };
-                        let drawn = paint(ui, &face, self.active == Some(spot));
+                        let drawn = paint(ui, &face, self.active == spot);
                         painted.push((index, drawn.tab.rect));
                         let mut label = drawn.tab;
                         if label.dragged() {
@@ -208,7 +213,7 @@ impl Tabs {
                 });
             });
         if let Some(spot) = activate {
-            self.active = Some(spot);
+            self.active = spot;
         }
         if let Some(spot) = close {
             self.close(spot);
@@ -386,7 +391,7 @@ mod tests {
         assert_eq!(tabs.active(), Some(1));
         tabs.close(Spot::Document(1));
         assert_eq!(tabs.active(), None);
-        assert_eq!(tabs.showing(), Some(Spot::Library));
+        assert_eq!(tabs.showing(), Spot::Library);
     }
 
     /// The strip is never empty.
@@ -404,7 +409,7 @@ mod tests {
             tabs.close(spot);
         }
         assert_eq!(tabs.open, vec![Spot::Library]);
-        assert_eq!(tabs.showing(), Some(Spot::Library));
+        assert_eq!(tabs.showing(), Spot::Library);
     }
 
     #[test]
@@ -475,7 +480,7 @@ mod tests {
         tabs.show(Spot::Keyboard);
         tabs.show(Spot::Library);
         assert_eq!(tabs.open.len(), 3);
-        assert_eq!(tabs.showing(), Some(Spot::Library));
+        assert_eq!(tabs.showing(), Spot::Library);
         // The center shows the library, so no document is active.
         assert_eq!(tabs.active(), None);
         assert_eq!(tabs.last_document(), Some(1));
@@ -487,7 +492,7 @@ mod tests {
         let mut tabs = Tabs::default();
         tabs.show(Spot::Library);
         tabs.show(Spot::Document(7));
-        assert_eq!(tabs.showing(), Some(Spot::Library));
+        assert_eq!(tabs.showing(), Spot::Library);
         assert!(!tabs.holds(7));
     }
 
@@ -542,11 +547,7 @@ mod tests {
             ],
             "a tab dropped on the library lands after it"
         );
-        assert_eq!(
-            tabs.showing(),
-            Some(Spot::Keyboard),
-            "moving is not showing"
-        );
+        assert_eq!(tabs.showing(), Spot::Keyboard, "moving is not showing");
     }
 
     /// An out-of-range index moves nothing and does not panic.
@@ -619,7 +620,7 @@ mod tests {
         );
         assert_eq!(
             tabs.showing(),
-            Some(Spot::Document(second)),
+            Spot::Document(second),
             "a drop is not a click, so what was in front stayed in front"
         );
     }
@@ -652,6 +653,6 @@ mod tests {
         ws.remove(id, &mut log);
         tabs.prune(&ws);
         assert!(!tabs.holds(id));
-        assert_eq!(tabs.showing(), Some(Spot::Library));
+        assert_eq!(tabs.showing(), Spot::Library);
     }
 }

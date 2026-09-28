@@ -10,18 +10,7 @@
 //!
 //! No group names a morph slot; each belongs to the parameter its name binds it to.
 
-use crate::panel::{Group, Match, Panel, Relevance};
-
-macro_rules! switched_on {
-    ($field:expr) => {
-        Some(Relevance {
-            any_of: &[Match {
-                field: $field,
-                is: &["true"],
-            }],
-        })
-    };
-}
+use crate::panel::{switched_on, Group, Match, Panel, Relevance};
 
 macro_rules! enabled_in_either_scene {
     ($field:expr) => {

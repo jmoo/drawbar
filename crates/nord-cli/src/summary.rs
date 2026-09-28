@@ -98,10 +98,9 @@ fn drawbars(ui: &Ui, positions: &[u8]) -> String {
 /// The panel printout, shared by `.ne5p` programs and `.ne5l` live slots.
 ///
 /// The live buffer is the program body under another tag, so it is the same panel and
-/// gets the same rendering; only the `kind` line and the slot space differ. `at` is the
+/// gets the same rendering; only the `type` line and the slot space differ. `at` is the
 /// header's own `(bank, slot)`, whichever space the caller reads it in.
-fn panels(ui: &Ui, kind: &str, at: (u16, u16), p: &ne5::Program) {
-    ui.out(field(ui, 2, "type", kind));
+fn panels(ui: &Ui, at: (u16, u16), p: &ne5::Program) {
     ui.out(field(ui, 2, "location", shown_at(at.0, at.1)));
     keyboard(ui, p);
     voices(ui, p);
@@ -455,7 +454,6 @@ fn sample_v3(ui: &Ui, s: &Cbin<nord_format::formats::nsmp::SampleV3>) {
 
 /// The Sample Editor project printout: identity, the audio files, the zone map.
 fn sample_project(ui: &Ui, p: &nsmpproj::Project) {
-    ui.out(field(ui, 2, "type", "Sample Editor project (nsmpproj)"));
     match p.name() {
         Ok(name) => ui.out(field(ui, 2, "name", name)),
         Err(e) => ui.warn(format!("name unreadable: {e}")),
@@ -528,7 +526,6 @@ fn sample_project(ui: &Ui, p: &nsmpproj::Project) {
 
 /// The sample-instrument printout: identity, then the zone map.
 fn sample(ui: &Ui, s: &Cbin<Sample>) {
-    ui.out(field(ui, 2, "type", "sample instrument (nsmp)"));
     let named = s.chain().is_ok_and(Chain::names_instrument);
     match s.name() {
         Ok(_) if !named => ui.out(field(ui, 2, "name", "(this library carries none)")),
@@ -632,17 +629,28 @@ fn sample(ui: &Ui, s: &Cbin<Sample>) {
     ));
 }
 
+/// The summary: a `type` line naming what the file is, then what its body decodes to.
 pub fn print(ui: &Ui, entity: &Entity) {
     match entity {
-        Entity::Program(Program::Electro5(p)) => {
-            panels(ui, "Electro 5 program (ne5p)", p.header.slot(), p)
+        Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
+        Entity::Bundle(b) => bundle(ui, b),
+        other => {
+            let id = other.identity();
+            // The three-character tags carry a trailing NUL; it is data, not display.
+            let tag = id.format.trim_end_matches('\0');
+            ui.out(field(ui, 2, "type", format!("{} ({tag})", id.kind)));
+            body(ui, other);
         }
-        Entity::Live(Live::Electro5(p)) => {
-            panels(ui, "Electro 5 live slot (ne5l)", p.header.slot(), p)
+    }
+}
+
+fn body(ui: &Ui, entity: &Entity) {
+    match entity {
+        Entity::Program(Program::Electro5(p)) | Entity::Live(Live::Electro5(p)) => {
+            panels(ui, p.header.slot(), p)
         }
         Entity::Song(Song::Electro5(s)) => {
             let (bank, slot) = s.header.slot();
-            ui.out(field(ui, 2, "type", "Electro 5 song / set (ne5t)"));
             ui.out(field(ui, 2, "location", shown_at(bank, slot)));
             section(ui, "Programs");
             for (n, slot) in ne5::song::Slot::ALL.into_iter().enumerate() {
@@ -656,8 +664,6 @@ pub fn print(ui: &Ui, entity: &Entity) {
             }
         }
         Entity::Settings(Settings::Electro5(s)) => {
-            ui.out(field(ui, 2, "type", "Electro 5 settings (ne5s)"));
-
             // Startup retains both program and live locations regardless of active mode.
             let boot = &s.body;
             section(ui, "Startup");
@@ -701,7 +707,6 @@ pub fn print(ui: &Ui, entity: &Entity) {
             }
         }
         Entity::Piano(p) => {
-            ui.out(field(ui, 2, "type", "piano library (npno)"));
             match p.name() {
                 Ok((name, variant)) if variant.is_empty() => ui.out(field(ui, 2, "name", name)),
                 Ok((name, variant)) => ui.out(field(ui, 2, "name", format!("{name} ({variant})"))),
@@ -732,9 +737,42 @@ pub fn print(ui: &Ui, entity: &Entity) {
             }
         }
         Entity::Sample(nord_format::Sample::V2(s)) => sample(ui, s),
-        Entity::Sample(nord_format::Sample::V3(s)) => sample_v3(ui, s),
         Entity::SampleProject(p) => sample_project(ui, p),
-        Entity::Bundle(nord_format::Bundle::Electro5(b)) => {
+        Entity::Program(Program::Stage2(p)) | Entity::Live(Live::Stage2(p)) => ns2_globals(ui, p),
+        Entity::Program(Program::Stage3(p)) | Entity::Live(Live::Stage3(p)) => ns3_globals(ui, p),
+        Entity::Program(Program::Stage4(p)) | Entity::Live(Live::Stage4(p)) => ns4_globals(ui, p),
+        Entity::Synth(nord_format::Synth::Stage4(y)) => ns4_preset(
+            ui,
+            &y.header,
+            &[
+                ("A", y.synth_a_layer_enabled),
+                ("B", y.synth_b_layer_enabled),
+                ("C", y.synth_c_layer_enabled),
+            ],
+        ),
+        Entity::PianoPreset(nord_format::PianoPreset::Stage4(n)) => ns4_preset(
+            ui,
+            &n.header,
+            &[
+                ("A", n.piano_a_layer_enabled),
+                ("B", n.piano_b_layer_enabled),
+            ],
+        ),
+        Entity::OrganPreset(nord_format::OrganPreset::Stage4(o)) => ns4_preset(
+            ui,
+            &o.header,
+            &[
+                ("A", o.organ_a_layer_enabled),
+                ("B", o.organ_b_layer_enabled),
+            ],
+        ),
+        other => raw_summary(ui, other),
+    }
+}
+
+fn bundle(ui: &Ui, bundle: &nord_format::Bundle) {
+    match bundle {
+        nord_format::Bundle::Electro5(b) => {
             ui.out(field(ui, 2, "type", "backup bundle (zip)"));
             ui.out(field(
                 ui,
@@ -748,64 +786,15 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 ui.warn(format!("bundle entry skipped: {name}: {why}"));
             }
         }
-        Entity::Program(Program::Stage2(p)) => ns2_globals(ui, "Stage 2 program (ns2p)", p),
-        Entity::Live(Live::Stage2(p)) => ns2_globals(ui, "Stage 2 live slot (ns2l)", p),
-        Entity::Program(Program::Stage3(p)) => ns3_globals(ui, "Stage 3 program (ns3f)", p),
-        Entity::Live(Live::Stage3(p)) => ns3_globals(ui, "Stage 3 live slot (ns3l)", p),
-        Entity::Program(Program::Stage4(p)) => ns4_globals(ui, "Stage 4 program (ns4p)", p),
-        Entity::Live(Live::Stage4(p)) => ns4_globals(ui, "Stage 4 live slot (ns4l)", p),
-        Entity::Synth(nord_format::Synth::Stage4(y)) => {
-            ns4_head(ui, "Stage 4 synth preset (ns4y)", &y.header);
-            section(ui, "Layers");
-            ui.out(field(
-                ui,
-                4,
-                "on",
-                layers(&[
-                    ("A", y.synth_a_layer_enabled),
-                    ("B", y.synth_b_layer_enabled),
-                    ("C", y.synth_c_layer_enabled),
-                ]),
-            ));
-            ns4_note(ui);
-        }
-        Entity::PianoPreset(nord_format::PianoPreset::Stage4(n)) => {
-            ns4_head(ui, "Stage 4 piano preset (ns4n)", &n.header);
-            section(ui, "Layers");
-            ui.out(field(
-                ui,
-                4,
-                "on",
-                layers(&[
-                    ("A", n.piano_a_layer_enabled),
-                    ("B", n.piano_b_layer_enabled),
-                ]),
-            ));
-            ns4_note(ui);
-        }
-        Entity::OrganPreset(nord_format::OrganPreset::Stage4(o)) => {
-            ns4_head(ui, "Stage 4 organ preset (ns4o)", &o.header);
-            section(ui, "Layers");
-            ui.out(field(
-                ui,
-                4,
-                "on",
-                layers(&[
-                    ("A", o.organ_a_layer_enabled),
-                    ("B", o.organ_b_layer_enabled),
-                ]),
-            ));
-            ns4_note(ui);
-        }
-        Entity::Bundle(nord_format::Bundle::Drum2Bank(b)) => {
+        nord_format::Bundle::Drum2Bank(b) => {
             ui.out(field(ui, 2, "type", "Drum 2 bank (zip)"));
             ui.out(field(ui, 2, "programs", b.programs.len().to_string()));
         }
-        Entity::Bundle(nord_format::Bundle::Drum3KitBank(b)) => {
+        nord_format::Bundle::Drum3KitBank(b) => {
             ui.out(field(ui, 2, "type", "Drum 3P kit bank (zip)"));
             ui.out(field(ui, 2, "kits", b.kits.len().to_string()));
         }
-        Entity::Bundle(nord_format::Bundle::Members(members)) => {
+        nord_format::Bundle::Members(members) => {
             ui.out(field(ui, 2, "type", "bundle (zip)"));
             let mut by_tag: std::collections::BTreeMap<String, usize> = Default::default();
             for (_, m) in members {
@@ -820,13 +809,11 @@ pub fn print(ui: &Ui, entity: &Entity) {
                 .join(", ");
             ui.out(field(ui, 2, "members", counts));
         }
-        other => raw_summary(ui, other),
     }
 }
 
 /// The Stage 2 program-wide globals, the decoded part of a mostly raw body.
-fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>) {
-    ui.out(field(ui, 2, "type", kind));
+fn ns2_globals(ui: &Ui, p: &Cbin<nord_format::formats::ns2::Program>) {
     let (bank, slot) = p.header.slot();
     ui.out(field(ui, 2, "location", shown_at(bank, slot)));
     ui.out(field(ui, 2, "category", category(&p.header)));
@@ -858,8 +845,7 @@ fn ns2_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns2::Program>
 }
 
 /// The Stage 3 program-wide globals.
-fn ns3_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns3::Program>) {
-    ui.out(field(ui, 2, "type", kind));
+fn ns3_globals(ui: &Ui, p: &Cbin<nord_format::formats::ns3::Program>) {
     let (bank, slot) = p.header.slot();
     ui.out(field(ui, 2, "location", shown_at(bank, slot)));
     ui.out(field(ui, 2, "category", category(&p.header)));
@@ -918,14 +904,21 @@ fn layers(on: &[(&str, bool)]) -> String {
 
 /// The container facts every Stage 4 file carries. The category is shown as its
 /// stored id: what the ids name on this model is not decoded.
-fn ns4_head(ui: &Ui, kind: &str, header: &nord_format::cbin::Header) {
-    ui.out(field(ui, 2, "type", kind));
+fn ns4_head(ui: &Ui, header: &nord_format::cbin::Header) {
     let (bank, slot) = header.slot();
     ui.out(field(ui, 2, "location", shown_at(bank, slot)));
     if let Some(id) = header.category() {
         ui.out(field(ui, 2, "category", format!("id {id}")));
     }
     ui.out(field(ui, 2, "version", version_label(header.version)));
+}
+
+/// A Stage 4 synth, piano or organ preset: its container facts and which layers are on.
+fn ns4_preset(ui: &Ui, header: &nord_format::cbin::Header, on: &[(&str, bool)]) {
+    ns4_head(ui, header);
+    section(ui, "Layers");
+    ui.out(field(ui, 4, "on", layers(on)));
+    ns4_note(ui);
 }
 
 fn ns4_note(ui: &Ui) {
@@ -941,8 +934,8 @@ fn ns4_note(ui: &Ui) {
 ///
 /// Only parameters with a known meaning are shown. The rest decode to the stored
 /// number, which is noise in a summary, so they are left to `--raw`.
-fn ns4_globals(ui: &Ui, kind: &str, p: &Cbin<nord_format::formats::ns4::Program>) {
-    ns4_head(ui, kind, &p.header);
+fn ns4_globals(ui: &Ui, p: &Cbin<nord_format::formats::ns4::Program>) {
+    ns4_head(ui, &p.header);
 
     section(ui, "Globals");
     ui.out(field(
@@ -1023,13 +1016,8 @@ fn transpose(enabled: bool, t: nord_format::components::StageTranspose) -> Strin
     }
 }
 
-/// Everything without a decoded body: identity, then the container's facts.
+/// Everything without a decoded body: the container's facts.
 fn raw_summary(ui: &Ui, entity: &Entity) {
-    let id = entity.identity();
-    // The three-character tags carry a trailing NUL; it is data, not display.
-    let tag = id.format.trim_end_matches('\0');
-    ui.out(field(ui, 2, "type", format!("{} ({tag})", id.kind)));
-
     if let Some(f) = entity.raw() {
         let header = &f.header;
         // A location word with its high bits set is not a bank/slot pair, so show it

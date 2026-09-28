@@ -8,7 +8,7 @@
 //! whether a Farfisa nibble counts as on, and where the b3+bass bars are stored.
 
 use crate::bits::Packed;
-use crate::components::{Drawbar, PercSpeed, VibChorus};
+use crate::components::{model_index, Drawbar, PercSpeed, VibChorus};
 use crate::error::ParseError;
 use nord_bits_derive::bitbody;
 
@@ -376,69 +376,6 @@ impl OrganPanel {
             (OrganModel::Pipe, _) => return None,
         })
     }
-}
-
-/// Declare a model's index into a shared enumeration.
-///
-/// The slot holds an index into a per-model table, because the modes each organ offers,
-/// and their order, differ by model. An index the model does not use decodes to `None`
-/// and round-trips unchanged.
-macro_rules! model_index {
-    ($(#[$meta:meta])* $name:ident, $bits:expr, $of:ty, [$($variant:ident),+ $(,)?]) => {
-        $(#[$meta])*
-        #[derive(Copy, Clone, Default, PartialEq, Eq)]
-        pub struct $name(u8);
-
-        impl $name {
-            /// What this model offers at the stored index, or `None` if it offers
-            /// nothing there.
-            pub fn get(&self) -> Option<$of> {
-                Self::TABLE.get(self.0 as usize).copied()
-            }
-
-            /// The index this model stores `value` at, or `None` if it does not offer it.
-            pub fn select(value: $of) -> Option<Self> {
-                Self::TABLE.iter().position(|&v| v == value).map(|i| $name(i as u8))
-            }
-
-            /// The stored index, named or not.
-            pub fn raw(&self) -> u8 {
-                self.0
-            }
-
-            const TABLE: &'static [$of] = &[$(<$of>::$variant),+];
-        }
-
-        impl Packed for $name {
-            const MAX_BITS: u32 = $bits;
-            const DECODE_BITS: u32 = u8::BITS;
-            const CONTROL: $crate::fields::ControlKind = $crate::fields::ControlKind::Selector;
-            type Error = ::core::convert::Infallible;
-
-            fn from_bits(bits: u64) -> Result<Self, Self::Error> {
-                Ok($name(bits as u8))
-            }
-
-            fn to_bits(&self) -> u64 {
-                self.0 as u64
-            }
-        }
-
-        impl Debug for $name {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                match self.get() {
-                    Some(value) => write!(f, "{value:?}"),
-                    None => write!(f, "unknown ({})", self.0),
-                }
-            }
-        }
-
-        impl Display for $name {
-            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                write!(f, "{self:?}")
-            }
-        }
-    };
 }
 
 model_index!(

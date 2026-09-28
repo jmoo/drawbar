@@ -5,14 +5,14 @@
 //! between them or layer both. They share one layout, so this type is placed twice;
 //! see [`super::program::Program`].
 //!
-//! The Stage 3 synth preset (`ns3y`) is this panel's synth block under its own
-//! tag, at panel byte 0x39.
+//! The synth block at panel byte 0x39 is a [`SynthPreset`], the body the Stage 3
+//! synth preset (`ns3y`) stores under its own tag.
 
 use super::program::*;
+use super::synth::SynthPreset;
 use crate::components::{
     CompressorResponse, DelayCharacter, Drawbar, DrawbarMorph, Effect1Type, Effect2Type, EqBand,
-    Frequency, Interval, KbZone4, Level, MorphTarget, PianoRef, Rate, ReverbType, SampleRef,
-    Selector, Time, WideSelector,
+    Frequency, KbZone4, Level, MorphTarget, PianoRef, Rate, ReverbType, Selector, Time,
 };
 use crate::types::{RangedU16, RangedU8};
 
@@ -77,122 +77,8 @@ pub struct Panel {
     pub synth_sustain_pedal: bool,
     #[bits(170..=179)]
     pub synth_preset_location: RangedU16<1023>,
-    #[bits(496..=496)]
-    pub synth_kb_hold: bool,
-    #[bits(497..=497)]
-    pub synth_arp_on: bool,
-    #[bits(498..=498)]
-    pub synth_arp_kb_sync: bool,
-    #[bits(499..=500)]
-    pub synth_arp_range: SynthArpRange,
-    #[bits(501..=502)]
-    pub synth_arp_pattern: SynthArpPattern,
-    #[bits(503..=503)]
-    pub synth_arp_master_clock: bool,
-    #[bits(504..=510)]
-    pub synth_arp_rate: Time,
-    #[bits(511..=518)]
-    pub synth_arp_rate_wheel: MorphTarget,
-    #[bits(519..=526)]
-    pub synth_arp_rate_aftertouch: MorphTarget,
-    #[bits(527..=534)]
-    pub synth_arp_rate_ctrl_pedal: MorphTarget,
-    #[bits(535..=536)]
-    pub synth_voice: SynthVoice,
-    #[bits(537..=543)]
-    pub synth_glide: Time,
-    #[bits(544..=545)]
-    pub synth_unison: SynthUnison,
-    #[bits(546..=548)]
-    pub synth_vibrato: SynthVibrato,
-    #[bits(549..=551)]
-    pub synth_lfo_wave: SynthLfoWave,
-    #[bits(552..=552)]
-    pub synth_lfo_master_clock: bool,
-    #[bits(553..=559)]
-    pub synth_lfo_rate: Rate,
-    #[bits(560..=567)]
-    pub synth_lfo_rate_wheel: MorphTarget,
-    #[bits(568..=575)]
-    pub synth_lfo_rate_aftertouch: MorphTarget,
-    #[bits(576..=583)]
-    pub synth_lfo_rate_ctrl_pedal: MorphTarget,
-    #[bits(584..=590)]
-    pub synth_mod_env_attack: Time,
-    #[bits(591..=597)]
-    pub synth_mod_env_decay: Time,
-    #[bits(598..=604)]
-    pub synth_mod_env_release: Time,
-    #[bits(605..=605)]
-    pub synth_mod_env_velocity: bool,
-    #[bits(606..=608)]
-    pub synth_oscillator_type: SynthOscillatorType,
-    #[bits(609..=617)]
-    pub synth_oscillator_1_wave_form: WideSelector<9>,
-    #[bits(619..=622)]
-    pub synth_oscillator_config: SynthOscillatorConfig,
-    #[bits(623..=628)]
-    pub synth_pitch: Interval,
-    #[bits(629..=635)]
-    pub synth_oscillator_control: Level,
-    #[bits(636..=643)]
-    pub synth_oscillator_control_wheel: MorphTarget,
-    #[bits(644..=651)]
-    pub synth_oscillator_control_aftertouch: MorphTarget,
-    #[bits(652..=659)]
-    pub synth_oscillator_control_ctrl_pedal: MorphTarget,
-    #[bits(660..=666)]
-    pub synth_oscillator_mod: Level,
-    #[bits(667..=674)]
-    pub synth_oscillator_mod_wheel: MorphTarget,
-    #[bits(675..=682)]
-    pub synth_oscillator_mod_aftertouch: MorphTarget,
-    #[bits(683..=690)]
-    pub synth_oscillator_mod_ctrl_pedal: MorphTarget,
-    #[bits(691..=693)]
-    pub synth_filter_type: SynthFilterType,
-    #[bits(694..=700)]
-    pub synth_filter_freq: Frequency,
-    #[bits(701..=708)]
-    pub synth_filter_freq_wheel: MorphTarget,
-    #[bits(709..=716)]
-    pub synth_filter_freq_aftertouch: MorphTarget,
-    #[bits(717..=724)]
-    pub synth_filter_freq_ctrl_pedal: MorphTarget,
-    #[bits(725..=731)]
-    pub synth_filter_hp_freq_res: Level,
-    #[bits(732..=739)]
-    pub synth_filter_hp_freq_res_wheel: MorphTarget,
-    #[bits(740..=747)]
-    pub synth_filter_hp_freq_res_aftertouch: MorphTarget,
-    #[bits(748..=755)]
-    pub synth_filter_hp_freq_res_ctrl_pedal: MorphTarget,
-    #[bits(756..=762)]
-    pub synth_filter_lfo_amount: Level,
-    #[bits(763..=770)]
-    pub synth_filter_lfo_amount_wheel: MorphTarget,
-    #[bits(771..=778)]
-    pub synth_filter_lfo_amount_aftertouch: MorphTarget,
-    #[bits(779..=786)]
-    pub synth_filter_lfo_amount_ctrl_pedal: MorphTarget,
-    #[bits(787..=793)]
-    pub synth_filter_vel_mod_env_amount: Level,
-    #[bits(794..=795)]
-    pub synth_filter_kb_track: SynthFilterKbTrack,
-    #[bits(796..=797)]
-    pub synth_filter_drive: SynthFilterDrive,
-    #[bits(798..=804)]
-    pub synth_amp_env_attack: Time,
-    #[bits(805..=811)]
-    pub synth_amp_env_decay: Time,
-    #[bits(812..=818)]
-    pub synth_amp_env_release: Time,
-    #[bits(819..=820)]
-    pub synth_amp_env_velocity: SynthAmpEnvVelocity,
-    #[bits(821..=852)]
-    pub synth_sample_id: SampleRef,
-    #[bits(853..=853)]
-    pub synth_fast_attack: bool,
+    #[at(57..115)]
+    pub synth: SynthPreset,
     #[bits(928..=928)]
     pub organ_on: bool,
     #[bits(929..=932)]
@@ -215,170 +101,10 @@ pub struct Panel {
     pub organ_live_mode: bool,
     #[bits(973..=973)]
     pub organ_preset_2_on: bool,
-    #[bits(992..=995)]
-    pub organ_preset_1_drawbar_1: Drawbar,
-    #[bits(996..=1000)]
-    pub organ_preset_1_drawbar_1_wheel: DrawbarMorph,
-    #[bits(1001..=1005)]
-    pub organ_preset_1_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(1006..=1010)]
-    pub organ_preset_1_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(1011..=1014)]
-    pub organ_preset_1_drawbar_2: Drawbar,
-    #[bits(1015..=1019)]
-    pub organ_preset_1_drawbar_2_wheel: DrawbarMorph,
-    #[bits(1020..=1024)]
-    pub organ_preset_1_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(1025..=1029)]
-    pub organ_preset_1_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(1030..=1033)]
-    pub organ_preset_1_drawbar_3: Drawbar,
-    #[bits(1034..=1038)]
-    pub organ_preset_1_drawbar_3_wheel: DrawbarMorph,
-    #[bits(1039..=1043)]
-    pub organ_preset_1_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(1044..=1048)]
-    pub organ_preset_1_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(1049..=1052)]
-    pub organ_preset_1_drawbar_4: Drawbar,
-    #[bits(1053..=1057)]
-    pub organ_preset_1_drawbar_4_wheel: DrawbarMorph,
-    #[bits(1058..=1062)]
-    pub organ_preset_1_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(1063..=1067)]
-    pub organ_preset_1_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(1068..=1071)]
-    pub organ_preset_1_drawbar_5: Drawbar,
-    #[bits(1072..=1076)]
-    pub organ_preset_1_drawbar_5_wheel: DrawbarMorph,
-    #[bits(1077..=1081)]
-    pub organ_preset_1_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(1082..=1086)]
-    pub organ_preset_1_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(1087..=1090)]
-    pub organ_preset_1_drawbar_6: Drawbar,
-    #[bits(1091..=1095)]
-    pub organ_preset_1_drawbar_6_wheel: DrawbarMorph,
-    #[bits(1096..=1100)]
-    pub organ_preset_1_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(1101..=1105)]
-    pub organ_preset_1_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(1106..=1109)]
-    pub organ_preset_1_drawbar_7: Drawbar,
-    #[bits(1110..=1114)]
-    pub organ_preset_1_drawbar_7_wheel: DrawbarMorph,
-    #[bits(1115..=1119)]
-    pub organ_preset_1_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(1120..=1124)]
-    pub organ_preset_1_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(1125..=1128)]
-    pub organ_preset_1_drawbar_8: Drawbar,
-    #[bits(1129..=1133)]
-    pub organ_preset_1_drawbar_8_wheel: DrawbarMorph,
-    #[bits(1134..=1138)]
-    pub organ_preset_1_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(1139..=1143)]
-    pub organ_preset_1_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(1144..=1147)]
-    pub organ_preset_1_drawbar_9: Drawbar,
-    #[bits(1148..=1152)]
-    pub organ_preset_1_drawbar_9_wheel: DrawbarMorph,
-    #[bits(1153..=1157)]
-    pub organ_preset_1_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(1158..=1162)]
-    pub organ_preset_1_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(1163..=1163)]
-    pub organ_vibrato_on: bool,
-    #[bits(1164..=1164)]
-    pub organ_percussion_on: bool,
-    #[bits(1165..=1165)]
-    pub organ_percussion_harmonic_third: bool,
-    #[bits(1166..=1166)]
-    pub organ_percussion_decay_fast: bool,
-    #[bits(1167..=1167)]
-    pub organ_percussion_volume_soft: bool,
-    #[bits(1208..=1211)]
-    pub organ_preset_2_drawbar_1: Drawbar,
-    #[bits(1212..=1216)]
-    pub organ_preset_2_drawbar_1_wheel: DrawbarMorph,
-    #[bits(1217..=1221)]
-    pub organ_preset_2_drawbar_1_aftertouch: DrawbarMorph,
-    #[bits(1222..=1226)]
-    pub organ_preset_2_drawbar_1_ctrl_pedal: DrawbarMorph,
-    #[bits(1227..=1230)]
-    pub organ_preset_2_drawbar_2: Drawbar,
-    #[bits(1231..=1235)]
-    pub organ_preset_2_drawbar_2_wheel: DrawbarMorph,
-    #[bits(1236..=1240)]
-    pub organ_preset_2_drawbar_2_aftertouch: DrawbarMorph,
-    #[bits(1241..=1245)]
-    pub organ_preset_2_drawbar_2_ctrl_pedal: DrawbarMorph,
-    #[bits(1246..=1249)]
-    pub organ_preset_2_drawbar_3: Drawbar,
-    #[bits(1250..=1254)]
-    pub organ_preset_2_drawbar_3_wheel: DrawbarMorph,
-    #[bits(1255..=1259)]
-    pub organ_preset_2_drawbar_3_aftertouch: DrawbarMorph,
-    #[bits(1260..=1264)]
-    pub organ_preset_2_drawbar_3_ctrl_pedal: DrawbarMorph,
-    #[bits(1265..=1268)]
-    pub organ_preset_2_drawbar_4: Drawbar,
-    #[bits(1269..=1273)]
-    pub organ_preset_2_drawbar_4_wheel: DrawbarMorph,
-    #[bits(1274..=1278)]
-    pub organ_preset_2_drawbar_4_aftertouch: DrawbarMorph,
-    #[bits(1279..=1283)]
-    pub organ_preset_2_drawbar_4_ctrl_pedal: DrawbarMorph,
-    #[bits(1284..=1287)]
-    pub organ_preset_2_drawbar_5: Drawbar,
-    #[bits(1288..=1292)]
-    pub organ_preset_2_drawbar_5_wheel: DrawbarMorph,
-    #[bits(1293..=1297)]
-    pub organ_preset_2_drawbar_5_aftertouch: DrawbarMorph,
-    #[bits(1298..=1302)]
-    pub organ_preset_2_drawbar_5_ctrl_pedal: DrawbarMorph,
-    #[bits(1303..=1306)]
-    pub organ_preset_2_drawbar_6: Drawbar,
-    #[bits(1307..=1311)]
-    pub organ_preset_2_drawbar_6_wheel: DrawbarMorph,
-    #[bits(1312..=1316)]
-    pub organ_preset_2_drawbar_6_aftertouch: DrawbarMorph,
-    #[bits(1317..=1321)]
-    pub organ_preset_2_drawbar_6_ctrl_pedal: DrawbarMorph,
-    #[bits(1322..=1325)]
-    pub organ_preset_2_drawbar_7: Drawbar,
-    #[bits(1326..=1330)]
-    pub organ_preset_2_drawbar_7_wheel: DrawbarMorph,
-    #[bits(1331..=1335)]
-    pub organ_preset_2_drawbar_7_aftertouch: DrawbarMorph,
-    #[bits(1336..=1340)]
-    pub organ_preset_2_drawbar_7_ctrl_pedal: DrawbarMorph,
-    #[bits(1341..=1344)]
-    pub organ_preset_2_drawbar_8: Drawbar,
-    #[bits(1345..=1349)]
-    pub organ_preset_2_drawbar_8_wheel: DrawbarMorph,
-    #[bits(1350..=1354)]
-    pub organ_preset_2_drawbar_8_aftertouch: DrawbarMorph,
-    #[bits(1355..=1359)]
-    pub organ_preset_2_drawbar_8_ctrl_pedal: DrawbarMorph,
-    #[bits(1360..=1363)]
-    pub organ_preset_2_drawbar_9: Drawbar,
-    #[bits(1364..=1368)]
-    pub organ_preset_2_drawbar_9_wheel: DrawbarMorph,
-    #[bits(1369..=1373)]
-    pub organ_preset_2_drawbar_9_aftertouch: DrawbarMorph,
-    #[bits(1374..=1378)]
-    pub organ_preset_2_drawbar_9_ctrl_pedal: DrawbarMorph,
-    #[bits(1379..=1379)]
-    pub organ_preset_2_vibrato_on: bool,
-    #[bits(1380..=1380)]
-    pub organ_preset_2_percussion_on: bool,
-    #[bits(1381..=1381)]
-    pub organ_preset_2_percussion_harmonic_third: bool,
-    #[bits(1382..=1382)]
-    pub organ_preset_2_percussion_decay_fast: bool,
-    #[bits(1383..=1383)]
-    pub organ_preset_2_percussion_volume_soft: bool,
+    #[at(124..151)]
+    pub organ_preset_1: OrganPreset,
+    #[at(151..178)]
+    pub organ_preset_2: OrganPreset,
     #[bits(1424..=1424)]
     pub extern_on: bool,
     #[bits(1425..=1427)]
@@ -583,4 +309,93 @@ pub struct Panel {
     pub program_output_sub_source: Selector<2>,
     #[bits(2069..=2070)]
     pub program_output_sub_destination: Selector<2>,
+}
+
+/// One organ preset: nine drawbars with their morph slots, then the vibrato and
+/// percussion switches. Bits are MSB-first from preset byte 0, which is panel byte 124
+/// for preset 1 and 151 for preset 2.
+#[nord_bits_derive::bitbody(27)]
+pub struct OrganPreset {
+    #[bits(0..=3)]
+    pub drawbar_1: Drawbar,
+    #[bits(4..=8)]
+    pub drawbar_1_wheel: DrawbarMorph,
+    #[bits(9..=13)]
+    pub drawbar_1_aftertouch: DrawbarMorph,
+    #[bits(14..=18)]
+    pub drawbar_1_ctrl_pedal: DrawbarMorph,
+    #[bits(19..=22)]
+    pub drawbar_2: Drawbar,
+    #[bits(23..=27)]
+    pub drawbar_2_wheel: DrawbarMorph,
+    #[bits(28..=32)]
+    pub drawbar_2_aftertouch: DrawbarMorph,
+    #[bits(33..=37)]
+    pub drawbar_2_ctrl_pedal: DrawbarMorph,
+    #[bits(38..=41)]
+    pub drawbar_3: Drawbar,
+    #[bits(42..=46)]
+    pub drawbar_3_wheel: DrawbarMorph,
+    #[bits(47..=51)]
+    pub drawbar_3_aftertouch: DrawbarMorph,
+    #[bits(52..=56)]
+    pub drawbar_3_ctrl_pedal: DrawbarMorph,
+    #[bits(57..=60)]
+    pub drawbar_4: Drawbar,
+    #[bits(61..=65)]
+    pub drawbar_4_wheel: DrawbarMorph,
+    #[bits(66..=70)]
+    pub drawbar_4_aftertouch: DrawbarMorph,
+    #[bits(71..=75)]
+    pub drawbar_4_ctrl_pedal: DrawbarMorph,
+    #[bits(76..=79)]
+    pub drawbar_5: Drawbar,
+    #[bits(80..=84)]
+    pub drawbar_5_wheel: DrawbarMorph,
+    #[bits(85..=89)]
+    pub drawbar_5_aftertouch: DrawbarMorph,
+    #[bits(90..=94)]
+    pub drawbar_5_ctrl_pedal: DrawbarMorph,
+    #[bits(95..=98)]
+    pub drawbar_6: Drawbar,
+    #[bits(99..=103)]
+    pub drawbar_6_wheel: DrawbarMorph,
+    #[bits(104..=108)]
+    pub drawbar_6_aftertouch: DrawbarMorph,
+    #[bits(109..=113)]
+    pub drawbar_6_ctrl_pedal: DrawbarMorph,
+    #[bits(114..=117)]
+    pub drawbar_7: Drawbar,
+    #[bits(118..=122)]
+    pub drawbar_7_wheel: DrawbarMorph,
+    #[bits(123..=127)]
+    pub drawbar_7_aftertouch: DrawbarMorph,
+    #[bits(128..=132)]
+    pub drawbar_7_ctrl_pedal: DrawbarMorph,
+    #[bits(133..=136)]
+    pub drawbar_8: Drawbar,
+    #[bits(137..=141)]
+    pub drawbar_8_wheel: DrawbarMorph,
+    #[bits(142..=146)]
+    pub drawbar_8_aftertouch: DrawbarMorph,
+    #[bits(147..=151)]
+    pub drawbar_8_ctrl_pedal: DrawbarMorph,
+    #[bits(152..=155)]
+    pub drawbar_9: Drawbar,
+    #[bits(156..=160)]
+    pub drawbar_9_wheel: DrawbarMorph,
+    #[bits(161..=165)]
+    pub drawbar_9_aftertouch: DrawbarMorph,
+    #[bits(166..=170)]
+    pub drawbar_9_ctrl_pedal: DrawbarMorph,
+    #[bits(171..=171)]
+    pub vibrato_on: bool,
+    #[bits(172..=172)]
+    pub percussion_on: bool,
+    #[bits(173..=173)]
+    pub percussion_harmonic_third: bool,
+    #[bits(174..=174)]
+    pub percussion_decay_fast: bool,
+    #[bits(175..=175)]
+    pub percussion_volume_soft: bool,
 }

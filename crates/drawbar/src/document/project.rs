@@ -16,12 +16,12 @@ use std::ops::RangeInclusive;
 
 use eframe::egui;
 use nord_format::formats::nsmpproj::{
-    Project, StrokeField, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
+    PathError, Project, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
 };
 use nord_format::note;
 use nord_format::Entity;
 
-use super::capability::{Fact, Offset, Row, State as Cap};
+use super::capability::{Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
 use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
@@ -164,58 +164,11 @@ fn read(project: &Project) -> Result<Snapshot, String> {
 
 /// Apply one `path = value`, in the CLI's vocabulary.
 fn set(project: &mut Project, path: &str, value: &str) -> Result<(), String> {
-    if path == "name" {
-        return project.set_name(value).map_err(|e| e.to_string());
-    }
-    let unknown = || format!("unknown field {path:?}");
-    let (block, field) = path.split_once('.').ok_or_else(unknown)?;
-    if let Some(id) = indexed(block, "file") {
-        if field != "path" {
-            return Err(unknown());
-        }
-        return project.set_audio_path(id, value).map_err(|e| e.to_string());
-    }
-    if let Some(id) = indexed(block, "stroke") {
-        let field = StrokeField::parse(field, value).map_err(|e| e.to_string())?;
-        return project
-            .set_stroke_field(id, field)
-            .map_err(|e| e.to_string());
-    }
-    if block == "velocity" {
-        let mut defaults = project.velocity_defaults().map_err(|e| e.to_string())?;
-        let stored = || {
-            value
-                .parse::<u8>()
-                .map_err(|_| format!("{path}: {value:?} is not a whole number, 0-255"))
-        };
-        match field {
-            "attack_amount" => defaults.attack_amount = stored()?,
-            "amplitude" => defaults.amplitude = stored()?,
-            "timbre" => defaults.timbre = stored()?,
-            _ => return Err(unknown()),
-        }
-        return project
-            .set_velocity_defaults(defaults)
-            .map_err(|e| e.to_string());
-    }
-    let id = indexed(block, "zone").ok_or_else(unknown)?;
-    let zones = project.zones().map_err(|e| e.to_string())?;
-    let zone = zones
-        .iter()
-        .find(|z| z.zone_id == id)
-        .ok_or_else(|| format!("this project has no zone {id}"))?;
-    let note = note::parse(value)?;
-    match field {
-        "root_key" => project.set_root_key(id, note),
-        "bottom_note" => project.set_key_range(id, note, zone.top_note),
-        "top_note" => project.set_key_range(id, zone.bottom_note, note),
-        _ => return Err(unknown()),
-    }
-    .map_err(|e| e.to_string())
-}
-
-fn indexed(part: &str, label: &str) -> Option<u32> {
-    part.strip_prefix(label).and_then(|n| n.parse().ok())
+    project.set_path(path, value).map_err(|e| match e {
+        PathError::Unknown => format!("unknown field {path:?}"),
+        PathError::NoZone(id) => format!("this project has no zone {id}"),
+        PathError::Refused(e) => e.to_string(),
+    })
 }
 
 /// A drag over one number, returning the new value only once it has changed.
@@ -635,14 +588,8 @@ fn parameters(ui: &mut egui::Ui, snapshot: &Snapshot, sets: &mut Sets) {
 
 /// What the file says about itself.
 pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
-    controls::heading(
-        ui,
-        "About this file",
-        "what the file says about itself, read here and written back unchanged",
-        None,
-    );
     let (product, version) = &snapshot.created_by;
-    super::capability::facts(
+    super::capability::about(
         ui,
         &[
             Fact {
@@ -681,94 +628,39 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
 /// The instrument editor's capabilities, as they apply to a project.
 ///
 /// A project is the source: what an instrument has baked in, a project states directly.
-pub fn capabilities() -> Vec<Row> {
-    let row = |name: &'static str, state: Cap, note: &'static str| Row { name, state, note };
-    vec![
-        row("name", Cap::Editable, "the project's own name"),
-        row(
-            "category / sub",
-            Cap::Absent,
-            "no category block this reader decodes",
-        ),
-        row(
-            "key zones: root / top / low",
-            Cap::Editable,
-            "each map_zone states all three",
-        ),
-        row(
-            "velocity layers",
-            Cap::Editable,
-            "a window per stroke, in its map_stroke",
-        ),
-        row(
-            "per-zone gain / detune",
-            Cap::Editable,
-            "m_gain; the detune beside it has no setter",
-        ),
-        row(
-            "per-key table",
-            Cap::Absent,
-            "a project states zones, not keys",
-        ),
-        row(
-            "instrument gain",
-            Cap::ReadOnly,
-            "m_mapGain, which nothing here writes",
-        ),
-        row(
-            "loop points / crossfade",
-            Cap::Editable,
-            "the loop, its length and its crossfade, in frames",
-        ),
-        row(
-            "loop decay / detune",
-            Cap::ReadOnly,
-            "m_loopDecay, which no control on this face writes — nord-cli does",
-        ),
-        row("release samples", Cap::Absent, "a piano library's bank 2"),
-        row(
-            "pedal resonance samples",
-            Cap::Absent,
-            "a piano library's bank 1",
-        ),
-        row(
-            "sound parameters",
-            Cap::Editable,
-            "the samplib_attrs velocity defaults",
-        ),
-        row(
-            "stereo / channels",
-            Cap::ReadOnly,
-            "the WAV's own, which is not read here",
-        ),
-        row(
-            "replace / add a stroke",
-            Cap::Editable,
-            "the source path; the project is the source",
-        ),
-        row(
-            "cut / move / drop strokes",
-            Cap::ReadOnly,
-            "the zones are read; nothing here removes one",
-        ),
-        row(
-            "decode / audition",
-            Cap::NeedsEncode,
-            "a project is built into an instrument before it plays",
-        ),
-        row("size trim", Cap::Absent, "not a thing a project has"),
-        row(
-            "write to the instrument",
-            Cap::Absent,
-            "build into an nsmp first",
-        ),
-        row(
-            "byte-exact round trip",
-            Cap::Verified,
-            "the text is rewritten as it was read",
-        ),
-    ]
-}
+pub const CAPABILITIES: Stands = [
+    (Cap::Editable, "the project's own name"),
+    (Cap::Absent, "no category block this reader decodes"),
+    (Cap::Editable, "each map_zone states all three"),
+    (Cap::Editable, "a window per stroke, in its map_stroke"),
+    (Cap::Editable, "m_gain; the detune beside it has no setter"),
+    (Cap::Absent, "a project states zones, not keys"),
+    (Cap::ReadOnly, "m_mapGain, which nothing here writes"),
+    (
+        Cap::Editable,
+        "the loop, its length and its crossfade, in frames",
+    ),
+    (
+        Cap::ReadOnly,
+        "m_loopDecay, which no control on this face writes — nord-cli does",
+    ),
+    (Cap::Absent, "a piano library's bank 2"),
+    (Cap::Absent, "a piano library's bank 1"),
+    (Cap::Editable, "the samplib_attrs velocity defaults"),
+    (Cap::ReadOnly, "the WAV's own, which is not read here"),
+    (Cap::Editable, "the source path; the project is the source"),
+    (
+        Cap::ReadOnly,
+        "the zones are read; nothing here removes one",
+    ),
+    (
+        Cap::NeedsEncode,
+        "a project is built into an instrument before it plays",
+    ),
+    (Cap::Absent, "not a thing a project has"),
+    (Cap::Absent, "build into an nsmp first"),
+    (Cap::Verified, "the text is rewritten as it was read"),
+];
 
 /// Where each field the Basic face writes lands in the file.
 ///
@@ -1248,7 +1140,7 @@ mod tests {
             ("sound parameters", "velocity.amplitude", "64"),
             ("replace / add a stroke", "file1.path", "other.wav"),
         ];
-        for row in capabilities() {
+        for row in super::super::capability::rows(&CAPABILITIES) {
             if row.state != Cap::Editable {
                 continue;
             }

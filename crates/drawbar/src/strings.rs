@@ -8,6 +8,8 @@
 //! Only English is embedded. Another language needs another pair of tables and one
 //! lookup; no module above this one spells a field name itself.
 
+use std::borrow::Borrow;
+
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
@@ -64,351 +66,212 @@ pub const SETTINGS_SECTIONS: [Section; 5] = [
     Section::Other,
 ];
 
-/// Registry path, the section it belongs in, and its label.
+/// Each section's registry paths and their labels.
 ///
-/// Grouped by section and alphabetical by path inside each group; a test enforces this.
+/// Alphabetical by path inside each section; a test enforces this.
 /// Display order is not this order: a document is laid out by the
 /// `nord_format::panel::Panel` its format declares, resolved in `document::field`.
-const FIELDS: &[(&str, Section, &str)] = &[
-    ("center_panel.gain", Section::Keyboard, "Program level"),
+const FIELDS: &[(Section, &[(&str, &str)])] = &[
     (
-        "center_panel.lower_control",
         Section::Keyboard,
-        "Lower control pedal",
+        &[
+            ("center_panel.gain", "Program level"),
+            ("center_panel.lower_control", "Lower control pedal"),
+            ("center_panel.lower_enabled", "Lower part enabled"),
+            ("center_panel.lower_octave_shift", "Lower octave shift"),
+            ("center_panel.lower_part", "Lower plays"),
+            ("center_panel.lower_sustain", "Lower sustain pedal"),
+            ("center_panel.part_mix", "Lower / upper balance"),
+            ("center_panel.split", "Split"),
+            ("center_panel.split_point", "Split point"),
+            ("center_panel.transpose", "Transpose (semitones)"),
+            ("center_panel.transpose_enabled", "Transpose touched"),
+            ("center_panel.unknown_boolean1", "Unnamed bit 18"),
+            ("center_panel.upper_control", "Upper control pedal"),
+            ("center_panel.upper_enabled", "Upper part enabled"),
+            ("center_panel.upper_octave_shift", "Upper octave shift"),
+            ("center_panel.upper_part", "Upper plays"),
+            ("center_panel.upper_sustain", "Upper sustain pedal"),
+        ],
     ),
     (
-        "center_panel.lower_enabled",
-        Section::Keyboard,
-        "Lower part enabled",
-    ),
-    (
-        "center_panel.lower_octave_shift",
-        Section::Keyboard,
-        "Lower octave shift",
-    ),
-    ("center_panel.lower_part", Section::Keyboard, "Lower plays"),
-    (
-        "center_panel.lower_sustain",
-        Section::Keyboard,
-        "Lower sustain pedal",
-    ),
-    (
-        "center_panel.part_mix",
-        Section::Keyboard,
-        "Lower / upper balance",
-    ),
-    ("center_panel.split", Section::Keyboard, "Split"),
-    ("center_panel.split_point", Section::Keyboard, "Split point"),
-    (
-        "center_panel.transpose",
-        Section::Keyboard,
-        "Transpose (semitones)",
-    ),
-    (
-        "center_panel.transpose_enabled",
-        Section::Keyboard,
-        "Transpose touched",
-    ),
-    (
-        "center_panel.unknown_boolean1",
-        Section::Keyboard,
-        "Unnamed bit 18",
-    ),
-    (
-        "center_panel.upper_control",
-        Section::Keyboard,
-        "Upper control pedal",
-    ),
-    (
-        "center_panel.upper_enabled",
-        Section::Keyboard,
-        "Upper part enabled",
-    ),
-    (
-        "center_panel.upper_octave_shift",
-        Section::Keyboard,
-        "Upper octave shift",
-    ),
-    ("center_panel.upper_part", Section::Keyboard, "Upper plays"),
-    (
-        "center_panel.upper_sustain",
-        Section::Keyboard,
-        "Upper sustain pedal",
-    ),
-    ("center_panel.drawbar_live", Section::Organ, "Drawbars live"),
-    ("center_panel.organ_type", Section::Organ, "Organ model"),
-    ("organ_panel.b3_bass_bar1", Section::Organ, "Bass drawbar 1"),
-    ("organ_panel.b3_bass_bar2", Section::Organ, "Bass drawbar 2"),
-    (
-        "organ_panel.b3_perc_speed",
         Section::Organ,
-        "Percussion decay",
+        &[
+            ("center_panel.drawbar_live", "Drawbars live"),
+            ("center_panel.organ_type", "Organ model"),
+            ("organ_panel.b3_bass_bar1", "Bass drawbar 1"),
+            ("organ_panel.b3_bass_bar2", "Bass drawbar 2"),
+            ("organ_panel.b3_perc_speed", "Percussion decay"),
+            ("organ_panel.b3_perc_third", "Percussion third harmonic"),
+            ("organ_panel.b3_preset1_drawbars", "B3 preset 1 drawbars"),
+            ("organ_panel.b3_preset1_perc", "B3 preset 1 percussion"),
+            ("organ_panel.b3_preset1_vib", "B3 preset 1 vibrato"),
+            ("organ_panel.b3_preset2_drawbars", "B3 preset 2 drawbars"),
+            ("organ_panel.b3_preset2_perc", "B3 preset 2 percussion"),
+            ("organ_panel.b3_preset2_selected", "B3 preset"),
+            ("organ_panel.b3_preset2_vib", "B3 preset 2 vibrato"),
+            ("organ_panel.b3_vib", "B3 vibrato / chorus"),
+            (
+                "organ_panel.farfisa_preset1_drawbars",
+                "Farfisa preset 1 registers",
+            ),
+            (
+                "organ_panel.farfisa_preset1_vib",
+                "Farfisa preset 1 vibrato",
+            ),
+            (
+                "organ_panel.farfisa_preset2_drawbars",
+                "Farfisa preset 2 registers",
+            ),
+            ("organ_panel.farfisa_preset2_selected", "Farfisa preset"),
+            (
+                "organ_panel.farfisa_preset2_vib",
+                "Farfisa preset 2 vibrato",
+            ),
+            ("organ_panel.farfisa_vib", "Farfisa vibrato / chorus"),
+            (
+                "organ_panel.pipe_preset1_drawbars",
+                "Pipe preset 1 drawbars",
+            ),
+            (
+                "organ_panel.pipe_preset2_drawbars",
+                "Pipe preset 2 drawbars",
+            ),
+            ("organ_panel.pipe_preset2_selected", "Pipe preset"),
+            ("organ_panel.vox_preset1_drawbars", "Vox preset 1 drawbars"),
+            ("organ_panel.vox_preset1_vib", "Vox preset 1 vibrato"),
+            ("organ_panel.vox_preset2_drawbars", "Vox preset 2 drawbars"),
+            ("organ_panel.vox_preset2_selected", "Vox preset"),
+            ("organ_panel.vox_preset2_vib", "Vox preset 2 vibrato"),
+            ("organ_panel.vox_vib", "Vox vibrato"),
+        ],
     ),
     (
-        "organ_panel.b3_perc_third",
-        Section::Organ,
-        "Percussion third harmonic",
+        Section::Piano,
+        &[
+            ("piano_panel.acoustics", "Acoustics"),
+            ("piano_panel.category", "Type"),
+            ("piano_panel.clav_model", "Clavinet model"),
+            ("piano_panel.id", "Piano library id"),
+            ("piano_panel.mono", "Mono"),
+            ("piano_panel.piano_model", "Model"),
+            ("piano_panel.touch", "Touch"),
+        ],
     ),
     (
-        "organ_panel.b3_preset1_drawbars",
-        Section::Organ,
-        "B3 preset 1 drawbars",
-    ),
-    (
-        "organ_panel.b3_preset1_perc",
-        Section::Organ,
-        "B3 preset 1 percussion",
-    ),
-    (
-        "organ_panel.b3_preset1_vib",
-        Section::Organ,
-        "B3 preset 1 vibrato",
-    ),
-    (
-        "organ_panel.b3_preset2_drawbars",
-        Section::Organ,
-        "B3 preset 2 drawbars",
-    ),
-    (
-        "organ_panel.b3_preset2_perc",
-        Section::Organ,
-        "B3 preset 2 percussion",
-    ),
-    (
-        "organ_panel.b3_preset2_selected",
-        Section::Organ,
-        "B3 preset",
-    ),
-    (
-        "organ_panel.b3_preset2_vib",
-        Section::Organ,
-        "B3 preset 2 vibrato",
-    ),
-    ("organ_panel.b3_vib", Section::Organ, "B3 vibrato / chorus"),
-    (
-        "organ_panel.farfisa_preset1_drawbars",
-        Section::Organ,
-        "Farfisa preset 1 registers",
-    ),
-    (
-        "organ_panel.farfisa_preset1_vib",
-        Section::Organ,
-        "Farfisa preset 1 vibrato",
-    ),
-    (
-        "organ_panel.farfisa_preset2_drawbars",
-        Section::Organ,
-        "Farfisa preset 2 registers",
-    ),
-    (
-        "organ_panel.farfisa_preset2_selected",
-        Section::Organ,
-        "Farfisa preset",
-    ),
-    (
-        "organ_panel.farfisa_preset2_vib",
-        Section::Organ,
-        "Farfisa preset 2 vibrato",
-    ),
-    (
-        "organ_panel.farfisa_vib",
-        Section::Organ,
-        "Farfisa vibrato / chorus",
-    ),
-    (
-        "organ_panel.pipe_preset1_drawbars",
-        Section::Organ,
-        "Pipe preset 1 drawbars",
-    ),
-    (
-        "organ_panel.pipe_preset2_drawbars",
-        Section::Organ,
-        "Pipe preset 2 drawbars",
-    ),
-    (
-        "organ_panel.pipe_preset2_selected",
-        Section::Organ,
-        "Pipe preset",
-    ),
-    (
-        "organ_panel.vox_preset1_drawbars",
-        Section::Organ,
-        "Vox preset 1 drawbars",
-    ),
-    (
-        "organ_panel.vox_preset1_vib",
-        Section::Organ,
-        "Vox preset 1 vibrato",
-    ),
-    (
-        "organ_panel.vox_preset2_drawbars",
-        Section::Organ,
-        "Vox preset 2 drawbars",
-    ),
-    (
-        "organ_panel.vox_preset2_selected",
-        Section::Organ,
-        "Vox preset",
-    ),
-    (
-        "organ_panel.vox_preset2_vib",
-        Section::Organ,
-        "Vox preset 2 vibrato",
-    ),
-    ("organ_panel.vox_vib", Section::Organ, "Vox vibrato"),
-    ("piano_panel.acoustics", Section::Piano, "Acoustics"),
-    ("piano_panel.category", Section::Piano, "Type"),
-    ("piano_panel.clav_model", Section::Piano, "Clavinet model"),
-    ("piano_panel.id", Section::Piano, "Piano library id"),
-    ("piano_panel.mono", Section::Piano, "Mono"),
-    ("piano_panel.piano_model", Section::Piano, "Model"),
-    ("piano_panel.touch", Section::Piano, "Touch"),
-    ("sample_panel.attack", Section::Sample, "Attack"),
-    (
-        "sample_panel.decay_release",
         Section::Sample,
-        "Decay / release",
+        &[
+            ("sample_panel.attack", "Attack"),
+            ("sample_panel.decay_release", "Decay / release"),
+            ("sample_panel.dynamics", "Dynamics"),
+            ("sample_panel.filter", "Filter"),
+            ("sample_panel.id", "Sample library id"),
+            ("sample_panel.number", "Sample number"),
+        ],
     ),
-    ("sample_panel.dynamics", Section::Sample, "Dynamics"),
-    ("sample_panel.filter", Section::Sample, "Filter"),
-    ("sample_panel.id", Section::Sample, "Sample library id"),
-    ("sample_panel.number", Section::Sample, "Sample number"),
-    ("effects_panel.fx1", Section::Effects, "Effect 1"),
     (
-        "effects_panel.fx1_control",
         Section::Effects,
-        "Effect 1 on the control pedal",
+        &[
+            ("effects_panel.fx1", "Effect 1"),
+            ("effects_panel.fx1_control", "Effect 1 on the control pedal"),
+            ("effects_panel.fx1_rate", "Effect 1 rate"),
+            ("effects_panel.fx1_type", "Effect 1 type"),
+            ("effects_panel.fx2", "Effect 2"),
+            ("effects_panel.fx2_deep", "Effect 2 deep"),
+            ("effects_panel.fx2_rate", "Effect 2 rate"),
+            ("effects_panel.fx2_type", "Effect 2 type"),
+            ("effects_panel.fx3", "Amp / compressor"),
+            ("effects_panel.fx3_compression", "Compression"),
+            ("effects_panel.fx3_type", "Amp model"),
+            ("effects_panel.fx4", "Delay"),
+            ("effects_panel.fx4_feedback", "Delay feedback"),
+            ("effects_panel.fx4_moisture", "Delay mix"),
+            ("effects_panel.fx4_ping_pong", "Delay ping-pong"),
+            ("effects_panel.fx4_tempo", "Delay time"),
+            ("effects_panel.fx5", "Reverb"),
+            ("effects_panel.fx5_moisture", "Reverb mix"),
+            ("effects_panel.fx5_type", "Reverb type"),
+            ("effects_panel.rotary_speed", "Rotary fast"),
+            ("effects_panel.rotary_stop", "Rotary stop"),
+        ],
     ),
-    ("effects_panel.fx1_rate", Section::Effects, "Effect 1 rate"),
-    ("effects_panel.fx1_type", Section::Effects, "Effect 1 type"),
-    ("effects_panel.fx2", Section::Effects, "Effect 2"),
-    ("effects_panel.fx2_deep", Section::Effects, "Effect 2 deep"),
-    ("effects_panel.fx2_rate", Section::Effects, "Effect 2 rate"),
-    ("effects_panel.fx2_type", Section::Effects, "Effect 2 type"),
-    ("effects_panel.fx3", Section::Effects, "Amp / compressor"),
     (
-        "effects_panel.fx3_compression",
-        Section::Effects,
-        "Compression",
+        Section::Eq,
+        &[
+            ("effects_panel.equalizer_bass", "Bass"),
+            ("effects_panel.equalizer_freq", "Mid frequency"),
+            ("effects_panel.equalizer_freq_gain", "Mid gain"),
+            ("effects_panel.equalizer_on", "Equalizer"),
+            ("effects_panel.equalizer_part", "Applies to"),
+            ("effects_panel.equalizer_treble", "Treble"),
+        ],
     ),
-    ("effects_panel.fx3_type", Section::Effects, "Amp model"),
-    ("effects_panel.fx4", Section::Effects, "Delay"),
     (
-        "effects_panel.fx4_feedback",
-        Section::Effects,
-        "Delay feedback",
-    ),
-    ("effects_panel.fx4_moisture", Section::Effects, "Delay mix"),
-    (
-        "effects_panel.fx4_ping_pong",
-        Section::Effects,
-        "Delay ping-pong",
-    ),
-    ("effects_panel.fx4_tempo", Section::Effects, "Delay time"),
-    ("effects_panel.fx5", Section::Effects, "Reverb"),
-    ("effects_panel.fx5_moisture", Section::Effects, "Reverb mix"),
-    ("effects_panel.fx5_type", Section::Effects, "Reverb type"),
-    (
-        "effects_panel.rotary_speed",
-        Section::Effects,
-        "Rotary fast",
-    ),
-    ("effects_panel.rotary_stop", Section::Effects, "Rotary stop"),
-    ("effects_panel.equalizer_bass", Section::Eq, "Bass"),
-    ("effects_panel.equalizer_freq", Section::Eq, "Mid frequency"),
-    ("effects_panel.equalizer_freq_gain", Section::Eq, "Mid gain"),
-    ("effects_panel.equalizer_on", Section::Eq, "Equalizer"),
-    ("effects_panel.equalizer_part", Section::Eq, "Applies to"),
-    ("effects_panel.equalizer_treble", Section::Eq, "Treble"),
-    ("b3_trig_mode", Section::System, "Organ key trigger"),
-    ("ctrl_pedal_gain", Section::System, "Control pedal gain"),
-    ("ctrl_pedal_type", Section::System, "Control pedal type"),
-    ("fine_tune", Section::System, "Fine tune (cents)"),
-    ("global_transpose", Section::System, "Transpose (semitones)"),
-    ("output_routing", Section::System, "Outputs"),
-    ("rotary_ctrl_type", Section::System, "Rotary control"),
-    ("rotary_pedal_mode", Section::System, "Rotary pedal"),
-    (
-        "sustain_pedal_mode",
         Section::System,
-        "Sustain pedal function",
+        &[
+            ("b3_trig_mode", "Organ key trigger"),
+            ("ctrl_pedal_gain", "Control pedal gain"),
+            ("ctrl_pedal_type", "Control pedal type"),
+            ("fine_tune", "Fine tune (cents)"),
+            ("global_transpose", "Transpose (semitones)"),
+            ("output_routing", "Outputs"),
+            ("rotary_ctrl_type", "Rotary control"),
+            ("rotary_pedal_mode", "Rotary pedal"),
+            ("sustain_pedal_mode", "Sustain pedal function"),
+            ("sustain_pedal_type", "Sustain pedal type"),
+        ],
     ),
-    ("sustain_pedal_type", Section::System, "Sustain pedal type"),
-    ("control_change_mode", Section::Midi, "Control change"),
-    ("global_channel", Section::Midi, "Global channel"),
     (
-        "lower_receive_channel",
         Section::Midi,
-        "Lower receive channel",
+        &[
+            ("control_change_mode", "Control change"),
+            ("global_channel", "Global channel"),
+            ("lower_receive_channel", "Lower receive channel"),
+            ("program_change_mode", "Program change"),
+            ("transpose_at", "Transpose applies at"),
+            ("upper_receive_channel", "Upper receive channel"),
+            ("upper_split_channel", "Upper split channel"),
+        ],
     ),
-    ("program_change_mode", Section::Midi, "Program change"),
-    ("transpose_at", Section::Midi, "Transpose applies at"),
     (
-        "upper_receive_channel",
-        Section::Midi,
-        "Upper receive channel",
-    ),
-    ("upper_split_channel", Section::Midi, "Upper split channel"),
-    ("b3_key_bounce", Section::Sound, "Key bounce"),
-    ("b3_key_click_level", Section::Sound, "Key click level"),
-    (
-        "b3_perc_db9_mute",
         Section::Sound,
-        "Percussion mutes drawbar 9",
+        &[
+            ("b3_key_bounce", "Key bounce"),
+            ("b3_key_click_level", "Key click level"),
+            ("b3_perc_db9_mute", "Percussion mutes drawbar 9"),
+            ("b3_perc_decay_fast", "Percussion decay, fast"),
+            ("b3_perc_decay_slow", "Percussion decay, slow"),
+            ("b3_perc_volume_normal", "Percussion volume, normal"),
+            ("b3_perc_volume_soft", "Percussion volume, soft"),
+            ("b3_tonewheel_mode", "Tonewheel mode"),
+            ("piano_string_resonance", "Piano string resonance (dB)"),
+            ("rotary_balance", "Bass / horn balance"),
+            ("rotary_horn_acceleration", "Horn acceleration"),
+            ("rotary_horn_speed", "Horn speed"),
+            ("rotary_rotor_acceleration", "Rotor acceleration"),
+            ("rotary_rotor_speed", "Rotor speed"),
+            ("rotary_speaker_type", "Rotary speaker"),
+        ],
     ),
     (
-        "b3_perc_decay_fast",
-        Section::Sound,
-        "Percussion decay, fast",
-    ),
-    (
-        "b3_perc_decay_slow",
-        Section::Sound,
-        "Percussion decay, slow",
-    ),
-    (
-        "b3_perc_volume_normal",
-        Section::Sound,
-        "Percussion volume, normal",
-    ),
-    (
-        "b3_perc_volume_soft",
-        Section::Sound,
-        "Percussion volume, soft",
-    ),
-    ("b3_tonewheel_mode", Section::Sound, "Tonewheel mode"),
-    (
-        "piano_string_resonance",
-        Section::Sound,
-        "Piano string resonance (dB)",
-    ),
-    ("rotary_balance", Section::Sound, "Bass / horn balance"),
-    (
-        "rotary_horn_acceleration",
-        Section::Sound,
-        "Horn acceleration",
-    ),
-    ("rotary_horn_speed", Section::Sound, "Horn speed"),
-    (
-        "rotary_rotor_acceleration",
-        Section::Sound,
-        "Rotor acceleration",
-    ),
-    ("rotary_rotor_speed", Section::Sound, "Rotor speed"),
-    ("rotary_speaker_type", Section::Sound, "Rotary speaker"),
-    ("startup_live_mode", Section::Startup, "Start in Live mode"),
-    ("startup_live_slot", Section::Startup, "Live slot"),
-    ("startup_program", Section::Startup, "Program"),
-    (
-        "startup_set_list_mode",
         Section::Startup,
-        "Start in Set List mode",
+        &[
+            ("startup_live_mode", "Start in Live mode"),
+            ("startup_live_slot", "Live slot"),
+            ("startup_program", "Program"),
+            ("startup_set_list_mode", "Start in Set List mode"),
+            ("startup_song", "Set list song"),
+        ],
     ),
-    ("startup_song", Section::Startup, "Set list song"),
 ];
 
-fn entry(path: &str) -> Option<&'static (&'static str, Section, &'static str)> {
-    FIELDS.iter().find(|(known, _, _)| *known == path)
+fn entry(path: &str) -> Option<(Section, &'static str)> {
+    FIELDS.iter().find_map(|(section, fields)| {
+        fields
+            .iter()
+            .find(|(known, _)| *known == path)
+            .map(|(_, label)| (*section, *label))
+    })
 }
 
 /// What a field is called.
@@ -416,15 +279,15 @@ fn entry(path: &str) -> Option<&'static (&'static str, Section, &'static str)> {
 /// An unmapped path falls back to its last segment with underscores replaced by spaces,
 /// so a field missing from the table still appears under a rough label.
 pub fn label(path: &str) -> String {
-    if let Some((_, _, label)) = entry(path) {
-        return (*label).to_string();
+    if let Some((_, label)) = entry(path) {
+        return label.to_string();
     }
     prettify(path)
 }
 
 /// Which part of the document a field belongs in.
 pub fn section(path: &str) -> Section {
-    entry(path).map_or(Section::Other, |(_, section, _)| *section)
+    entry(path).map_or(Section::Other, |(section, _)| section)
 }
 
 /// Whether the table maps this path, which tells a real label from a fallback.
@@ -719,10 +582,37 @@ pub fn kind_word(kind: Kind, family: Option<Family>) -> String {
     }
 }
 
+/// `n` and the noun phrase for that many: `1 file`, `0 files`, `2 files`.
+pub fn counted(n: usize, one: &str, many: &str) -> String {
+    match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    }
+}
+
+/// Words joined as a sentence lists them: `A`, `A and B`, `A, B and C`.
+pub fn listed<S: Borrow<str>>(words: &[S]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.borrow().to_string(),
+        [head @ .., last] => format!("{} and {}", head.join(", "), last.borrow()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_list_reads_as_a_sentence_would_name_it() {
+        assert_eq!(listed::<&str>(&[]), "");
+        assert_eq!(listed(&["Vox"]), "Vox");
+        assert_eq!(listed(&["Vox", "Farfisa"]), "Vox and Farfisa");
+        assert_eq!(listed(&["Vox", "Farfisa", "Pipe"]), "Vox, Farfisa and Pipe");
+        let owned = ["soft layer".to_string(), "release samples".to_string()];
+        assert_eq!(listed(&owned), "soft layer and release samples");
+    }
 
     #[test]
     fn an_unmapped_path_falls_back_to_a_prettified_leaf() {
@@ -736,8 +626,10 @@ mod tests {
     #[test]
     fn no_path_is_listed_twice() {
         let mut seen = HashSet::new();
-        for (path, _, _) in FIELDS {
-            assert!(seen.insert(*path), "{path} is in the table twice");
+        for (_, fields) in FIELDS {
+            for (path, _) in *fields {
+                assert!(seen.insert(*path), "{path} is in the table twice");
+            }
         }
     }
 
@@ -748,28 +640,27 @@ mod tests {
     fn no_two_fields_of_one_document_answer_to_one_label() {
         for settings in [false, true] {
             let mut seen = HashSet::new();
-            for (path, section, label) in FIELDS {
+            for (section, fields) in FIELDS {
                 if SETTINGS_SECTIONS.contains(section) != settings {
                     continue;
                 }
-                assert!(
-                    seen.insert(*label),
-                    "{path} and another field are both “{label}”"
-                );
+                for (path, label) in *fields {
+                    assert!(
+                        seen.insert(*label),
+                        "{path} and another field are both “{label}”"
+                    );
+                }
             }
         }
     }
 
     #[test]
     fn the_table_is_alphabetical_within_each_section() {
-        let mut previous: Option<(Section, &str)> = None;
-        for (path, section, _) in FIELDS {
-            if let Some((before, was)) = previous {
-                if before == *section {
-                    assert!(was < *path, "{was} is listed before {path}");
-                }
+        for (_, fields) in FIELDS {
+            for pair in fields.windows(2) {
+                let (was, path) = (pair[0].0, pair[1].0);
+                assert!(was < path, "{was} is listed before {path}");
             }
-            previous = Some((*section, path));
         }
     }
 
@@ -828,5 +719,12 @@ mod tests {
         assert_eq!(place(ObjectClass::Program, at), "Programs 7:4");
         assert_eq!(shown(at), "7:4");
         assert_eq!(folder(ObjectClass::Unknown(9)), "Other");
+    }
+
+    #[test]
+    fn only_one_of_a_thing_is_singular() {
+        assert_eq!(counted(1, "file", "files"), "1 file");
+        assert_eq!(counted(0, "file", "files"), "0 files");
+        assert_eq!(counted(2, "entry", "entries"), "2 entries");
     }
 }

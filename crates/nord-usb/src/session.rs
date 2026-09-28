@@ -121,12 +121,10 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     }
 
     async fn open_class(&mut self, class: ObjectClass) -> Result<()> {
-        self.request(
-            Service::Program,
-            10,
+        self.request(&Message::program(
             cmd::SESSION_OPEN,
-            &class.to_raw().to_be_bytes(),
-        )
+            class.to_raw().to_be_bytes(),
+        ))
         .await
         .map(|_| ())
     }
@@ -137,8 +135,8 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     /// refusing. Confirmed on hardware. An instrument that answers `0x12` to everything
     /// recovers immediately afterward.
     async fn discard_stale_session(&mut self) -> Result<()> {
-        let close = Message::new(Service::Program, 10, cmd::SESSION_CLOSE, Vec::new());
-        self.notify(&close).await?;
+        self.notify(&Message::program(cmd::SESSION_CLOSE, Vec::new()))
+            .await?;
         // The reply is ignored, but it must be read or it would be taken as the answer
         // to the next request.
         let _ = self.read_frame().await?;
@@ -188,11 +186,8 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// `Ok(None)` means the limit passed with nothing read. The transport has already
     /// canceled the outstanding transfer by then, so the session is still in step.
     async fn read_frame(&mut self) -> Result<Option<Message>> {
-        self.read_frame_with_limit(self.read_limit).await
-    }
-
-    async fn read_frame_with_limit(&mut self, limit: Duration) -> Result<Option<Message>> {
-        self.read_frame_as(limit, Message::decode_response).await
+        self.read_frame_as(self.read_limit, Message::decode_response)
+            .await
     }
 
     async fn read_frame_as(
@@ -249,7 +244,7 @@ impl<T: Transport, C> Session<'_, T, C> {
 
         let mut drained = 0;
         loop {
-            let Some(resp) = self.read_probe_frame_with_limit(limit).await? else {
+            let Some(resp) = self.read_frame_as(limit, Message::decode_probe).await? else {
                 return Ok(None);
             };
             if resp.command == cmd::CHANGED && resp.command != response && drained < DRAIN_CAP {
@@ -261,21 +256,10 @@ impl<T: Transport, C> Session<'_, T, C> {
         }
     }
 
-    async fn read_probe_frame_with_limit(&mut self, limit: Duration) -> Result<Option<Message>> {
-        self.read_frame_as(limit, Message::decode_probe).await
-    }
-
     /// Send one request and read its response through [`Self::response_to`].
-    pub(crate) async fn request(
-        &mut self,
-        service: Service,
-        subsystem: u32,
-        command: u32,
-        args: &[u8],
-    ) -> Result<Message> {
-        let req = Message::new(service, subsystem, command, args.to_vec());
-        self.notify(&req).await?;
-        self.response_to(command).await
+    pub(crate) async fn request(&mut self, msg: &Message) -> Result<Message> {
+        self.notify(msg).await?;
+        self.response_to(msg.command).await
     }
 
     /// Read the reply to `command`, enforcing the framing invariants: it must carry
@@ -392,20 +376,14 @@ impl<T: Transport, C> Session<'_, T, C> {
         }
         // Mark first so a failed close surfaces as `Err` instead of a Drop assertion.
         self.closed = true;
-        if let Err(e) = self
-            .request(Service::Program, 10, cmd::SESSION_CLOSE, &[])
-            .await
-        {
-            // ⚠️ A refused close must still say GOODBYE; its failure does not replace
-            // the class-close error.
-            let _ = self
-                .request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
-                .await;
-            return Err(e);
-        }
-        self.request(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, &[])
-            .await?;
-        Ok(())
+        let closed = self
+            .request(&Message::program(cmd::SESSION_CLOSE, Vec::new()))
+            .await;
+        // ⚠️ A refused close must still say GOODBYE; its failure does not replace the
+        // class-close error.
+        let goodbye = Message::new(Service::Ui, ui::SUBSYSTEM, ui::GOODBYE, Vec::new());
+        let said_goodbye = self.request(&goodbye).await;
+        closed.and(said_goodbye).map(|_| ())
     }
 
     /// Commit with a bounded close for exploratory probes.

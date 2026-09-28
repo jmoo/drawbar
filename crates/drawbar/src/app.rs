@@ -68,14 +68,10 @@ pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
 ///
 /// Both themes share it: a key is the same color in either theme, and the stops are the
 /// instrument's own plastic, not part of the app's styling.
-pub fn stop_white(_visuals: &egui::Visuals) -> egui::Color32 {
-    egui::Color32::from_rgb(0xd8, 0xd6, 0xd0)
-}
+pub const STOP_WHITE: egui::Color32 = egui::Color32::from_rgb(0xd8, 0xd6, 0xd0);
 
 /// The ebony of a black key or a mutation drawbar stop.
-pub fn stop_black(_visuals: &egui::Visuals) -> egui::Color32 {
-    egui::Color32::from_rgb(0x2a, 0x2a, 0x2e)
-}
+pub const STOP_BLACK: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x2a, 0x2e);
 
 /// The persisted theme choice. `System` follows the host preference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -451,8 +447,7 @@ impl DrawbarApp {
             .show(ctx, |ui| {
                 self.tabs.ui(ui, &self.workspace, acts);
                 match self.tabs.showing() {
-                    // The center shows the library when no tab claims it.
-                    None | Some(Spot::Library) => {
+                    Spot::Library => {
                         self.document.leave();
                         acts.extend(self.library.ui(
                             ui,
@@ -463,7 +458,7 @@ impl DrawbarApp {
                             &self.shell,
                         ));
                     }
-                    Some(Spot::Keyboard) => {
+                    Spot::Keyboard => {
                         self.document.leave();
                         acts.extend(self.keyboard.ui(
                             ui,
@@ -474,7 +469,7 @@ impl DrawbarApp {
                             &self.tabs,
                         ));
                     }
-                    Some(Spot::Document(id)) => self.open_document(ui, id, played, acts),
+                    Spot::Document(id) => self.open_document(ui, id, played, acts),
                 }
             });
     }

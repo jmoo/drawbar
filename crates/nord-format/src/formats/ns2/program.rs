@@ -18,7 +18,7 @@
 //! Values are raw except where the documentation enumerates them.
 
 use super::slot::Slot;
-use crate::cbin::{self, Cbin};
+use crate::cbin::Cbin;
 use crate::components::{
     Level, MasterTempo, MorphOf, ReverbType, RotorSpeed, Selector, SplitNote, StageTranspose,
 };
@@ -40,6 +40,9 @@ pub const BODY_LEN: usize = 521;
 /// re-encode. Placements come from the community byte maps, and values are raw except
 /// where those maps enumerate them. Inferred from specimens; not confirmed on
 /// hardware.
+///
+/// The header's [`slot`](crate::cbin::Header::slot) holds bank 0..=3 and location
+/// 0..=99 on current exports. A read does not validate it.
 #[nord_bits_derive::bitbody(521)]
 pub struct Program {
     #[bits(16..=17)]
@@ -126,17 +129,8 @@ impl Program {
     }
 }
 
-/// The `(bank, location)` pair from the header, uninterpreted: bank 0..=3,
-/// location 0..=99 on current exports. Not validated; see
-/// [`crate::formats::ns3::program::location`] on out-of-range locations in old files.
-pub fn location(file: &Cbin<Program>) -> (u16, u16) {
-    file.header.slot()
-}
-
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Program>, Error> {
-    let file: Cbin<Program> = cbin::read(reader, FORMAT)?;
-    crate::formats::known_version(FORMAT, file.header.version, KNOWN_VERSIONS)?;
-    Ok(file)
+    crate::formats::read_known(reader, FORMAT, KNOWN_VERSIONS)
 }
 
 /// The Stage 2's octave shift: a nibble biased by 7.

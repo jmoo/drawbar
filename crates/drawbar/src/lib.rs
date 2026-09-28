@@ -15,6 +15,8 @@ pub mod filter;
 pub mod folders;
 pub mod icon;
 pub mod inspector;
+#[cfg(target_arch = "wasm32")]
+mod js;
 pub mod keyboard;
 pub mod knob;
 pub mod led;
