@@ -36,11 +36,13 @@ impl Temp {
         self.0.join(path)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read(&self, path: &str) -> Vec<u8> {
         fs::read(self.at(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 
     /// The names in one folder, sorted.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn names(&self, dir: &str) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.at(dir))
             .unwrap_or_else(|e| panic!("{dir}: {e}"))

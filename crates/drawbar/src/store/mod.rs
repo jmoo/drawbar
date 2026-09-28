@@ -388,5 +388,6 @@ pub fn leave_behind(storage: &mut dyn eframe::Storage) {
     }
 }
 
-#[cfg(test)]
+// The tests run the desktop's backend over folders on disk.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

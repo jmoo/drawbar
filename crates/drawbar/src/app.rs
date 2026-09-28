@@ -909,6 +909,7 @@ mod tests {
     }
 
     /// The app over a library in `root`, once it has opened.
+    #[cfg(not(target_arch = "wasm32"))]
     fn opened_over(root: &crate::testing::Temp) -> (egui::Context, DrawbarApp) {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
@@ -930,6 +931,7 @@ mod tests {
         panic!("the library did not open");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn frame(ctx: &egui::Context, app: &mut DrawbarApp) {
         use eframe::App as _;
 
@@ -943,6 +945,7 @@ mod tests {
 
     /// End to end through the app's own frames: New makes a file, quitting writes the
     /// index, and the next run finds the asset where it was left.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn what_is_made_in_one_run_is_a_file_the_next_run_opens() {
         use eframe::App as _;
@@ -972,6 +975,7 @@ mod tests {
     }
 
     /// Run frames until the library just asked for has opened.
+    #[cfg(not(target_arch = "wasm32"))]
     fn until_open(ctx: &egui::Context, app: &mut DrawbarApp) {
         for _ in 0..500 {
             frame(ctx, app);
@@ -987,6 +991,7 @@ mod tests {
     /// Switching writes the library open until then, its unsaved edit as a working copy
     /// in its own sidecar, and opening it again brings the edit back. A view of a slot
     /// stays in the window and leaves nothing in the library it was open over.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn switching_libraries_keeps_each_ones_unsaved_edits_in_its_own_folder() {
         let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
