@@ -1,13 +1,18 @@
 //! The browser's library: a folder tree in the origin private file system, which every
-//! browser drawbar runs in keeps for the page and nothing else can see.
+//! browser drawbar runs in keeps for the page and nothing else can see, or a folder on
+//! this computer the user picked, in browsers that let a page open one.
 //!
-//! Reads and folder changes run on the page's one thread. A file is written by
-//! `library-writer.js`, a dedicated worker served beside the page, because the handles
-//! that write in place exist only there: the file is written under `.drawbar/tmp/` in
-//! chunks, flushed, then moved over its path. From the first write the worker also holds
-//! `.drawbar/lock` open, and a second tab that finds it held only reads the library.
+//! Reads and folder changes run on the page's one thread. A file is written under
+//! `.drawbar/tmp/` in chunks, then moved over its path. In the private file system it is
+//! written by `library-writer.js`, a dedicated worker served beside the page, because the
+//! handles that write in place exist only there. From the first write the worker also
+//! holds `.drawbar/lock` open, and a second tab that finds it held only reads the
+//! library. Those handles cannot reach a picked folder, so there the page writes through
+//! a writable stream, and a Web Lock named for the folder keeps a second tab to reading.
 //!
-//! Commands run one at a time in a task of their own, in the order they were sent.
+//! Commands run one at a time in a task of their own, in the order they were sent. A
+//! library let go runs the commands it was sent before it lets go of its lock, and the
+//! next library opens only then.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -23,7 +28,9 @@ use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     File, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
-    FileSystemHandle, FileSystemHandleKind, MessageEvent, StorageManager, Worker,
+    FileSystemGetFileOptions, FileSystemHandle, FileSystemHandleKind,
+    FileSystemHandlePermissionDescriptor, FileSystemPermissionMode, FileSystemWritableFileStream,
+    LockOptions, MessageEvent, StorageManager, Worker,
 };
 
 use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TMP, WORKING};
@@ -41,9 +48,49 @@ const LOCK: &str = ".drawbar/lock";
 /// How much of a file crosses to the writer, or back from a read, at once.
 const CHUNK: usize = 4 * 1024 * 1024;
 
-/// The browser's library has no path a user could open, so there is nothing to find.
-pub fn default_root() -> Option<()> {
-    Some(())
+/// Where a library is in the browser.
+#[derive(Clone, Debug)]
+pub enum Root {
+    /// The browser's own storage for the page, in every browser.
+    Private,
+    /// A folder on this computer the user picked.
+    Picked(Picked),
+}
+
+/// A folder the user picked, and the id drawbar knows it by.
+#[derive(Clone, Debug)]
+pub struct Picked {
+    /// ⚠️ Names the folder's Web Lock, so every tab must know one folder by one id: a
+    /// folder picked again takes the id the recent list already gives it.
+    pub id: u32,
+    pub handle: FileSystemDirectoryHandle,
+}
+
+impl PartialEq for Root {
+    fn eq(&self, other: &Root) -> bool {
+        match (self, other) {
+            (Root::Private, Root::Private) => true,
+            (Root::Picked(a), Root::Picked(b)) => a.id == b.id,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Root {}
+
+impl Root {
+    /// The picked folder's name, or `None` for the browser's own library.
+    pub fn name(&self) -> Option<String> {
+        match self {
+            Root::Private => None,
+            Root::Picked(picked) => Some(picked.handle.name()),
+        }
+    }
+}
+
+/// The library in the browser's own storage, which needs no one to find it.
+pub fn default_root() -> Option<Root> {
+    Some(Root::Private)
 }
 
 /// Commands queued for the task that runs them.
@@ -52,6 +99,23 @@ struct Inbox {
     cmds: VecDeque<Cmd>,
     /// Resolves the promise the task waits on while the queue is empty.
     wake: Option<Function>,
+    /// No command follows those queued; the task ends once they have run.
+    closed: bool,
+}
+
+impl Inbox {
+    fn wake(inbox: &RefCell<Inbox>) {
+        let wake = inbox.borrow_mut().wake.take();
+        if let Some(wake) = wake {
+            let _ = wake.call0(&JsValue::NULL);
+        }
+    }
+}
+
+thread_local! {
+    /// Settles once the library started last has run its last command and let go of its
+    /// lock.
+    static LET_GO: RefCell<Option<Promise>> = const { RefCell::new(None) };
 }
 
 /// What the browser says about keeping drawbar's files.
@@ -64,37 +128,63 @@ struct Room {
 }
 
 pub struct Backend {
+    root: Root,
     inbox: Rc<RefCell<Inbox>>,
     events: Rc<RefCell<VecDeque<Event>>>,
     room: Rc<RefCell<Room>>,
 }
 
 impl Backend {
-    pub fn start(ctx: &egui::Context, _root: ()) -> Backend {
+    /// Open the library at `root` once the one started before it has let go.
+    pub fn start(ctx: &egui::Context, root: Root) -> Backend {
         let backend = Backend {
+            root: root.clone(),
             inbox: Rc::default(),
             events: Rc::default(),
             room: Rc::default(),
         };
-        spawn_local(drive(
+        let mut done = None;
+        let let_go = Promise::new(&mut |resolve, _| done = Some(resolve));
+        let before = LET_GO.with(|held| held.replace(Some(let_go)));
+        let (inbox, events, room) = (
             backend.inbox.clone(),
             backend.events.clone(),
             backend.room.clone(),
-            ctx.clone(),
-        ));
+        );
+        let ctx = ctx.clone();
+        spawn_local(async move {
+            if let Some(before) = before {
+                let _ = JsFuture::from(before).await;
+            }
+            drive(root, inbox, events, room, ctx).await;
+            if let Some(done) = done {
+                let _ = done.call0(&JsValue::NULL);
+            }
+        });
         backend
     }
 
+    pub fn root(&self) -> &Root {
+        &self.root
+    }
+
     pub fn label(&self) -> String {
-        "this browser".to_string()
+        match &self.root {
+            Root::Private => "this browser".to_string(),
+            Root::Picked(picked) => format!("the folder {} on this computer", picked.handle.name()),
+        }
     }
 
     pub fn reveal(&self) -> Option<String> {
         None
     }
 
-    /// How much of the browser's storage drawbar takes, and whether it is kept.
+    /// How much of the browser's storage drawbar takes, and whether it is kept. Empty
+    /// for a picked folder, which is not the browser's to keep.
     pub fn room(&self) -> String {
+        if matches!(self.root, Root::Picked(_)) {
+            return String::new();
+        }
         let room = self.room.borrow();
         let used = room
             .used
@@ -111,14 +201,8 @@ impl Backend {
     }
 
     pub fn send(&mut self, cmd: Cmd) {
-        let wake = {
-            let mut inbox = self.inbox.borrow_mut();
-            inbox.cmds.push_back(cmd);
-            inbox.wake.take()
-        };
-        if let Some(wake) = wake {
-            let _ = wake.call0(&JsValue::NULL);
-        }
+        self.inbox.borrow_mut().cmds.push_back(cmd);
+        Inbox::wake(&self.inbox);
     }
 
     pub fn try_recv(&mut self) -> Option<Event> {
@@ -130,19 +214,30 @@ impl Backend {
         self.try_recv()
     }
 
-    pub fn finish(&mut self) {}
+    /// Run every command already sent, then let the library go. The page cannot wait,
+    /// so they run after this returns, and nothing hears their answers.
+    pub fn finish(&mut self) {
+        self.inbox.borrow_mut().closed = true;
+        Inbox::wake(&self.inbox);
+    }
 }
 
-/// Run each command as it arrives, for as long as the page lives.
+impl Drop for Backend {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Run each command as it arrives, until the backend is finished.
 async fn drive(
+    root: Root,
     inbox: Rc<RefCell<Inbox>>,
     events: Rc<RefCell<VecDeque<Event>>>,
     room: Rc<RefCell<Room>>,
     ctx: egui::Context,
 ) {
-    let mut fs = Opfs::open(room.clone()).await;
-    loop {
-        let cmd = next(&inbox).await;
+    let mut fs = Folder::open(root, room.clone()).await;
+    while let Some(cmd) = next(&inbox).await {
         let event = match &mut fs {
             Ok(fs) => exec::run(fs, cmd).await,
             Err(why) => Some(refused(cmd, why)),
@@ -157,11 +252,18 @@ async fn drive(
     }
 }
 
-/// The next command, waiting for one while there is none.
-async fn next(inbox: &Rc<RefCell<Inbox>>) -> Cmd {
+/// The next command, waiting for one while there is none, or `None` once the backend
+/// is finished and none is left.
+async fn next(inbox: &Rc<RefCell<Inbox>>) -> Option<Cmd> {
     loop {
-        if let Some(cmd) = inbox.borrow_mut().cmds.pop_front() {
-            return cmd;
+        {
+            let mut held = inbox.borrow_mut();
+            if let Some(cmd) = held.cmds.pop_front() {
+                return Some(cmd);
+            }
+            if held.closed {
+                return None;
+            }
         }
         let arrives = Promise::new(&mut |resolve, _| inbox.borrow_mut().wake = Some(resolve));
         let _ = JsFuture::from(arrives).await;
@@ -356,13 +458,108 @@ impl Writer {
             &text("message").unwrap_or_default(),
         ))
     }
+
+    /// Write `bytes` to a new file at `temp`, flushed, in chunks. A file begun and not
+    /// finished is deleted.
+    async fn write(&self, temp: &str, bytes: &[u8]) -> io::Result<()> {
+        let wrote = async {
+            self.ask("begin", temp, &[]).await?;
+            for (n, chunk) in bytes.chunks(CHUNK).enumerate() {
+                let data = Uint8Array::new_with_length(chunk.len() as u32);
+                data.copy_from(chunk);
+                let at = (n * CHUNK) as f64;
+                self.ask(
+                    "write",
+                    temp,
+                    &[("at", at.into()), ("data", data.buffer().into())],
+                )
+                .await?;
+            }
+            self.ask("end", temp, &[]).await
+        }
+        .await;
+        if wrote.is_err() {
+            let _ = self.ask("abandon", temp, &[]).await;
+        }
+        wrote.map(|_| ())
+    }
 }
 
-/// A library rooted in the origin private file system.
-struct Opfs {
+/// The writer, started if it has not been.
+fn started(writer: &mut Option<Writer>) -> io::Result<&Writer> {
+    if writer.is_none() {
+        *writer = Some(Writer::start()?);
+    }
+    Ok(writer.as_ref().expect("started above"))
+}
+
+impl Drop for Writer {
+    /// Stopping the worker closes its handles, the lock's among them.
+    fn drop(&mut self) {
+        self.worker.terminate();
+    }
+}
+
+/// The Web Lock held while this tab writes a picked folder. Letting go of it releases
+/// the lock.
+struct Held(Function);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.0.call0(&JsValue::NULL);
+    }
+}
+
+/// Take the Web Lock `name` if no other tab of this site holds it, and hold it until the
+/// answer is dropped. `None` when another tab holds it.
+async fn hold(name: &str) -> io::Result<Option<Held>> {
+    let navigator = web_sys::window()
+        .ok_or_else(|| io::Error::other("the page has no window"))?
+        .navigator();
+    if field(&navigator, "locks").is_none() {
+        return Err(io::Error::other("this browser cannot lock a folder"));
+    }
+    let mut answer = None;
+    let answered = Promise::new(&mut |resolve, _| answer = Some(resolve));
+    let answer = answer.expect("a promise runs its executor at once");
+    let granted = Closure::once_into_js(move |lock: JsValue| -> Promise {
+        if lock.is_null() {
+            let _ = answer.call1(&JsValue::NULL, &JsValue::FALSE);
+            return Promise::resolve(&JsValue::UNDEFINED);
+        }
+        let mut release = None;
+        let holding = Promise::new(&mut |resolve, _| release = Some(resolve));
+        let _ = answer.call1(&JsValue::NULL, &release.into());
+        holding
+    });
+    let options = LockOptions::new();
+    options.set_if_available(true);
+    // Settles only once the lock is let go, or at once when the request is refused.
+    let requested = navigator.locks().request_with_options_and_callback(
+        name,
+        &options,
+        granted.unchecked_ref(),
+    );
+    let first = Promise::race(&Array::of2(&answered, &requested));
+    let answer = JsFuture::from(first).await.map_err(failed)?;
+    Ok(answer.dyn_into::<Function>().ok().map(Held))
+}
+
+/// How a library's files are written, and how a second tab is kept to reading it.
+enum Writes {
+    /// Through `library-writer.js`, which holds `.drawbar/lock`. The origin private file
+    /// system only. Started with the first write, since a library only read needs none.
+    Worker(Option<Writer>),
+    /// Through a writable stream on the page, for a picked folder, under the Web Lock
+    /// named `lock` while `held`.
+    Streams { lock: String, held: Option<Held> },
+}
+
+/// A library's folder: the origin private file system's root, or a folder the user
+/// picked.
+struct Folder {
     root: FileSystemDirectoryHandle,
-    /// Started with the first write, since a library only read needs none.
-    writer: Option<Writer>,
+    writes: Writes,
     /// `.drawbar/` and its folders have been made, once, for this page.
     prepared: bool,
     /// Names the next temporary file under `.drawbar/tmp/`.
@@ -375,25 +572,38 @@ struct Opfs {
 /// A folder of the library and the name of one entry in it.
 type Spot = (FileSystemDirectoryHandle, String);
 
-impl Opfs {
-    /// The private root, or why this browser gives the page none. Some private windows
-    /// refuse it.
-    async fn open(room: Rc<RefCell<Room>>) -> Result<Opfs, String> {
-        let unkept = |why: String| format!("this browser gives drawbar no storage here: {why}");
-        let storage = storage()
-            .filter(|storage| field(storage, "getDirectory").is_some())
-            .ok_or_else(|| unkept("it has no origin private file system".to_string()))?;
-        let root = settle(storage.get_directory())
-            .await
-            .map_err(|e| unkept(e.to_string()))?;
-        Ok(Opfs {
+impl Folder {
+    /// The folder at `root`, or why this browser gives the page no storage. Some private
+    /// windows refuse it.
+    async fn open(root: Root, room: Rc<RefCell<Room>>) -> Result<Folder, String> {
+        let (root, writes) = match root {
+            Root::Private => (Folder::private().await?, Writes::Worker(None)),
+            Root::Picked(picked) => (
+                picked.handle,
+                Writes::Streams {
+                    lock: format!("drawbar library {}", picked.id),
+                    held: None,
+                },
+            ),
+        };
+        Ok(Folder {
             root,
-            writer: None,
+            writes,
             prepared: false,
             temps: 0,
             room,
             asked: false,
         })
+    }
+
+    async fn private() -> Result<FileSystemDirectoryHandle, String> {
+        let unkept = |why: String| format!("this browser gives drawbar no storage here: {why}");
+        let storage = storage()
+            .filter(|storage| field(storage, "getDirectory").is_some())
+            .ok_or_else(|| unkept("it has no origin private file system".to_string()))?;
+        settle(storage.get_directory())
+            .await
+            .map_err(|e| unkept(e.to_string()))
     }
 
     /// The folder at `path`, made where missing when `create` is set.
@@ -429,48 +639,58 @@ impl Opfs {
         }
     }
 
-    fn writer(&mut self) -> io::Result<&Writer> {
-        if self.writer.is_none() {
-            self.writer = Some(Writer::start()?);
-        }
-        Ok(self.writer.as_ref().expect("started above"))
-    }
-
     /// Write `bytes` to a new file under `.drawbar/tmp/`, flushed, and return its path.
-    async fn stage(&mut self, bytes: &[u8]) -> io::Result<String> {
-        if !std::mem::replace(&mut self.asked, true) {
+    ///
+    /// The file takes `path`'s extension: Chrome reads a file moved to a new extension
+    /// whole, for a Safe Browsing check, before it lets the move land.
+    async fn stage(&mut self, path: &str, bytes: &[u8]) -> io::Result<String> {
+        let extension = path
+            .rsplit('/')
+            .next()
+            .and_then(|leaf| leaf.rsplit_once('.'))
+            .map_or(String::new(), |(_, extension)| format!(".{extension}"));
+        let temp = format!("{TMP}/{}{extension}", self.temps);
+        self.temps += 1;
+        let private = matches!(self.writes, Writes::Worker(_));
+        if private && !std::mem::replace(&mut self.asked, true) {
             ask_to_keep(self.room.clone());
         }
-        let temp = format!("{TMP}/{}", self.temps);
-        self.temps += 1;
-        let writer = self.writer()?;
+        let wrote = match &mut self.writes {
+            Writes::Worker(writer) => started(writer)?.write(&temp, bytes).await,
+            Writes::Streams { .. } => self.stream(&temp, bytes).await,
+        };
+        match wrote {
+            Ok(()) => Ok(temp),
+            Err(e) if private && e.kind() == io::ErrorKind::StorageFull => Err(self.full().await),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Write `bytes` to a new file at `temp` through a writable stream, which the browser
+    /// applies to the file only as it closes.
+    async fn stream(&self, temp: &str, bytes: &[u8]) -> io::Result<()> {
+        let (dir, leaf) = self.spot(temp).await?;
+        let options = FileSystemGetFileOptions::new();
+        options.set_create(true);
+        let file: FileSystemFileHandle =
+            settle(dir.get_file_handle_with_options(&leaf, &options)).await?;
+        let stream: FileSystemWritableFileStream = settle(file.create_writable()).await?;
         let wrote = async {
-            writer.ask("begin", &temp, &[]).await?;
-            for (n, chunk) in bytes.chunks(CHUNK).enumerate() {
+            for chunk in bytes.chunks(CHUNK) {
                 let data = Uint8Array::new_with_length(chunk.len() as u32);
                 data.copy_from(chunk);
-                let at = (n * CHUNK) as f64;
-                writer
-                    .ask(
-                        "write",
-                        &temp,
-                        &[("at", at.into()), ("data", data.buffer().into())],
-                    )
-                    .await?;
+                let writing = stream.write_with_buffer_source(&data).map_err(failed)?;
+                JsFuture::from(writing).await.map_err(failed)?;
             }
-            writer.ask("end", &temp, &[]).await
+            JsFuture::from(stream.close()).await.map_err(failed)
         }
         .await;
-        match wrote {
-            Ok(_) => Ok(temp),
-            Err(e) => {
-                let _ = writer.ask("abandon", &temp, &[]).await;
-                Err(match e.kind() {
-                    io::ErrorKind::StorageFull => self.full().await,
-                    _ => e,
-                })
-            }
+        if let Err(e) = wrote {
+            let _ = JsFuture::from(stream.abort()).await;
+            let _ = JsFuture::from(dir.remove_entry(&leaf)).await;
+            return Err(e);
         }
+        Ok(())
     }
 
     /// Why a write that ran out of room failed, in the terms the user can act on.
@@ -559,6 +779,23 @@ async fn snapshot(handle: &FileSystemFileHandle) -> io::Result<File> {
     settle(handle.get_file()).await
 }
 
+/// Whether the page may read and write the folder at `dir`, asking the user when `ask`
+/// is set and the browser has not said.
+///
+/// ⚠️ Asking needs a click the user has just made.
+pub async fn permission(dir: &FileSystemDirectoryHandle, ask: bool) -> io::Result<bool> {
+    let descriptor = FileSystemHandlePermissionDescriptor::new();
+    descriptor.set_mode(FileSystemPermissionMode::Readwrite);
+    let state = match ask {
+        false => dir.query_permission_with_descriptor(&descriptor),
+        true => dir.request_permission_with_descriptor(&descriptor),
+    };
+    let state = JsFuture::from(state.unchecked_into::<Promise>())
+        .await
+        .map_err(failed)?;
+    Ok(state.as_string().as_deref() == Some("granted"))
+}
+
 /// Move everything in `from` into a folder `name` of `into`, file by file, and remove
 /// each folder it empties. For browsers that cannot move a folder whole.
 fn move_tree<'a>(
@@ -586,7 +823,7 @@ fn move_tree<'a>(
     })
 }
 
-impl Fs for Opfs {
+impl Fs for Folder {
     async fn prepare(&mut self) -> io::Result<()> {
         if self.prepared {
             return Ok(());
@@ -594,14 +831,39 @@ impl Fs for Opfs {
         for dir in [TMP, WORKING] {
             self.dir(dir, true).await?;
         }
-        self.writer()?;
+        if let Writes::Worker(writer) = &mut self.writes {
+            started(writer)?;
+        }
         self.prepared = true;
         Ok(())
     }
 
     async fn lock(&mut self) -> io::Result<bool> {
-        let held = self.writer()?.ask("lock", LOCK, &[]).await?;
-        Ok(held.as_bool() == Some(true))
+        match &mut self.writes {
+            Writes::Worker(writer) => {
+                let held = started(writer)?.ask("lock", LOCK, &[]).await?;
+                Ok(held.as_bool() == Some(true))
+            }
+            Writes::Streams { held: Some(_), .. } => Ok(true),
+            Writes::Streams { lock, held } => {
+                *held = hold(lock).await?;
+                Ok(held.is_some())
+            }
+        }
+    }
+
+    /// A picked folder is written only while the browser lets the page write it.
+    async fn probe(&mut self) -> io::Result<()> {
+        if matches!(self.writes, Writes::Worker(_)) {
+            return Ok(());
+        }
+        match permission(&self.root, false).await? {
+            true => Ok(()),
+            false => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "this browser does not let drawbar write to the folder",
+            )),
+        }
     }
 
     /// Breadth first, so the top of a large tree is listed before the bound is reached.
@@ -710,18 +972,19 @@ impl Fs for Opfs {
         }
     }
 
-    /// ⚠️ The check and the move are two steps. Nothing else writes between them,
-    /// because this tab holds the library's lock.
+    /// ⚠️ The check and the move are two steps. No other drawbar writes between them,
+    /// because this tab holds the library's lock, but in a picked folder another program
+    /// may, and the move replaces what it wrote.
     async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         if self.stat(path).await?.is_some() {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        let temp = self.stage(bytes).await?;
+        let temp = self.stage(path, bytes).await?;
         self.place(&temp, path).await
     }
 
     async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let temp = self.stage(bytes).await?;
+        let temp = self.stage(path, bytes).await?;
         self.place(&temp, path).await
     }
 

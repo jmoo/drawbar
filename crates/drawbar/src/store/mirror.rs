@@ -132,6 +132,18 @@ impl Store {
         self.backend.root()
     }
 
+    /// Where the library is.
+    #[cfg(target_arch = "wasm32")]
+    pub fn root(&self) -> &super::Root {
+        self.backend.root()
+    }
+
+    /// Whether no save or rescan waits for its answer, so a library whose answers cannot
+    /// be waited for can be let go without losing one.
+    pub fn settled(&self) -> bool {
+        !self.scanning && !self.records.values().any(|record| record.saving)
+    }
+
     /// Where the library is, as the user would look for it.
     pub fn label(&self) -> String {
         self.backend.label()

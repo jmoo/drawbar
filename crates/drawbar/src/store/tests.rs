@@ -236,6 +236,49 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
     assert_eq!(root.read("untitled.ne5p"), edited);
 }
 
+/// A browser cannot wait for its library's answers, so it lets a library go only once it
+/// is settled, after one last pass whose answers nothing reads.
+#[test]
+fn a_settled_library_let_go_without_waiting_keeps_its_save_and_its_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, queue, Pass::Files));
+    assert!(!session.store.settled(), "the first write is in flight");
+    while !session.store.settled() {
+        assert!(session.next(), "the first write answered");
+    }
+    let saved = with_gain(&session.bytes(id), "96");
+    let edited = with_gain(&saved, "12");
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, edited.clone(), log);
+    assert!(
+        session.store.sync(workspace, browser, queue, Pass::Last),
+        "nothing waits"
+    );
+    drop(session);
+    assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, edited, "the edit came back");
+    assert!(entity.is_unsaved());
+}
+
 #[test]
 fn a_file_renamed_outside_keeps_its_id_and_tags() {
     let root = Temp::new();

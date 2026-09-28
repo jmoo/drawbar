@@ -38,7 +38,11 @@ pub use native::{default_root, Backend};
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-pub use web::{default_root, Backend};
+pub use web::{default_root, permission, Backend, Picked, Root};
+
+/// Where a library is: a folder on the desktop.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Root = std::path::PathBuf;
 
 pub use exec::{MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
