@@ -14,7 +14,9 @@ files this crate's own writers produced, with sidecars recording what was set.
 The sweep fails unless that tree holds a file of every type the reader
 dispatches. Each specimen is parsed, round-tripped byte for byte, checked for
 unnameable values, and has every registry field set and read back without moving
-another.
+another. A piano library or sample instrument, alone or in a bundle, must also
+index to the bytes a whole read gives each stroke or zone, reading none of the
+audio to find them.
 
 With `--features corpus`, `NORD_CORPUS_ROOT` names a corpus: any tree of Nord
 files. The sweep runs over every file in it the reader recognizes, wherever it

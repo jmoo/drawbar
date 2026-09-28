@@ -11,6 +11,15 @@ survives a round trip even where its meaning is not fully known. Every fixture
 and every file in the private corpus is checked this way, and every editable
 field is set and read back to prove it moves no other bit.
 
+## Large libraries
+
+A piano library or sample instrument can run to hundreds of megabytes, and a
+whole read holds all of it in memory. `npno::Index` and `nsmp::Index` read only a
+file's headers and stroke directory, through `Read` and `Seek`, and give the byte
+range of each stroke's audio. A caller reads one stroke by its range and decodes
+it. The index does not verify the container checksum, which covers every byte;
+`cbin::inspect` checks it in one streaming pass.
+
 ## The support map
 
 The authoritative list is in the `formats` module documentation on
