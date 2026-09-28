@@ -1855,8 +1855,24 @@ impl Workspace {
     pub fn close_library(&mut self) -> Vec<u64> {
         let gone = self.listed().map(|entity| entity.id).collect();
         self.entities.retain(|entity| !entity.kept);
+        self.let_go();
         self.revision += 1;
         gone
+    }
+
+    /// Drop the checks and reads waiting on files no asset is held under, so that their
+    /// handles close.
+    ///
+    /// ⚠️ A check or read already running holds its file until it answers.
+    fn let_go(&mut self) {
+        let entities = &self.entities;
+        let held = |id: u64| entities.iter().any(|entity| entity.id == id);
+        self.checks.retain(|(id, _)| held(*id));
+        self.waking.retain(|wake| held(wake.id));
+        if self.checking.as_ref().is_some_and(|check| !held(check.id)) {
+            self.checking = None;
+        }
+        self.next_check();
     }
 
     /// The next id a new asset would take, for the store to carry over.
@@ -2069,6 +2085,30 @@ mod tests {
 
     fn ingest(name: &str, bytes: Vec<u8>) -> LocalEntity {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes, 0)
+    }
+
+    /// Closing a library lets go of the files its assets rested in, checks still waiting
+    /// their turn included, so no handle to the library it left stays open.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn closing_the_library_lets_go_of_the_files_its_assets_rest_in() {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let mut workspace = Workspace::new(egui::Context::default());
+        let files: Vec<Arc<OnDisk>> = ["First.nsmp", "Second.nsmp", "Third.nsmp"]
+            .into_iter()
+            .map(|name| {
+                let file = crate::testing::on_disk(&dir, name, &bytes);
+                crate::testing::rest(&mut workspace, name, file.clone());
+                file
+            })
+            .collect();
+        let waiting = &files[2];
+        assert!(Arc::strong_count(waiting) > 2, "its check waits its turn");
+
+        workspace.close_library();
+        assert_eq!(workspace.listed().count(), 0);
+        assert_eq!(Arc::strong_count(waiting), 1, "only this test holds it");
     }
 
     /// The number a file and a slot are compared on is the CRC-32 of the wire body, and
