@@ -234,7 +234,6 @@ async fn identify(handle: FileSystemDirectoryHandle, known: Vec<Root>) -> Root {
             });
         }
     }
-    // Random rather than counted: another tab may have kept a list that lost an id.
     let id = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
     Root::Picked(Picked {
         id: id.max(1),
