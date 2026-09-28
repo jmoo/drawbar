@@ -944,6 +944,7 @@ dependencies = [
  "rodio",
  "ron",
  "serde",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

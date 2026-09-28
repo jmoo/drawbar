@@ -51,6 +51,8 @@ nord-usb = { path = "../nord-usb", version = "0.7.1", features = [
 ] }
 # `playback` alone: the decoders are for files, and drawbar feeds it raw samples.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+# The `file:` URL that shows the library's folder. eframe already builds it.
+url = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

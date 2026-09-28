@@ -77,6 +77,11 @@ fn temp_for(path: &str) -> String {
     }
 }
 
+/// A folder as a `file:` URL, or `None` for a path that is not absolute.
+fn folder_url(dir: &Path) -> Option<String> {
+    url::Url::from_directory_path(dir).ok().map(String::from)
+}
+
 /// The thread that owns one library's files.
 pub struct Backend {
     root: PathBuf,
@@ -122,7 +127,7 @@ impl Backend {
 
     /// The URL that shows the library's folder in the system's file manager.
     pub fn reveal(&self) -> Option<String> {
-        Some(format!("file://{}", self.root.display()))
+        folder_url(&self.root)
     }
 
     pub fn send(&mut self, cmd: Cmd) {
@@ -479,6 +484,25 @@ mod tests {
             prepared: false,
             lock: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_url_escapes_what_a_url_would_read_as_its_own() {
+        assert_eq!(
+            folder_url(Path::new("/Users/jo/Music/Jo's #1 kit?/ü")).as_deref(),
+            Some("file:///Users/jo/Music/Jo's%20%231%20kit%3F/%C3%BC/")
+        );
+        assert_eq!(folder_url(Path::new("Music/drawbar")), None, "relative");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_url_on_windows_names_the_drive_and_escapes_the_rest() {
+        assert_eq!(
+            folder_url(Path::new(r"C:\Users\Jo Moore\Music\drawbar")).as_deref(),
+            Some("file:///C:/Users/Jo%20Moore/Music/drawbar/")
+        );
     }
 
     #[test]
