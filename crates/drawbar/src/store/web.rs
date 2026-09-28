@@ -33,7 +33,7 @@ use web_sys::{
     LockOptions, MessageEvent, StorageManager, Worker,
 };
 
-use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TMP, WORKING};
+use super::exec::{self, Children, Fs, Kind, TMP, WORKING};
 use super::{names, Cmd, Event, Failure, Stat};
 use crate::js::{describe, field};
 use crate::room::measure as size;
@@ -858,62 +858,23 @@ impl Fs for Folder {
         }
     }
 
-    /// Breadth first, so the top of a large tree is listed before the bound is reached.
-    async fn list(&self) -> io::Result<Vec<Entry>> {
-        let mut into = Vec::new();
-        let mut looked = 0;
-        let mut folders = VecDeque::from([(self.root.clone(), String::new())]);
-        while let Some((dir, prefix)) = folders.pop_front() {
-            if looked >= MOST_ENTRIES {
-                into.push(Entry {
-                    path: prefix,
-                    kind: Kind::Unwalked,
-                });
-                continue;
-            }
-            let found = match entries(&dir).await {
-                Ok(found) => found,
-                // A folder inside that cannot be read is left unlisted, not the library.
-                Err(_) if !prefix.is_empty() => {
-                    into.push(Entry {
-                        path: prefix,
-                        kind: Kind::Unwalked,
-                    });
-                    continue;
-                }
-                Err(e) => return Err(e),
+    async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+        let found = entries(&self.dir(dir, false).await?).await?;
+        let more = found.len() > room;
+        let mut children = Vec::new();
+        for (name, handle) in found.into_iter().take(room) {
+            let kind = match handle.kind() {
+                FileSystemHandleKind::Directory => Some(Kind::Dir),
+                _ if exec::opens(&name) => match snapshot(handle.unchecked_ref()).await {
+                    Ok(file) => Some(Kind::File(stat(&file))),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                    Err(e) => Some(Kind::Unread(e.to_string())),
+                },
+                _ => Some(Kind::Other),
             };
-            let room = MOST_ENTRIES - looked;
-            if found.len() > room {
-                into.push(Entry {
-                    path: prefix.clone(),
-                    kind: Kind::Unwalked,
-                });
-            }
-            for (name, handle) in found.into_iter().take(room) {
-                looked += 1;
-                let path = match prefix.is_empty() {
-                    true => name.clone(),
-                    false => format!("{prefix}/{name}"),
-                };
-                let kind = match handle.kind() {
-                    FileSystemHandleKind::Directory => {
-                        if !name.starts_with('.') {
-                            folders.push_back((handle.unchecked_into(), path.clone()));
-                        }
-                        Kind::Dir
-                    }
-                    _ if exec::opens(&name) => match snapshot(handle.unchecked_ref()).await {
-                        Ok(file) => Kind::File(stat(&file)),
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(e) => Kind::Unread(e.to_string()),
-                    },
-                    _ => Kind::Other,
-                };
-                into.push(Entry { path, kind });
-            }
+            children.push((name, kind));
         }
-        Ok(into)
+        Ok((children, more))
     }
 
     async fn names(&self, dir: &str) -> io::Result<Vec<String>> {

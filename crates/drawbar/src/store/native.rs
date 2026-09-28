@@ -1,7 +1,6 @@
 //! The desktop backend: a library is a directory, and commands run in order on a thread
 //! of their own.
 
-use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use super::exec::{self, Entry, Fs, Kind, MOST_ENTRIES, TEMP, TMP, WORKING};
+use super::exec::{self, Children, Fs, Kind, TEMP, TMP, WORKING};
 use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
 
@@ -187,56 +186,6 @@ impl Disk {
         Ok(at)
     }
 
-    /// Breadth first, so the top of a large tree is listed before the bound is reached.
-    fn walk(&self) -> io::Result<Vec<Entry>> {
-        let mut entries = Vec::new();
-        let mut looked = 0;
-        let mut folders = VecDeque::from([String::new()]);
-        while let Some(prefix) = folders.pop_front() {
-            if looked >= MOST_ENTRIES {
-                entries.push(Entry {
-                    path: prefix,
-                    kind: Kind::Unwalked,
-                });
-                continue;
-            }
-            let found = match sorted(&self.locate(&prefix)?) {
-                Ok(found) => found,
-                // A folder inside that cannot be read is left unlisted, not the library.
-                Err(_) if !prefix.is_empty() => {
-                    entries.push(Entry {
-                        path: prefix,
-                        kind: Kind::Unwalked,
-                    });
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
-            let room = MOST_ENTRIES - looked;
-            if found.len() > room {
-                entries.push(Entry {
-                    path: prefix.clone(),
-                    kind: Kind::Unwalked,
-                });
-            }
-            for (name, entry) in found.into_iter().take(room) {
-                looked += 1;
-                let path = match prefix.is_empty() {
-                    true => name.clone(),
-                    false => format!("{prefix}/{name}"),
-                };
-                let Some(kind) = kind(&entry, &name) else {
-                    continue;
-                };
-                if matches!(kind, Kind::Dir) && !name.starts_with('.') {
-                    folders.push_back(path.clone());
-                }
-                entries.push(Entry { path, kind });
-            }
-        }
-        Ok(entries)
-    }
-
     /// Write `bytes` to the temporary for `path`, synced to the disk.
     fn stage(&self, path: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         let temp = self.locate(&temp_for(path))?;
@@ -369,12 +318,22 @@ impl Fs for Disk {
         }
     }
 
-    async fn list(&self) -> io::Result<Vec<Entry>> {
-        match self.walk() {
+    async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+        let found = match sorted(&self.locate(dir)?) {
             // The default library is made at its first write.
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.exists() => Ok(Vec::new()),
-            walked => walked,
-        }
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound && dir.is_empty() && !self.root.exists() =>
+            {
+                return Ok((Vec::new(), false));
+            }
+            found => found?,
+        };
+        let more = found.len() > room;
+        let children = found.into_iter().take(room).map(|(name, entry)| {
+            let kind = kind(&entry, &name);
+            (name, kind)
+        });
+        Ok((children.collect(), more))
     }
 
     async fn names(&self, dir: &str) -> io::Result<Vec<String>> {

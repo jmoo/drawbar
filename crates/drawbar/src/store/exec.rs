@@ -6,7 +6,7 @@
 //! flight is either under `.drawbar/tmp/` or a hidden `.<name>.drawbar-tmp` sibling, and
 //! opening the library sweeps both.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::sync::Arc;
 
@@ -68,6 +68,9 @@ pub enum Kind {
     Other,
 }
 
+/// One folder's entries, as [`Fs::children`] gives them, and whether it holds more.
+pub type Children = (Vec<(String, Option<Kind>)>, bool);
+
 /// One entry below a library's root.
 pub struct Entry {
     /// Relative to the root, joined by `/`.
@@ -91,9 +94,10 @@ pub trait Fs {
     async fn probe(&mut self) -> io::Result<()> {
         Ok(())
     }
-    /// Every entry below the root, parents before children, up to [`MOST_ENTRIES`] of
-    /// them. A folder whose name starts with a dot is listed but not entered.
-    async fn list(&self) -> io::Result<Vec<Entry>>;
+    /// The first `room` entries of the folder at `dir`, by name, each with its kind, and
+    /// whether the folder holds more. `None` leaves an entry out of the listing, though it
+    /// still counts toward [`MOST_ENTRIES`]. Never [`Kind::Unwalked`].
+    async fn children(&self, dir: &str, room: usize) -> io::Result<Children>;
     /// The names in one folder.
     async fn names(&self, dir: &str) -> io::Result<Vec<String>>;
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
@@ -318,6 +322,57 @@ async fn sweep(fs: &mut impl Fs, dir: &str, stale: impl Fn(&str) -> bool) -> usi
     swept
 }
 
+/// Every entry below the root, parents before children, up to [`MOST_ENTRIES`] of them.
+/// Breadth first, so the top of a large tree is listed before the bound is reached. A
+/// folder whose name starts with a dot is listed but not entered.
+async fn walk(fs: &impl Fs) -> io::Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    let mut looked = 0;
+    let mut folders = VecDeque::from([String::new()]);
+    while let Some(prefix) = folders.pop_front() {
+        if looked >= MOST_ENTRIES {
+            entries.push(Entry {
+                path: prefix,
+                kind: Kind::Unwalked,
+            });
+            continue;
+        }
+        let (found, more) = match fs.children(&prefix, MOST_ENTRIES - looked).await {
+            Ok(children) => children,
+            // A folder inside that cannot be read is left unlisted, not the library.
+            Err(_) if !prefix.is_empty() => {
+                entries.push(Entry {
+                    path: prefix,
+                    kind: Kind::Unwalked,
+                });
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if more {
+            entries.push(Entry {
+                path: prefix.clone(),
+                kind: Kind::Unwalked,
+            });
+        }
+        for (name, kind) in found {
+            looked += 1;
+            let Some(kind) = kind else {
+                continue;
+            };
+            let path = match prefix.is_empty() {
+                true => name.clone(),
+                false => format!("{prefix}/{name}"),
+            };
+            if matches!(kind, Kind::Dir) && !name.starts_with('.') {
+                folders.push_back(path.clone());
+            }
+            entries.push(Entry { path, kind });
+        }
+    }
+    Ok(entries)
+}
+
 /// The tree, and the temporary siblings interrupted saves left in it.
 ///
 /// Every file in `held` is listed and read, whatever its kind and however far the walk
@@ -339,7 +394,7 @@ async fn listing(
     // Every file, with its `Stat` where the walk took one.
     let mut files: BTreeMap<LibPath, Option<Stat>> = BTreeMap::new();
     let mut unread: BTreeMap<LibPath, String> = BTreeMap::new();
-    for entry in fs.list().await? {
+    for entry in walk(fs).await? {
         let leaf = entry.path.rsplit('/').next().unwrap_or(&entry.path);
         if entry.path.split('/').any(|part| part.starts_with('.')) {
             let file = matches!(entry.kind, Kind::File(_) | Kind::Unread(_) | Kind::Other);
@@ -579,10 +634,22 @@ mod tests {
     use crate::testing::{on_disk, sample_bytes, Temp};
 
     /// A library whose files claim whatever size they are given, without taking it. The
-    /// ones in `rests` are left in place, as the desktop leaves a sample instrument.
+    /// ones in `rests` are left in place, as the desktop leaves a sample instrument, and
+    /// the folders in `unreadable` cannot be read.
     struct Claimed {
         files: BTreeMap<String, u64>,
         rests: BTreeMap<String, Arc<OnDisk>>,
+        unreadable: BTreeSet<String>,
+    }
+
+    impl Claimed {
+        fn of(files: impl IntoIterator<Item = (String, u64)>) -> Claimed {
+            Claimed {
+                files: files.into_iter().collect(),
+                rests: BTreeMap::new(),
+                unreadable: BTreeSet::new(),
+            }
+        }
     }
 
     fn stat(len: u64) -> Stat {
@@ -603,15 +670,27 @@ mod tests {
         async fn lock(&mut self) -> io::Result<bool> {
             Err(refused())
         }
-        async fn list(&self) -> io::Result<Vec<Entry>> {
-            Ok(self
-                .files
-                .iter()
-                .map(|(path, len)| Entry {
-                    path: path.clone(),
-                    kind: Kind::File(stat(*len)),
-                })
-                .collect())
+        async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+            if self.unreadable.contains(dir) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let mut found = BTreeMap::new();
+            for (path, len) in &self.files {
+                let inside = match dir.is_empty() {
+                    true => Some(path.as_str()),
+                    false => path.strip_prefix(dir).and_then(|at| at.strip_prefix('/')),
+                };
+                let Some(inside) = inside else {
+                    continue;
+                };
+                let (name, kind) = match inside.split_once('/') {
+                    Some((folder, _)) => (folder, Kind::Dir),
+                    None => (inside, Kind::File(stat(*len))),
+                };
+                found.insert(name.to_string(), Some(kind));
+            }
+            let more = found.len() > room;
+            Ok((found.into_iter().take(room).collect(), more))
         }
         async fn names(&self, _: &str) -> io::Result<Vec<String>> {
             Ok(Vec::new())
@@ -664,11 +743,11 @@ mod tests {
     fn library(dir: &Temp) -> Claimed {
         let file = on_disk(dir, "Marimba.nsmp", &sample_bytes());
         Claimed {
-            files: BTreeMap::from([
+            rests: BTreeMap::from([("Marimba.nsmp".to_string(), file)]),
+            ..Claimed::of([
                 ("Marimba.nsmp".to_string(), MOST_BYTES),
                 ("Small.ne5p".to_string(), 10),
-            ]),
-            rests: BTreeMap::from([("Marimba.nsmp".to_string(), file)]),
+            ])
         }
     }
 
@@ -721,5 +800,55 @@ mod tests {
 
         let (listed, _) = now(listing(&fs, &held, &BTreeSet::new(), &BTreeMap::new())).unwrap();
         assert_eq!(paths(&listed.unread), ["Small.ne5p"], "held whole");
+    }
+
+    fn walked(fs: &Claimed) -> Vec<(String, bool)> {
+        let entries = now(walk(fs)).unwrap();
+        entries
+            .into_iter()
+            .map(|entry| (entry.path, matches!(entry.kind, Kind::Unwalked)))
+            .collect()
+    }
+
+    /// Breadth first up to the bound: the folder the bound cuts short, and every folder
+    /// past it, is marked not walked in full. A folder whose name starts with a dot is
+    /// listed but not entered.
+    #[test]
+    fn the_walk_looks_at_most_entries_breadth_first() {
+        let deep = (0..MOST_ENTRIES).map(|n| (format!("a/{n:05}.ne5p"), 1));
+        let top = ["top.ne5p", "b/deep.ne5p", ".hidden/x.ne5p"].map(|path| (path.to_string(), 1));
+        let listed = walked(&Claimed::of(deep.chain(top)));
+        let unwalked: Vec<&str> = listed
+            .iter()
+            .filter(|(_, unwalked)| *unwalked)
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert_eq!(unwalked, ["a", "b"]);
+        assert_eq!(
+            listed.len() - unwalked.len(),
+            MOST_ENTRIES,
+            "entries looked at"
+        );
+        assert!(listed.iter().any(|(path, _)| path == ".hidden"));
+        assert!(!listed.iter().any(|(path, _)| path.starts_with(".hidden/")));
+        assert!(!listed.iter().any(|(path, _)| path == "b/deep.ne5p"));
+    }
+
+    /// A folder inside that cannot be read is listed as not walked in full, and the rest
+    /// of the library still lists. A root that cannot be read fails the listing.
+    #[test]
+    fn an_unreadable_folder_is_left_unwalked_and_an_unreadable_root_fails() {
+        let files = [("a/x.ne5p", 1), ("top.ne5p", 1)].map(|(path, len)| (path.to_string(), len));
+        let mut fs = Claimed::of(files);
+        fs.unreadable.insert("a".to_string());
+        let listed = walked(&fs);
+        let listed: Vec<(&str, bool)> = listed
+            .iter()
+            .map(|(path, unwalked)| (path.as_str(), *unwalked))
+            .collect();
+        assert_eq!(listed, [("a", false), ("top.ne5p", false), ("a", true)]);
+
+        fs.unreadable.insert(String::new());
+        assert!(now(walk(&fs)).is_err());
     }
 }
