@@ -335,8 +335,13 @@ fn locate<R: Read + Seek>(
         }
     }
 
-    // The header was read from `start`, so the stream ends past it.
-    let len = stream_end(r)? - start;
+    let end = stream_end(r)?;
+    let len = end.checked_sub(start).ok_or_else(|| {
+        ParseError::AssertFail(format!(
+            "{}: the stream ends at byte {end}, before the container's start at byte {start}",
+            name(&header, format),
+        ))
+    })?;
     let overhead = header.generation.body_start() + header.generation.trailer_len();
     if len < overhead {
         return Err(ParseError::AssertFail(format!(
@@ -944,6 +949,46 @@ mod tests {
         // A type-1 header is longer than this whole file, so it cannot even be read.
         let truncated = &v1_file(&[1, 2, 3, 4, 5])[..0x2b];
         assert!(read::<Five>(&mut Cursor::new(truncated), "test").is_err());
+    }
+
+    /// A stream cut to `keep` bytes as soon as its end is looked for, as a file
+    /// truncated between the header read and the length check is.
+    struct Truncated {
+        bytes: Cursor<Vec<u8>>,
+        keep: usize,
+    }
+
+    impl Read for Truncated {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.bytes.read(buf)
+        }
+    }
+
+    impl Seek for Truncated {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            if let SeekFrom::End(_) = pos {
+                self.bytes.get_mut().truncate(self.keep);
+            }
+            self.bytes.seek(pos)
+        }
+    }
+
+    #[test]
+    fn a_file_truncated_before_its_container_starts_is_refused() {
+        let at = 8;
+        let mut bytes = vec![0; at];
+        bytes.extend(v1_file(&[1, 2, 3, 4, 5]));
+        let mut r = Truncated {
+            bytes: Cursor::new(bytes),
+            keep: at / 2,
+        };
+        r.bytes.set_position(at as u64);
+        let err = locate_body(&mut r, "test").unwrap_err();
+        assert!(
+            matches!(&err, Error::Parse(ParseError::AssertFail(why))
+                if why.contains("ends at byte 4, before the container's start at byte 8")),
+            "refused for the wrong reason: {err}",
+        );
     }
 
     #[test]

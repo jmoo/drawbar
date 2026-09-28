@@ -30,7 +30,11 @@ impl Index {
     /// to the end of the stream.
     pub fn read_from(r: &mut (impl Read + Seek)) -> Result<Index, Error> {
         let (header, body) = cbin::locate_body(r, FORMAT)?;
-        let body_len = usize::try_from(body.end - body.start).map_err(|_| overflow("the body"))?;
+        let body_len = body
+            .end
+            .checked_sub(body.start)
+            .and_then(|len| usize::try_from(len).ok())
+            .ok_or_else(|| overflow("the body"))?;
 
         let mut head = try_vec(body_len.min(DIRECTORY_AT))?;
         cbin::read_at(r, body.start, &mut head)?;

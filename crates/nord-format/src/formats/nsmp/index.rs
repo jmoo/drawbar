@@ -134,7 +134,10 @@ fn walk<F: Framing>(
     map_tag: &F::Tag,
     stroke_tag: &F::Tag,
 ) -> Result<Walked<F::Version>, Error> {
-    let len = body.end - body.start;
+    let len = body
+        .end
+        .checked_sub(body.start)
+        .ok_or_else(|| overflow("the body's end"))?;
     if len == 0 {
         return Err(section::missing_opener(F::OPENER.as_ref()).into());
     }
