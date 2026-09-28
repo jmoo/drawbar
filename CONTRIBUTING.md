@@ -215,9 +215,9 @@ Cargo from `crates/` inside the development shell; the parent
 
 - `nix develop -c cargo test --workspace` runs the default test suite.
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
-- `nix flake check` checks formatting, runs Clippy, builds the rustdoc of every
-  crate with warnings denied, runs the tests of `scripts/bump.bash`, and evaluates
-  every flake output.
+- `nix flake check` checks formatting, runs Clippy, builds every crate's rustdoc
+  with warnings denied, runs the tests of `scripts/bump.bash`, and evaluates every
+  flake output.
 - `nix build .#<crate>` builds and tests one crate.
 - `nix build .#nord.all` covers every crate and cross target.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private
@@ -240,8 +240,8 @@ Cargo from `crates/` inside the development shell; the parent
   uses a character no face draws.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
-would change, and treats Clippy and rustdoc warnings as failures. The public suite must
-compile and pass without private corpus access. `tests/corpus` discovers the
+would change, and treats Clippy and rustdoc warnings as failures. The public suite
+must compile and pass without private corpus access. `tests/corpus` discovers the
 committed fixtures, plus the corpus when enabled, by content, and applies sidecar
 `.oracle.json` files where present. Test code names no corpus path: a claim about
 every file of a kind runs once per such file, and a claim about one file lives in

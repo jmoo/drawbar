@@ -58,7 +58,8 @@ at all when the server compresses it.
 ## Checks
 
 `nix flake check` runs the formatting check, Clippy and rustdoc with warnings
-denied, and the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every crate with
-its tests, the cross targets, the browser build and this guide. CI runs both.
+denied, and the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every
+crate with its tests, the cross targets, the browser build and this guide. CI runs
+both.
 `nix fmt` formats everything. [Testing](testing.md) describes the suites, and
 [Contributing](contributing.md) the house rules.

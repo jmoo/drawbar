@@ -1901,8 +1901,9 @@ pub struct NewZone<'a> {
     /// Highest note this zone answers to. Stored as given; the file keeps top notes and
     /// does not derive them from the root keys.
     pub top_note: u8,
-    /// The stroke's global id, 1 through 255: one byte, and zero is not an id. Zones
-    /// name their strokes by it, not by position, so it need not follow section order.
+    /// The stroke's global id, 1 through 255: one byte, and the editor never issues
+    /// zero. Zones name their strokes by it, not by position, so it need not follow
+    /// section order.
     pub global_id: u32,
     /// The zone's sustain loop, which truncates its audio at [`Loop::end`].
     pub loops: Option<Loop>,
