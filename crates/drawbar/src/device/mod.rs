@@ -1520,7 +1520,7 @@ impl Device {
                 },
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
-                        "{}'s former contents are in the local list as {name}",
+                        "what {} held is in the local list as {name}",
                         shown(at)
                     ));
                     log.trouble(format!(
