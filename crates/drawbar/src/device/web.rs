@@ -143,10 +143,12 @@ impl Link {
                     return;
                 }
             };
-            // ⚠️ The WebUSB transport does not expose the endpoint-0 identity request.
+            // ⚠️ The WebUSB transport does not expose the endpoint-0 identity request, so
+            // only the firmware is known: `bcdDevice` holds the same hundredths that
+            // request `0x04` answers.
             let card = DeviceCard {
                 build: None,
-                firmware: None,
+                firmware: Some(bcd_device(&chosen)),
                 interface: None,
                 kind: None,
                 manufacturer: chosen.manufacturer_name(),
@@ -294,4 +296,11 @@ fn request_device() -> Result<Promise<UsbDevice>, JsValue> {
     let filter = UsbDeviceFilter::new();
     filter.set_vendor_id(VENDOR_ID);
     Ok(usb.request_device(&UsbDeviceRequestOptions::new(&[filter])))
+}
+
+/// `bcdDevice`, which WebUSB splits into a byte and two nibbles.
+fn bcd_device(device: &UsbDevice) -> u16 {
+    u16::from(device.device_version_major()) << 8
+        | u16::from(device.device_version_minor()) << 4
+        | u16::from(device.device_version_subminor())
 }

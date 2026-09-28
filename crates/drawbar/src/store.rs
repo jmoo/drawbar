@@ -70,6 +70,12 @@ pub struct Left {
 
 impl Left {
     pub fn report(self, log: &mut Log) {
+        if self.skipped > 0 {
+            crate::telemetry::fault("store", "too-big");
+        }
+        if self.dropped > 0 {
+            crate::telemetry::fault("store", "full");
+        }
         match (self.skipped, self.dropped) {
             (0, 0) => {}
             (skipped, 0) => log.say(plural(skipped, "too big to save for the next session")),

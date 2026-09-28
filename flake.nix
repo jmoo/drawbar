@@ -64,6 +64,23 @@
                     touch "$out"
                   '';
               clippy = pkgs.nord.clippy;
+              telemetry =
+                pkgs.runCommand "check-telemetry"
+                  {
+                    nativeBuildInputs = [ pkgs.nodejs ];
+                    src = lib.fileset.toSource {
+                      fileset = lib.fileset.unions [
+                        ./crates/drawbar/telemetry.json
+                        ./docs/src/privacy.md
+                        ./telemetry
+                      ];
+                      root = ./.;
+                    };
+                  }
+                  ''
+                    node --test "$src/telemetry/test/check.test.js"
+                    touch "$out"
+                  '';
             };
 
             devShells.default = pkgs.lib.crane.devShell {

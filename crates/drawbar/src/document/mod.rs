@@ -1203,6 +1203,7 @@ fn hear(
         }
     };
     if let Err(why) = played {
+        crate::telemetry::fault("audio", "refused");
         log.error(why);
         log.trouble(format!("This computer would not play that {what}."));
     }
