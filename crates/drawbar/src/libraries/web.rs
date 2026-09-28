@@ -14,7 +14,7 @@ use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     DirectoryPickerOptions, FileSystemDirectoryHandle, FileSystemHandle, FileSystemPermissionMode,
-    IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransactionMode,
+    IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransaction, IdbTransactionMode,
 };
 
 use super::THIS_COMPUTER;
@@ -259,13 +259,17 @@ fn entries(recent: &[Root]) -> Array {
 /// The list IndexedDB holds. An entry that does not read is left out.
 async fn read() -> Result<Vec<Root>, String> {
     let db = database().await?;
-    let get = db
-        .transaction_with_str(STORE)
-        .and_then(|transaction| transaction.object_store(STORE))
-        .and_then(|store| store.get(&KEY.into()))
-        .map_err(|e| describe(&e))?;
-    let held = done(&get).await?;
-    let Ok(held) = held.dyn_into::<Array>() else {
+    let held = async {
+        let get = db
+            .transaction_with_str(STORE)
+            .and_then(|transaction| transaction.object_store(STORE))
+            .and_then(|store| store.get(&KEY.into()))
+            .map_err(|e| describe(&e))?;
+        done(&get).await
+    }
+    .await;
+    db.close();
+    let Ok(held) = held?.dyn_into::<Array>() else {
         return Ok(Vec::new());
     };
     Ok(held
@@ -284,14 +288,22 @@ async fn read() -> Result<Vec<Root>, String> {
         .collect())
 }
 
+/// Keep `entries` as the list, once IndexedDB has committed it.
 async fn write(entries: Array) -> Result<(), String> {
     let db = database().await?;
-    let put = db
-        .transaction_with_str_and_mode(STORE, IdbTransactionMode::Readwrite)
-        .and_then(|transaction| transaction.object_store(STORE))
-        .and_then(|store| store.put_with_key(&entries, &KEY.into()))
-        .map_err(|e| describe(&e))?;
-    done(&put).await.map(|_| ())
+    let written = async {
+        let transaction = db
+            .transaction_with_str_and_mode(STORE, IdbTransactionMode::Readwrite)
+            .map_err(|e| describe(&e))?;
+        transaction
+            .object_store(STORE)
+            .and_then(|store| store.put_with_key(&entries, &KEY.into()))
+            .map_err(|e| describe(&e))?;
+        committed(&transaction).await
+    }
+    .await;
+    db.close();
+    written
 }
 
 /// drawbar's database, made at its first use.
@@ -314,6 +326,26 @@ async fn database() -> Result<IdbDatabase, String> {
     let opened = done(&request).await;
     request.set_onupgradeneeded(None);
     Ok(opened?.unchecked_into())
+}
+
+/// Once `transaction` has committed, or why it did not.
+///
+/// ⚠️ Its requests succeed before it commits, and the commit can still fail, as when the
+/// origin is out of room.
+async fn committed(transaction: &IdbTransaction) -> Result<(), String> {
+    let answered = Promise::new(&mut |resolve, reject| {
+        transaction.set_oncomplete(Some(&resolve));
+        transaction.set_onabort(Some(&reject));
+        transaction.set_onerror(Some(&reject));
+    });
+    let answer = JsFuture::from(answered).await;
+    transaction.set_oncomplete(None);
+    transaction.set_onabort(None);
+    transaction.set_onerror(None);
+    answer.map(|_| ()).map_err(|_| match transaction.error() {
+        Some(error) => describe(&error),
+        None => "IndexedDB did not commit the change".to_string(),
+    })
 }
 
 /// The result of an IndexedDB request, once it has one.
