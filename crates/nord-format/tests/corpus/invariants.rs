@@ -30,8 +30,8 @@ pub enum Kind {
     EditableWide,
     /// A wide instrument with a v4 preset.
     WideV4Preset,
-    /// A v4 `map` with a per-key table the zone layout plans.
-    PlannedKeyMap,
+    /// A wide instrument with a `map` section.
+    WideMap,
     Project,
     Piano,
 }
@@ -66,7 +66,8 @@ pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
             match sample {
                 Sample::V2(narrow) => {
                     kinds.push(Kind::Narrow);
-                    if narrow.chain().is_ok_and(|c| c == nsmp::Chain::Early) {
+                    // A chain that does not read lands here too, where the trial names why.
+                    if !narrow.chain().is_ok_and(|c| c != nsmp::Chain::Early) {
                         kinds.push(Kind::EarlyNarrow);
                     }
                 }
@@ -78,8 +79,8 @@ pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
                     if matches!(wide.sty(), Ok(nsmp::Sty::V4(_))) {
                         kinds.push(Kind::WideV4Preset);
                     }
-                    if planned_key_map(wide).is_some() {
-                        kinds.push(Kind::PlannedKeyMap);
+                    if nsmp::section::find4(&wide.body.sections, nsmp::section::MAP4).is_some() {
+                        kinds.push(Kind::WideMap);
                     }
                 }
             }
@@ -193,7 +194,7 @@ pub const INVARIANTS: &[Invariant] = &[
         dynamics,
     ),
     claim(
-        Kind::PlannedKeyMap,
+        Kind::WideMap,
         "the key-map planner reproduces the table",
         key_map_plan,
     ),
@@ -858,40 +859,53 @@ struct KeyMapPlan {
     writes: bool,
 }
 
-/// The per-key table's plan, where the `map` holds a table and the planner reads it.
-fn planned_key_map(sample: &nord_format::cbin::Cbin<nsmp::SampleV3>) -> Option<KeyMapPlan> {
-    let table = sample.zone_table().ok()?;
-    let zones = sample.zones().ok()?;
-    let map = nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4)?;
-    let kind = table.key_map(&map.payload).ok()?;
+/// The per-key table's plan, or `None` where the `map` holds no table.
+fn planned_key_map(
+    sample: &nord_format::cbin::Cbin<nsmp::SampleV3>,
+) -> Result<Option<KeyMapPlan>, String> {
+    let map =
+        nsmp::section::find4(&sample.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
+    let table = sample.zone_table().context("zone table")?;
+    let kind = table.key_map(&map.payload).context("per-key table")?;
     if kind == nsmp::zone::KeyMap::Absent {
-        return None;
+        return Ok(None);
     }
-    let plan = table.plan_key_map(&map.payload, &zones).ok()?;
+    let zones = sample.zones().context("zones")?;
+    let plan = table
+        .plan_key_map(&map.payload, &zones)
+        .context("the key-map planner")?;
     let mut planned = map.payload.clone();
     for (at, quad) in &plan {
         planned[*at..*at + quad.len()].copy_from_slice(quad);
     }
-    Some(KeyMapPlan {
+    Ok(Some(KeyMapPlan {
         kind,
         stored: map.payload.clone(),
         planned,
         writes: !plan.is_empty(),
-    })
+    }))
 }
 
 /// The Sample Editor writes the neutral table for any zone layout, so the planner
-/// leaves it neutral; a populated table is the one the planner derives.
+/// leaves it neutral; a populated table is the one the planner derives. An instrument
+/// whose table plans is one whose zones can be edited.
 fn key_map_plan(_: &[u8], entity: &Entity) -> Result<(), String> {
-    let plan = planned_key_map(samples::wide(entity)?).ok_or("the per-key table does not plan")?;
-    if plan.kind == nsmp::zone::KeyMap::Neutral {
-        ensure!(!plan.writes, "the planner wrote into a neutral table");
-        return Ok(());
+    let wide = samples::wide(entity)?;
+    match planned_key_map(wide)? {
+        None => {}
+        Some(plan) if plan.kind == nsmp::zone::KeyMap::Neutral => {
+            ensure!(!plan.writes, "the planner wrote into a neutral table");
+        }
+        Some(plan) => ensure!(
+            plan.planned == plan.stored,
+            "the planned key map differs at {:#x?}",
+            moved(&plan.stored, &plan.planned)
+        ),
     }
     ensure!(
-        plan.planned == plan.stored,
-        "the planned key map differs at {:#x?}",
-        moved(&plan.stored, &plan.planned)
+        wide.zones_are_editable(),
+        "the zones are not editable: {:?}",
+        wide.zones().err()
     );
     Ok(())
 }
@@ -919,7 +933,7 @@ fn wide_retune_round_trip(bytes: &[u8], entity: &Entity) -> Result<(), String> {
 /// Whether the instrument's per-key table is populated, so a zone edit recomputes
 /// it along with the zone.
 fn populated(entity: &Entity) -> Result<bool, String> {
-    Ok(planned_key_map(samples::wide(entity)?)
+    Ok(planned_key_map(samples::wide(entity)?)?
         .is_some_and(|plan| plan.kind == nsmp::zone::KeyMap::Populated))
 }
 
