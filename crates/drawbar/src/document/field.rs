@@ -1142,43 +1142,31 @@ fn outline(ui: &egui::Ui, rect: egui::Rect, neutral: bool) {
     );
 }
 
-/// The name over a control: the app's label for it, or the prettified path in monospace
-/// where the table has no label yet.
+/// The name over a control, with its path under the pointer.
 fn caption(ui: &mut egui::Ui, field: &Field, edited: bool) {
     named_caption(ui, &field.path, edited, note(field));
 }
 
 /// The same caption for a bare path, used by the register that draws nine fields.
 fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
-    let known = strings::known(path);
     let quiet = app::caption(ui.visuals());
     let response = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add(egui::Label::new(
                 egui::RichText::new(strings::label(path).to_uppercase())
-                    .font(match known {
-                        true => egui::FontId::proportional(LABEL),
-                        false => egui::FontId::monospace(LABEL),
-                    })
+                    .font(egui::FontId::proportional(LABEL))
                     .color(quiet),
             ));
             if edited {
                 app::dot(ui, app::warn(ui.visuals()), DOT);
             }
-            if !known {
-                icon(ui, Glyph::Tag, 9.0, quiet);
-            }
         })
         .response;
-    let mut hint = path.to_string();
-    if !known {
-        hint.push_str(": no label yet, showing the prettified path");
-    }
-    if !note.is_empty() {
-        hint.push_str(" · ");
-        hint.push_str(note);
-    }
+    let hint = match note {
+        "" => path.to_string(),
+        note => format!("{path} · {note}"),
+    };
     response.on_hover_text(hint);
 }
 

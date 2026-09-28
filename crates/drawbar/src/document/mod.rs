@@ -1982,16 +1982,25 @@ mod tests {
         );
     }
 
-    /// An unpolished label should look unpolished. Cells show names in capitals.
+    /// A field with no label is named after its path, in the type every caption uses.
     #[test]
-    fn a_path_with_no_label_shows_a_name_derived_from_the_path() {
-        let said = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()).twice();
+    fn a_path_with_no_label_is_captioned_like_any_other() {
+        let mut open = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap());
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
         assert!(!strings::known("synth_a_volume"));
-        assert!(
-            said.iter().any(|word| word == "SYNTH A VOLUME"),
-            "{:?}",
-            &said[..said.len().min(40)]
-        );
+        let font = testing::painted(&output)
+            .into_iter()
+            .find(|word| word.text == "SYNTH A VOLUME")
+            .expect("the caption is painted")
+            .galley
+            .job
+            .sections[0]
+            .format
+            .font_id
+            .family
+            .clone();
+        assert_eq!(font, egui::FontFamily::Proportional);
     }
 
     #[test]
