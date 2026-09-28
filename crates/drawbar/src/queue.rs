@@ -910,23 +910,27 @@ fn item(
     // A drag carries the same payload as the asset's library row, so dropping it on a
     // slot sends it there.
     if response.dragged() {
-        egui::DragAndDrop::set_payload(
-            ui.ctx(),
-            Carried {
-                head: Held {
-                    what: Item::Local(entity.id),
-                    kind: Kind::of(entity),
-                    filed: None,
-                    // `enqueue` admitted it, so the instrument attached then accepted it.
-                    fits: true,
-                },
-                name: entity.name.clone(),
-                rest: Vec::new(),
-            },
-        );
+        egui::DragAndDrop::set_payload(ui.ctx(), carried(entity, device));
     }
     // The row truncates the name, so the hover text shows it in full.
     response.on_hover_text(format!("{}\n{why}", entity.name))
+}
+
+/// What dragging a waiting entry carries.
+///
+/// ⚠️ `fits` asks the instrument attached now. [`refit`] keeps entries that instrument
+/// refuses, so an entry being in the queue does not mean it fits.
+fn carried(entity: &LocalEntity, device: &DeviceState) -> Carried {
+    Carried {
+        head: Held {
+            what: Item::Local(entity.id),
+            kind: Kind::of(entity),
+            filed: None,
+            fits: fit(device, entity).allowed(),
+        },
+        name: entity.name.clone(),
+        rest: Vec::new(),
+    }
 }
 
 /// Where an entry is going, as a chip that opens a slot picker.
@@ -1546,6 +1550,39 @@ mod tests {
         );
         assert!(matches!(landed, Put::Standing));
         assert_eq!(queue.ids(), vec![second, first]);
+    }
+
+    /// An entry the instrument attached now refuses stays queued, and dragging it to a
+    /// slot is refused as a drag of the same asset from the library would be.
+    #[test]
+    fn a_waiting_entry_the_instrument_now_refuses_drags_as_refused() {
+        let (mut workspace, mut log, bytes) = bench();
+        let (mut device, _) = attached(&workspace);
+        let class = ObjectClass::Program;
+        let id = workspace.ingest("electro".into(), Origin::Fresh, bytes, &mut log);
+        let mut queue = Queue::default();
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        let slot = crate::browser::Onto::Slot { class, at: at(1) };
+        let entity = workspace.get(id).unwrap();
+        assert!(crate::browser::landing(&carried(entity, &device.state).head, slot).allowed());
+
+        device.pretend_attached_as("Nord Stage 4");
+        refit(&workspace, &device.state, &mut queue, &mut log);
+        assert!(queue.entry(id).unwrap().failure.is_some(), "still waiting");
+        let dragged = carried(entity, &device.state).head;
+        assert!(!dragged.fits);
+        match crate::browser::landing(&dragged, slot) {
+            crate::browser::Landing::No(why) => assert!(why.contains("format"), "{why}"),
+            other => panic!("{other:?} should have been refused"),
+        }
     }
 
     /// A write that stops leaves the rest of the queue where it was, and the entry it
