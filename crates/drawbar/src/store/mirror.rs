@@ -60,9 +60,6 @@ struct Record {
     /// The last listing that read the file left it resting in place rather than read it
     /// whole, and nothing has been saved over it since.
     rests: bool,
-    /// The asset left the workspace while its first save was in flight; the file goes
-    /// once that save lands.
-    removed: bool,
 }
 
 /// An unsaved edit's bytes, as written to `working/`.
@@ -887,13 +884,6 @@ impl Store {
                 record.missing = false;
                 record.rests = false;
                 browser.folders.missing.remove(&id);
-                if record.removed {
-                    self.records.remove(&id);
-                    self.write(Cmd::RemoveFile {
-                        path,
-                        expect: print,
-                    });
-                }
                 return;
             }
             Err(Failure::Moved) if record.fingerprint.is_none() => {
@@ -1132,8 +1122,10 @@ impl Store {
             let Some(record) = self.records.get_mut(&id) else {
                 continue;
             };
+            // ⚠️ The file is deleted by the pass after its save answers, since only then
+            // is its fingerprint known, and a pass is where nothing is sent while a rescan
+            // is in flight.
             if record.saving {
-                record.removed = true;
                 continue;
             }
             if let Some(old) = record.working.take() {
@@ -1194,7 +1186,6 @@ impl Record {
             working: None,
             saving: false,
             missing: false,
-            removed: false,
             rests: false,
         }
     }

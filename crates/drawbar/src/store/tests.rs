@@ -741,6 +741,36 @@ fn a_file_that_cannot_be_looked_at_is_shown_unread_and_the_library_opens() {
     assert_eq!(unread, ["Cello/c3.ne5p"]);
 }
 
+/// An asset deleted while its first write is in flight loses its file once that write
+/// answers, and a rescan meanwhile does not bring the file back as a new one.
+#[test]
+fn an_asset_deleted_while_its_file_is_written_goes_without_coming_back() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, queue, Pass::Files));
+    workspace.remove(id, log);
+    session.store.sync(workspace, browser, queue, Pass::Files);
+    session.store.rescan();
+    while session.store.scanning() {
+        assert!(session.next(), "the write and the rescan answered");
+    }
+    session.sync();
+    session.refocus();
+
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert_eq!(session.said("appeared in the library folder"), 0);
+    assert_eq!(session.said("deleted outside drawbar"), 0);
+    assert_eq!(root.names(""), [".drawbar"], "the file is gone");
+}
+
 #[test]
 fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
     let root = Temp::new();
