@@ -589,10 +589,10 @@ impl Browser {
                 .response
                 .on_hover_text(
                     "Its file is gone from the library folder. Its tags and the slot it came \
-                     from are kept until you forget it.",
+                     from are kept until you delete it.",
                 )
                 .context_menu(|ui| {
-                    offer(ui, "Forget", None, Act::Forget(id), acts);
+                    offer(ui, "Delete", None, Act::Forget(id), acts);
                 });
         }
     }

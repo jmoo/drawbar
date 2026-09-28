@@ -69,7 +69,7 @@ and before it sends anything to the instrument.
   **Take theirs**, or **Keep both** (yours becomes a new file beside it).
 - A file deleted outside drawbar leaves the list, unless it had tags, unsaved
   edits, or a slot it came from. Then it stays, marked missing, until you save it
-  back or **Forget** it.
+  back or delete it.
 - If a sound waiting to be sent changed on disk, nothing is sent until you have
   looked at it.
 
