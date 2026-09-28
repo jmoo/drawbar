@@ -63,10 +63,6 @@ pub enum Kind {
     Unwalked,
     File(Stat),
     /// A file [`opens`] takes that could not be looked at, and why.
-    #[cfg_attr(
-        target_arch = "wasm32",
-        allow(dead_code, reason = "the browser's walk does not report one yet")
-    )]
     Unread(String),
     /// A file [`opens`] does not take, listed by name without a look at it.
     Other,

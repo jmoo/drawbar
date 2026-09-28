@@ -905,9 +905,8 @@ impl Fs for Folder {
                     }
                     _ if exec::opens(&name) => match snapshot(handle.unchecked_ref()).await {
                         Ok(file) => Kind::File(stat(&file)),
-                        // Left out, not the library: a file drawbar holds is looked at
-                        // again, and listed unread when that fails too.
-                        Err(_) => continue,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => Kind::Unread(e.to_string()),
                     },
                     _ => Kind::Other,
                 };
