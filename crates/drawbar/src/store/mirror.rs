@@ -75,8 +75,6 @@ struct Loading {
     claimed: BTreeSet<u64>,
     /// The working copies not yet taken up, by id.
     working: BTreeMap<u64, Vec<u8>>,
-    /// The new id of each row that moved with a working copy, and that copy's file.
-    renamed: Vec<(u64, String)>,
     /// The id the next file the index does not name takes.
     next: u64,
     /// Every folder listed so far.
@@ -194,6 +192,9 @@ pub struct Store {
     /// Working copies the index still names that nothing needs, to drop at the next
     /// full pass.
     stale: Vec<String>,
+    /// The new id of each row the open gave one, with a working copy, and that copy's
+    /// file, which the next full pass writes again under the new id.
+    renamed: Vec<(u64, String)>,
     /// How many writing commands have been sent.
     sent: u64,
     /// How many commands have been sent since the open.
@@ -220,6 +221,7 @@ impl Store {
             keeps_views: true,
             name: None,
             stale: Vec::new(),
+            renamed: Vec::new(),
             sent: 0,
             issued: 0,
         }
@@ -779,7 +781,6 @@ impl Store {
             .max(sidecar.next_id)
             .max(assets.keys().max().map_or(0, |id| id.saturating_add(1)));
         let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
-        let mut renamed = Vec::new();
         for (id, row) in assets {
             if id >= floor {
                 rows.insert(id, row);
@@ -791,7 +792,7 @@ impl Store {
                 working.insert(moved, bytes);
             }
             if let Some(generation) = row.working {
-                renamed.push((moved, working_name(id, generation)));
+                self.renamed.push((moved, working_name(id, generation)));
             }
             rows.insert(moved, row);
         }
@@ -804,7 +805,6 @@ impl Store {
             rows,
             claimed: BTreeSet::new(),
             working,
-            renamed,
             next,
             dirs: Vec::new(),
             files: 0,
@@ -1002,14 +1002,6 @@ impl Store {
             record.path = None;
             record.working = Some(Working { generation, stamp });
             self.records.insert(id, record);
-        }
-        // A working copy is named by its asset's id, so one whose asset moved is written
-        // again under the new id, and the old one dropped, at the next full pass.
-        for (id, old) in std::mem::take(&mut loading.renamed) {
-            if let Some(record) = self.records.get_mut(&id) {
-                record.working = None;
-            }
-            self.stale.push(old);
         }
         browser.folders.sync(&loading.dirs);
         flag_duplicates(workspace, browser, log);
@@ -1333,6 +1325,9 @@ impl Store {
         }
         crate::folders::place_new(workspace, &browser.folders);
         let mut writes = Vec::new();
+        if full {
+            self.renumber(&mut writes);
+        }
         let mut drops = match full {
             true => std::mem::take(&mut self.stale),
             false => Vec::new(),
@@ -1364,6 +1359,26 @@ impl Store {
             }
         }
         done
+    }
+
+    /// Write again under its new id each working copy of a row the open gave one, and
+    /// drop the old copy once the index no longer names it. A row a listed file has
+    /// claimed writes its edit afresh; one no file has claimed yet is written as it was
+    /// read, since the index keeps that row under the new id.
+    fn renumber(&mut self, writes: &mut Vec<(String, Vec<u8>)>) {
+        for (id, old) in std::mem::take(&mut self.renamed) {
+            match self.records.get_mut(&id) {
+                Some(record) => record.working = None,
+                None => writes.extend(self.loading.as_ref().and_then(|loading| {
+                    let generation = loading.rows.get(&id)?.working?;
+                    Some((
+                        working_name(id, generation),
+                        loading.working.get(&id)?.clone(),
+                    ))
+                })),
+            }
+            self.stale.push(old);
+        }
     }
 
     /// Send one change to the folders. One made or removed while the open's listing is in

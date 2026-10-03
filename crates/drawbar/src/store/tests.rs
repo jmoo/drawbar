@@ -1648,6 +1648,47 @@ fn a_library_let_go_while_it_is_listed_keeps_what_its_index_held() {
     assert_eq!(third.path(id).as_deref(), Some("untitled.ne5p"));
 }
 
+/// A row the open gives a new id keeps its unsaved edit through a quit before the
+/// listing is complete, whether a listed file had claimed the row by then or not.
+#[test]
+fn an_edit_under_a_new_id_survives_a_quit_while_the_library_is_listed() {
+    for claimed in [false, true] {
+        let root = Temp::new();
+        let mut first = Session::open(&root);
+        let id = first.create();
+        first.sync();
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited.clone(), log);
+        first.close();
+
+        // Ids a library open before gave out, as when switching from one to another.
+        let mut bench = Bench::new();
+        for _ in 0..3 {
+            let Bench { workspace, log, .. } = &mut bench;
+            workspace.view("seen".into(), Origin::Fresh, b"a view".to_vec(), log);
+        }
+        assert!(bench.workspace.next_id() > id, "the row takes a new id");
+        let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+        let mut second = Session { store, bench };
+        assert!(second.next(), "opening answered");
+        if claimed {
+            assert!(second.next(), "the rows of the index answered");
+            assert_eq!(second.bytes(second.only()), edited);
+        }
+        assert!(second.store.listing(), "its listing has not all come back");
+        second.close();
+
+        let third = Session::open(&root);
+        let entity = third.bench.workspace.get(third.only()).unwrap();
+        assert_eq!(
+            entity.bytes, edited,
+            "the edit came back (claimed: {claimed})"
+        );
+        assert!(entity.is_unsaved());
+    }
+}
+
 /// Everything drawbar holds whole is in memory, so it reads only so much of one library.
 /// A file past that is listed like any other, and a read of it is refused before
 /// anything is read, and says why. The file here is sparse, so it takes no room on disk.
