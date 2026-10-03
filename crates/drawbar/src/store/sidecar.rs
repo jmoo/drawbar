@@ -180,6 +180,21 @@ pub fn read(text: &str) -> Read {
     }
 }
 
+/// A fingerprint's CRC: `Some(…)` or `None`, or a bare number as an index written before
+/// a fingerprint could lack one.
+pub(super) fn crc<'de, D: serde::Deserializer<'de>>(at: D) -> Result<Option<u32>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Crc {
+        Bare(u32),
+        Optional(Option<u32>),
+    }
+    Ok(match Crc::deserialize(at)? {
+        Crc::Bare(crc) => Some(crc),
+        Crc::Optional(crc) => crc,
+    })
+}
+
 pub fn write(sidecar: &Sidecar) -> Result<String, String> {
     ron::ser::to_string_pretty(sidecar, ron::ser::PrettyConfig::default())
         .map_err(|e| e.to_string())

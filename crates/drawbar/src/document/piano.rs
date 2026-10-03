@@ -88,18 +88,29 @@ fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
 /// The stretch of keyboard the map draws: a full piano, A0 to C8.
 const SPAN: Span = Span { low: 21, high: 108 };
 
-/// The length and a checksum of the bytes the asset was last saved as, which is enough
-/// to tell two baselines apart. A save changes both.
+/// What tells two baselines apart. A save changes it.
 ///
-/// ⚠️ A baseline resting in its file is marked by the whole file's CRC-32, which is
-/// known when the file is opened, and not by the body's, which is known only once the
-/// file is checked: a mark that moved when the check answered would discard the plan.
-type Mark = (u64, Option<u32>);
+/// ⚠️ A baseline resting in its file is marked by the indexing of the file, which a rescan
+/// replaces whenever the file changed, and not by a checksum, which is known only once
+/// the file is checked: a mark that moved when the check answered would discard the plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    /// Bytes held whole: their length, and the checksum a slot holding them reports.
+    Held(u64, Option<u32>),
+    /// A file left on disk, by its [`crate::ondisk::OnDisk::serial`].
+    Resting(u64),
+}
+
+impl Default for Mark {
+    fn default() -> Mark {
+        Mark::Held(0, None)
+    }
+}
 
 fn mark(entity: &LocalEntity) -> Mark {
     match &entity.saved.file {
-        Some(file) => (file.len, Some(file.crc)),
-        None => (entity.saved.bytes.len() as u64, entity.saved.crc32),
+        Some(file) => Mark::Resting(file.serial),
+        None => Mark::Held(entity.saved.bytes.len() as u64, entity.saved.crc32),
     }
 }
 

@@ -1,8 +1,10 @@
 //! Which file on disk is which asset, after changes drawbar did not make.
 //!
-//! A file is its asset where drawbar last knew it. A file at a path drawbar never knew is
-//! the asset whose file went missing when their contents agree, one to one; that is a
-//! rename made outside, and the asset's id, tags and origin follow it.
+//! A file is its asset where drawbar last knew it. It holds what drawbar knew while its
+//! length and time are the ones drawbar took, and otherwise only where its CRC says so. A
+//! file at a path drawbar never knew is the asset whose file went missing when their
+//! lengths and CRCs agree, one to one; that is a rename made outside, and the asset's id,
+//! tags and origin follow it. A file whose CRC was never taken is matched by path alone.
 
 use std::collections::BTreeMap;
 
@@ -30,6 +32,34 @@ pub struct Matched {
     pub arrived: Vec<Found>,
 }
 
+/// Whether a file at the path drawbar knew holds what `known` says it did. One listed
+/// without its contents was listed so because its [`super::Stat`] was the known one.
+pub fn same(known: Option<Fingerprint>, found: &Found) -> bool {
+    if !found.read() {
+        return true;
+    }
+    let Some(print) = known else {
+        return false;
+    };
+    if print.stat() == found.stat {
+        return true;
+    }
+    print.contents().is_some() && print.contents() == found.fingerprint().contents()
+}
+
+/// What drawbar knows of a file found where it was: its fingerprint, keeping the CRC known
+/// before where the contents are the same.
+pub fn kept(known: Option<Fingerprint>, found: &Found) -> Fingerprint {
+    let print = found.fingerprint();
+    match (same(known, found), known) {
+        (true, Some(known)) => Fingerprint {
+            crc: print.crc.or(known.crc),
+            ..print
+        },
+        _ => print,
+    }
+}
+
 pub fn match_files(known: &BTreeMap<u64, Known>, files: Vec<Found>) -> Matched {
     let mut by_path: BTreeMap<&LibPath, u64> = BTreeMap::new();
     for (id, held) in known {
@@ -44,13 +74,7 @@ pub fn match_files(known: &BTreeMap<u64, Known>, files: Vec<Found>) -> Matched {
             continue;
         };
         claimed.insert(id);
-        let same = match found.contents() {
-            None => true,
-            Some(contents) => known[&id]
-                .fingerprint
-                .is_some_and(|print| (print.len, print.crc) == contents),
-        };
-        match same {
+        match same(known[&id].fingerprint, &found) {
             true => matched.same.push((id, found)),
             false => matched.changed.push((id, found)),
         }
@@ -60,17 +84,14 @@ pub fn match_files(known: &BTreeMap<u64, Known>, files: Vec<Found>) -> Matched {
     type Contents = (u64, u32);
     let mut strangers_by: BTreeMap<Contents, Vec<usize>> = BTreeMap::new();
     for (at, found) in strangers.iter().enumerate() {
-        if let Some(contents) = found.contents() {
+        if let Some(contents) = found.fingerprint().contents() {
             strangers_by.entry(contents).or_default().push(at);
         }
     }
     let mut missing_by: BTreeMap<Contents, Vec<u64>> = BTreeMap::new();
     for (id, held) in known.iter().filter(|(id, _)| !claimed.contains(*id)) {
-        match held.fingerprint {
-            Some(print) => missing_by
-                .entry((print.len, print.crc))
-                .or_default()
-                .push(*id),
+        match held.fingerprint.and_then(|print| print.contents()) {
+            Some(contents) => missing_by.entry(contents).or_default().push(*id),
             None => matched.vanished.push(*id),
         }
     }

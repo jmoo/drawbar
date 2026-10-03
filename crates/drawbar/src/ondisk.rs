@@ -7,6 +7,8 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use nord_format::cbin::{self, Header};
 use nord_format::crc::Crc32Stream;
@@ -70,8 +72,11 @@ pub struct OnDisk {
     file: File,
     /// The file's length when it was indexed.
     pub len: u64,
-    /// CRC-32 over every byte of the file, when it was indexed.
-    pub crc: u32,
+    /// CRC-32 over every byte of the file, once a pass over all of it has taken it.
+    crc: OnceLock<u32>,
+    /// Distinct for every file indexed in this run, so two indexings of one path are told
+    /// apart.
+    pub serial: u64,
     pub index: Index,
     /// Every range [`OnDisk::read`] was asked for.
     #[cfg(test)]
@@ -83,9 +88,10 @@ impl OnDisk {
     /// and for one whose index does not read, which is then read whole so that its decode
     /// says why.
     ///
-    /// `crc` is the file's CRC-32 where it is already known; otherwise it is taken in one
-    /// streaming pass.
+    /// `crc` is the file's CRC-32 where it is already known; otherwise [`OnDisk::crc`]
+    /// takes it when it is first asked for.
     pub fn open(file: File, crc: Option<u32>) -> io::Result<Option<OnDisk>> {
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
         let len = file.metadata()?.len();
         let mut head = [0u8; 12];
         if len < head.len() as u64 {
@@ -107,14 +113,11 @@ impl OnDisk {
         let Ok(index) = index else {
             return Ok(None);
         };
-        let crc = match crc {
-            Some(crc) => crc,
-            None => crc_of(&mut BufReader::with_capacity(CHUNK, At::new(&file, len)))?,
-        };
         Ok(Some(OnDisk {
             file,
             len,
-            crc,
+            crc: crc.map(OnceLock::from).unwrap_or_default(),
+            serial: SERIAL.fetch_add(1, Ordering::Relaxed),
             index,
             #[cfg(test)]
             reads: Default::default(),
@@ -154,9 +157,31 @@ impl OnDisk {
         BufReader::with_capacity(CHUNK, At::new(&self.file, self.len))
     }
 
-    /// Whether `bytes` are what the file held when it was indexed.
+    /// CRC-32 over every byte of the file, taken in one streaming pass the first time it
+    /// is asked for.
+    ///
+    /// ⚠️ That pass reads the whole file, hundreds of megabytes for a piano library, on
+    /// the calling thread.
+    pub fn crc(&self) -> io::Result<u32> {
+        if let Some(crc) = self.crc.get() {
+            return Ok(*crc);
+        }
+        let crc = crc_of(&mut self.reader())?;
+        Ok(*self.crc.get_or_init(|| crc))
+    }
+
+    /// The CRC, where a pass has taken it already.
+    pub fn known_crc(&self) -> Option<u32> {
+        self.crc.get().copied()
+    }
+
+    /// Whether `bytes` are what the file held when it was indexed. Takes the file's CRC
+    /// if nothing has yet.
     pub fn holds(&self, bytes: &[u8]) -> bool {
-        self.len == bytes.len() as u64 && self.crc == nord_format::crc::crc32(bytes)
+        self.len == bytes.len() as u64
+            && self
+                .crc()
+                .is_ok_and(|crc| crc == nord_format::crc::crc32(bytes))
     }
 
     /// The ranges read so far, emptied.

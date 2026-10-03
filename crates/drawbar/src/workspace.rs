@@ -156,10 +156,12 @@ impl Container {
     }
 
     /// The facts of a file left on disk, in one streaming pass over it, and a second over
-    /// the body where the stored checksum cannot stand for the body's CRC-32.
+    /// the body where the stored checksum cannot stand for the body's CRC-32. The file's
+    /// own CRC is taken first, where no pass has taken it yet.
     fn of_file(file: &OnDisk) -> Result<Container, String> {
         use std::io::{Read as _, Seek as _};
 
+        file.crc().map_err(|e| e.to_string())?;
         let info = nord_format::cbin::inspect(&mut file.reader()).map_err(|e| e.to_string())?;
         let body = body_of(&info).ok_or("the body is larger than this machine can address")?;
         let body_crc32 = match (info.header.generation, info.checksum_ok) {
@@ -234,6 +236,9 @@ pub struct Baseline {
     /// The file that holds these bytes, read by range and never held: `bytes` is then
     /// empty, and `crc32` is `None` until the file's checksum has been checked.
     pub file: Option<Arc<OnDisk>>,
+    /// CRC-32 over all of `bytes`, where it was taken as they arrived. See
+    /// [`Baseline::whole_crc`].
+    pub(crate) bytes_crc: Option<u32>,
 }
 
 impl Baseline {
@@ -241,6 +246,7 @@ impl Baseline {
     pub(crate) fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
         Baseline {
+            bytes_crc: Some(nord_format::crc::crc32(&bytes)),
             bytes,
             crc32,
             stamp,
@@ -254,6 +260,16 @@ impl Baseline {
             crc32: None,
             stamp,
             file: Some(file),
+            bytes_crc: None,
+        }
+    }
+
+    /// CRC-32 over the whole of these bytes, where something has taken it: the file's,
+    /// for a baseline resting in it, once its check has read it.
+    pub fn whole_crc(&self) -> Option<u32> {
+        match &self.file {
+            Some(file) => file.known_crc(),
+            None => self.bytes_crc,
         }
     }
 
@@ -376,7 +392,10 @@ impl LocalEntity {
             link: None,
             wrote: None,
         };
-        held.saved = held.baseline();
+        held.saved = Baseline {
+            bytes_crc: Some(nord_format::crc::crc32(&held.bytes)),
+            ..held.baseline()
+        };
         held
     }
 
@@ -498,6 +517,7 @@ impl LocalEntity {
             crc32: self.container.as_ref().map(|held| held.body_crc32),
             stamp: self.stamp,
             file: None,
+            bytes_crc: None,
         }
     }
 

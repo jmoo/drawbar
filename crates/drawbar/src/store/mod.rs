@@ -177,22 +177,34 @@ pub struct Stat {
     pub modified: Option<u64>,
 }
 
-/// Enough about a file's contents to tell whether it changed, and to recognize it at
-/// another path.
+/// Enough about a file to tell whether it changed, and to recognize it at another path.
+///
+/// Its [`Stat`] is trusted: a file whose length and time are the ones taken holds what it
+/// held. Where they moved, the CRC decides, and a fingerprint without one says only that
+/// the file is not known to be the same.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<u64>,
-    /// CRC-32 over the whole file.
-    pub crc: u32,
+    /// CRC-32 over the whole file, once something has read all of it.
+    #[serde(default, deserialize_with = "sidecar::crc")]
+    pub crc: Option<u32>,
 }
 
 impl Fingerprint {
     pub fn of(stat: Stat, bytes: &[u8]) -> Fingerprint {
         Fingerprint {
+            crc: Some(nord_format::crc::crc32(bytes)),
+            ..Fingerprint::unread(stat)
+        }
+    }
+
+    /// A file's fingerprint before its contents are read.
+    pub fn unread(stat: Stat) -> Fingerprint {
+        Fingerprint {
             len: stat.len,
             modified: stat.modified,
-            crc: nord_format::crc::crc32(bytes),
+            crc: None,
         }
     }
 
@@ -204,14 +216,14 @@ impl Fingerprint {
     }
 
     /// Whether `bytes` are the contents this fingerprint was taken of, whenever they were
-    /// written.
+    /// written. Never, for a fingerprint without a CRC.
     pub fn holds(&self, bytes: &[u8]) -> bool {
-        self.len == bytes.len() as u64 && self.crc == nord_format::crc::crc32(bytes)
+        self.len == bytes.len() as u64 && self.crc == Some(nord_format::crc::crc32(bytes))
     }
 
-    /// Whether two fingerprints were taken of the same contents.
-    pub fn same_contents(&self, other: &Fingerprint) -> bool {
-        (self.len, self.crc) == (other.len, other.crc)
+    /// The length and CRC that recognize these contents at another path.
+    pub fn contents(&self) -> Option<(u64, u32)> {
+        Some((self.len, self.crc?))
     }
 }
 
@@ -226,28 +238,23 @@ pub struct Found {
     /// The file left on disk and indexed in place of `bytes`, where the backend reads a
     /// piano or sample instrument by range.
     pub file: Option<Arc<OnDisk>>,
+    /// CRC-32 over the whole file, taken only where its contents decide something: its
+    /// [`Stat`] moved from one whose CRC is known, or it may be a known file moved.
+    pub crc: Option<u32>,
 }
 
 impl Found {
-    /// What the listing read of the contents, as length and CRC-32. `None` for a file it
-    /// was not asked to read.
-    pub fn contents(&self) -> Option<(u64, u32)> {
-        match (&self.bytes, &self.file) {
-            (Some(bytes), _) => Some((bytes.len() as u64, nord_format::crc::crc32(bytes))),
-            (None, Some(file)) => Some((file.len, file.crc)),
-            (None, None) => None,
-        }
+    /// Whether the listing read the contents.
+    pub fn read(&self) -> bool {
+        self.bytes.is_some() || self.file.is_some()
     }
 
-    /// The fingerprint of what the listing read. `None` for a file it was not asked to
-    /// read.
-    pub fn fingerprint(&self) -> Option<Fingerprint> {
-        let (_, crc) = self.contents()?;
-        Some(Fingerprint {
-            len: self.stat.len,
-            modified: self.stat.modified,
-            crc,
-        })
+    /// The file's fingerprint, with the CRC where the listing took one.
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint {
+            crc: self.crc,
+            ..Fingerprint::unread(self.stat)
+        }
     }
 }
 
@@ -310,10 +317,10 @@ pub enum Cmd {
     /// lock and sweep interrupted writes first; where it does not, write nothing. Answered
     /// by [`Event::Opened`].
     Open,
-    /// List the tree again, reading every file whose [`Stat`] is not in `known` under its
-    /// path. Answered by [`Event::Scanned`].
+    /// List the tree again, reading every file whose [`Stat`] is not the one `known`
+    /// holds under its path. Answered by [`Event::Scanned`].
     Scan {
-        known: std::collections::BTreeMap<LibPath, Stat>,
+        known: std::collections::BTreeMap<LibPath, Fingerprint>,
         /// The files of `known` the app leaves in place rather than holding whole.
         resting: std::collections::BTreeSet<LibPath>,
     },

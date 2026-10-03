@@ -147,11 +147,11 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd) -> Option<Event> {
         Cmd::Open => Some(Event::Opened(open(fs).await)),
         Cmd::Scan { known, resting } => {
             let held = known
-                .into_iter()
-                .map(|(path, stat)| (path, Some(stat)))
+                .iter()
+                .map(|(path, print)| (path.clone(), Some(print.stat())))
                 .collect();
             Some(Event::Scanned(
-                listing(fs, &held, &resting, &BTreeMap::new())
+                listing(fs, &held, &resting, &known)
                     .await
                     .map(|(listing, _)| listing)
                     .map_err(|e| e.to_string()),
@@ -382,6 +382,10 @@ async fn walk(fs: &impl Fs) -> io::Result<Vec<Entry>> {
 /// first, except the files `resting` names and the ones this listing leaves resting.
 /// A file the backend leaves on disk reuses the CRC `prints` holds for it while its
 /// [`Stat`] is the one there.
+///
+/// A CRC is taken only where the contents decide: a file `prints` knows whose [`Stat`]
+/// moved, and a file at a new path whose length is that of a file `prints` knows and the
+/// listing did not find.
 async fn listing(
     fs: &impl Fs,
     held: &BTreeMap<LibPath, Option<Stat>>,
@@ -463,14 +467,13 @@ async fn listing(
                 stat,
                 bytes: None,
                 file: None,
+                crc: None,
             });
             continue;
         }
-        let print = prints
-            .get(&path)
-            .copied()
-            .filter(|print| print.stat() == stat);
-        let read = match fs.rest(path.as_str(), print).await {
+        let print = prints.get(&path).copied();
+        let unmoved = print.filter(|print| print.stat() == stat);
+        let read = match fs.rest(path.as_str(), unmoved).await {
             Ok(Some(file)) => Ok((None, Some(file))),
             Ok(None) => fs
                 .read(path.as_str())
@@ -483,17 +486,29 @@ async fn listing(
                 if bytes.is_some() {
                     holding = holding.saturating_add(stat.len);
                 }
-                listing.files.push(Found {
+                let mut found = Found {
                     path,
                     stat,
                     bytes,
                     file,
-                });
+                    crc: None,
+                };
+                if unmoved.is_none() && print.is_some_and(|print| print.crc.is_some()) {
+                    found.crc = crc(&found);
+                }
+                listing.files.push(found);
             }
             Err(e) => listing.unread.push((path, e.to_string())),
         }
     }
+    let found: BTreeSet<&LibPath> = listing.files.iter().map(|found| &found.path).collect();
+    let missing: BTreeSet<u64> = prints
+        .iter()
+        .filter(|(path, print)| !found.contains(path) && print.crc.is_some())
+        .map(|(_, print)| print.len)
+        .collect();
     let mut room = MOST_BYTES.saturating_sub(holding);
+    let mut strangers = Vec::new();
     for (path, stat) in arrived {
         let Some(stat) = stat.filter(|_| opens(path.leaf())) else {
             listing.others.push(path);
@@ -501,11 +516,12 @@ async fn listing(
         };
         match fs.rest(path.as_str(), None).await {
             Ok(Some(file)) => {
-                listing.files.push(Found {
+                strangers.push(Found {
                     path,
                     stat,
                     bytes: None,
                     file: Some(file),
+                    crc: None,
                 });
                 continue;
             }
@@ -521,20 +537,37 @@ async fn listing(
         }
         room -= stat.len;
         match fs.read(path.as_str()).await {
-            Ok(bytes) => listing.files.push(Found {
+            Ok(bytes) => strangers.push(Found {
                 path,
                 stat,
                 bytes: Some(bytes),
                 file: None,
+                crc: None,
             }),
             Err(e) => listing.unread.push((path, e.to_string())),
         }
+    }
+    for mut found in strangers {
+        if missing.contains(&found.stat.len) {
+            found.crc = crc(&found);
+        }
+        listing.files.push(found);
     }
     listing.files.sort_by(|a, b| a.path.cmp(&b.path));
     listing.others.sort();
     listing.unread.sort();
     listing.unwalked.sort();
     Ok((listing, temps))
+}
+
+/// CRC-32 over the whole of what a listing read, or `None` where the file could not be
+/// read through.
+fn crc(found: &Found) -> Option<u32> {
+    match (&found.bytes, &found.file) {
+        (Some(bytes), _) => Some(nord_format::crc::crc32(bytes)),
+        (None, Some(file)) => file.crc().ok(),
+        (None, None) => None,
+    }
 }
 
 fn too_much() -> String {

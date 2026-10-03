@@ -381,6 +381,72 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     assert_eq!(again.bench.workspace.listed().count(), 1);
 }
 
+/// A file written again elsewhere, its time new and its length the same, is the asset
+/// moved when its contents are what the asset's file held.
+#[test]
+fn a_file_copied_to_a_new_path_and_deleted_is_matched_by_its_contents() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.sync();
+
+    let bytes = root.read("untitled.ne5p");
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    fs::write(root.at("Grand.ne5p"), &bytes).unwrap();
+    session.refocus();
+    assert_eq!(session.path(id).as_deref(), Some("Grand.ne5p"));
+    assert!(session.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(session.bench.workspace.listed().count(), 1);
+}
+
+/// A file drawbar listed but never wrote is fingerprinted by its length and time until
+/// its contents are read, and then by its CRC as well. A save over it after it changed
+/// on disk, its length the same, is refused; one after it was only written again with
+/// the same contents goes through.
+#[test]
+fn a_save_over_a_listed_file_is_refused_only_where_its_contents_changed() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    session.sync();
+
+    let theirs = with_gain(&program, "12");
+    assert_eq!(theirs.len(), program.len());
+    fs::write(root.at("Grand.ne5p"), &theirs).unwrap();
+    let mine = with_gain(&program, "96");
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(
+        root.read("Grand.ne5p"),
+        theirs,
+        "theirs was not written over"
+    );
+    assert_eq!(session.said("was not saved, because it changed on disk"), 1);
+
+    let again = Temp::new();
+    fs::write(again.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&again);
+    let id = session.only();
+    session.sync();
+    fs::write(again.at("Grand.ne5p"), &program).unwrap();
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(
+        again.read("Grand.ne5p"),
+        mine,
+        "the same contents, written again"
+    );
+    assert_eq!(session.said("was not saved"), 0);
+}
+
 #[test]
 fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
     let root = Temp::new();
@@ -956,7 +1022,7 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
             fingerprint: Some(Fingerprint {
                 len: 10,
                 modified: Some(7),
-                crc: 0xdead_beef,
+                crc: Some(0xdead_beef),
             }),
             tags: [4].into(),
             origin: Stored::Device {
@@ -967,8 +1033,26 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
             working: Some(3),
         },
     );
+    let unread = Row {
+        path: LibPath::parse("c3.ne5p"),
+        name: "c3.ne5p".into(),
+        fingerprint: Some(Fingerprint {
+            len: 3,
+            modified: None,
+            crc: None,
+        }),
+        tags: [4].into(),
+        origin: Stored::Fresh,
+        working: None,
+    };
+    index.assets.insert(10, unread);
     let text = sidecar::write(&index).unwrap();
-    assert_eq!(sidecar::read(&text), Read::Known(index));
+    assert_eq!(sidecar::read(&text), Read::Known(index.clone()));
+
+    // An index written while every fingerprint had a CRC wrote it bare.
+    let bare = text.replace("Some(3735928559)", "3735928559");
+    assert_ne!(bare, text);
+    assert_eq!(sidecar::read(&bare), Read::Known(index));
 
     assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
     assert!(matches!(sidecar::read("not an index"), Read::Unreadable(_)));
@@ -984,6 +1068,7 @@ fn a_file_at_a_new_path_is_an_asset_moved_only_when_one_matches_one() {
         },
         bytes: Some(bytes.to_vec()),
         file: None,
+        crc: Some(nord_format::crc::crc32(bytes)),
     };
     let known = |path: &str, bytes: &[u8]| Known {
         path: LibPath::parse(path).unwrap(),

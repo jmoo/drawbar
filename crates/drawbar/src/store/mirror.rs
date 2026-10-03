@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::diff::{match_files, Known};
+use super::diff::{self, match_files, Known};
 use super::exec::working_name;
 use super::sidecar::{Row, Sidecar, VERSION};
 use super::{names, Backend, Cmd, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened};
@@ -386,7 +386,7 @@ impl Store {
             if record.rests {
                 resting.insert(path.clone());
             }
-            known.insert(path.clone(), print.stat());
+            known.insert(path.clone(), print);
         }
         self.scanning = true;
         self.backend.send(Cmd::Scan { known, resting });
@@ -577,13 +577,17 @@ impl Store {
             .into_iter()
             .map(|(id, found)| (id, found, true));
         for (id, found, changed) in on_disk.map(|(id, found)| (id, found, false)).chain(changed) {
-            let (Some(row), Some(print)) = (rows.get(&id), found.fingerprint()) else {
+            let Some(row) = rows.get(&id).filter(|_| found.read()) else {
                 continue;
             };
-            let mine = working.remove(&id).filter(|mine| match &found.bytes {
-                Some(bytes) => mine != bytes,
-                None => !print.holds(mine),
-            });
+            let print = diff::kept(row.fingerprint, &found);
+            let mine = working
+                .remove(&id)
+                .filter(|mine| match (&found.bytes, &found.file) {
+                    (Some(bytes), _) => mine != bytes,
+                    (None, Some(file)) => !file.holds(mine),
+                    (None, None) => true,
+                });
             if changed && mine.is_some() {
                 conflicts.push(id);
             }
@@ -748,8 +752,8 @@ impl Store {
             workspace.place(id, found.path.clone());
             if let Some(record) = self.records.get_mut(&id) {
                 record.path = Some(found.path.clone());
-                if let (Some(print), Some(read)) = (&mut record.fingerprint, found.fingerprint()) {
-                    *print = read;
+                if let Some(print) = &mut record.fingerprint {
+                    *print = diff::kept(Some(*print), &found);
                     record.rests = found.file.is_some();
                 }
             }
@@ -799,9 +803,13 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let (Some(print), Some(entity)) = (found.fingerprint(), workspace.get(id)) else {
+        let Some(entity) = workspace.get(id).filter(|_| found.read()) else {
             return;
         };
+        let mut print = found.fingerprint();
+        if let (None, Some(bytes)) = (print.crc, &found.bytes) {
+            print.crc = Some(nord_format::crc::crc32(bytes));
+        }
         let name = entity.name.clone();
         let unsaved = entity.is_unsaved();
         let rests = found.file.is_some();
@@ -1027,6 +1035,17 @@ impl Store {
         let Some(record) = self.records.get_mut(&entity.id) else {
             return true;
         };
+        // A fingerprint taken without its CRC learns it once the contents have been read
+        // through, while the baseline is still what the file holds.
+        if let Some(print) = record
+            .fingerprint
+            .as_mut()
+            .filter(|print| print.crc.is_none())
+        {
+            if !record.saving && entity.saved.stamp == record.saved {
+                print.crc = entity.saved.whole_crc();
+            }
+        }
         let missing = record.missing;
         let from = record
             .path
@@ -1319,8 +1338,10 @@ pub(crate) fn duplicates(
 /// A file drawbar did not know, recorded under `id`, and the asset it becomes. `None` for
 /// a file the listing did not read.
 fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Option<Saved> {
-    let print = found.fingerprint()?;
-    records.insert(id, Record::of_found(&found, print));
+    if !found.read() {
+        return None;
+    }
+    records.insert(id, Record::of_found(&found, found.fingerprint()));
     Some(Saved {
         id,
         name: found.path.leaf().to_string(),

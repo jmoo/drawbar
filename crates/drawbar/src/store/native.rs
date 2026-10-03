@@ -427,7 +427,7 @@ impl Fs for Disk {
         known: Option<Fingerprint>,
     ) -> io::Result<Option<Arc<OnDisk>>> {
         let file = File::open(self.locate(path)?)?;
-        Ok(OnDisk::open(file, known.map(|print| print.crc))?.map(Arc::new))
+        Ok(OnDisk::open(file, known.and_then(|print| print.crc))?.map(Arc::new))
     }
 }
 
@@ -500,6 +500,38 @@ mod tests {
         assert!(matches!(moved, Some(Event::Failed(_))), "{moved:?}");
         assert_eq!(root.read("c3.ne5p"), b"lower");
         assert_eq!(root.read("C3.ne5p"), b"upper");
+    }
+
+    /// A file whose length or time moved since drawbar took them is deleted only where
+    /// its CRC says it still holds what drawbar read. Without one, it is left.
+    #[test]
+    fn a_delete_over_a_file_whose_stat_moved_needs_its_crc() {
+        let root = Temp::new();
+        fs::write(root.at("c3.ne5p"), b"contents").unwrap();
+        let stale = Stat {
+            len: 8,
+            modified: Some(1),
+        };
+        let path = LibPath::root().join("c3.ne5p");
+        let remove = |crc| {
+            exec::execute(
+                &mut disk(&root),
+                Cmd::RemoveFile {
+                    path: path.clone(),
+                    expect: Fingerprint {
+                        crc,
+                        ..Fingerprint::unread(stale)
+                    },
+                },
+            )
+        };
+        assert!(matches!(remove(None), Some(Event::Failed(_))));
+        let other = Some(nord_format::crc::crc32(b"other st"));
+        assert!(matches!(remove(other), Some(Event::Failed(_))));
+        assert_eq!(root.read("c3.ne5p"), b"contents");
+
+        assert!(remove(Some(nord_format::crc::crc32(b"contents"))).is_none());
+        assert!(!root.at("c3.ne5p").exists());
     }
 
     #[test]
