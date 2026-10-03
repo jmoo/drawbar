@@ -3360,3 +3360,45 @@ fn an_unsaved_edit_of_a_resting_sample_is_named_before_the_library_goes() {
     let working = root.at(".drawbar/working");
     assert!(!working.exists() || root.names(".drawbar/working").is_empty());
 }
+
+/// A plan over a piano library resting in its file is saved by laying the library out
+/// again from its file, each kept stroke read by its range: the file then holds what a
+/// whole read and a whole layout write make, and the asset rests in it.
+#[test]
+fn a_plan_over_a_resting_piano_is_saved_through_its_file() {
+    use nord_format::formats::npno;
+
+    let root = Temp::new();
+    let bytes = large_piano();
+    fs::write(root.at("Grand.npno"), &bytes).unwrap();
+    let mut session = Session::listed(&root);
+    session.ask_all();
+    let id = session.only();
+    let trim = |library: &mut npno::Library<'_>| {
+        library.set_name("Trimmed").unwrap();
+        library.retain_strokes(|stroke| stroke.root != 60);
+    };
+
+    let workspace = &mut session.bench.workspace;
+    let file = workspace.get(id).and_then(|entity| entity.rests()).unwrap();
+    let crate::ondisk::Index::Piano(index) = &file.index else {
+        panic!("a piano library")
+    };
+    let mut library = index.library().clone();
+    trim(&mut library);
+    workspace.hold_edit(id, Some(crate::rewrite::Rewrite::Piano(library)));
+    workspace.mark_pending(id, true);
+    assert!(workspace.save_edit(id));
+    session.sync();
+
+    let mut whole = npno::Library::borrow(&bytes).unwrap();
+    trim(&mut whole);
+    let whole = whole.to_piano().unwrap();
+    assert!(
+        root.read("Grand.npno")
+            == nord_format::to_bytes(&nord_format::Entity::Piano(whole)).unwrap()
+    );
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(entity.rests().is_some() && !entity.is_unsaved());
+    assert_eq!(entity.held_whole(), 0);
+}

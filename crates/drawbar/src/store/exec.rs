@@ -118,16 +118,18 @@ pub trait Fs {
     /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of a copy of the file
     /// outside the library at `from`, which is never held whole.
     async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()>;
-    /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of the file `edit` makes of
-    /// `from`, a piano or sample instrument resting in the library, which is read by
-    /// range and never held whole. A source that changed since its index was read is
-    /// refused with [`crate::rewrite::changed`], and nothing is placed.
+    /// [`Fs::create`] of the file `edit` makes of `from`, a piano or sample instrument
+    /// resting in the library, which is read by range and never held whole; or, where
+    /// `over` names the [`Stat`] of the file at `path`, [`Fs::replace`] of it. A source
+    /// that changed since its index was read, or a file at `path` whose stat moved while
+    /// the copy was written, is refused with [`crate::rewrite::changed`], and nothing is
+    /// placed.
     async fn rewrite(
         &mut self,
         path: &str,
         from: &OnDisk,
         edit: &Rewrite,
-        over: bool,
+        over: Option<Stat>,
     ) -> io::Result<()>;
     /// Rename a file or folder. Refused when another entry is at `to`.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
@@ -1306,13 +1308,14 @@ async fn rewrite_over(
         true => Failure::Moved,
         false => Failure::Io(e.to_string()),
     };
-    match still(fs, path, &expect).await.map_err(io)? {
-        Some(true) => fs
-            .rewrite(path.as_str(), from, edit, true)
-            .await
-            .map_err(io)?,
-        Some(false) | None => return Err(Failure::Moved),
+    if still(fs, path, &expect).await.map_err(io)? != Some(true) {
+        return Err(Failure::Moved);
     }
+    let stat = fs.stat(path.as_str()).await.map_err(io)?;
+    let stat = stat.ok_or(Failure::Moved)?;
+    fs.rewrite(path.as_str(), from, edit, Some(stat))
+        .await
+        .map_err(io)?;
     landed(fs, path).await
 }
 
@@ -1493,7 +1496,13 @@ mod tests {
             Err(refused())
         }
 
-        async fn rewrite(&mut self, _: &str, _: &OnDisk, _: &Rewrite, _: bool) -> io::Result<()> {
+        async fn rewrite(
+            &mut self,
+            _: &str,
+            _: &OnDisk,
+            _: &Rewrite,
+            _: Option<Stat>,
+        ) -> io::Result<()> {
             Err(refused())
         }
         async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {

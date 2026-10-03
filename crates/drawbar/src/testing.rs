@@ -303,6 +303,60 @@ pub(crate) fn zoned_sample(
         .expect("the instrument writes")
 }
 
+/// The system allocator, noting the largest single allocation a thread makes while it
+/// watches.
+pub(crate) struct Watching;
+
+thread_local! {
+    static LARGEST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn note(size: usize) {
+    let _ = LARGEST.try_with(|largest| {
+        if let Some(held) = largest.get() {
+            largest.set(Some(held.max(size)));
+        }
+    });
+}
+
+// SAFETY: every call is passed to the system allocator unchanged.
+unsafe impl std::alloc::GlobalAlloc for Watching {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        note(layout.size());
+        // SAFETY: as the caller promised the system allocator.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        note(layout.size());
+        // SAFETY: as the caller promised the system allocator.
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        note(size);
+        // SAFETY: as the caller promised the system allocator.
+        unsafe { std::alloc::System.realloc(ptr, layout, size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: as the caller promised the system allocator.
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static WATCHING: Watching = Watching;
+
+/// What `f` answers, and the largest single allocation it made on this thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn largest_allocation<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    LARGEST.with(|largest| largest.set(Some(0)));
+    let answer = f();
+    let largest = LARGEST.with(|largest| largest.take()).unwrap_or_default();
+    (answer, largest)
+}
+
 /// `bytes` written to `name` in `dir` and indexed in place, as a library opens a piano or
 /// sample instrument.
 #[cfg(not(target_arch = "wasm32"))]

@@ -373,24 +373,30 @@ the files hovered.
 
 A sample's document draws from the index's outline, and an open zone reads its
 own stroke's range. An edit of it is held over the file as the sets made since
-it was saved, and the outline they make (`document::sample::Edits`). The
-workspace holds the rewrite that saves it (`Workspace::hold_edit`, `rewrite.rs`),
-and a save sends `Cmd::Rewrite`: the backend copies the file through into a
-temporary with the edited sections spliced in and the checksum restated, then
-puts it over the file, and the asset rests in what it wrote. On the desktop the
-copy is `cbin::Patch::copy` over the open handle; in the browser it is laid out
-as the ranges of the file it keeps and the bytes the edit holds, and each range
-is sliced from the `File` and handed to the writer. Either way the copy's
-checksum is checked as it streams, so a file changed since its index was read is
-refused and left as it is. An export or send of an asset holding such an edit
-waits for it to be saved first. An edit held this way has no working copy, so
-opening another library asks before discarding it.
+it was saved, and the outline they make (`document::sample::Edits`). A piano
+plan over a resting library is checked against the index's stroke directory,
+which carries each stroke's range. Either way the workspace holds the rewrite
+that saves the edit (`Workspace::hold_edit`, `rewrite.rs`), and a save sends
+`Cmd::Rewrite`: the backend writes the file again from itself into a temporary,
+then puts it over the file, and the asset rests in what it wrote. A sample's
+copy splices the edited sections in and restates the checksum
+(`cbin::Patch::copy`); a piano's is laid out by `npno::Library::write_from`,
+which reads one kept stroke at a time by its range. In the browser the copy is
+laid out first as the ranges of the file it keeps and the bytes the edit holds,
+recording a piano's layout with a writer that keeps each stroke's range rather
+than its audio, and each range is sliced from the `File` and handed to the
+writer; a piano's checksum is taken as the copy streams (`cbin::Verifier::seal`)
+and written last. A sample's copy checks its checksum as it streams, so a file
+changed since its index was read is refused, and either kind is refused where
+the file's stat moved while the copy was written. Nothing is put over the file
+then. An export or send of an asset holding such an edit waits for it to be
+saved first. An edit held this way has no working copy, so opening another
+library asks before discarding it.
 
 Some acts still need the whole file. They read it whole off the frame first
-(`Workspace::wake`): laying out a piano edit to save it, a send, Keep both,
-Duplicate, and an Overwrite that replaces another file. In the browser the act
-waits for that read. Exporting a resting file copies it across without reading
-it into memory.
+(`Workspace::wake`): a send, Keep both, Duplicate, and an Overwrite that replaces
+another file. In the browser the act waits for that read. Exporting a resting
+file copies it across without reading it into memory.
 
 ## The store protocol
 

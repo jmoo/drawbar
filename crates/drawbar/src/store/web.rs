@@ -1245,9 +1245,9 @@ impl Fs for Folder {
         path: &str,
         from: &OnDisk,
         edit: &Rewrite,
-        over: bool,
+        over: Option<Stat>,
     ) -> io::Result<()> {
-        if !over && self.taken(path).await? {
+        if over.is_none() && self.taken(path).await? {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         let snapshot = from
@@ -1257,7 +1257,15 @@ impl Fs for Folder {
         let temp = self
             .stage(path, Contents::Edited(&pieces, &snapshot))
             .await?;
-        if over {
+        if let Some(held) = over {
+            if !matches!(self.stat(path).await, Ok(Some(now)) if now == held) {
+                if let Ok((dir, leaf)) = self.spot(&temp).await {
+                    let _ = JsFuture::from(dir.remove_entry(&leaf)).await;
+                }
+                return Err(crate::rewrite::changed(
+                    "the file changed while its edit was written".into(),
+                ));
+            }
             self.forget(path);
         }
         self.place(&temp, path).await

@@ -33,8 +33,8 @@ revert. **Save** (⌘S) writes the file. If the sound belongs to a slot on the
 connected instrument, Save also queues it for sending. **Revert** goes back to
 the last save, and is the only undo. An edit you have not saved is kept too, and
 comes back unsaved the next time drawbar starts. An edit of a sample instrument
-is the exception: it is kept only until you quit or open another library, and
-drawbar asks before opening another discards it.
+or piano library is the exception: it is kept only until you quit or open
+another library, and drawbar asks before opening another discards it.
 
 ## Where it lives
 
@@ -94,9 +94,8 @@ held is marked **not read** until there is room for it again.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so they
 stay in their files: drawbar holds in memory only the part it shows or plays,
-and reads one whole when you save a piano edit, send it, or copy it. Saving an
-edit of a sample writes its file again from itself, and exporting or sending one
-saves it first. When one is read, its checksum is checked in the background. Its row says
+and reads one whole when you send it or copy it. Saving an edit of one writes
+its file again from itself, and exporting or sending one saves it first. When one is read, its checksum is checked in the background. Its row says
 **checking…** until that is done, and **failed verification** if the file does
 not match its checksum. Such a file is not sent. What stays in its file does
 not count toward the 1 GiB.

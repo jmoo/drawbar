@@ -39,6 +39,7 @@ use crate::led;
 use crate::midi;
 use crate::ondisk::{self, OnDisk};
 use crate::panel::cut;
+use crate::rewrite::Rewrite;
 use crate::room;
 use crate::strings;
 use crate::work;
@@ -380,6 +381,17 @@ pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, St
 /// index alone.
 pub fn check(entity: &LocalEntity, plan: &Plan) -> Result<(), String> {
     Source::saved(entity).with(|library| replanned(library.clone(), plan).map(|_| ()))?
+}
+
+/// The rewrite that saves `plan` into the file the asset rests in, laid out from that
+/// file's index, which reads no audio: `None` where it rests in no piano library's file,
+/// or the plan edits nothing. The plan is checked as [`check`] checks it.
+pub fn rewrite(entity: &LocalEntity, plan: &Plan) -> Result<Option<Rewrite>, String> {
+    let Some(ondisk::Index::Piano(index)) = entity.indexed() else {
+        return check(entity, plan).map(|()| None);
+    };
+    let library = replanned(index.library().clone(), plan)?;
+    Ok((!plan.is_empty()).then_some(Rewrite::Piano(library)))
 }
 
 /// [`planned`] over a library already read.
@@ -1393,7 +1405,17 @@ impl State {
     /// Hold an act that must not run until the plan in hand has reached the bytes, and
     /// start or join the apply that puts it there. Returns the act where it is free to
     /// run now.
+    ///
+    /// ⚠️ A plan over a file the library rests in is never laid out here: it is saved
+    /// through that file instead (see [`super::Document::settle`]), and opening another
+    /// library asks before it lets one go.
     pub fn hold(&mut self, ctx: &egui::Context, act: Act, workspace: &Workspace) -> Option<Act> {
+        let laid = |id: &u64| {
+            self.pending(*id)
+                && workspace
+                    .get(*id)
+                    .is_some_and(|entity| entity.saved.file.is_none())
+        };
         let waits = match &act {
             // Every asset on this computer leaves with its library, so each plan over one
             // is laid out first, one at a time.
@@ -1401,10 +1423,10 @@ impl State {
                 .plans
                 .keys()
                 .copied()
-                .filter(|id| self.pending(*id))
+                .filter(laid)
                 .filter(|id| workspace.get(*id).is_some_and(|entity| entity.kept))
                 .min(),
-            _ => waits_on(&act).filter(|id| self.pending(*id)),
+            _ => waits_on(&act).filter(laid),
         };
         let Some(id) = waits else {
             return Some(act);
@@ -1425,20 +1447,16 @@ impl State {
         let Some(entity) = workspace.get(id) else {
             return;
         };
+        if entity.saved.file.is_some() {
+            return;
+        }
         let laying = plan.clone();
-        let lay = move |progress: &work::Progress, saved: &[u8]| {
-            let library = planned(saved, &laying)?;
+        let held = entity.saved.bytes.clone();
+        let job = work::run(ctx, move |progress| {
+            let library = planned(&held, &laying)?;
             progress.say(format!("laying out {} strokes", library.strokes().len()));
             materialize(&library)
-        };
-        // ⚠️ A baseline resting in its file is read whole here, off the frame.
-        let job = match entity.saved.file.clone() {
-            Some(file) => file.whole_then(ctx, move |progress, saved| lay(progress, &saved)),
-            None => {
-                let held = entity.saved.bytes.clone();
-                work::run(ctx, move |progress| lay(progress, &held))
-            }
-        };
+        });
         self.job = Some(Laying { id, plan, job });
     }
 
@@ -5260,17 +5278,18 @@ mod tests {
         );
     }
 
-    /// A plan over a library resting in its file is checked through the index and laid
-    /// out off the frame from a read of the file. What it was saved as stays in the
-    /// file, and a revert leaves the library resting there again.
+    /// A plan over a library resting in its file is checked through the index and never
+    /// laid out in memory: its rewrite is the index's library under the plan, which
+    /// writes the bytes a whole layout writes, and a save is not held here to lay it out.
+    /// A revert leaves the library resting where it was.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_plan_over_a_resting_library_lays_out_from_its_file_and_reverts_to_it() {
+    fn a_plan_over_a_resting_library_is_rewritten_from_its_index_and_reverts_to_it() {
         let dir = testing::Temp::new();
         let saved = bytes();
         let file = testing::on_disk(&dir, "Test Piano.npno", &saved);
         let mut editor = Editor::new(facts().total * 2);
-        editor.id = testing::rest(&mut editor.workspace, "Test Piano.npno", file);
+        editor.id = testing::rest(&mut editor.workspace, "Test Piano.npno", file.clone());
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         let plan = editor.state.plans[&editor.id].clone();
@@ -5278,20 +5297,23 @@ mod tests {
             plan.banks.contains(&Bank::Release),
             "the index took the plan"
         );
-        editor.apply();
-        let edited = editor.workspace.get(editor.id).expect("it is open");
-        assert_eq!(edited.bytes, rebuild(&saved, &plan).unwrap());
-        assert!(edited.is_unsaved());
-        assert!(edited.rests().is_none(), "the edit is held");
+        let entity = editor.workspace.get(editor.id).expect("it is open");
+        let edit = rewrite(entity, &plan).unwrap().expect("a plan to save");
+        let mut out = std::io::Cursor::new(Vec::new());
+        edit.write(&file, &mut out).unwrap();
+        assert_eq!(out.into_inner(), rebuild(&saved, &plan).unwrap());
+        let save = Act::SaveDoc(editor.id);
+        let held = editor.state.hold(&editor.ctx, save, &editor.workspace);
         assert!(
-            edited.saved.bytes.is_empty() && edited.saved.file.is_some(),
-            "what it was saved as is left in the file",
+            held.is_some() && !editor.state.applying(),
+            "nothing lays it out"
         );
+        assert!(rewrite(entity, &Plan::default()).unwrap().is_none());
 
         editor.workspace.revert(editor.id, &mut editor.log);
         editor.state.forget(editor.id);
         let reverted = editor.workspace.get(editor.id).expect("it is open");
-        assert!(reverted.rests().is_some(), "it rests in its file again");
+        assert!(reverted.rests().is_some(), "it rests in its file still");
         assert!(reverted.bytes.is_empty() && !reverted.is_unsaved());
     }
 

@@ -443,13 +443,22 @@ impl Fs for Disk {
         path: &str,
         from: &OnDisk,
         edit: &Rewrite,
-        over: bool,
+        over: Option<Stat>,
     ) -> io::Result<()> {
-        if !over {
+        if over.is_none() {
             self.free(path)?;
         }
         let temp = self.stage(path, |file| edit.write(from, file))?;
-        self.place(temp, path, over)
+        if let Some(held) = over {
+            let now = self.stat(path).await;
+            if !matches!(now, Ok(Some(now)) if now == held) {
+                let _ = fs::remove_file(&temp);
+                return Err(crate::rewrite::changed(
+                    "the file changed while its edit was written".into(),
+                ));
+            }
+        }
+        self.place(temp, path, over.is_some())
     }
 
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
@@ -611,6 +620,114 @@ mod tests {
 
         assert!(remove(Some(nord_format::crc::crc32(b"contents"))).is_none());
         assert!(!root.at("c3.ne5p").exists());
+    }
+
+    /// A piano library the size a vendor ships, about 200 MB in 64 strokes of about 3 MB.
+    fn large_piano() -> Vec<u8> {
+        use nord_format::formats::npno::synthetic::{take, Build};
+        use nord_format::formats::npno::Bank;
+
+        Build {
+            version: 0x464,
+            channels: 1,
+            takes: (21..85)
+                .map(|root| take(root, Bank::Attack, 0, 3_000))
+                .collect(),
+            map: (21..85).map(|key| (key, key)).collect(),
+        }
+        .bytes()
+        .expect("the builder lays out a library")
+    }
+
+    /// A plan over a piano library of a vendor's size is saved through its file: each
+    /// kept stroke is read and written by its range, and nothing near the library's size
+    /// is ever allocated.
+    #[test]
+    fn a_large_piano_plan_is_saved_with_no_buffer_near_its_size() {
+        use crate::rewrite::Rewrite;
+
+        let root = Temp::new();
+        let bytes = large_piano();
+        let len = bytes.len();
+        assert!(len > 190_000_000, "{len} bytes is a vendor's size");
+        fs::write(root.at("Grand.npno"), &bytes).unwrap();
+        drop(bytes);
+        let file = File::open(root.at("Grand.npno")).unwrap();
+        let from = Arc::new(OnDisk::open(file, None).unwrap().unwrap());
+        let crate::ondisk::Index::Piano(index) = &from.index else {
+            panic!("a piano library")
+        };
+        let mut library = index.library().clone();
+        library.set_name("Trimmed").unwrap();
+        library.retain_strokes(|stroke| stroke.root % 2 == 0);
+        let edit = Arc::new(Rewrite::Piano(library));
+        let stat = stat(&fs::metadata(root.at("Grand.npno")).unwrap());
+
+        let (answer, largest) = crate::testing::largest_allocation(|| {
+            execute(
+                &mut disk(&root),
+                Cmd::Rewrite {
+                    id: 1,
+                    path: LibPath::root().join("Grand.npno"),
+                    from,
+                    edit,
+                    expect: Fingerprint::unread(stat),
+                },
+            )
+        });
+        // One stroke's audio, about 3 MB, is the most held at once.
+        assert!(
+            (1 << 20..8 << 20).contains(&largest),
+            "{largest} bytes held at once"
+        );
+        let Some(Event::Rewritten {
+            result: Ok(found), ..
+        }) = answer
+        else {
+            panic!("{answer:?}")
+        };
+        let saved = found.file.expect("the saved library rests in its file");
+        let crate::ondisk::Index::Piano(index) = &saved.index else {
+            panic!("a piano library")
+        };
+        assert_eq!(index.library().strokes().len(), 32);
+        assert_eq!(index.library().name().0, "Trimmed");
+        let info = nord_format::cbin::inspect(&mut File::open(root.at("Grand.npno")).unwrap());
+        assert!(info.unwrap().checksum_ok);
+        assert_eq!(
+            root.names(""),
+            [".drawbar", "Grand.npno"],
+            "no copy is left"
+        );
+    }
+
+    /// A file whose stat moves while its edit is written is not written over, and the
+    /// copy is let go.
+    #[test]
+    fn a_rewrite_over_a_file_that_moved_while_it_was_written_is_refused() {
+        use crate::rewrite::{is_changed, Rewrite};
+
+        let root = Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let from = crate::testing::on_disk(&root, "Marimba.nsmp", &bytes);
+        let crate::ondisk::Index::Sample(index) = &from.index else {
+            panic!("a sample instrument")
+        };
+        let mut outline = index.outline().clone();
+        outline.set_name("Vibes").unwrap();
+        let moved = Stat {
+            len: bytes.len() as u64,
+            modified: Some(1),
+        };
+        let wrote = nord_usb::block_on(disk(&root).rewrite(
+            "Marimba.nsmp",
+            &from,
+            &Rewrite::Sample(outline),
+            Some(moved),
+        ));
+        assert!(wrote.as_ref().is_err_and(is_changed), "{wrote:?}");
+        assert_eq!(root.read("Marimba.nsmp"), bytes);
+        assert_eq!(root.names(""), ["Marimba.nsmp"], "no copy is left");
     }
 
     #[cfg(target_os = "macos")]

@@ -552,18 +552,20 @@ impl Document {
     /// name the format refuses, or a switch that would leave no strokes, is refused now
     /// and cannot block every later edit. The bytes are laid out only when something
     /// needs them; see [`piano::State::start`].
-    fn replan(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+    fn replan(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
         let Some(plan) = self.piano.drafted() else {
             return;
         };
         let checked = match workspace.get(id) {
-            Some(entity) => piano::check(entity, &plan),
+            Some(entity) => piano::rewrite(entity, &plan),
             None => return,
         };
         match checked {
-            Ok(()) => {
+            Ok(rewrite) => {
                 self.piano.commit(plan);
                 self.refused(None);
+                // A library resting in its file is saved by writing the plan through it.
+                workspace.hold_edit(id, rewrite);
             }
             Err(why) => {
                 self.piano.discard();
@@ -3414,6 +3416,60 @@ mod tests {
             !open.entity().is_unsaved(),
             "the saved bytes include the plan",
         );
+    }
+
+    /// A plan over a piano library resting in its file is saved through that file: the
+    /// document holds the rewrite of its index, never the library, and a save waits for
+    /// the store to write the file again from itself, then runs with the plan gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_pianos_plan_is_saved_through_its_file() {
+        use crate::browser::Act;
+
+        let bytes = piano_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Test Piano.npno", file.clone());
+        open.id = id;
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("Test Piano")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+
+        assert!(open.document.pends(id), "the rename is a plan");
+        assert!(open.workspace.edit_of(id).is_some(), "held as a rewrite");
+        assert!(open.entity().rests().is_some() && open.entity().held_whole() == 0);
+        assert_eq!(file.take_reads(), [], "nothing was read to plan it");
+
+        let ctx = open.ctx.clone();
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, log);
+        assert_eq!(ran, [], "the save waits for the file");
+        assert!(!document.piano.applying(), "nothing lays it out in memory");
+
+        let (from, edit) = workspace.send_edit(id).expect("the store takes it");
+        let mut out = std::fs::File::create(dir.at("Saved.npno")).unwrap();
+        edit.write(&from, &mut out).unwrap();
+        drop(out);
+        let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
+        let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
+        workspace.edit_saved(id, std::sync::Arc::new(saved));
+        let ran = document.settle(&ctx, Vec::new(), workspace, log);
+        assert_eq!(ran, [Act::SaveDoc(id)]);
+
+        let renamed = piano::snapshot(
+            &nord_format::from_stream(&mut std::io::Cursor::new(dir.read("Saved.npno"))).unwrap(),
+        );
+        assert!(renamed.unwrap().unwrap().name.contains('X'));
+        open.frame(Vec::new());
+        assert!(!open.document.pends(id), "the plan went with the save");
+        assert!(!open.entity().is_unsaved());
     }
 
     /// A pending plan marks the asset unsaved, which offers Revert. A revert drops the
