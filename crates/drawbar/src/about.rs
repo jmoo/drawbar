@@ -11,6 +11,7 @@ use crate::icon::{sized, Glyph};
 use crate::log::Log;
 use crate::sheet::{self, GAP};
 use crate::shell::GUIDE;
+use crate::store::Store;
 use crate::workspace::Workspace;
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -205,12 +206,12 @@ struct Build {
 }
 
 impl Build {
-    fn new(device: &Device, workspace: &Workspace) -> Build {
+    fn new(device: &Device, workspace: &Workspace, store: Option<&Store>) -> Build {
         let mut lines = vec![Line::new("Version", sheet::VERSION, "alpha"), target()];
         #[cfg(target_arch = "wasm32")]
         lines.push(Line::new("Browser", web::agent(), ""));
         lines.push(usb(device));
-        lines.push(files(workspace));
+        lines.push(files(workspace, store));
         Build { lines }
     }
 }
@@ -249,15 +250,10 @@ fn usb(device: &Device) -> Line {
     }
 }
 
-/// How many files this computer holds. Their total size is not shown, because the store
-/// does not track it.
-fn files(workspace: &Workspace) -> Line {
-    let key = match cfg!(target_arch = "wasm32") {
-        true => "Local storage",
-        false => "Files",
-    };
+/// How many files this computer holds, and in a browser how much room they take there.
+fn files(workspace: &Workspace, store: Option<&Store>) -> Line {
     let held = crate::strings::counted(workspace.listed().count(), "file", "files");
-    Line::new(key, held, "")
+    Line::new("Files", held, store.map(Store::kept).unwrap_or_default())
 }
 
 /// What Copy diagnostics puts on the clipboard: what this build is, then the tail of the
@@ -284,9 +280,9 @@ pub struct About {
 
 impl About {
     /// Read what this build is. Called when the box opens.
-    pub fn new(device: &Device, workspace: &Workspace) -> About {
+    pub fn new(device: &Device, workspace: &Workspace, store: Option<&Store>) -> About {
         About {
-            build: Build::new(device, workspace),
+            build: Build::new(device, workspace, store),
             copied: None,
         }
     }

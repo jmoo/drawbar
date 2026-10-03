@@ -1,7 +1,7 @@
 //! HTTP: the browser's `fetch` in a tab, and `ureq` over `rustls` in a window.
 
-/// The most bytes a reply may hold: what this computer keeps for one asset.
-pub const LIMIT: usize = crate::store::MAX_ENTITY;
+/// The most bytes a reply may hold.
+pub const LIMIT: usize = 1 << 20;
 
 #[cfg(target_arch = "wasm32")]
 pub async fn get(url: &str) -> Result<Vec<u8>, String> {

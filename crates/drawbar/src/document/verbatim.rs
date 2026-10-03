@@ -270,7 +270,7 @@ mod tests {
             entity.container.is_none(),
             "a file cut short inside its container has no container"
         );
-        assert_eq!(body(entity), entity.bytes.as_slice());
+        assert_eq!(body(entity), &*entity.bytes);
     }
 
     #[test]

@@ -409,6 +409,8 @@ let
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
           # The demo sounds the welcome sheet fetches, beside the app that reads them.
           cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
+          # The worker that writes the library; the app asks for it beside the page.
+          cp ${./crates/drawbar/library-writer.js} "$out/library-writer.js"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2
@@ -456,7 +458,10 @@ let
       filter = path: type: !(type == "directory" && hasSuffix "/book" path);
     };
 
-    nativeBuildInputs = [ final.mdbook ];
+    nativeBuildInputs = [
+      final.mdbook
+      final.mdbook-mermaid
+    ];
 
     dontConfigure = true;
     dontInstall = true;
@@ -470,6 +475,9 @@ let
         echo "mdbook rendered no index.html" >&2
         exit 1
       fi
+
+      # mdBook copies `additional-js` and nothing beside it.
+      cp LICENSE-mermaid.txt "$out/"
       runHook postBuild
     '';
 

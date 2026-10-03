@@ -138,7 +138,7 @@ impl State {
     pub fn ui(&mut self, ui: &mut egui::Ui, entity: &LocalEntity, sets: &mut Sets) {
         // After a refused edit the buffer differs from the file; this restores the file's
         // text.
-        if self.text.as_bytes() != entity.bytes.as_slice() {
+        if self.text.as_bytes() != &*entity.bytes {
             match read(&entity.bytes) {
                 Ok(words) => words.clone_into(&mut self.text),
                 Err(why) => {

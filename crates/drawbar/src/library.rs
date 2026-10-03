@@ -318,7 +318,7 @@ fn local(
         unsaved: entity.is_unsaved(),
         where_: whereabouts(entity, device, queue),
         at: entity.spot(),
-        size: entity.bytes.len() as u64,
+        size: entity.size(),
         needs: wanted(entity, device),
     }
 }
@@ -386,7 +386,7 @@ pub fn agrees(
     }
     match queue.entry(entity.id).map(|held| &held.diff) {
         Some(Diff::Identical) => Some(true),
-        Some(Diff::Fields(_) | Diff::Bytes { .. }) => Some(false),
+        Some(Diff::Fields(_) | Diff::Bytes { .. } | Diff::Checksum) => Some(false),
         _ => None,
     }
 }
@@ -448,34 +448,25 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
     whereabouts(entity, device, queue).mark(queue.holds(entity.id))
 }
 
-/// The library a program names, and its name if the instrument has reported one.
+/// The library a program names, and its name if the instrument has reported one. A
+/// program not read this session names what a read of it found before.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let Some(fields) = entity.entity.as_ref().and_then(crate::fields::fields_of) else {
+    let plays = match (&entity.entity, entity.remembered.as_deref()) {
+        (Some(_), _) => entity.plays,
+        (None, Some(known)) => known.plays,
+        (None, None) => None,
+    };
+    let Some(plays) = plays else {
         return Needs::Nothing;
     };
-    // One cell, so it shows the first library the program names.
-    for (path, class) in [
-        ("piano_panel.id", ObjectClass::Piano),
-        ("sample_panel.id", ObjectClass::Sample),
-    ] {
-        // Zero is "this program references no library", not an id to go looking for.
-        let Some(id) = fields
-            .iter()
-            .find(|field| field.path == path)
-            .and_then(|field| crate::document::library_id(&field.value))
-            .filter(|id| *id != 0)
-        else {
-            continue;
-        };
-        return match device.dependency_name(class, id) {
-            Some(name) => Needs::Named {
-                class,
-                name: name.to_string(),
-            },
-            None => Needs::Wanted { class, id },
-        };
+    let (class, id) = (plays.class(), plays.id());
+    match device.dependency_name(class, id) {
+        Some(name) => Needs::Named {
+            class,
+            name: name.to_string(),
+        },
+        None => Needs::Wanted { class, id },
     }
-    Needs::Nothing
 }
 
 /// What the instrument said a slot plays, if that slot is the one it was last asked
@@ -894,7 +885,9 @@ impl Library {
             .id_salt("library_table")
             .auto_shrink([false; 2])
             .show_rows(ui, ROW, rows.len(), |ui, shown| {
-                for row in shown.filter_map(|index| rows.get(index)) {
+                let shown = rows.get(shown).unwrap_or_default();
+                workspace.in_view(shown.iter().filter_map(|row| row.item.local()));
+                for row in shown {
                     paint(
                         ui, row, width, &tracks, browser, &list, workspace, device, queue, acts,
                     );
@@ -1777,7 +1770,7 @@ mod tests {
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Settings, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let held = workspace.get(id).unwrap();
         let crc = held.saved.crc32.expect("a container");
         let body_len = held.container.as_ref().expect("a container").body_len();
@@ -1936,7 +1929,7 @@ mod tests {
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let saved_as = workspace.get(id).unwrap().saved.crc32.unwrap();
 
         // Edited before anything is read, so there is no earlier link to fall back on.
@@ -2048,7 +2041,7 @@ mod tests {
         let (tags, mut queue) = (Tags::default(), Queue::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
@@ -2462,13 +2455,117 @@ mod tests {
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
 
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
 
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
+    }
+
+    /// The table asks for the files of the rows in view, and not of a row out of view.
+    #[test]
+    fn only_the_table_rows_in_view_are_asked_for() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let saved = (1..=500)
+            .map(|id| crate::workspace::Saved {
+                id,
+                name: format!("Sound {id:04}.ne5p"),
+                path: Some(crate::store::LibPath::root().join(&format!("Sound {id:04}.ne5p"))),
+                origin: Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(1),
+                unsaved: None,
+            })
+            .collect();
+        workspace.restore(saved, None, &mut log);
+        testing::run(&ctx, screen(), |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                });
+        });
+        assert!(workspace.wanted(1), "the first row is in view");
+        assert!(!workspace.wanted(500), "the last row is not");
+    }
+
+    /// Frames of the tree beside the table take the library's families once, and a file
+    /// read since is in them on the next frame.
+    #[test]
+    fn frames_take_the_families_once_per_change() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ns4p".into(),
+            path: Some(crate::store::LibPath::root().join("Grand.ns4p")),
+            origin: Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(1),
+            unsaved: None,
+        };
+        workspace.restore(vec![saved], None, &mut log);
+        let mut draw = |browser: &mut Browser, workspace: &Workspace| {
+            testing::run(
+                &ctx,
+                testing::screen(egui::vec2(1200.0, 600.0), Vec::new()),
+                |ctx| {
+                    egui::SidePanel::left("browser")
+                        .exact_width(crate::shell::BROWSER)
+                        .show(ctx, |ui| {
+                            browser.ui(ui, workspace, &device, &queue, &shell.filter);
+                        });
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new())
+                        .show(ctx, |ui| {
+                            library.ui(ui, browser, workspace, &device, &queue, &shell);
+                        });
+                },
+            );
+        };
+        for _ in 0..3 {
+            draw(&mut browser, &workspace);
+        }
+        assert_eq!(workspace.families_taken.get(), 1);
+        assert_eq!(
+            workspace.families_present(),
+            [Family::Stage4],
+            "what its name says"
+        );
+
+        workspace.take_wanted();
+        workspace.took(1, Some(Fresh::Program.bytes().unwrap()), None);
+        workspace.settle_files(&mut log);
+        draw(&mut browser, &workspace);
+        assert_eq!(workspace.families_taken.get(), 2);
+        assert_eq!(
+            workspace.families_present(),
+            [Family::Electro5],
+            "what it holds"
+        );
     }
 
     /// A frame of the table at the center's width with no dock open.
@@ -2675,7 +2772,7 @@ mod tests {
     /// out, a column without an edge, or another version is left out.
     #[test]
     fn the_column_widths_come_back_and_nonsense_is_left_out() {
-        let mut store = crate::store::Fake::default();
+        let mut store = crate::testing::Fake::default();
         let mut before = Library::default();
         before.widths[Column::Kind as usize] = Some(150.0);
         before.widths[Column::Size as usize] = Some(70.0);

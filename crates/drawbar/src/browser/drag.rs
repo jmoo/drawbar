@@ -5,7 +5,7 @@
 
 use eframe::egui;
 use nord_format::accept::Family;
-use nord_format::Entity;
+use nord_format::EntityKind;
 use nord_usb::{Location, ObjectClass};
 
 use super::Act;
@@ -16,10 +16,10 @@ use crate::workspace::{LocalEntity, Workspace};
 
 /// What an asset is, which decides the folder it belongs in.
 ///
-/// Every decoded [`Entity`] has a kind of its own, so a decoded file is never called just
-/// a file. Declaration order matches [`Kind::ALL`], the order any set of kinds is listed
-/// in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Every decoded [`nord_format::Entity`] has a kind of its own, so a decoded file is never
+/// called just a file. Declaration order matches [`Kind::ALL`], the order any set of kinds
+/// is listed in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Program,
     SetList,
@@ -48,7 +48,7 @@ pub enum Kind {
     Project,
     /// A text note. No instrument holds one, so it has no folder and nothing sends it.
     Text,
-    /// Bytes that did not decode.
+    /// Bytes that did not decode, or a file drawbar does not open.
     Other,
 }
 
@@ -89,35 +89,59 @@ impl Kind {
 
     /// What an asset is.
     ///
-    /// ⚠️ Exhaustive over [`Entity`], so a family the library adds is a compile error
+    /// ⚠️ Exhaustive over [`EntityKind`], so a family the library adds is a compile error
     /// here and never a nameless row.
     ///
     /// Bytes that did not decode are a note when `document::text::is_text` said so on
-    /// arrival, and [`Kind::Other`] otherwise.
+    /// arrival, and [`Kind::Other`] otherwise. An asset resting in its file is what its
+    /// index reads. One not read or decoded yet is what a read before found, where one is
+    /// [`remembered`](LocalEntity::remembered), and what its name says otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
-        let Some(decoded) = entity.entity.as_ref() else {
+        if entity.reading() || entity.unread() {
+            return match entity.remembered.as_deref() {
+                Some(known) => known.kind,
+                None => Kind::of_name(&entity.name),
+            };
+        }
+        match entity.indexed() {
+            Some(crate::ondisk::Index::Piano(_)) => return Kind::Piano,
+            Some(crate::ondisk::Index::Sample(_)) => return Kind::Sample,
+            None => {}
+        }
+        let Some(decoded) = entity.entity.as_deref() else {
             return match entity.is_text {
                 true => Kind::Text,
                 false => Kind::Other,
             };
         };
-        match decoded {
-            Entity::Program(_) => Kind::Program,
-            Entity::Song(_) => Kind::SetList,
-            Entity::Sample(_) => Kind::Sample,
-            Entity::Piano(_) | Entity::PianoLibrary(_) => Kind::Piano,
-            Entity::Live(_) => Kind::Live,
-            Entity::Settings(_) => Kind::Settings,
-            Entity::Synth(_) => Kind::Synth,
-            Entity::OrganPreset(_) => Kind::OrganPreset,
-            Entity::PianoPreset(_) => Kind::PianoPreset,
-            Entity::Performance(_) => Kind::Performance,
-            Entity::Midi(_) | Entity::Sysex(_) => Kind::LeadBank,
-            Entity::Cne3(_) => Kind::SampleLibrary,
-            Entity::PipeLibrary(_) => Kind::PipeLibrary,
-            Entity::Bundle(_) => Kind::Bundle,
-            Entity::SampleProject(_) => Kind::Project,
+        Kind::of_entity(decoded.kind())
+    }
+
+    /// The kind of asset a file that decodes to `entity` is.
+    fn of_entity(entity: EntityKind) -> Kind {
+        match entity {
+            EntityKind::Program => Kind::Program,
+            EntityKind::Song => Kind::SetList,
+            EntityKind::Sample => Kind::Sample,
+            EntityKind::Piano | EntityKind::PianoLibrary => Kind::Piano,
+            EntityKind::Live => Kind::Live,
+            EntityKind::Settings => Kind::Settings,
+            EntityKind::Synth => Kind::Synth,
+            EntityKind::OrganPreset => Kind::OrganPreset,
+            EntityKind::PianoPreset => Kind::PianoPreset,
+            EntityKind::Performance => Kind::Performance,
+            EntityKind::Midi | EntityKind::Sysex => Kind::LeadBank,
+            EntityKind::Cne3 => Kind::SampleLibrary,
+            EntityKind::PipeLibrary => Kind::PipeLibrary,
+            EntityKind::Bundle => Kind::Bundle,
+            EntityKind::SampleProject => Kind::Project,
         }
+    }
+
+    /// What a file of this name is, by its extension, before anything has read it.
+    /// [`Kind::Other`] for a file drawbar does not open.
+    pub fn of_name(name: &str) -> Kind {
+        tagged(name).map_or(Kind::Other, |(_, kind)| kind)
     }
 
     pub fn from_class(class: ObjectClass) -> Kind {
@@ -202,20 +226,31 @@ impl Kind {
     }
 }
 
+/// The tag a file of this name is kept under, by its extension, and the kind of asset
+/// it holds: a format `nord-format` reads, or a note. `None` for a file drawbar does not
+/// open.
+pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
+    use crate::document::text;
+
+    let (_, extension) = name.rsplit_once('.')?;
+    if extension.eq_ignore_ascii_case(text::EXTENSION) {
+        return Some((text::EXTENSION, Kind::Text));
+    }
+    let format = nord_format::formats::by_extension(extension)?;
+    Some((format.tag, Kind::of_entity(format.entity)))
+}
+
 /// The kinds present: what the list on this computer holds and what the attached
 /// instrument has a folder for, in [`Kind::ALL`] order.
 ///
 /// The union of both places, because a kind narrows what the library shows, and the
 /// library shows both.
 pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
-    let here: Vec<Kind> = workspace
-        .listed()
-        .map(Kind::of)
-        .chain(device.classes().into_iter().map(Kind::from_class))
-        .collect();
+    let here = workspace.kinds();
+    let there: Vec<Kind> = device.classes().into_iter().map(Kind::from_class).collect();
     Kind::ALL
         .into_iter()
-        .filter(|kind| here.contains(kind))
+        .filter(|kind| here.contains(kind) || there.contains(kind))
         .collect()
 }
 
@@ -239,6 +274,7 @@ impl Qualifier {
 
 /// The families and sample generations of the assets on this computer, which decide
 /// whether a kind's word alone is clear.
+#[derive(Default)]
 pub struct Kept {
     families: Vec<Family>,
     generations: Vec<&'static str>,
@@ -248,20 +284,9 @@ impl Kept {
     /// Files that name no family (the shared library formats, the carriers, bytes that
     /// did not decode) add none, so a list of samples spans no families.
     pub fn of(workspace: &Workspace) -> Kept {
-        let here: Vec<Family> = workspace
-            .listed()
-            .filter_map(|entity| Family::of_tag(&entity.tag()))
-            .collect();
-        let mut generations: Vec<&'static str> =
-            workspace.listed().filter_map(generation).collect();
-        generations.sort_unstable();
-        generations.dedup();
         Kept {
-            families: Family::ALL
-                .into_iter()
-                .filter(|family| here.contains(family))
-                .collect(),
-            generations,
+            families: workspace.families_present(),
+            generations: workspace.generations_present(),
         }
     }
 }
@@ -274,7 +299,7 @@ pub fn qualifier(
     kept: &Kept,
     instrument: Option<Family>,
 ) -> Option<Qualifier> {
-    if let Some(generation) = generation(entity) {
+    if let Some(generation) = entity.generation() {
         return (kept.generations.len() > 1).then_some(Qualifier::Generation(generation));
     }
     let family = Family::of_tag(&entity.tag());
@@ -294,13 +319,6 @@ fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>)
         return true;
     }
     matches!((asset, instrument), (Some(asset), Some(held)) if asset != held)
-}
-
-fn generation(entity: &LocalEntity) -> Option<&'static str> {
-    match entity.entity.as_ref()? {
-        Entity::Sample(sample) => Some(sample.generation()),
-        _ => None,
-    }
 }
 
 /// One row of the tree.
@@ -485,6 +503,31 @@ pub(super) fn ghost(ctx: &egui::Context) {
 mod tests {
     use super::*;
     use crate::strings::folder;
+
+    #[test]
+    fn a_note_and_a_file_nothing_reads_are_kinds_of_name() {
+        assert_eq!(tagged("Set list.TXT"), Some(("txt", Kind::Text)));
+        assert_eq!(Kind::of_name("no extension"), Kind::Other);
+        assert_eq!(Kind::of_name("scan.pdf"), Kind::Other);
+    }
+
+    /// A new file of each kind drawbar makes is the kind its name says.
+    #[test]
+    fn a_fresh_files_kind_is_the_kind_its_name_says() {
+        let mut workspace = Workspace::new(eframe::egui::Context::default());
+        let mut log = crate::log::Log::default();
+        for fresh in crate::workspace::Fresh::ALL {
+            let name = format!("x.{}", fresh.tag());
+            let id = workspace.ingest(
+                name.clone(),
+                crate::workspace::Origin::Fresh,
+                fresh.bytes().unwrap(),
+                &mut log,
+            );
+            let entity = workspace.get(id).expect("ingested");
+            assert_eq!(Kind::of(entity), Kind::of_name(&name), "{name}");
+        }
+    }
 
     /// The asset on this computer every drag fixture carries.
     const CARRIED: u64 = 1;

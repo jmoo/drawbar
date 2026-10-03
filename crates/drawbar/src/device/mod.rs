@@ -12,19 +12,27 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 use eframe::egui;
 use nord_format::accept::{Acceptance, Family};
+use nord_usb::op::Received;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
+use crate::ondisk::OnDisk;
 use crate::queue::Queue;
 use crate::strings::{counted, folder, place, shown};
 use crate::tabs::Tabs;
 use crate::workspace::{LocalEntity, Origin, Workspace};
 
+#[cfg(all(test, unix))]
+mod hardware;
 mod scan;
+mod scratch;
+#[cfg(not(target_arch = "wasm32"))]
+pub use scratch::shelf;
 mod worker;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,6 +46,7 @@ mod web;
 use web::Link;
 
 pub use scan::{Progress, Scan};
+use scratch::Scratch;
 pub use worker::{Emit, Flow};
 
 /// The number the panel labels a zero-indexed bank with.
@@ -92,18 +101,19 @@ pub enum DeviceCmd {
         why: Purpose,
     },
     Put {
-        /// The asset on this computer these bytes came from. The [`DeviceEvent::Sent`] this
+        /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
         /// raises names it, so a lone put settles the queue as a batch does.
         id: u64,
         class: ObjectClass,
         at: Location,
         name: String,
-        bytes: Vec<u8>,
+        payload: Payload,
     },
     /// Every queued object of one class, written inside a single session.
     ///
     /// Each item runs the same read-back, delete, write and restore flow as a lone
-    /// [`DeviceCmd::Put`]; only the session is shared. A refusal stops the batch there.
+    /// [`DeviceCmd::Put`]; only the session is shared, and a restore runs in one of its
+    /// own after it. A refusal stops the batch there.
     SendAll {
         class: ObjectClass,
         items: Vec<Outgoing>,
@@ -165,7 +175,39 @@ pub struct Outgoing {
     pub id: u64,
     pub at: Location,
     pub name: String,
-    pub bytes: Vec<u8>,
+    pub payload: Payload,
+}
+
+/// What a write sends: the bytes an asset holds, or the file it rests in, which the
+/// write reads a transfer chunk at a time and never whole.
+#[derive(Clone)]
+pub enum Payload {
+    Bytes(Vec<u8>),
+    File {
+        file: Arc<OnDisk>,
+        /// The checksum a slot holding the file reports, from the check that cleared it
+        /// to be sent. See [`crate::workspace::Container::body_crc32`].
+        crc32: u32,
+    },
+}
+
+impl Payload {
+    /// What sending `entity` writes, or why the instrument must not be sent it. One resting
+    /// in its file under an edit is sent once the edit is saved there.
+    pub fn of(entity: &LocalEntity) -> Result<Payload, String> {
+        entity.sendable()?;
+        match (entity.rests(), &entity.container) {
+            (None, _) => Ok(Payload::Bytes(entity.bytes.to_vec())),
+            (Some(_), _) if entity.is_unsaved() => {
+                Err("it holds an edit not yet saved into its file".into())
+            }
+            (Some(file), Some(container)) => Ok(Payload::File {
+                file: file.clone(),
+                crc32: container.body_crc32,
+            }),
+            (Some(_), None) => Err("its checksum has not been checked".into()),
+        }
+    }
 }
 
 /// How the status strip describes one operation.
@@ -354,10 +396,11 @@ pub enum DeviceEvent {
         id: u64,
         class: ObjectClass,
         at: Location,
-        /// The bytes the write carried: what the slot now holds and what the asset is saved
-        /// as from here on (see [`Workspace::landed`]). The asset may hold something else
-        /// by now, since a write takes as long as the instrument takes.
-        bytes: Vec<u8>,
+        /// What the write carried: what the slot now holds and what the asset is saved as
+        /// from here on (see [`Workspace::landed`] and [`Workspace::landed_file`]). The
+        /// asset may hold something else by now, since a write takes as long as the
+        /// instrument takes.
+        sent: Payload,
     },
     /// A slot's former contents, left with nowhere else to go by a failed write and a
     /// failed restore, or by a delete that may have landed.
@@ -365,6 +408,20 @@ pub enum DeviceEvent {
         at: Location,
         name: String,
         bytes: Vec<u8>,
+    },
+    /// A slot's former contents, too large to hold, which a failed write and a failed
+    /// restore left in the file they were read into.
+    Kept {
+        at: Location,
+        /// Where the file is, in words a person can follow to it.
+        place: String,
+    },
+    /// The occupant of a piano or sample slot something is queued for, read through its
+    /// checksum and not kept, since the instrument reports no checksum for those slots.
+    Summed {
+        class: ObjectClass,
+        at: Location,
+        received: Received,
     },
     Note(String),
     OpOk(String),
@@ -1035,7 +1092,7 @@ impl Device {
             events,
             #[cfg(test)]
             from_worker: sender.clone(),
-            link: Link::new(ctx, sender),
+            link: Link::new(ctx, sender, Scratch::default()),
             pending: VecDeque::new(),
             running: None,
             asked_deps: None,
@@ -1084,6 +1141,14 @@ impl Device {
     pub fn release(&mut self) {
         self.link.disconnect();
         self.link.join(std::time::Duration::from_secs(2));
+    }
+
+    /// Keep the occupant of a slot a write replaces, when it is too large to hold, in
+    /// `dir`: the open library's `.drawbar/tmp/`, or `None` where the library cannot be
+    /// written, for a `rescued` folder of drawbar's own data.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn keep_occupants_in(&self, dir: Option<std::path::PathBuf>) {
+        self.link.scratch().keep_in(dir);
     }
 
     /// Queue one command the user asked for. It runs ahead of the background read, and
@@ -1330,6 +1395,33 @@ impl Device {
         self.state.banks.insert((class.to_raw(), bank), slots);
     }
 
+    /// Fill in a bank as a walk of a piano or sample library would have: a name and a
+    /// body length for each occupied slot, and no checksum, since those slots report none.
+    #[cfg(test)]
+    pub fn pretend_lengths(
+        &mut self,
+        class: ObjectClass,
+        bank: u32,
+        slots: &[Option<(&str, u32)>],
+    ) {
+        self.pretend_attached();
+        let slots = slots
+            .iter()
+            .enumerate()
+            .map(|(slot, held)| {
+                held.map(|(name, body_len)| ProgramInfo {
+                    location: Location::from_user(bank, slot as u32 + 1),
+                    body_len,
+                    format: "npno".into(),
+                    version: 540,
+                    crc32: None,
+                    name: name.to_string(),
+                })
+            })
+            .collect();
+        self.state.banks.insert((class.to_raw(), bank), slots);
+    }
+
     /// Give a class the banks the device would have reported, for a headless render.
     #[cfg(test)]
     pub fn pretend_geometry(&mut self, class: ObjectClass, banks: &[(&str, u32)]) {
@@ -1542,6 +1634,21 @@ impl Device {
                         log.trouble(format!("{} is empty.", place(class, at)));
                     }
                 },
+                DeviceEvent::Kept { at, place } => {
+                    log.error(format!(
+                        "{} could not be restored; its bytes are kept at {place}",
+                        shown(at)
+                    ));
+                    log.trouble(format!(
+                        "{} is empty. What was in it is kept at {place}.",
+                        shown(at)
+                    ));
+                }
+                DeviceEvent::Summed {
+                    class,
+                    at,
+                    received,
+                } => queue.summed(class, at, &received, workspace),
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
                         "what {} held is in the local list as {name}",
@@ -1561,10 +1668,15 @@ impl Device {
                     id,
                     class,
                     at,
-                    bytes,
+                    sent,
                 } => {
                     queue.forget(id);
-                    workspace.landed(id, class, at, bytes);
+                    match sent {
+                        Payload::Bytes(bytes) => workspace.landed(id, class, at, bytes),
+                        Payload::File { file, crc32 } => {
+                            workspace.landed_file(id, class, at, file, crc32)
+                        }
+                    }
                 }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
@@ -1911,7 +2023,7 @@ mod tests {
 
         let bytes = {
             let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
+            let bytes = workspace.get(id).unwrap().bytes.to_vec();
             workspace.remove(id, &mut log);
             bytes
         };
@@ -1951,7 +2063,7 @@ mod tests {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
-            bytes: workspace.get(landed).unwrap().bytes.clone(),
+            sent: Payload::Bytes(workspace.get(landed).unwrap().bytes.to_vec()),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -1960,13 +2072,66 @@ mod tests {
         assert_eq!(queue.ids(), vec![still_owed]);
     }
 
+    /// A file that lands after its asset was saved as something else leaves the asset
+    /// saved as the file: what the slot holds. The edit saved meanwhile is still on this
+    /// computer, now unsaved against the file.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_file_that_lands_after_another_save_is_what_its_asset_is_saved_as() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        device.pretend_attached();
+        let (mut log, mut tabs, mut queue) = (Log::default(), Tabs::default(), Queue::default());
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::piano(4);
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &bytes);
+        let id = crate::testing::rest(&mut workspace, "Upright.npno", file.clone());
+        workspace.settle_files(&mut log);
+        let crc32 = workspace.get(id).unwrap().saved.crc32.unwrap();
+        let sent = Payload::of(workspace.get(id).unwrap()).unwrap();
+
+        // The last byte of its audio, changed, under a checksum that agrees.
+        let mut edited = bytes.clone();
+        let last = edited.len() - 1;
+        edited[last] ^= 1;
+        let v1 = nord_format::cbin::Generation::V1;
+        let body = nord_format::crc::crc32(&edited[v1.body_start() as usize..]);
+        let stored = v1.checksum_range(edited.len()).unwrap();
+        edited[stored].copy_from_slice(&body.to_le_bytes());
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.mark_saved(id);
+        assert!(!workspace.get(id).unwrap().is_unsaved());
+
+        let at = Location::from_user(1, 1);
+        device.pretend(DeviceEvent::Sent {
+            id,
+            class: ObjectClass::Piano,
+            at,
+            sent,
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(entity.bytes, edited, "the edit is kept");
+        assert!(entity.is_unsaved(), "and is not what the slot holds");
+        assert!(entity
+            .saved
+            .file
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &file)));
+        assert_eq!(entity.saved.crc32, Some(crc32));
+        assert_eq!(entity.link, Some((ObjectClass::Piano, at)));
+        assert_eq!(file.take_reads(), [], "nothing read the file");
+    }
+
     /// One program on this computer, and the body checksum a walk would report for the
     /// slot holding it.
     fn program(workspace: &mut Workspace, log: &mut Log, origin: Origin) -> (u64, u32) {
         let made = workspace
             .create(crate::workspace::Fresh::Program, log)
             .unwrap();
-        let bytes = workspace.get(made).unwrap().bytes.clone();
+        let bytes = workspace.get(made).unwrap().bytes.to_vec();
         workspace.remove(made, log);
         let id = workspace.ingest("Africa-Split.ne5p".into(), origin, bytes, log);
         let crc = workspace
@@ -1981,7 +2146,7 @@ mod tests {
         let made = workspace
             .create(crate::workspace::Fresh::Stage4Program, log)
             .unwrap();
-        let bytes = workspace.get(made).unwrap().bytes.clone();
+        let bytes = workspace.get(made).unwrap().bytes.to_vec();
         workspace.remove(made, log);
         let id = workspace.ingest("Africa-Split.ns4p".into(), origin, bytes, log);
         let crc = workspace
@@ -2122,7 +2287,7 @@ mod tests {
             "standing nowhere, it takes the lowest address holding it"
         );
 
-        let sent = workspace.get(id).unwrap().bytes.clone();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
         workspace.landed(id, class, high, sent);
         device.relink(&mut workspace);
         assert_eq!(
@@ -2242,7 +2407,7 @@ mod tests {
         let (id, crc) = program(&mut workspace, &mut log, Origin::Device { class, at });
 
         // Changed here before anything was attached, and saved.
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
@@ -2293,7 +2458,7 @@ mod tests {
         );
 
         // The match is on the name alone, trimmed and case-sensitive.
-        let bytes = workspace.get(settings).unwrap().bytes.clone();
+        let bytes = workspace.get(settings).unwrap().bytes.to_vec();
         let by_name = |workspace: &mut Workspace, name: &str, log: &mut Log| {
             let id = workspace.ingest(name.into(), Origin::Fresh, bytes.clone(), log);
             let at = super::named(
@@ -2389,12 +2554,12 @@ mod tests {
             let (id, crc) = program(&mut workspace, &mut log, origin);
             device.pretend_attached();
 
-            let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+            let sent = workspace.get(id).expect("it is on the list").bytes.to_vec();
             device.pretend(DeviceEvent::Sent {
                 id,
                 class,
                 at,
-                bytes: sent,
+                sent: Payload::Bytes(sent),
             });
             device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -2491,7 +2656,7 @@ mod tests {
         crate::queue::enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
 
         // What the write carries is what the asset held when it went out.
-        let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+        let sent = workspace.get(id).expect("it is on the list").bytes.to_vec();
 
         let (_, edited) = crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())])
             .expect("the registry takes the set");
@@ -2501,7 +2666,7 @@ mod tests {
             id,
             class,
             at,
-            bytes: sent.clone(),
+            sent: Payload::Bytes(sent.clone()),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -2536,7 +2701,7 @@ mod tests {
                     class,
                     at,
                     name: "Africa Split".into(),
-                    bytes: vec![0; 4],
+                    payload: Payload::Bytes(vec![0; 4]),
                 },
                 &mut log,
             );
@@ -2661,7 +2826,7 @@ mod tests {
                 class,
                 at: Location { bank: 6, slot: 9 },
                 name: "Africa Split".into(),
-                bytes: vec![0; 4],
+                payload: Payload::Bytes(vec![0; 4]),
             },
             &mut log,
         );
@@ -2790,7 +2955,7 @@ mod tests {
             class: ObjectClass::Program,
             at: Location { bank: 6, slot: 3 },
             name: "Africa Split".into(),
-            bytes: Vec::new(),
+            payload: Payload::Bytes(Vec::new()),
         };
         let words = cmd.words();
         assert_eq!(words.doing, "Sending “Africa Split” to Programs 7:4…");

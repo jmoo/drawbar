@@ -780,21 +780,21 @@ fn stored_name(
     shape: Shape,
     renaming: (Option<String>, Option<String>),
 ) -> Option<(Named, String)> {
-    let decoded = entity.entity.as_ref()?;
+    let decoded = || entity.entity.as_deref();
     match shape {
         Shape::Sample => {
-            let held = sample::snapshot(decoded)?.ok()?;
+            let held = sample::named(entity)?.ok()?;
             Some((
                 Named::Stored {
                     limit: Some(held.max_name_len?),
                     variant: None,
                     width: NAME,
                 },
-                held.name,
+                renaming.0.unwrap_or(held.name),
             ))
         }
         Shape::Project => {
-            let held = project::snapshot(decoded)?.ok()?;
+            let held = project::snapshot(decoded()?)?.ok()?;
             Some((
                 Named::Stored {
                     limit: None,
@@ -805,7 +805,7 @@ fn stored_name(
             ))
         }
         Shape::Piano => {
-            let held = piano::snapshot(decoded)?.ok()?;
+            let held = piano::named(entity)?.ok()?;
             let (name, variant) = renaming;
             Some((
                 Named::Stored {
@@ -941,17 +941,18 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     let tag = entity.tag();
     let kind = Kind::of(entity);
     let word = kind_word(kind, Family::of_tag(&tag).map(Qualifier::Family));
-    let version = entity.container.as_ref().map(|held| held.header.version);
+    let version = match (&entity.container, entity.indexed()) {
+        (Some(held), _) => Some(held.header.version),
+        (None, Some(index)) => Some(index.header().version),
+        (None, None) => None,
+    };
     let sentence = match version {
         Some(version) => format!("{word}, content version {version}"),
         None => word,
     };
     match kind {
         Kind::Sample => {
-            let generation = entity
-                .entity
-                .as_ref()
-                .and_then(sample::snapshot)
+            let generation = sample::named(entity)
                 .and_then(Result::ok)
                 .map_or_else(String::new, |held| format!(" {}", held.generation));
             (
@@ -998,7 +999,10 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
 
 /// The stream version a piano library states, which is separate from the container's.
 fn stream_version(entity: &LocalEntity) -> Option<u16> {
-    match entity.entity.as_ref()? {
+    if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
+        return Some(index.library().stream_version());
+    }
+    match entity.entity.as_deref()? {
         nord_format::Entity::Piano(piano) => piano.stream_version().ok(),
         _ => None,
     }
@@ -1062,14 +1066,14 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
         });
     }
     if kind == Kind::SetList {
-        let entries = setlist::entries(entity.entity.as_ref()?)?;
+        let entries = setlist::entries(entity.entity.as_deref()?)?;
         return Some(SizeLine {
             text: counted(entries, "entry", "entries"),
             warn: false,
             hint: "the programs this set list orders".to_string(),
         });
     }
-    let bytes = entity.bytes.len() as u64;
+    let bytes = entity.size();
     Some(SizeLine {
         text: room::measure(bytes),
         warn: false,
@@ -1189,7 +1193,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
                 "{} is free in {}, and this is {}",
                 room::measure(free),
                 folder(class),
-                room::measure(entity.bytes.len() as u64)
+                room::measure(entity.size())
             ),
             send: None,
         };
@@ -1211,7 +1215,7 @@ pub(super) fn loads(entity: &LocalEntity, device: &DeviceState) -> Option<(Objec
 /// `None` where the folder does not count in bytes or the document fits.
 fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Option<(u64, u64)> {
     let free = room::free_bytes(class, device)?;
-    let bytes = entity.bytes.len() as u64;
+    let bytes = entity.size();
     bytes
         .checked_sub(free)
         .filter(|over| *over > 0)
@@ -1239,7 +1243,7 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
             });
         }
     }
-    if let Some(stated) = entity.entity.as_ref().and_then(sample::stated) {
+    if let Some(stated) = sample::stated_of(entity) {
         cells.push(stated);
     }
     cells
@@ -1332,7 +1336,7 @@ mod tests {
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         assert_eq!(lives(workspace.get(fresh).unwrap()), "This computer");
 
-        let bytes = workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = workspace.get(fresh).unwrap().bytes.to_vec();
         let copied = workspace.ingest(
             "Africa.ne5p".to_string(),
             Origin::Device {
@@ -1478,7 +1482,7 @@ mod tests {
         let device = crate::device::Device::new(egui::Context::default());
         let (mut workspace, mut log) = workspace();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let mut edited = workspace.get(id).unwrap().bytes.clone();
+        let mut edited = workspace.get(id).unwrap().bytes.to_vec();
         *edited.last_mut().expect("a byte to move") ^= 0xff;
         workspace.replace_bytes(id, edited, &mut log);
 
@@ -1611,7 +1615,7 @@ mod tests {
         let (mut workspace, mut log) = workspace();
         let at = Location { bank: 6, slot: 3 };
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = workspace.get(fresh).unwrap().bytes.to_vec();
         let copied = workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -1643,7 +1647,7 @@ mod tests {
             "a program the instrument does not hold has no slot to load"
         );
 
-        let mut edited = workspace.get(copied).unwrap().bytes.clone();
+        let mut edited = workspace.get(copied).unwrap().bytes.to_vec();
         *edited.last_mut().expect("a byte to move") ^= 0xff;
         workspace.replace_bytes(copied, edited, &mut log);
         assert_eq!(

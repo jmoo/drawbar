@@ -1,8 +1,9 @@
 //! Work that outlives the frame that started it: encoding a piano library, or laying one
 //! out again from a plan.
 //!
-//! ⚠️ wasm has one thread, so there the work runs inline and the frame waits for it. The
-//! caller gets the same [`Job`] either way and polls it the same way.
+//! ⚠️ wasm has one thread, so there the work runs inline and the frame waits for it,
+//! except work that waits on the browser, which runs as a task of its own. The caller gets
+//! the same [`Job`] either way and polls it the same way.
 
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -95,6 +96,24 @@ pub fn run<T: Send + 'static>(
     let (tx, rx) = channel();
     let progress = Progress::default();
     let _ = tx.send(work(&progress));
+    Job { rx, progress }
+}
+
+/// Start `work`, a future the browser answers whenever it answers, and request a repaint
+/// when it has.
+#[cfg(target_arch = "wasm32")]
+pub fn spawn<T: 'static, F: std::future::Future<Output = T> + 'static>(
+    ctx: &egui::Context,
+    work: impl FnOnce(Progress) -> F,
+) -> Job<T> {
+    let (tx, rx) = channel();
+    let progress = Progress::default();
+    let working = work(progress.clone());
+    let ctx = ctx.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tx.send(working.await);
+        ctx.request_repaint();
+    });
     Job { rx, progress }
 }
 
