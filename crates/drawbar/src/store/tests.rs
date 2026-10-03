@@ -1287,12 +1287,7 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
     };
     index.assets.insert(10, unread);
     let text = sidecar::write(&index).unwrap();
-    assert_eq!(sidecar::read(&text), Read::Known(index.clone()));
-
-    // An index written while every fingerprint had a CRC wrote it bare.
-    let bare = text.replace("Some(3735928559)", "3735928559");
-    assert_ne!(bare, text);
-    assert_eq!(sidecar::read(&bare), Read::Known(index));
+    assert_eq!(sidecar::read(&text), Read::Known(index));
 
     assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
     assert!(matches!(sidecar::read("not an index"), Read::Unreadable(_)));

@@ -227,7 +227,6 @@ pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<u64>,
     /// CRC-32 over the whole file, once something has read all of it.
-    #[serde(default, deserialize_with = "sidecar::crc")]
     pub crc: Option<u32>,
 }
 

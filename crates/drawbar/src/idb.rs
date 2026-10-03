@@ -13,8 +13,8 @@ use crate::js::describe;
 
 const DATABASE: &str = "drawbar";
 
-/// Raised each time a store is added: opening at a higher version makes what is missing.
-const VERSION: u32 = 2;
+/// The version the database is made at, with every store below.
+const VERSION: u32 = 1;
 
 /// The folders picked lately, under one key. See [`crate::libraries`].
 pub const LIBRARIES: &str = "libraries";
@@ -38,9 +38,7 @@ pub async fn database() -> Result<IdbDatabase, String> {
         };
         let db: IdbDatabase = db.unchecked_into();
         for store in [LIBRARIES, FILES] {
-            if !db.object_store_names().contains(store) {
-                let _ = db.create_object_store(store);
-            }
+            let _ = db.create_object_store(store);
         }
     });
     request.set_onupgradeneeded(Some(upgrade.as_ref().unchecked_ref()));
