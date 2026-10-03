@@ -12,7 +12,9 @@
 //! [`encode`] builds a new instrument from PCM in all three generations.
 //!
 //! [`Index`] reads the zones and the position of each zone's stroke without reading the
-//! audio, so one stroke can be read by range.
+//! audio, so one stroke can be read by range. Its [`Outline`] answers what a whole read
+//! answers outside the audio, and [`Index::patch`] saves an edited one as a few
+//! replaced sections.
 
 /// A zone and the stroke stream that plays it, ready for [`codec::decode`].
 pub struct ZoneAudio<'a> {
@@ -33,6 +35,7 @@ mod index;
 pub mod kernel;
 pub mod keymap;
 pub mod meta;
+mod outline;
 pub mod section;
 pub mod stroke;
 pub mod sty;
@@ -41,6 +44,7 @@ pub mod zone;
 pub use index::{Index, ZoneSpan};
 pub use keymap::{KeyTable, Level};
 pub use meta::Meta;
+pub use outline::{Fields, NarrowFields, Outline, WideFields};
 pub use section::{Framed, Framing, Narrow, Section, Wide};
 pub use stroke::Stroke;
 pub use sty::{velocity_level, EqBand, Sty, StyV2, StyV3};

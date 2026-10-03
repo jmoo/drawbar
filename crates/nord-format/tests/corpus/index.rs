@@ -191,5 +191,185 @@ fn sample_index(bytes: &[u8], sample: &Sample) -> Result<(), String> {
         let opening = nsmp::Index::STROKE_OPENING as u64;
         reads_within(&reader.reads, &span.stream, opening).map_err(|e| format!("zone {i}: {e}"))?;
     }
+    outline_agrees(index.outline(), sample)?;
+    for edit in sample_edits(&index) {
+        patch_agrees(bytes, &index, edit).map_err(|e| format!("{edit:?}: {e}"))?;
+    }
     Ok(())
+}
+
+/// Both sides give the same value, or both refuse.
+fn same<T: PartialEq + std::fmt::Debug, E: std::fmt::Display>(
+    what: &str,
+    outline: Result<T, E>,
+    whole: Result<T, E>,
+) -> Result<(), String> {
+    match (outline, whole) {
+        (Ok(outline), Ok(whole)) => {
+            ensure!(
+                outline == whole,
+                "{what}: the outline reads {outline:?} and a whole read {whole:?}"
+            );
+            Ok(())
+        }
+        (Err(_), Err(_)) => Ok(()),
+        (outline, whole) => Err(format!(
+            "{what}: the outline reads {:?} and a whole read {:?}",
+            outline.map_err(|e| e.to_string()),
+            whole.map_err(|e| e.to_string())
+        )),
+    }
+}
+
+type Answer<T> = Result<T, nord_format::error::Error>;
+
+/// A value read without the chance of a refusal, for [`same`].
+fn ok<T>(value: T) -> Answer<T> {
+    Ok(value)
+}
+
+fn outline_agrees(outline: &nsmp::Outline, sample: &Sample) -> Result<(), String> {
+    same("the name", outline.name(), sample.name())?;
+    same("the chain", outline.chain(), sample.chain())?;
+    same(
+        "the name's capacity",
+        ok(outline.max_name_len()),
+        ok(sample.max_name_len()),
+    )?;
+    same(
+        "the generation",
+        ok(outline.generation()),
+        ok(sample.generation()),
+    )?;
+    same(
+        "whether the zones edit",
+        ok(outline.zones_are_editable()),
+        ok(sample.zones_are_editable()),
+    )?;
+    match (outline.fields(), sample) {
+        (nsmp::Fields::V2(fields), Sample::V2(whole)) => {
+            same("the chain", fields.chain(), whole.chain())?;
+            same("the zones", fields.zones(), whole.zones())?;
+            same("the keyboard map", fields.key_table(), whole.key_table())?;
+            same("the preset", fields.sty(), whole.sty())?;
+            same(
+                "the categories",
+                ok(fields.categories()),
+                ok(whole.categories()),
+            )
+        }
+        (nsmp::Fields::V3(fields), Sample::V3(whole)) => {
+            same("the sub name", fields.sub_name(), whole.sub_name())?;
+            same("the zones", fields.zones(), whole.zones())?;
+            same("the zone table", fields.zone_table(), whole.zone_table())?;
+            same("the preset", fields.sty(), whole.sty())?;
+            same("the meta section", fields.meta(), whole.meta())?;
+            same(
+                "the stroke count",
+                ok(fields.stroke_count()),
+                ok(whole.stroke_count()),
+            )
+        }
+        _ => Err("the outline is of another generation than a whole read".into()),
+    }
+}
+
+/// One edit the sample document makes.
+#[derive(Debug, Clone, Copy)]
+enum Edit {
+    Name,
+    Root(u8),
+    Top(u8),
+    Low(u8),
+    Key,
+}
+
+/// An edit of each kind, to the first zone, moving each note it sets.
+fn sample_edits(index: &nsmp::Index) -> Vec<Edit> {
+    let mut edits = vec![Edit::Name, Edit::Key];
+    if let Some(zone) = index.zones().first() {
+        edits.push(Edit::Root(zone.root_key ^ 1));
+        edits.push(Edit::Top(zone.top_note.saturating_sub(1)));
+        edits.push(Edit::Low(zone.low_note.map_or(0, |low| low ^ 1)));
+    }
+    edits
+}
+
+/// A per-key level the keyboard map is unlikely to hold already.
+fn level() -> nsmp::Level {
+    nsmp::Level::new(nsmp::keymap::GAIN_UNITY / 2, -128).unwrap()
+}
+
+fn edit_whole(sample: &mut Sample, edit: Edit) -> Answer<()> {
+    match edit {
+        Edit::Name => sample.set_name("Patched"),
+        Edit::Root(note) => sample.set_root_key(0, note),
+        Edit::Top(note) => sample.set_zone_top_note(0, note),
+        Edit::Low(note) => sample.set_zone_low_note(0, note),
+        Edit::Key => match sample {
+            Sample::V2(file) => {
+                let mut table = file.key_table()?;
+                table.set_key(60, level())?;
+                file.set_key_table(&table)
+            }
+            Sample::V3(_) => Err(wide()),
+        },
+    }
+}
+
+fn edit_outline(outline: &mut nsmp::Outline, edit: Edit) -> Answer<()> {
+    match edit {
+        Edit::Name => outline.set_name("Patched"),
+        Edit::Root(note) => outline.set_root_key(0, note),
+        Edit::Top(note) => outline.set_zone_top_note(0, note),
+        Edit::Low(note) => outline.set_zone_low_note(0, note),
+        Edit::Key => {
+            let nsmp::Fields::V2(fields) = outline.fields() else {
+                return Err(wide());
+            };
+            let mut table = fields.key_table()?;
+            table.set_key(60, level())?;
+            outline.set_key_table(&table)
+        }
+    }
+}
+
+fn wide() -> nord_format::error::Error {
+    nord_format::error::ParseError::AssertFail(
+        "the wide chain's keyboard map is not written".into(),
+    )
+    .into()
+}
+
+/// The edit made through the index is the file a whole read, the edit and a whole
+/// write make, or both refuse it.
+fn patch_agrees(bytes: &[u8], index: &nsmp::Index, edit: Edit) -> Result<(), String> {
+    let mut entity = crate::samples::parse(bytes)?;
+    let Entity::Sample(sample) = &mut entity else {
+        return Err("not a sample instrument".into());
+    };
+    let whole = edit_whole(sample, edit).and_then(|()| sample.to_bytes());
+    let mut outline = index.outline().clone();
+    let patched = edit_outline(&mut outline, edit).and_then(|()| {
+        let mut out = Vec::new();
+        index
+            .patch(&outline)?
+            .copy(&mut Cursor::new(bytes), &mut out)?;
+        Ok(out)
+    });
+    match (whole, patched) {
+        (Ok(whole), Ok(patched)) => {
+            let first = whole.iter().zip(&patched).position(|(a, b)| a != b);
+            ensure!(
+                whole.len() == patched.len() && first.is_none(),
+                "the patch writes {} bytes and a whole edit {}, first apart at {first:?}",
+                patched.len(),
+                whole.len()
+            );
+            Ok(())
+        }
+        (Err(_), Err(_)) => Ok(()),
+        (Ok(_), Err(e)) => Err(format!("a whole edit takes it and the patch refuses: {e}")),
+        (Err(e), Ok(_)) => Err(format!("the patch takes it and a whole edit refuses: {e}")),
+    }
 }

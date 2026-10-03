@@ -29,7 +29,7 @@
 //! The container reads and writes in one forward pass with O(1) state; body allocation
 //! belongs to the body type.
 
-use crate::crc::{Crc16Stream, Crc32Stream};
+use crate::crc::{crc16_patched, crc32_patched, Change, Crc16Stream, Crc32Stream};
 use crate::error::{try_vec, Error, ParseError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -225,25 +225,38 @@ enum Hash {
 }
 
 impl Hash {
+    /// The accumulator for `generation`, having seen nothing.
+    fn new(generation: Generation) -> Hash {
+        match generation {
+            Generation::V0 => Hash::V0(Crc16Stream::new()),
+            Generation::V1 => Hash::V1(Crc32Stream::new()),
+        }
+    }
+
     /// The accumulator for `header`'s generation, having seen whatever of the header
     /// that generation's checksum covers.
     fn primed(header: &Header) -> Hash {
-        match header.generation {
-            // The crc16 covers the header too. Re-encoding is exact: the magic is
-            // verified and the other header bytes are held in `header`.
-            Generation::V0 => {
-                let mut hash = Crc16Stream::new();
-                hash.update(&header.head_bytes());
-                Hash::V0(hash)
-            }
-            Generation::V1 => Hash::V1(Crc32Stream::new()),
+        let mut hash = Hash::new(header.generation);
+        // The crc16 covers the header too. Re-encoding is exact: the magic is verified
+        // and the other header bytes are held in `header`.
+        if header.generation == Generation::V0 {
+            hash.update(&header.head_bytes());
         }
+        hash
     }
 
     fn update(&mut self, bytes: &[u8]) {
         match self {
             Hash::V0(h) => h.update(bytes),
             Hash::V1(h) => h.update(bytes),
+        }
+    }
+
+    /// The checksum so far, a crc16 widened.
+    fn value(&self) -> u32 {
+        match self {
+            Hash::V0(h) => h.value().into(),
+            Hash::V1(h) => h.value(),
         }
     }
 }
@@ -385,6 +398,215 @@ pub(crate) fn locate_body(
 ) -> Result<(Header, Range<u64>), Error> {
     let (header, _, body) = locate(r, Some(format))?;
     Ok((header, body))
+}
+
+/// Read the header of a `format` file, find its body and read its stored checksum,
+/// reading no body byte. A type-0 file's crc16 is read from its trailer.
+///
+/// ⚠️ The checksum is not verified, as [`locate_body`] verifies nothing.
+pub(crate) fn locate_sealed(
+    r: &mut (impl Read + Seek),
+    format: &'static str,
+) -> Result<(Header, Range<u64>, Seal), Error> {
+    let (header, stored_crc32, body) = locate(r, Some(format))?;
+    let generation = header.generation;
+    let start = body.start - generation.body_start();
+    let seal = match generation {
+        Generation::V1 => Seal {
+            generation,
+            stored: stored_crc32,
+            at: start + 0x18..start + 0x1c,
+            covers: body.clone(),
+            file: start..body.end,
+        },
+        Generation::V0 => {
+            let mut trailer = [0u8; 2];
+            read_at(r, body.end, &mut trailer)?;
+            Seal {
+                generation,
+                stored: u16::from_le_bytes(trailer).into(),
+                at: body.end..body.end + 2,
+                covers: start..body.end,
+                file: start..body.end + 2,
+            }
+        }
+    };
+    Ok((header, body, seal))
+}
+
+/// Where a file keeps its checksum, the bytes it covers, and the value it stores, as
+/// positions in the stream it was read from. Enough to restate the checksum after an
+/// in-place edit without reading the bytes the edit leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Seal {
+    generation: Generation,
+    /// The type-1 crc32, or the type-0 crc16 widened.
+    stored: u32,
+    /// The checksum's own bytes.
+    at: Range<u64>,
+    covers: Range<u64>,
+    /// The whole file, header and trailer included.
+    file: Range<u64>,
+}
+
+impl Seal {
+    /// The patch that writes each edit, and the checksum they leave the file with.
+    ///
+    /// Edits must lie inside what the checksum covers, keep their length, and not
+    /// overlap. The checksum is derived from the stored one, not from the bytes, so it is
+    /// right exactly when the stored one was; [`Patch::copy`] checks that.
+    pub(crate) fn patch(&self, mut edits: Vec<Edit<'_>>) -> Result<Patch, Error> {
+        edits.sort_by_key(|edit| edit.at);
+        let mut changes = Vec::with_capacity(edits.len());
+        let mut end = self.covers.start;
+        for edit in &edits {
+            let past = u64::try_from(edit.old.len())
+                .ok()
+                .and_then(|len| edit.at.checked_add(len));
+            match past {
+                Some(past) if edit.at >= end && past <= self.covers.end => end = past,
+                _ => return Err(outside(edit.at, &self.covers)),
+            }
+            changes.push(Change {
+                at: edit.at - self.covers.start,
+                old: edit.old,
+                new: &edit.new,
+            });
+        }
+        let len = self.covers.end - self.covers.start;
+        let (stored, bytes) = match self.generation {
+            Generation::V1 => {
+                let crc = crc32_patched(self.stored, len, &changes)?;
+                (crc, crc.to_le_bytes().to_vec())
+            }
+            Generation::V0 => {
+                let crc = crc16_patched(self.stored as u16, len, &changes)?;
+                (crc.into(), crc.to_le_bytes().to_vec())
+            }
+        };
+        let mut splices: Vec<Splice> = edits
+            .into_iter()
+            .map(|edit| Splice {
+                at: edit.at,
+                bytes: edit.new,
+            })
+            .collect();
+        splices.push(Splice {
+            at: self.at.start,
+            bytes,
+        });
+        splices.sort_by_key(|splice| splice.at);
+        Ok(Patch {
+            splices,
+            seal: Seal {
+                stored,
+                ..self.clone()
+            },
+        })
+    }
+}
+
+/// Bytes an in-place edit writes at a stream position, over the `old` bytes there.
+#[derive(Debug, Clone)]
+pub(crate) struct Edit<'a> {
+    pub at: u64,
+    pub old: &'a [u8],
+    pub new: Vec<u8>,
+}
+
+/// An edit at `at`, overlapping another or reaching outside the checksummed `covers`.
+fn outside(at: u64, covers: &Range<u64>) -> Error {
+    ParseError::OutOfBounds {
+        value: format!("an edit at byte {at}"),
+        bound: format!("one clear of the edits before it, within the checksummed bytes {covers:?}"),
+    }
+    .into()
+}
+
+/// Same-length replacements for some of a file's bytes, its checksum among them: an
+/// in-place edit, made without reading the bytes it leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Patch {
+    splices: Vec<Splice>,
+    /// The checksum the patched file stores.
+    seal: Seal,
+}
+
+/// Bytes to write at a position of the stream a [`Patch`] was made against, over as
+/// many bytes as they hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Splice {
+    pub at: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Bytes [`Patch::copy`] moves per read.
+const COPY_CHUNK: usize = 1 << 16;
+
+impl Patch {
+    /// Every replacement, in ascending position and none overlapping another. One is
+    /// the checksum.
+    pub fn splices(&self) -> &[Splice] {
+        &self.splices
+    }
+
+    /// Copy the file through from `from`, the stream the patch was made against, to
+    /// `to`, writing each splice in place of the bytes it covers. Memory is one chunk.
+    ///
+    /// The copy's checksum is computed as it streams and must be the one the patch
+    /// wrote. A source that changed since the patch was made, or whose stored checksum
+    /// was already wrong, is refused, with `to` holding the whole copy.
+    pub fn copy(&self, from: &mut (impl Read + Seek), to: &mut impl Write) -> Result<(), Error> {
+        from.seek(SeekFrom::Start(self.seal.file.start))?;
+        let mut hash = Hash::new(self.seal.generation);
+        let mut buf = try_vec(COPY_CHUNK)?;
+        let mut pos = self.seal.file.start;
+        for splice in self.splices.iter().map(Some).chain([None]) {
+            let until = splice.map_or(self.seal.file.end, |splice| splice.at);
+            while pos < until {
+                let n = (until - pos).min(COPY_CHUNK as u64) as usize;
+                from.read_exact(&mut buf[..n])?;
+                self.emit(pos, &buf[..n], to, &mut hash)?;
+                pos += n as u64;
+            }
+            if let Some(splice) = splice {
+                let len = splice.bytes.len() as u64;
+                let skip =
+                    i64::try_from(len).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                from.seek(SeekFrom::Current(skip))?;
+                self.emit(pos, &splice.bytes, to, &mut hash)?;
+                pos += len;
+            }
+        }
+        let (computed, expected) = (hash.value(), self.seal.stored);
+        if computed != expected {
+            return Err(ParseError::AssertFail(format!(
+                "the patched copy checksums to {computed:#010x}, not the {expected:#010x} the \
+                 patch derived: the source is not the file it was made against, or its stored \
+                 checksum was already wrong"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Write `bytes`, which sit at stream position `pos`, hashing the part the checksum
+    /// covers.
+    fn emit(
+        &self,
+        pos: u64,
+        bytes: &[u8],
+        to: &mut impl Write,
+        hash: &mut Hash,
+    ) -> Result<(), Error> {
+        to.write_all(bytes)?;
+        let covers = &self.seal.covers;
+        let end = pos + bytes.len() as u64;
+        let from = covers.start.clamp(pos, end) - pos;
+        let until = covers.end.clamp(pos, end) - pos;
+        hash.update(&bytes[from as usize..until as usize]);
+        Ok(())
+    }
 }
 
 /// The stream position of offset `at` into a body at `body`, or `None` past its end.
@@ -1000,5 +1222,107 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         file.write_to(&mut out).unwrap();
         assert_eq!(out.into_inner(), bytes);
+    }
+
+    /// The body edits as `(body offset, bytes)`, applied to `body`.
+    fn edited_body(body: &[u8], edits: &[(usize, &[u8])]) -> Vec<u8> {
+        let mut out = body.to_vec();
+        for (at, bytes) in edits {
+            out[*at..*at + bytes.len()].copy_from_slice(bytes);
+        }
+        out
+    }
+
+    /// The patch making `edits` to the file at `lead` bytes into `stream`.
+    fn patch(stream: &[u8], lead: usize, edits: &[(usize, &[u8])]) -> Result<Patch, Error> {
+        let mut r = Cursor::new(stream);
+        r.set_position(lead as u64);
+        let (_, body, seal) = locate_sealed(&mut r, "test")?;
+        let edits = edits
+            .iter()
+            .map(|(at, bytes)| {
+                let pos = body.start + *at as u64;
+                Edit {
+                    at: pos,
+                    old: &stream[pos as usize..pos as usize + bytes.len()],
+                    new: bytes.to_vec(),
+                }
+            })
+            .collect();
+        seal.patch(edits)
+    }
+
+    fn copied(patch: &Patch, stream: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        patch.copy(&mut Cursor::new(stream), &mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn a_patched_copy_is_the_file_written_whole_with_the_edits() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let edits: [(usize, &[u8]); 3] = [(150_000, b"tail"), (3, b"head"), (70_000, &[0; 9])];
+        let edited = edited_body(&body, &edits);
+        for (file, whole) in [
+            (v1_file(&body), v1_file(&edited)),
+            (v0_file(&body), v0_file(&edited)),
+        ] {
+            let mut stream = b"lead".to_vec();
+            stream.extend_from_slice(&file);
+            let patch = patch(&stream, 4, &edits).unwrap();
+            assert_eq!(copied(&patch, &stream).unwrap(), whole);
+            assert_eq!(
+                patch.splices().len(),
+                edits.len() + 1,
+                "one splice is the checksum"
+            );
+        }
+    }
+
+    #[test]
+    fn edits_that_overlap_or_leave_the_checksummed_bytes_are_refused() {
+        let body = [0u8; 64];
+        for file in [v1_file(&body), v0_file(&body)] {
+            let overlapping: [(usize, &[u8]); 2] = [(10, &[1; 4]), (12, &[2; 4])];
+            assert!(patch(&file, 0, &overlapping).is_err());
+            let (_, body, seal) = locate_sealed(&mut Cursor::new(&file), "test").unwrap();
+            let past = Edit {
+                at: body.end - 2,
+                old: &[0; 3],
+                new: vec![1; 3],
+            };
+            assert!(seal.patch(vec![past]).is_err());
+        }
+        let file = v1_file(&body);
+        let (_, _, seal) = locate_sealed(&mut Cursor::new(&file), "test").unwrap();
+        let header = Edit {
+            at: 0x08,
+            old: &file[0x08..0x0c],
+            new: b"tset".to_vec(),
+        };
+        assert!(seal.patch(vec![header]).is_err());
+    }
+
+    #[test]
+    fn a_copy_of_a_source_changed_outside_the_splices_is_refused() {
+        let body = [0x5au8; 300];
+        for file in [v1_file(&body), v0_file(&body)] {
+            let patch = patch(&file, 0, &[(100, b"new")]).unwrap();
+            let mut changed = file.clone();
+            changed[0x2c + 200] ^= 1;
+            let error = copied(&patch, &changed).unwrap_err().to_string();
+            assert!(
+                error.contains("not the file it was made against"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_copy_of_a_source_whose_stored_checksum_was_wrong_is_refused() {
+        let mut file = v1_file(&[1u8; 40]);
+        file[0x18] ^= 0xff;
+        let patch = patch(&file, 0, &[(0, b"x")]).unwrap();
+        assert!(copied(&patch, &file).is_err());
     }
 }
