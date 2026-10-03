@@ -17,7 +17,7 @@ use crate::queue::Queue;
 use crate::shell::{Dock, Shell};
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
-use crate::zoom::Zoom;
+use crate::zoom::{Room, Zoom};
 
 /// A theme-specific success color with enough contrast for small text.
 pub fn good(visuals: &egui::Visuals) -> egui::Color32 {
@@ -168,6 +168,8 @@ pub struct DrawbarApp {
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
     pub(crate) zoom: Zoom,
+    /// What the display and the window allowed the zoom to be, as of this frame.
+    pub(crate) room: Room,
     /// The MIDI controllers listened to, whichever tab is in front.
     pub(crate) midi: Midi,
     pub(crate) splash: crate::splash::Splash,
@@ -224,6 +226,7 @@ impl DrawbarApp {
             log: Log::default(),
             theme,
             zoom,
+            room: Room::of(&cc.egui_ctx),
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
@@ -309,7 +312,7 @@ impl DrawbarApp {
         #[cfg(target_os = "macos")]
         self.menu_bar_events(ctx, frame, zooms, &mut acts);
         self.shortcuts(ctx, frame, zooms, &mut acts);
-        let smaller = self.zoom.after(crate::zoom::Step::Out);
+        let smaller = self.zoom.after(crate::zoom::Step::Out, self.room).ok();
         if let Some(zoom) = crate::shell::too_small_notice(ctx, smaller) {
             self.pick_zoom(ctx, frame, zoom);
         }
@@ -444,6 +447,7 @@ impl eframe::App for DrawbarApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.room = Room::of(ctx);
         if crate::shell::too_small(ctx.screen_rect().size()) {
             self.gated(ctx, frame);
             return;
@@ -501,7 +505,7 @@ impl eframe::App for DrawbarApp {
         self.browser.dialog(ctx, &mut acts);
         self.backdrop(ctx);
         self.top_bar(ctx, frame, &mut acts);
-        self.status_line(ctx, frame, &mut acts);
+        self.status_line(ctx, &mut acts);
         self.browser_card(ctx, &mut acts);
         self.inspector_card(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
@@ -520,6 +524,9 @@ impl eframe::App for DrawbarApp {
             self.shell.log_open =
                 self.log
                     .popover(ctx, &mut self.shell.log_problems, self.shell.status_rect);
+        }
+        if self.shell.zoom_open {
+            self.shell.zoom_open = self.zoom_popover(ctx, frame);
         }
 
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is

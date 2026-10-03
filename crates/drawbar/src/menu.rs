@@ -108,7 +108,7 @@ pub fn label(command: Command) -> &'static str {
         Command::Activity => "Activity log",
         Command::Zoom(Step::In) => "Zoom in",
         Command::Zoom(Step::Out) => "Zoom out",
-        Command::Zoom(Step::Reset) => "Default size",
+        Command::Zoom(Step::Reset) => "Reset zoom",
         Command::Theme(choice) => choice.name(),
         Command::Connect => "Connect…",
         Command::Disconnect => "Disconnect",
@@ -468,7 +468,7 @@ impl DrawbarApp {
             Command::Inspector => check(self.shell.open(Dock::Inspector)),
             Command::Activity => check(self.shell.log_open),
             Command::Zoom(step) => Offer {
-                enabled: self.zoom.after(step).is_some(),
+                enabled: self.zoom.after(step, self.room).is_ok(),
                 ..plain
             },
             Command::Theme(choice) => check(self.theme == choice),
@@ -528,7 +528,7 @@ impl DrawbarApp {
             Command::Inspector => acts.push(Act::ToggleDock(Dock::Inspector)),
             Command::Activity => acts.push(Act::ToggleLog),
             Command::Zoom(step) => {
-                if let Some(zoom) = self.zoom.after(step) {
+                if let Ok(zoom) = self.zoom.after(step, self.room) {
                     self.pick_zoom(ctx, frame, zoom);
                 }
             }

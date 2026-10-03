@@ -1,14 +1,12 @@
 //! How large the whole window is drawn: one factor on every point the shell lays out.
-//!
-//! The reader sees steps from the default, never the factor behind them.
 
-use std::cmp::Ordering;
+use eframe::egui;
 
 /// The zooms offered, in percent, smallest first.
-const STEPS: [u16; 8] = [80, 90, 100, 110, 125, 150, 175, 200];
+const STEPS: [u16; 11] = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
 
 /// Where a zoom nobody has picked stands: the size the shell is drawn for.
-const DEFAULT: Zoom = Zoom(2);
+const DEFAULT: Zoom = Zoom(5);
 
 /// A change of zoom a command asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +14,17 @@ pub enum Step {
     In,
     Out,
     Reset,
+}
+
+/// Why a step leads nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// There is no step that way, or the zoom is already where it leads.
+    End,
+    /// The next step down would draw a point smaller than a pixel of this display.
+    Blur,
+    /// The next step up would leave the window too small for the shell.
+    Room,
 }
 
 /// One of [`STEPS`], by its index.
@@ -33,24 +42,17 @@ impl Zoom {
     /// computer and its budget.
     pub(crate) const KEY: &'static str = "drawbar.zoom";
 
-    /// A stored zoom. Anything that is not one of the steps is the default.
+    /// A stored zoom, at the step nearest it. Anything that is not a percent is the
+    /// default.
     pub(crate) fn read(text: &str) -> Zoom {
-        text.parse::<u16>()
-            .ok()
-            .and_then(|percent| STEPS.iter().position(|&step| step == percent))
-            .map_or(DEFAULT, Zoom)
+        let Ok(percent) = text.parse::<u16>() else {
+            return DEFAULT;
+        };
+        let nearest = (0..STEPS.len()).min_by_key(|&index| STEPS[index].abs_diff(percent));
+        nearest.map_or(DEFAULT, Zoom)
     }
 
-    /// "Default", or how many steps from it, signed with a true minus.
-    pub(crate) fn label(self) -> String {
-        match self.0.cmp(&DEFAULT.0) {
-            Ordering::Equal => "Default".to_string(),
-            Ordering::Greater => format!("+{}", self.0 - DEFAULT.0),
-            Ordering::Less => format!("\u{2212}{}", DEFAULT.0 - self.0),
-        }
-    }
-
-    /// The factor in percent, which is also how it is stored.
+    /// The factor in percent, which is also how it is stored and shown.
     pub(crate) fn percent(self) -> u16 {
         STEPS[self.0]
     }
@@ -59,14 +61,59 @@ impl Zoom {
         f32::from(self.percent()) / 100.0
     }
 
-    /// Where `step` leads, or nothing where it would change nothing.
-    pub(crate) fn after(self, step: Step) -> Option<Zoom> {
-        let index = match step {
-            Step::In => self.0 + 1,
-            Step::Out => self.0.checked_sub(1)?,
-            Step::Reset => DEFAULT.0,
-        };
-        (index < STEPS.len() && index != self.0).then_some(Zoom(index))
+    pub(crate) fn is_default(self) -> bool {
+        self == DEFAULT
+    }
+
+    /// Where `step` leads in `room`. A step in only has to fit and a step out only has to
+    /// stay sharp, since each direction only ever improves the other. A reset always
+    /// leads home.
+    pub(crate) fn after(self, step: Step, room: Room) -> Result<Zoom, Stop> {
+        match step {
+            Step::In => {
+                let next = STEPS
+                    .get(self.0 + 1)
+                    .map(|_| Zoom(self.0 + 1))
+                    .ok_or(Stop::End)?;
+                room.fits(next).then_some(next).ok_or(Stop::Room)
+            }
+            Step::Out => {
+                let next = self.0.checked_sub(1).map(Zoom).ok_or(Stop::End)?;
+                room.sharp(next).then_some(next).ok_or(Stop::Blur)
+            }
+            Step::Reset => (!self.is_default()).then_some(DEFAULT).ok_or(Stop::End),
+        }
+    }
+}
+
+/// What the display and the window allow a zoom to be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Room {
+    /// The display's physical pixels per point at 100%.
+    pub native: f32,
+    /// The window in points at 100%.
+    pub screen: egui::Vec2,
+}
+
+impl Room {
+    /// The room the last frame had. Before the first frame a context knows neither, so
+    /// it reads as one pixel per point and a window too large to limit anything.
+    pub fn of(ctx: &egui::Context) -> Room {
+        Room {
+            native: ctx.native_pixels_per_point().unwrap_or(1.0),
+            screen: ctx.screen_rect().size() * ctx.zoom_factor(),
+        }
+    }
+
+    /// ⚠️ Below one pixel per point, egui draws a 1 pt rule as a faint smear and small
+    /// text loses its shape. A 2× display stays sharp down to 50%, a 1× display only to
+    /// 100%.
+    fn sharp(self, zoom: Zoom) -> bool {
+        f32::from(zoom.percent()) * self.native >= 100.0
+    }
+
+    fn fits(self, zoom: Zoom) -> bool {
+        !crate::shell::too_small(self.screen / zoom.factor())
     }
 }
 
@@ -74,65 +121,113 @@ impl Zoom {
 mod tests {
     use super::*;
 
-    #[test]
-    fn stepping_up_from_the_smallest_visits_every_zoom_once_and_stops_at_the_largest() {
-        let mut zoom = Zoom::read("80");
-        assert_eq!(zoom.after(Step::Out), None, "nothing below the smallest");
+    /// A 2× display in a window big enough for every step.
+    const ROOMY: Room = Room {
+        native: 2.0,
+        screen: egui::vec2(4000.0, 3000.0),
+    };
+
+    fn walk(from: &str, step: Step, room: Room) -> Vec<u16> {
+        let mut zoom = Zoom::read(from);
         let mut seen = vec![zoom.percent()];
-        while let Some(larger) = zoom.after(Step::In) {
-            assert_eq!(
-                larger.after(Step::Out),
-                Some(zoom),
-                "a step down undoes a step up"
-            );
-            zoom = larger;
+        while let Ok(next) = zoom.after(step, room) {
+            zoom = next;
             seen.push(zoom.percent());
         }
-        assert_eq!(seen, [80, 90, 100, 110, 125, 150, 175, 200]);
+        seen
     }
 
     #[test]
-    fn each_zoom_is_named_by_its_steps_from_the_default() {
-        let labels: Vec<String> = STEPS
-            .iter()
-            .map(|percent| Zoom::read(&percent.to_string()).label())
-            .collect();
+    fn with_room_to_spare_a_step_visits_every_zoom_once_and_stops_at_either_end() {
         assert_eq!(
-            labels,
-            [
-                "\u{2212}2",
-                "\u{2212}1",
-                "Default",
-                "+1",
-                "+2",
-                "+3",
-                "+4",
-                "+5"
-            ]
+            walk("50", Step::In, ROOMY),
+            [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200]
+        );
+        assert_eq!(Zoom::read("200").after(Step::In, ROOMY), Err(Stop::End));
+        assert_eq!(Zoom::read("50").after(Step::Out, ROOMY), Err(Stop::End));
+        for percent in STEPS.windows(2) {
+            let (low, high) = (
+                Zoom::read(&percent[0].to_string()),
+                Zoom::read(&percent[1].to_string()),
+            );
+            assert_eq!(high.after(Step::Out, ROOMY), Ok(low), "{percent:?}");
+        }
+    }
+
+    #[test]
+    fn a_step_out_stops_where_a_point_would_be_smaller_than_a_pixel() {
+        let on = |native: f32| Room { native, ..ROOMY };
+        assert_eq!(walk("100", Step::Out, on(1.0)), [100]);
+        assert_eq!(Zoom::read("100").after(Step::Out, on(1.0)), Err(Stop::Blur));
+        assert_eq!(walk("100", Step::Out, on(1.25)), [100, 90, 80]);
+        assert_eq!(walk("100", Step::Out, on(1.5)), [100, 90, 80, 75, 67]);
+        assert_eq!(walk("100", Step::Out, on(2.0)).last(), Some(&50));
+        // Stepping in from a blurred zoom is always a step toward sharp.
+        assert_eq!(
+            Zoom::read("50").after(Step::In, on(1.0)),
+            Ok(Zoom::read("67"))
         );
     }
 
     #[test]
-    fn reset_leads_to_the_default_from_anywhere_but_the_default() {
-        assert_eq!(Zoom::default().after(Step::Reset), None);
-        for percent in [80, 200] {
-            let zoom = Zoom::read(&percent.to_string());
-            assert_eq!(zoom.after(Step::Reset), Some(Zoom::default()), "{percent}");
+    fn a_step_in_stops_where_the_window_would_be_too_small_for_the_shell() {
+        let least = crate::shell::LEAST;
+        let window = |scale: f32| Room {
+            screen: least * scale,
+            ..ROOMY
+        };
+        assert_eq!(walk("100", Step::In, window(1.0)), [100]);
+        assert_eq!(
+            Zoom::read("100").after(Step::In, window(1.0)),
+            Err(Stop::Room)
+        );
+        assert_eq!(walk("100", Step::In, window(1.25)), [100, 110, 125]);
+        assert_eq!(walk("100", Step::In, window(2.0)).last(), Some(&200));
+        // Stepping out of a zoom too large for the window is always a step toward fitting.
+        assert_eq!(
+            Zoom::read("200").after(Step::Out, window(1.0)),
+            Ok(Zoom::read("175"))
+        );
+    }
+
+    #[test]
+    fn reset_leads_home_from_anywhere_else_whatever_the_room() {
+        let cramped = Room {
+            native: 1.0,
+            screen: egui::Vec2::ZERO,
+        };
+        assert_eq!(Zoom::default().after(Step::Reset, ROOMY), Err(Stop::End));
+        for percent in ["50", "200"] {
+            assert_eq!(
+                Zoom::read(percent).after(Step::Reset, cramped),
+                Ok(Zoom::default()),
+                "{percent}"
+            );
         }
     }
 
     #[test]
     fn a_zoom_nobody_picked_is_actual_size() {
+        assert!(Zoom::default().is_default());
         assert_eq!(Zoom::default().percent(), 100);
         assert_eq!(Zoom::default().factor(), 1.0);
     }
 
     #[test]
-    fn a_stored_zoom_is_read_back_and_anything_else_is_the_default() {
+    fn a_stored_zoom_comes_back_at_the_nearest_step() {
         for percent in STEPS {
             assert_eq!(Zoom::read(&percent.to_string()).percent(), percent);
         }
-        for text in ["", "105", "1.1", "110%", "-80", "65616"] {
+        for (stored, step) in [
+            ("105", 100),
+            ("106", 110),
+            ("66", 67),
+            ("0", 50),
+            ("65535", 200),
+        ] {
+            assert_eq!(Zoom::read(stored).percent(), step, "{stored}");
+        }
+        for text in ["", "1.1", "110%", "-80", "65536"] {
             assert_eq!(Zoom::read(text), Zoom::default(), "{text:?}");
         }
     }
