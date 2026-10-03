@@ -35,11 +35,11 @@ use web_sys::{
     LockOptions, MessageEvent, StorageManager, Worker,
 };
 
-use super::exec::{self, Children, Fs, Kind, TMP, WORKING};
-use super::{names, Cmd, Event, Failure, Fingerprint, Outside, Stat};
+use super::exec::{self, Children, Fs, Kind, Staged, TMP, WORKING};
+use super::{names, Cmd, Event, Failure, Fingerprint, Stat};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
-use crate::rewrite::{Pieces, Rewrite};
+use crate::rewrite::Pieces;
 use crate::room::measure as size;
 
 /// Where the writer is served, beside the page. The version keeps a cached writer from
@@ -783,7 +783,7 @@ impl Folder {
     ///
     /// The file takes `path`'s extension: Chrome reads a file moved to a new extension
     /// whole, for a Safe Browsing check, before it lets the move land.
-    async fn stage(&mut self, path: &str, contents: Contents<'_>) -> io::Result<String> {
+    async fn staged(&mut self, path: &str, contents: Contents<'_>) -> io::Result<String> {
         let extension = path
             .rsplit('/')
             .next()
@@ -857,7 +857,7 @@ impl Folder {
     ///
     /// ⚠️ `move(folder, name)` with both arguments: Safari has no one-argument form.
     /// Chrome, Firefox and Safari all replace a file already at the name.
-    async fn place(&self, temp: &str, path: &str) -> io::Result<()> {
+    async fn put(&self, temp: &str, path: &str) -> io::Result<()> {
         let placed = async {
             let file = self.file(temp).await?;
             let (dir, leaf) = self.spot(path).await?;
@@ -1233,71 +1233,48 @@ impl Fs for Folder {
         stats
     }
 
-    /// ⚠️ The check and the move are two steps. No other drawbar writes between them,
-    /// because this tab holds the library's lock, but in a picked folder another program
-    /// may, and the move replaces what it wrote.
-    async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        if self.taken(path).await? {
-            return Err(io::ErrorKind::AlreadyExists.into());
+    type Temp = String;
+
+    /// The private file system holds no links, and a picked folder's handles reach
+    /// entries by name without following any, so a temporary is never written through
+    /// one.
+    async fn stage(&mut self, path: &str, what: Staged<'_>) -> io::Result<String> {
+        match what {
+            Staged::Bytes(bytes) => self.staged(path, Contents::Bytes(bytes)).await,
+            Staged::Outside(from) => self.staged(path, Contents::Blob(from)).await,
+            Staged::Library(from) => {
+                let from = snapshot(&self.file(from).await?).await?;
+                self.staged(path, Contents::Blob(&from)).await
+            }
+            Staged::Edited(from, edit) => {
+                let snapshot = from
+                    .snapshot()
+                    .ok_or_else(|| io::Error::other("drawbar no longer reads that file"))?;
+                let pieces = edit.pieces(from)?;
+                self.staged(path, Contents::Edited(&pieces, &snapshot))
+                    .await
+            }
         }
-        let temp = self.stage(path, Contents::Bytes(bytes)).await?;
-        self.place(&temp, path).await
     }
 
-    async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let temp = self.stage(path, Contents::Bytes(bytes)).await?;
-        self.forget(path);
-        self.place(&temp, path).await
-    }
-
-    /// ⚠️ As [`Fs::create`], the check and the move are two steps.
-    async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()> {
+    /// ⚠️ The check that nothing is at `path` and the move are two steps. No other
+    /// drawbar writes between them, because this tab holds the library's lock, but in a
+    /// picked folder another program may, and the move replaces what it wrote.
+    async fn place(&mut self, temp: String, path: &str, over: bool) -> io::Result<()> {
         if !over && self.taken(path).await? {
+            self.discard(temp).await;
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        let temp = self.stage(path, Contents::Blob(from)).await?;
         if over {
             self.forget(path);
         }
-        self.place(&temp, path).await
+        self.put(&temp, path).await
     }
 
-    /// ⚠️ As [`Fs::create`], the check and the move are two steps.
-    async fn copy(&mut self, path: &str, from: &str, over: bool) -> io::Result<()> {
-        let from = snapshot(&self.file(from).await?).await?;
-        self.copy_in(path, &from, over).await
-    }
-
-    /// ⚠️ As [`Fs::create`], the check and the move are two steps.
-    async fn rewrite(
-        &mut self,
-        path: &str,
-        from: &OnDisk,
-        edit: &Rewrite,
-        over: Option<Stat>,
-    ) -> io::Result<()> {
-        if over.is_none() && self.taken(path).await? {
-            return Err(io::ErrorKind::AlreadyExists.into());
+    async fn discard(&mut self, temp: String) {
+        if let Ok((dir, leaf)) = self.spot(&temp).await {
+            let _ = JsFuture::from(dir.remove_entry(&leaf)).await;
         }
-        let snapshot = from
-            .snapshot()
-            .ok_or_else(|| io::Error::other("drawbar no longer reads that file"))?;
-        let pieces = edit.pieces(from)?;
-        let temp = self
-            .stage(path, Contents::Edited(&pieces, &snapshot))
-            .await?;
-        if let Some(held) = over {
-            if !matches!(self.stat(path).await, Ok(Some(now)) if now == held) {
-                if let Ok((dir, leaf)) = self.spot(&temp).await {
-                    let _ = JsFuture::from(dir.remove_entry(&leaf)).await;
-                }
-                return Err(crate::rewrite::changed(
-                    "the file changed while its edit was written".into(),
-                ));
-            }
-            self.forget(path);
-        }
-        self.place(&temp, path).await
     }
 
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {

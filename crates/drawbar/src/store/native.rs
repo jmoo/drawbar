@@ -11,10 +11,9 @@ use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use super::exec::{self, Children, Fs, Kind, TEMP, TMP, WORKING};
-use super::{Cmd, Event, Fingerprint, Outside, Stat};
+use super::exec::{self, Children, Fs, Kind, Staged, TEMP, TMP, WORKING};
+use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
-use crate::rewrite::Rewrite;
 
 /// The folder the default library is, inside drawbar's own data.
 const LIBRARY: &str = "library";
@@ -46,7 +45,7 @@ fn beside_store() -> Option<PathBuf> {
 
 const LOCK: &str = ".drawbar/lock";
 
-/// Where [`Fs::replace`] and [`Fs::create`] write before the rename: `.drawbar/tmp/` for
+/// Where [`Fs::stage`] writes before [`Fs::place`] renames: `.drawbar/tmp/` for
 /// the index's own files, and a hidden sibling in the same folder for a library file, so
 /// the rename never crosses a volume. Each `attempt` after the first takes another name
 /// the open's sweep still finds.
@@ -202,7 +201,7 @@ impl Disk {
     }
 
     /// Write the temporary for `path` with `write`, synced to the disk.
-    fn stage(
+    fn staged(
         &self,
         path: &str,
         write: impl FnOnce(&mut File) -> io::Result<()>,
@@ -271,8 +270,8 @@ impl Disk {
     }
 
     /// Put the temporary `temp` at `path`: over whatever is there where `over` is set,
-    /// and otherwise only where nothing is, as [`Fs::create`] says.
-    fn place(&self, temp: PathBuf, path: &str, over: bool) -> io::Result<()> {
+    /// and otherwise only where nothing is, as [`Fs::place`] says.
+    fn put(&self, temp: PathBuf, path: &str, over: bool) -> io::Result<()> {
         let target = self.locate(path)?;
         let placed = match over {
             true => fs::rename(&temp, &target),
@@ -477,63 +476,39 @@ impl Fs for Disk {
         }
     }
 
-    async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        self.free(path)?;
-        let temp = self.stage(path, |file| file.write_all(bytes))?;
-        self.place(temp, path, false)
+    type Temp = PathBuf;
+
+    /// A copy of the library's own file is a clone where the disk can make one, which
+    /// shares the source's blocks rather than writing them again.
+    async fn stage(&mut self, path: &str, what: Staged<'_>) -> io::Result<PathBuf> {
+        match what {
+            Staged::Bytes(bytes) => self.staged(path, |file| file.write_all(bytes)),
+            Staged::Outside(from) => self.staged(path, |file| {
+                io::copy(&mut File::open(from)?, file).map(|_| ())
+            }),
+            Staged::Library(from) => {
+                let mut source = File::open(self.locate(from)?)?;
+                match self.clone_of(&source, path)? {
+                    Some(temp) => Ok(temp),
+                    None => self.staged(path, |file| io::copy(&mut source, file).map(|_| ())),
+                }
+            }
+            Staged::Edited(from, edit) => self.staged(path, |file| edit.write(from, file)),
+        }
     }
 
-    async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let temp = self.stage(path, |file| file.write_all(bytes))?;
-        self.place(temp, path, true)
-    }
-
-    async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()> {
+    async fn place(&mut self, temp: PathBuf, path: &str, over: bool) -> io::Result<()> {
         if !over {
-            self.free(path)?;
-        }
-        let temp = self.stage(path, |file| {
-            io::copy(&mut File::open(from)?, file)?;
-            Ok(())
-        })?;
-        self.place(temp, path, over)
-    }
-
-    /// The copy is the system's own, which on a disk that can shares the source's blocks
-    /// rather than writing them again.
-    async fn copy(&mut self, path: &str, from: &str, over: bool) -> io::Result<()> {
-        if !over {
-            self.free(path)?;
-        }
-        let mut source = File::open(self.locate(from)?)?;
-        let temp = match self.clone_of(&source, path)? {
-            Some(temp) => temp,
-            None => self.stage(path, |file| io::copy(&mut source, file).map(|_| ()))?,
-        };
-        self.place(temp, path, over)
-    }
-
-    async fn rewrite(
-        &mut self,
-        path: &str,
-        from: &OnDisk,
-        edit: &Rewrite,
-        over: Option<Stat>,
-    ) -> io::Result<()> {
-        if over.is_none() {
-            self.free(path)?;
-        }
-        let temp = self.stage(path, |file| edit.write(from, file))?;
-        if let Some(held) = over {
-            let now = self.stat(path).await;
-            if !matches!(now, Ok(Some(now)) if now == held) {
+            if let Err(e) = self.free(path) {
                 let _ = fs::remove_file(&temp);
-                return Err(crate::rewrite::changed(
-                    "the file changed while its edit was written".into(),
-                ));
+                return Err(e);
             }
         }
-        self.place(temp, path, over.is_some())
+        self.put(temp, path, over)
+    }
+
+    async fn discard(&mut self, temp: PathBuf) {
+        let _ = fs::remove_file(temp);
     }
 
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
@@ -908,35 +883,6 @@ mod tests {
             root.names(""),
             [".drawbar", "Copy.ne5p", "Grand.ne5p", "Saved.ne5p"]
         );
-    }
-
-    /// A file whose stat moves while its edit is written is not written over, and the
-    /// copy is let go.
-    #[test]
-    fn a_rewrite_over_a_file_that_moved_while_it_was_written_is_refused() {
-        use crate::rewrite::{is_changed, Rewrite};
-
-        let root = Temp::new();
-        let bytes = crate::testing::sample_bytes();
-        let from = crate::testing::on_disk(&root, "Marimba.nsmp", &bytes);
-        let crate::ondisk::Index::Sample(index) = &from.index else {
-            panic!("a sample instrument")
-        };
-        let mut outline = index.outline().clone();
-        outline.set_name("Vibes").unwrap();
-        let moved = Stat {
-            len: bytes.len() as u64,
-            modified: Some(1),
-        };
-        let wrote = nord_usb::block_on(disk(&root).rewrite(
-            "Marimba.nsmp",
-            &from,
-            &Rewrite::Sample(outline),
-            Some(moved),
-        ));
-        assert!(wrote.as_ref().is_err_and(is_changed), "{wrote:?}");
-        assert_eq!(root.read("Marimba.nsmp"), bytes);
-        assert_eq!(root.names(""), ["Marimba.nsmp"], "no copy is left");
     }
 
     #[cfg(target_os = "macos")]

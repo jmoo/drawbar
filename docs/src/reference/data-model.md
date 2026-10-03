@@ -376,7 +376,10 @@ one streaming pass that also takes the whole file's CRC-32 for its fingerprint
 (`OnDisk::verify`). Until it has, a resting file is not known to hold any
 bytes (`OnDisk::holds`), and nothing takes its CRC on the frame. A file whose
 stat moved is told to hold what drawbar knew by its CRC, taken in one streaming
-pass (`Fs::crc`). A resting file changed on disk under an unsaved edit is not
+pass (`Fs::crc`). A save, a copy over a file and a rewrite look at the file
+again once the new contents are staged, just before the rename, and refuse one
+whose stat moved (`exec::put`); a window of one stat and one rename remains,
+since no portable rename checks what it replaces. A resting file changed on disk under an unsaved edit is not
 read whole to keep the edit apart: the asset rests in the new file, and the
 workspace makes the edit again over it (`rewrite::Edit::over`). An edit the new
 file already holds is let go. One that no longer applies is kept as it was,

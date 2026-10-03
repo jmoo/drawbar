@@ -1,7 +1,7 @@
 //! Running a [`Cmd`] against a library's files, the same way whichever backend holds
 //! them.
 //!
-//! The crash-safety of every write rests on [`Fs::create`] and [`Fs::replace`]: a file is
+//! The crash-safety of every write rests on [`Fs::stage`] and [`Fs::place`]: a file is
 //! written somewhere else first and appears at its path whole. Everything written in
 //! flight is either under `.drawbar/tmp/` or a hidden `.<name>.drawbar-tmp` sibling, and
 //! opening the library sweeps both.
@@ -111,31 +111,19 @@ pub trait Fs {
         }
         stats
     }
-    /// Write a file where none is. It appears whole or not at all, and a file that
-    /// appeared there first is left alone and reported as
-    /// [`io::ErrorKind::AlreadyExists`].
-    async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
-    /// Write a file over whatever is there. Afterwards, or after a crash at any point,
-    /// the path holds the old contents or the new, never part of either.
-    async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
-    /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of a copy of the file
-    /// outside the library at `from`, which is never held whole.
-    async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()>;
-    /// [`Fs::copy_in`] of the library's own file at `from`.
-    async fn copy(&mut self, path: &str, from: &str, over: bool) -> io::Result<()>;
-    /// [`Fs::create`] of the file `edit` makes of `from`, a piano or sample instrument
-    /// resting in the library, which is read by range and never held whole; or, where
-    /// `over` names the [`Stat`] of the file at `path`, [`Fs::replace`] of it. A source
-    /// that changed since its index was read, or a file at `path` whose stat moved while
-    /// the copy was written, is refused with [`crate::rewrite::changed`], and nothing is
-    /// placed.
-    async fn rewrite(
-        &mut self,
-        path: &str,
-        from: &OnDisk,
-        edit: &Rewrite,
-        over: Option<Stat>,
-    ) -> io::Result<()>;
+    /// A temporary a write is staged in, until it is put at its path or let go.
+    type Temp;
+    /// Write `what` into a new temporary for `path`, flushed, never through anything
+    /// already at the temporary's name. Nothing is left where it fails. A source that
+    /// changed since it was read is refused with [`crate::rewrite::changed`].
+    async fn stage(&mut self, path: &str, what: Staged<'_>) -> io::Result<Self::Temp>;
+    /// Put a staged temporary at `path`: over whatever is there where `over` is set, and
+    /// otherwise only where nothing is, refused as [`io::ErrorKind::AlreadyExists`].
+    /// Afterwards, or after a crash at any point, the path holds the old contents or the
+    /// new, never part of either. A temporary not put is let go.
+    async fn place(&mut self, temp: Self::Temp, path: &str, over: bool) -> io::Result<()>;
+    /// Let go of a staged temporary that is not to be put anywhere.
+    async fn discard(&mut self, temp: Self::Temp);
     /// Rename a file or folder. Refused when another entry is at `to`.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
     async fn make_dir(&mut self, path: &str) -> io::Result<()>;
@@ -152,6 +140,84 @@ pub trait Fs {
         _known: Option<Fingerprint>,
     ) -> io::Result<Option<Arc<OnDisk>>> {
         Ok(None)
+    }
+}
+
+/// What a write stages before it puts the file at its path.
+pub enum Staged<'a> {
+    Bytes(&'a [u8]),
+    /// A copy of a file outside the library, never held whole.
+    Outside(&'a Outside),
+    /// A copy of the library's own file at this path, never held whole.
+    Library(&'a str),
+    /// The file an edit makes of a piano or sample instrument resting in the library,
+    /// read by range and never held whole.
+    Edited(&'a OnDisk, &'a Rewrite),
+}
+
+/// What a write may put its file over.
+#[derive(Clone, Copy)]
+enum Over {
+    /// Nothing: the path must be free.
+    Nothing,
+    /// Whatever is there.
+    Anything,
+    /// The file there, while it has this [`Stat`].
+    Held(Stat),
+}
+
+/// Write `what` to `path` through a temporary, over what `over` allows. A held file whose
+/// stat moved by the time the temporary is written is refused with [`moved`], and nothing
+/// is put over it.
+///
+/// ⚠️ A window remains between that last look and the rename, since no portable call
+/// renames only over a file that is still the one looked at. It is one stat and one
+/// rename long, after the whole write rather than before it.
+async fn put(fs: &mut impl Fs, path: &str, what: Staged<'_>, over: Over) -> io::Result<()> {
+    let temp = fs.stage(path, what).await?;
+    if let Over::Held(held) = over {
+        if !matches!(fs.stat(path).await, Ok(Some(now)) if now == held) {
+            fs.discard(temp).await;
+            return Err(moved());
+        }
+    }
+    fs.place(temp, path, !matches!(over, Over::Nothing)).await
+}
+
+/// What a write may put its file over, where the file at `path` must still hold what
+/// `expect` says: refused with [`Failure::Moved`] where it does not.
+async fn held(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> Result<Over, Failure> {
+    let io = |e: io::Error| Failure::Io(e.to_string());
+    if still(fs, path, expect).await.map_err(io)? != Some(true) {
+        return Err(Failure::Moved);
+    }
+    let stat = fs.stat(path.as_str()).await.map_err(io)?;
+    Ok(Over::Held(stat.ok_or(Failure::Moved)?))
+}
+
+/// Why a write refused to put its file over one whose stat moved while it was staged.
+#[derive(Debug)]
+struct Moved;
+
+impl std::fmt::Display for Moved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the file changed on disk while its new contents were written")
+    }
+}
+
+impl std::error::Error for Moved {}
+
+fn moved() -> io::Error {
+    io::Error::other(Moved)
+}
+
+/// A write refused for a target that is not the file it was to go over, or a name taken
+/// first, as [`Failure::Moved`]; any other as why.
+fn refusal(e: io::Error) -> Failure {
+    let taken = e.kind() == io::ErrorKind::AlreadyExists;
+    match taken || e.get_ref().is_some_and(|inner| inner.is::<Moved>()) {
+        true => Failure::Moved,
+        false => Failure::Io(e.to_string()),
     }
 }
 
@@ -1265,12 +1331,13 @@ async fn commit(
     drop: Vec<String>,
 ) -> Result<(), String> {
     for (name, bytes) in working {
-        fs.replace(&format!("{WORKING}/{name}"), &bytes)
+        let path = format!("{WORKING}/{name}");
+        put(fs, &path, Staged::Bytes(&bytes), Over::Anything)
             .await
             .map_err(|e| e.to_string())?;
     }
     let text = sidecar::write(sidecar)?;
-    fs.replace(INDEX, text.as_bytes())
+    put(fs, INDEX, Staged::Bytes(text.as_bytes()), Over::Anything)
         .await
         .map_err(|e| e.to_string())?;
     for name in drop {
@@ -1304,16 +1371,13 @@ async fn save(
     expect: Option<Fingerprint>,
 ) -> Result<Fingerprint, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
-    match expect {
-        None => match fs.create(path.as_str(), bytes).await {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Moved),
-            wrote => wrote.map_err(io)?,
-        },
-        Some(expect) => match still(fs, path, &expect).await.map_err(io)? {
-            Some(true) => fs.replace(path.as_str(), bytes).await.map_err(io)?,
-            Some(false) | None => return Err(Failure::Moved),
-        },
-    }
+    let over = match expect {
+        None => Over::Nothing,
+        Some(expect) => held(fs, path, &expect).await?,
+    };
+    put(fs, path.as_str(), Staged::Bytes(bytes), over)
+        .await
+        .map_err(refusal)?;
     let stat = fs
         .stat(path.as_str())
         .await
@@ -1331,18 +1395,12 @@ async fn rewrite_over(
     edit: &Rewrite,
     expect: Fingerprint,
 ) -> Result<Found, Failure> {
-    let io = |e: io::Error| match rewrite::is_changed(&e) {
+    let over = held(fs, path, &expect).await?;
+    let wrote = put(fs, path.as_str(), Staged::Edited(from, edit), over).await;
+    wrote.map_err(|e| match rewrite::is_changed(&e) {
         true => Failure::Moved,
-        false => Failure::Io(e.to_string()),
-    };
-    if still(fs, path, &expect).await.map_err(io)? != Some(true) {
-        return Err(Failure::Moved);
-    }
-    let stat = fs.stat(path.as_str()).await.map_err(io)?;
-    let stat = stat.ok_or(Failure::Moved)?;
-    fs.rewrite(path.as_str(), from, edit, Some(stat))
-        .await
-        .map_err(io)?;
+        false => refusal(e),
+    })?;
     landed(fs, path).await
 }
 
@@ -1378,31 +1436,17 @@ async fn import(
         }
     }
     let over = match expect {
-        None => None,
-        Some(expect) => {
-            if still(fs, path, &expect).await.map_err(io)? != Some(true) {
-                return Err(Failure::Moved);
-            }
-            Some(
-                fs.stat(path.as_str())
-                    .await
-                    .map_err(io)?
-                    .ok_or(Failure::Moved)?,
-            )
-        }
+        None => Over::Nothing,
+        Some(expect) => held(fs, path, &expect).await?,
     };
-    let copied = match from {
-        Source::Outside(file) => fs.copy_in(path.as_str(), file, over.is_some()).await,
-        Source::Library(source, _) => {
-            fs.copy(path.as_str(), source.as_str(), over.is_some())
-                .await
-        }
-        Source::Edited(file, edit) => fs.rewrite(path.as_str(), file, edit, over).await,
+    let what = match from {
+        Source::Outside(file) => Staged::Outside(file),
+        Source::Library(source, _) => Staged::Library(source.as_str()),
+        Source::Edited(file, edit) => Staged::Edited(file, edit),
     };
-    match copied {
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Moved),
+    match put(fs, path.as_str(), what, over).await {
         Err(e) if rewrite::is_changed(&e) => return Err(changed()),
-        copied => copied.map_err(io)?,
+        copied => copied.map_err(refusal)?,
     }
     landed(fs, path).await
 }
@@ -1442,9 +1486,11 @@ mod tests {
     /// folders in `unreadable` cannot be read, and the files in `vanished` are listed but
     /// gone when looked at. It counts the files it reads whole. The commands in `waiting`
     /// were sent while a listing is in flight, and `later` is sent once that many files
-    /// have been read.
+    /// have been read. A write staged for the path `meddles` names changes that file to the
+    /// length it gives, as a program outside drawbar would while the write runs.
     struct Claimed {
         files: BTreeMap<String, u64>,
+        meddles: Option<(String, u64)>,
         rests: BTreeMap<String, Arc<OnDisk>>,
         unreadable: BTreeSet<String>,
         vanished: BTreeSet<String>,
@@ -1457,6 +1503,7 @@ mod tests {
         fn of(files: impl IntoIterator<Item = (String, u64)>) -> Claimed {
             Claimed {
                 files: files.into_iter().collect(),
+                meddles: None,
                 rests: BTreeMap::new(),
                 unreadable: BTreeSet::new(),
                 vanished: BTreeSet::new(),
@@ -1540,31 +1587,33 @@ mod tests {
                 .filter(|_| !self.vanished.contains(path));
             Ok(here.map(|len| stat(*len)))
         }
-        async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-            self.files.insert(path.to_string(), bytes.len() as u64);
+        type Temp = (String, u64);
+
+        async fn stage(&mut self, path: &str, what: Staged<'_>) -> io::Result<(String, u64)> {
+            let Staged::Bytes(bytes) = what else {
+                return Err(refused());
+            };
+            if let Some((at, len)) = self.meddles.take_if(|(at, _)| at == path) {
+                self.files.insert(at, len);
+            }
+            Ok((path.to_string(), bytes.len() as u64))
+        }
+
+        async fn place(
+            &mut self,
+            (_, len): (String, u64),
+            path: &str,
+            over: bool,
+        ) -> io::Result<()> {
+            if !over && self.files.contains_key(path) {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
+            self.files.insert(path.to_string(), len);
             Ok(())
         }
-        async fn copy_in(&mut self, _: &str, _: &Outside, _: bool) -> io::Result<()> {
-            Err(refused())
-        }
 
-        async fn copy(&mut self, _: &str, _: &str, _: bool) -> io::Result<()> {
-            Err(refused())
-        }
+        async fn discard(&mut self, _: (String, u64)) {}
 
-        async fn replace(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
-            Err(refused())
-        }
-
-        async fn rewrite(
-            &mut self,
-            _: &str,
-            _: &OnDisk,
-            _: &Rewrite,
-            _: Option<Stat>,
-        ) -> io::Result<()> {
-            Err(refused())
-        }
         async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
             let moved: Vec<String> = self
                 .files
@@ -1720,6 +1769,20 @@ mod tests {
         let parts = parts(&mut fs, rows);
         assert_eq!(parts[0].files[0].bytes.as_deref(), Some(&b"Grand.ne5p"[..]));
         assert_eq!(fs.reads.get(), 1);
+    }
+
+    /// A file changed outside drawbar while a save's new contents are written is not
+    /// written over: the save is refused as moved, and what was written there stays.
+    #[test]
+    fn a_save_over_a_file_changed_while_it_was_staged_is_refused() {
+        let mut fs = Claimed {
+            meddles: Some(("Grand.ne5p".to_string(), 99)),
+            ..Claimed::of([("Grand.ne5p".to_string(), 10)])
+        };
+        let expect = Fingerprint::unread(stat(10));
+        let saved = now(save(&mut fs, &path("Grand.ne5p"), b"new", Some(expect)));
+        assert_eq!(saved, Err(Failure::Moved));
+        assert_eq!(fs.files["Grand.ne5p"], 99, "what was written there stays");
     }
 
     /// A read asked for leaves a sample instrument in its file, which takes none of the
