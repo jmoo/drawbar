@@ -14,6 +14,7 @@ use eframe::egui;
 
 use crate::app::{accent, bold, caption, good, unlit, warn};
 use crate::browser::Act;
+use crate::device::NO_USB;
 use crate::icon::{sized, Glyph};
 use crate::panel::caps;
 use crate::sheet::{self, GAP};
@@ -237,14 +238,14 @@ impl Start {
 }
 
 /// The welcome sheet. `Some` once the reader has asked for something.
-pub fn welcome(ctx: &egui::Context) -> Option<Wanted> {
+pub fn welcome(ctx: &egui::Context, usb: bool) -> Option<Wanted> {
     egui::Modal::new(egui::Id::new("welcome"))
         .frame(sheet::frame(&ctx.style().visuals))
-        .show(ctx, welcome_body)
+        .show(ctx, |ui| welcome_body(ui, usb))
         .inner
 }
 
-fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
+fn welcome_body(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
     ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
     let mut wanted = None;
     // The start cards stay under the scrolling middle, so a short window scrolls the
@@ -270,7 +271,7 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
     let top = ui.cursor().top();
     sheet::section(ui, |ui| {
         sheet::heading(ui, "Start here", None);
-        wanted = starts(ui);
+        wanted = starts(ui, usb);
     });
     let height = ui.cursor().top() - top;
     if height != below {
@@ -493,7 +494,7 @@ const CARD_TITLE: f32 = 12.0;
 const CARD_SUB: f32 = 10.5;
 
 /// The cards, as many across as the sheet has room for.
-fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
+fn starts(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
     let full = ui.available_width();
     let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, STARTS.len());
     let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
@@ -508,7 +509,11 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
             for start in row {
-                let (drawn, needs) = card(ui, start.card(), width, height);
+                let reachable = usb || !matches!(start, Start::Connect);
+                let (drawn, needs) = ui
+                    .add_enabled_ui(reachable, |ui| card(ui, start.card(), width, height))
+                    .inner;
+                let drawn = drawn.on_disabled_hover_text(NO_USB);
                 tallest = tallest.max(needs);
                 if !drawn.clicked() {
                     continue;
@@ -1151,7 +1156,7 @@ mod tests {
         let mut said = Vec::new();
         for _ in 0..3 {
             said = drawn_at(&ctx, size, |ctx| {
-                welcome(ctx);
+                welcome(ctx, true);
             });
         }
 
@@ -1197,6 +1202,37 @@ mod tests {
         assert!(box_of(&said, "Breaking").is_some(), "{said:?}");
     }
 
+    #[test]
+    fn without_usb_the_connect_card_is_grayed_out_and_says_why_on_hover() {
+        let ctx = headless();
+        let size = egui::vec2(1200.0, 900.0);
+        let frame = |events: Vec<egui::Event>| {
+            let input = testing::screen(size, events);
+            let mut wanted = None;
+            let output = testing::run(&ctx, input, |ctx| wanted = welcome(ctx, false));
+            (wanted, testing::painted(&output))
+        };
+        // The sheet centers itself, and the cards match heights, over the first frames.
+        for _ in 0..3 {
+            let _ = frame(Vec::new());
+        }
+        let at = ctx
+            .read_response(card_id("Connect an instrument…"))
+            .expect("the sheet offers to connect")
+            .rect
+            .center();
+
+        let _ = frame(vec![egui::Event::PointerMoved(at)]);
+        for _ in 0..60 {
+            let _ = frame(Vec::new());
+        }
+        let (_, said) = frame(Vec::new());
+        assert!(box_of(&said, NO_USB).is_some(), "{said:?}");
+
+        let (wanted, _) = frame(vec![testing::button(at, true), testing::button(at, false)]);
+        assert!(wanted.is_none(), "the grayed card asked to connect");
+    }
+
     /// How tall the start cards stand on a screen `width` wide, once they have settled.
     fn cards_tall(ctx: &egui::Context, width: f32) -> f32 {
         let mut tall = 0.0;
@@ -1204,7 +1240,7 @@ mod tests {
             let _ = drawn_at(ctx, egui::vec2(width, 900.0), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let top = ui.cursor().top();
-                    starts(ui);
+                    starts(ui, true);
                     tall = ui.cursor().top() - top;
                 });
             });
@@ -1234,7 +1270,7 @@ mod tests {
             let size = egui::vec2(width, least.y);
             for _ in 0..3 {
                 let _ = drawn_at(&ctx, size, |ctx| {
-                    welcome(ctx);
+                    welcome(ctx, true);
                 });
             }
             let rects: Vec<(&str, egui::Rect)> = STARTS

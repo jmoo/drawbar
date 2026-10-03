@@ -77,12 +77,12 @@ impl Splash {
 
     /// Draw whichever sheet is up, record the version once it is dismissed, and return
     /// what the reader asked for.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<Act> {
+    pub fn show(&mut self, ctx: &egui::Context, usb: bool) -> Option<Act> {
         while let Ok(notes) = self.inbox.try_recv() {
             self.notes = notes;
         }
         match self.showing? {
-            Sheet::Welcome => match welcome(ctx)? {
+            Sheet::Welcome => match welcome(ctx, usb)? {
                 Wanted::Done => {
                     self.dismiss();
                     None
