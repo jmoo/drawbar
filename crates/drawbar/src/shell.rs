@@ -691,7 +691,21 @@ impl DrawbarApp {
                 .on_hover_text(format!("{product}: attached"));
             }
             None => {
-                let label = label("Connect instrument…");
+                let looking = matches!(
+                    self.device.state.connection,
+                    crate::device::Connection::Connecting
+                );
+                // Labeled however narrow, if briefly: with nothing attached, it is the only
+                // way in.
+                let label = Some(
+                    match (looking, narrow) {
+                        (true, false) => "Looking for an instrument…",
+                        (true, true) => "Looking…",
+                        (false, false) => "Connect instrument…",
+                        (false, true) => "Connect…",
+                    }
+                    .to_string(),
+                );
                 let connect = Pill {
                     glyph: Glyph::Plug,
                     mark: ink,
@@ -707,8 +721,14 @@ impl DrawbarApp {
                     radius: CHIP / 2.0,
                 }
                 .show(ui)
-                .on_hover_text("Find a Nord on USB and read what it holds");
-                if connect.clicked() {
+                .on_hover_text(
+                    "Find a Nord on USB and read what it holds.\n\nClose Nord Sound Manager \
+                     first. It keeps the USB connection to itself while it is open.\n\nIn a \
+                     browser: Chrome or Edge only.",
+                );
+                // ⚠️ The click reaches `requestDevice()` in the frame it landed in, which
+                // keeps the browser's transient user activation alive.
+                if connect.clicked() && !looking {
                     acts.push(Act::Connect);
                 }
             }
@@ -1422,6 +1442,49 @@ mod tests {
                 platform == Platform::Web,
                 "{platform:?}: the word mark"
             );
+        }
+    }
+
+    /// Connecting is offered once, in the top bar, which says when it is looking and
+    /// keeps its label clear of the search box at the least window on every platform.
+    #[test]
+    fn the_top_bar_alone_offers_to_connect_and_says_when_it_is_looking() {
+        // The pill's glyph and the search field's inner padding sit between the two.
+        const BETWEEN: f32 = 24.0;
+        for (platform, chrome) in [
+            (Platform::Mac, Frame::System),
+            (Platform::Windows, Frame::Captions),
+            (Platform::Linux, Frame::System),
+            (Platform::Web, Frame::System),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            app.platform = platform;
+            app.chrome = chrome;
+            for (connection, label) in [
+                (crate::device::Connection::Disconnected, "Connect…"),
+                (crate::device::Connection::Connecting, "Looking…"),
+            ] {
+                app.device.state.connection = connection;
+                let _ = settled(&ctx, &mut app, LEAST);
+                let mut frame = eframe::Frame::_new_kittest();
+                let output = testing::run(&ctx, testing::screen(LEAST, Vec::new()), |ctx| {
+                    app.update(ctx, &mut frame)
+                });
+                let said = testing::painted(&output);
+                assert!(
+                    !said
+                        .iter()
+                        .any(|word| word.text == "Connect an instrument…"),
+                    "{platform:?}: the tree's row"
+                );
+                let pill = testing::where_(&said, label);
+                let search = ctx.read_response(egui::Id::new(SEARCH)).unwrap().rect;
+                assert!(
+                    pill.left() - search.right() >= BETWEEN,
+                    "{platform:?}: {label} at {pill:?} crowds the search at {search:?}"
+                );
+            }
         }
     }
 

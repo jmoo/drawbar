@@ -13,7 +13,7 @@ use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
 use super::drag::{kinds_present, qualifier, Item, Kept, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click, Verb};
-use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
+use crate::device::{occupancy, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
 use crate::menu::{marked, new_menu};
@@ -271,9 +271,8 @@ impl Browser {
             }
         }
 
-        match device.state.connected() {
-            true => self.instrument_rows(ui, workspace, device, queue, filter, acts),
-            false => self.connect_row(ui, device, acts),
+        if device.state.connected() {
+            self.instrument_rows(ui, workspace, device, queue, filter, acts);
         }
 
         let counts = [
@@ -354,38 +353,6 @@ impl Browser {
                 ui.menu_button("New", |ui| new_menu(ui, acts));
             });
         });
-    }
-
-    /// The row shown in place of an instrument until one is connected.
-    ///
-    /// ⚠️ The click reaches `requestDevice()` in the frame it landed in, which keeps the
-    /// browser's transient user activation alive.
-    fn connect_row(&mut self, ui: &mut egui::Ui, device: &Device, acts: &mut Vec<Act>) {
-        if matches!(device.state.connection, Connection::Connecting) {
-            nothing(ui, 0, "Looking for an instrument…");
-            return;
-        }
-        let drawn = row(
-            ui,
-            false,
-            &Cells {
-                indent: indent(0, false),
-                glyph: Some(Glyph::Keyboard),
-                name: "Connect an instrument…",
-                faint: true,
-                ..Cells::default()
-            },
-        );
-        if drawn
-            .response
-            .on_hover_text(
-                "Close Nord Sound Manager first. It keeps the USB connection to itself while \
-                 it is open.\n\nIn a browser: Chrome or Edge only.",
-            )
-            .clicked()
-        {
-            acts.push(Act::Connect);
-        }
     }
 
     /// The folder ids in creation order, copied out so a row can change the list it is

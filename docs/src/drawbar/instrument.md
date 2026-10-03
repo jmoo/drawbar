@@ -7,8 +7,8 @@ have been tested.
 ## Connecting
 
 Close Nord Sound Manager first, since it keeps the USB connection to itself. Then
-click **Connect instrument…** in the top bar, **Connect an instrument…** under
-**Places**, or **Instrument ▸ Connect…**.
+click **Connect instrument…** in the top bar (**Connect…** in a narrow window) or
+**Instrument ▸ Connect…**.
 A web browser asks you to pick the device. The desktop app takes the first Nord
 it finds.
 
