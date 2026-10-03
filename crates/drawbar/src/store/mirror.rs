@@ -591,10 +591,12 @@ impl Store {
             tags,
             rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
         );
-        let by_path = rows
-            .iter()
-            .filter_map(|(id, row)| Some((row.path.clone()?, *id)))
-            .collect();
+        let mut by_path = BTreeMap::new();
+        for (id, row) in &rows {
+            if let Some(path) = &row.path {
+                by_path.entry(path.clone()).or_insert(*id);
+            }
+        }
         self.loading = Some(Loading {
             rows,
             by_path,
