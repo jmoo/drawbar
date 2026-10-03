@@ -52,6 +52,17 @@ nord-usb = { path = "../nord-usb", version = "0.8.0", features = [
 ] }
 # `playback` alone: the decoders are for files, and drawbar feeds it raw samples.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+# HTTPS for the demo sounds. `ring` is the crypto provider, and the trusted roots are
+# the system's own rather than a bundled set.
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+] }
+rustls-native-certs = "0.8"
+ureq = { version = "3.4", default-features = false, features = [
+  "rustls-no-provider",
+] }
 
 # The native menu bar, and the title bar the traffic lights sit in. macOS only:
 # elsewhere the menus and window buttons are drawn in the window.

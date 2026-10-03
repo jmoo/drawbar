@@ -17,7 +17,6 @@ use crate::browser::Act;
 use crate::icon::{sized, Glyph};
 use crate::panel::caps;
 use crate::sheet::{self, GAP};
-use crate::shell::GUIDE;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -188,13 +187,13 @@ const RISK_LEAD: &str = "Keep your own backups.";
 const RISK_REST: &str = " drawbar is alpha software. Treat what it holds as a working copy.";
 
 /// The start cards, in the order the sheet shows them.
-const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Guide];
+const STARTS: [Start; 3] = [Start::Connect, Start::Open, Start::Demo];
 
 #[derive(Clone, Copy)]
 enum Start {
     Connect,
     Open,
-    Guide,
+    Demo,
 }
 
 /// How one [`Start`] reads on the sheet.
@@ -225,11 +224,11 @@ impl Start {
                 hint: "",
                 lead: false,
             },
-            Start::Guide => Card {
-                glyph: Glyph::BookOpen,
-                label: "Read the guide",
-                sub: "",
-                hint: "",
+            Start::Demo => Card {
+                glyph: Glyph::AudioWaveform,
+                label: "Get the demo sounds",
+                sub: "A tine piano and a pad, in a Demo sounds folder on this computer.",
+                hint: "From drawbar.app; anything already here is not added again",
                 lead: false,
             },
         }
@@ -516,7 +515,7 @@ fn starts(ui: &mut egui::Ui) -> Option<Wanted> {
                 match start {
                     Start::Connect => wanted = Some(Wanted::Act(Act::Connect)),
                     Start::Open => wanted = Some(Wanted::Act(Act::OpenFiles)),
-                    Start::Guide => ui.ctx().open_url(egui::OpenUrl::new_tab(GUIDE)),
+                    Start::Demo => wanted = Some(Wanted::Act(Act::FetchDemos)),
                 }
             }
         });
@@ -1156,13 +1155,9 @@ mod tests {
         }
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        for label in [
-            "I understand",
-            "Connect an instrument…",
-            "Open files…",
-            "Read the guide",
-            &format!("{RISK_LEAD}{RISK_REST}"),
-        ] {
+        let risk = format!("{RISK_LEAD}{RISK_REST}");
+        let starts = STARTS.map(|start| start.card().label);
+        for label in ["I understand", risk.as_str()].into_iter().chain(starts) {
             let drawn = box_of(&said, label)
                 .unwrap_or_else(|| panic!("{label} was never painted: {said:?}"));
             assert!(
