@@ -62,6 +62,17 @@ contents, and the library a program needs, show once it is read. Once the listin
 is done, drawbar reads each file with tags or a slot it came from in the
 background, so those match their slots before you look at them.
 
+drawbar remembers what it read. For each file it keeps a small summary: its kind,
+the instrument it is for, the checksum it matches a slot by, the library a program
+plays, and the WAVs a Sample Editor project names. The summaries live in drawbar's
+own data, never in the library: in `library-cache.ron`, in
+`~/Library/Application Support/drawbar` on macOS, `~/.local/share/drawbar` on
+Linux and `%APPDATA%\drawbar\data` on Windows, and in the site's IndexedDB in
+the browser. When you open the library again, a file whose size and date have not
+changed shows its kind and matches its slot without being read, and is read only
+when you select, open or act on it. Deleting the summaries loses nothing: drawbar
+reads the files again as it needs them.
+
 You can rename, move and make folders while a library is still being listed. A
 folder you remove waits until everything in it has been listed.
 
