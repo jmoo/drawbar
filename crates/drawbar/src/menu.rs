@@ -10,6 +10,7 @@ use nord_usb::ObjectClass;
 
 use crate::app::{accent, DrawbarApp, ThemeChoice};
 use crate::browser::Act;
+use crate::device::NO_USB;
 use crate::icon::{sized, Glyph};
 use crate::newproject::Making;
 use crate::platform::{written, Platform};
@@ -146,7 +147,7 @@ fn hint(command: Command) -> Option<&'static str> {
 /// ⚠️ One menu, used everywhere. The tree's context menu, the File menu, the top bar and
 /// the tab row all offer "New", and four different menus of one name would be four
 /// things to learn. Connecting an instrument makes nothing on this computer, so it is on
-/// the tree's instrument row instead.
+/// the top bar's pill and in Instrument ▸ Connect… instead.
 pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     drop_down_style(ui);
     new_lines(ui, &new_entries(), acts);
@@ -474,7 +475,14 @@ impl DrawbarApp {
                 ..plain
             },
             Command::Theme(choice) => check(self.theme == choice),
-            Command::Connect => (!attached).then_some(plain)?,
+            Command::Connect => {
+                let usb = self.device.usb();
+                (!attached).then_some(Offer {
+                    enabled: usb,
+                    hint: (!usb).then_some(NO_USB),
+                    ..plain
+                })?
+            }
             Command::Disconnect | Command::ReadEverything | Command::ReviewQueue => {
                 attached.then_some(plain)?
             }
@@ -552,10 +560,7 @@ impl DrawbarApp {
             Command::Welcome => self.splash.open_welcome(),
             Command::CopyLog => acts.push(Act::CopyLog),
             Command::About => {
-                self.about = Some(crate::about::About::new(
-                    &self.device.state,
-                    &self.workspace,
-                ))
+                self.about = Some(crate::about::About::new(&self.device, &self.workspace))
             }
         }
     }

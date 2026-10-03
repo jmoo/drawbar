@@ -17,7 +17,7 @@ use nord_usb::transport::{web::WebUsbTransport, VENDOR_ID};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{UsbConnectionEvent, UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions};
+use web_sys::{Usb, UsbConnectionEvent, UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions};
 
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
@@ -181,6 +181,10 @@ impl Link {
         });
     }
 
+    pub fn available() -> bool {
+        usb().is_some()
+    }
+
     pub fn disconnect(&mut self) {
         self.send(DeviceCmd::Disconnect);
     }
@@ -264,7 +268,7 @@ fn watch_for_unplug(
     inner: &Rc<RefCell<Inner>>,
     emit: &Emit,
 ) -> Option<Closure<dyn FnMut(UsbConnectionEvent)>> {
-    let usb = web_sys::window()?.navigator().usb();
+    let usb = usb()?;
     let held = inner.clone();
     let emit = emit.clone();
     let watch = Closure::wrap(Box::new(move |event: UsbConnectionEvent| {
@@ -283,11 +287,22 @@ fn watch_for_unplug(
     Some(watch)
 }
 
+/// The browser's WebUSB entry point, where it has one.
+///
+/// ⚠️ `Navigator::usb` hands back `undefined` where there is none, and the first call on
+/// it throws through the wasm frames of whatever called it. eframe's frame is one of
+/// them: the exception skips the release of its runner borrow, and every later frame
+/// finds the runner held and paints nothing.
+fn usb() -> Option<Usb> {
+    let navigator = web_sys::window()?.navigator();
+    js_sys::Reflect::get(&navigator, &JsValue::from_str("usb"))
+        .ok()?
+        .dyn_into()
+        .ok()
+}
+
 fn request_device() -> Result<Promise<UsbDevice>, JsValue> {
-    let usb = web_sys::window()
-        .ok_or_else(|| JsValue::from_str("no window"))?
-        .navigator()
-        .usb();
+    let usb = usb().ok_or_else(|| JsValue::from_str("this browser has no WebUSB"))?;
 
     // Filter by vendor only: the chooser lists any Clavia device, and the vendor-interface
     // check in `WebUsbTransport::open` rejects one this app cannot drive.

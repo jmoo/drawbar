@@ -12,6 +12,7 @@ use eframe::egui;
 
 use crate::app::{accent, bold, canvas, good, tint, ui as ui_text, warn, DrawbarApp, ThemeChoice};
 use crate::browser::Act;
+use crate::device::NO_USB;
 use crate::filter::Filter;
 use crate::icon::{painted, sized, Glyph};
 use crate::log::Level;
@@ -738,7 +739,7 @@ impl DrawbarApp {
                     }
                     .to_string(),
                 );
-                let connect = Pill {
+                let pill = Pill {
                     glyph: Glyph::Plug,
                     mark: ink,
                     label: label.as_deref(),
@@ -751,13 +752,15 @@ impl DrawbarApp {
                     dashed: true,
                     lamp: None,
                     radius: CHIP / 2.0,
-                }
-                .show(ui)
-                .on_hover_text(
-                    "Find a Nord on USB and read what it holds.\n\nClose Nord Sound Manager \
-                     first. It keeps the USB connection to itself while it is open.\n\nIn a \
-                     browser: Chrome or Edge only.",
-                );
+                };
+                let connect = ui
+                    .add_enabled_ui(self.device.usb(), |ui| pill.show(ui))
+                    .inner
+                    .on_hover_text(
+                        "Find a Nord on USB and read what it holds.\n\nClose Nord Sound \
+                         Manager first. It keeps the USB connection to itself while it is open.",
+                    )
+                    .on_disabled_hover_text(NO_USB);
                 // ⚠️ The click reaches `requestDevice()` in the frame it landed in, which
                 // keeps the browser's transient user activation alive.
                 if connect.clicked() && !looking {
@@ -1508,12 +1511,19 @@ mod tests {
         center: egui::Rect,
         panels: Vec<(String, egui::Rect)>,
         /// Every string the frame painted, headers and button labels included.
-        words: Vec<String>,
+        words: Vec<testing::Word>,
     }
 
     impl Painted {
         fn wrote(&self, word: &str) -> bool {
-            self.words.iter().any(|said| said == word)
+            self.at(word).is_some()
+        }
+
+        fn at(&self, word: &str) -> Option<egui::Rect> {
+            self.words
+                .iter()
+                .find(|said| said.text == word)
+                .map(|said| said.rect)
         }
 
         fn region(&self, want: &str) -> Option<egui::Rect> {
@@ -1584,7 +1594,7 @@ mod tests {
         Painted {
             center,
             panels,
-            words: testing::words(&output),
+            words: testing::painted(&output),
         }
     }
 
@@ -1860,7 +1870,7 @@ mod tests {
     #[test]
     fn the_zoom_comes_back_as_it_was_left_and_the_status_line_shows_it() {
         let shows_a_percent =
-            |painted: &Painted| painted.words.iter().any(|word| word.ends_with('%'));
+            |painted: &Painted| painted.words.iter().any(|word| word.text.ends_with('%'));
         let mut store = Fake::default();
         {
             let ctx = egui::Context::default();
@@ -2089,6 +2099,43 @@ mod tests {
             let (sub, item) = (testing::where_(&said, sub), testing::where_(&said, item));
             assert_eq!(sub.left(), item.left(), "{sub:?} against {item:?}");
         }
+    }
+
+    /// Without WebUSB, the top bar's pill and Instrument ▸ Connect… stay where they are,
+    /// grayed out, and say why.
+    #[test]
+    fn without_usb_connect_is_grayed_out_and_says_why_on_hover() {
+        let screen = egui::vec2(1440.0, 900.0);
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.device.pretend_no_usb();
+        let pill = settled(&ctx, &mut app, screen)
+            .at("Connect instrument…")
+            .expect("the top bar offers to connect");
+
+        let _ = frame_of(
+            &ctx,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(pill.center())],
+        );
+        for _ in 0..60 {
+            let _ = drawn_at(&ctx, &mut app, screen);
+        }
+        let hovered = drawn_at(&ctx, &mut app, screen);
+        assert!(hovered.wrote(NO_USB), "{:?}", hovered.words);
+        let _ = frame_of(&ctx, &mut app, screen, testing::click(pill.center()));
+        assert_ne!(
+            app.log.status().1,
+            NO_USB,
+            "the grayed pill asked to connect"
+        );
+
+        let offer = app
+            .offer(Command::Connect)
+            .expect("the Instrument menu offers to connect");
+        assert!(!offer.enabled, "Instrument ▸ Connect… can be picked");
+        assert_eq!(offer.hint, Some(NO_USB));
     }
 
     /// The one-button menu lists every section's items while they fit under it, and
@@ -2428,7 +2475,7 @@ mod tests {
         assert!(!app.shell.log_open, "Escape closes the activity log");
         assert_eq!(picked(&app), 1, "and keeps the selection");
 
-        app.about = Some(crate::about::About::new(&app.device.state, &app.workspace));
+        app.about = Some(crate::about::About::new(&app.device, &app.workspace));
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
         assert!(app.about.is_none(), "Escape closes About");
