@@ -153,6 +153,13 @@ A `Baseline` is what the asset was last saved as:
 `LocalEntity::is_unsaved` compares stamps, never bodies. Every listed row asks
 it every frame, and a piano library is hundreds of megabytes.
 
+A send that lands moves the baseline to what it sent (`Workspace::landed`). An
+asset sent from the file it rests in keeps that file as its baseline, and
+`Workspace::landed_file` sets the link and the write from the checksum its check
+took; nothing reads the file again. Where the baseline moved while the file was
+sent, the file becomes the baseline again under a stamp of its own, so an edit
+saved meanwhile shows as unsaved.
+
 ### Ids
 
 The workspace hands out ids from `next_id`, and the index stores rows by id, so
@@ -404,11 +411,16 @@ copies the library's own file byte for byte (`std::fs::copy` on the desktop,
 which clones the file where the disk can, and slice by slice through the writer
 in the browser), or writes the edit held of it through as it copies. The copy's
 asset is unread until it lands, then rests in it, and a file a copy is still to be
-sent of is not deleted before it is.
+sent of is not deleted before it is. Exporting a resting file copies it across
+without reading it into memory.
 
-A send still needs the whole file. It reads it whole off the frame first
-(`Workspace::wake`), and in the browser the send waits for that read. Exporting a
-resting file copies it across without reading it into memory.
+A send never reads a resting file whole either. The command carries the file
+(`device::Payload::File`), and the worker reads it one transfer chunk at a time
+through `nord_usb::FileSource`: by position through the handle on the desktop,
+and by `File.slice` through the snapshot in the browser. The queue compares a
+resting file with a slot's occupant by the checksum its check took, so its diff
+says only whether the bodies differ. A file that fails to read partway through a
+send fails it as a refused write does, and the slot's occupant is put back.
 
 ## The store protocol
 
