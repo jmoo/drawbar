@@ -15,9 +15,9 @@ use crate::app::{bad, good, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
 use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
-use crate::icon::{painted, Glyph};
+use crate::icon::{painted, sized, Glyph};
 use crate::log::Log;
-use crate::panel::{cell, cut, inset, row_ink, Track, GAP, GLYPH, PAD};
+use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
 use crate::strings::{label, place};
 use crate::workspace::{first_difference, wire_body, LocalEntity, Workspace};
 
@@ -162,8 +162,8 @@ impl Occupant {
 #[derive(Default)]
 pub struct Queue {
     list: Vec<Queued>,
-    /// The entry the dock shows in detail.
-    picked: Option<u64>,
+    /// The entry the review shows in detail.
+    pub(crate) picked: Option<u64>,
 }
 
 /// The outcome of queueing an asset, which decides what the log says.
@@ -640,33 +640,233 @@ fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
 }
 
 /// The height of one waiting item.
-const ROW: f32 = 22.0;
+const ROW: f32 = 32.0;
 
 /// The state glyph at the end of a row.
-const SMALL: f32 = 11.0;
+const SMALL: f32 = 13.0;
 
 /// The destination chip's height, and its padding at each end.
-const CHIP: f32 = 17.0;
-const CHIP_PAD: f32 = 5.0;
+const CHIP: f32 = 20.0;
+const CHIP_PAD: f32 = 6.0;
 
 /// The font sizes a row uses.
-const NAME: f32 = 12.0;
+const NAME: f32 = 12.5;
 const MONO: f32 = 10.5;
 
-/// The item list's width, and the geometry of the diff beside it.
+/// The item list's preferred and least widths, and the geometry of the diff beside it.
 const ITEMS: f32 = 250.0;
-const HEAD: f32 = 20.0;
-const DIFF_ROW: f32 = 22.0;
-const DIFF_MONO: f32 = 11.0;
+const ITEMS_LEAST: f32 = 170.0;
+const HEAD: f32 = 24.0;
+const DIFF_ROW: f32 = 26.0;
+const DIFF_MONO: f32 = 11.5;
 
-/// The queue page of the dock: the waiting items, and the diff of the picked one.
-pub fn page(
+/// The review's largest size, and its margin from the window's edge.
+const SHEET: egui::Vec2 = egui::vec2(940.0, 580.0);
+const SHEET_MARGIN: f32 = 24.0;
+
+/// The review of what is waiting: what each write replaces, how it differs, and what to
+/// know before sending. Nothing is written until Send all.
+///
+/// Returns whether it stays open: Escape, a click on the backdrop, Not now, Send all, or
+/// opening an item's document closes it.
+pub fn review(
+    ctx: &egui::Context,
+    queue: &mut Queue,
+    workspace: &Workspace,
+    device: &DeviceState,
+    acts: &mut Vec<Act>,
+) -> bool {
+    let screen = ctx.screen_rect();
+    let size = egui::vec2(
+        SHEET.x.min(screen.width() - 2.0 * SHEET_MARGIN),
+        SHEET.y.min(screen.height() - 2.0 * SHEET_MARGIN),
+    );
+    let visuals = ctx.style().visuals.clone();
+    let frame = egui::Frame::new()
+        .fill(visuals.panel_fill)
+        .stroke(visuals.widgets.noninteractive.bg_stroke)
+        .corner_radius(14)
+        .shadow(visuals.popup_shadow);
+    let before = acts.len();
+    let mut open = true;
+    let shown = egui::Modal::new(egui::Id::new("review"))
+        .frame(frame)
+        .backdrop_color(egui::Color32::from_black_alpha(115))
+        .show(ctx, |ui| {
+            ui.set_min_size(size);
+            ui.set_max_size(size);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            open &= review_head(ui, queue, device);
+            let foot = review_foot(ui, queue, workspace, device, acts);
+            open &= foot;
+            review_body(ui, queue, workspace, device, acts);
+        });
+    let opened_one = acts[before..]
+        .iter()
+        .any(|act| matches!(act, Act::Open(_) | Act::SendAll));
+    open && !shown.should_close() && !opened_one
+}
+
+/// The review's header: what it is, where the writes go, and how many of each kind.
+/// Returns false when close was clicked.
+fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
+    let visuals = ui.visuals().clone();
+    let quiet = crate::app::caption(&visuals);
+    let lit = crate::app::accent(&visuals);
+    let mut open = true;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 62.0), egui::Sense::hover());
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(16.0, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    bar.spacing_mut().item_spacing.x = 10.0;
+    let (tile, _) = bar.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
+    bar.painter()
+        .rect_filled(tile, 9.0, crate::app::tint(lit, 0.16));
+    painted(&bar, Glyph::Upload, tile.shrink(8.0), lit);
+    bar.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(
+            egui::RichText::new("Review send queue")
+                .font(egui::FontId::new(15.0, crate::app::bold())),
+        );
+        let to = device.product().unwrap_or("the instrument");
+        ui.label(
+            egui::RichText::new(format!("To {to} · nothing is written until you send"))
+                .size(12.0)
+                .color(quiet),
+        );
+    });
+    bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
+        bar.spacing_mut().item_spacing.x = 6.0;
+        crate::panel::flat(bar);
+        let close = egui::Button::image(sized(Glyph::X, 14.0, quiet))
+            .image_tint_follows_text_color(false)
+            .corner_radius(7.0)
+            .min_size(egui::Vec2::splat(28.0));
+        if bar.add(close).on_hover_text("close").clicked() {
+            open = false;
+        }
+        bar.add_space(4.0);
+        let (writes, replaces, failed) = counts(queue);
+        if failed > 0 {
+            crate::panel::signal_pill(
+                bar,
+                &plural(failed, "cannot go", "cannot go"),
+                bad(&visuals),
+            );
+        }
+        if replaces > 0 {
+            crate::panel::signal_pill(bar, &format!("{replaces} replace"), warn(&visuals));
+        }
+        crate::panel::quiet_pill(bar, &plural(writes, "write", "writes"));
+    });
+    open
+}
+
+/// How many entries will be written, how many of those replace something, and how many
+/// the attached instrument has refused.
+fn counts(queue: &Queue) -> (usize, usize, usize) {
+    let failed = queue
+        .entries()
+        .iter()
+        .filter(|held| held.failure.is_some())
+        .count();
+    let replaces = queue
+        .entries()
+        .iter()
+        .filter(|held| held.failure.is_none() && matches!(held.replaces, Occupancy::Held(_)))
+        .count();
+    (queue.len() - failed, replaces, failed)
+}
+
+/// `n` and the noun for it.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    }
+}
+
+/// The review's foot, along the bottom: what to know before sending, then Clear, Not now,
+/// and Send all. Returns false when the review should close.
+fn review_foot(
+    ui: &mut egui::Ui,
+    queue: &Queue,
+    workspace: &Workspace,
+    device: &DeviceState,
+    acts: &mut Vec<Act>,
+) -> bool {
+    let visuals = ui.visuals().clone();
+    let whole = ui.max_rect();
+    let rect = egui::Rect::from_min_max(egui::pos2(whole.left(), whole.bottom() - 58.0), whole.max);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+    );
+    let mut open = true;
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(16.0, 0.0)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    bar.spacing_mut().item_spacing.x = 8.0;
+    let sending = queue.len() - counts(queue).2;
+    let send = crate::panel::accent_button(
+        &mut bar,
+        Glyph::Upload,
+        &format!("Send all {sending}"),
+        sending > 0,
+    )
+    .on_disabled_hover_text("Nothing waiting can go to the instrument attached now.");
+    if send.clicked() {
+        acts.push(Act::SendAll);
+    }
+    if crate::panel::tonal_button(&mut bar, None, "Not now").clicked() {
+        open = false;
+    }
+    if !queue.is_empty()
+        && crate::panel::tonal_button(&mut bar, None, "Clear")
+            .on_hover_text("stop waiting to send any of it; nothing is deleted")
+            .clicked()
+    {
+        acts.push(Act::ClearQueue);
+    }
+    let warnings = crate::browser::send_warnings(queue, workspace, device);
+    if let Some(first) = warnings.first() {
+        let room = bar.available_width();
+        bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
+            bar.set_max_width(room);
+            bar.spacing_mut().item_spacing.x = 8.0;
+            bar.add(sized(Glyph::CircleAlert, 15.0, warn(&visuals)));
+            let said = first.trim_start_matches("⚠️ ");
+            let label = bar.add(egui::Label::new(egui::RichText::new(said).size(12.0)).truncate());
+            if warnings.len() > 1 {
+                label.on_hover_text(warnings.join("\n\n"));
+            }
+        });
+    }
+    open
+}
+
+/// The waiting items beside the diff of the one picked.
+fn review_body(
     ui: &mut egui::Ui,
     queue: &mut Queue,
     workspace: &Workspace,
     device: &DeviceState,
     acts: &mut Vec<Act>,
 ) {
+    let whole = ui.max_rect();
+    let body = egui::Rect::from_min_max(
+        egui::pos2(whole.left() + 10.0, ui.cursor().top() + 4.0),
+        egui::pos2(whole.right() - 10.0, whole.bottom() - 58.0 - 10.0),
+    );
+    let mut inside = ui.new_child(egui::UiBuilder::new().max_rect(body));
+    let ui = &mut inside;
     if queue.is_empty() {
         ui.add_space(GAP);
         ui.horizontal(|ui| {
@@ -680,62 +880,99 @@ pub fn page(
         });
         return;
     }
-    ui.spacing_mut().item_spacing.y = 0.0;
+    if queue.picked.is_none_or(|id| queue.entry(id).is_none()) {
+        queue.picked = queue.entries().first().map(|held| held.id);
+    }
+    let list = (body.width() * 0.3).clamp(ITEMS_LEAST, ITEMS);
+    let items = egui::Rect::from_min_size(body.min, egui::vec2(list, body.height()));
+    let pane = egui::Rect::from_min_max(egui::pos2(items.right() + 8.0, body.top()), body.max);
     let picked = queue.picked;
     let mut clicked = None;
-    egui::SidePanel::left("queue_items")
-        .resizable(false)
-        .exact_width(ITEMS)
-        .frame(egui::Frame::new())
-        .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("queue_items")
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    for held in queue.entries() {
-                        let Some(entity) = workspace.get(held.id) else {
-                            continue;
-                        };
-                        let drawn = item(
-                            ui,
-                            held,
-                            entity,
-                            picked == Some(held.id),
-                            device,
-                            queue,
-                            acts,
-                        );
-                        if drawn.clicked() {
-                            clicked = Some(held.id);
-                        }
-                    }
-                });
+    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(items));
+    egui::ScrollArea::vertical()
+        .id_salt("queue_items")
+        .auto_shrink([false; 2])
+        .show(&mut column, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for held in queue.entries() {
+                let Some(entity) = workspace.get(held.id) else {
+                    continue;
+                };
+                let drawn = item(
+                    ui,
+                    held,
+                    entity,
+                    picked == Some(held.id),
+                    device,
+                    queue,
+                    acts,
+                );
+                if drawn.clicked() {
+                    clicked = Some(held.id);
+                }
+            }
         });
+    ui.painter()
+        .rect_filled(pane, 9.0, ui.visuals().window_fill);
     if let Some(held) = picked.and_then(|id| queue.entry(id)) {
-        diff(ui, held);
+        let mut diff = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
+        let name = workspace
+            .get(held.id)
+            .map_or("", |entity| entity.name.as_str());
+        diff_title(&mut diff, held, name);
+        table(&mut diff, held);
     }
     if let Some(id) = clicked {
         queue.picked = Some(id);
     }
 }
 
-/// What the picked item would change in the slot it is waiting for.
-fn diff(ui: &mut egui::Ui, held: &Queued) {
-    let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
-    let edge = ui.max_rect();
-    ui.painter().vline(
-        edge.left(),
-        edge.top()..=edge.bottom(),
-        egui::Stroke::new(1.0_f32, border),
+/// The diff's title: what is going where, and how many fields it changes.
+fn diff_title(ui: &mut egui::Ui, held: &Queued, name: &str) {
+    let visuals = ui.visuals().clone();
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    table(ui, held);
+    bar.spacing_mut().item_spacing.x = 8.0;
+    if let Diff::Fields(fields) = &held.diff {
+        bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
+            let differ = plural(fields.len(), "field differs", "fields differ");
+            crate::panel::signal_pill(bar, &differ, warn(&visuals));
+            bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
+                title_words(bar, held, name);
+            });
+        });
+    } else {
+        title_words(&mut bar, held, name);
+    }
+    ui.add_space(4.0);
+}
+
+/// The picked item's name, and what is known of the slot it goes to, which is shortened
+/// first.
+fn title_words(ui: &mut egui::Ui, held: &Queued, name: &str) {
+    ui.label(
+        egui::RichText::new(crate::strings::display_name(name))
+            .font(egui::FontId::new(12.5, crate::app::bold())),
+    );
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(format!("→ {}", held.replaces.said(held.class, held.at)))
+                .size(12.0)
+                .color(crate::app::caption(ui.visuals())),
+        )
+        .truncate(),
+    );
 }
 
 /// The four column heads, and under them either the fields that differ or a single line
 /// describing any other kind of difference.
 pub fn table(ui: &mut egui::Ui, held: &Queued) {
-    let ui = &mut inset(ui);
-    let width = ui.available_width() - PAD;
+    let width = ui.available_width();
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
     diff_head(ui, width, &tracks);
 
@@ -747,6 +984,7 @@ pub fn table(ui: &mut egui::Ui, held: &Queued) {
         .id_salt("queue_diff")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
             for field in fields {
                 field_row(ui, width, &tracks, field);
             }
@@ -2260,10 +2498,10 @@ mod tests {
         assert_eq!(draw(press).0, Some(wanted));
     }
 
-    /// Paints the page headlessly with each kind of diff, to catch a layout that panics
+    /// Paints the review headlessly with each kind of diff, to catch a layout that panics
     /// or an id that collides.
     #[test]
-    fn the_dock_page_paints_every_kind_of_diff() {
+    fn the_review_paints_every_kind_of_diff_at_any_window_width() {
         let Bench {
             ctx,
             mut workspace,
@@ -2302,17 +2540,12 @@ mod tests {
         // One waiting on its read, one with a field list, one for a free slot.
         queue.arrived(class, at(1), "Squabble B", &bytes, &workspace);
 
-        for width in [430.0_f32, 900.0] {
+        for width in [700.0_f32, 1280.0] {
             for picked in queue.ids() {
                 queue.picked = Some(picked);
-                testing::run(&ctx, egui::RawInput::default(), |ctx| {
-                    egui::TopBottomPanel::bottom("dock")
-                        .exact_height(crate::shell::DOCK_BODY)
-                        .frame(egui::Frame::new())
-                        .show(ctx, |ui| {
-                            ui.set_width(width);
-                            page(ui, &mut queue, &workspace, &device.state, &mut Vec::new());
-                        });
+                let input = testing::screen(egui::vec2(width, 600.0), Vec::new());
+                testing::run(&ctx, input, |ctx| {
+                    review(ctx, &mut queue, &workspace, &device.state, &mut Vec::new());
                 });
             }
         }

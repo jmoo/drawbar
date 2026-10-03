@@ -16,10 +16,10 @@ use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
+use crate::menu::marked;
 use crate::newproject::Making;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
-use crate::shell::marked;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -691,7 +691,7 @@ impl Browser {
         }
         ui.menu_button("Move to folder", |ui| {
             for folder in self.folders.all() {
-                if marked(ui, &folder.name, filed == Some(folder.id), None) {
+                if marked(ui, &folder.name, filed == Some(folder.id)) {
                     acts.push(Act::File {
                         id,
                         folder: Some(folder.id),
@@ -716,7 +716,7 @@ impl Browser {
     pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         for tag in self.tags.all() {
             let on = self.tags.on_all(picked, tag.id);
-            if marked(ui, &tag.name, on, None) {
+            if marked(ui, &tag.name, on) {
                 let ids = picked.to_vec();
                 acts.push(match on {
                     true => Act::Untag { ids, tag: tag.id },

@@ -1,8 +1,7 @@
 //! The app: the light and dark themes, and the routing between the regions.
 //!
-//! The regions themselves (the title bar, the toolbar, the three docks, the status bar)
-//! live in [`crate::shell`]; `DrawbarApp::update` sets only the order they claim space
-//! in.
+//! The regions themselves (the top bar, the two side cards, the status line) live in
+//! [`crate::shell`]; `DrawbarApp::update` sets only the order they claim space in.
 
 use eframe::egui;
 
@@ -13,8 +12,9 @@ use crate::keyboard::Keyboard;
 use crate::library::Library;
 use crate::log::Log;
 use crate::midi::{Midi, Played};
+use crate::platform::Platform;
 use crate::queue::Queue;
-use crate::shell::Shell;
+use crate::shell::{Dock, Shell};
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
 
@@ -102,6 +102,10 @@ impl ThemeChoice {
         }
     }
 
+    /// Every choice, in the order the theme button cycles through them.
+    pub(crate) const ALL: [ThemeChoice; 3] =
+        [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
+
     pub(crate) fn next(self) -> ThemeChoice {
         match self {
             ThemeChoice::System => ThemeChoice::Light,
@@ -110,12 +114,12 @@ impl ThemeChoice {
         }
     }
 
-    /// The label beside the sun or moon icon.
-    pub(crate) fn label(self) -> &'static str {
+    /// The choice's name in the Theme menu.
+    pub(crate) fn name(self) -> &'static str {
         match self {
-            ThemeChoice::System => "Theme: auto",
-            ThemeChoice::Light => "Theme: light",
-            ThemeChoice::Dark => "Theme: dark",
+            ThemeChoice::System => "Auto",
+            ThemeChoice::Light => "Light",
+            ThemeChoice::Dark => "Dark",
         }
     }
 
@@ -167,6 +171,11 @@ pub struct DrawbarApp {
     pub(crate) splash: crate::splash::Splash,
     /// The About box while it is showing. Not kept between sessions.
     pub(crate) about: Option<crate::about::About>,
+    /// Where this build runs, and who draws the window's frame on this run.
+    pub(crate) platform: Platform,
+    pub(crate) chrome: crate::platform::Frame,
+    #[cfg(target_os = "macos")]
+    menubar: Option<crate::menubar::MenuBar>,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last written, in egui time.
@@ -207,6 +216,10 @@ impl DrawbarApp {
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
+            platform: Platform::current(),
+            chrome: crate::platform::Frame::of(Platform::current()),
+            #[cfg(target_os = "macos")]
+            menubar: None,
             saved: 0,
             saved_at: 0.0,
             left: crate::store::Left::default(),
@@ -222,6 +235,34 @@ impl DrawbarApp {
         }
         app.saved = app.workspace.revision();
         app
+    }
+
+    /// The app with the macOS menu bar installed. Only the window's own app, never a test,
+    /// may own the one menu bar the system has.
+    #[cfg(target_os = "macos")]
+    pub fn with_menu_bar(mut self, ctx: &egui::Context) -> DrawbarApp {
+        self.menubar = crate::menubar::MenuBar::install(ctx);
+        self
+    }
+
+    /// Run what was picked from the macOS menu bar, and bring its items up to date.
+    #[cfg(target_os = "macos")]
+    fn menu_bar_events(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        acts: &mut Vec<browser::Act>,
+    ) {
+        let Some(mut bar) = self.menubar.take() else {
+            return;
+        };
+        for command in bar.picked() {
+            if self.offer(command).is_some_and(|offer| offer.enabled) {
+                self.run(ctx, frame, command, acts);
+            }
+        }
+        bar.refresh(|command| self.offer(command));
+        self.menubar = Some(bar);
     }
 
     /// Ingest anything dropped on the window, or hand it to the New dialog while one is
@@ -404,14 +445,30 @@ impl eframe::App for DrawbarApp {
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
         acts.extend(asked);
+        #[cfg(target_os = "macos")]
+        self.menu_bar_events(ctx, frame, &mut acts);
+        self.shortcuts(ctx, frame, &mut acts);
         self.browser.dialog(ctx, &mut acts);
-        self.titlebar(ctx, frame, &mut acts);
-        self.toolbar(ctx, &mut acts);
-        self.status_bar(ctx, &mut acts);
-        self.bottom_dock(ctx, &mut acts);
-        self.browser_dock(ctx, &mut acts);
-        self.inspector_dock(ctx, &mut acts);
+        self.backdrop(ctx);
+        self.top_bar(ctx, frame, &mut acts);
+        self.status_line(ctx, &mut acts);
+        self.browser_card(ctx, &mut acts);
+        self.inspector_card(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
+        if self.shell.review_open {
+            self.shell.review_open = crate::queue::review(
+                ctx,
+                &mut self.queue,
+                &self.workspace,
+                &self.device.state,
+                &mut acts,
+            );
+        }
+        if self.shell.log_open {
+            self.shell.log_open =
+                self.log
+                    .popover(ctx, &mut self.shell.log_problems, self.shell.status_rect);
+        }
 
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
@@ -438,20 +495,30 @@ impl eframe::App for DrawbarApp {
 }
 
 impl DrawbarApp {
-    /// The tab strip, and the view of the front tab.
+    /// The row of tabs between the two panel toggles, and the front tab's view in the
+    /// document card under it.
     ///
     /// Keys `played` on a MIDI controller reach only the key map of the front document.
     fn center(&mut self, ctx: &egui::Context, played: &Played, acts: &mut Vec<browser::Act>) {
-        let fill = ctx.style().visuals.panel_fill;
+        let gutter = crate::panel::GUTTER as i8;
+        let margin = egui::Margin {
+            left: gutter,
+            right: gutter,
+            top: 0,
+            bottom: gutter,
+        };
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(fill))
+            .frame(egui::Frame::NONE.inner_margin(margin))
             .show(ctx, |ui| {
-                self.tabs.ui(ui, &self.workspace, acts);
+                self.tab_row(ui, acts);
+                let rect = ui.available_rect_before_wrap();
+                let mut inside = crate::shell::card(ui, rect);
+                let ui_ = &mut inside;
                 match self.tabs.showing() {
                     Spot::Library => {
                         self.document.leave();
                         acts.extend(self.library.ui(
-                            ui,
+                            ui_,
                             &mut self.browser,
                             &self.workspace,
                             &self.device,
@@ -462,7 +529,7 @@ impl DrawbarApp {
                     Spot::Keyboard => {
                         self.document.leave();
                         acts.extend(self.keyboard.ui(
-                            ui,
+                            ui_,
                             &mut self.browser,
                             &self.workspace,
                             &self.device,
@@ -470,9 +537,37 @@ impl DrawbarApp {
                             &self.tabs,
                         ));
                     }
-                    Spot::Document(id) => self.open_document(ui, id, played, acts),
+                    Spot::Document(id) => self.open_document(ui_, id, played, acts),
                 }
+                crate::shell::round_off(ui, rect);
             });
+    }
+
+    /// The browser's toggle, the tabs, and the inspector's toggle, across the top of the
+    /// center.
+    fn tab_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<browser::Act>) {
+        let row = egui::Rect::from_min_size(
+            ui.cursor().min,
+            egui::vec2(ui.available_width(), crate::tabs::HEIGHT),
+        );
+        let along = |ui: &mut egui::Ui, layout| {
+            ui.new_child(egui::UiBuilder::new().max_rect(row).layout(layout))
+        };
+        let mut start = along(ui, egui::Layout::left_to_right(egui::Align::Center));
+        self.panel_toggle(&mut start, Dock::Browser, acts);
+        let mut end = along(ui, egui::Layout::right_to_left(egui::Align::Center));
+        self.panel_toggle(&mut end, Dock::Inspector, acts);
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(start.min_rect().right() + 4.0, row.top()),
+            egui::pos2(end.min_rect().left() - 4.0, row.bottom()),
+        );
+        let mut tabs = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(strip)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        self.tabs.ui(&mut tabs, &self.workspace, acts);
+        ui.advance_cursor_after_rect(row);
     }
 
     /// A document owns its own room: the header is full bleed and the body inside it

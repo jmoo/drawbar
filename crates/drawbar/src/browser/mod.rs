@@ -32,7 +32,7 @@ mod row;
 mod selection;
 mod tree;
 
-pub use act::{apply, bulk, foreign_format, Act, Bulk, LOAD_ON_INSTRUMENT};
+pub use act::{apply, bulk, foreign_format, send_warnings, Act, Bulk, LOAD_ON_INSTRUMENT};
 pub use drag::{
     kinds_present, landing, qualifier, Carried, Held, Item, Kept, Kind, Onto, Qualifier,
 };
@@ -41,7 +41,6 @@ pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
 pub use tree::new_menu;
 
-use act::{will_write, write_warnings};
 use drag::ghost;
 use selection::{gesture, Gesture};
 use tree::{Branch, Sections};
@@ -73,7 +72,6 @@ struct Ask {
 /// What a yes to an [`Ask`] does, which names and marks its button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verb {
-    Send,
     Save,
     Replace,
     Delete,
@@ -82,7 +80,6 @@ enum Verb {
 impl Verb {
     fn label(self) -> &'static str {
         match self {
-            Verb::Send => "Send",
             Verb::Save => "Save",
             Verb::Replace => "Replace",
             Verb::Delete => "Delete",
@@ -93,14 +90,13 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Send | Verb::Save => sheet::primary(ui, Some(glyph), label),
+            Verb::Save => sheet::primary(ui, Some(glyph), label),
             Verb::Replace | Verb::Delete => sheet::destructive(ui, glyph, label),
         }
     }
 
     fn glyph(self) -> Glyph {
         match self {
-            Verb::Send => Glyph::Upload,
             Verb::Save => Glyph::Save,
             Verb::Replace => Glyph::Replace,
             Verb::Delete => Glyph::Trash2,
@@ -491,53 +487,6 @@ impl Browser {
             Some(false) => self.ask = None,
             None => {}
         }
-    }
-
-    /// The confirmation for a batch write: every entry it would write, and what each
-    /// would replace. Entries the instrument has already refused are left out.
-    fn ask_send(
-        &mut self,
-        workspace: &Workspace,
-        device: &Device,
-        queue: &Queue,
-        title: String,
-        act: Act,
-    ) {
-        let mut lines = Vec::new();
-        let mut warnings: Vec<String> = Vec::new();
-        for held in will_write(queue) {
-            let Some(entity) = workspace.get(held.id) else {
-                continue;
-            };
-            let (class, at) = (held.class, held.at);
-            for warning in write_warnings(&device.state, class, entity) {
-                if !warnings.contains(&warning) {
-                    warnings.push(warning);
-                }
-            }
-            // What is known about the slot; for an unread bank, that it has not been
-            // read.
-            lines.push(format!(
-                "“{}” → {}",
-                entity.name,
-                held.replaces.said(class, at)
-            ));
-        }
-        if lines.is_empty() {
-            return;
-        }
-        // The warnings first: they are the reason to say no.
-        let mut note = warnings;
-        if !note.is_empty() {
-            note.push(String::new());
-        }
-        note.extend(lines);
-        self.ask = Some(Ask {
-            title,
-            note: Some(note.join("\n")),
-            verb: Verb::Send,
-            acts: vec![act],
-        });
     }
 
     /// Ask before a write back to one slot, showing the note that write carries.
@@ -1209,18 +1158,16 @@ mod tests {
         assert!(said.contains("Kept a copy on this computer"), "{said}");
     }
 
-    /// The warning appears in the batch's modal once per format, however many items carry
-    /// it, and above the list of destinations, which readers skim.
+    /// The review warns once per format, however many items carry it.
     ///
     /// The instrument reports a model the acceptance table does not know, so the only
     /// check left is against the folder's own formats. A known family would refuse these
     /// files outright.
     #[test]
-    fn the_modal_says_when_a_batch_is_of_another_model() {
+    fn the_review_warns_once_when_a_batch_is_of_another_model() {
         use crate::workspace::Origin;
 
         let Bench {
-            mut browser,
             mut workspace,
             mut device,
             mut queue,
@@ -1245,12 +1192,14 @@ mod tests {
             ids.push(id);
         }
 
-        browser.ask_send(&workspace, &device, &queue, "Send?".into(), Act::SendAll);
-        let note = browser.ask.as_ref().and_then(|ask| ask.note.clone());
-        let note = note.expect("the modal has a note");
-        assert_eq!(note.matches("This file is ns4p").count(), 1, "{note}");
-        let warned = note.find("ns4p").expect("the warning is there");
-        let listed = note.find("replaces").expect("and so are the destinations");
-        assert!(warned < listed, "the warning comes first:\n{note}");
+        let warnings = send_warnings(&queue, &workspace, &device.state);
+        let foreign = warnings
+            .iter()
+            .filter(|warning| warning.contains("This file is ns4p"))
+            .count();
+        assert_eq!(
+            foreign, 1,
+            "two files of one model, one warning: {warnings:?}"
+        );
     }
 }

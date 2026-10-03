@@ -12,7 +12,7 @@ use crate::filter::Narrow;
 use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
-use crate::shell::{Dock, Page, Shell};
+use crate::shell::{Dock, Shell};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Workspace};
@@ -92,7 +92,8 @@ pub enum Act {
     SendAll,
     /// Queue every asset [`crate::queue::changed`] finds, each for its own slot.
     QueueChanged,
-    /// Ask before sending everything waiting; a yes runs `SendAll`.
+    /// Ask before sending everything waiting: the review of the queue, whose Send all
+    /// runs `SendAll`.
     AskSendAll,
     /// A Send already confirmed, so it does not ask again.
     Replace {
@@ -146,8 +147,12 @@ pub enum Act {
     /// Close the tab the center is showing.
     CloseTab,
     ToggleDock(Dock),
-    /// Open the bottom dock on one of its pages.
-    ShowPage(Page),
+    /// Open the review of what is waiting to be sent.
+    ReviewQueue,
+    /// Show or hide the activity popover.
+    ToggleLog,
+    /// Open the activity popover on the problems alone.
+    ShowProblems,
     /// Copy the whole activity log to the clipboard.
     CopyLog,
     /// Ask the window to close. Never reached on the web, where the tab is the window.
@@ -292,18 +297,6 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
     }
 }
 
-/// Whether running this act puts something in the send queue or moves what is in it.
-fn enqueues(act: &Act) -> bool {
-    matches!(
-        act,
-        Act::Send { .. }
-            | Act::Replace { .. }
-            | Act::Retarget { .. }
-            | Act::SendChecked(_)
-            | Act::QueueChanged
-    )
-}
-
 /// Run what the browser asked for.
 #[allow(clippy::too_many_arguments)]
 pub fn apply(
@@ -317,9 +310,6 @@ pub fn apply(
     log: &mut Log,
 ) {
     for act in acts {
-        if enqueues(&act) {
-            shell.show_page(Page::Queue);
-        }
         match act {
             Act::Connect => device.connect(log),
             Act::Disconnect => device.disconnect(log),
@@ -415,19 +405,7 @@ pub fn apply(
             Act::ClearQueue => queue.clear(),
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
-            Act::AskSendAll => match will_write(queue).count() {
-                0 => log.say(
-                    "Nothing waiting can go to the instrument attached now, so there is \
-                     nothing to send.",
-                ),
-                waiting => {
-                    let title = match waiting {
-                        1 => "Send 1 sound to the instrument?".to_string(),
-                        n => format!("Send {n} sounds to the instrument?"),
-                    };
-                    browser.ask_send(workspace, device, queue, title, Act::SendAll);
-                }
-            },
+            Act::AskSendAll | Act::ReviewQueue => shell.review_open = true,
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
@@ -469,7 +447,14 @@ pub fn apply(
                 tabs.close(tabs.showing());
             }
             Act::ToggleDock(dock) => shell.toggle(dock),
-            Act::ShowPage(page) => shell.show_page(page),
+            Act::ToggleLog => {
+                shell.log_open = !shell.log_open;
+                shell.log_problems = false;
+            }
+            Act::ShowProblems => {
+                shell.log_open = !shell.log_open || !shell.log_problems;
+                shell.log_problems = true;
+            }
             Act::CopyLog => workspace.ctx().copy_text(log.transcript()),
             Act::Quit => workspace
                 .ctx()
@@ -557,6 +542,22 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Vec<(ObjectClass, Vec<Outgoi
 /// may include it.
 pub(super) fn will_write(queue: &Queue) -> impl Iterator<Item = &Queued> {
     queue.entries().iter().filter(|held| held.failure.is_none())
+}
+
+/// What a batch should be warned about, each warning once, in queue order.
+pub fn send_warnings(queue: &Queue, workspace: &Workspace, state: &DeviceState) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
+    for held in will_write(queue) {
+        let Some(entity) = workspace.get(held.id) else {
+            continue;
+        };
+        for warning in write_warnings(state, held.class, entity) {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+    warnings
 }
 
 /// Warn when an outgoing format tag differs from every format tag read in the folder.
@@ -1371,10 +1372,10 @@ mod tests {
         );
     }
 
-    /// Whatever puts something in the queue opens the bottom dock on the queue page, even
-    /// when the dock was closed.
+    /// Queueing says where the asset is going on the status line and leaves the window as
+    /// it was: the review opens only when asked for.
     #[test]
-    fn queueing_opens_the_dock_on_the_queue_page() {
+    fn queueing_says_where_it_goes_without_opening_the_review() {
         let mut bench = Bench::new();
         let class = ObjectClass::Program;
         bench.device.pretend_partitions(&crate::device::ELECTRO5);
@@ -1387,11 +1388,6 @@ mod tests {
             &mut bench.log,
         );
 
-        bench.shell = Shell {
-            dock_open: false,
-            page: Page::Log,
-            ..Shell::default()
-        };
         bench.act(vec![Act::Send {
             id,
             class,
@@ -1399,8 +1395,12 @@ mod tests {
         }]);
 
         assert!(bench.queue.holds(id));
-        assert!(bench.shell.dock_open);
-        assert_eq!(bench.shell.page, Page::Queue);
+        assert!(!bench.shell.review_open);
+        let (_, said) = bench.log.status();
+        assert!(said.contains("waiting to be sent to Programs"), "{said}");
+
+        bench.act(vec![Act::AskSendAll]);
+        assert!(bench.shell.review_open, "asking to send all is the review");
     }
 
     /// A session belongs to a folder, so a batch is one command per folder, in queue
@@ -1508,7 +1508,7 @@ mod tests {
     /// bank is not reported as empty. With no warnings, nothing comes before the
     /// destinations.
     #[test]
-    fn the_send_question_says_what_is_known_about_each_slot() {
+    fn the_review_says_what_is_known_about_each_slot() {
         let mut bench = Bench::new();
         let class = ObjectClass::Program;
         // Bank 7 was scanned: 7:1 holds something and 7:2 is empty. Bank 8 was not read.
@@ -1535,31 +1535,30 @@ mod tests {
         }
 
         bench.act(vec![Act::AskSendAll]);
+        assert!(bench.shell.review_open);
 
-        let note = bench
-            .browser
-            .ask
-            .as_ref()
-            .and_then(|ask| ask.note.clone())
-            .expect("a question was raised");
-        for said in [
-            "Programs 7:1 holds “Africa Split”",
-            "Programs 7:2 is empty",
-            "Programs 8:1 has not been read yet",
-        ] {
-            assert!(note.contains(said), "{note}");
+        let mut said = Vec::new();
+        for id in bench.queue.ids() {
+            bench.queue.picked = Some(id);
+            said.extend(reviewed(&mut bench));
         }
-        assert!(
-            note.starts_with("“sound"),
-            "nothing is written above the destinations:\n{note}"
-        );
+        for slot in [
+            "→ Programs 7:1 holds “Africa Split”",
+            "→ Programs 7:2 is empty",
+            "→ Programs 8:1 has not been read yet",
+        ] {
+            assert!(
+                said.iter().any(|word| word.starts_with(slot)),
+                "{slot}: {said:?}"
+            );
+        }
     }
 
-    /// ⚠️ The confirmation counts and names what the batch would write. An entry the
-    /// attached instrument has refused stays in the queue and is not written, so naming
-    /// it would promise a write that will not happen.
+    /// ⚠️ The review counts what the batch would write. An entry the attached instrument
+    /// has refused stays in the queue and is not written, so counting it would promise a
+    /// write that will not happen.
     #[test]
-    fn the_send_question_leaves_out_what_the_batch_would_skip() {
+    fn the_review_counts_only_what_the_batch_would_write() {
         use crate::device::DeviceEvent;
 
         let mut bench = Bench::new();
@@ -1630,13 +1629,29 @@ mod tests {
 
         bench.act(vec![Act::AskSendAll]);
 
-        let ask = bench.browser.ask.as_ref().expect("a question was raised");
-        assert_eq!(ask.title, "Send 1 sound to the instrument?");
-        let note = ask.note.as_deref().expect("the modal has a note");
-        assert!(
-            !note.contains("Africa-Split"),
-            "the refused entry is not part of this write:\n{note}"
-        );
+        let said = reviewed(&mut bench);
+        for word in ["1 write", "1 cannot go", "Send all 1"] {
+            assert!(said.iter().any(|it| it == word), "{word}: {said:?}");
+        }
+    }
+
+    /// Every string the review paints, after a frame to settle its layout.
+    fn reviewed(bench: &mut Bench) -> Vec<String> {
+        let mut said = Vec::new();
+        for _ in 0..2 {
+            let input = crate::testing::screen(eframe::egui::vec2(1280.0, 800.0), Vec::new());
+            let output = crate::testing::run(&bench.ctx, input, |ctx| {
+                crate::queue::review(
+                    ctx,
+                    &mut bench.queue,
+                    &bench.workspace,
+                    &bench.device.state,
+                    &mut Vec::new(),
+                );
+            });
+            said = crate::testing::words(&output);
+        }
+        said
     }
 
     /// The queue outlives the instrument it was built for. An entry the attached

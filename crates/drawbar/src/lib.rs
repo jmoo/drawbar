@@ -22,10 +22,14 @@ pub mod knob;
 pub mod led;
 pub mod library;
 pub mod log;
+pub mod menu;
+#[cfg(target_os = "macos")]
+mod menubar;
 pub mod midi;
 pub mod named;
 pub mod newproject;
 pub mod panel;
+pub mod platform;
 pub mod queue;
 pub mod room;
 pub mod sheet;

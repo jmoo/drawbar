@@ -21,7 +21,7 @@ use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
 use crate::panel::{chip, cut, inset, list_width, row_ink, Track, GLYPH, PAD};
 use crate::queue::{Diff, Queue};
-use crate::shell::{Page, Shell};
+use crate::shell::Shell;
 use crate::strings::{counted, folder, place, shown};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
@@ -1323,7 +1323,7 @@ fn footer(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().button_padding.y = 0.0;
                     if ui.small_button("Review send queue").clicked() {
-                        acts.push(Act::ShowPage(Page::Queue));
+                        acts.push(Act::ReviewQueue);
                     }
                     // Reversed: the strip runs right to left, so [`Bulk::ALL`]'s first
                     // action has to be drawn last to sit farthest left.

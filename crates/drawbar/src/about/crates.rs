@@ -382,6 +382,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2017 Pyfisch",
+                crates: &[
+                    "keyboard-types 0.8.3",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2017 RON developers",
                 crates: &[
                     "ron 0.10.1",
@@ -530,6 +536,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
             Holder {
                 notice: "Copyright (c) 2019 The Crossbeam Project Developers",
                 crates: &[
+                    "crossbeam-channel 0.5.17",
                     "crossbeam-utils 0.8.22",
                 ],
             },
@@ -617,6 +624,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 notice: "Copyright (c) 2022 Yevhenii Reizner",
                 crates: &[
                     "strict-num 0.1.1",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2022-2022 Tauri Programme within The Commons Conservancy",
+                crates: &[
+                    "muda 0.21.0",
                 ],
             },
             Holder {
@@ -1122,6 +1135,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("cpal", "0.17.3"),
     ("crc32fast", "1.5.0"),
     ("crcxx", "0.3.1"),
+    ("crossbeam-channel", "0.5.17"),
     ("crossbeam-utils", "0.8.22"),
     ("crunchy", "0.2.4"),
     ("cursor-icon", "1.2.0"),
@@ -1221,6 +1235,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("jni-sys-macros", "0.4.1"),
     ("jobserver", "0.1.35"),
     ("js-sys", "0.3.98"),
+    ("keyboard-types", "0.8.3"),
     ("khronos_api", "3.1.0"),
     ("kurbo", "0.11.3"),
     ("libc", "0.2.189"),
@@ -1243,6 +1258,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("midir", "0.11.0"),
     ("miniz_oxide", "0.8.9"),
     ("moxcms", "0.8.1"),
+    ("muda", "0.21.0"),
     ("naga", "25.0.1"),
     ("ndk", "0.9.0"),
     ("ndk-context", "0.1.1"),

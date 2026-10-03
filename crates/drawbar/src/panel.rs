@@ -290,6 +290,81 @@ pub fn quiet_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
     pill(ui, text, ink, fill)
 }
 
+/// A button in a card's body: an optional glyph and a word on a tonal fill, with no
+/// border.
+///
+/// It rests on `bg-inactive` and turns `bg-hovered` under the pointer, so it reads as a
+/// control without the weight of a bordered button.
+pub fn tonal_button(ui: &mut egui::Ui, glyph: Option<Glyph>, label: &str) -> egui::Response {
+    const HEIGHT: f32 = 28.0;
+    const RADIUS: u8 = 7;
+    const SIDE: f32 = 10.0;
+    const ICON: f32 = 12.0;
+    const TEXT: f32 = 12.0;
+
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(TEXT),
+        egui::Color32::PLACEHOLDER,
+    );
+    let mark = match glyph {
+        Some(_) => ICON + GAP,
+        None => 0.0,
+    };
+    let width = SIDE + mark + galley.size().x + SIDE;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click());
+    let widgets = &ui.visuals().widgets;
+    let state = match response.hovered() {
+        true => &widgets.hovered,
+        false => &widgets.inactive,
+    };
+    let (fill, ink) = (state.weak_bg_fill, state.fg_stroke.color);
+    let painter = ui.painter();
+    painter.rect_filled(rect, RADIUS, fill);
+    let middle = rect.center().y;
+    let x = rect.left() + SIDE;
+    if let Some(glyph) = glyph {
+        crate::icon::painted(
+            ui,
+            glyph,
+            egui::Rect::from_min_size(egui::pos2(x, middle - ICON / 2.0), egui::Vec2::splat(ICON)),
+            ink,
+        );
+    }
+    let height = galley.size().y;
+    painter.galley(egui::pos2(x + mark, middle - height / 2.0), galley, ink);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    response
+}
+
+/// A button that carries the accent: the one action a sheet exists for. A faint wash
+/// and border of the accent, its glyph in the accent, and its label in the active ink.
+pub fn accent_button(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let lit = crate::app::accent(&visuals);
+    let button = egui::Button::image_and_text(
+        crate::icon::sized(glyph, 14.0, lit),
+        egui::RichText::new(label).color(visuals.widgets.active.fg_stroke.color),
+    )
+    .image_tint_follows_text_color(false)
+    .fill(crate::app::tint(lit, 0.16))
+    .stroke(egui::Stroke::new(1.0_f32, crate::app::tint(lit, 0.55)))
+    .corner_radius(8.0)
+    .min_size(egui::vec2(0.0, 32.0));
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(12.0, 4.0);
+        ui.add_enabled(enabled, button)
+    })
+    .inner
+}
+
 /// A header title: [`crate::app::micro`], uppercased.
 ///
 /// Uppercasing is the only treatment: egui has no letter spacing, and faking it looks

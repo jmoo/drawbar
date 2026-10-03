@@ -50,6 +50,10 @@ nord-usb = { path = "../nord-usb", version = "0.7.1", features = [
 # `playback` alone: the decoders are for files, and drawbar feeds it raw samples.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
 
+# The native menu bar. macOS only: elsewhere the menus are drawn in the window.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 # Exact: `wasm-bindgen-cli` must match this version, and the Nix build takes the CLI
