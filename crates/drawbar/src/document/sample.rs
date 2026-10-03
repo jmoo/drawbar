@@ -69,7 +69,9 @@ pub struct Zone {
 #[derive(Clone, PartialEq)]
 pub struct Snapshot {
     pub name: String,
-    pub max_name_len: usize,
+    /// The longest name the file stores, or `None` where it stores none and the
+    /// instrument goes by its asset's name.
+    pub max_name_len: Option<usize>,
     /// The v3/v4 second name, which follows the `_` in the vendor's filenames. Empty on
     /// a v2 instrument, which has one name.
     pub sub_name: String,
@@ -77,7 +79,7 @@ pub struct Snapshot {
     pub generation: &'static str,
     pub categories: Vec<String>,
     pub zones: Vec<Zone>,
-    /// Whether the zone controls do anything. The name is always settable.
+    /// Whether the zone controls do anything.
     pub zones_editable: bool,
     /// The keyboard map ahead of the v2 zone table, where the section holds one.
     pub key_table: Option<KeyTable>,
@@ -98,7 +100,7 @@ fn read(sample: &Sample) -> Result<Snapshot, String> {
     let told = told(sample)?;
     Ok(Snapshot {
         name: sample.name().map_err(|e| e.to_string())?,
-        max_name_len: sample.max_name_len(),
+        max_name_len: sample.name_is_editable().then(|| sample.max_name_len()),
         sub_name: told.sub_name,
         generation: sample.generation(),
         categories: told.categories,
@@ -237,6 +239,9 @@ fn sound(sample: &Sample) -> Vec<(&'static str, String)> {
 /// `zone1.top_note`, `zone1.low_note`.
 fn set(sample: &mut Sample, path: &str, value: &str) -> Result<(), String> {
     if path == "name" {
+        if !sample.name_is_editable() {
+            return Err("this instrument stores no name".to_string());
+        }
         return sample.set_name(value).map_err(|e| e.to_string());
     }
     let unknown = || format!("unknown field {path:?}");
@@ -1874,14 +1879,17 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
             value: snapshot.version.to_string(),
             note: "what decides which fields this format has",
         },
-        Fact {
-            key: "Name in file",
-            value: format!(
-                "{} B, {} used",
-                snapshot.max_name_len,
-                snapshot.name.trim_end().len()
-            ),
-            note: "the whole field is written; the rest is padding",
+        match snapshot.max_name_len {
+            Some(len) => Fact {
+                key: "Name in file",
+                value: format!("{len} B, {} used", snapshot.name.trim_end().len()),
+                note: "the whole field is written; the rest is padding",
+            },
+            None => Fact {
+                key: "Name in file",
+                value: "none".to_string(),
+                note: "the hdr holds no name field; the file name is the name",
+            },
         },
         Fact {
             key: "Zones",
@@ -2402,6 +2410,19 @@ mod tests {
         assert_eq!(
             apply(&song, &[("name".into(), "Vibes".into())]).unwrap_err(),
             "not a sample instrument"
+        );
+    }
+
+    /// An instrument whose `hdr` holds no name field offers no name and refuses one.
+    #[test]
+    fn a_sample_storing_no_name_offers_none_and_refuses_a_rename() {
+        let bytes = testing::nameless_sample_bytes();
+        let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let held = snapshot(&entity).unwrap().unwrap();
+        assert_eq!(held.max_name_len, None);
+        assert_eq!(
+            apply(&bytes, &[("name".into(), "Vibes".into())]).unwrap_err(),
+            "this instrument stores no name"
         );
     }
 

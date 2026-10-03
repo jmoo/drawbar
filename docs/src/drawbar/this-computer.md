@@ -48,4 +48,5 @@ on the desktop.
 A sound's name comes from the slot it was read from, the filename, or the New
 menu, and drawbar shows it without the extension. Rename with F2 or the name box
 in the document header. Where the file stores a name of its own, as samples and
-pianos do, that box edits the stored name.
+pianos do, that box edits the stored name. Instruments from the original Sample
+Library store none, so their box renames the file.

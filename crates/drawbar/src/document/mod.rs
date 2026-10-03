@@ -977,6 +977,7 @@ impl Document {
             .and_then(|e| e.entity.as_ref())
             .and_then(sample::snapshot)
             .and_then(Result::ok)
+            .filter(|snapshot| snapshot.max_name_len.is_some())
             .map(|snapshot| snapshot.name)
             .filter(|name| !name.trim().is_empty())
             .or_else(|| entity.map(|e| e.name.clone()))
@@ -1360,7 +1361,7 @@ pub(crate) fn library_id(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{self, sample_bytes, wav_bytes, Bench, Word};
+    use crate::testing::{self, nameless_sample_bytes, sample_bytes, wav_bytes, Bench, Word};
     use crate::workspace::{Fresh, Origin};
 
     /// One document open in a headless window, with everything a frame of it needs.
@@ -1697,6 +1698,22 @@ mod tests {
         );
     }
 
+    /// Where the instrument stores no name, its name box renames the asset, the only
+    /// name such an instrument has.
+    #[test]
+    fn a_sample_storing_no_name_renames_the_asset_from_its_name_box() {
+        let mut open = Open::file("whatever.nsmp", nameless_sample_bytes());
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("whatever")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+
+        assert_eq!(open.document.refusal(), None);
+        let renamed = open.entity().name.clone();
+        assert!(renamed.contains('X'), "the asset was renamed: {renamed}");
+        assert!(renamed.ends_with(".nsmp"), "the extension stays: {renamed}");
+    }
+
     /// ⚠️ A stored name box is limited to the field's length in bytes. A box counting
     /// characters would accept an accented name twice that long, and the format would
     /// refuse it only after the whole name was typed.
@@ -1708,7 +1725,7 @@ mod tests {
                 .expect("an instrument")
                 .expect("it reads")
         };
-        let limit = held(&open).max_name_len;
+        let limit = held(&open).max_name_len.expect("the file stores a name");
         assert!(limit > 2, "there is room for an accented letter");
 
         open.frame(Vec::new());
