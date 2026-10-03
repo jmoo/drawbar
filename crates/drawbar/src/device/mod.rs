@@ -359,8 +359,8 @@ pub enum DeviceEvent {
         /// by now, since a write takes as long as the instrument takes.
         bytes: Vec<u8>,
     },
-    /// A slot's former contents, which a failed write and a failed restore left with
-    /// nowhere else to go.
+    /// A slot's former contents, left with nowhere else to go by a failed write and a
+    /// failed restore, or by a delete that may have landed.
     Rescued {
         at: Location,
         name: String,
@@ -1520,11 +1520,12 @@ impl Device {
                 },
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
-                        "{} could not be restored; its bytes are in the local list as {name}",
+                        "what {} held is in the local list as {name}",
                         shown(at)
                     ));
                     log.trouble(format!(
-                        "{} is empty. What was in it is on this computer as “{name}”.",
+                        "{} may no longer hold its sound. What was in it is on this computer \
+                         as “{name}”.",
                         shown(at)
                     ));
                     workspace.ingest(name, Origin::Rescued { at }, bytes, log);
