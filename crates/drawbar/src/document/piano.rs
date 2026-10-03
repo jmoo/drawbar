@@ -70,13 +70,13 @@ pub fn named(entity: &LocalEntity) -> Option<Result<Snapshot, String>> {
         let (name, variant) = index.library().name();
         return Some(Ok(Snapshot { name, variant }));
     }
-    snapshot(entity.entity.as_ref()?)
+    snapshot(entity.entity.as_deref()?)
 }
 
 /// Whether an asset is a piano library this document reads, decoded or resting in its
 /// file.
 fn is_piano(entity: &LocalEntity) -> bool {
-    entity.entity.as_ref().and_then(piano).is_some()
+    entity.entity.as_deref().and_then(piano).is_some()
         || matches!(entity.indexed(), Some(ondisk::Index::Piano(_)))
 }
 

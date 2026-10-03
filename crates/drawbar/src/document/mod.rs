@@ -94,7 +94,7 @@ impl<'a> Asset<'a> {
     }
 
     fn decoded(&self) -> Option<&'a nord_format::Entity> {
-        self.entity.entity.as_ref()
+        self.entity.entity.as_deref()
     }
 }
 
@@ -106,7 +106,7 @@ fn shape(entity: &LocalEntity) -> Shape {
         Some(crate::ondisk::Index::Sample(_)) => return Shape::Sample,
         None => {}
     }
-    let Some(decoded) = &entity.entity else {
+    let Some(decoded) = entity.entity.as_deref() else {
         // ⚠️ Checked before `is_text`, so a WAV always opens in the encode panel and
         // never as text.
         if encode::is_wav(&entity.bytes) {
@@ -307,7 +307,7 @@ impl Document {
             return Wants::default();
         };
         let stamp = entity.stamp;
-        let decoded = entity.entity.as_ref();
+        let decoded = entity.entity.as_deref();
         let registry = decoded.map(fields::fields_of).unwrap_or_default();
         let viewing = workspace.is_view(id);
         let asset = Asset::of(entity);
@@ -903,7 +903,7 @@ impl Document {
 
     /// Decode, play, strike, or save one zone of a sample instrument.
     fn zone_audio(&mut self, id: u64, ask: sample::Ask, workspace: &mut Workspace, log: &mut Log) {
-        let entity = workspace.get(id).and_then(|e| e.entity.as_ref());
+        let entity = workspace.get(id).and_then(|e| e.entity.as_deref());
         let (zone, ask) = match ask {
             sample::Ask::Decode(zone) => {
                 if !self.audio.due(zone) {
@@ -1000,7 +1000,7 @@ impl Document {
     fn instrument_name(&self, id: u64, workspace: &Workspace) -> String {
         let entity = workspace.get(id);
         entity
-            .and_then(|e| e.entity.as_ref())
+            .and_then(|e| e.entity.as_deref())
             .and_then(sample::snapshot)
             .and_then(Result::ok)
             .map(|snapshot| snapshot.name)
@@ -1094,7 +1094,7 @@ impl Document {
             workspace.replace_bytes(id, out, log);
         }
         if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
-            if let Some(decoded) = &held.entity {
+            if let Some(decoded) = held.entity.as_deref() {
                 self.audio.carry(id, (before, held.stamp), decoded);
             }
         }
@@ -1729,7 +1729,7 @@ mod tests {
     fn typing_in_a_samples_name_box_writes_the_name_the_file_stores() {
         let mut open = Open::file("whatever.nsmp", sample_bytes());
         let stored = |open: &Open| {
-            sample::snapshot(open.entity().entity.as_ref().unwrap())
+            sample::snapshot(open.entity().entity.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
                 .name
@@ -1757,7 +1757,7 @@ mod tests {
     fn a_stored_name_box_holds_no_more_bytes_than_the_field_does() {
         let mut open = Open::file("whatever.nsmp", sample_bytes());
         let held = |open: &Open| {
-            sample::snapshot(open.entity().entity.as_ref().expect("it decoded"))
+            sample::snapshot(open.entity().entity.as_deref().expect("it decoded"))
                 .expect("an instrument")
                 .expect("it reads")
         };
@@ -2828,7 +2828,7 @@ mod tests {
             .find(|e| e.id != id)
             .expect("an instrument was added");
         assert_eq!(made.name, "Marimba hit.nsmp");
-        let snapshot = sample::snapshot(made.entity.as_ref().expect("it decoded"))
+        let snapshot = sample::snapshot(made.entity.as_deref().expect("it decoded"))
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.name, "Marimba hit");
@@ -2909,7 +2909,7 @@ mod tests {
         ] {
             let open = Open::file(name, bytes);
             let entity = open.entity();
-            let registry = entity.entity.as_ref().and_then(fields::fields_of);
+            let registry = entity.entity.as_deref().and_then(fields::fields_of);
             assert!(registry.is_none(), "{name} declares no field registry");
             assert_eq!(
                 faces(shape(entity))
@@ -3070,7 +3070,7 @@ mod tests {
             None,
             "the selection does not survive a switch"
         );
-        let snapshot = sample::snapshot(open.entity().entity.as_ref().unwrap())
+        let snapshot = sample::snapshot(open.entity().entity.as_deref().unwrap())
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.zones[0].top_note, 84, "the edit survives");
@@ -3126,7 +3126,7 @@ mod tests {
     fn a_piano_lays_its_plan_out_before_anything_carries_its_bytes() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         let named = |open: &Open| {
-            piano::snapshot(open.entity().entity.as_ref().unwrap())
+            piano::snapshot(open.entity().entity.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
                 .name

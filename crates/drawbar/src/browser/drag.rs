@@ -107,7 +107,7 @@ impl Kind {
             Some(crate::ondisk::Index::Sample(_)) => return Kind::Sample,
             None => {}
         }
-        let Some(decoded) = entity.entity.as_ref() else {
+        let Some(decoded) = entity.entity.as_deref() else {
             return match entity.is_text {
                 true => Kind::Text,
                 false => Kind::Other,

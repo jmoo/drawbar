@@ -450,7 +450,7 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
 
 /// The library a program names, and its name if the instrument has reported one.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let Some(fields) = entity.entity.as_ref().and_then(crate::fields::fields_of) else {
+    let Some(fields) = entity.entity.as_deref().and_then(crate::fields::fields_of) else {
         return Needs::Nothing;
     };
     // One cell, so it shows the first library the program names.

@@ -780,7 +780,7 @@ fn stored_name(
     shape: Shape,
     renaming: (Option<String>, Option<String>),
 ) -> Option<(Named, String)> {
-    let decoded = || entity.entity.as_ref();
+    let decoded = || entity.entity.as_deref();
     match shape {
         Shape::Sample => {
             let held = sample::snapshot(decoded()?)?.ok()?;
@@ -954,7 +954,7 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
         Kind::Sample => {
             let generation = entity
                 .entity
-                .as_ref()
+                .as_deref()
                 .and_then(sample::snapshot)
                 .and_then(Result::ok)
                 .map_or_else(String::new, |held| format!(" {}", held.generation));
@@ -1006,7 +1006,7 @@ fn stream_version(entity: &LocalEntity) -> Option<u16> {
     if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
         return Some(index.library().stream_version());
     }
-    match entity.entity.as_ref()? {
+    match entity.entity.as_deref()? {
         nord_format::Entity::Piano(piano) => piano.stream_version().ok(),
         _ => None,
     }
@@ -1070,7 +1070,7 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
         });
     }
     if kind == Kind::SetList {
-        let entries = setlist::entries(entity.entity.as_ref()?)?;
+        let entries = setlist::entries(entity.entity.as_deref()?)?;
         return Some(SizeLine {
             text: counted(entries, "entry", "entries"),
             warn: false,
@@ -1247,7 +1247,7 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
             });
         }
     }
-    if let Some(stated) = entity.entity.as_ref().and_then(sample::stated) {
+    if let Some(stated) = entity.entity.as_deref().and_then(sample::stated) {
         cells.push(stated);
     }
     cells

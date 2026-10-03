@@ -804,7 +804,7 @@ fn templates(workspace: &Workspace) -> Vec<(u64, String)> {
         .entities()
         .iter()
         .filter(|entity| {
-            matches!(entity.entity, Some(Entity::Piano(_)))
+            matches!(entity.entity.as_deref(), Some(Entity::Piano(_)))
                 || matches!(entity.indexed(), Some(crate::ondisk::Index::Piano(_)))
         })
         .map(|entity| (entity.id, entity.name.clone()))

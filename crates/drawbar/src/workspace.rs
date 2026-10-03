@@ -314,7 +314,7 @@ pub struct Wrote {
 /// What a set of bytes decodes to, worked out once, when they land.
 struct Decoded {
     container: Option<Container>,
-    entity: Option<Entity>,
+    entity: Option<Box<Entity>>,
     parse_error: Option<String>,
     verify: VerifyState,
     is_text: bool,
@@ -338,7 +338,7 @@ impl Decoded {
     fn of(bytes: &[u8]) -> Decoded {
         let (entity, parse_error) = match nord_format::from_stream(&mut std::io::Cursor::new(bytes))
         {
-            Ok(entity) => (Some(entity), None),
+            Ok(entity) => (Some(Box::new(entity)), None),
             Err(e) => (None, Some(e.to_string())),
         };
         let verify = match &entity {
@@ -372,7 +372,8 @@ pub struct LocalEntity {
     /// needs the whole body asks [`LocalEntity::whole`], and its length is
     /// [`LocalEntity::size`].
     pub bytes: Vec<u8>,
-    pub entity: Option<Entity>,
+    /// Boxed, since a decode is kilobytes and most assets of a large library have none.
+    pub entity: Option<Box<Entity>>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     /// Whether the bytes are a note, from [`crate::document::text::is_text`].
@@ -600,7 +601,7 @@ impl LocalEntity {
     /// A note has neither, so its tag comes from its bytes being text. See
     /// [`crate::document::text::is_text`].
     pub fn tag(&self) -> String {
-        match (&self.entity, &self.container) {
+        match (self.entity.as_deref(), &self.container) {
             (Some(entity), _) => entity.identity().format.to_string(),
             (None, Some(container)) => container.tag(),
             (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
