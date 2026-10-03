@@ -1242,6 +1242,9 @@ pub struct Workspace {
     /// Assets whose file is being copied in, each with what it is a copy of. Each is
     /// unread until its copy lands.
     arriving: std::collections::BTreeMap<u64, CopyOf>,
+    /// The asset each arriving copy moves over the file of another comes from, by the
+    /// asset it lands on. It goes only once its copy has landed.
+    moving_over: std::collections::BTreeMap<u64, u64>,
     /// The files File ▸ Open… picked, not yet taken.
     picked: Vec<Outside>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
@@ -1331,6 +1334,7 @@ impl Workspace {
             checks: VecDeque::new(),
             checking: None,
             arriving: Default::default(),
+            moving_over: Default::default(),
             picked: Vec::new(),
             undecoded: VecDeque::new(),
             hurried: Default::default(),
@@ -2241,6 +2245,26 @@ impl Workspace {
         }
     }
 
+    /// Copy the file the asset `from` rests in, with any edit held of it, over the file
+    /// of the asset `id`, and let `from` go once the copy has landed: see
+    /// [`Workspace::moved_over`]. Returns `false`, and copies nothing, where `from` rests
+    /// in no file a copy can be made of.
+    pub fn move_over(&mut self, id: u64, from: u64) -> bool {
+        let (Some(copy), Some(source)) = (self.copy_of(from), self.get(from)) else {
+            return false;
+        };
+        let len = source.size();
+        self.arrive_over(id, copy, len);
+        self.moving_over.insert(id, from);
+        true
+    }
+
+    /// The asset a copy that has answered over the file of `id` was moved from, which
+    /// goes where the copy landed and stays where it did not.
+    pub fn moved_over(&mut self, id: u64) -> Option<u64> {
+        self.moving_over.remove(&id)
+    }
+
     /// Copy `from` in again for an asset whose copy did not land.
     pub fn arrive_again(&mut self, id: u64, from: CopyOf) {
         if self.get(id).is_some() {
@@ -2943,6 +2967,7 @@ impl Workspace {
     /// file.
     pub fn forget(&mut self, id: u64) -> Option<LocalEntity> {
         self.arriving.remove(&id);
+        self.moving_over.remove(&id);
         self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
@@ -2969,6 +2994,7 @@ impl Workspace {
         let held = |id: u64| entities.iter().any(|entity| entity.id == id);
         self.checks.retain(|(id, _)| held(*id));
         self.edits.retain(|id, _| held(*id));
+        self.moving_over.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));
         self.wanted.get_mut().retain(|id| held(*id));

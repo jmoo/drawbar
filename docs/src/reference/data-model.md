@@ -440,8 +440,9 @@ copies the library makes too (`Workspace::arrive`, `store::CopyOf`): `Cmd::Impor
 copies the library's own file byte for byte (`std::fs::copy` on the desktop,
 which clones the file where the disk can, and slice by slice through the writer
 in the browser), or writes the edit held of it through as it copies. The copy's
-asset is unread until it lands, then rests in it, and a file a copy is still to be
-sent of is not deleted before it is. Exporting a resting file copies it across
+asset is unread until it lands, then rests in it. A file a copy is still to be
+made of is not deleted until the copy answers, and the asset an Overwrite moved
+over another file goes only once its copy has landed: one that fails leaves it. Exporting a resting file copies it across
 without reading it into memory.
 
 A send never reads a resting file whole either. The command carries the file

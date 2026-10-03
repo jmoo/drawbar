@@ -3498,6 +3498,8 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let acts = session.bench.browser.answer("Overwrite");
     session.bench.act(acts);
     session.sync();
+    assert!(root.at("Moved.nsmp").exists(), "kept until the copy lands");
+    session.sync();
 
     assert!(root.read("Kept.nsmp") == ours);
     assert_eq!(file.take_reads(), [], "nothing read it");
@@ -3509,6 +3511,41 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     assert!(session.bench.browser.tags.worn(kept).contains(&tag));
     let entity = session.bench.workspace.get(kept).unwrap();
     assert!(entity.rests().is_some() && entity.held_whole() == 0);
+}
+
+/// A copy over another file that does not land leaves the asset it was moved from, and
+/// that asset's file: nothing else holds what it holds.
+#[test]
+fn a_copy_over_that_does_not_land_keeps_the_file_it_came_from() {
+    let root = Temp::new();
+    let ours = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
+    let theirs = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184);
+    fs::write(root.at("Kept.nsmp"), &theirs).unwrap();
+    fs::write(root.at("Moved.nsmp"), &ours).unwrap();
+    let mut session = Session::listed(&root);
+    session.ask_all();
+    let moved = session.named("Moved.nsmp");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.nsmp".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    // Saved over outside drawbar before the copy runs, so the copy is refused.
+    let outside = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 276);
+    fs::write(root.at("Kept.nsmp"), &outside).unwrap();
+    session.sync();
+    session.sync();
+
+    assert!(root.read("Kept.nsmp") == outside, "not written over");
+    assert!(
+        root.read("Moved.nsmp") == ours,
+        "the file it came from stays"
+    );
+    let entity = session.bench.workspace.get(moved).expect("the asset stays");
+    assert!(entity.kept);
+    assert_eq!(session.said("was not overwritten"), 1);
 }
 
 /// A sample instrument holding an unsaved edit over its file, whose file is saved over

@@ -1960,6 +1960,13 @@ impl Store {
                 record.summarized = None;
                 browser.folders.missing.remove(&id);
                 workspace.took(id, None, found.file);
+                // The asset the copy was moved from goes now it has landed, and its file
+                // with it at the next pass.
+                if let Some(from) = workspace.moved_over(id) {
+                    browser.tags.forget(from);
+                    browser.folders.missing.remove(&from);
+                    workspace.remove(from, log);
+                }
                 return log.say(format!("“{name}” is on this computer."));
             }
             Err(Failure::Moved) if record.fingerprint.is_none() => {
@@ -1976,6 +1983,8 @@ impl Store {
             Err(Failure::Io(why)) => why,
         };
         log.error(format!("copying {name} into the library: {why}"));
+        // A copy moved over this file from another that did not land leaves that one.
+        workspace.moved_over(id);
         match record.fingerprint {
             Some(print) => {
                 workspace.relist(id, print.len);
@@ -2590,9 +2599,9 @@ impl Store {
             .filter(|id| workspace.get(*id).is_none())
             .collect();
         for id in gone {
-            // A file a copy is still to be sent of waits for it.
-            let copied = |copy: u64| self.records.get(&copy).is_some_and(|held| held.saving);
-            if !workspace.copies_of(id).all(copied) {
+            // ⚠️ A file a copy is still to be made of waits until the copy answers: a
+            // copy that fails has nothing else to make it from.
+            if workspace.copies_of(id).next().is_some() {
                 continue;
             }
             let Some(record) = self.records.get_mut(&id) else {

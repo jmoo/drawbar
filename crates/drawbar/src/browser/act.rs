@@ -63,8 +63,9 @@ pub enum Act {
         gone: Option<u64>,
     },
     /// Copy the file the asset `from` rests in, with any edit held of it, over the file
-    /// of the asset `id`, which keeps its id, folder and tags, and remove `from`: the
-    /// overwrite of an asset renamed or moved onto a name, where it rests in its file.
+    /// of the asset `id`, which keeps its id, folder and tags, and remove `from` once
+    /// the copy has landed: the overwrite of an asset renamed or moved onto a name, where
+    /// it rests in its file.
     CopyOver {
         id: u64,
         from: u64,
@@ -547,7 +548,7 @@ pub fn apply(
                     log.say(format!("Replaced “{}”.", entity.name));
                 }
             }
-            Act::CopyOver { id, from } => copy_over(browser, workspace, tabs, queue, log, id, from),
+            Act::CopyOver { id, from } => copy_over(workspace, log, id, from),
             Act::MoveAs { id, folder, name } => match browser.folders.dir(folder) {
                 Some(dir) => put(browser, workspace, log, id, dir, name),
                 None => log.say("That folder is gone, so nothing moved."),
@@ -920,28 +921,11 @@ fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u
     put(browser, workspace, log, id, path.parent(), name);
 }
 
-/// Copy the file the asset `from` rests in over the file of the asset `id`, and remove
-/// `from`.
-fn copy_over(
-    browser: &mut Browser,
-    workspace: &mut Workspace,
-    tabs: &mut Tabs,
-    queue: &mut Queue,
-    log: &mut Log,
-    id: u64,
-    from: u64,
-) {
-    if unapplied(workspace, log, from) {
-        return;
-    }
-    let (Some(copy), Some(source)) = (workspace.copy_of(from), workspace.get(from)) else {
-        return;
-    };
-    let len = source.size();
-    workspace.arrive_over(id, copy, len);
-    remove(browser, workspace, tabs, queue, log, from);
-    if let Some(entity) = workspace.get(id) {
-        log.say(format!("Replaced “{}”.", entity.name));
+/// Copy the file the asset `from` rests in over the file of the asset `id`. `from` goes
+/// once the copy has landed, and stays where it did not.
+fn copy_over(workspace: &mut Workspace, log: &mut Log, id: u64, from: u64) {
+    if !unapplied(workspace, log, from) {
+        workspace.move_over(id, from);
     }
 }
 
