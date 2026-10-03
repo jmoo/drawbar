@@ -60,7 +60,7 @@ pub enum Act {
         id: u64,
         folder: Option<u64>,
     },
-    /// Queue each of these assets for the slot [`bound_for`] gives it. The log says which
+    /// Queue each of these assets for the slot `bound_for` gives it. The log says which
     /// were not queued, and why.
     SendChecked(Vec<u64>),
     Copy {
@@ -132,7 +132,7 @@ pub enum Act {
     Remove(u64),
     /// Hand the open document's bytes to the user as a file.
     Export(u64),
-    /// ⌘S on the open document; [`save_doc`] says what saving means for each kind.
+    /// ⌘S on the open document; `save_doc` says what saving means for each kind.
     SaveDoc(u64),
     /// The write back to a slot that [`Act::SaveDoc`] on a view asked about, confirmed.
     WriteBack(u64),

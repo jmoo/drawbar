@@ -167,8 +167,8 @@ const V4_DYNAMICS_ENABLE: usize = 3;
 /// at both of that field's legal values whenever the dynamics enable is on.
 const V4_DYNAMICS_CURVE: usize = 4;
 
-/// The value [`V4_DYNAMICS_CURVE`] holds when no curve is selected. It reads 6
-/// exactly when the response triple is 127.
+/// The value a v4 payload's dynamics curve byte holds when no curve is selected. It
+/// reads 6 exactly when the response triple is 127.
 /// Inferred from specimens; not confirmed on hardware.
 pub const DYNAMICS_CURVE_NONE: u8 = 6;
 
