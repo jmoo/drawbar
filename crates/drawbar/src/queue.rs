@@ -726,18 +726,29 @@ fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
     bar.painter()
         .rect_filled(tile, 9.0, crate::app::tint(lit, 0.16));
     painted(&bar, Glyph::Upload, tile.shrink(8.0), lit);
-    bar.vertical(|ui| {
+    let to = device.product().unwrap_or("the instrument");
+    let [title, line] = [
+        egui::RichText::new("Review send queue").font(egui::FontId::new(15.0, crate::app::bold())),
+        egui::RichText::new(format!("To {to} · nothing is written until you send"))
+            .size(12.0)
+            .color(quiet),
+    ]
+    .map(|text| {
+        egui::WidgetText::from(text).into_galley(
+            &bar,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::FontSelection::Default,
+        )
+    });
+    let block = egui::vec2(
+        title.size().x.max(line.size().x),
+        title.size().y + 2.0 + line.size().y,
+    );
+    bar.allocate_ui_with_layout(block, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(
-            egui::RichText::new("Review send queue")
-                .font(egui::FontId::new(15.0, crate::app::bold())),
-        );
-        let to = device.product().unwrap_or("the instrument");
-        ui.label(
-            egui::RichText::new(format!("To {to} · nothing is written until you send"))
-                .size(12.0)
-                .color(quiet),
-        );
+        ui.label(title);
+        ui.label(line);
     });
     bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
         bar.spacing_mut().item_spacing.x = 6.0;
@@ -818,7 +829,10 @@ fn review_foot(
     let send = crate::panel::accent_button(
         &mut bar,
         Glyph::Upload,
-        &format!("Send all {sending}"),
+        &match sending {
+            0 => "Send all".to_string(),
+            n => format!("Send all {n}"),
+        },
         sending > 0,
     )
     .on_disabled_hover_text("Nothing waiting can go to the instrument attached now.");
@@ -1324,10 +1338,8 @@ const DIFF_TRACKS: [Track; 4] = [
 /// The row of column heads over the diff.
 fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
-    let visuals = ui.visuals().clone();
-    ui.painter().rect_filled(rect, 0.0, visuals.faint_bg_color);
-    let ink = crate::app::caption(&visuals);
-    for (head, track) in ["field", "on this computer", "", "on the keyboard"]
+    let ink = crate::app::caption(ui.visuals());
+    for (head, track) in ["Field", "On this computer", "", "On the keyboard"]
         .iter()
         .zip(tracks)
     {
@@ -1336,8 +1348,8 @@ fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
             rect.left() + track.start,
             rect.center().y,
             track.end - track.start,
-            &head.to_uppercase(),
-            egui::TextFormat::simple(egui::FontId::proportional(9.5), ink),
+            head,
+            egui::TextFormat::simple(egui::FontId::proportional(11.5), ink),
         );
     }
 }
