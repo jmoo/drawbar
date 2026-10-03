@@ -430,12 +430,17 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
-/// What the status line says while the library is being read, if it is.
-fn reading(place: &crate::folders::Where) -> Option<String> {
-    Some(match place.listing? {
-        1 => "Reading the library… 1 file".to_string(),
-        files => format!("Reading the library… {files} files"),
-    })
+/// What the status line says while the library is being read, if it is: how many files
+/// its listing has found, then how many are still to be decoded.
+fn reading(place: Option<&crate::folders::Where>, unread: usize) -> Option<String> {
+    let said = match (place.and_then(|at| at.listing), unread) {
+        (Some(1), _) => "1 file".to_string(),
+        (Some(files), _) => format!("{files} files"),
+        (None, 0) => return None,
+        (None, 1) => "1 file to go".to_string(),
+        (None, unread) => format!("{unread} files to go"),
+    };
+    Some(format!("Reading the library… {said}"))
 }
 
 /// The title bar's MIDI input status: a short label, the lamp beside it, and the details
@@ -1018,7 +1023,8 @@ impl DrawbarApp {
             .show(ctx, |ui| {
                 edge(ui, Side::Top);
                 along(ui, |ui| {
-                    let reading = self.browser.folders.place.as_ref().and_then(reading);
+                    let place = self.browser.folders.place.as_ref();
+                    let reading = reading(place, self.workspace.reading());
                     let said = match (&self.device.state.in_flight, reading) {
                         (Some(words), _) => {
                             ui.spinner();

@@ -50,6 +50,8 @@ pub enum Kind {
     Text,
     /// Bytes that did not decode.
     Other,
+    /// Bytes from the library not decoded yet: what they are is not known.
+    Reading,
 }
 
 /// The kinds the instrument has a folder for, each with that folder's class.
@@ -67,7 +69,7 @@ const HOMES: [(Kind, ObjectClass); 6] = [
 
 impl Kind {
     /// Every kind, in the order any list of kinds uses.
-    pub const ALL: [Kind; 17] = [
+    pub const ALL: [Kind; 18] = [
         Kind::Program,
         Kind::SetList,
         Kind::Sample,
@@ -85,6 +87,7 @@ impl Kind {
         Kind::Project,
         Kind::Text,
         Kind::Other,
+        Kind::Reading,
     ];
 
     /// What an asset is.
@@ -96,6 +99,9 @@ impl Kind {
     /// [`is_text`](crate::document::text::is_text) said so on arrival, and
     /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads.
     pub fn of(entity: &LocalEntity) -> Kind {
+        if entity.reading() {
+            return Kind::Reading;
+        }
         match entity.indexed() {
             Some(crate::ondisk::Index::Piano(_)) => return Kind::Piano,
             Some(crate::ondisk::Index::Sample(_)) => return Kind::Sample,
@@ -161,6 +167,7 @@ impl Kind {
             Kind::Project => "project",
             Kind::Text => "note",
             Kind::Other => "file",
+            Kind::Reading => "reading…",
         }
     }
 
@@ -179,6 +186,7 @@ impl Kind {
                 Kind::Bundle => "Bundles",
                 Kind::Project => "Sample Editor projects",
                 Kind::Text => "Notes",
+                Kind::Reading => "Being read",
                 _ => "Other",
             },
         }
@@ -204,6 +212,7 @@ impl Kind {
             Kind::Project => Glyph::FolderGit2,
             Kind::Text => Glyph::FileText,
             Kind::Other => Glyph::HardDrive,
+            Kind::Reading => Glyph::Clock,
         }
     }
 }
@@ -213,6 +222,8 @@ impl Kind {
 ///
 /// The union of both places, because a kind narrows what the library shows, and the
 /// library shows both.
+///
+/// An asset still being read has no kind yet, so it adds none.
 pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
     let here: Vec<Kind> = workspace
         .listed()
@@ -221,7 +232,7 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect();
     Kind::ALL
         .into_iter()
-        .filter(|kind| here.contains(kind))
+        .filter(|kind| *kind != Kind::Reading && here.contains(kind))
         .collect()
 }
 
@@ -384,7 +395,9 @@ pub fn landing(carried: &Held, onto: Onto) -> Result<Act, &'static str> {
         // A folder this app cannot name is no kind's home, so the kind check also keeps
         // drops out of it.
         (Item::Local(id), Onto::Slot { class, at }) => {
-            if carried.kind.home() != Some(class) {
+            if carried.kind == Kind::Reading {
+                Err("it is still being read")
+            } else if carried.kind.home() != Some(class) {
                 Err("that folder holds a different kind of thing")
             } else if !carried.fits {
                 Err("the instrument does not take files of that format")

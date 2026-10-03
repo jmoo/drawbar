@@ -771,6 +771,9 @@ impl Browser {
         // ⚠️ The row already shows the full name on hover when it truncates it. A hover
         // here would show it twice.
         let response = drawn.response;
+        if ui.is_rect_visible(response.rect) {
+            workspace.hurry(entity.id);
+        }
 
         if response.dragged() {
             if let Some(head) = self.held(item, workspace, &device.state) {
@@ -1657,6 +1660,42 @@ mod tests {
             });
         }
         assert_eq!(browser.folders.censuses.get(), 1);
+    }
+
+    /// A file not decoded yet is a row under its own name that says it is being read,
+    /// and drawing it puts it first in line.
+    #[test]
+    fn a_row_not_decoded_yet_says_so_and_is_decoded_first() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ne5p".into(),
+            path: Some(LibPath::root().join("Grand.ne5p")),
+            origin: crate::workspace::Origin::Fresh,
+            saved: Fresh::Program.bytes().unwrap(),
+            file: None,
+            unsaved: None,
+        };
+        workspace.restore(vec![saved], None, &mut log);
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            egui::SidePanel::left("browser")
+                .exact_width(crate::shell::BROWSER)
+                .show(ctx, |ui| {
+                    browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                });
+        });
+        let said = words(&output);
+        assert!(said.iter().any(|word| word == "Grand"), "{said:?}");
+        assert!(said.iter().any(|word| word == "reading…"), "{said:?}");
+        assert!(workspace.hurried(1));
     }
 
     /// ⚠️ A filter applied while a document is in front would narrow a table nobody is

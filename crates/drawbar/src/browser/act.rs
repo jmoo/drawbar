@@ -192,6 +192,74 @@ pub enum Act {
     Refused(String),
 }
 
+impl Act {
+    /// The assets on this computer whose decode the act works from, which are decoded
+    /// before it runs if they are still being read.
+    pub fn reads(&self) -> Vec<u64> {
+        match self {
+            Act::Open(item) => item.local().into_iter().collect(),
+            Act::Keep(id)
+            | Act::KeepBoth(id)
+            | Act::Send { id, .. }
+            | Act::Retarget { id, .. }
+            | Act::Replace { id, .. }
+            | Act::DuplicateLocal(id)
+            | Act::Export(id)
+            | Act::SaveDoc(id)
+            | Act::WriteBack(id)
+            | Act::Revert(id) => vec![*id],
+            Act::SendChecked(ids) => ids.clone(),
+            Act::Connect
+            | Act::Disconnect
+            | Act::OpenFiles
+            | Act::New(_)
+            | Act::NewFromWavs(_)
+            | Act::Resync
+            | Act::ReadAgain(_)
+            | Act::Import { .. }
+            | Act::Overwrite { .. }
+            | Act::MoveAs { .. }
+            | Act::Forget(_)
+            | Act::NewFolder
+            | Act::NewFolderIn(_)
+            | Act::RemoveFolder(_)
+            | Act::Tag { .. }
+            | Act::Untag { .. }
+            | Act::NewTag(_)
+            | Act::RenameTag { .. }
+            | Act::RemoveTag(_)
+            | Act::SaveAsGig
+            | Act::File { .. }
+            | Act::Copy { .. }
+            | Act::LoadOnInstrument { .. }
+            | Act::Unqueue(_)
+            | Act::ClearQueue
+            | Act::SendAll
+            | Act::QueueChanged
+            | Act::AskSendAll
+            | Act::Rearrange { .. }
+            | Act::RenameLocal { .. }
+            | Act::RenameFolder { .. }
+            | Act::RenameSlot { .. }
+            | Act::DuplicateSlot { .. }
+            | Act::DeleteSlot { .. }
+            | Act::Remove(_)
+            | Act::ShowTab(_)
+            | Act::ShowClass(_)
+            | Act::Narrow(_)
+            | Act::CloseTab
+            | Act::ToggleDock(_)
+            | Act::ShowPage(_)
+            | Act::CopyLog
+            | Act::Quit
+            | Act::PickLibrary
+            | Act::OpenLibrary(_)
+            | Act::OpenLibraryDiscarding(_)
+            | Act::Refused(_) => Vec::new(),
+        }
+    }
+}
+
 /// The bulk actions on the checked set, in the order the library's footer and a checked
 /// row's menu offer them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -353,6 +421,7 @@ pub fn apply(
     log: &mut Log,
 ) {
     for act in acts {
+        workspace.read_now(act.reads(), log);
         if enqueues(&act) {
             shell.show_page(Page::Queue);
         }

@@ -441,6 +441,8 @@ fn a_save_over_a_listed_file_is_refused_only_where_its_contents_changed() {
     fs::write(again.at("Grand.ne5p"), &program).unwrap();
     let mut session = Session::open(&again);
     let id = session.only();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.settle_files(log);
     session.sync();
     fs::write(again.at("Grand.ne5p"), &program).unwrap();
     let log = &mut session.bench.log;
@@ -1211,6 +1213,49 @@ fn a_large_tree_is_listed_whole() {
     assert_eq!(names, ["deep.ne5p", "kept.ne5p", "top.ne5p"]);
     assert!(session.bench.browser.tags.worn(kept).contains(&tag));
     assert_eq!(session.said("not listed"), 0);
+}
+
+/// A file the listing brings back is listed by its name before it is decoded, and the
+/// decodes run off the frame. Opening one decodes it at once.
+#[test]
+fn a_file_not_decoded_yet_is_decoded_when_it_is_opened() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(root.at("Other.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut session = Session::open(&root);
+    let named = |session: &Session, name: &str| {
+        let mut listed = session.bench.workspace.listed();
+        listed.find(|entity| entity.name == name).expect(name).id
+    };
+    let (grand, other) = (named(&session, "Grand.ne5p"), named(&session, "Other.ne5p"));
+    for id in [grand, other] {
+        let entity = session.bench.workspace.get(id).unwrap();
+        assert_eq!(Kind::of(entity), Kind::Reading);
+        assert_eq!(entity.verify.note(), Some("reading…"));
+        assert!(!entity.is_unsaved());
+    }
+    assert_eq!(session.bench.workspace.reading(), 2);
+
+    let open = crate::browser::Act::Open(crate::browser::Item::Local(grand));
+    session.bench.act(vec![open]);
+    assert!(session.bench.tabs.holds(grand), "its tab is open");
+    let entity = session.bench.workspace.get(grand).unwrap();
+    assert_eq!(Kind::of(entity), Kind::Program);
+    assert!(matches!(entity.verify, VerifyState::Ok));
+    assert_eq!(entity.bytes, program);
+    assert!(!entity.is_unsaved());
+    assert_eq!(
+        session.bench.workspace.reading(),
+        1,
+        "the other waits its turn"
+    );
+
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.settle_files(log);
+    let entity = workspace.get(other).unwrap();
+    assert_eq!(Kind::of(entity), Kind::Program);
+    assert_eq!(workspace.reading(), 0);
 }
 
 /// A library let go before its listing has all come back keeps, in its index, the rows

@@ -78,6 +78,9 @@ pub enum VerifyState {
     Failed(String),
     /// Nothing to check, and why.
     NotApplicable(&'static str),
+    /// Bytes from the library not decoded yet. They are decoded off the frame, or at
+    /// once by [`Workspace::read_now`] for whatever needs them.
+    Reading,
 }
 
 impl VerifyState {
@@ -85,6 +88,7 @@ impl VerifyState {
         match self {
             VerifyState::Ok | VerifyState::Checked => "ok",
             VerifyState::Checking => "checking…",
+            VerifyState::Reading => "reading…",
             VerifyState::Differs { .. } => "differs",
             VerifyState::Failed(_) => "failed",
             VerifyState::NotApplicable(_) => "n/a",
@@ -96,6 +100,7 @@ impl VerifyState {
             VerifyState::Ok => "re-encoded byte-for-byte".into(),
             VerifyState::Checked => "its stored checksum matches its body".into(),
             VerifyState::Checking => "its checksum is being checked".into(),
+            VerifyState::Reading => "it is still being read".into(),
             VerifyState::Differs { at } => format!("first difference at byte {at:#06x}"),
             VerifyState::Failed(why) => why.clone(),
             VerifyState::NotApplicable(why) => (*why).to_string(),
@@ -106,7 +111,9 @@ impl VerifyState {
         match self {
             VerifyState::Ok | VerifyState::Checked => crate::app::good(visuals),
             VerifyState::Differs { .. } | VerifyState::Failed(_) => crate::app::bad(visuals),
-            VerifyState::Checking | VerifyState::NotApplicable(_) => visuals.weak_text_color(),
+            VerifyState::Checking | VerifyState::Reading | VerifyState::NotApplicable(_) => {
+                visuals.weak_text_color()
+            }
         }
     }
 
@@ -114,6 +121,7 @@ impl VerifyState {
     pub fn note(&self) -> Option<&'static str> {
         match self {
             VerifyState::Checking => Some("checking…"),
+            VerifyState::Reading => Some("reading…"),
             VerifyState::Failed(_) => Some("failed verification"),
             VerifyState::Ok
             | VerifyState::Checked
@@ -303,6 +311,51 @@ pub struct Wrote {
     pub crc32: u32,
 }
 
+/// What a set of bytes decodes to, worked out once, when they land.
+struct Decoded {
+    container: Option<Container>,
+    entity: Option<Entity>,
+    parse_error: Option<String>,
+    verify: VerifyState,
+    is_text: bool,
+    /// CRC-32 over all the bytes, where they were read through.
+    crc: Option<u32>,
+}
+
+impl Decoded {
+    /// What a decode that never answered leaves.
+    fn failed(why: &str) -> Decoded {
+        Decoded {
+            container: None,
+            entity: None,
+            parse_error: Some(why.to_string()),
+            verify: VerifyState::Failed(why.to_string()),
+            is_text: false,
+            crc: None,
+        }
+    }
+
+    fn of(bytes: &[u8]) -> Decoded {
+        let (entity, parse_error) = match nord_format::from_stream(&mut std::io::Cursor::new(bytes))
+        {
+            Ok(entity) => (Some(entity), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let verify = match &entity {
+            Some(entity) => verify(entity, bytes),
+            None => VerifyState::NotApplicable("the file did not decode"),
+        };
+        Decoded {
+            container: Container::read(bytes),
+            entity,
+            parse_error,
+            verify,
+            is_text: crate::document::text::is_text(bytes),
+            crc: Some(nord_format::crc::crc32(bytes)),
+        }
+    }
+}
+
 /// One object held in memory: its bytes, what they decode to, and how they got here.
 pub struct LocalEntity {
     /// Stable across reordering, so a selection survives a removal.
@@ -363,40 +416,56 @@ pub struct LocalEntity {
 
 impl LocalEntity {
     fn new(id: u64, name: String, origin: Origin, bytes: Vec<u8>, stamp: u64) -> LocalEntity {
-        let container = Container::read(&bytes);
-        let (entity, parse_error) =
-            match nord_format::from_stream(&mut std::io::Cursor::new(&bytes)) {
-                Ok(entity) => (Some(entity), None),
-                Err(e) => (None, Some(e.to_string())),
-            };
-        let verify = match &entity {
-            Some(entity) => verify(entity, &bytes),
-            None => VerifyState::NotApplicable("the file did not decode"),
-        };
-        let is_text = crate::document::text::is_text(&bytes);
-        let mut held = LocalEntity {
+        let decoded = Decoded::of(&bytes);
+        let mut held = LocalEntity::unread(id, name, origin, bytes, stamp);
+        held.decoded(decoded);
+        held
+    }
+
+    /// An asset whose bytes are not decoded yet, as [`VerifyState::Reading`] says. Until
+    /// [`LocalEntity::decoded`] it has no decode, no container and no kind.
+    fn unread(id: u64, name: String, origin: Origin, bytes: Vec<u8>, stamp: u64) -> LocalEntity {
+        LocalEntity {
             id,
             name,
             path: None,
             origin,
+            saved: Baseline {
+                bytes: bytes.clone(),
+                crc32: None,
+                stamp,
+                file: None,
+                bytes_crc: None,
+            },
             bytes,
-            entity,
-            parse_error,
-            container,
-            is_text,
-            verify,
-            saved: Baseline::default(),
+            entity: None,
+            parse_error: None,
+            container: None,
+            is_text: false,
+            verify: VerifyState::Reading,
             pending: false,
             kept: true,
             stamp,
             link: None,
             wrote: None,
-        };
-        held.saved = Baseline {
-            bytes_crc: Some(nord_format::crc::crc32(&held.bytes)),
-            ..held.baseline()
-        };
-        held
+        }
+    }
+
+    /// Whether its bytes are still to be decoded.
+    pub fn reading(&self) -> bool {
+        matches!(self.verify, VerifyState::Reading)
+    }
+
+    /// Take what its bytes decode to. They are what it was saved as, since nothing can
+    /// edit an asset still being read.
+    fn decoded(&mut self, decoded: Decoded) {
+        self.saved.crc32 = decoded.container.as_ref().map(|held| held.body_crc32);
+        self.saved.bytes_crc = decoded.crc;
+        self.container = decoded.container;
+        self.entity = decoded.entity;
+        self.parse_error = decoded.parse_error;
+        self.verify = decoded.verify;
+        self.is_text = decoded.is_text;
     }
 
     /// An asset whose bytes are the file `file` holds, left there and read by range. It
@@ -978,7 +1047,31 @@ pub struct Workspace {
     checking: Option<Check>,
     /// Assets being read whole out of the files they rested in.
     waking: Vec<Wake>,
+    /// Assets from the library whose bytes are still to be decoded, in the order they
+    /// arrived, and those asked for first.
+    unread: VecDeque<u64>,
+    hurried: std::cell::RefCell<std::collections::BTreeSet<u64>>,
+    /// Decodes running off the frame, each of a few assets, and every asset in them.
+    decoding: Vec<Decode>,
+    flying: std::collections::BTreeSet<u64>,
 }
+
+/// Assets decoded off the frame, each answered with the stamp of the bytes decoded.
+struct Decode {
+    ids: Vec<u64>,
+    job: work::Job<Vec<(u64, u64, Decoded)>>,
+}
+
+/// How many decodes run at once, and how many assets and bytes one takes. The browser
+/// has one thread, so there one runs inline each frame, and takes less.
+#[cfg(not(target_arch = "wasm32"))]
+const DECODES: usize = 8;
+#[cfg(not(target_arch = "wasm32"))]
+const DECODE: (usize, u64) = (64, 16 << 20);
+#[cfg(target_arch = "wasm32")]
+const DECODES: usize = 1;
+#[cfg(target_arch = "wasm32")]
+const DECODE: (usize, u64) = (16, 2 << 20);
 
 /// A file's checksum being checked off the frame.
 struct Check {
@@ -1010,6 +1103,10 @@ impl Workspace {
             checks: VecDeque::new(),
             checking: None,
             waking: Vec::new(),
+            unread: VecDeque::new(),
+            hurried: Default::default(),
+            decoding: Vec::new(),
+            flying: Default::default(),
         }
     }
 
@@ -1493,6 +1590,131 @@ impl Workspace {
         }
     }
 
+    /// How many assets are still to be decoded.
+    pub fn reading(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|entity| entity.reading())
+            .count()
+    }
+
+    /// Decode `id` ahead of the others still to be, where it is one of them: the row is
+    /// in view, or picked.
+    pub fn hurry(&self, id: u64) {
+        if self.get(id).is_some_and(LocalEntity::reading) {
+            self.hurried.borrow_mut().insert(id);
+        }
+    }
+
+    /// Whether `id` has been asked for ahead of the others.
+    #[cfg(test)]
+    pub fn hurried(&self, id: u64) -> bool {
+        self.hurried.borrow().contains(&id)
+    }
+
+    /// Decode these assets now, on this thread, where they are still to be: something is
+    /// about to act on what they decode to.
+    pub fn read_now(&mut self, ids: impl IntoIterator<Item = u64>, log: &mut Log) {
+        for id in ids {
+            let Some(entity) = self.get(id).filter(|entity| entity.reading()) else {
+                continue;
+            };
+            let (stamp, decoded) = (entity.stamp, Decoded::of(&entity.bytes));
+            self.take_decode(id, stamp, decoded, log);
+        }
+    }
+
+    /// Fold in the decodes that have answered, and start the next.
+    fn decode(&mut self, log: &mut Log) {
+        for Decode { ids, job } in std::mem::take(&mut self.decoding) {
+            match job.poll() {
+                work::Answer::Running => self.decoding.push(Decode { ids, job }),
+                answer => self.decodes(ids, answer, log),
+            }
+        }
+        self.next_decodes();
+        #[cfg(target_arch = "wasm32")]
+        if !self.decoding.is_empty() || !self.unread.is_empty() {
+            self.ctx.request_repaint();
+        }
+    }
+
+    fn decodes(
+        &mut self,
+        ids: Vec<u64>,
+        answer: work::Answer<Vec<(u64, u64, Decoded)>>,
+        log: &mut Log,
+    ) {
+        for id in &ids {
+            self.flying.remove(id);
+        }
+        let decoded = match answer {
+            work::Answer::Running => return,
+            work::Answer::Answered(decoded) => decoded,
+            work::Answer::Died => {
+                let why = "the decode stopped without an answer";
+                ids.into_iter()
+                    .filter_map(|id| Some((id, self.get(id)?.stamp, Decoded::failed(why))))
+                    .collect()
+            }
+        };
+        for (id, stamp, decoded) in decoded {
+            self.take_decode(id, stamp, decoded, log);
+        }
+    }
+
+    /// Give an asset what its bytes decode to, unless it no longer holds those bytes or
+    /// has its decode already.
+    fn take_decode(&mut self, id: u64, stamp: u64, decoded: Decoded, log: &mut Log) {
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        if !entity.reading() || entity.stamp != stamp {
+            return;
+        }
+        entity.decoded(decoded);
+        if let Some(e) = &entity.parse_error {
+            log.warn(format!("{}: {e}", entity.name));
+        }
+        self.revision += 1;
+    }
+
+    /// Start decodes, up to [`DECODES`] at once, of the assets asked for first and then
+    /// of the rest in the order they arrived.
+    fn next_decodes(&mut self) {
+        while self.decoding.len() < DECODES {
+            let (most, most_bytes) = DECODE;
+            let mut chunk = Vec::new();
+            let mut bytes = 0;
+            while chunk.len() < most && bytes < most_bytes {
+                let next = self.hurried.get_mut().pop_first();
+                let Some(id) = next.or_else(|| self.unread.pop_front()) else {
+                    break;
+                };
+                if self.flying.contains(&id) {
+                    continue;
+                }
+                let Some(entity) = self.get(id).filter(|entity| entity.reading()) else {
+                    continue;
+                };
+                bytes += entity.bytes.len() as u64;
+                chunk.push((id, entity.stamp, entity.bytes.clone()));
+            }
+            if chunk.is_empty() {
+                return;
+            }
+            let ids: Vec<u64> = chunk.iter().map(|(id, _, _)| *id).collect();
+            self.flying.extend(ids.iter().copied());
+            let job = work::run(&self.ctx, move |_| {
+                chunk
+                    .into_iter()
+                    .map(|(id, stamp, bytes)| (id, stamp, Decoded::of(&bytes)))
+                    .collect()
+            });
+            self.decoding.push(Decode { ids, job });
+        }
+    }
+
     /// Decode `bytes`, verify them, and add the row, logging the details of what
     /// arrived. Every way in (drop, picker, fresh default, device read) lands here.
     ///
@@ -1585,9 +1807,9 @@ impl Workspace {
         }
     }
 
-    /// Drain whatever the pickers finished with, fold in the checks and reads of files
-    /// that have answered, and return the files picked to open, by name. Call once per
-    /// frame.
+    /// Drain whatever the pickers finished with, fold in the checks, reads and decodes
+    /// that have answered and start the next, and return the files picked to open, by
+    /// name. Call once per frame.
     pub fn poll(&mut self, log: &mut Log) -> Vec<(String, Vec<u8>)> {
         let mut opened = Vec::new();
         while let Ok(message) = self.rx.try_recv() {
@@ -1603,12 +1825,21 @@ impl Workspace {
             self.checked(answer, log);
         }
         self.woken(log);
+        self.decode(log);
         opened
     }
 
-    /// Wait for every check and read in flight, and fold them in.
+    /// Wait for every check, read and decode in flight, and fold them in.
     #[cfg(test)]
     pub fn settle_files(&mut self, log: &mut Log) {
+        loop {
+            self.next_decodes();
+            let Some(Decode { ids, job }) = self.decoding.pop() else {
+                break;
+            };
+            let answer = job.wait();
+            self.decodes(ids, answer, log);
+        }
         while let Some(check) = &self.checking {
             let answer = check.job.wait();
             self.checked(answer, log);
@@ -1859,6 +2090,11 @@ impl Workspace {
         if self.get(id).is_none_or(|entity| entity.holds(&bytes)) {
             return None;
         }
+        // The baseline of an asset still being read stays, and is read here.
+        if let Some(entity) = self.get_mut(id).filter(|entity| entity.reading()) {
+            let saved = std::mem::take(&mut entity.saved.bytes);
+            entity.saved = Baseline::read(saved, entity.saved.stamp);
+        }
         let stamp = self.stamp();
         // The baseline stays, but whether the asset holds it may change. A revert, or an
         // edit made and then undone, puts back what it was saved as.
@@ -1931,8 +2167,8 @@ impl Workspace {
         gone
     }
 
-    /// Drop the checks and reads waiting on files no asset is held under, so that their
-    /// handles close.
+    /// Drop the checks, reads and decodes waiting on assets no longer held, so that the
+    /// files' handles close.
     ///
     /// ⚠️ A check or read already running holds its file until it answers.
     fn let_go(&mut self) {
@@ -1940,6 +2176,8 @@ impl Workspace {
         let held = |id: u64| entities.iter().any(|entity| entity.id == id);
         self.checks.retain(|(id, _)| held(*id));
         self.waking.retain(|wake| held(wake.id));
+        self.unread.retain(|id| held(*id));
+        self.hurried.get_mut().retain(|id| held(*id));
         if self.checking.as_ref().is_some_and(|check| !held(check.id)) {
             self.checking = None;
         }
@@ -1955,11 +2193,11 @@ impl Workspace {
     ///
     /// Every asset is verified on the way in: bytes from a store have been somewhere
     /// this app does not control and get no more trust than bytes from a disk. An asset
-    /// held whole is decoded and re-encoded here. One resting in its file decodes
-    /// nothing, and its checksum is checked off the frame; see [`Workspace::poll`]. An id
-    /// is refused if it leaves no room for the next id or is already in the list.
-    ///
-    /// ⚠️ Restore decodes and re-encodes every asset held whole before the next frame.
+    /// held whole is decoded and re-encoded off the frame, a few at a time, and is
+    /// [`VerifyState::Reading`] until then; one holding an unsaved edit is decoded here.
+    /// One resting in its file decodes nothing, and its checksum is checked off the
+    /// frame. See [`Workspace::poll`]. An id is refused if it leaves no room for the next
+    /// id or is already in the list.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
         let mut refused = 0;
         let mut held: std::collections::HashSet<u64> =
@@ -2000,8 +2238,14 @@ impl Workspace {
                         ..LocalEntity::new(id, name, origin, bytes, stamp)
                     }
                 }
-                (None, unsaved) => {
-                    let bytes = unsaved.unwrap_or_else(|| saved.clone());
+                (None, None) => {
+                    self.unread.push_back(id);
+                    LocalEntity {
+                        path,
+                        ..LocalEntity::unread(id, name, origin, saved, stamp)
+                    }
+                }
+                (None, Some(bytes)) => {
                     // The saved and held bytes share a stamp only when they are the same
                     // bytes.
                     let held = match bytes == saved {
@@ -2904,8 +3148,8 @@ mod tests {
         );
     }
 
-    /// What a previous session held comes back decoded and checked, keeping its name,
-    /// its origin and its id.
+    /// What a previous session held comes back keeping its name, its origin and its id,
+    /// and is decoded and checked off the frame.
     #[test]
     fn a_restored_asset_keeps_what_it_was() {
         let ctx = egui::Context::default();
@@ -2926,11 +3170,54 @@ mod tests {
         );
         let entity = workspace.get(9).expect("restored under its own id");
         assert_eq!(entity.name, "Africa-Split.ne5p");
+        assert_eq!(
+            crate::browser::Kind::of(entity),
+            crate::browser::Kind::Reading
+        );
+        assert!(!entity.is_unsaved());
+        workspace.settle_files(&mut log);
+        let entity = workspace.get(9).unwrap();
         assert!(matches!(entity.verify, VerifyState::Ok));
+        assert_eq!(
+            crate::browser::Kind::of(entity),
+            crate::browser::Kind::Program
+        );
         assert!(!entity.is_unsaved());
         // A new asset cannot land on an id something restored is already using.
         let fresh = workspace.create(Fresh::Live, &mut log).unwrap();
         assert!(fresh >= 10);
+    }
+
+    /// The assets asked for first are decoded first, whatever order the rest arrived in.
+    #[test]
+    fn an_asset_hurried_is_decoded_before_the_others() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let held = DECODES * DECODE.0 + 1;
+        let saved = (1..=held as u64).map(|id| Saved {
+            id,
+            name: format!("{id}.ne5p"),
+            path: None,
+            origin: Origin::Fresh,
+            saved: bytes.clone(),
+            file: None,
+            unsaved: None,
+        });
+        workspace.restore(saved.collect(), None, &mut log);
+        let last = held as u64;
+        workspace.hurry(last);
+        workspace.next_decodes();
+        assert!(
+            workspace.flying.contains(&last),
+            "the last to arrive goes first"
+        );
+        assert!(
+            !workspace.flying.contains(&(last - 1)),
+            "one more than fits waits"
+        );
+        workspace.settle_files(&mut log);
+        assert_eq!(workspace.reading(), 0);
     }
 
     /// A flipped body byte is reported: the container's checksum no longer matches, and

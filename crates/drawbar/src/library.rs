@@ -825,6 +825,9 @@ impl Library {
             .auto_shrink([false; 2])
             .show_rows(ui, ROW, rows.len(), |ui, shown| {
                 for row in shown.filter_map(|index| rows.get(index)) {
+                    if let Some(id) = row.item.local() {
+                        workspace.hurry(id);
+                    }
                     paint(
                         ui, row, width, &tracks, browser, &list, workspace, device, queue, acts,
                     );
