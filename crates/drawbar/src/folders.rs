@@ -493,6 +493,31 @@ impl Folders {
         }
     }
 
+    /// Move back what a rename the disk refused had moved, the changes not yet sent
+    /// among it: each was made after the rename, where it put things.
+    pub(crate) fn follow_back(&mut self, to: &LibPath, from: &LibPath) {
+        self.follow(to, from);
+        let back = |path: &mut LibPath| {
+            if let Some(at) = path.moved(to, from) {
+                *path = at;
+            }
+        };
+        for op in &mut self.ops {
+            match op {
+                Op::MakeDir(path) | Op::RemoveDir(path) => back(path),
+                Op::MoveDir { from, to } => {
+                    back(from);
+                    back(to);
+                }
+            }
+        }
+    }
+
+    /// Put back changes taken and not sent, ahead of any made since.
+    pub(crate) fn hold(&mut self, ops: Vec<Op>) {
+        self.ops.splice(0..0, ops);
+    }
+
     /// Whether everything in `dir` has been listed: the whole library has, or `dir` was
     /// listed ahead of the rest.
     pub(crate) fn listed_whole(&self, dir: &LibPath) -> bool {

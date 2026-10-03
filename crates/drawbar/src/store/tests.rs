@@ -149,6 +149,20 @@ impl Session {
         self.store.sync(workspace, browser, queue, Pass::Full);
     }
 
+    /// Rename a folder, and send the change without waiting for it.
+    fn rename_folder(&mut self, id: u64, name: &str) {
+        let name = name.into();
+        self.bench
+            .act(vec![crate::browser::Act::RenameFolder { id, name }]);
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            ..
+        } = &mut self.bench;
+        self.store.sync(workspace, browser, queue, Pass::Files);
+    }
+
     /// Write everything, and wait until the disk has it.
     fn sync(&mut self) {
         let Bench {
@@ -1758,6 +1772,99 @@ fn a_folder_rename_refused_while_the_library_is_listed_leaves_everything_where_i
         session.said("did not change as asked: moving Gig to Set"),
         1
     );
+}
+
+/// A library of one folder, `Gig`, holding one tagged file nothing has read, and the
+/// folder's id.
+fn gig() -> (Temp, Session, u64, u64) {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::listed(&root);
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(session.only(), tag, true);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    (root, session, folder, tag)
+}
+
+/// Two renames of one folder, the second sent before the first answers. The disk
+/// refuses the first, since a folder drawbar does not know has the name; that folder is
+/// left alone, and the second renames the folder drawbar holds.
+#[test]
+fn a_second_rename_waits_for_a_first_the_disk_refuses() {
+    let (root, mut session, folder, tag) = gig();
+    let id = session.only();
+    fs::create_dir(root.at("Set")).unwrap();
+    fs::write(root.at("Set/theirs.pdf"), b"theirs").unwrap();
+    session.rename_folder(folder, "Set");
+    session.rename_folder(folder, "Sets");
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set", "Sets"]);
+    assert_eq!(root.names("Set"), ["theirs.pdf"], "theirs is untouched");
+    assert_eq!(root.names("Sets"), ["a.ne5p"]);
+    assert_eq!(session.only(), id);
+    assert_eq!(session.path(id).as_deref(), Some("Sets/a.ne5p"));
+    assert!(session.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(
+        session.said("did not change as asked: moving Gig to Set"),
+        1
+    );
+}
+
+/// Two renames of one folder, the second sent before the first answers, both land.
+#[test]
+fn a_second_rename_waits_for_a_first_that_lands() {
+    let (root, mut session, folder, tag) = gig();
+    let id = session.only();
+    session.rename_folder(folder, "Set");
+    session.rename_folder(folder, "Sets");
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Sets"]);
+    assert_eq!(root.names("Sets"), ["a.ne5p"]);
+    assert_eq!(session.path(id).as_deref(), Some("Sets/a.ne5p"));
+    assert!(session.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+/// A file moved into a folder whose rename has not answered waits for it. Where the
+/// disk refuses the rename, the file goes into the folder under its old name, never into
+/// the folder outside drawbar that has the new one.
+#[test]
+fn a_file_moved_into_a_folder_whose_rename_is_unanswered_waits_for_it() {
+    let (root, mut session, folder, _) = gig();
+    fs::write(
+        root.at("f.ne5p"),
+        with_gain(&Fresh::Program.bytes().unwrap(), "12"),
+    )
+    .unwrap();
+    session.refocus();
+    let id = session.named("f.ne5p");
+    fs::create_dir(root.at("Set")).unwrap();
+    fs::write(root.at("Set/theirs.pdf"), b"theirs").unwrap();
+    session.rename_folder(folder, "Set");
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    browser.folders.file(workspace, id, Some(folder));
+    assert_eq!(
+        workspace.get(id).unwrap().path,
+        LibPath::parse("Set/f.ne5p")
+    );
+    assert!(
+        !session.store.sync(workspace, browser, queue, Pass::Files),
+        "the move waits"
+    );
+    session.settle();
+    session.sync();
+    assert_eq!(root.names("Set"), ["theirs.pdf"], "theirs is untouched");
+    assert_eq!(root.names("Gig"), ["a.ne5p", "f.ne5p"]);
+    assert_eq!(session.path(id).as_deref(), Some("Gig/f.ne5p"));
 }
 
 /// A folder removed while the library is still being listed waits until everything in

@@ -288,6 +288,8 @@ pub struct Store {
     printed: BTreeSet<u64>,
     /// A [`Cmd::Fingerprint`] is in flight.
     fingerprinting: bool,
+    /// Each rename sent that has not answered, from and to.
+    moving: Vec<(LibPath, LibPath)>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
     /// The assets whose read was refused for want of room, each with its file's length,
@@ -323,6 +325,7 @@ impl Store {
             unprinted: Default::default(),
             printed: BTreeSet::new(),
             fingerprinting: false,
+            moving: Vec::new(),
             budget: MOST_BYTES,
             roomless: BTreeMap::new(),
             sent: 0,
@@ -360,7 +363,7 @@ impl Store {
         queue: &Queue,
     ) -> bool {
         self.sync(workspace, browser, queue, Pass::Files);
-        !self.scanning && !self.saving()
+        !self.scanning && !self.saving() && self.moving.is_empty()
     }
 
     fn saving(&self) -> bool {
@@ -562,6 +565,7 @@ impl Store {
             from: from.clone(),
             to: to.clone(),
         });
+        self.moving.push((from.clone(), to.clone()));
         if let Some(loading) = &mut self.loading {
             loading.moves.push(Rename {
                 sent: self.issued,
@@ -592,7 +596,13 @@ impl Store {
             }
         }
         workspace.relocate(to, from);
-        browser.folders.follow(to, from);
+        browser.folders.follow_back(to, from);
+    }
+
+    /// Forget a rename now answered. `false` for one this store did not send.
+    fn answered_move(&mut self, from: &LibPath, to: &LibPath) -> bool {
+        let sent = self.moving.iter().position(|(a, b)| a == from && b == to);
+        sent.map(|at| self.moving.remove(at)).is_some()
     }
 
     /// Take in the files read for the assets that asked. Each comes back as it is now: a
@@ -741,6 +751,7 @@ impl Store {
             Event::Read(answers) => self.took(answers, workspace, log),
             Event::Fingerprinted(files) => self.fingerprinted(files),
             Event::Moved { from, to, result } => match result {
+                _ if !self.answered_move(&from, &to) => {}
                 Ok(()) => {
                     if let Some(loading) = &mut self.loading {
                         loading.answered(&from, &to, true);
@@ -909,8 +920,8 @@ impl Store {
         self.backend.finish();
     }
 
-    /// Wait for every save in flight to answer, and fold the answers in. `false` when one
-    /// did not come.
+    /// Wait for every save and rename in flight to answer, and fold the answers in.
+    /// `false` when one did not come.
     fn answered(
         &mut self,
         workspace: &mut Workspace,
@@ -918,7 +929,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        while self.saving() {
+        while self.saving() || !self.moving.is_empty() {
             match self.backend.recv() {
                 None => return false,
                 // ⚠️ A listing taken before the last pass's moves would read each as a
@@ -1579,7 +1590,24 @@ impl Store {
             return false;
         }
         let full = pass != Pass::Files;
-        let ops = browser.folders.take_ops();
+        let mut ops = browser.folders.take_ops();
+        // ⚠️ A change that touches a rename still to answer waits for it, with every change
+        // after it: were the rename refused, the change would act on whatever else has that
+        // name on disk.
+        let held = ops.iter().position(|op| {
+            ends(op)
+                .into_iter()
+                .any(|path| unsettled(&self.moving, path))
+        });
+        let held = held.map(|at| ops.split_off(at)).unwrap_or_default();
+        // The files those changes move wait with them.
+        let mut waiting = self.moving.clone();
+        for op in &held {
+            let [from, to] = ends(op);
+            waiting.push((from.clone(), to.clone()));
+        }
+        let holds = !held.is_empty();
+        browser.folders.hold(held);
         let (removals, ops): (Vec<Op>, Vec<Op>) = ops
             .into_iter()
             .partition(|op| matches!(op, Op::RemoveDir(_)));
@@ -1597,7 +1625,7 @@ impl Store {
         };
         let mut done = true;
         for entity in workspace.entities() {
-            done &= self.file(entity);
+            done &= self.file(entity, &waiting);
             if full {
                 self.working(entity, queue, &mut writes, &mut drops);
             }
@@ -1624,7 +1652,7 @@ impl Store {
         if pass == Pass::Full {
             self.fingerprint_precious(workspace, browser);
         }
-        done
+        done && !holds
     }
 
     /// Read in the background, for its CRC, each file that holds something no file can
@@ -1749,11 +1777,25 @@ impl Store {
     }
 
     /// Send what one asset's file needs: its first write, a move, or a save. Returns
-    /// `false` when a save has to wait.
-    fn file(&mut self, entity: &LocalEntity) -> bool {
+    /// `false` when a save or a move has to wait. `waiting` are the renames and other
+    /// folder changes not settled yet, each from and to.
+    fn file(&mut self, entity: &LocalEntity, waiting: &[(LibPath, LibPath)]) -> bool {
         let (true, Some(path)) = (entity.kept, &entity.path) else {
             return true;
         };
+        // ⚠️ A file written or moved into, or out of, a folder a rename has not answered
+        // for could land in whatever else has that name on disk.
+        let record = self.records.get(&entity.id);
+        let from = record.and_then(|record| record.path.as_ref());
+        let moves = from.is_none_or(|from| from != path);
+        if moves
+            && [Some(path), from]
+                .into_iter()
+                .flatten()
+                .any(|at| unsettled(waiting, at))
+        {
+            return false;
+        }
         let bytes = || entity.saved.bytes.clone();
         if !self
             .records
@@ -1984,6 +2026,21 @@ impl Record {
             ..Record::of_file(found.path.clone(), fingerprint)
         }
     }
+}
+
+/// The paths a change to the folders acts on, where it was and where it goes.
+fn ends(op: &Op) -> [&LibPath; 2] {
+    match op {
+        Op::MakeDir(path) | Op::RemoveDir(path) => [path, path],
+        Op::MoveDir { from, to } => [from, to],
+    }
+}
+
+/// Whether `path` is in, or is, either side of one of these renames.
+fn unsettled(moving: &[(LibPath, LibPath)], path: &LibPath) -> bool {
+    moving
+        .iter()
+        .any(|(from, to)| path.is_in(from) || path.is_in(to))
 }
 
 /// Say what is new in what a listing found beside the assets: a file that did not read,
