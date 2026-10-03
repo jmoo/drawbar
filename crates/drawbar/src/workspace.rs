@@ -194,26 +194,16 @@ impl Container {
         Some(Container::of(info, body, body_crc32))
     }
 
-    /// The facts of a file left on disk, in one streaming pass over it, and a second over
-    /// the body where the stored checksum cannot stand for the body's CRC-32. The file's
-    /// own CRC is taken first, where no pass has taken it yet.
-    fn of_file(file: &OnDisk) -> Result<Container, String> {
-        use std::io::{Read as _, Seek as _};
-
-        file.crc().map_err(|e| e.to_string())?;
-        let info = nord_format::cbin::inspect(&mut file.reader()).map_err(|e| e.to_string())?;
-        let body = body_of(&info).ok_or("the body is larger than this machine can address")?;
-        let body_crc32 = match (info.header.generation, info.checksum_ok) {
-            (Generation::V1, true) => info.stored_checksum,
-            _ => {
-                let mut reader = file.reader();
-                reader
-                    .seek(std::io::SeekFrom::Start(body.start as u64))
-                    .and_then(|_| ondisk::crc_of(&mut reader.take(body.len() as u64)))
-                    .map_err(|e| e.to_string())?
-            }
+    /// The facts of a file left on disk, from what a checksum pass over it found.
+    fn of_file(file: &OnDisk, sums: ondisk::Sums) -> Result<Container, String> {
+        let info = nord_format::cbin::Info {
+            header: file.index.header().clone(),
+            body_len: sums.body.end - sums.body.start,
+            checksum_ok: sums.checksum_ok,
+            stored_checksum: sums.stored,
         };
-        Ok(Container::of(info, body, body_crc32))
+        let body = body_of(&info).ok_or("the body is larger than this machine can address")?;
+        Ok(Container::of(info, body, sums.body_crc32))
     }
 
     fn of(
@@ -667,7 +657,8 @@ impl LocalEntity {
     ///
     /// ⚠️ A read of a file reads all of it, hundreds of megabytes for a piano library, on
     /// the calling thread. Only an act that carries the whole body asks: a send, a copy,
-    /// an overwrite.
+    /// an overwrite. The browser refuses it, and such an act reads the file whole off the
+    /// frame first ([`Workspace::wake`]).
     pub fn whole(&self) -> std::io::Result<Cow<'_, [u8]>> {
         if self.unread() {
             return Err(std::io::Error::other(UNREAD));
@@ -1240,6 +1231,8 @@ pub struct Workspace {
     checking: Option<Check>,
     /// Assets being read whole out of the files they rested in.
     waking: Vec<Wake>,
+    /// The files, by [`OnDisk::serial`], a read whole out of failed. Each is read once.
+    unwoken: std::collections::BTreeSet<u64>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
     /// asked for first.
     undecoded: VecDeque<u64>,
@@ -1276,7 +1269,7 @@ const DECODE: (usize, u64) = (16, 2 << 20);
 struct Check {
     id: u64,
     file: Arc<OnDisk>,
-    job: work::Job<Result<Container, String>>,
+    job: work::Job<Result<ondisk::Sums, String>>,
 }
 
 /// A file being read whole and decoded off the frame.
@@ -1310,6 +1303,7 @@ impl Workspace {
             checks: VecDeque::new(),
             checking: None,
             waking: Vec::new(),
+            unwoken: Default::default(),
             undecoded: VecDeque::new(),
             hurried: Default::default(),
             wanted: Default::default(),
@@ -1724,13 +1718,12 @@ impl Workspace {
         let Some((id, file)) = self.checks.pop_front() else {
             return;
         };
-        let read = file.clone();
-        let job = work::run(&self.ctx, move |_| Container::of_file(&read));
+        let job = file.verify(&self.ctx);
         self.checking = Some(Check { id, file, job });
     }
 
     /// Fold in the check that has answered, where one has, and start the next.
-    fn checked(&mut self, answer: work::Answer<Result<Container, String>>, log: &mut Log) {
+    fn checked(&mut self, answer: work::Answer<Result<ondisk::Sums, String>>, log: &mut Log) {
         let answer = match answer {
             work::Answer::Running => return,
             work::Answer::Answered(answer) => answer,
@@ -1739,6 +1732,7 @@ impl Workspace {
         let Some(Check { id, file, .. }) = self.checking.take() else {
             return;
         };
+        let answer = answer.and_then(|sums| Container::of_file(&file, sums));
         self.next_check();
         let Some(entity) = self.get_mut(id) else {
             return;
@@ -1786,8 +1780,9 @@ impl Workspace {
         self.revision += 1;
     }
 
-    /// Read an asset resting in its file whole, off the frame, for an editor that works on
-    /// the whole body. It stays resting until the read answers.
+    /// Read an asset resting in its file whole, off the frame, for an editor or an act
+    /// that works on the whole body. It stays resting until the read answers, and a file
+    /// whose read failed is not read again.
     pub fn wake(&mut self, id: u64) {
         if self.waking.iter().any(|held| held.id == id) {
             return;
@@ -1798,17 +1793,21 @@ impl Workspace {
         let Some(file) = entity.rests().cloned() else {
             return;
         };
-        let (name, origin, stamp, read) = (
-            entity.name.clone(),
-            entity.origin.clone(),
-            entity.stamp,
-            file.clone(),
-        );
-        let job = work::run(&self.ctx, move |_| {
-            let bytes = read.whole().map_err(|e| e.to_string())?;
+        if self.unwoken.contains(&file.serial) {
+            return;
+        }
+        let (name, origin, stamp) = (entity.name.clone(), entity.origin.clone(), entity.stamp);
+        let job = file.whole_then(&self.ctx, move |_, bytes| {
             Ok(LocalEntity::new(id, name, origin, bytes.into(), stamp))
         });
         self.waking.push(Wake { id, file, job });
+    }
+
+    /// Whether the read whole out of the file an asset rests in failed.
+    pub fn unwoken(&self, id: u64) -> bool {
+        self.get(id)
+            .and_then(LocalEntity::rests)
+            .is_some_and(|file| self.unwoken.contains(&file.serial))
     }
 
     /// Whether an asset is being read whole out of its file.
@@ -1851,11 +1850,12 @@ impl Workspace {
         }
         match answer {
             Ok(made) => {
-                log.info(format!("{}: read whole for editing", entity.name));
+                log.info(format!("{}: read whole", entity.name));
                 self.swap(id, false, |_| made);
             }
             Err(why) => {
                 let name = entity.name.clone();
+                self.unwoken.insert(file.serial);
                 log.error(format!("{name}: {why}"));
                 log.trouble(format!("“{name}” could not be read."));
                 if let Some(entity) = self.get_mut(id) {
@@ -2452,6 +2452,12 @@ impl Workspace {
             });
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(file) = entity.rests() {
+            let _ = self.tx.send(save_file(&name, file));
+            self.ctx.request_repaint();
+            return;
+        }
         self.save_bytes(name, entity.bytes.to_vec());
     }
 
@@ -2918,15 +2924,21 @@ async fn save(name: String, bytes: Vec<u8>) -> Incoming {
     }
 }
 
+/// [`save`] for an asset resting in its file: the browser hands the file over itself, and
+/// nothing of it is read into this tab.
+#[cfg(target_arch = "wasm32")]
+fn save_file(name: &str, file: &OnDisk) -> Incoming {
+    let Some(snapshot) = file.snapshot() else {
+        return Incoming::Failed(format!("{name}: drawbar no longer reads its file"));
+    };
+    match hand_over(name, &snapshot) {
+        Ok(()) => Incoming::Note(format!("downloaded {name} ({} bytes)", file.len)),
+        Err(e) => Incoming::Failed(format!("{name}: {e:?}")),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn download(name: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
-    use wasm_bindgen::JsCast as _;
-    use wasm_bindgen::JsValue;
-
-    let document = web_sys::window()
-        .and_then(|w| w.document())
-        .ok_or_else(|| JsValue::from_str("no document"))?;
-
     // `Uint8Array::from` copies into the JS heap, so the Blob does not alias Rust
     // memory that is about to be freed.
     let parts = js_sys::Array::new();
@@ -2934,8 +2946,19 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
     let options = web_sys::BlobPropertyBag::new();
     options.set_type("application/octet-stream");
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)?;
+    hand_over(name, &blob)
+}
 
-    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+/// Hand `blob` to the downloader under `name`.
+#[cfg(target_arch = "wasm32")]
+fn hand_over(name: &str, blob: &web_sys::Blob) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::JsValue;
+
+    let document = web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or_else(|| JsValue::from_str("no document"))?;
+    let url = web_sys::Url::create_object_url_with_blob(blob)?;
     let anchor: web_sys::HtmlAnchorElement = document.create_element("a")?.unchecked_into();
     anchor.set_href(&url);
     anchor.set_download(name);

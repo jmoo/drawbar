@@ -187,7 +187,7 @@ stateDiagram-v2
     Remembered --> Reading: picked, opened or acted on
     Remembered --> Listed: file changed
     Reading --> Whole: read whole
-    Reading --> Resting: piano or sample, desktop
+    Reading --> Resting: piano or sample
     Reading --> NotRead: gone, error or no room
     NotRead --> Reading: room made
     Resting --> Whole: woken
@@ -218,11 +218,12 @@ stateDiagram-v2
   2 MiB a frame in the browser. An act about to use the decode runs it at once
   (`Workspace::read_now`). Decoding re-encodes and compares, as for any file
   that arrives.
-- **Resting.** On the desktop, a piano library or sample instrument stays in its
-  file, opened and indexed. Its checksum is checked off the frame, one file at a
-  time, and until then it is `Checking`. A file that fails its check is not
-  sent. Each resting file holds a file handle open, so the desktop raises its
-  open-file limit at start (`ondisk::raise_open_files`).
+- **Resting.** A piano library or sample instrument stays in its file, indexed.
+  Its checksum is checked off the frame, one file at a time, and until then it
+  is `Checking`. A file that fails its check is not sent. On the desktop each
+  resting file holds a file handle open, so the desktop raises its open-file
+  limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
+  snapshot the page took of it.
 - **Unsaved.** Its stamp differs from its baseline's. At the next full pass its
   bytes are written to `working/` under a new generation.
 - **Saving.** Saving moves the baseline to the current bytes, and the store
@@ -303,8 +304,7 @@ its CRC taken alone, 64 files or 64 MiB at a time
 The assets may hold at most 1 GiB of a library's files whole
 (`exec::MOST_BYTES`). The count is every asset's bytes, plus its baseline's
 where they are not the same allocation, plus the listed length of every read in
-flight. A file resting on disk takes none of it. In the browser nothing rests,
-so pianos and samples count in full.
+flight. A file resting in its file takes none of it.
 
 Each `Cmd::Read` carries the room left. The backend reads its files in order,
 and answers each one that would not fit in what is left with `Failure::Room`.
@@ -327,18 +327,36 @@ smallest first, once room can be made.
 
 ### Reading by range
 
-On the desktop, `OnDisk::open` indexes a CBIN file whose tag is `npno` or
-`nsmp` with `nord_format::formats::npno::Index` or `nsmp::Index`. Those read
-only the container header, the prefix and the stroke or zone directory, and give
-the byte range of each stroke's audio. A piano document reads one stroke by its
-range (`OnDisk::read`), and the sample editor, which works on the whole body,
-reads the file whole off the frame first (`Workspace::wake`). A file whose index
-does not read is read whole, so its decode can say why.
+`OnDisk::open` indexes a CBIN file whose tag is `npno` or `nsmp` with
+`nord_format::formats::npno::Index` or `nsmp::Index`. Those read only the
+container header, the prefix and the stroke or zone directory, and give the
+byte range of each stroke's audio. A piano document reads one stroke by its
+range (`OnDisk::read`). A file whose index does not read is read whole, so its
+decode can say why.
 
 The index does not verify the container checksum. The resting check does, in
-one streaming pass that also takes the whole file's CRC-32 for its fingerprint.
-The handle follows the file through a rename, and reads whatever the file holds
-now if it is rewritten in place; a rescan notices that and indexes it again.
+one streaming pass that also takes the whole file's CRC-32 for its fingerprint
+(`OnDisk::verify`). On the desktop the handle follows the file through a rename,
+and reads whatever the file holds now if it is rewritten in place; a rescan
+notices that and indexes it again.
+
+In the browser a read answers only later. The indexes read through a reader
+over the slices fetched so far (`ondisk::Slices`), which reports the file's
+real length and fails naming the range it lacks; the backend fetches that range,
+at least 64 KiB of it, and reads the index again. A piano's index arrives in one
+fetch after the 12 bytes that say what the file is, and a sample's in about one
+fetch per stroke. A read on the frame of a stroke not fetched yet answers
+`WouldBlock` and fetches it, and the repaint when it lands plays it. A pass over
+the whole file, the checksum or a whole read, streams 4 MiB slices in a task of
+its own. A `File` snapshot fails to read once its file is written, so a move this
+tab makes takes the snapshot again where the file went, and a file written over
+is indexed again.
+
+Some acts still need the whole file. They read it whole off the frame first
+(`Workspace::wake`): opening a sample in its editor, laying out a piano edit to
+save it, a send, Keep both, Duplicate, and an Overwrite that replaces another
+file. In the browser the act waits for that read. Exporting a resting file
+copies it across without reading it into memory.
 
 ## The store protocol
 
@@ -531,14 +549,13 @@ file already there. In a picked folder the page writes through
 Web Lock named for the folder, taken with `ifAvailable`, keeps a second tab to
 reading. Reads go through `File` snapshots in 4 MiB slices.
 
-Three things differ from the desktop. `create` checks the name and then moves,
+Two things differ from the desktop. `create` checks the name and then moves,
 in two steps, so in a picked folder another program can write between them.
 Chrome cannot move a folder whole, so a folder moves file by file, and an
-interrupted move leaves its files split between the two names, none lost. And
-the browser reads every file whole: nothing rests by range. The first write to
-the private file system also asks the browser to keep it through a shortage of
-space. A tab opens a new library only once the one before it has run its last
-command and let go of its lock.
+interrupted move leaves its files split between the two names, none lost. The
+first write to the private file system also asks the browser to keep it through
+a shortage of space. A tab opens a new library only once the one before it has
+run its last command and let go of its lock.
 
 ## Fingerprints, reconciliation and conflicts
 

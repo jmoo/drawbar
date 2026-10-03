@@ -20,6 +20,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{Arc, Weak};
 
 use eframe::egui;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
@@ -34,8 +35,9 @@ use web_sys::{
 };
 
 use super::exec::{self, Children, Fs, Kind, TMP, WORKING};
-use super::{names, Cmd, Event, Failure, Stat};
+use super::{names, Cmd, Event, Failure, Fingerprint, Stat};
 use crate::js::{describe, field};
+use crate::ondisk::OnDisk;
 use crate::room::measure as size;
 
 /// Where the writer is served, beside the page. The version keeps a cached writer from
@@ -138,6 +140,7 @@ pub struct Backend {
 impl Backend {
     /// Open the library at `root` once the one started before it has let go.
     pub fn start(ctx: &egui::Context, root: Root) -> Backend {
+        crate::ondisk::repaint_with(ctx);
         let backend = Backend {
             root: root.clone(),
             inbox: Rc::default(),
@@ -586,6 +589,9 @@ struct Folder {
     /// are let go after each command, and after every move, new folder or removal this
     /// tab makes, whether it succeeded or not.
     dirs: RefCell<HashMap<String, FileSystemDirectoryHandle>>,
+    /// The files left resting, each at the path it is at now, so a move takes their
+    /// snapshots again where they went.
+    resting: RefCell<Vec<(Weak<OnDisk>, String)>>,
 }
 
 /// A folder of the library and the name of one entry in it.
@@ -618,6 +624,7 @@ impl Folder {
             asked: false,
             inbox,
             dirs: RefCell::default(),
+            resting: RefCell::default(),
         })
     }
 
@@ -798,6 +805,42 @@ impl Folder {
             .await
             .map_err(failed)?;
         Ok(())
+    }
+
+    /// Take again the snapshot of every resting file a move from `from` to `to` carried,
+    /// where it is now. One that cannot be taken stays as it was, and its reads fail.
+    async fn follow(&self, from: &str, to: &str) {
+        self.resting
+            .borrow_mut()
+            .retain(|(file, _)| file.strong_count() > 0);
+        let carried: Vec<(Arc<OnDisk>, String)> = self
+            .resting
+            .borrow_mut()
+            .iter_mut()
+            .filter_map(|(file, path)| {
+                let rest = match path.strip_prefix(from)? {
+                    rest if rest.is_empty() || rest.starts_with('/') => rest.to_string(),
+                    _ => return None,
+                };
+                *path = format!("{to}{rest}");
+                Some((file.upgrade()?, path.clone()))
+            })
+            .collect();
+        for (file, path) in carried {
+            if let Ok(handle) = self.file(&path).await {
+                if let Ok(snapshot) = snapshot(&handle).await {
+                    file.resnapshot(snapshot);
+                }
+            }
+        }
+    }
+
+    /// Stop following the resting files at `path`, which was written over or deleted:
+    /// what they rest in is gone.
+    fn forget(&self, path: &str) {
+        self.resting
+            .borrow_mut()
+            .retain(|(file, at)| at != path && file.strong_count() > 0);
     }
 
     /// [`Fs::remove_dir`], leaving the folder handles as they are.
@@ -1032,16 +1075,8 @@ impl Fs for Folder {
         while bytes.len() < len {
             let at = bytes.len();
             let end = len.min(at + CHUNK);
-            let slice = file
-                .slice_with_f64_and_f64(at as f64, end as f64)
-                .map_err(failed)?;
-            let buffer: js_sys::ArrayBuffer = settle(slice.array_buffer()).await?;
-            let chunk = Uint8Array::new(&buffer);
-            if chunk.length() as usize != end - at {
-                return Err(io::Error::other("the file changed while it was read"));
-            }
-            bytes.resize(end, 0);
-            chunk.copy_to(&mut bytes[at..end]);
+            let chunk = crate::ondisk::slice(&file, at as u64..end as u64).await?;
+            bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
     }
@@ -1103,12 +1138,16 @@ impl Fs for Folder {
 
     async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let temp = self.stage(path, bytes).await?;
+        self.forget(path);
         self.place(&temp, path).await
     }
 
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         let moved = self.relocate(from, to).await;
         self.dirs.get_mut().clear();
+        if moved.is_ok() {
+            self.follow(from, to).await;
+        }
         moved
     }
 
@@ -1119,6 +1158,7 @@ impl Fs for Folder {
     }
 
     async fn remove_file(&mut self, path: &str) -> io::Result<()> {
+        self.forget(path);
         let (dir, leaf) = self.spot(path).await?;
         settle::<FileSystemFileHandle>(dir.get_file_handle(&leaf)).await?;
         JsFuture::from(dir.remove_entry(&leaf))
@@ -1131,5 +1171,23 @@ impl Fs for Folder {
         let removed = self.unmake(path).await;
         self.dirs.get_mut().clear();
         removed
+    }
+
+    /// The file is indexed through a snapshot taken now, and followed through the moves
+    /// this tab makes.
+    async fn rest(
+        &self,
+        path: &str,
+        known: Option<Fingerprint>,
+    ) -> io::Result<Option<Arc<OnDisk>>> {
+        let snapshot = snapshot(&self.file(path).await?).await?;
+        let Some(file) = OnDisk::open(snapshot, known.and_then(|print| print.crc)).await? else {
+            return Ok(None);
+        };
+        let file = Arc::new(file);
+        self.resting
+            .borrow_mut()
+            .push((Arc::downgrade(&file), path.to_string()));
+        Ok(Some(file))
     }
 }

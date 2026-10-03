@@ -683,7 +683,7 @@ impl Lister {
                 Err(e) => return self.part.unread.push((found.path, e.to_string())),
             }
             if unmoved.is_none() && row.print.is_some_and(|print| print.crc.is_some()) {
-                found.crc = crc(&found);
+                found.crc = crc(&found).await;
             }
         }
         self.part.files.push(found);
@@ -906,7 +906,7 @@ fn gathered(path: String, kind: &Kind, temps: &mut Vec<String>) -> Option<LibPat
 async fn fingerprint(fs: &impl Fs, found: &mut Found) {
     if let Ok((bytes, file)) = read(fs, &found.path, None).await {
         (found.bytes, found.file) = (bytes, file);
-        found.crc = crc(found);
+        found.crc = crc(found).await;
     }
 }
 
@@ -1038,7 +1038,7 @@ impl<'a> Rescan<'a> {
             ..Found::unread(path, stat)
         };
         if print.crc.is_some() {
-            found.crc = crc(&found);
+            found.crc = crc(&found).await;
         }
         self.found.insert(found.path.clone());
         self.listing.files.push(found);
@@ -1100,7 +1100,7 @@ async fn check(fs: &impl Fs, known: &BTreeMap<LibPath, Fingerprint>) -> Vec<Foun
             };
             (found.bytes, found.file) = (bytes, file);
             if print.crc.is_some() {
-                found.crc = crc(&found);
+                found.crc = crc(&found).await;
             }
         }
         checked.push(found);
@@ -1167,11 +1167,11 @@ async fn read_one(
 }
 
 /// CRC-32 over the whole of what a listing read, or `None` where the file could not be
-/// read through.
-fn crc(found: &Found) -> Option<u32> {
+/// read through. A file left resting is read in one streaming pass.
+async fn crc(found: &Found) -> Option<u32> {
     match (&found.bytes, &found.file) {
         (Some(bytes), _) => Some(nord_format::crc::crc32(bytes)),
-        (None, Some(file)) => file.crc().ok(),
+        (None, Some(file)) => file.crc_now().await.ok(),
         (None, None) => None,
     }
 }
@@ -1273,6 +1273,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
     use crate::testing::{on_disk, sample_bytes, Temp};
 
     /// A library whose files claim whatever size they are given, without taking it. The
@@ -1538,6 +1539,7 @@ mod tests {
 
     /// A read asked for leaves a sample instrument in its file, which takes none of the
     /// room, and refuses a file that does not fit what room is left.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_read_leaves_an_instrument_in_place_and_stops_at_the_room_left() {
         let dir = Temp::new();

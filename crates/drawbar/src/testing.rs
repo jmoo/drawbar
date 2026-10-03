@@ -1,8 +1,11 @@
 //! Headless frames, what they painted, and the state a browser act runs against, for
 //! the UI tests of every module.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -17,8 +20,10 @@ use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
 /// A directory of its own under the system's temp folder, removed when dropped.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Temp(pub PathBuf);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Temp {
     pub fn new() -> Temp {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -36,13 +41,11 @@ impl Temp {
         self.0.join(path)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn read(&self, path: &str) -> Vec<u8> {
         fs::read(self.at(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 
     /// The names in one folder, sorted.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn names(&self, dir: &str) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.at(dir))
             .unwrap_or_else(|e| panic!("{dir}: {e}"))
@@ -53,6 +56,7 @@ impl Temp {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Temp {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -265,6 +269,7 @@ pub(crate) fn sample_bytes() -> Vec<u8> {
 
 /// `bytes` written to `name` in `dir` and indexed in place, as a library opens a piano or
 /// sample instrument.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn on_disk(dir: &Temp, name: &str, bytes: &[u8]) -> Arc<crate::ondisk::OnDisk> {
     fs::write(dir.at(name), bytes).expect("the file is written");
     let file = fs::File::open(dir.at(name)).expect("the file opens");
@@ -273,6 +278,7 @@ pub(crate) fn on_disk(dir: &Temp, name: &str, bytes: &[u8]) -> Arc<crate::ondisk
 }
 
 /// An asset resting in `file`, restored as a library restores one, and its id.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn rest(workspace: &mut Workspace, name: &str, file: Arc<crate::ondisk::OnDisk>) -> u64 {
     let id = workspace.next_id();
     workspace.restore(

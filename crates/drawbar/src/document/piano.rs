@@ -150,20 +150,20 @@ impl<'a> Source<'a> {
     }
 
     /// Decode the `at`-th stroke of the directory, reading only its own range of a file.
-    fn decode(&self, at: usize) -> Result<Played, String> {
-        let error = |e: nord_format::error::Error| e.to_string();
+    fn decode(&self, at: usize) -> Result<Played, Unheard> {
+        let error = |e: nord_format::error::Error| Unheard::Refused(e.to_string());
         let (audio, channels) = match self {
             Source::Held(bytes) => {
                 let library = npno::Library::borrow(bytes).map_err(error)?;
-                let stroke = library.strokes().get(at).ok_or("no such stroke")?;
+                let stroke = library.strokes().get(at).ok_or_else(Unheard::none)?;
                 (
                     npno::codec::decode(stroke, library.channels()),
                     library.channels(),
                 )
             }
             Source::File(file, index) => {
-                let range = index.audio_ranges().get(at).ok_or("no such stroke")?;
-                let read = file.read(range.clone()).map_err(|e| e.to_string())?;
+                let range = index.audio_ranges().get(at).ok_or_else(Unheard::none)?;
+                let read = file.read(range.clone()).map_err(Unheard::of)?;
                 let stroke = index.stroke(at, &read).map_err(error)?;
                 let channels = index.library().channels();
                 (npno::codec::decode(&stroke, channels), channels)
@@ -173,6 +173,37 @@ impl<'a> Source<'a> {
             samples: audio.interleaved(),
             channels,
         })
+    }
+}
+
+/// Why a stroke gave no audio.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unheard {
+    /// Its range is still being read from the file. A repaint follows once it lands, and
+    /// asking again then decodes it.
+    Reading,
+    Refused(String),
+}
+
+impl std::fmt::Display for Unheard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unheard::Reading => f.write_str("its audio is still being read from the file"),
+            Unheard::Refused(why) => f.write_str(why),
+        }
+    }
+}
+
+impl Unheard {
+    fn none() -> Unheard {
+        Unheard::Refused("no such stroke".to_string())
+    }
+
+    fn of(e: std::io::Error) -> Unheard {
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock => Unheard::Reading,
+            _ => Unheard::Refused(e.to_string()),
+        }
     }
 }
 
@@ -978,26 +1009,27 @@ impl Cache {
 
     /// Decode one root's loudest kept attack stroke and draw its waveform, once. A
     /// refusal is remembered like a success: asking again would only produce it a
-    /// second time.
-    fn decode(&mut self, source: Source<'_>, plan: &Plan, root: u8) -> Result<(), String> {
+    /// second time. A stroke still being read from its file is not remembered.
+    fn decode(&mut self, source: Source<'_>, plan: &Plan, root: u8) -> Result<(), Unheard> {
         self.wanted = None;
         let answer = self.stroke(source, plan, root);
-        if !self.shapes.contains_key(&root) {
-            let shape = match (&answer, self.newest(root)) {
-                (Ok(()), Some((_, played))) => Ok(sample::envelope(
-                    &played.samples,
-                    played.channels,
-                    sample::COLUMNS,
-                )),
-                (Ok(()), None) => Err("the stroke decoded into nothing".to_string()),
-                (Err(why), _) => Err(why.clone()),
-            };
-            let from = source
-                .with(|library| pick(library, plan, root))
-                .ok()
-                .flatten();
-            self.shapes.insert(root, Drawn { from, shape });
+        if answer == Err(Unheard::Reading) || self.shapes.contains_key(&root) {
+            return answer;
         }
+        let shape = match (&answer, self.newest(root)) {
+            (Ok(()), Some((_, played))) => Ok(sample::envelope(
+                &played.samples,
+                played.channels,
+                sample::COLUMNS,
+            )),
+            (Ok(()), None) => Err("the stroke decoded into nothing".to_string()),
+            (Err(why), _) => Err(why.to_string()),
+        };
+        let from = source
+            .with(|library| pick(library, plan, root))
+            .ok()
+            .flatten();
+        self.shapes.insert(root, Drawn { from, shape });
         answer
     }
 
@@ -1005,16 +1037,28 @@ impl Cache {
     ///
     /// ⚠️ One stroke, whatever else the library holds: the audio of a whole root is more
     /// than this app ever needs at once.
-    fn stroke(&mut self, source: Source<'_>, plan: &Plan, root: u8) -> Result<(), String> {
-        let (at, key) = source.with(|library| {
-            let at = loudest(library, plan, root)?;
-            Ok::<_, String>((at, picked(root, &library.strokes()[at])))
-        })??;
+    fn stroke(&mut self, source: Source<'_>, plan: &Plan, root: u8) -> Result<(), Unheard> {
+        let (at, key) = source
+            .with(|library| {
+                let at = loudest(library, plan, root)?;
+                Ok::<_, String>((at, picked(root, &library.strokes()[at])))
+            })
+            .and_then(|found| found)
+            .map_err(Unheard::Refused)?;
         if let Some(held) = self.touch(key) {
-            return held.as_ref().map(|_| ()).map_err(String::clone);
+            return held
+                .as_ref()
+                .map(|_| ())
+                .map_err(|why| Unheard::Refused(why.clone()));
         }
-        let made = source.decode(at);
-        let answer = made.as_ref().map(|_| ()).map_err(String::clone);
+        let made = match source.decode(at) {
+            Err(Unheard::Reading) => return Err(Unheard::Reading),
+            made => made.map_err(|why| why.to_string()),
+        };
+        let answer = made
+            .as_ref()
+            .map(|_| ())
+            .map_err(|why| Unheard::Refused(why.clone()));
         self.strokes.insert(0, (key, made));
         self.strokes.truncate(KEPT_STROKES);
         answer
@@ -1381,22 +1425,20 @@ impl State {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        // ⚠️ A baseline resting in its file is read whole here, off the frame.
-        let file = entity.saved.file.clone();
-        let held = entity.saved.bytes.clone();
         let laying = plan.clone();
-        let job = work::run(ctx, move |progress| {
-            let saved = match file {
-                Some(file) => {
-                    progress.say("reading the library");
-                    file.whole().map_err(|e| e.to_string())?.into()
-                }
-                None => held,
-            };
-            let library = planned(&saved, &laying)?;
+        let lay = move |progress: &work::Progress, saved: &[u8]| {
+            let library = planned(saved, &laying)?;
             progress.say(format!("laying out {} strokes", library.strokes().len()));
             materialize(&library)
-        });
+        };
+        // ⚠️ A baseline resting in its file is read whole here, off the frame.
+        let job = match entity.saved.file.clone() {
+            Some(file) => file.whole_then(ctx, move |progress, saved| lay(progress, &saved)),
+            None => {
+                let held = entity.saved.bytes.clone();
+                work::run(ctx, move |progress| lay(progress, &held))
+            }
+        };
         self.job = Some(Laying { id, plan, job });
     }
 
@@ -1473,7 +1515,7 @@ impl State {
 
     /// Decode one root's loudest kept attack stroke, once, returning the codec's own
     /// error where it fails.
-    pub fn decode(&mut self, entity: &LocalEntity, root: u8) -> Result<(), String> {
+    pub fn decode(&mut self, entity: &LocalEntity, root: u8) -> Result<(), Unheard> {
         let held = self.plans.get(&entity.id);
         self.audio
             .decode(Source::of(entity), held.unwrap_or(&Plan::default()), root)
@@ -5187,6 +5229,7 @@ mod tests {
     /// Auditioning a library resting in its file reads that one stroke's range and
     /// nothing else, and hears what the whole file holds there. Drawing the document
     /// reads no audio at all.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn an_audition_of_a_resting_library_reads_exactly_its_strokes_range() {
         let dir = testing::Temp::new();
@@ -5220,6 +5263,7 @@ mod tests {
     /// A plan over a library resting in its file is checked through the index and laid
     /// out off the frame from a read of the file. What it was saved as stays in the
     /// file, and a revert leaves the library resting there again.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_plan_over_a_resting_library_lays_out_from_its_file_and_reverts_to_it() {
         let dir = testing::Temp::new();

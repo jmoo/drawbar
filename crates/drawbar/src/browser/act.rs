@@ -405,10 +405,26 @@ enum Ready {
     Never(String),
 }
 
+/// The assets an act carries whole: a send, or a copy of what they hold.
+fn carries(act: &Act, queue: &Queue) -> Vec<u64> {
+    match act {
+        Act::KeepBoth(id)
+        | Act::DuplicateLocal(id)
+        | Act::WriteBack(id)
+        | Act::Send { id, .. }
+        | Act::Retarget { id, .. }
+        | Act::Replace { id, .. } => vec![*id],
+        Act::SendChecked(ids) => ids.clone(),
+        Act::SendAll => will_write(queue).map(|held| held.id).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Whether every asset `act` reads has been read, and everything in a folder it removes
 /// has been listed. One not read yet is asked for, and so is the listing of a folder, and
-/// the act waits for them.
-fn ready(act: &Act, workspace: &Workspace, folders: &mut Folders) -> Ready {
+/// the act waits for them. In the browser, which cannot read a file whole on the frame,
+/// an asset the act carries whole that rests in its file is read whole first.
+fn ready(act: &Act, workspace: &mut Workspace, queue: &Queue, folders: &mut Folders) -> Ready {
     if let Some(dir) = removing(act, folders).filter(|dir| !folders.listed_whole(dir)) {
         folders.walk(&dir);
         return Ready::Later;
@@ -424,10 +440,32 @@ fn ready(act: &Act, workspace: &Workspace, folders: &mut Folders) -> Ready {
         workspace.hurry(id);
         later = true;
     }
+    if cfg!(target_arch = "wasm32") {
+        for id in carries(act, queue) {
+            match wake(workspace, id) {
+                Ready::Now => {}
+                Ready::Later => later = true,
+                never => return never,
+            }
+        }
+    }
     match later {
         true => Ready::Later,
         false => Ready::Now,
     }
+}
+
+/// Whether an asset is held whole, and otherwise read it whole: `Later` while that runs,
+/// and `Never` once it has failed.
+fn wake(workspace: &mut Workspace, id: u64) -> Ready {
+    let Some(entity) = workspace.get(id).filter(|entity| entity.rests().is_some()) else {
+        return Ready::Now;
+    };
+    if workspace.unwoken(id) {
+        return Ready::Never(format!("“{}” could not be read.", entity.name));
+    }
+    workspace.wake(id);
+    Ready::Later
 }
 
 /// The folder an act removes, if it removes one.
@@ -465,7 +503,7 @@ pub fn apply(
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
-        match ready(&act, workspace, &mut browser.folders) {
+        match ready(&act, workspace, queue, &mut browser.folders) {
             Ready::Now => {}
             Ready::Later => {
                 browser.held.push(act);
@@ -720,6 +758,15 @@ fn put(
         Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
         Clash::Taken(occupant) => {
             let folder = browser.folders.id_of(&dir);
+            // The overwrite it offers carries it whole, and the browser reads that first.
+            if cfg!(target_arch = "wasm32") {
+                if let Ready::Later = wake(workspace, id) {
+                    return browser.held.push(Act::MoveAs { id, folder, name });
+                }
+            }
+            let Some(entity) = workspace.get(id) else {
+                return;
+            };
             let free = browser.folders.free(&dir, &name, workspace);
             let both = vec![Act::MoveAs {
                 id,

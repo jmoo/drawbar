@@ -279,6 +279,9 @@ pub struct Document {
     /// holds may come back after the tab that started it has closed. See
     /// [`Document::settle`].
     piano: piano::State,
+    /// A root the user asked to hear, and the document asking, while its stroke is read
+    /// from the file. It is asked again each frame until it decodes.
+    reading: Option<(u64, piano::Ask)>,
 }
 
 impl Document {
@@ -484,6 +487,16 @@ impl Document {
                 device.send(cmd, log);
             }
         }
+        // A request the user made since takes the place of one still waiting.
+        let heard = |asked: &Asked| matches!(asked, Asked::Root(ask) if !matches!(ask, piano::Ask::Show(_)));
+        let waited = self
+            .reading
+            .take()
+            .filter(|(on, _)| *on == id && !asked.iter().any(heard));
+        let asked = waited
+            .map(|(_, ask)| Asked::Root(ask))
+            .into_iter()
+            .chain(asked);
         for asked in asked {
             match asked {
                 Asked::Open(item) => wants.open = Some(item),
@@ -976,14 +989,23 @@ impl Document {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        if let Err(why) = self.piano.decode(entity, root) {
+        match self.piano.decode(entity, root) {
+            Ok(()) => {}
+            // An open row asks again by itself.
+            Err(piano::Unheard::Reading) if matches!(ask, piano::Ask::Show(_)) => return,
+            Err(piano::Unheard::Reading) => {
+                self.reading = Some((id, ask));
+                return;
+            }
             // ⚠️ An open row asks for its waveform itself and shows why it has none.
             // The log is for requests the user made.
-            if !matches!(ask, piano::Ask::Show(_)) {
-                log.error(why);
-                log.trouble("That root could not be decoded.");
+            Err(piano::Unheard::Refused(why)) => {
+                if !matches!(ask, piano::Ask::Show(_)) {
+                    log.error(why);
+                    log.trouble("That root could not be decoded.");
+                }
+                return;
             }
-            return;
         }
         let Some(sound) = self.piano.sound(root) else {
             return;
@@ -1534,6 +1556,7 @@ mod tests {
 
     /// A sample instrument resting in its file is read whole, off the frame, when its
     /// document opens, and the editor draws once the read answers.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_resting_sample_is_read_whole_when_its_document_opens() {
         let dir = testing::Temp::new();

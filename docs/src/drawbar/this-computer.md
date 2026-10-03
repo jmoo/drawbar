@@ -86,12 +86,13 @@ again when you need it. It keeps every file that is open, selected, in view,
 unsaved or waiting to be sent. A file that would go past the 1 GiB with only those
 held is marked **not read** until there is room for it again.
 
-Piano libraries and sample instruments run to hundreds of megabytes, so on the
-desktop they stay in their files: drawbar holds in memory only the part it shows
-or plays, and reads a sample whole when you open it. When one is read, its
-checksum is checked in the background. Its row says **checking…** until that
-is done, and **failed verification** if the file does not match its checksum.
-Such a file is not sent. What stays in its file does not count toward the 1 GiB.
+Piano libraries and sample instruments run to hundreds of megabytes, so they
+stay in their files: drawbar holds in memory only the part it shows or plays,
+and reads one whole when you open a sample, save a piano edit, send it, or copy
+it. When one is read, its checksum is checked in the background. Its row says
+**checking…** until that is done, and **failed verification** if the file does
+not match its checksum. Such a file is not sent. What stays in its file does
+not count toward the 1 GiB.
 
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.

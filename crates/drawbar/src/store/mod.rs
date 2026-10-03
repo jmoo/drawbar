@@ -236,8 +236,7 @@ impl Fingerprint {
 pub enum Holds {
     /// Read whole, into memory.
     Whole,
-    /// Left in its file and read by range, as the desktop leaves a piano or sample
-    /// instrument.
+    /// Left in its file and read by range, as a piano or sample instrument is.
     Resting,
     /// Not read: drawbar knows its name, length and time.
     Unread,
