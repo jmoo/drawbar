@@ -338,6 +338,17 @@ impl Sample {
         }
     }
 
+    /// Whether this instrument stores a name that [`Self::set_name`] can replace.
+    ///
+    /// False where the `hdr` stops short of the name field, as on
+    /// [`nsmp::Chain::Early`]; [`Self::name`] then reads empty.
+    pub fn name_is_editable(&self) -> bool {
+        match self {
+            Sample::V2(s) => s.name_is_editable(),
+            Sample::V3(s) => s.name_is_editable(),
+        }
+    }
+
     /// Move the note a zone's sample plays untransposed at.
     pub fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
         match self {
@@ -370,8 +381,7 @@ impl Sample {
         }
     }
 
-    /// Whether this instrument's zones can be retuned and remapped. Its name
-    /// always can.
+    /// Whether this instrument's zones can be retuned and remapped.
     ///
     /// False where the zone table does not read, or where a `map` that also
     /// describes the keyboard note by note cannot be recomputed from the layout.
