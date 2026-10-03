@@ -113,6 +113,20 @@ const ASK_AROUND: f32 = 160.0;
 /// The shortest the note gets, however short the window.
 const ASK_FEWEST: f32 = 80.0;
 
+/// The words on a bulk action's button for the checked set: Queue counts what the
+/// attached instrument would take.
+pub(crate) fn bulk_label(
+    action: Bulk,
+    checked: &[Item],
+    workspace: &Workspace,
+    state: &DeviceState,
+) -> String {
+    match action {
+        Bulk::Queue => act::fits(checked, workspace, state).label(),
+        Bulk::Copy | Bulk::Export | Bulk::Tag | Bulk::Delete => action.label().to_string(),
+    }
+}
+
 /// The new name Enter commits from an in-place rename, if any.
 ///
 /// A blank or unchanged field returns `None`, so no operation is sent that would do
@@ -549,10 +563,7 @@ impl Browser {
         // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
         // this computer, where another instrument's file is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
-        let label = match &fits {
-            Some(fits) => fits.label(),
-            None => action.label().to_string(),
-        };
+        let label = bulk_label(action, checked, workspace, state);
         let live = !wanted.is_empty() && fits.as_ref().is_none_or(|fits| fits.takes > 0);
         let dead = fits
             .and_then(|fits| fits.why)
