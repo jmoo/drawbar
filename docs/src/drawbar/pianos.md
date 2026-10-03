@@ -9,8 +9,11 @@ plays.
 
 An edit does not rewrite the library. It is a plan over the saved file, shown at
 once, and every switch can be turned back on. The file is laid out only when it
-has to be: on Save, Export, or Queue send. The header reads `applying…` while
-that runs, and the action waits for it.
+has to be: on Save, Export, or Queue send, and the action waits for it. A library
+in your library folder is saved by writing it again from its own file, one stroke
+at a time, and Export and Queue send save the plan first. One held elsewhere, as
+a view of a slot is, is laid out in memory, and the header reads `applying…`
+while that runs.
 
 A plan is an unsaved edit like any other: the name is starred until it is saved,
 and **Revert** drops it.

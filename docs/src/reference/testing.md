@@ -14,7 +14,12 @@ files this crate's own writers produced, with sidecars recording what was set.
 The sweep fails unless that tree holds a file of every type the reader
 dispatches. Each specimen is parsed, round-tripped byte for byte, checked for
 unnameable values, and has every registry field set and read back without moving
-another.
+another. A piano library or sample instrument, alone or in a bundle, must also
+index to the bytes a whole read gives each stroke or zone, reading none of the
+audio to find them. A sample's outline must answer as a whole read does, and an
+edit saved as a patch must write the bytes a whole edit writes. An edited piano
+library streamed from its file must write the bytes the whole library writes,
+reading one stroke at a time.
 
 With `--features corpus`, `NORD_CORPUS_ROOT` names a corpus: any tree of Nord
 files. The sweep runs over every file in it the reader recognizes, wherever it
@@ -59,6 +64,33 @@ instead of passing as silence. `nord … --record <path>` writes a complete scri
 The step forms, the header keys, the `expect` values and the intent table are
 documented in
 [`crates/nord-usb/tests/scripts/README.md`](https://github.com/jmoo/drawbar/blob/master/crates/nord-usb/tests/scripts/README.md).
+
+## drawbar on an instrument
+
+`cargo test -p drawbar` runs headless: the device worker talks to a scripted
+instrument, and no test needs hardware. A separate suite in
+`crates/drawbar/src/device/hardware.rs` drives drawbar's own send paths against an
+attached instrument: a library over a temporary folder, the browser's acts, the
+queue, and the device worker over USB. It sends piano libraries and sample
+instruments from the files they rest in, replaces an occupied slot, changes a file
+on disk while it is being sent, and checks that memory stays bounded by the transfer
+chunk.
+
+The tests write to the instrument, so they are ignored and do nothing unless
+`DRAWBAR_HARDWARE=1`. Close drawbar and Nord Sound Manager first, so the interface
+is free, and run them one at a time:
+
+```sh
+DRAWBAR_HARDWARE=1 cargo test -p drawbar --lib device::hardware -- --ignored --test-threads=1 --nocapture
+```
+
+nord-cli reads the source objects, reads back what drawbar wrote, and deletes it
+again; `DRAWBAR_HARDWARE_NORD` names its binary when it is not `nord` on the
+path. The sources are slots on the instrument: `DRAWBAR_HARDWARE_PIANO` and
+`DRAWBAR_HARDWARE_OTHER_PIANO`, two piano libraries of a few megabytes, and
+`DRAWBAR_HARDWARE_SAMPLE`, a sample instrument of more than a megabyte. Each test
+writes only to the last vacant slots of bank 1 and deletes only names it gave, and
+the last test checks that every class holds what it held when the run started.
 
 ## Everything at once
 

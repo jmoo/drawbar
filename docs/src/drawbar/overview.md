@@ -66,12 +66,13 @@ explanation.
 
 ## Folders and tags
 
-Folders group sounds on this computer; the instrument never sees them. Make one
-with **New ▸ New folder**. Tags label sounds without moving them, and a sound can
-carry several. **Tag ▸ New tag…** in a row's menu, or **New tag** in the
-inspector's Tags card, puts a new tag on the selected sounds and opens its name for
-typing. Click a tag in that card to put it on, or take it off, everything
-selected. Removing a folder or a tag deletes no sounds.
+Folders on this computer are folders in its library folder, and can hold folders
+of their own; the instrument never sees them. Make one with **New ▸ New folder**.
+Tags label sounds without moving them, and a sound can carry several. **Tag ▸ New
+tag…** in a row's menu, or **New tag** in the inspector's Tags card, puts a new tag
+on the selected sounds and opens its name for typing. Click a tag in that card to
+put it on, or take it off, everything selected. Removing a folder moves what was in
+it up a level, and removing a tag deletes no sounds.
 
 ## MIDI controllers
 
