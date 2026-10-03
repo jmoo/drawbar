@@ -531,7 +531,7 @@ let
   # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
 
   corpusTree = builtins.fetchGit {
-    rev = "a3acd08d9f58469352db4c5f07b8e7ce358e80ce";
+    rev = "778a5715eb4c067dd11e390d894ce4a81cea8f03";
     url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
   };
 
