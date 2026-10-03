@@ -352,10 +352,13 @@ one streaming pass that also takes the whole file's CRC-32 for its fingerprint
 bytes (`OnDisk::holds`), and nothing takes its CRC on the frame. A file whose
 stat moved is told to hold what drawbar knew by its CRC, taken in one streaming
 pass (`Fs::crc`). A resting file changed on disk under an unsaved edit is not
-read whole to keep the edit apart: the asset rests in the new file, and its
-editor makes a sample's edit again over it where the edit still applies. On the desktop the handle follows the file through a rename,
-and reads whatever the file holds now if it is rewritten in place; a rescan
-notices that and indexes it again.
+read whole to keep the edit apart: the asset rests in the new file, and the
+workspace makes the edit again over it (`rewrite::Edit::over`). An edit the new
+file already holds is let go. One that no longer applies is kept as it was,
+still unsaved, and refuses to be saved, sent or copied until it is edited again
+or reverted. On the desktop the handle follows the file through a rename, and
+reads whatever the file holds now if it is rewritten in place; a rescan notices
+that and indexes it again.
 
 In the browser a read answers only later. The indexes read through a reader
 over the slices fetched so far (`ondisk::Slices`), which reports the file's
@@ -389,8 +392,11 @@ A sample's document draws from the index's outline, and an open zone reads its
 own stroke's range. An edit of it is held over the file as the sets made since
 it was saved, and the outline they make (`document::sample::Edits`). A piano
 plan over a resting library is checked against the index's stroke directory,
-which carries each stroke's range. Either way the workspace holds the rewrite
-that saves the edit (`Workspace::hold_edit`, `rewrite.rs`), and a save sends
+which carries each stroke's range. Either way the workspace holds the edit, as
+the sets or the plan (`rewrite::Edit`), and the rewrite that saves it into the
+file the asset rests in (`Workspace::hold_edit`, `rewrite.rs`). An editor takes
+up the workspace's edit wherever the asset rests in a file its own edit was not
+made over. A save sends
 `Cmd::Rewrite`: the backend writes the file again from itself into a temporary,
 then puts it over the file, and the asset rests in what it wrote. A sample's
 copy splices the edited sections in and restates the checksum

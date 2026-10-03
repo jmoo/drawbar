@@ -1713,7 +1713,9 @@ impl Store {
             (false, None, Some(file)) => workspace.adopt_file(id, file),
             (_, None, None) => return,
         }
-        match unsaved {
+        // An edit held over the file the asset rests in is made again over the file as
+        // it is now, and one that file already holds leaves nothing to choose between.
+        match unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
             false => log.say(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
@@ -2851,5 +2853,11 @@ fn conflict(id: u64, workspace: &Workspace, browser: &mut Browser, log: &mut Log
         "{}: changed on disk while drawbar held an unsaved edit",
         entity.name
     ));
+    if let Some(why) = workspace.unapplied(id) {
+        log.warn(format!(
+            "{}: the edit does not apply to the file as it is now: {why}",
+            entity.name
+        ));
+    }
     browser.ask_conflict(id, &entity.name);
 }

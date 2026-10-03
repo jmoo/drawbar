@@ -629,6 +629,20 @@ fn applied(sample: &mut impl Settable, sets: &[(String, String)]) -> Result<(), 
     Ok(())
 }
 
+/// The instrument `sets` make of the one `index` read, where they change it.
+fn edited(index: &nsmp::Index, sets: &[(String, String)]) -> Result<Option<Outlined>, String> {
+    let made = Outlined::of(index, sets)?;
+    let patch = index.patch(&made.outline).map_err(|e| e.to_string())?;
+    // One splice is the checksum, restated as it was.
+    Ok((patch.splices().len() > 1).then_some(made))
+}
+
+/// The rewrite that saves `sets` into the file `index` read: `None` where they change
+/// nothing there.
+pub fn rewrite(index: &nsmp::Index, sets: &[(String, String)]) -> Result<Option<Rewrite>, String> {
+    Ok(edited(index, sets)?.map(|made| Rewrite::Sample(made.outline)))
+}
+
 /// An instrument resting in its file as an edit leaves it: its fields outside the audio,
 /// and each zone's root key, which the narrow chain keeps only in the stroke.
 #[derive(Clone)]
@@ -703,26 +717,24 @@ impl Edits {
         let held = self.0.get(&id).filter(|edit| edit.over == file.serial);
         let mut all = held.map(|edit| edit.sets.clone()).unwrap_or_default();
         all.extend(sets.iter().cloned());
-        self.make(id, file, index, all)
+        self.make(id, file, index, all, false)
     }
 
-    /// The edit `sets` make of `file`, kept where it changes anything.
+    /// The edit `sets` make of `file`, kept where it changes anything. `held` says the
+    /// workspace holds it already.
     fn make(
         &mut self,
         id: u64,
         file: &OnDisk,
         index: &nsmp::Index,
         sets: Sets,
+        held: bool,
     ) -> Result<(), String> {
-        let made = Outlined::of(index, &sets)?;
-        let patch = index.patch(&made.outline).map_err(|e| e.to_string())?;
-        // One splice is the checksum, restated as it was.
-        if patch.splices().len() <= 1 {
+        let Some(made) = edited(index, &sets)? else {
             self.0.remove(&id);
             return Ok(());
-        }
+        };
         let over = file.serial;
-        let held = false;
         self.0.insert(
             id,
             Edit {
@@ -735,14 +747,20 @@ impl Edits {
         Ok(())
     }
 
-    /// Follow the file an instrument rests in: an edit of another file is made again over
-    /// this one. One that no longer applies is let go, and this says why.
-    pub fn follow(&mut self, id: u64, file: &OnDisk, index: &nsmp::Index) -> Result<(), String> {
-        if self.0.get(&id).is_none_or(|edit| edit.over == file.serial) {
-            return Ok(());
+    /// Take up the edit the workspace holds of an instrument resting in `file`, where
+    /// this holds none over that file. One that does not apply there is not shown.
+    pub fn adopt(&mut self, id: u64, file: &OnDisk, index: &nsmp::Index, sets: &Sets) {
+        if self.over(id, file) {
+            return;
         }
-        let edit = self.0.remove(&id).expect("held above");
-        self.make(id, file, index, edit.sets)
+        if self.make(id, file, index, sets.clone(), true).is_err() {
+            self.0.remove(&id);
+        }
+    }
+
+    /// Whether an edit of `id` is held over `file`.
+    pub fn over(&self, id: u64, file: &OnDisk) -> bool {
+        self.0.get(&id).is_some_and(|edit| edit.over == file.serial)
     }
 
     /// Whether an edit is held of `id` that changes its file.
@@ -756,11 +774,11 @@ impl Edits {
         Some(&edit.made)
     }
 
-    /// The rewrite that saves the edit of `id`, where the workspace does not hold it yet.
-    pub fn unheld(&mut self, id: u64) -> Option<Rewrite> {
+    /// The sets of the edit of `id`, where the workspace does not hold it yet.
+    pub fn unheld(&mut self, id: u64) -> Option<Sets> {
         let edit = self.0.get_mut(&id).filter(|edit| !edit.held)?;
         edit.held = true;
-        Some(Rewrite::Sample(edit.made.outline.clone()))
+        Some(edit.sets.clone())
     }
 
     /// The name the edit of `id` gives the instrument, where it holds one.

@@ -178,8 +178,10 @@ drawbar last saw is taken to be unchanged.
 - A file changed outside drawbar is shown as it is now. If you had unsaved edits
   to it, drawbar asks: **Keep mine** (your next save writes over the file),
   **Take theirs**, or **Keep both** (yours becomes a new file beside it). An
-  unsaved edit of a sample instrument is made again over the file as it is now,
-  where it still applies; an unsaved piano plan is dropped.
+  unsaved edit of a sample instrument or piano library is made again over the
+  file as it is now, and drawbar asks only if the file does not already hold
+  it. An edit that no longer applies to the file stays unsaved, and is neither
+  saved nor copied until you edit it again or take theirs.
 - A file deleted outside drawbar leaves the list, unless it had tags, unsaved
   edits, or a slot it came from. Then it stays, marked missing, until you save it
   back or delete it.

@@ -3244,14 +3244,8 @@ impl Session {
     /// and ask for it to be saved.
     fn rename_resting(&mut self, id: u64, name: &str) {
         let workspace = &mut self.bench.workspace;
-        let file = workspace.get(id).and_then(|entity| entity.rests()).unwrap();
-        let crate::ondisk::Index::Sample(index) = &file.index else {
-            panic!("a sample instrument")
-        };
-        let mut outline = index.outline().clone();
-        outline.set_name(name).unwrap();
-        workspace.hold_edit(id, Some(crate::rewrite::Rewrite::Sample(outline)));
-        workspace.mark_pending(id, true);
+        let sets = vec![("name".to_string(), name.to_string())];
+        workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)));
         assert!(workspace.save_edit(id));
     }
 }
@@ -3339,14 +3333,8 @@ fn an_unsaved_edit_of_a_resting_sample_is_named_before_the_library_goes() {
     assert_eq!(session.store.unkept(&session.bench.workspace), [""; 0]);
 
     let workspace = &mut session.bench.workspace;
-    let file = workspace.get(id).and_then(|entity| entity.rests()).unwrap();
-    let crate::ondisk::Index::Sample(index) = &file.index else {
-        panic!("a sample instrument")
-    };
-    let mut outline = index.outline().clone();
-    outline.set_name("Vibes").unwrap();
-    workspace.hold_edit(id, Some(crate::rewrite::Rewrite::Sample(outline)));
-    workspace.mark_pending(id, true);
+    let sets = vec![("name".to_string(), "Vibes".to_string())];
+    workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)));
     session.autosave();
     assert_eq!(
         session.store.unkept(&session.bench.workspace),
@@ -3375,14 +3363,8 @@ fn a_plan_over_a_resting_piano_is_saved_through_its_file() {
     };
 
     let workspace = &mut session.bench.workspace;
-    let file = workspace.get(id).and_then(|entity| entity.rests()).unwrap();
-    let crate::ondisk::Index::Piano(index) = &file.index else {
-        panic!("a piano library")
-    };
-    let mut library = index.library().clone();
-    trim(&mut library);
-    workspace.hold_edit(id, Some(crate::rewrite::Rewrite::Piano(library)));
-    workspace.mark_pending(id, true);
+    let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
+    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan)));
     assert!(workspace.save_edit(id));
     session.sync();
 
@@ -3558,4 +3540,170 @@ fn a_resting_sample_changed_outside_under_an_edit_is_never_read_whole() {
     assert_eq!(entity.held_whole(), 0);
     let (title, _) = session.bench.browser.asking().expect("a question");
     assert!(title.contains("Zoned.nsmp"), "{title}");
+}
+
+/// A piano library rooted at each of `roots`, every key mapped to the nearest, each
+/// stroke `blocks` blocks of audio.
+fn piano_rooted(roots: &[u8], blocks: u16) -> Vec<u8> {
+    use nord_format::formats::npno::synthetic::{take, Build};
+    use nord_format::formats::npno::Bank;
+
+    Build {
+        version: 0x464,
+        channels: 1,
+        takes: roots
+            .iter()
+            .map(|root| take(*root, Bank::Attack, 0, blocks))
+            .collect(),
+        map: (21..=108)
+            .map(|key: u8| {
+                let root = roots.iter().min_by_key(|root| root.abs_diff(key));
+                (key, *root.expect("a root"))
+            })
+            .collect(),
+    }
+    .bytes()
+    .expect("the builder lays out a library")
+}
+
+/// A library holding a piano library resting in its file under a plan that renames it
+/// and drops the strokes rooted at 60, and that plan.
+fn planned_piano(root: &Temp) -> (Session, u64, crate::document::piano::Plan) {
+    fs::write(root.at("Grand.npno"), piano_rooted(&[48, 60, 72], 4)).unwrap();
+    let mut session = Session::listed(root);
+    session.ask_all();
+    let id = session.only();
+    let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
+    let workspace = &mut session.bench.workspace;
+    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan.clone())));
+    assert!(workspace.get(id).unwrap().is_unsaved());
+    (session, id, plan)
+}
+
+/// A piano library whose file is saved over outside drawbar under an unsaved plan keeps
+/// the plan, made again over the file as it is now, and drawbar asks whose to keep.
+/// Keeping mine saves the plan over their file.
+#[test]
+fn a_plan_over_a_resting_piano_changed_outside_is_made_again_over_theirs() {
+    let root = Temp::new();
+    let (mut session, id, plan) = planned_piano(&root);
+    let theirs = piano_rooted(&[48, 60, 72], 5);
+    fs::write(root.at("Grand.npno"), &theirs).unwrap();
+
+    session.settle();
+
+    let workspace = &session.bench.workspace;
+    let entity = workspace.get(id).unwrap();
+    let file = entity.rests().expect("it rests in their file");
+    assert_eq!(file.len, theirs.len() as u64);
+    let (over, _) = workspace
+        .edit_of(id)
+        .expect("the plan applies to their file");
+    assert!(std::sync::Arc::ptr_eq(over, file));
+    assert!(entity.is_unsaved());
+    let (title, answers) = session.bench.browser.asking().expect("a question");
+    assert_eq!(title, "“Grand.npno” changed on disk");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+
+    session.bench.browser.answer("Keep mine");
+    assert!(session.bench.workspace.save_edit(id));
+    session.sync();
+    let made = crate::document::piano::rebuild(&theirs, &plan).unwrap();
+    assert!(root.read("Grand.npno") == made, "their file under my plan");
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+/// A plan that no longer applies to the file saved over it outside drawbar is kept as
+/// it was, unsaved, and drawbar asks whose to keep. It is neither saved nor copied
+/// beside the file, and taking theirs lets it go.
+#[test]
+fn a_plan_that_no_longer_applies_to_its_changed_file_is_kept_until_theirs_is_taken() {
+    let root = Temp::new();
+    let (mut session, id, plan) = planned_piano(&root);
+    // Dropping the strokes rooted at 60 would leave this library none.
+    let theirs = piano_rooted(&[60], 4);
+    fs::write(root.at("Grand.npno"), &theirs).unwrap();
+
+    session.settle();
+
+    let workspace = &session.bench.workspace;
+    assert_eq!(
+        workspace.edit(id),
+        Some(&crate::rewrite::Edit::Piano(plan)),
+        "the plan is kept as it was"
+    );
+    assert!(workspace.unapplied(id).is_some());
+    assert!(workspace.get(id).unwrap().is_unsaved());
+    let (title, _) = session.bench.browser.asking().expect("a question");
+    assert_eq!(title, "“Grand.npno” changed on disk");
+    assert!(session.said("does not apply to the file as it is now") > 0);
+
+    let acts = session.bench.browser.answer("Keep both");
+    session.bench.act(acts);
+    session.sync();
+    let files: Vec<String> = root
+        .names("")
+        .into_iter()
+        .filter(|name| name != ".drawbar")
+        .collect();
+    assert_eq!(files, ["Grand.npno"], "nothing was copied");
+    assert_eq!(session.said("was not copied"), 1);
+    assert!(
+        session.bench.workspace.edit(id).is_some(),
+        "the plan is still kept"
+    );
+    assert!(
+        !session.bench.workspace.save_edit(id),
+        "and cannot be saved"
+    );
+
+    session.bench.act(vec![crate::browser::Act::Revert(id)]);
+    session.sync();
+    let workspace = &session.bench.workspace;
+    assert!(workspace.edit(id).is_none());
+    assert!(!workspace.get(id).unwrap().is_unsaved());
+    assert!(root.read("Grand.npno") == theirs);
+}
+
+/// A sample instrument's edit that no longer applies to the file saved over it outside
+/// drawbar is kept, unsaved, rather than let go.
+#[test]
+fn a_sample_edit_that_no_longer_applies_to_its_changed_file_is_kept() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    let sets = vec![("zone3.root_key".to_string(), "C5".to_string())];
+    let edit = crate::rewrite::Edit::Sample(sets);
+    let workspace = &mut session.bench.workspace;
+    workspace.hold_edit(id, Some(edit.clone()));
+    assert!(
+        workspace.edit_of(id).is_some(),
+        "the edit applies to the file"
+    );
+    let theirs = crate::testing::sample_bytes();
+    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+
+    session.settle();
+
+    let workspace = &session.bench.workspace;
+    assert_eq!(workspace.edit(id), Some(&edit));
+    assert!(workspace.unapplied(id).is_some(), "their file has one zone");
+    assert!(workspace.get(id).unwrap().is_unsaved());
+    assert!(session.bench.browser.asking().is_some());
+}
+
+/// A file saved over outside drawbar with what an unsaved edit of it makes leaves the
+/// edit nothing to change, so it is let go and nothing is asked.
+#[test]
+fn an_edit_their_file_already_holds_is_let_go_without_asking() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let theirs = session.edit_resting(id, &bytes);
+    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+
+    session.settle();
+
+    let workspace = &session.bench.workspace;
+    assert!(workspace.edit(id).is_none());
+    assert!(!workspace.get(id).unwrap().is_unsaved());
+    assert!(session.bench.browser.asking().is_none(), "nothing to ask");
 }

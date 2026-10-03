@@ -15,6 +15,7 @@ use crate::fields;
 use crate::log::Log;
 use crate::midi::Played;
 use crate::queue::Queue;
+use crate::rewrite::Edit;
 use crate::strings;
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, VerifyState, Workspace};
@@ -27,7 +28,7 @@ mod field;
 mod header;
 pub mod keys;
 mod panel;
-mod piano;
+pub(crate) mod piano;
 mod project;
 pub(crate) mod sample;
 mod setlist;
@@ -321,7 +322,7 @@ impl Document {
             return Wants::default();
         }
         workspace.read_now([id], log);
-        self.follow_sample(id, workspace, log);
+        self.follow_sample(id, workspace);
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
@@ -379,7 +380,16 @@ impl Document {
             _ => 0,
         };
         let extras = match shape {
-            Shape::Piano => self.piano.begin(id, entity, &device.state),
+            Shape::Piano => {
+                let held = match workspace
+                    .edit(id)
+                    .filter(|_| workspace.edit_of(id).is_some())
+                {
+                    Some(Edit::Piano(plan)) => Some(plan),
+                    _ => None,
+                };
+                self.piano.begin(id, entity, &device.state, held)
+            }
             Shape::Fields
             | Shape::SetList
             | Shape::Sample
@@ -505,7 +515,7 @@ impl Document {
                 Asked::Advanced => {
                     self.views.insert(id, Face::Advanced);
                 }
-                Asked::Export => self.export(ui.ctx(), id, workspace),
+                Asked::Export => self.export(ui.ctx(), id, workspace, log),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
                 Asked::Encode => self.encode(id, workspace, log),
@@ -525,7 +535,7 @@ impl Document {
             workspace.rename(id, name);
         }
         if act.export {
-            self.export(ui.ctx(), id, workspace);
+            self.export(ui.ctx(), id, workspace, log);
         }
         if act.revert {
             workspace.revert(id, log);
@@ -563,15 +573,18 @@ impl Document {
             return;
         };
         let checked = match workspace.get(id) {
-            Some(entity) => piano::rewrite(entity, &plan),
+            Some(entity) => piano::check(entity, &plan).map(|()| entity.rests().is_some()),
             None => return,
         };
         match checked {
-            Ok(rewrite) => {
-                self.piano.commit(plan);
+            Ok(resting) => {
+                self.piano.commit(plan.clone());
                 self.refused(None);
                 // A library resting in its file is saved by writing the plan through it.
-                workspace.hold_edit(id, rewrite);
+                if resting {
+                    let edit = (!plan.is_empty()).then_some(Edit::Piano(plan));
+                    workspace.hold_edit(id, edit);
+                }
             }
             Err(why) => {
                 self.piano.discard();
@@ -594,29 +607,25 @@ impl Document {
         }
     }
 
-    /// Follow the file a sample instrument rests in: an edit of another file is made
-    /// again over this one, and one that no longer applies is let go. The workspace is
-    /// given the edit's rewrite, and told whether there is one.
-    fn follow_sample(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
-        if !self.samples.pending(id) {
-            return;
-        }
+    /// Keep the edit of a sample instrument resting in its file level with the
+    /// workspace's: this document's edit is handed to the workspace once made, and where
+    /// the instrument rests in another file than this document's edit is over, it takes
+    /// up what the workspace made of the edit there.
+    fn follow_sample(&mut self, id: u64, workspace: &mut Workspace) {
         let Some((file, index)) = workspace.get(id).and_then(sample::resting) else {
             self.samples.forget(id);
-            workspace.mark_pending(id, false);
             return;
         };
-        if let Err(why) = self.samples.follow(id, file, index) {
-            let name = workspace.get(id).map_or("", |entity| &entity.name);
-            log.error(format!("{name}: {why}"));
-            log.trouble(format!(
-                "“{name}” changed on disk, and its edit no longer applies, so it was let go."
-            ));
+        if !self.samples.over(id, file) {
+            match workspace.edit(id) {
+                Some(Edit::Sample(sets)) => self.samples.adopt(id, file, index, sets),
+                _ => self.samples.forget(id),
+            }
+            return;
         }
-        if let Some(rewrite) = self.samples.unheld(id) {
-            workspace.hold_edit(id, Some(rewrite));
+        if let Some(sets) = self.samples.unheld(id) {
+            workspace.hold_edit(id, Some(Edit::Sample(sets)));
         }
-        workspace.mark_pending(id, self.samples.pending(id));
     }
 
     /// Tell the workspace whether this document holds a pending plan, and return whether
@@ -653,8 +662,12 @@ impl Document {
         queue: &Queue,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
-        for id in self.samples.ids() {
-            self.follow_sample(id, workspace, log);
+        let mut ids = self.samples.ids();
+        ids.extend(workspace.edited());
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            self.follow_sample(id, workspace);
         }
         let mut out = Vec::new();
         for act in acts {
@@ -665,7 +678,7 @@ impl Document {
                 self.samples.forget(*id);
             }
             let carried = act.carries(queue);
-            if let Some(act) = self.save_first(act, &carried, workspace) {
+            if let Some(act) = self.save_first(act, &carried, workspace, log) {
                 out.extend(self.piano.hold(ctx, act, workspace));
             }
         }
@@ -676,13 +689,27 @@ impl Document {
 
     /// Hold an act that carries assets out of the app while any of them holds an edit
     /// over the file it rests in, and ask for each such edit to be saved into its file
-    /// first. Returns the act where it is free to run now.
+    /// first. Returns the act where it is free to run now, and drops it, saying why,
+    /// where an edit does not apply to the file it would be saved into.
     fn save_first(
         &mut self,
         act: crate::browser::Act,
         carried: &[u64],
         workspace: &mut Workspace,
+        log: &mut Log,
     ) -> Option<crate::browser::Act> {
+        let unapplied = carried.iter().find_map(|id| {
+            let why = workspace.unapplied(*id)?;
+            Some((&workspace.get(*id)?.name, why))
+        });
+        if let Some((name, why)) = unapplied {
+            log.error(format!("{name}: {why}"));
+            log.trouble(format!(
+                "“{name}” holds an edit that does not apply to its file as it is now, so \
+                 it was not saved. Revert it, or edit it again."
+            ));
+            return None;
+        }
         let files: Vec<(u64, u64)> = carried
             .iter()
             .filter(|id| workspace.edit_of(**id).is_some())
@@ -761,9 +788,9 @@ impl Document {
     }
 
     /// Export the document's bytes once any pending edit has reached them.
-    fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace) {
+    fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace, log: &mut Log) {
         let held = self
-            .save_first(crate::browser::Act::Export(id), &[id], workspace)
+            .save_first(crate::browser::Act::Export(id), &[id], workspace, log)
             .and_then(|act| self.piano.hold(ctx, act, workspace));
         if held.is_some() {
             workspace.export(id);
@@ -1237,7 +1264,10 @@ impl Document {
                 return Err(why);
             }
             self.refused(None);
-            self.follow_sample(id, workspace, log);
+            if !self.samples.pending(id) {
+                workspace.hold_edit(id, None);
+            }
+            self.follow_sample(id, workspace);
             return Ok(());
         }
         // ⚠️ Works on the asset's own bytes, never a copy. A piano library is hundreds
@@ -3590,6 +3620,40 @@ mod tests {
         open.frame(Vec::new());
         assert!(!open.document.pends(id), "the plan went with the save");
         assert!(!open.entity().is_unsaved());
+    }
+
+    /// A plan over a piano library resting in its file stays when the file is saved over
+    /// outside drawbar: the document shows it made again over the file as it is now.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_pianos_plan_follows_its_file_saved_over_outside() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &piano_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Test Piano.npno", file);
+        open.id = id;
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("Test Piano")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+        assert!(open.workspace.edit_of(id).is_some(), "the rename is a plan");
+
+        let theirs = testing::on_disk(&dir, "Theirs.npno", &piano_bytes());
+        open.workspace.adopt_file(id, theirs.clone());
+        open.act(Vec::new());
+        open.twice();
+
+        let (over, _) = open.workspace.edit_of(id).expect("the plan is kept");
+        assert!(
+            std::sync::Arc::ptr_eq(over, &theirs),
+            "made over their file"
+        );
+        assert!(open.document.pends(id) && open.entity().is_unsaved());
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert!(
+            renamed.is_some_and(|name| name.contains('X')),
+            "the document shows the plan over their file"
+        );
     }
 
     /// A pending plan marks the asset unsaved, which offers Revert. A revert drops the

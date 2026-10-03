@@ -15,7 +15,41 @@ use std::ops::{AsyncFnMut, Range};
 use nord_format::cbin::Verifier;
 use nord_format::formats::{npno, nsmp};
 
+use crate::document::piano::Plan;
 use crate::ondisk::{self, OnDisk};
+
+/// An edit of an instrument resting in its file, as its editor made it. It is made again
+/// over whichever file the instrument rests in, as [`Edit::over`] makes it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Edit {
+    /// The `path = value` sets made of a sample instrument since it was saved, in order.
+    /// Each names the value it leaves, so made again over a file that holds them they
+    /// change nothing.
+    Sample(Vec<(String, String)>),
+    /// A piano library's plan.
+    Piano(Plan),
+}
+
+impl Edit {
+    /// The rewrite that saves this edit into `file`: `None` where it changes nothing
+    /// there, and why not where it does not apply to what the file holds.
+    pub fn over(&self, file: &OnDisk) -> Result<Option<Rewrite>, String> {
+        match (self, &file.index) {
+            (Edit::Sample(sets), ondisk::Index::Sample(index)) => {
+                crate::document::sample::rewrite(index, sets)
+            }
+            (Edit::Piano(plan), ondisk::Index::Piano(index)) => {
+                crate::document::piano::rewrite_over(index, plan)
+            }
+            (Edit::Sample(_), ondisk::Index::Piano(_)) => {
+                Err("the file is no longer a sample instrument".to_string())
+            }
+            (Edit::Piano(_), ondisk::Index::Sample(_)) => {
+                Err("the file is no longer a piano library".to_string())
+            }
+        }
+    }
+}
 
 /// What an edit changes of a file resting in the library.
 #[derive(Debug)]

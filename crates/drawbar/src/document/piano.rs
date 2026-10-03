@@ -238,6 +238,18 @@ pub struct Plan {
     key_roots: BTreeMap<u8, Option<u8>>,
 }
 
+#[cfg(test)]
+impl Plan {
+    /// A plan renaming the library and dropping the strokes of one root on one layer.
+    pub fn trimmed(name: &str, root: u8, layer: u8) -> Plan {
+        Plan {
+            name: Some(name.to_string()),
+            roots: [((root, layer), false)].into(),
+            ..Plan::default()
+        }
+    }
+}
+
 impl Plan {
     /// Whether it edits nothing. The baseline it is measured against is not an edit.
     ///
@@ -383,13 +395,10 @@ pub fn check(entity: &LocalEntity, plan: &Plan) -> Result<(), String> {
     Source::saved(entity).with(|library| replanned(library.clone(), plan).map(|_| ()))?
 }
 
-/// The rewrite that saves `plan` into the file the asset rests in, laid out from that
-/// file's index, which reads no audio: `None` where it rests in no piano library's file,
-/// or the plan edits nothing. The plan is checked as [`check`] checks it.
-pub fn rewrite(entity: &LocalEntity, plan: &Plan) -> Result<Option<Rewrite>, String> {
-    let Some(ondisk::Index::Piano(index)) = entity.indexed() else {
-        return check(entity, plan).map(|()| None);
-    };
+/// The rewrite that saves `plan` into the library `index` read, laid out from the index,
+/// which reads no audio: `None` where the plan edits nothing. The plan is checked as
+/// [`check`] checks it.
+pub fn rewrite_over(index: &npno::Index, plan: &Plan) -> Result<Option<Rewrite>, String> {
     let library = replanned(index.library().clone(), plan)?;
     Ok((!plan.is_empty()).then_some(Rewrite::Piano(library)))
 }
@@ -1222,7 +1231,15 @@ impl State {
     ///
     /// [`Extras::default`] for anything that is not a piano library, which leaves the
     /// header's own rules in charge.
-    pub fn begin(&mut self, id: u64, entity: &LocalEntity, device: &DeviceState) -> Extras {
+    /// `held` is the plan the workspace holds of a library resting in its file, which a
+    /// plan over another baseline gives way to.
+    pub fn begin(
+        &mut self,
+        id: u64,
+        entity: &LocalEntity,
+        device: &DeviceState,
+        held: Option<&Plan>,
+    ) -> Extras {
         if !is_piano(entity) {
             self.open = None;
             return Extras::default();
@@ -1244,11 +1261,11 @@ impl State {
         }
         let plan = self.plans.entry(id).or_default();
         // A save makes the drops permanent: the rows show the file as it now is, and
-        // there is nothing left to put back.
+        // there is nothing left to put back but a plan the workspace made again over it.
         if plan.against != baseline {
             *plan = Plan {
                 against: baseline,
-                ..Plan::default()
+                ..held.cloned().unwrap_or_default()
             };
             self.laid.remove(&id);
         }
@@ -4576,7 +4593,7 @@ mod tests {
             let output = testing::run(&self.ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let entity = self.workspace.get(self.id).expect("it is open");
-                    self.state.begin(self.id, entity, &self.device.state);
+                    self.state.begin(self.id, entity, &self.device.state, None);
                     if let Some(edit) = edit.take() {
                         edit(&mut self.state.draft);
                     }
@@ -4827,7 +4844,7 @@ mod tests {
 
         let said = editor
             .state
-            .begin(editor.id, held, &editor.device.state)
+            .begin(editor.id, held, &editor.device.state, None)
             .edited
             .expect("the header claims the plan");
         assert_eq!(said.words, "trimmed");
@@ -5062,6 +5079,7 @@ mod tests {
             other,
             editor.workspace.get(other).expect("it is open"),
             &editor.device.state,
+            None,
         );
         assert_eq!(
             editor.state.summary.as_ref().map(|held| held.kept),
@@ -5194,7 +5212,7 @@ mod tests {
         );
         let entity = workspace.get(id).expect("it is open");
         let mut state = State::default();
-        state.begin(id, entity, &Device::new(ctx).state);
+        state.begin(id, entity, &Device::new(ctx).state, None);
 
         state.decode(entity, ROOTS[0]).expect("it decodes");
         assert_eq!(
@@ -5260,7 +5278,7 @@ mod tests {
         assert!(entity.bytes.is_empty(), "the library is not held");
 
         let mut state = State::default();
-        state.begin(id, entity, &Device::new(ctx).state);
+        state.begin(id, entity, &Device::new(ctx).state, None);
         assert!(state.facts().is_some(), "the facts read from the index");
         assert_eq!(file.take_reads(), [], "drawing it read no audio");
 
@@ -5297,8 +5315,10 @@ mod tests {
             plan.banks.contains(&Bank::Release),
             "the index took the plan"
         );
-        let entity = editor.workspace.get(editor.id).expect("it is open");
-        let edit = rewrite(entity, &plan).unwrap().expect("a plan to save");
+        let ondisk::Index::Piano(index) = &file.index else {
+            panic!("a piano library's index")
+        };
+        let edit = rewrite_over(index, &plan).unwrap().expect("a plan to save");
         let mut out = std::io::Cursor::new(Vec::new());
         edit.write(&file, &mut out).unwrap();
         assert_eq!(out.into_inner(), rebuild(&saved, &plan).unwrap());
@@ -5308,7 +5328,7 @@ mod tests {
             held.is_some() && !editor.state.applying(),
             "nothing lays it out"
         );
-        assert!(rewrite(entity, &Plan::default()).unwrap().is_none());
+        assert!(rewrite_over(index, &Plan::default()).unwrap().is_none());
 
         editor.workspace.revert(editor.id, &mut editor.log);
         editor.state.forget(editor.id);

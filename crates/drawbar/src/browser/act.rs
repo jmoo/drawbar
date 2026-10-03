@@ -931,6 +931,9 @@ fn copy_over(
     id: u64,
     from: u64,
 ) {
+    if unapplied(workspace, log, from) {
+        return;
+    }
     let (Some(copy), Some(source)) = (workspace.copy_of(from), workspace.get(from)) else {
         return;
     };
@@ -942,11 +945,29 @@ fn copy_over(
     }
 }
 
+/// Refuse to copy an asset holding an edit that does not apply to the file it rests in,
+/// saying so: no file holds what the edit makes of it.
+fn unapplied(workspace: &Workspace, log: &mut Log, id: u64) -> bool {
+    let (Some(entity), Some(why)) = (workspace.get(id), workspace.unapplied(id)) else {
+        return false;
+    };
+    log.error(format!("{}: {why}", entity.name));
+    log.trouble(format!(
+        "“{}” was not copied: its edit does not apply to its file as it is now. Revert it, \
+         or edit it again.",
+        entity.name
+    ));
+    true
+}
+
 fn duplicate(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
     let dir = workspace
         .get(id)
         .and_then(|entity| entity.path.as_ref())
         .map(LibPath::parent);
+    if unapplied(workspace, log, id) {
+        return;
+    }
     // One resting in its file is copied by the library, never held whole.
     if let (Some(dir), Some(copy)) = (dir.clone(), workspace.copy_of(id)) {
         let Some(source) = workspace.get(id) else {
@@ -982,6 +1003,9 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         .path
         .as_ref()
         .map_or_else(LibPath::root, LibPath::parent);
+    if unapplied(workspace, log, id) {
+        return;
+    }
     let name = browser.folders.free(&dir, &entity.name, workspace);
     // One resting in its file is copied by the library, with the edit held of it.
     if let Some(copy) = workspace.copy_of(id) {
