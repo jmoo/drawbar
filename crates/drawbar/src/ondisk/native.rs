@@ -88,12 +88,8 @@ impl Source {
         self.read(0, 0..len)
     }
 
-    pub(super) fn crc(&self, _len: u64) -> io::Result<u32> {
+    pub(super) async fn crc_now(&self, _serial: u64, _len: u64) -> io::Result<u32> {
         crc_of(&mut self.reader())
-    }
-
-    pub(super) async fn crc_now(&self, _serial: u64, len: u64) -> io::Result<u32> {
-        self.crc(len)
     }
 
     fn reader(&self) -> BufReader<At<'_>> {

@@ -1021,7 +1021,7 @@ impl Store {
         ));
         for (id, record) in &mut self.records {
             if std::mem::take(&mut record.saving) {
-                workspace.unsave(*id, log);
+                workspace.unsave(*id);
                 if let Some(entity) = workspace.get(*id) {
                     record.saved = entity.saved.stamp;
                 }
@@ -1503,7 +1503,7 @@ impl Store {
         // looked, so the tree is listed again.
         self.owes |= !complete.gone.is_empty();
         for id in &missing {
-            workspace.unsave(*id, log);
+            workspace.unsave(*id);
             browser.folders.missing.insert(*id);
         }
         for (id, generation) in viewed {
@@ -1708,7 +1708,7 @@ impl Store {
         let holds = found.holds();
         match (unsaved, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
-            (true, None, Some(file)) => workspace.rebase_file(id, file, log),
+            (true, None, Some(file)) => workspace.rebase_file(id, file),
             (false, Some(bytes), _) => workspace.adopt(id, bytes, log),
             (false, None, Some(file)) => workspace.adopt_file(id, file),
             (_, None, None) => return,
@@ -1806,7 +1806,7 @@ impl Store {
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
         };
-        workspace.unsave(id, log);
+        workspace.unsave(id);
         if let (Some(record), Some(entity)) = (self.records.get_mut(&id), workspace.get(id)) {
             record.saved = entity.saved.stamp;
         }

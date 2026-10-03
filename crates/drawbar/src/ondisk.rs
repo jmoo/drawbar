@@ -211,20 +211,7 @@ impl OnDisk {
     }
 
     /// CRC-32 over every byte of the file, taken in one streaming pass the first time it
-    /// is asked for.
-    ///
-    /// ⚠️ On the desktop that pass reads the whole file, hundreds of megabytes for a piano
-    /// library, on the calling thread. The browser cannot wait for it, and answers only a
-    /// CRC already taken: [`OnDisk::crc_now`] takes one.
-    pub fn crc(&self) -> io::Result<u32> {
-        if let Some(crc) = self.crc.get() {
-            return Ok(*crc);
-        }
-        let crc = self.source.crc(self.len)?;
-        Ok(*self.crc.get_or_init(|| crc))
-    }
-
-    /// [`OnDisk::crc`], in a task that may wait for the browser's slices.
+    /// is asked for, in a task that may wait for the browser's slices.
     pub async fn crc_now(&self) -> io::Result<u32> {
         if let Some(crc) = self.crc.get() {
             return Ok(*crc);
@@ -238,13 +225,14 @@ impl OnDisk {
         self.crc.get().copied()
     }
 
-    /// Whether `bytes` are what the file held when it was indexed. Takes the file's CRC
-    /// if nothing has yet, where this target can on the calling thread.
+    /// Whether `bytes` are known to be what the file held when it was indexed. Never
+    /// before a pass has taken the file's CRC: the check every resting file is given takes
+    /// it, off the frame.
     pub fn holds(&self, bytes: &[u8]) -> bool {
         self.len == bytes.len() as u64
             && self
-                .crc()
-                .is_ok_and(|crc| crc == nord_format::crc::crc32(bytes))
+                .known_crc()
+                .is_some_and(|crc| crc == nord_format::crc::crc32(bytes))
     }
 
     /// The ranges read so far, a read of the whole file among them, emptied.
@@ -626,6 +614,26 @@ mod tests {
         );
         assert!(slices.hold(90..101, vec![0; 11]).is_err(), "past the end");
         assert!(slices.hold(0..10, vec![0; 9]).is_err(), "short");
+    }
+
+    /// Whether a resting file holds some bytes is known only once its check has taken
+    /// its CRC, off the frame: asking before takes none.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_file_holds_bytes_only_once_its_check_has_taken_its_crc() {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        assert!(!file.holds(&bytes), "not known before its CRC is taken");
+        assert_eq!(file.known_crc(), None, "and asking takes none");
+
+        let ctx = crate::testing::context();
+        let checked = file.verify(&ctx).wait();
+        assert!(matches!(checked, crate::work::Answer::Answered(Ok(_))));
+        assert!(file.holds(&bytes));
+        let mut other = bytes.clone();
+        other[20] ^= 1;
+        assert!(!file.holds(&other));
     }
 
     /// The pass checks what `cbin::inspect` checks, of a type-1 file and a type-0 one,

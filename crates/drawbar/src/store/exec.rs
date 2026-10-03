@@ -98,6 +98,9 @@ pub trait Fs {
     /// The names in one folder.
     async fn names(&self, dir: &str) -> io::Result<Vec<String>>;
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
+    /// CRC-32 over the whole file at `path`, taken in one streaming pass that never holds
+    /// it whole.
+    async fn crc(&self, path: &str) -> io::Result<u32>;
     /// The file at `path`, or `None` where no file is: nothing, a folder, or a link.
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
     /// [`Fs::stat`] of each of `paths`, in order.
@@ -1263,8 +1266,8 @@ async fn commit(
     Ok(())
 }
 
-/// Whether the file at `path` still holds what `expect` says, reading it only when its
-/// [`Stat`] moved.
+/// Whether the file at `path` still holds what `expect` says, taking its CRC only when its
+/// [`Stat`] moved to one of the same length, and `expect` has a CRC to compare.
 async fn still(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> io::Result<Option<bool>> {
     let Some(stat) = fs.stat(path.as_str()).await? else {
         return Ok(None);
@@ -1272,7 +1275,10 @@ async fn still(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> io::Result
     if stat == expect.stat() {
         return Ok(Some(true));
     }
-    Ok(Some(expect.holds(&fs.read(path.as_str()).await?)))
+    let Some((len, crc)) = expect.contents().filter(|(len, _)| *len == stat.len) else {
+        return Ok(Some(false));
+    };
+    Ok(Some((stat.len, fs.crc(path.as_str()).await?) == (len, crc)))
 }
 
 async fn save(
@@ -1501,6 +1507,12 @@ mod tests {
         async fn names(&self, _: &str) -> io::Result<Vec<String>> {
             Ok(Vec::new())
         }
+        async fn crc(&self, path: &str) -> io::Result<u32> {
+            self.read(path)
+                .await
+                .map(|bytes| nord_format::crc::crc32(&bytes))
+        }
+
         async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             self.reads.set(self.reads.get() + 1);
             Ok(path.as_bytes().to_vec())

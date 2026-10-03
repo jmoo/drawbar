@@ -427,7 +427,7 @@ enum Ready {
     Never(String),
 }
 
-/// The assets an act carries whole: a send, or a copy of what they hold.
+/// The assets an act carries whole: the ones a send writes.
 fn carries(act: &Act, queue: &Queue) -> Vec<u64> {
     match act {
         Act::WriteBack(id)

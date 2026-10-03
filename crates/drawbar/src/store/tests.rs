@@ -3534,3 +3534,33 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let entity = session.bench.workspace.get(kept).unwrap();
     assert!(entity.rests().is_some() && entity.held_whole() == 0);
 }
+
+/// A sample instrument holding an unsaved edit over its file, whose file is saved over
+/// outside drawbar, is not read whole to keep the edit apart: it rests in the new file,
+/// which its edit follows where it still applies, and drawbar asks what to do.
+#[test]
+fn a_resting_sample_changed_outside_under_an_edit_is_never_read_whole() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    session.edit_resting(id, &bytes);
+    let before = session
+        .bench
+        .workspace
+        .get(id)
+        .unwrap()
+        .rests()
+        .unwrap()
+        .clone();
+    let theirs = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184);
+    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+
+    session.settle();
+
+    assert_eq!(before.take_reads(), [], "nothing read the old file");
+    let entity = session.bench.workspace.get(id).unwrap();
+    let file = entity.rests().expect("it rests in the file there now");
+    assert_eq!(file.len, theirs.len() as u64);
+    assert_eq!(entity.held_whole(), 0);
+    let (title, _) = session.bench.browser.asking().expect("a question");
+    assert!(title.contains("Zoned.nsmp"), "{title}");
+}

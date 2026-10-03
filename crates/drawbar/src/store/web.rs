@@ -1166,6 +1166,19 @@ impl Fs for Folder {
         Ok(bytes)
     }
 
+    async fn crc(&self, path: &str) -> io::Result<u32> {
+        let file = snapshot(&self.file(path).await?).await?;
+        let len = file.size() as u64;
+        let mut crc = nord_format::crc::Crc32Stream::new();
+        let mut at = 0;
+        while at < len {
+            let end = len.min(at + CHUNK as u64);
+            crc.update(&crate::ondisk::slice(&file, at..end).await?);
+            at = end;
+        }
+        Ok(crc.value())
+    }
+
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match self.handle(path).await {
             Ok(handle) if handle.kind() == FileSystemHandleKind::Directory => Ok(None),

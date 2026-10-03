@@ -339,7 +339,12 @@ decode can say why.
 
 The index does not verify the container checksum. The resting check does, in
 one streaming pass that also takes the whole file's CRC-32 for its fingerprint
-(`OnDisk::verify`). On the desktop the handle follows the file through a rename,
+(`OnDisk::verify`). Until it has, a resting file is not known to hold any
+bytes (`OnDisk::holds`), and nothing takes its CRC on the frame. A file whose
+stat moved is told to hold what drawbar knew by its CRC, taken in one streaming
+pass (`Fs::crc`). A resting file changed on disk under an unsaved edit is not
+read whole to keep the edit apart: the asset rests in the new file, and its
+editor makes a sample's edit again over it where the edit still applies. On the desktop the handle follows the file through a rename,
 and reads whatever the file holds now if it is rewritten in place; a rescan
 notices that and indexes it again.
 

@@ -657,9 +657,9 @@ impl LocalEntity {
     /// The whole body: the bytes held, or a read of the file it rests in.
     ///
     /// ⚠️ A read of a file reads all of it, hundreds of megabytes for a piano library, on
-    /// the calling thread. Only an act that carries the whole body asks: a send, a copy,
-    /// an overwrite. The browser refuses it, and such an act reads the file whole off the
-    /// frame first ([`Workspace::wake`]).
+    /// the calling thread. Only a send, which carries the whole body, asks. The browser
+    /// refuses it, and a send reads the file whole off the frame first
+    /// ([`Workspace::wake`]).
     pub fn whole(&self) -> std::io::Result<Cow<'_, [u8]>> {
         if self.unread() {
             return Err(std::io::Error::other(UNREAD));
@@ -1625,9 +1625,11 @@ impl Workspace {
     }
 
     /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
-    /// writes the edit over them, and a revert takes them.
+    /// writes the edit over them, and a revert takes them. An asset resting in its file
+    /// adopts them instead, and an editor's edit held over the file it rested in follows
+    /// it there where the edit still applies.
     pub fn rebase(&mut self, id: u64, theirs: Vec<u8>, log: &mut Log) {
-        if !self.hold(id, log) {
+        if !self.apart(id) {
             return self.adopt(id, theirs, log);
         }
         let stamp = self.stamp_for(id, &theirs);
@@ -1637,8 +1639,8 @@ impl Workspace {
     }
 
     /// [`Workspace::rebase`] onto a file left on disk.
-    pub fn rebase_file(&mut self, id: u64, theirs: Arc<OnDisk>, log: &mut Log) {
-        if !self.hold(id, log) {
+    pub fn rebase_file(&mut self, id: u64, theirs: Arc<OnDisk>) {
+        if !self.apart(id) {
             return self.adopt_file(id, theirs);
         }
         let stamp = self.stamp();
@@ -1649,10 +1651,11 @@ impl Workspace {
     }
 
     /// Count an asset as unsaved again, because the save it was counted saved by did not
-    /// land.
-    pub fn unsave(&mut self, id: u64, log: &mut Log) {
+    /// land. One resting in its file holds what the file holds, and an edit held over it
+    /// stays unsaved.
+    pub fn unsave(&mut self, id: u64) {
         self.edit_not_saved(id);
-        if !self.hold(id, log) {
+        if !self.apart(id) {
             return;
         }
         let stamp = self.stamp();
@@ -1663,37 +1666,11 @@ impl Workspace {
         }
     }
 
-    /// Read an asset resting in its file into memory, decoded, so that its saved baseline
-    /// can move away from those bytes. Returns `false` where the file could not be read,
-    /// and the asset still rests.
-    ///
-    /// ⚠️ Reads and decodes the whole file on this thread. It runs only where a file
-    /// changed on disk, or a save failed, under an asset that still rests.
-    fn hold(&mut self, id: u64, log: &mut Log) -> bool {
-        let Some(entity) = self.get(id) else {
-            return true;
-        };
-        let Some(file) = entity.rests() else {
-            return true;
-        };
-        match file.whole() {
-            Ok(bytes) => {
-                self.swap(id, true, |held| {
-                    LocalEntity::new(
-                        id,
-                        held.name.clone(),
-                        held.origin.clone(),
-                        bytes.into(),
-                        held.stamp,
-                    )
-                });
-                true
-            }
-            Err(e) => {
-                log.error(format!("{}: {e}", entity.name));
-                false
-            }
-        }
+    /// Whether an asset's bytes stand apart from what it was saved as, so that its saved
+    /// baseline can move away from them. One resting in its file holds nothing apart from
+    /// the file, and is never read whole to make it so.
+    fn apart(&self, id: u64) -> bool {
+        self.get(id).is_none_or(|entity| entity.rests().is_none())
     }
 
     /// Leave an asset's bytes in `file`, which holds them, under `stamp`, and check the
@@ -1819,9 +1796,9 @@ impl Workspace {
         self.revision += 1;
     }
 
-    /// Read an asset resting in its file whole, off the frame, for an editor or an act
-    /// that works on the whole body. It stays resting until the read answers, and a file
-    /// whose read failed is not read again.
+    /// Read an asset resting in its file whole, off the frame, for a send, which carries
+    /// the whole body. It stays resting until the read answers, and a file whose read
+    /// failed is not read again.
     pub fn wake(&mut self, id: u64) {
         if self.waking.iter().any(|held| held.id == id) {
             return;

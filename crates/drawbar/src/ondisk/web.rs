@@ -128,13 +128,6 @@ impl Source {
         ))
     }
 
-    pub(super) fn crc(&self, _len: u64) -> io::Result<u32> {
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "its CRC is taken only off the frame",
-        ))
-    }
-
     pub(super) async fn crc_now(&self, serial: u64, len: u64) -> io::Result<u32> {
         let mut crc = Crc32Stream::new();
         stream(serial, len, |chunk| {

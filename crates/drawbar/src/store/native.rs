@@ -407,6 +407,10 @@ impl Fs for Disk {
         fs::read(self.locate(path)?)
     }
 
+    async fn crc(&self, path: &str) -> io::Result<u32> {
+        crate::ondisk::crc_of(&mut File::open(self.locate(path)?)?)
+    }
+
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match fs::symlink_metadata(self.locate(path)?) {
             Ok(meta) if meta.is_file() => Ok(Some(stat(&meta))),
@@ -768,6 +772,32 @@ mod tests {
         assert!(root.read("Copy.npno") == bytes);
         let info = nord_format::cbin::inspect(&mut File::open(root.at("Edited.npno")).unwrap());
         assert!(info.unwrap().checksum_ok);
+    }
+
+    /// A file whose stat moved is told to hold what drawbar knew by its CRC, taken in one
+    /// streaming pass: deleting a piano library of a vendor's size that way holds nothing
+    /// near its size.
+    #[test]
+    fn a_file_whose_stat_moved_is_checked_by_a_streamed_crc() {
+        let root = Temp::new();
+        let bytes = large_piano();
+        fs::write(root.at("Grand.npno"), &bytes).unwrap();
+        let expect = Fingerprint {
+            len: bytes.len() as u64,
+            modified: Some(1),
+            crc: Some(nord_format::crc::crc32(&bytes)),
+        };
+        drop(bytes);
+        let remove = Cmd::RemoveFile {
+            path: LibPath::root().join("Grand.npno"),
+            expect,
+        };
+
+        let (answer, largest) =
+            crate::testing::largest_allocation(|| execute(&mut disk(&root), remove));
+        assert!(answer.is_none(), "{answer:?}");
+        assert!(largest < 8 << 20, "{largest} bytes held at once");
+        assert!(!root.at("Grand.npno").exists());
     }
 
     /// A file whose stat moves while its edit is written is not written over, and the
