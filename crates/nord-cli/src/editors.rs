@@ -510,11 +510,11 @@ mod tests {
         if let Some(len) = hdr_len {
             match &mut sample {
                 Sample::V2(s) => section::find_mut(&mut s.body.sections, section::HDR)
-                    .unwrap()
+                    .expect("the encoder writes a hdr")
                     .payload
                     .truncate(len),
                 Sample::V3(s) => section::find_mut(&mut s.body.sections, section::HDR4)
-                    .unwrap()
+                    .expect("the encoder writes a hdr4")
                     .payload
                     .truncate(len),
             }
@@ -552,7 +552,7 @@ mod tests {
         );
         let err = SampleEditor(&mut nameless)
             .set("name", "Marimba")
-            .unwrap_err();
+            .expect_err("a hdr without a name field refuses a name");
         assert!(err.contains("no name"), "{err}");
     }
 
