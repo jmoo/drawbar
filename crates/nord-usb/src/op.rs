@@ -4,9 +4,7 @@
 //! session and applying primitives repeatedly. Operations send the progress labels the
 //! instrument displays but omit reads that only refresh a host UI.
 
-use nord_format::cbin::{Cbin, RawBody};
-
-use crate::envelope;
+use crate::envelope::{self, FileSink, FileSource, Opened};
 use crate::error::{Error, Result};
 use crate::session::ReadWrite;
 use crate::session::{Session, WRITE_LIMIT};
@@ -15,6 +13,8 @@ use crate::wire::{
     cmd, read_u32, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
     ProgramInfo, Service, Status,
 };
+use nord_format::cbin::Generation;
+use nord_format::crc::Crc32Stream;
 
 /// Query the inventory for the class the session was opened with.
 ///
@@ -75,24 +75,52 @@ pub async fn info<T: Transport, C>(
 
 /// Read one program off the instrument, returning the bytes of a `.ne5p` file.
 ///
-/// **Read-only.** The body is wrapped in a `CBIN` header ([`envelope`]) to make a file.
-/// When the device reports a CRC-32, the body is checked against it.
+/// **Read-only.** [`read_into`], held in memory.
 pub async fn read_program<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Vec<u8>> {
-    let (meta, body) = transfer_out(session, at).await?;
+    let mut file = Vec::new();
+    read_into(session, at, &mut file).await?;
+    Ok(file)
+}
 
-    let file = envelope::wrap(&meta.format, at, meta.version, &body)?;
-    if let Some(expected) = meta.crc32 {
-        let actual = envelope::crc32(&body);
-        if expected != actual {
+/// What [`read_into`] took off the instrument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Received {
+    /// The slot's object info, as the read's own `INFO` reported it.
+    pub info: ProgramInfo,
+    /// CRC-32 of the body as it arrived: the checksum a slot holding it reports, where
+    /// its class reports one.
+    pub body_crc32: u32,
+}
+
+/// Read one object off the instrument into `file` as a `CBIN` file, one transfer chunk at
+/// a time, so that memory stays bounded by the chunk whatever the object's size.
+///
+/// **Read-only.** The body is written behind the space its `CBIN` header ([`envelope`])
+/// takes, and the header last, once the body's checksum is known. When the device reports
+/// a CRC-32, the body is checked against it, and a mismatch is an error with no header
+/// written. `file` then holds a partial body, as it does after any error; discarding it
+/// is the caller's.
+///
+/// The frames are the same whatever `file` is: [`read_program`] is this, into memory.
+pub async fn read_into<T: Transport, C>(
+    session: &mut Session<'_, T, C>,
+    at: Location,
+    file: &mut impl FileSink,
+) -> Result<Received> {
+    let (info, body_crc32) = transfer_out(session, at, file, Generation::V1.body_start()).await?;
+    if let Some(expected) = info.crc32 {
+        if expected != body_crc32 {
             return Err(Error::Envelope(format!(
-                "body checksum mismatch: device reported {expected:08x}, received {actual:08x}"
+                "body checksum mismatch: device reported {expected:08x}, received {body_crc32:08x}"
             )));
         }
     }
-    Ok(file)
+    let head = envelope::header(&info.format, at, info.version, body_crc32)?;
+    file.write_at(0, &head).await?;
+    Ok(Received { info, body_crc32 })
 }
 
 /// Read an entity's body off the instrument without wrapping it in a CBIN header.
@@ -104,7 +132,9 @@ pub async fn read_body<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Vec<u8>> {
-    Ok(transfer_out(session, at).await?.1)
+    let mut body = Vec::new();
+    transfer_out(session, at, &mut body, 0).await?;
+    Ok(body)
 }
 
 /// Body bytes to ask for in one `READ`. A larger body arrives across several requests,
@@ -120,7 +150,7 @@ const READ_CHUNK: u32 = 32720;
 
 /// Body bytes per `WRITE_DATA` frame. The whole frame must stay under the device's
 /// maximum transfer; an oversized frame wedges the instrument until a power cycle.
-const WRITE_CHUNK: usize = 32720;
+pub(crate) const WRITE_CHUNK: usize = 32720;
 
 /// Fault-injection overrides; absent variables keep captured sizes, invalid values fail.
 #[cfg(any(feature = "fault-injection", test))]
@@ -162,11 +192,14 @@ fn write_chunk() -> Result<usize> {
         .map_err(|_| Error::InvalidArgument("NORD_WRITE_CHUNK exceeds usize".into()))
 }
 
-/// Read the metadata and body through the device's chunked transfer sequence.
+/// Read the metadata and body through the device's chunked transfer sequence, writing
+/// the body into `file` from `base`. Returns the metadata and the body's CRC-32.
 async fn transfer_out<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
-) -> Result<(ProgramInfo, Vec<u8>)> {
+    file: &mut impl FileSink,
+    base: u64,
+) -> Result<(ProgramInfo, u32)> {
     let chunk_size = read_chunk()?;
     let meta = info(session, at).await?;
 
@@ -176,11 +209,10 @@ async fn transfer_out<T: Transport, C>(
         .request(&Message::program(cmd::BEGIN_READ, at.to_bytes()))
         .await?;
 
-    // Clamp allocation from the device-supplied length; large valid bodies grow by chunk.
-    let mut body = Vec::with_capacity((meta.body_len as usize).min(1 << 20));
+    let mut crc = Crc32Stream::new();
+    let mut offset = 0u32;
     let mut painted = None;
-    while (body.len() as u32) < meta.body_len {
-        let offset = body.len() as u32;
+    while offset < meta.body_len {
         let want = chunk_size.min(meta.body_len - offset);
 
         let req = [
@@ -192,10 +224,12 @@ async fn transfer_out<T: Transport, C>(
         let resp = session.request(&Message::program(cmd::READ, req)).await?;
 
         let chunk = read_payload(resp.payload(), at, offset, want)?;
-        body.extend_from_slice(chunk);
+        file.write_at(base + u64::from(offset), chunk).await?;
+        crc.update(chunk);
+        offset += want;
 
         // Progress moves only at whole percentages.
-        let pct = (body.len() as u64 * 100 / (meta.body_len.max(1)) as u64) as u16;
+        let pct = (offset as u64 * 100 / (meta.body_len.max(1)) as u64) as u16;
         if painted != Some(pct) {
             session.notify(&ui::percent(pct)).await?;
             painted = Some(pct);
@@ -210,7 +244,7 @@ async fn transfer_out<T: Transport, C>(
     session
         .request(&Message::program(cmd::END_TRANSFER, at.to_bytes()))
         .await?;
-    Ok((meta, body))
+    Ok((meta, crc.value()))
 }
 
 fn read_payload(payload: &[u8], at: Location, offset: u32, length: u32) -> Result<&[u8]> {
@@ -325,7 +359,29 @@ pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
     at: Location,
-    file: &[u8],
+    mut file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<()> {
+    write_from(session, unit, at, &mut file, name, timestamp).await
+}
+
+/// [`write()`], reading the file from `file` one transfer chunk at a time, so that memory
+/// stays bounded by the chunk whatever the file's size.
+///
+/// The body is read twice. The first pass checks it against the file's checksum before
+/// any frame is sent, so a damaged file is refused as [`write()`] refuses it. The second
+/// sends it, and withholds the final chunk with [`Error::Envelope`] if the bytes no
+/// longer match, which leaves the write unfinished rather than completed with a file
+/// that changed after it was checked.
+///
+/// A failed read from `file` returns its [`Error::Io`] the way a failed send returns
+/// its error: the session is still in step, and closing it is the caller's.
+pub async fn write_from<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    unit: AllocationUnit,
+    at: Location,
+    file: &mut impl FileSource,
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
@@ -335,11 +391,12 @@ pub async fn write<T: Transport>(
             session.class().label()
         )));
     }
-    let file = envelope::unwrap(file)?;
+    let chunk = write_chunk()?;
+    let opened = envelope::open(file, chunk).await?;
     if !unit.is_bytes() {
-        reserve(session, unit.blocks_for(file.body.0.len())?).await?;
+        reserve(session, unit.blocks_for(opened.body.len())?).await?;
     }
-    transfer_in(session, at, &file, name, timestamp).await
+    transfer_in(session, at, file, &opened, chunk, name, timestamp).await
 }
 
 /// A [`cmd::BEGIN_WRITE`] argument block: the address, the body's length, the format
@@ -393,37 +450,50 @@ pub fn write_data_args(at: Location, offset: usize, chunk: &[u8]) -> Result<Vec<
 async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
-    file: &Cbin<RawBody>,
+    file: &mut impl FileSource,
+    opened: &Opened,
+    chunk_size: usize,
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
-    let body = &file.body.0;
-    let chunk_size = write_chunk()?;
+    let body = opened.body.clone();
+    let len = body.len();
+    let mut verifier = opened.verifier()?;
 
     session.notify(&ui::label("Downloading...")?).await?;
 
-    let begin = begin_write_args(at, body.len(), &file.header.tag, timestamp, name)?;
+    let begin = begin_write_args(at, len, &opened.header.tag, timestamp, name)?;
     session
         .request(&Message::program(cmd::BEGIN_WRITE, begin))
         .await?;
 
+    let mut buf = vec![0; chunk_size.min(len)];
     let mut offset = 0usize;
     let mut painted = None;
-    while offset < body.len() {
-        let end = offset.saturating_add(chunk_size).min(body.len());
-        let data = Message::program(
-            cmd::WRITE_DATA,
-            write_data_args(at, offset, &body[offset..end])?,
-        );
+    while offset < len {
+        let end = offset.saturating_add(chunk_size).min(len);
+        let chunk = &mut buf[..end - offset];
+        file.read_at((body.start + offset) as u64, chunk).await?;
+        verifier
+            .update(chunk)
+            .map_err(|e| Error::Envelope(e.to_string()))?;
+        let data = Message::program(cmd::WRITE_DATA, write_data_args(at, offset, chunk)?);
         // Only the final chunk is acknowledged.
-        if end == body.len() {
+        if end == len {
+            if !opened.matches(std::mem::take(&mut verifier))? {
+                return Err(Error::Envelope(
+                    "the file changed after its checksum was checked, so its last chunk \
+                     was not sent"
+                        .into(),
+                ));
+            }
             session.request(&data).await?;
         } else {
             session.notify(&data).await?;
         }
         offset = end;
 
-        let pct = (offset as u64 * 100 / (body.len().max(1)) as u64) as u16;
+        let pct = (offset as u64 * 100 / (len.max(1)) as u64) as u16;
         if painted != Some(pct) {
             session.notify(&ui::percent(pct)).await?;
             painted = Some(pct);
