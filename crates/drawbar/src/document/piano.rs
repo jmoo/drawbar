@@ -24,6 +24,7 @@ use nord_format::formats::npno::{self, Bank, FINE_TUNE_CENTS_PER_UNIT};
 use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
+use serde::{Deserialize, Serialize};
 
 use super::capability::{self, Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
@@ -208,12 +209,16 @@ impl Unheard {
     }
 }
 
-/// Every edit a piano document holds, against the baseline it is an edit of.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Every edit a piano document holds, against the baseline it is an edit of. A working
+/// copy keeps it without its baseline, which a new session marks afresh.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Plan {
+    #[serde(skip)]
     against: Mark,
     /// Banks dropped whole. [`Bank::Attack`] is never one: a library with no attack
     /// strokes answers no key at all.
+    #[serde(with = "codes::banks")]
     banks: BTreeSet<Bank>,
     /// Layer values dropped on every root.
     layers: BTreeSet<u8>,
@@ -230,12 +235,59 @@ pub struct Plan {
     /// The highest key damped at note-off; [`ALL_KEYS_DAMPED`] leaves none ringing.
     damper_top: Option<u8>,
     /// The kind of instrument the library files itself under.
+    #[serde(with = "codes::kind")]
     kind: Option<Kind>,
     /// Decibels a stroke is attenuated by, keyed by `(root, bank code, layer value)`
     /// because a drop moves the stroke's index in the directory.
     trims: BTreeMap<(u8, u8, u8), u16>,
     /// The root a re-routed key plays, `None` where it plays nothing.
     key_roots: BTreeMap<u8, Option<u8>>,
+}
+
+/// A plan's banks and kind as a working copy writes them: by the codes the file stores.
+mod codes {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub mod banks {
+        use super::*;
+        use nord_format::formats::npno::Bank;
+        use std::collections::BTreeSet;
+
+        pub fn serialize<S: Serializer>(banks: &BTreeSet<Bank>, to: S) -> Result<S::Ok, S::Error> {
+            to.collect_seq(banks.iter().map(|bank| bank.code()))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<BTreeSet<Bank>, D::Error> {
+            let codes = BTreeSet::<u8>::deserialize(from)?;
+            let bank = |code: u8| {
+                Bank::from_code(code).ok_or_else(|| D::Error::custom(format!("no bank {code}")))
+            };
+            codes.into_iter().map(bank).collect()
+        }
+    }
+
+    pub mod kind {
+        use super::*;
+        use nord_format::formats::npno::encode::Kind;
+
+        pub fn serialize<S: Serializer>(kind: &Option<Kind>, to: S) -> Result<S::Ok, S::Error> {
+            match kind {
+                Some(kind) => to.serialize_some(&kind.code()),
+                None => to.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Option<Kind>, D::Error> {
+            let Some(code) = Option::<u8>::deserialize(from)? else {
+                return Ok(None);
+            };
+            match Kind::from_code(code) {
+                Some(kind) => Ok(Some(kind)),
+                None => Err(D::Error::custom(format!("no kind {code}"))),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

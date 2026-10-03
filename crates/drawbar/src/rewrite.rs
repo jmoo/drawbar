@@ -14,13 +14,15 @@ use std::ops::{AsyncFnMut, Range};
 
 use nord_format::cbin::Verifier;
 use nord_format::formats::{npno, nsmp};
+use serde::{Deserialize, Serialize};
 
 use crate::document::piano::Plan;
 use crate::ondisk::{self, OnDisk};
 
 /// An edit of an instrument resting in its file, as its editor made it. It is made again
-/// over whichever file the instrument rests in, as [`Edit::over`] makes it.
-#[derive(Clone, Debug, PartialEq)]
+/// over whichever file the instrument rests in, as [`Edit::over`] makes it, and is kept
+/// across a quit as a working copy ([`Edit::working`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
     /// The `path = value` sets made of a sample instrument since it was saved, in order.
     /// Each names the value it leaves, so made again over a file that holds them they
@@ -30,7 +32,51 @@ pub enum Edit {
     Piano(Plan),
 }
 
+/// The version of the working copy [`Edit::working`] writes.
+///
+/// ⚠️ Raise it with any change to what an edit writes. A copy under another version is
+/// refused, and the library opens read-only rather than drop the edit.
+const WORKING: u32 = 1;
+
+/// A working copy holding an edit.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Working<E> {
+    version: u32,
+    edit: E,
+}
+
+/// Only the version, read first so a copy of another version is recognized as that.
+#[derive(Deserialize)]
+struct Version {
+    version: u32,
+}
+
 impl Edit {
+    /// The working copy that keeps this edit across a quit: RON text, versioned.
+    pub fn working(&self) -> Result<Vec<u8>, String> {
+        let kept = Working {
+            version: WORKING,
+            edit: self,
+        };
+        let text = ron::ser::to_string_pretty(&kept, ron::ser::PrettyConfig::default());
+        text.map(String::into_bytes).map_err(|e| e.to_string())
+    }
+
+    /// The edit a working copy keeps, or why it does not read.
+    pub fn from_working(bytes: &[u8]) -> Result<Edit, String> {
+        let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+        let version = ron::from_str::<Version>(text).map_err(|e| e.to_string())?;
+        if version.version != WORKING {
+            return Err(format!(
+                "version {} is not one this build reads",
+                version.version
+            ));
+        }
+        let kept: Working<Edit> = ron::from_str(text).map_err(|e| e.to_string())?;
+        Ok(kept.edit)
+    }
+
     /// The rewrite that saves this edit into `file`: `None` where it changes nothing
     /// there, and why not where it does not apply to what the file holds.
     pub fn over(&self, file: &OnDisk) -> Result<Option<Rewrite>, String> {
@@ -377,6 +423,31 @@ mod tests {
 
     use super::*;
     use crate::testing::{on_disk, zoned_sample, Temp};
+
+    /// An edit's working copy reads back as the edit. A copy of another version, or one
+    /// naming a field or a bank code this build does not know, is refused rather than
+    /// read as something else.
+    #[test]
+    fn an_edit_reads_back_from_its_working_copy_and_nothing_else_does() {
+        let sample = Edit::Sample(vec![("zone2.root_key".into(), "C4".into())]);
+        let piano = Edit::Piano(Plan::trimmed("Trimmed", 60, 0));
+        for edit in [&sample, &piano] {
+            let copy = edit.working().unwrap();
+            assert_eq!(Edit::from_working(&copy).as_ref(), Ok(edit));
+        }
+
+        let text = String::from_utf8(piano.working().unwrap()).unwrap();
+        for (from, to) in [
+            ("version: 1", "version: 2"),
+            ("gain: None", "gain: None, loudness: None"),
+            ("banks: []", "banks: [9]"),
+        ] {
+            let changed = text.replacen(from, to, 1);
+            assert_ne!(changed, text, "{from}");
+            let read = Edit::from_working(changed.as_bytes());
+            assert!(read.is_err(), "{to}: {read:?}");
+        }
+    }
 
     /// A reader over bytes that records the span of every read.
     struct Recording<'a> {

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::cache::{self, Cache};
 use super::diff::{self, match_files, Known};
 use super::exec::{too_much, working_name};
-use super::sidecar::{Row, Sidecar, VERSION};
+use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, LibPath,
     Listing, Opened, Source, MOST_BYTES,
@@ -21,6 +21,7 @@ use crate::browser::Browser;
 use crate::folders::{Folders, Op, Where};
 use crate::log::Log;
 use crate::queue::Queue;
+use crate::rewrite::Edit;
 use crate::summary::Summary;
 use crate::workspace::{precious, LocalEntity, Origin, Saved, Workspace};
 
@@ -56,7 +57,7 @@ struct Record {
     /// The [`crate::workspace::Baseline::stamp`] of the bytes the file holds, or is
     /// being written with.
     saved: u64,
-    working: Option<Working>,
+    working: Option<Kept>,
     /// A save has been sent and not answered.
     saving: bool,
     /// The file went missing outside drawbar. Nothing writes it again until the asset
@@ -251,10 +252,11 @@ const PRINTS: (usize, u64) = (64, 64 << 20);
 /// listed bytes. A read something needs runs after it.
 const FETCHES: (usize, u64) = (32, 16 << 20);
 
-/// An unsaved edit's bytes, as written to `working/`.
-struct Working {
-    generation: u64,
-    /// The [`LocalEntity::stamp`] of the bytes it holds.
+/// An unsaved edit, as written to `working/`.
+struct Kept {
+    copy: Working,
+    /// The stamp of what the copy holds: the [`LocalEntity::stamp`] of the bytes, or
+    /// the stamp of the edit (see [`Workspace::kept_edit`]).
     stamp: u64,
 }
 
@@ -411,23 +413,25 @@ impl Store {
         self.records.values().any(|record| record.saving)
     }
 
-    /// The names of the assets that letting this library go would lose: each edit an
-    /// editor holds over a file it rests in, which no working copy keeps, and where
-    /// nothing may be written here, each edit not already kept as a working copy and each
-    /// asset never written to a file.
+    /// The names of the assets that letting this library go would lose, where nothing
+    /// may be written here: each edit not already kept as a working copy, and each asset
+    /// never written to a file. A library open for writing keeps every one at its last
+    /// pass.
     pub fn unkept(&self, workspace: &Workspace) -> Vec<String> {
-        let open = self.open();
+        if self.open() {
+            return Vec::new();
+        }
         workspace
             .listed()
             .filter(|entity| {
-                if open {
-                    return entity.rests().is_some() && entity.is_unsaved();
-                }
                 let record = self.records.get(&entity.id);
                 let written = record.is_some_and(|record| record.fingerprint.is_some());
+                let stamp = workspace
+                    .kept_edit(entity.id)
+                    .map_or(entity.stamp, |(_, stamp)| stamp);
                 let held = record
                     .and_then(|record| record.working.as_ref())
-                    .is_some_and(|working| working.stamp == entity.stamp);
+                    .is_some_and(|working| working.stamp == stamp);
                 !written || (entity.is_unsaved() && !held)
             })
             .map(|entity| entity.name.clone())
@@ -983,7 +987,7 @@ impl Store {
                 self.committed = None;
                 for (id, record) in &mut self.records {
                     if let Some(old) = record.working.take() {
-                        self.stale.push(working_name(*id, old.generation));
+                        self.stale.push(working_name(*id, old.copy.generation));
                     }
                 }
                 self.rescan();
@@ -1237,8 +1241,9 @@ impl Store {
             if let Some(bytes) = working.remove(&id) {
                 working.insert(moved, bytes);
             }
-            if let Some(generation) = row.working {
-                self.renamed.push((moved, working_name(id, generation)));
+            if let Some(copy) = row.working {
+                self.renamed
+                    .push((moved, working_name(id, copy.generation)));
             }
             rows.insert(moved, row);
         }
@@ -1304,6 +1309,7 @@ impl Store {
         loading.dirs.extend(dirs);
 
         let mut back = Vec::new();
+        let mut edits = Vec::new();
         let mut conflicts = Vec::new();
         loading.files += files.len();
         for found in files {
@@ -1316,41 +1322,50 @@ impl Store {
             loading.claimed.insert(id);
             let print = loading.rows.get(&id).and_then(|row| row.fingerprint);
             let changed = !diff::same(print, &found);
-            if let Some((saved, conflicted)) = self.claim(&mut loading, id, found, changed) {
+            if let Some((saved, edit, conflicted)) = self.claim(&mut loading, id, found, changed) {
                 back.push(saved);
+                edits.extend(edit.map(|edit| (id, edit)));
                 if conflicted {
                     conflicts.push(id);
                 }
             }
         }
-        self.restored(back, &loading, workspace, &browser.folders, log);
+        self.restored(back, edits, &loading, workspace, &browser.folders, log);
+        // An edit the file already holds was let go as it came back.
         for id in conflicts {
-            conflict(id, workspace, browser, log);
+            if workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+                conflict(id, workspace, browser, log);
+            }
         }
         self.loading = Some(loading);
     }
 
     /// A listed file at the path of a row, or one matched to a row it moved from: the
-    /// asset it comes back as, with the edit its working copy holds over it, and whether
-    /// that edit is over a file that changed.
+    /// asset it comes back as, with the bytes or the edit its working copy holds over it,
+    /// and whether that is over a file that changed.
     fn claim(
         &mut self,
         loading: &mut Loading,
         id: u64,
         found: Found,
         changed: bool,
-    ) -> Option<(Saved, bool)> {
+    ) -> Option<(Saved, Option<Edit>, bool)> {
         let row = loading.rows.get(&id)?;
         let print = diff::kept(row.fingerprint, &found);
-        let mine = loading
-            .working
-            .remove(&id)
-            .filter(|mine| match (&found.bytes, &found.file) {
-                (Some(bytes), _) => mine != bytes,
-                (None, Some(file)) => !file.holds(mine),
-                (None, None) => found.crc != Some(nord_format::crc::crc32(mine)),
-            });
-        let conflicted = changed && mine.is_some();
+        let copy = loading.working.remove(&id);
+        let (mine, edit) = match (row.working.map(|copy| copy.keeps), copy) {
+            // The open read every edit's copy through, so this one reads.
+            (Some(Keeps::Edit), Some(copy)) => (None, Edit::from_working(&copy).ok()),
+            (_, mine) => {
+                let mine = mine.filter(|mine| match (&found.bytes, &found.file) {
+                    (Some(bytes), _) => mine != bytes,
+                    (None, Some(file)) => !file.holds(mine),
+                    (None, None) => found.crc != Some(nord_format::crc::crc32(mine)),
+                });
+                (mine, None)
+            }
+        };
+        let conflicted = changed && (mine.is_some() || edit.is_some());
         self.records.insert(id, Record::of_found(&found, print));
         let saved = Saved {
             id,
@@ -1362,13 +1377,15 @@ impl Store {
             file: found.file,
             unsaved: mine,
         };
-        Some((saved, conflicted))
+        Some((saved, edit, conflicted))
     }
 
-    /// Put assets back in the workspace, and record what each was restored as.
+    /// Put assets back in the workspace, with the edits their working copies kept over
+    /// their files, and record what each was restored as.
     fn restored(
         &mut self,
         back: Vec<Saved>,
+        edits: Vec<(u64, Edit)>,
         loading: &Loading,
         workspace: &mut Workspace,
         folders: &Folders,
@@ -1376,6 +1393,9 @@ impl Store {
     ) {
         let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
         workspace.restore(back, Some(loading.next), log);
+        for (id, edit) in edits {
+            workspace.restore_edit(id, edit);
+        }
         for id in ids {
             self.settle(id, workspace, &loading.rows);
             self.place_ahead(id, workspace, folders);
@@ -1449,6 +1469,7 @@ impl Store {
         });
         let matched = match_files(&known, strangers.collect());
         let mut back = Vec::new();
+        let mut edits = Vec::new();
         for (id, found) in matched.renamed {
             let Some(stranger) = listed.get(&found.path).copied() else {
                 continue;
@@ -1462,8 +1483,9 @@ impl Store {
                 browser.tags.set(id, tag, true);
             }
             browser.tags.forget(stranger);
-            if let Some((saved, _)) = self.claim(&mut loading, id, found, false) {
+            if let Some((saved, edit, _)) = self.claim(&mut loading, id, found, false) {
                 back.push(saved);
+                edits.extend(edit.map(|edit| (id, edit)));
             }
         }
         let mut missing = Vec::new();
@@ -1471,8 +1493,11 @@ impl Store {
             let Some(row) = loading.rows.get(&id) else {
                 continue;
             };
-            match loading.working.remove(&id) {
-                Some(bytes) => {
+            // An edit's copy has no file to be made over, so its row is kept, naming the
+            // copy, as any precious row is.
+            let keeps = row.working.map(|copy| copy.keeps);
+            match (keeps, loading.working.remove(&id)) {
+                (Some(Keeps::Bytes), Some(bytes)) => {
                     let mut record = Record::of_file(row.path.clone().unwrap_or_default(), None);
                     record.fingerprint = row.fingerprint;
                     record.missing = true;
@@ -1480,20 +1505,20 @@ impl Store {
                     missing.push(id);
                     back.push(saved_from(id, row, bytes));
                 }
-                None if row.precious() => browser.folders.lose(id, row.clone()),
-                None => {}
+                _ if row.precious() => browser.folders.lose(id, row.clone()),
+                _ => {}
             }
         }
         // Rows with no path are views of slots that held an edit; each comes back as a
         // file on this computer. Its working copy stays until that file is written.
         let mut viewed = Vec::new();
         for (id, row) in loading.rows.iter().filter(|(_, row)| row.path.is_none()) {
-            if let (Some(bytes), Some(generation)) = (loading.working.remove(id), row.working) {
-                viewed.push((*id, generation));
+            if let (Some(bytes), Some(copy)) = (loading.working.remove(id), row.working) {
+                viewed.push((*id, copy));
                 back.push(saved_from(*id, row, bytes));
             }
         }
-        self.restored(back, &loading, workspace, &browser.folders, log);
+        self.restored(back, edits, &loading, workspace, &browser.folders, log);
         for path in &complete.gone {
             if let Some(id) = listed.get(path) {
                 self.vanished(*id, workspace, browser, queue, log);
@@ -1506,11 +1531,11 @@ impl Store {
             workspace.unsave(*id);
             browser.folders.missing.insert(*id);
         }
-        for (id, generation) in viewed {
+        for (id, copy) in viewed {
             let stamp = workspace.get(id).map_or(0, |entity| entity.stamp);
             let mut record = Record::of_file(LibPath::root(), None);
             record.path = None;
-            record.working = Some(Working { generation, stamp });
+            record.working = Some(Kept { copy, stamp });
             self.records.insert(id, record);
         }
         browser.folders.sync(&loading.dirs);
@@ -1528,24 +1553,25 @@ impl Store {
     }
 
     /// Record the stamps of an asset just restored, and the working copy it came back
-    /// with, so nothing is written again for it.
+    /// with, so nothing is written again for it. A copy whose edit is no longer held is
+    /// dropped at the next full pass.
     fn settle(&mut self, id: u64, workspace: &Workspace, rows: &BTreeMap<u64, Row>) {
         let (Some(entity), Some(record)) = (workspace.get(id), self.records.get_mut(&id)) else {
             return;
         };
         record.saved = entity.saved.stamp;
-        let generation = rows.get(&id).and_then(|row| row.working);
-        record.working = match (entity.is_unsaved(), generation) {
-            (true, Some(generation)) => Some(Working {
-                generation,
-                stamp: entity.stamp,
-            }),
-            (false, Some(generation)) => {
-                self.stale.push(working_name(id, generation));
-                None
-            }
-            (_, None) => None,
+        let Some(copy) = rows.get(&id).and_then(|row| row.working) else {
+            record.working = None;
+            return;
         };
+        let stamp = match copy.keeps {
+            Keeps::Bytes => entity.is_unsaved().then_some(entity.stamp),
+            Keeps::Edit => workspace.kept_edit(id).map(|(_, stamp)| stamp),
+        };
+        record.working = stamp.map(|stamp| Kept { copy, stamp });
+        if record.working.is_none() {
+            self.stale.push(working_name(id, copy.generation));
+        }
     }
 
     /// Fold a new listing in, and return the assets whose files moved or changed.
@@ -2028,7 +2054,8 @@ impl Store {
         for entity in workspace.entities() {
             done &= self.file(entity, workspace.arriving(entity.id), &waiting);
             if full {
-                self.working(entity, queue, &mut writes, &mut drops);
+                let edit = workspace.kept_edit(entity.id);
+                self.working(entity, edit, queue, &mut writes, &mut drops);
             }
         }
         self.send_edits(workspace, &waiting);
@@ -2290,7 +2317,7 @@ impl Store {
             match self.records.get_mut(&id) {
                 Some(record) => record.working = None,
                 None => writes.extend(self.loading.as_ref().and_then(|loading| {
-                    let generation = loading.rows.get(&id)?.working?;
+                    let generation = loading.rows.get(&id)?.working?.generation;
                     Some((
                         working_name(id, generation),
                         loading.working.get(&id)?.clone(),
@@ -2481,20 +2508,26 @@ impl Store {
     }
 
     /// Write a working copy for an edit not yet saved, or drop the one a save made
-    /// unnecessary.
+    /// unnecessary. `edit` is the edit held over the file the asset rests in, and its
+    /// stamp, which the copy keeps in place of the bytes.
     fn working(
         &mut self,
         entity: &LocalEntity,
+        edit: Option<(&Edit, u64)>,
         queue: &Queue,
         writes: &mut Vec<(String, Vec<u8>)>,
         drops: &mut Vec<String>,
     ) {
         // A view is kept only while it holds something the slot does not.
-        let needs = match entity.kept {
+        let unsaved = match entity.kept {
             true => entity.stamp != entity.saved.stamp,
             false => self.keeps_views && precious(entity, queue),
         };
-        if !entity.kept && needs && !self.records.contains_key(&entity.id) {
+        let needs = match edit {
+            Some((_, stamp)) => Some((Keeps::Edit, stamp)),
+            None => unsaved.then_some((Keeps::Bytes, entity.stamp)),
+        };
+        if !entity.kept && needs.is_some() && !self.records.contains_key(&entity.id) {
             self.records.insert(
                 entity.id,
                 Record {
@@ -2506,28 +2539,38 @@ impl Store {
         let Some(record) = self.records.get_mut(&entity.id) else {
             return;
         };
-        match (needs, &record.working) {
-            (true, Some(held)) if held.stamp == entity.stamp => {}
-            (true, _) => {
+        let held = record
+            .working
+            .as_ref()
+            .map(|held| (held.copy.keeps, held.stamp));
+        match needs {
+            Some(needs) if held == Some(needs) => {}
+            Some((keeps, stamp)) => {
+                let bytes = match edit {
+                    Some((edit, _)) => edit.working(),
+                    None => Ok(entity.bytes.to_vec()),
+                };
+                // An edit that does not write is left to the copy before it.
+                let Ok(bytes) = bytes else {
+                    return;
+                };
                 let generation = self.next_generation;
                 self.next_generation += 1;
-                writes.push((working_name(entity.id, generation), entity.bytes.to_vec()));
-                if let Some(old) = record.working.replace(Working {
-                    generation,
-                    stamp: entity.stamp,
-                }) {
-                    drops.push(working_name(entity.id, old.generation));
+                writes.push((working_name(entity.id, generation), bytes));
+                let copy = Working { generation, keeps };
+                if let Some(old) = record.working.replace(Kept { copy, stamp }) {
+                    drops.push(working_name(entity.id, old.copy.generation));
                 }
             }
-            (false, Some(_)) if !record.saving => {
+            None if !record.saving => {
                 if let Some(old) = record.working.take() {
-                    drops.push(working_name(entity.id, old.generation));
+                    drops.push(working_name(entity.id, old.copy.generation));
                 }
                 if record.path.is_none() {
                     self.records.remove(&entity.id);
                 }
             }
-            (false, _) => {}
+            None => {}
         }
     }
 
@@ -2555,7 +2598,7 @@ impl Store {
                 continue;
             }
             if let Some(old) = record.working.take() {
-                drops.push(working_name(id, old.generation));
+                drops.push(working_name(id, old.copy.generation));
             }
             let file = (record.path.clone(), record.fingerprint, record.missing);
             self.records.remove(&id);
@@ -2582,7 +2625,7 @@ impl Store {
                     fingerprint: record.fingerprint,
                     tags: browser.tags.worn(*id).clone(),
                     origin: (&entity.origin).into(),
-                    working: record.working.as_ref().map(|held| held.generation),
+                    working: record.working.as_ref().map(|held| held.copy),
                 },
             );
         }

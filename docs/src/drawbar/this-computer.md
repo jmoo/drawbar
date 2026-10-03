@@ -32,9 +32,7 @@ Every edit lands at once, and the name turns italic with a `*` until you save or
 revert. **Save** (⌘S) writes the file. If the sound belongs to a slot on the
 connected instrument, Save also queues it for sending. **Revert** goes back to
 the last save, and is the only undo. An edit you have not saved is kept too, and
-comes back unsaved the next time drawbar starts. An edit of a sample instrument
-or piano library is the exception: it is kept only until you quit or open
-another library, and drawbar asks before opening another discards it.
+comes back unsaved the next time drawbar starts.
 
 ## Where it lives
 

@@ -73,7 +73,10 @@ order, so one library always serializes to the same text
             )),
             tags: [1],
             origin: File("c3.wav"),
-            working: Some(12),
+            working: Some((
+                generation: 12,
+                keeps: Bytes,
+            )),
         ),
     },
 )
@@ -91,7 +94,7 @@ order, so one library always serializes to the same text
 | `fingerprint` | Length, modification time in nanoseconds, and CRC-32 of the file when drawbar last read or wrote it. The CRC is `None` until something has read the whole file. |
 | `tags` | Tag ids. |
 | `origin` | `Fresh`, `File(name)`, `Device(class, bank, slot)` or `Rescued(bank, slot)`. |
-| `working` | The generation of the asset's working copy, while it holds an unsaved edit. |
+| `working` | The asset's working copy, while it holds an unsaved edit: its generation, and what it keeps, `Bytes` or `Edit`. |
 
 A path read from the index is checked on the way in: every component must be a
 real name, never empty, `.` or `..`, and never holding `/`, `\` or NUL
@@ -105,9 +108,26 @@ read-only.
 
 ### Working copies, `tmp/` and `lock`
 
-- `working/<id>-<generation>` holds the bytes of an unsaved edit. A working copy
-  is never rewritten: a new edit gets a new generation, and the old file is
-  deleted once the index stops naming it.
+- `working/<id>-<generation>` holds an unsaved edit. A working copy is never
+  rewritten: a new edit gets a new generation, and the old file is deleted once
+  the index stops naming it. One that `keeps: Bytes` holds the asset's bytes
+  whole. One that `keeps: Edit` holds an edit of a piano library or sample
+  instrument resting in its file, as RON text under a version of its own
+  (`rewrite::Edit::working`):
+
+  ```text
+  (
+      version: 1,
+      edit: Sample([
+          ("name", "Vibes"),
+      ]),
+  )
+  ```
+
+  A sample's edit is the `path = value` sets made since it was saved, and a
+  piano's is its plan (`document::piano::Plan`), the format's banks and kinds
+  written by their codes. A copy of another version does not read, and opens
+  the library read-only.
 - `tmp/` holds the temporary files of writes in flight. On the desktop that is
   only the index's own files; a library file is staged as a hidden sibling,
   `.<name>.drawbar-tmp`, so its rename never crosses a volume. In the browser
@@ -236,8 +256,8 @@ stateDiagram-v2
   snapshot the page took of it.
 - **Unsaved.** Its stamp differs from its baseline's. At the next full pass its
   bytes are written to `working/` under a new generation. An edit of a resting
-  asset stays an edit held over its file, with no working copy, and the asset
-  stays resting until the save writes the file again.
+  asset stays an edit held over its file, and the asset stays resting until the
+  save writes the file again; its working copy keeps the edit, not the bytes.
 - **Saving.** Saving moves the baseline to the current bytes, and the store
   writes the baseline to the file. A baseline that rests in its file needs no
   write. A save refused because the file changed, one that failed, and one sent
@@ -410,8 +430,8 @@ and written last. A sample's copy checks its checksum as it streams, so a file
 changed since its index was read is refused, and either kind is refused where
 the file's stat moved while the copy was written. Nothing is put over the file
 then. An export or send of an asset holding such an edit waits for it to be
-saved first. An edit held this way has no working copy, so opening another
-library asks before discarding it.
+saved first. An edit held this way is kept across a quit as a working copy of
+the edit itself, and the next open makes it again over the file.
 
 Duplicate, Keep both, and an Overwrite that puts a resting file over another, are
 copies the library makes too (`Workspace::arrive`, `store::CopyOf`): `Cmd::Import`
@@ -709,7 +729,9 @@ become the baseline, and the edit stays. The user is then asked:
   reverts the original.
 
 At open, a file that changed under a working copy raises the same question,
-unless the working copy holds what the file now holds.
+unless the working copy holds what the file now holds. An edit's copy is made
+again over the file as it is now, and asks only where the file changed and does
+not already hold the edit. One that no longer applies is kept as it was.
 
 ## Names
 

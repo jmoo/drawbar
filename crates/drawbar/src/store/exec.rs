@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::sync::Arc;
 
-use super::sidecar::{self, Read, Sidecar};
+use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
     Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened, Outside,
     Source, Stat,
@@ -307,14 +307,26 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
     // its `.drawbar/` as that drawbar left it.
     let (sidecar, mut writable) = index(fs).await;
-    let named: BTreeMap<String, u64> = sidecar
+    let named: BTreeMap<String, (u64, Keeps)> = sidecar
         .assets
         .iter()
-        .filter_map(|(id, row)| Some((working_name(*id, row.working?), *id)))
+        .filter_map(|(id, row)| {
+            let copy = row.working?;
+            Some((working_name(*id, copy.generation), (*id, copy.keeps)))
+        })
         .collect();
     let mut working = BTreeMap::new();
-    for (name, id) in &named {
-        match fs.read(&format!("{WORKING}/{name}")).await {
+    for (name, (id, keeps)) in &named {
+        let read = fs.read(&format!("{WORKING}/{name}")).await;
+        // An edit's copy is read through here, so one this build cannot read is not
+        // taken for no edit at all.
+        let read = read.and_then(|bytes| match keeps {
+            Keeps::Bytes => Ok(bytes),
+            Keeps::Edit => rewrite::Edit::from_working(&bytes)
+                .map(|_| bytes)
+                .map_err(io::Error::other),
+        });
+        match read {
             Ok(bytes) => {
                 working.insert(*id, bytes);
             }

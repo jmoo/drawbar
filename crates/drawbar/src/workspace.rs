@@ -1267,8 +1267,8 @@ struct Held {
     edit: Edit,
     /// Moves whenever the edit does.
     stamp: u64,
-    /// The file the edit was last made over.
-    over: Arc<OnDisk>,
+    /// The file the edit was last made over, `None` where the asset rests in none.
+    over: Option<Arc<OnDisk>>,
     /// The rewrite that writes the edit into `over`, or why it does not apply there.
     rewrite: Result<Arc<Rewrite>, String>,
     save: Save,
@@ -2274,8 +2274,8 @@ impl Workspace {
         let Some(held) = self.edits.get(&id) else {
             return Some(CopyOf::Asset(id));
         };
-        let rewrite = held.rewrite.as_ref().ok()?;
-        Some(CopyOf::Edited(held.over.clone(), rewrite.clone()))
+        let (over, rewrite) = (held.over.as_ref()?, held.rewrite.as_ref().ok()?);
+        Some(CopyOf::Edited(over.clone(), rewrite.clone()))
     }
 
     /// Let go of what an asset holds, unread again as a file of `len` bytes under a new
@@ -2547,13 +2547,39 @@ impl Workspace {
             return;
         };
         let stamp = self.stamp();
-        self.make_edit(id, edit, stamp, over, save);
+        self.make_edit(id, edit, stamp, Some(over), save);
+    }
+
+    /// Hold an edit kept across a quit of an asset just restored, made over the file it
+    /// rests in. One that file already holds is let go.
+    pub fn restore_edit(&mut self, id: u64, edit: Edit) {
+        let Some(entity) = self.get(id) else {
+            return;
+        };
+        let over = entity.rests().cloned();
+        let stamp = self.stamp();
+        self.make_edit(id, edit, stamp, over, Save::No);
     }
 
     /// Hold `edit` of an asset made over `over`, the file it rests in, or let it go where
     /// it changes nothing there.
-    fn make_edit(&mut self, id: u64, edit: Edit, stamp: u64, over: Arc<OnDisk>, save: Save) {
-        let rewrite = match edit.over(&over) {
+    fn make_edit(
+        &mut self,
+        id: u64,
+        edit: Edit,
+        stamp: u64,
+        over: Option<Arc<OnDisk>>,
+        save: Save,
+    ) {
+        let made = match &over {
+            Some(file) => edit.over(file),
+            None => Err(
+                "the file is not a piano library or sample instrument resting in \
+                         the library"
+                    .to_string(),
+            ),
+        };
+        let rewrite = match made {
             Ok(None) => {
                 self.let_go_edit(id);
                 return;
@@ -2584,11 +2610,12 @@ impl Workspace {
         let Some(held) = self.edits.get(&id) else {
             return;
         };
-        if Arc::ptr_eq(&held.over, &file) || matches!(held.save, Save::Sent(_)) {
+        let over = held.over.as_ref();
+        if over.is_some_and(|over| Arc::ptr_eq(over, &file)) || matches!(held.save, Save::Sent(_)) {
             return;
         }
         let (edit, stamp) = (held.edit.clone(), held.stamp);
-        self.make_edit(id, edit, stamp, file, Save::No);
+        self.make_edit(id, edit, stamp, Some(file), Save::No);
     }
 
     /// Let go of the edit held of an asset, and return whether there was one.
@@ -2623,11 +2650,17 @@ impl Workspace {
         self.edits.keys().copied()
     }
 
+    /// The edit held of an asset, whether or not it applies, and its stamp, which moves
+    /// whenever the edit does: what a working copy keeps of it.
+    pub(crate) fn kept_edit(&self, id: u64) -> Option<(&Edit, u64)> {
+        self.edits.get(&id).map(|held| (&held.edit, held.stamp))
+    }
+
     /// The edit held of an asset resting in its file, where it applies to that file: the
     /// file it is made over, and the rewrite that writes it.
     pub fn edit_of(&self, id: u64) -> Option<(&Arc<OnDisk>, &Arc<Rewrite>)> {
         let held = self.edits.get(&id)?;
-        Some((&held.over, held.rewrite.as_ref().ok()?))
+        Some((held.over.as_ref()?, held.rewrite.as_ref().ok()?))
     }
 
     /// Ask the store to save the edit held of an asset resting in its file into that
@@ -2662,9 +2695,9 @@ impl Workspace {
     /// Take an edit the store is asked to save, as it sends the save.
     pub(crate) fn send_edit(&mut self, id: u64) -> Option<(Arc<OnDisk>, Arc<Rewrite>)> {
         let held = self.edits.get_mut(&id)?;
-        let rewrite = held.rewrite.as_ref().ok()?.clone();
+        let (over, rewrite) = (held.over.clone()?, held.rewrite.as_ref().ok()?.clone());
         held.save = Save::Sent(held.stamp);
-        Some((held.over.clone(), rewrite))
+        Some((over, rewrite))
     }
 
     /// An edit's save did not land. The edit stays, made over the file the asset rests in

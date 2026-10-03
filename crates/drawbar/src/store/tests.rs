@@ -1270,7 +1270,10 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
                 bank: 0,
                 slot: 2,
             },
-            working: Some(3),
+            working: Some(Working {
+                generation: 3,
+                keeps: Keeps::Edit,
+            }),
         },
     );
     let unread = Row {
@@ -3324,26 +3327,6 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     );
 }
 
-/// An edit held over a file it rests in has no working copy, so letting the library go
-/// would lose it, and it is named before another library opens.
-#[test]
-fn an_unsaved_edit_of_a_resting_sample_is_named_before_the_library_goes() {
-    let root = Temp::new();
-    let (mut session, id, _) = resting_sample(&root);
-    assert_eq!(session.store.unkept(&session.bench.workspace), [""; 0]);
-
-    let workspace = &mut session.bench.workspace;
-    let sets = vec![("name".to_string(), "Vibes".to_string())];
-    workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)));
-    session.autosave();
-    assert_eq!(
-        session.store.unkept(&session.bench.workspace),
-        ["Zoned.nsmp"]
-    );
-    let working = root.at(".drawbar/working");
-    assert!(!working.exists() || root.names(".drawbar/working").is_empty());
-}
-
 /// A plan over a piano library resting in its file is saved by laying the library out
 /// again from its file, each kept stroke read by its range: the file then holds what a
 /// whole read and a whole layout write make, and the asset rests in it.
@@ -3706,4 +3689,237 @@ fn an_edit_their_file_already_holds_is_let_go_without_asking() {
     assert!(workspace.edit(id).is_none());
     assert!(!workspace.get(id).unwrap().is_unsaved());
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
+}
+
+/// A library holding a three-zone sample instrument and a piano library, each resting in
+/// its file, with an unsaved edit held of each, and the ids and edits.
+fn edited_pair(root: &Temp) -> (Session, [(u64, crate::rewrite::Edit); 2]) {
+    let sample = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
+    fs::write(root.at("Zoned.nsmp"), sample).unwrap();
+    fs::write(root.at("Grand.npno"), piano_rooted(&[48, 60, 72], 4)).unwrap();
+    let mut session = Session::listed(root);
+    session.ask_all();
+    let sets = vec![("name".to_string(), "Vibes".to_string())];
+    let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
+    let edits = [
+        (
+            session.named("Zoned.nsmp"),
+            crate::rewrite::Edit::Sample(sets),
+        ),
+        (
+            session.named("Grand.npno"),
+            crate::rewrite::Edit::Piano(plan),
+        ),
+    ];
+    for (id, edit) in &edits {
+        let workspace = &mut session.bench.workspace;
+        workspace.hold_edit(*id, Some(edit.clone()));
+        assert!(workspace.edit_of(*id).is_some(), "the edit applies");
+    }
+    (session, edits)
+}
+
+impl Session {
+    /// Whether each of these assets holds this edit, unsaved, made over the file it rests
+    /// in.
+    fn holds(&self, edits: &[(u64, crate::rewrite::Edit)]) {
+        for (id, edit) in edits {
+            let workspace = &self.bench.workspace;
+            let entity = workspace.get(*id).expect("the same id");
+            assert_eq!(workspace.edit(*id), Some(edit), "{}", entity.name);
+            let (over, _) = workspace.edit_of(*id).expect("it applies");
+            assert!(entity
+                .rests()
+                .is_some_and(|file| std::sync::Arc::ptr_eq(file, over)));
+            assert!(entity.is_unsaved(), "{} is unsaved", entity.name);
+        }
+    }
+}
+
+/// The working copies the library's index names, by asset id.
+fn copies(root: &Temp) -> BTreeMap<u64, Working> {
+    let text = String::from_utf8_lossy(&root.read(".drawbar/library.ron")).into_owned();
+    let Read::Known(index) = sidecar::read(&text) else {
+        panic!("the index reads")
+    };
+    index
+        .assets
+        .into_iter()
+        .filter_map(|(id, row)| Some((id, row.working?)))
+        .collect()
+}
+
+/// An unsaved edit of a sample instrument and an unsaved piano plan, each over the file
+/// it rests in, are kept across a quit as working copies of the edits themselves, and
+/// come back unsaved, over the files as they were, without a question. Nothing is
+/// asked of opening another library either.
+#[test]
+fn an_unsaved_sample_edit_and_piano_plan_come_back_unsaved_after_a_quit() {
+    let root = Temp::new();
+    let (session, edits) = edited_pair(&root);
+    let files = (root.read("Zoned.nsmp"), root.read("Grand.npno"));
+    assert_eq!(session.store.unkept(&session.bench.workspace), [""; 0]);
+    session.close();
+
+    let kinds: Vec<Keeps> = copies(&root).values().map(|copy| copy.keeps).collect();
+    assert_eq!(kinds, [Keeps::Edit, Keeps::Edit]);
+    let mut second = Session::listed(&root);
+    second.holds(&edits);
+    assert!(second.bench.browser.asking().is_none(), "nothing changed");
+    let words = second.document(edits[0].0);
+    assert!(words.iter().any(|word| word == "Vibes"), "{words:?}");
+    assert!(root.read("Zoned.nsmp") == files.0 && root.read("Grand.npno") == files.1);
+
+    for (id, _) in &edits {
+        assert!(second.bench.workspace.save_edit(*id));
+    }
+    second.sync();
+    second.close();
+    let third = Session::listed(&root);
+    assert!(copies(&root).is_empty(), "the saves needed no copy");
+    assert!(root.names(".drawbar/working").is_empty());
+    for (id, _) in &edits {
+        assert!(!third.bench.workspace.get(*id).unwrap().is_unsaved());
+    }
+}
+
+/// Edits kept across a quit over files saved over outside drawbar meanwhile are made
+/// again over the files as they are now, and drawbar asks whose to keep. Keeping mine
+/// saves each over theirs.
+#[test]
+fn edits_kept_across_a_quit_are_made_again_over_their_files_changed_meanwhile() {
+    let root = Temp::new();
+    let (session, edits) = edited_pair(&root);
+    session.close();
+    let theirs = (
+        crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184),
+        piano_rooted(&[48, 60, 72], 5),
+    );
+    fs::write(root.at("Zoned.nsmp"), &theirs.0).unwrap();
+    fs::write(root.at("Grand.npno"), &theirs.1).unwrap();
+
+    let mut second = Session::listed(&root);
+
+    second.holds(&edits);
+    assert_eq!(
+        second.said("changed on disk while drawbar held an unsaved edit"),
+        2
+    );
+    let (title, answers) = second.bench.browser.asking().expect("a question");
+    assert!(title.ends_with("changed on disk"), "{title}");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+
+    for (id, _) in &edits {
+        assert!(second.bench.workspace.save_edit(*id));
+    }
+    second.sync();
+    let [(_, crate::rewrite::Edit::Sample(sets)), (_, crate::rewrite::Edit::Piano(plan))] = &edits
+    else {
+        panic!("a sample's sets and a piano's plan")
+    };
+    let sample = crate::document::sample::apply(&theirs.0, sets).unwrap();
+    assert!(
+        root.read("Zoned.nsmp") == sample,
+        "their sample under my edit"
+    );
+    let piano = crate::document::piano::rebuild(&theirs.1, plan).unwrap();
+    assert!(
+        root.read("Grand.npno") == piano,
+        "their piano under my plan"
+    );
+}
+
+/// A plan kept across a quit that does not apply to its file as it is now is kept as it
+/// was, unsaved, and drawbar asks whose to keep. Its copy stays for the next run.
+#[test]
+fn a_plan_kept_across_a_quit_that_no_longer_applies_is_kept_and_asked_about() {
+    let root = Temp::new();
+    let (session, edits) = edited_pair(&root);
+    session.close();
+    fs::write(root.at("Grand.npno"), piano_rooted(&[60], 4)).unwrap();
+
+    let second = Session::listed(&root);
+    let (id, plan) = &edits[1];
+    let workspace = &second.bench.workspace;
+    assert_eq!(workspace.edit(*id), Some(plan), "kept as it was");
+    assert!(workspace.unapplied(*id).is_some());
+    assert!(workspace.get(*id).unwrap().is_unsaved());
+    let (title, _) = second.bench.browser.asking().expect("a question");
+    assert_eq!(title, "“Grand.npno” changed on disk");
+    second.close();
+
+    let third = Session::listed(&root);
+    assert_eq!(
+        third.bench.workspace.edit(*id),
+        Some(plan),
+        "and kept again"
+    );
+    assert_eq!(copies(&root).len(), 2);
+}
+
+/// An edit's working copy is written before the index that names it, and the copy it
+/// replaces is dropped after, so a quit between those writes leaves the old index with
+/// the old copy or the new index with the new one. The next open takes the edit the
+/// index names and sweeps the other copy.
+#[test]
+fn a_quit_between_an_edit_copy_and_its_index_keeps_the_edit_the_index_names() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    let named =
+        |name: &str| crate::rewrite::Edit::Sample(vec![("name".to_string(), name.to_string())]);
+    session.bench.workspace.hold_edit(id, Some(named("Vibes")));
+    session.autosave();
+    session.settle();
+    let index = |root: &Temp| root.read(".drawbar/library.ron");
+    let copy = |root: &Temp| {
+        let names = root.names(".drawbar/working");
+        let [name] = names.as_slice() else {
+            panic!("one copy: {names:?}")
+        };
+        (name.clone(), root.read(&format!(".drawbar/working/{name}")))
+    };
+    let (old_index, old_copy) = (index(&root), copy(&root));
+    session.bench.workspace.hold_edit(id, Some(named("Bells")));
+    session.close();
+    let (new_index, new_copy) = (index(&root), copy(&root));
+    assert_ne!(old_copy.0, new_copy.0, "a new generation");
+
+    let crash = |index: &[u8], kept: &str| {
+        fs::write(root.at(".drawbar/library.ron"), index).unwrap();
+        for (name, bytes) in [&old_copy, &new_copy] {
+            fs::write(root.at(&format!(".drawbar/working/{name}")), bytes).unwrap();
+        }
+        let session = Session::listed(&root);
+        assert_eq!(session.bench.workspace.edit(id), Some(&named(kept)));
+        assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
+        assert_eq!(
+            root.names(".drawbar/working").len(),
+            1,
+            "the other is swept"
+        );
+        session.close();
+    };
+    crash(&old_index, "Vibes");
+    crash(&new_index, "Bells");
+}
+
+/// A working copy of an edit that this build does not read is never taken for no edit:
+/// the library opens read-only and leaves the copy for a build that reads it.
+#[test]
+fn an_edit_copy_of_another_version_leaves_the_library_read_only() {
+    let root = Temp::new();
+    let (session, _) = edited_pair(&root);
+    session.close();
+    let names = root.names(".drawbar/working");
+    let at = root.at(&format!(".drawbar/working/{}", names[0]));
+    let text = String::from_utf8(fs::read(&at).unwrap()).unwrap();
+    let newer = text.replacen("version: 1", "version: 2", 1);
+    assert_ne!(newer, text);
+    fs::write(&at, &newer).unwrap();
+
+    let second = Session::listed(&root);
+    let why = second.store.read_only().expect("read-only");
+    assert!(why.contains("could not be read"), "{why}");
+    second.close();
+    assert_eq!(fs::read(&at).unwrap(), newer.as_bytes(), "the copy is left");
 }

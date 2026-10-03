@@ -62,10 +62,26 @@ pub struct Row {
     pub tags: BTreeSet<u64>,
     #[serde(default)]
     pub origin: Stored,
-    /// The generation of its working copy, `working/<id>-<generation>`, while it holds
-    /// an edit not yet saved.
+    /// Its working copy, while it holds an edit not yet saved.
     #[serde(default)]
-    pub working: Option<u64>,
+    pub working: Option<Working>,
+}
+
+/// A working copy, `working/<id>-<generation>`, and what it keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Working {
+    pub generation: u64,
+    pub keeps: Keeps,
+}
+
+/// What a working copy keeps of an unsaved edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Keeps {
+    /// The asset's bytes, whole.
+    Bytes,
+    /// An edit of the file the asset rests in, as [`crate::rewrite::Edit::working`]
+    /// writes it.
+    Edit,
 }
 
 impl Row {

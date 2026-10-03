@@ -85,7 +85,7 @@ pub use cache::keep_libraries;
 pub use cache::Cache;
 pub use exec::{opens, MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
-pub use sidecar::{Row, Sidecar, Stored};
+pub use sidecar::{Keeps, Row, Sidecar, Stored, Working};
 
 use std::sync::Arc;
 
