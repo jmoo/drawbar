@@ -803,7 +803,10 @@ fn templates(workspace: &Workspace) -> Vec<(u64, String)> {
     let mut open: Vec<(u64, String)> = workspace
         .entities()
         .iter()
-        .filter(|entity| matches!(entity.entity, Some(Entity::Piano(_))))
+        .filter(|entity| {
+            matches!(entity.entity.as_deref(), Some(Entity::Piano(_)))
+                || matches!(entity.indexed(), Some(crate::ondisk::Index::Piano(_)))
+        })
         .map(|entity| (entity.id, entity.name.clone()))
         .collect();
     open.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
@@ -816,6 +819,9 @@ fn skeleton(workspace: &Workspace, id: u64) -> Result<Library<'static>, String> 
     let entity = workspace
         .get(id)
         .ok_or_else(|| "the template is no longer open".to_string())?;
+    if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
+        return Ok(index.library().clone());
+    }
     Library::borrow(&entity.bytes)
         .map(|library| library.without_audio())
         .map_err(|e| format!("{}: {e}", entity.name))

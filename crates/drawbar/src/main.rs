@@ -18,12 +18,14 @@ fn main() -> eframe::Result {
             .with_title_shown(false),
         platform => viewport.with_decorations(!Frame::of(platform).undecorated()),
     };
+    #[cfg(unix)]
+    drawbar::ondisk::raise_open_files();
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
     eframe::run_native(
-        "drawbar",
+        drawbar::APP,
         options,
         Box::new(|cc| {
             let app = drawbar::DrawbarApp::new(cc);

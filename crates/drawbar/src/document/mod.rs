@@ -15,9 +15,10 @@ use crate::fields;
 use crate::log::Log;
 use crate::midi::Played;
 use crate::queue::Queue;
+use crate::rewrite::Edit;
 use crate::strings;
 use crate::tags::Tags;
-use crate::workspace::{LocalEntity, Workspace};
+use crate::workspace::{LocalEntity, VerifyState, Workspace};
 
 mod advanced;
 pub mod capability;
@@ -27,7 +28,7 @@ mod field;
 mod header;
 pub mod keys;
 mod panel;
-mod piano;
+pub(crate) mod piano;
 mod project;
 pub(crate) mod sample;
 mod setlist;
@@ -94,14 +95,19 @@ impl<'a> Asset<'a> {
     }
 
     fn decoded(&self) -> Option<&'a nord_format::Entity> {
-        self.entity.entity.as_ref()
+        self.entity.entity.as_deref()
     }
 }
 
 fn shape(entity: &LocalEntity) -> Shape {
     use nord_format::Entity as E;
 
-    let Some(decoded) = &entity.entity else {
+    match entity.indexed() {
+        Some(crate::ondisk::Index::Piano(_)) => return Shape::Piano,
+        Some(crate::ondisk::Index::Sample(_)) => return Shape::Sample,
+        None => {}
+    }
+    let Some(decoded) = entity.entity.as_deref() else {
         // ⚠️ Checked before `is_text`, so a WAV always opens in the encode panel and
         // never as text.
         if encode::is_wav(&entity.bytes) {
@@ -174,6 +180,7 @@ pub struct Wants {
 
 /// Requests from the Basic face that cannot run while the asset is borrowed for drawing:
 /// audio, or a new asset made from this one.
+#[derive(Clone, Copy)]
 enum Asked {
     Zone(sample::Ask),
     Root(piano::Ask),
@@ -272,6 +279,21 @@ pub struct Document {
     /// holds may come back after the tab that started it has closed. See
     /// [`Document::settle`].
     piano: piano::State,
+    /// A root or zone the user asked to hear, and the document asking, while its stroke
+    /// is read from the file. It is asked again each frame until it decodes.
+    reading: Option<(u64, Asked)>,
+    /// The edits of sample instruments resting in their files.
+    samples: sample::Edits,
+    /// Acts waiting for the edits of assets resting in their files to be saved into
+    /// those files.
+    saving: Vec<Saving>,
+}
+
+/// An act waiting for edits to be saved: each asset it carries that held one, with the
+/// [`crate::ondisk::OnDisk::serial`] of the file it rested in as the act began.
+struct Saving {
+    files: Vec<(u64, u64)>,
+    act: crate::browser::Act,
 }
 
 impl Document {
@@ -286,22 +308,31 @@ impl Document {
         around: &Around<'_>,
     ) -> Wants {
         let played = around.played;
+        // A file not read yet is asked for, and the tab says so until it comes; one read
+        // and not yet decoded is decoded here.
+        if let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) {
+            let said = match &entity.verify {
+                VerifyState::NotRead(why) => format!("“{}” could not be read: {why}", entity.name),
+                _ => "Reading…".to_string(),
+            };
+            workspace.hurry(id);
+            ui.label(egui::RichText::new(said).weak());
+            return Wants::default();
+        }
+        workspace.read_now([id], log);
+        self.follow_sample(id, workspace);
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
         let stamp = entity.stamp;
-        let decoded = entity.entity.as_ref();
+        let decoded = entity.entity.as_deref();
         let registry = decoded.map(fields::fields_of).unwrap_or_default();
         let viewing = workspace.is_view(id);
         let asset = Asset::of(entity);
         let shape = asset.shape;
 
         if self.opened() != Some(id) {
-            self.open = Some(Opened::new(
-                asset,
-                viewing,
-                self.piano.renaming(asset.entity),
-            ));
+            self.open = Some(Opened::new(asset, viewing, self.renaming(asset.entity)));
             self.advanced.leave();
             // ⚠️ Leaving the tab stops playback: a zone still playing over another
             // document has no control on screen to stop it.
@@ -347,7 +378,16 @@ impl Document {
             _ => 0,
         };
         let extras = match shape {
-            Shape::Piano => self.piano.begin(id, entity, &device.state),
+            Shape::Piano => {
+                let held = match workspace
+                    .edit(id)
+                    .filter(|_| workspace.edit_of(id).is_some())
+                {
+                    Some(Edit::Piano(plan)) => Some(plan),
+                    _ => None,
+                };
+                self.piano.begin(id, entity, &device.state, held)
+            }
             Shape::Fields
             | Shape::SetList
             | Shape::Sample
@@ -358,6 +398,7 @@ impl Document {
             | Shape::Undecoded => extras(asset, device, workspace, pending),
         };
 
+        let renaming = self.renaming(entity);
         let Some(open) = self.open.as_mut() else {
             return Wants::default();
         };
@@ -372,7 +413,7 @@ impl Document {
                 queue: around.queue,
                 tags: around.tags,
                 view: viewing,
-                renaming: self.piano.renaming(entity),
+                renaming,
                 shape,
                 extras,
             },
@@ -455,10 +496,21 @@ impl Document {
                 device.send(cmd, log);
             }
         }
+        // A request the user made since takes the place of one still waiting.
+        let heard = |asked: &Asked| match asked {
+            Asked::Root(ask) => !matches!(ask, piano::Ask::Show(_)),
+            Asked::Zone(ask) => !matches!(ask, sample::Ask::Decode(_)),
+            _ => false,
+        };
+        let waited = self
+            .reading
+            .take()
+            .filter(|(on, _)| *on == id && !asked.iter().any(heard));
+        let asked = waited.map(|(_, ask)| ask).into_iter().chain(asked);
         for asked in asked {
             match asked {
                 Asked::Open(item) => wants.open = Some(item),
-                Asked::Export => self.export(ui.ctx(), id, workspace),
+                Asked::Export => self.export(ui.ctx(), id, workspace, log),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
                 Asked::Encode => self.encode(id, workspace, log),
@@ -478,7 +530,7 @@ impl Document {
             workspace.rename(id, name);
         }
         if act.export {
-            self.export(ui.ctx(), id, workspace);
+            self.export(ui.ctx(), id, workspace, log);
         }
         if act.revert {
             workspace.revert(id, log);
@@ -511,18 +563,23 @@ impl Document {
     /// name the format refuses, or a switch that would leave no strokes, is refused now
     /// and cannot block every later edit. The bytes are laid out only when something
     /// needs them; see [`piano::State::start`].
-    fn replan(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+    fn replan(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
         let Some(plan) = self.piano.drafted() else {
             return;
         };
         let checked = match workspace.get(id) {
-            Some(entity) => piano::planned(&entity.saved.bytes, &plan).map(|_| ()),
+            Some(entity) => piano::check(entity, &plan).map(|()| entity.rests().is_some()),
             None => return,
         };
         match checked {
-            Ok(()) => {
-                self.piano.commit(plan);
+            Ok(resting) => {
+                self.piano.commit(plan.clone());
                 self.refused(None);
+                // A library resting in its file is saved by writing the plan through it.
+                if resting {
+                    let edit = (!plan.is_empty()).then_some(Edit::Piano(plan));
+                    workspace.hold_edit(id, edit);
+                }
             }
             Err(why) => {
                 self.piano.discard();
@@ -534,7 +591,36 @@ impl Document {
 
     /// Whether this document holds an edit its bytes do not.
     fn pends(&self, id: u64) -> bool {
-        self.piano.pending(id)
+        self.piano.pending(id) || self.samples.pending(id)
+    }
+
+    /// The names a save writes, where the document's edit renames the file's.
+    fn renaming(&self, entity: &LocalEntity) -> (Option<String>, Option<String>) {
+        match self.samples.name(entity.id) {
+            Some(name) => (Some(name), None),
+            None => self.piano.renaming(entity),
+        }
+    }
+
+    /// Keep the edit of a sample instrument resting in its file level with the
+    /// workspace's: this document's edit is handed to the workspace once made, and where
+    /// the instrument rests in another file than this document's edit is over, it takes
+    /// up what the workspace made of the edit there.
+    fn follow_sample(&mut self, id: u64, workspace: &mut Workspace) {
+        let Some((file, index)) = workspace.get(id).and_then(sample::resting) else {
+            self.samples.forget(id);
+            return;
+        };
+        if !self.samples.over(id, file) {
+            match workspace.edit(id) {
+                Some(Edit::Sample(sets)) => self.samples.adopt(id, file, index, sets),
+                _ => self.samples.forget(id),
+            }
+            return;
+        }
+        if let Some(sets) = self.samples.unheld(id) {
+            workspace.hold_edit(id, Some(Edit::Sample(sets)));
+        }
     }
 
     /// Tell the workspace whether this document holds a pending plan, and return whether
@@ -546,8 +632,16 @@ impl Document {
         workspace.mark_pending(id, self.pends(id))
     }
 
-    /// Hold back acts that would carry a piano library's bytes while its plan is not yet
-    /// applied, and start the apply they wait for.
+    /// Let go of what is kept about an asset that has left the workspace.
+    pub fn forget(&mut self, id: u64) {
+        self.views.remove(&id);
+        self.piano.forget(id);
+        self.samples.forget(id);
+    }
+
+    /// Hold back acts that would carry an asset's bytes while an edit of it has not
+    /// reached them, and start what they wait for: the save of an edit held over the file
+    /// the asset rests in, or the apply of a piano library's plan.
     ///
     /// ⚠️ Call after the frame's acts are collected and before any of them run. An act
     /// let through here writes the bytes as they stand, which for a pending plan is the
@@ -560,20 +654,95 @@ impl Document {
         ctx: &egui::Context,
         acts: Vec<crate::browser::Act>,
         workspace: &mut Workspace,
+        queue: &Queue,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
-        let mut out: Vec<crate::browser::Act> = acts
-            .into_iter()
-            .filter_map(|act| {
-                // Whatever the gesture's source, the saved bytes are about to be
-                // restored or removed, and a plan over them would edit nothing.
-                if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
-                    self.piano.forget(*id);
-                }
-                self.piano.hold(ctx, act, workspace)
-            })
-            .collect();
+        let mut ids = self.samples.ids();
+        ids.extend(workspace.edited());
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            self.follow_sample(id, workspace);
+        }
+        let mut out = Vec::new();
+        for act in acts {
+            // Whatever the gesture's source, the saved bytes are about to be restored or
+            // removed, and an edit over them would edit nothing.
+            if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
+                self.piano.forget(*id);
+                self.samples.forget(*id);
+            }
+            let carried = act.carries(queue);
+            if let Some(act) = self.save_first(act, &carried, workspace, log) {
+                out.extend(self.piano.hold(ctx, act, workspace));
+            }
+        }
+        out.extend(self.saved(workspace, log));
         out.extend(self.released(ctx, workspace, log));
+        out
+    }
+
+    /// Hold an act that carries assets out of the app while any of them holds an edit
+    /// over the file it rests in, and ask for each such edit to be saved into its file
+    /// first. Returns the act where it is free to run now, and drops it, saying why,
+    /// where an edit does not apply to the file it would be saved into.
+    fn save_first(
+        &mut self,
+        act: crate::browser::Act,
+        carried: &[u64],
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Option<crate::browser::Act> {
+        let unapplied = carried.iter().find_map(|id| {
+            let why = workspace.unapplied(*id)?;
+            Some((&workspace.get(*id)?.name, why))
+        });
+        if let Some((name, why)) = unapplied {
+            log.error(format!("{name}: {why}"));
+            log.trouble(format!(
+                "“{name}” holds an edit that does not apply to its file as it is now, so \
+                 it was not saved. Revert it, or edit it again."
+            ));
+            return None;
+        }
+        let files: Vec<(u64, u64)> = carried
+            .iter()
+            .filter(|id| workspace.edit_of(**id).is_some())
+            .filter_map(|id| Some((*id, workspace.get(*id)?.rests()?.serial)))
+            .collect();
+        if files.is_empty() {
+            return Some(act);
+        }
+        for (id, _) in &files {
+            workspace.save_edit(*id);
+        }
+        self.saving.push(Saving { files, act });
+        None
+    }
+
+    /// The acts whose saves have all answered: each runs where every save landed, and
+    /// is dropped, with a word, where one did not.
+    fn saved(&mut self, workspace: &Workspace, log: &mut Log) -> Vec<crate::browser::Act> {
+        let (answered, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.saving)
+            .into_iter()
+            .partition(|held| held.files.iter().all(|(id, _)| !workspace.saving_edit(*id)));
+        self.saving = waiting;
+        let mut out = Vec::new();
+        for Saving { files, act } in answered {
+            let unsaved = files.iter().find_map(|(id, serial)| {
+                let entity = workspace.get(*id)?;
+                let moved = entity.rests().is_some_and(|file| file.serial != *serial);
+                (!moved || entity.is_unsaved()).then_some(entity)
+            });
+            match (unsaved, &act) {
+                (None, _) => out.push(act),
+                (Some(_), crate::browser::Act::SaveDoc(_)) => {}
+                (Some(entity), _) => log.say(format!(
+                    "“{}” was not saved, so what waited on its save did not run.",
+                    entity.name
+                )),
+            }
+        }
         out
     }
 
@@ -613,13 +782,12 @@ impl Document {
         applied.acts
     }
 
-    /// Export the document's bytes once any pending plan has been applied to them.
-    fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace) {
-        if self
-            .piano
-            .hold(ctx, crate::browser::Act::Export(id), workspace)
-            .is_some()
-        {
+    /// Export the document's bytes once any pending edit has reached them.
+    fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace, log: &mut Log) {
+        let held = self
+            .save_first(crate::browser::Act::Export(id), &[id], workspace, log)
+            .and_then(|act| self.piano.hold(ctx, act, workspace));
+        if held.is_some() {
             workspace.export(id);
         }
     }
@@ -676,9 +844,7 @@ impl Document {
     ) -> Option<Asked> {
         match asset.shape {
             Shape::Wav | Shape::Undecoded => self.wav_body(ui),
-            Shape::Sample => self
-                .sample_body(ui, asset.decoded()?, sets)
-                .map(Asked::Zone),
+            Shape::Sample => self.sample_body(ui, asset.entity, sets).map(Asked::Zone),
             Shape::Project => {
                 self.project_body(ui, asset.decoded()?, sets);
                 None
@@ -723,10 +889,10 @@ impl Document {
     fn sample_body(
         &mut self,
         ui: &mut egui::Ui,
-        decoded: &nord_format::Entity,
+        entity: &LocalEntity,
         sets: &mut Sets,
     ) -> Option<sample::Ask> {
-        let snapshot = match sample::snapshot(decoded)? {
+        let snapshot = match self.sample_snapshot(entity)? {
             Ok(snapshot) => snapshot,
             Err(why) => {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
@@ -754,7 +920,7 @@ impl Document {
             }
             Shape::Piano => self.piano.meta(ui),
             Shape::Sample => {
-                if let Some(Ok(snapshot)) = asset.decoded().and_then(sample::snapshot) {
+                if let Some(Ok(snapshot)) = self.sample_snapshot(asset.entity) {
                     sample::metadata(ui, &snapshot);
                 }
             }
@@ -797,7 +963,7 @@ impl Document {
                 false
             }
             Shape::Sample => {
-                if let Some(Ok(snapshot)) = asset.decoded().and_then(sample::snapshot) {
+                if let Some(Ok(snapshot)) = self.sample_snapshot(asset.entity) {
                     capability::table(ui, &sample::capabilities(snapshot.generation));
                     capability::offsets(ui, &sample::offsets(&snapshot));
                 }
@@ -845,6 +1011,16 @@ impl Document {
                 .map(Asked::Root)
                 .collect();
         }
+        if asset.shape == Shape::Sample {
+            let Some(Ok(snapshot)) = self.sample_snapshot(asset.entity) else {
+                return Vec::new();
+            };
+            let Some(open) = self.open.as_mut() else {
+                return Vec::new();
+            };
+            let asks = sample::map(ui, &mut open.sample, &snapshot, sets, played);
+            return asks.into_iter().map(Asked::Zone).collect();
+        }
         let (Some(open), Some(decoded)) = (self.open.as_mut(), asset.decoded()) else {
             return Vec::new();
         };
@@ -854,18 +1030,13 @@ impl Document {
                     field::nav(ui, &mut open.fields, doc);
                 }
             }
-            Shape::Sample => {
-                if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-                    let asks = sample::map(ui, &mut open.sample, &snapshot, sets, played);
-                    return asks.into_iter().map(Asked::Zone).collect();
-                }
-            }
             Shape::Project => {
                 if let Some(Ok(snapshot)) = project::snapshot(decoded) {
                     project::map(ui, &mut open.sample, &snapshot, sets, played);
                 }
             }
             Shape::Piano
+            | Shape::Sample
             | Shape::SetList
             | Shape::Text
             | Shape::Verbatim
@@ -877,14 +1048,10 @@ impl Document {
 
     /// Decode, play, strike, or save one zone of a sample instrument.
     fn zone_audio(&mut self, id: u64, ask: sample::Ask, workspace: &mut Workspace, log: &mut Log) {
-        let entity = workspace.get(id).and_then(|e| e.entity.as_ref());
         let (zone, ask) = match ask {
             sample::Ask::Decode(zone) => {
-                if !self.audio.due(zone) {
-                    return;
-                }
-                if let Some(decoded) = entity {
-                    self.audio.decode(decoded, zone);
+                if self.audio.due(zone) {
+                    self.decode_zone(id, ask, zone, workspace);
                 }
                 return;
             }
@@ -900,8 +1067,8 @@ impl Document {
                 semitones,
                 finger,
             } => {
-                if let Some(decoded) = entity {
-                    self.audio.decode(decoded, zone);
+                if !self.decode_zone(id, ask, zone, workspace) {
+                    return;
                 }
                 (zone, Hear::Strike { semitones, finger })
             }
@@ -928,6 +1095,33 @@ impl Document {
         );
     }
 
+    /// Decode one zone, from the bytes held or from its stroke's range of the file the
+    /// instrument rests in. Returns `false` while that range is still being read, and
+    /// asks again on the frames after.
+    fn decode_zone(
+        &mut self,
+        id: u64,
+        ask: sample::Ask,
+        zone: usize,
+        workspace: &Workspace,
+    ) -> bool {
+        let Some(entity) = workspace.get(id) else {
+            return true;
+        };
+        if let Some((file, index)) = sample::resting(entity) {
+            let answered = self.audio.decode_resting(file, index, zone);
+            // An open row asks for its waveform again by itself.
+            if !answered && !matches!(ask, sample::Ask::Decode(_)) {
+                self.reading = Some((id, Asked::Zone(ask)));
+            }
+            return answered;
+        }
+        if let Some(decoded) = entity.entity.as_deref() {
+            self.audio.decode(decoded, zone);
+        }
+        true
+    }
+
     /// Show, play, or save one root of a piano library. The stroke is decoded first,
     /// once, because every request needs it.
     fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
@@ -938,14 +1132,23 @@ impl Document {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        if let Err(why) = self.piano.decode(entity, root) {
+        match self.piano.decode(entity, root) {
+            Ok(()) => {}
+            // An open row asks again by itself.
+            Err(piano::Unheard::Reading) if matches!(ask, piano::Ask::Show(_)) => return,
+            Err(piano::Unheard::Reading) => {
+                self.reading = Some((id, Asked::Root(ask)));
+                return;
+            }
             // ⚠️ An open row asks for its waveform itself and shows why it has none.
             // The log is for requests the user made.
-            if !matches!(ask, piano::Ask::Show(_)) {
-                log.error(why);
-                log.trouble("That root could not be decoded.");
+            Err(piano::Unheard::Refused(why)) => {
+                if !matches!(ask, piano::Ask::Show(_)) {
+                    log.error(why);
+                    log.trouble("That root could not be decoded.");
+                }
+                return;
             }
-            return;
         }
         let Some(sound) = self.piano.sound(root) else {
             return;
@@ -974,13 +1177,23 @@ impl Document {
     fn instrument_name(&self, id: u64, workspace: &Workspace) -> String {
         let entity = workspace.get(id);
         entity
-            .and_then(|e| e.entity.as_ref())
-            .and_then(sample::snapshot)
+            .and_then(|e| self.sample_snapshot(e))
             .and_then(Result::ok)
             .map(|snapshot| snapshot.name)
             .filter(|name| !name.trim().is_empty())
             .or_else(|| entity.map(|e| e.name.clone()))
             .unwrap_or_default()
+    }
+
+    /// What a sample instrument's document shows: its decode, or the index of the file
+    /// it rests in.
+    fn sample_snapshot(&self, entity: &LocalEntity) -> Option<Result<sample::Snapshot, String>> {
+        if let Some((file, index)) = sample::resting(entity) {
+            if let Some(edited) = self.samples.outlined(entity.id, file) {
+                return Some(edited.snapshot(index));
+            }
+        }
+        sample::named(entity)
     }
 
     /// Build an instrument from the open WAV as a new asset. The WAV is left unchanged.
@@ -1039,6 +1252,19 @@ impl Document {
             return Ok(());
         };
         let (before, edited) = (entity.stamp, shape(entity));
+        if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
+            if let Err(why) = self.samples.take(id, file, index, &sets) {
+                log.error(why.clone());
+                self.refused(Some(why.clone()));
+                return Err(why);
+            }
+            self.refused(None);
+            if !self.samples.pending(id) {
+                workspace.hold_edit(id, None);
+            }
+            self.follow_sample(id, workspace);
+            return Ok(());
+        }
         // ⚠️ Works on the asset's own bytes, never a copy. A piano library is hundreds
         // of megabytes and every set of every frame comes through here; the piano arm
         // makes no bytes because its sets go into a plan.
@@ -1068,7 +1294,7 @@ impl Document {
             workspace.replace_bytes(id, out, log);
         }
         if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
-            if let Some(decoded) = &held.entity {
+            if let Some(decoded) = held.entity.as_deref() {
                 self.audio.carry(id, (before, held.stamp), decoded);
             }
         }
@@ -1424,13 +1650,33 @@ mod tests {
             self.workspace.get(self.id).expect("it is still open")
         }
 
+        /// Run `acts` as the app runs a frame's acts: held here first where they wait on
+        /// the document, then applied.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn act(&mut self, acts: Vec<crate::browser::Act>) {
+            let ctx = self.ctx.clone();
+            let acts =
+                self.document
+                    .settle(&ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
+            crate::browser::apply(
+                &mut crate::browser::Browser::default(),
+                &mut crate::shell::Shell::default(),
+                acts,
+                &mut self.workspace,
+                &mut self.device,
+                &mut crate::tabs::Tabs::default(),
+                &mut self.queue,
+                &mut self.log,
+            );
+        }
+
         /// The open document's state.
         fn state(&mut self) -> &mut Opened {
             self.document.open.as_mut().expect("a document is open")
         }
 
         fn set(&mut self, sets: &[(&str, &str)]) {
-            let bytes = self.entity().bytes.clone();
+            let bytes = self.entity().bytes.to_vec();
             let sets: Vec<(String, String)> = sets
                 .iter()
                 .map(|(path, value)| ((*path).to_string(), (*value).to_string()))
@@ -1494,6 +1740,194 @@ mod tests {
         render_view(sets, kind, Face::Basic);
     }
 
+    /// A sample instrument resting in its file opens from its index: the document draws
+    /// with nothing read whole, and an open row's waveform reads its own stroke's range
+    /// and nothing else, decoding to the audio a whole read decodes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_opens_from_its_index_and_decodes_a_zone_from_its_range() {
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
+
+        let words = open.twice();
+        assert!(words.iter().any(|word| word == "Marimba"), "{words:?}");
+        assert!(words.iter().any(|word| word == "Zone 1"), "{words:?}");
+        assert!(open.entity().rests().is_some() && open.entity().held_whole() == 0);
+        assert_eq!(file.take_reads(), [], "the frames read no stroke");
+
+        sample::pick_row(&mut open.state().sample, 0);
+        open.twice();
+        let crate::ondisk::Index::Sample(index) = &file.index else {
+            panic!("a sample's index")
+        };
+        let stroke = index.zones()[0].stream.clone();
+        assert_eq!(
+            file.take_reads(),
+            [stroke],
+            "one read, of the zone's stroke"
+        );
+        let decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the open row asked for it");
+        let whole = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let mut held = sample::Cache::default();
+        held.decode(&whole, 0);
+        let whole = held.get(0).unwrap().as_ref().unwrap();
+        assert!(decoded.as_ref().unwrap().audio == whole.audio);
+    }
+
+    /// An edit of a sample resting in its file is held over the file, which nothing reads
+    /// whole: the document shows it and counts it unsaved. A save waits until the store
+    /// has written the file through with the edit, and then runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_samples_edit_is_held_over_its_file_and_saved_through_it() {
+        use crate::browser::Act;
+
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
+        open.id = id;
+        open.twice();
+
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets.clone(), workspace, log).unwrap();
+        let words = open.twice();
+        assert!(words.iter().any(|word| word == "edited"), "{words:?}");
+        let named = open.document.instrument_name(id, &open.workspace);
+        assert_eq!(named, "Vibes");
+        let entity = open.entity();
+        assert!(entity.is_unsaved() && entity.rests().is_some());
+        assert_eq!(entity.held_whole(), 0);
+        assert_eq!(file.take_reads(), [], "nothing was read to edit it");
+
+        let ctx = open.ctx.clone();
+        let Open {
+            document,
+            workspace,
+            queue,
+            log,
+            ..
+        } = &mut open;
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        assert_eq!(ran, [], "the save waits for the file");
+        assert!(workspace.saving_edit(id));
+
+        let (from, edit) = workspace.send_edit(id).expect("the store takes it");
+        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
+        edit.write(&from, &mut out).unwrap();
+        drop(out);
+        let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
+        let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
+        workspace.edit_saved(id, std::sync::Arc::new(saved));
+        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
+        assert_eq!(ran, [Act::SaveDoc(id)]);
+
+        let whole = sample::apply(&bytes, &sets).unwrap();
+        assert!(dir.read("Saved.nsmp") == whole);
+        let words = open.twice();
+        assert!(!words.iter().any(|word| word == "edited"), "{words:?}");
+        assert!(!open.entity().is_unsaved());
+        let named = open.document.instrument_name(id, &open.workspace);
+        assert_eq!(named, "Vibes", "read from the file the save wrote");
+    }
+
+    /// A queued send of a sample resting in its file under an edit waits for the edit to
+    /// be saved into the file, and then sends the file the save wrote, unread.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_send_of_a_resting_sample_saves_its_edit_and_sends_the_file_saved() {
+        use crate::browser::Act;
+        use crate::device::{DeviceCmd, Payload};
+
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        let (class, at) = (ObjectClass::Sample, Location::from_user(1, 1));
+        open.device.pretend_scanned(class, 1, &[""]);
+        open.act(vec![Act::Send { id, class, at }]);
+        assert!(open.queue.entry(id).is_some(), "it waits to be sent");
+
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets.clone(), workspace, log).unwrap();
+        open.twice();
+        open.act(vec![Act::SendAll]);
+        let sent = |open: &Open| {
+            let batch = open.device.queued().iter().find_map(|cmd| match cmd {
+                DeviceCmd::SendAll { items, .. } => Some(items),
+                _ => None,
+            });
+            batch.map(|items| items[0].payload.clone())
+        };
+        assert!(sent(&open).is_none(), "nothing is sent before the save");
+        assert!(open.workspace.saving_edit(id));
+
+        let (from, edit) = open.workspace.send_edit(id).expect("the store takes it");
+        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
+        edit.write(&from, &mut out).unwrap();
+        drop(out);
+        let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
+        open.workspace.edit_saved(id, saved.clone());
+        open.workspace.settle_files(&mut open.log);
+        saved.take_reads();
+        open.act(Vec::new());
+
+        let Some(Payload::File { file: sent, .. }) = sent(&open) else {
+            panic!("the file the save wrote is sent: {:?}", open.log.status())
+        };
+        assert!(std::sync::Arc::ptr_eq(&sent, &saved));
+        assert!(dir.read("Saved.nsmp") == sample::apply(&bytes, &sets).unwrap());
+        assert_eq!(saved.take_reads(), [], "nothing read it to send it");
+    }
+
+    /// An edit of a sample resting in its file is not sent as the file without it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_holding_an_unsaved_edit_is_not_sendable_as_its_file() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        assert!(crate::device::Payload::of(open.entity()).is_ok());
+
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets, workspace, log).unwrap();
+        assert!(crate::device::Payload::of(open.entity()).is_err());
+    }
+
     /// Every kind, in both the dark and the light theme.
     #[test]
     fn every_kind_shows_the_header_and_names_its_faces() {
@@ -1520,7 +1954,7 @@ mod tests {
     #[test]
     fn the_headers_words_never_run_under_its_controls() {
         let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.clone();
+        let bytes = open.entity().bytes.to_vec();
         open.id = open.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -1676,7 +2110,7 @@ mod tests {
     fn typing_in_a_samples_name_box_writes_the_name_the_file_stores() {
         let mut open = Open::file("whatever.nsmp", sample_bytes());
         let stored = |open: &Open| {
-            sample::snapshot(open.entity().entity.as_ref().unwrap())
+            sample::snapshot(open.entity().entity.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
                 .name
@@ -1704,7 +2138,7 @@ mod tests {
     fn a_stored_name_box_holds_no_more_bytes_than_the_field_does() {
         let mut open = Open::file("whatever.nsmp", sample_bytes());
         let held = |open: &Open| {
-            sample::snapshot(open.entity().entity.as_ref().expect("it decoded"))
+            sample::snapshot(open.entity().entity.as_deref().expect("it decoded"))
                 .expect("an instrument")
                 .expect("it reads")
         };
@@ -1808,7 +2242,7 @@ mod tests {
     #[test]
     fn the_loud_action_carries_the_count_where_there_is_somewhere_to_send_it() {
         let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.clone();
+        let bytes = open.entity().bytes.to_vec();
         open.id = open.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -2102,7 +2536,7 @@ mod tests {
     fn a_refused_cell_keeps_its_error() {
         let mut open = Open::fresh(Fresh::Program);
         open.frame(Vec::new());
-        let (id, before) = (open.id, open.entity().bytes.clone());
+        let (id, before) = (open.id, open.entity().bytes.to_vec());
 
         // The same call the frame makes, so this covers how the table handles the
         // library's answer.
@@ -2254,7 +2688,7 @@ mod tests {
         } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
         let local = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
         assert!(local.name.is_none(), "nothing has been asked");
@@ -2290,7 +2724,7 @@ mod tests {
             .workspace
             .create(Fresh::Program, &mut open.log)
             .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.clone();
+        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
         let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
             .expect("a program can name a piano");
         open.id = open.workspace.ingest(
@@ -2360,7 +2794,7 @@ mod tests {
         } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
 
         // Nothing scanned: the dial stays numeric.
@@ -2618,7 +3052,7 @@ mod tests {
         open.frame(vec![testing::button(PAGE_CORNER, true)]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
 
-        let written = String::from_utf8(open.entity().bytes.clone()).expect("still text");
+        let written = String::from_utf8(open.entity().bytes.to_vec()).expect("still text");
         assert!(written.contains('X'), "X is in the bytes: {written:?}");
         assert_eq!(
             written.replace('X', ""),
@@ -2774,7 +3208,7 @@ mod tests {
             .find(|e| e.id != id)
             .expect("an instrument was added");
         assert_eq!(made.name, "Marimba hit.nsmp");
-        let snapshot = sample::snapshot(made.entity.as_ref().expect("it decoded"))
+        let snapshot = sample::snapshot(made.entity.as_deref().expect("it decoded"))
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.name, "Marimba hit");
@@ -2855,7 +3289,7 @@ mod tests {
         ] {
             let open = Open::file(name, bytes);
             let entity = open.entity();
-            let registry = entity.entity.as_ref().and_then(fields::fields_of);
+            let registry = entity.entity.as_deref().and_then(fields::fields_of);
             assert!(registry.is_none(), "{name} declares no field registry");
             assert_eq!(
                 faces(shape(entity))
@@ -3016,7 +3450,7 @@ mod tests {
             None,
             "the selection does not survive a switch"
         );
-        let snapshot = sample::snapshot(open.entity().entity.as_ref().unwrap())
+        let snapshot = sample::snapshot(open.entity().entity.as_deref().unwrap())
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.zones[0].top_note, 84, "the edit survives");
@@ -3072,7 +3506,7 @@ mod tests {
     fn a_piano_lays_its_plan_out_before_anything_carries_its_bytes() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         let named = |open: &Open| {
-            piano::snapshot(open.entity().entity.as_ref().unwrap())
+            piano::snapshot(open.entity().entity.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
                 .name
@@ -3095,6 +3529,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::SaveDoc(open.id)],
             &mut open.workspace,
+            &open.queue,
             &mut open.log,
         );
         assert!(
@@ -3126,6 +3561,95 @@ mod tests {
         );
     }
 
+    /// A plan over a piano library resting in its file is saved through that file: the
+    /// document holds the rewrite of its index, never the library, and a save waits for
+    /// the store to write the file again from itself, then runs with the plan gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_pianos_plan_is_saved_through_its_file() {
+        use crate::browser::Act;
+
+        let bytes = piano_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Test Piano.npno", file.clone());
+        open.id = id;
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("Test Piano")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+
+        assert!(open.document.pends(id), "the rename is a plan");
+        assert!(open.workspace.edit_of(id).is_some(), "held as a rewrite");
+        assert!(open.entity().rests().is_some() && open.entity().held_whole() == 0);
+        assert_eq!(file.take_reads(), [], "nothing was read to plan it");
+
+        let ctx = open.ctx.clone();
+        let Open {
+            document,
+            workspace,
+            queue,
+            log,
+            ..
+        } = &mut open;
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        assert_eq!(ran, [], "the save waits for the file");
+        assert!(!document.piano.applying(), "nothing lays it out in memory");
+
+        let (from, edit) = workspace.send_edit(id).expect("the store takes it");
+        let mut out = std::fs::File::create(dir.at("Saved.npno")).unwrap();
+        edit.write(&from, &mut out).unwrap();
+        drop(out);
+        let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
+        let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
+        workspace.edit_saved(id, std::sync::Arc::new(saved));
+        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
+        assert_eq!(ran, [Act::SaveDoc(id)]);
+
+        let renamed = piano::snapshot(
+            &nord_format::from_stream(&mut std::io::Cursor::new(dir.read("Saved.npno"))).unwrap(),
+        );
+        assert!(renamed.unwrap().unwrap().name.contains('X'));
+        open.frame(Vec::new());
+        assert!(!open.document.pends(id), "the plan went with the save");
+        assert!(!open.entity().is_unsaved());
+    }
+
+    /// A plan over a piano library resting in its file stays when the file is saved over
+    /// outside drawbar: the document shows it made again over the file as it is now.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_pianos_plan_follows_its_file_saved_over_outside() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &piano_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Test Piano.npno", file);
+        open.id = id;
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("Test Piano")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+        assert!(open.workspace.edit_of(id).is_some(), "the rename is a plan");
+
+        let theirs = testing::on_disk(&dir, "Theirs.npno", &piano_bytes());
+        open.workspace.adopt_file(id, theirs.clone());
+        open.act(Vec::new());
+        open.twice();
+
+        let (over, _) = open.workspace.edit_of(id).expect("the plan is kept");
+        assert!(
+            std::sync::Arc::ptr_eq(over, &theirs),
+            "made over their file"
+        );
+        assert!(open.document.pends(id) && open.entity().is_unsaved());
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert!(
+            renamed.is_some_and(|name| name.contains('X')),
+            "the document shows the plan over their file"
+        );
+    }
+
     /// A pending plan marks the asset unsaved, which offers Revert. A revert drops the
     /// plan whichever control raised it; the File menu raises the same act as the
     /// header.
@@ -3152,6 +3676,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::Revert(open.id)],
             &mut open.workspace,
+            &open.queue,
             &mut open.log,
         );
         assert!(

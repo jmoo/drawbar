@@ -380,6 +380,19 @@ impl Pill<'_> {
     }
 }
 
+/// What the status line says while the library is being read, if it is: how many files
+/// its listing has found, then how many are still to be decoded.
+fn reading(place: Option<&crate::folders::Where>, unread: usize) -> Option<String> {
+    let said = match (place.and_then(|at| at.listing), unread) {
+        (Some(1), _) => "1 file".to_string(),
+        (Some(files), _) => format!("{files} files"),
+        (None, 0) => return None,
+        (None, 1) => "1 file to go".to_string(),
+        (None, unread) => format!("{unread} files to go"),
+    };
+    Some(format!("Reading the library… {said}"))
+}
+
 /// The MIDI controllers' reading: a short label, its signal, and the details on hover.
 /// `None` while MIDI is off.
 ///
@@ -914,9 +927,12 @@ impl DrawbarApp {
     /// The newest sentence, or what the instrument is doing, then the count of problems.
     fn said(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let visuals = ui.visuals().clone();
-        let (glyph, tint_, text) = match &self.device.state.in_flight {
-            Some(words) => (None, visuals.text_color(), words.doing.clone()),
-            None => {
+        let place = self.browser.folders.place.as_ref();
+        let reading = reading(place, self.workspace.reading());
+        let (glyph, tint_, text) = match (&self.device.state.in_flight, reading) {
+            (Some(words), _) => (None, visuals.text_color(), words.doing.clone()),
+            (None, Some(reading)) => (None, visuals.text_color(), reading),
+            (None, None) => {
                 let (level, text) = self.log.status();
                 let glyph = match level {
                     Level::Info => Glyph::CircleCheck,
@@ -1174,8 +1190,8 @@ pub fn too_small_notice(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Fake;
     use crate::testing;
+    use crate::testing::Fake;
     use eframe::{App, Storage};
     use nord_usb::ObjectClass;
 
@@ -1188,7 +1204,7 @@ mod tests {
     fn app(ctx: &egui::Context, storage: Option<&dyn eframe::Storage>) -> DrawbarApp {
         let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
         cc.storage = storage;
-        DrawbarApp::new(&cc)
+        DrawbarApp::with_library(&cc, None)
     }
 
     /// Attach an instrument, which the full layout needs.
@@ -1553,7 +1569,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = app.workspace.get(fresh).unwrap().bytes.to_vec();
         app.workspace.remove(fresh, &mut app.log);
         let id = app.workspace.ingest(
             "Africa-Split.ne5p".into(),
@@ -1670,7 +1686,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let bytes = app.workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         app.workspace.replace_bytes(id, edited, &mut app.log);
@@ -1824,7 +1840,11 @@ mod tests {
         assert!(!app.shell.log_open, "Escape closes the activity log");
         assert_eq!(picked(&app), 1, "and keeps the selection");
 
-        app.about = Some(crate::about::About::new(&app.device.state, &app.workspace));
+        app.about = Some(crate::about::About::new(
+            &app.device.state,
+            &app.workspace,
+            None,
+        ));
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
         assert!(app.about.is_none(), "Escape closes About");

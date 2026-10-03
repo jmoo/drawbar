@@ -1,0 +1,149 @@
+//! drawbar's IndexedDB database in the browser: the folders picked lately, and what was
+//! read of each library's files.
+
+use std::future::Future;
+
+use js_sys::Promise;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast as _, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransaction};
+
+use crate::js::describe;
+
+const DATABASE: &str = "drawbar";
+
+/// The version the database is made at, with every store below.
+const VERSION: u32 = 1;
+
+/// The folders picked lately, under one key. See [`crate::libraries`].
+pub const LIBRARIES: &str = "libraries";
+
+/// One record per file read, under its library's id and its path. See
+/// [`crate::store::Cache`].
+pub const FILES: &str = "files";
+
+/// drawbar's database, with every store it holds made at its first use.
+///
+/// ⚠️ A database another build made at a version this one does not know is deleted and
+/// made again. It holds only what drawbar rebuilds (the folders picked lately, what was
+/// read of each library), so starting it empty costs a re-pick and some re-reads, where
+/// keeping it would leave both unusable.
+pub async fn database() -> Result<IdbDatabase, String> {
+    let factory = web_sys::window()
+        .and_then(|window| window.indexed_db().ok().flatten())
+        .ok_or("this browser has no IndexedDB")?;
+    match open(&factory).await {
+        Err(Refused::Version) => {
+            deleted(&factory).await?;
+            open(&factory).await.map_err(Refused::into_reason)
+        }
+        opened => opened.map_err(Refused::into_reason),
+    }
+}
+
+/// Why the database did not open.
+enum Refused {
+    /// It is at a version this build does not know.
+    Version,
+    Other(String),
+}
+
+impl Refused {
+    fn into_reason(self) -> String {
+        match self {
+            Refused::Version => "IndexedDB holds drawbar's database at another version".into(),
+            Refused::Other(why) => why,
+        }
+    }
+}
+
+async fn open(factory: &web_sys::IdbFactory) -> Result<IdbDatabase, Refused> {
+    let request: IdbOpenDbRequest = factory
+        .open_with_u32(DATABASE, VERSION)
+        .map_err(|e| Refused::Other(describe(&e)))?;
+    let upgrading = request.clone();
+    let upgrade = Closure::once(move |_: JsValue| {
+        let Ok(db) = upgrading.result() else {
+            return;
+        };
+        let db: IdbDatabase = db.unchecked_into();
+        for store in [LIBRARIES, FILES] {
+            let _ = db.create_object_store(store);
+        }
+    });
+    request.set_onupgradeneeded(Some(upgrade.as_ref().unchecked_ref()));
+    let opened = done(&request).await;
+    request.set_onupgradeneeded(None);
+    match opened {
+        Ok(db) => Ok(db.unchecked_into()),
+        Err(why) => match request.error() {
+            Ok(Some(error)) if error.name() == "VersionError" => Err(Refused::Version),
+            _ => Err(Refused::Other(why)),
+        },
+    }
+}
+
+/// Delete drawbar's database. Refused while another tab holds it open, rather than
+/// waiting for that tab to let go.
+async fn deleted(factory: &web_sys::IdbFactory) -> Result<(), String> {
+    let request = factory
+        .delete_database(DATABASE)
+        .map_err(|e| describe(&e))?;
+    let answered = Promise::new(&mut |resolve, reject| {
+        request.set_onsuccess(Some(&resolve));
+        request.set_onerror(Some(&reject));
+        request.set_onblocked(Some(&reject));
+    });
+    let answer = JsFuture::from(answered).await;
+    request.set_onsuccess(None);
+    request.set_onerror(None);
+    request.set_onblocked(None);
+    answer
+        .map(|_| ())
+        .map_err(|_| "another tab holds drawbar's database open".to_string())
+}
+
+/// Once `transaction` has committed, or why it did not.
+///
+/// ⚠️ Its requests succeed before it commits, and the commit can still fail, as when the
+/// origin is out of room.
+pub async fn committed(transaction: &IdbTransaction) -> Result<(), String> {
+    let answered = Promise::new(&mut |resolve, reject| {
+        transaction.set_oncomplete(Some(&resolve));
+        transaction.set_onabort(Some(&reject));
+        transaction.set_onerror(Some(&reject));
+    });
+    let answer = JsFuture::from(answered).await;
+    transaction.set_oncomplete(None);
+    transaction.set_onabort(None);
+    transaction.set_onerror(None);
+    answer.map(|_| ()).map_err(|_| match transaction.error() {
+        Some(error) => describe(&error),
+        None => "IndexedDB did not commit the change".to_string(),
+    })
+}
+
+/// The result of an IndexedDB request, once it has one.
+///
+/// ⚠️ Listens from the call, not from the first poll: a request that answers before its
+/// listener is set never answers it, as the second of two requests sent together would.
+pub fn done(request: &IdbRequest) -> impl Future<Output = Result<JsValue, String>> {
+    let answered = Promise::new(&mut |resolve, reject| {
+        request.set_onsuccess(Some(&resolve));
+        request.set_onerror(Some(&reject));
+    });
+    let request = request.clone();
+    async move {
+        let answer = JsFuture::from(answered).await;
+        request.set_onsuccess(None);
+        request.set_onerror(None);
+        if answer.is_err() {
+            return Err(match request.error() {
+                Ok(Some(error)) => describe(&error),
+                _ => "IndexedDB refused the request".to_string(),
+            });
+        }
+        request.result().map_err(|e| describe(&e))
+    }
+}

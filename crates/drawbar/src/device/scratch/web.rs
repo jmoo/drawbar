@@ -1,0 +1,131 @@
+//! The browser's files, under `.drawbar/tmp/` of its private storage: written through a
+//! `library-writer.js` of their own, since the handles that write in place exist only in
+//! a worker, and read back by slices of the `File` the browser gives for them.
+
+use std::cell::RefCell;
+use std::io;
+use std::rc::Rc;
+
+use web_sys::{FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions};
+
+use nord_usb::{FileSink, FileSource};
+
+use super::{all_taken, numbered, NAMES};
+use crate::store::{buffer, private_root, settle, Writer, TMP};
+
+/// The writer new files are written through, started with the first.
+#[derive(Clone, Default)]
+pub struct Scratch {
+    writer: Rc<RefCell<Option<Rc<Writer>>>>,
+}
+
+impl Scratch {
+    fn writer(&self) -> io::Result<Rc<Writer>> {
+        let mut held = self.writer.borrow_mut();
+        if held.is_none() {
+            *held = Some(Rc::new(Writer::start()?));
+        }
+        Ok(held.clone().expect("started above"))
+    }
+
+    /// A new file named `name` under `.drawbar/tmp/`, never one already there.
+    pub async fn create(&self, name: &str) -> io::Result<Kept> {
+        let dir = tmp().await?;
+        let writer = self.writer()?;
+        for attempt in 0..NAMES {
+            let leaf = numbered(name, attempt);
+            match settle::<FileSystemFileHandle>(dir.get_file_handle(&leaf)).await {
+                Ok(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    let path = format!("{TMP}/{leaf}");
+                    writer.ask("begin", &path, &[]).await?;
+                    return Ok(Kept {
+                        writer,
+                        dir,
+                        leaf,
+                        path,
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(all_taken(name))
+    }
+}
+
+/// `.drawbar/tmp/` of the private storage, made where it is missing.
+async fn tmp() -> io::Result<FileSystemDirectoryHandle> {
+    let options = FileSystemGetDirectoryOptions::new();
+    options.set_create(true);
+    let mut dir = private_root().await?;
+    for name in TMP.split('/') {
+        dir = settle(dir.get_directory_handle_with_options(name, &options)).await?;
+    }
+    Ok(dir)
+}
+
+/// One file made by [`Scratch::create`], held open by the writer until it is closed.
+pub struct Kept {
+    writer: Rc<Writer>,
+    dir: FileSystemDirectoryHandle,
+    leaf: String,
+    /// From the private storage's root, as the writer names files.
+    path: String,
+}
+
+impl Kept {
+    /// Where the file is, in words a person can follow to it.
+    pub fn place(&self) -> String {
+        format!("{} in this browser's storage for drawbar", self.path)
+    }
+
+    /// Flush what was written and let the file go.
+    pub async fn close(&mut self) -> io::Result<()> {
+        self.writer.ask("end", &self.path, &[]).await.map(|_| ())
+    }
+
+    /// The file, read from its start. It must be closed first.
+    pub async fn source(&self) -> io::Result<impl FileSource> {
+        let handle: FileSystemFileHandle = settle(self.dir.get_file_handle(&self.leaf)).await?;
+        let file: web_sys::File = settle(handle.get_file()).await?;
+        Ok(Slices {
+            len: file.size() as u64,
+            file,
+        })
+    }
+
+    /// Let the file go, if it is held, and delete it.
+    pub async fn remove(self) -> io::Result<()> {
+        self.writer
+            .ask("abandon", &self.path, &[])
+            .await
+            .map(|_| ())
+    }
+}
+
+impl FileSink for Kept {
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        let at = (offset as f64).into();
+        let data = buffer(buf).into();
+        self.writer
+            .ask("write", &self.path, &[("at", at), ("data", data)])
+            .await
+            .map(|_| ())
+    }
+}
+
+/// A file the browser gave, read by slices.
+struct Slices {
+    file: web_sys::File,
+    len: u64,
+}
+
+impl FileSource for Slices {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        crate::ondisk::slice_into(&self.file, offset, buf).await
+    }
+}

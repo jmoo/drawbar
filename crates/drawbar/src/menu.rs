@@ -11,6 +11,7 @@ use nord_usb::ObjectClass;
 use crate::app::{accent, DrawbarApp, ThemeChoice};
 use crate::browser::Act;
 use crate::icon::{sized, Glyph};
+use crate::libraries::Picking;
 use crate::newproject::Making;
 use crate::platform::{written, Platform};
 use crate::shell::Dock;
@@ -25,6 +26,13 @@ pub enum Command {
     New(Fresh),
     FromWavs(Making),
     NewFolder,
+    /// Open another folder as the library.
+    PickLibrary,
+    /// Let the browser back into the library open last.
+    Reconnect,
+    /// Switch to the recent library at this place in [`crate::folders::Folders::libraries`].
+    Recent(usize),
+    RevealLibrary,
     Save,
     Revert,
     Export,
@@ -35,6 +43,7 @@ pub enum Command {
     Browser,
     Inspector,
     Activity,
+    AllFiles,
     Theme(ThemeChoice),
     Connect,
     Disconnect,
@@ -57,6 +66,9 @@ pub enum Entry {
     Do(Command),
     Rule,
     Sub(&'static str, Vec<Entry>),
+    /// The recent libraries, as a submenu of [`Command::Recent`] lines, left out while
+    /// there are none.
+    Recent,
 }
 
 /// One menu: its title and its lines.
@@ -94,6 +106,10 @@ pub fn label(command: Command) -> &'static str {
         Command::New(kind) => kind.label(),
         Command::FromWavs(making) => making.item().0,
         Command::NewFolder => "New folder",
+        Command::PickLibrary => OPEN_LIBRARY,
+        Command::Reconnect => "Reconnect library",
+        Command::Recent(_) => "Recent library",
+        Command::RevealLibrary => "Show the library folder",
         Command::Save => "Save",
         Command::Revert => "Revert to saved",
         Command::Export => "Export…",
@@ -104,6 +120,7 @@ pub fn label(command: Command) -> &'static str {
         Command::Browser => "Browser panel",
         Command::Inspector => "Inspector panel",
         Command::Activity => "Activity log",
+        Command::AllFiles => crate::folders::SHOW_ALL_FILES,
         Command::Theme(choice) => choice.name(),
         Command::Connect => "Connect…",
         Command::Disconnect => "Disconnect",
@@ -128,7 +145,7 @@ fn hint(command: Command) -> Option<&'static str> {
         Command::New(kind) => kind.note(),
         Command::FromWavs(making) => Some(making.item().1),
         Command::NewFolder => {
-            Some("groups the list on this computer; the instrument never sees it")
+            Some("a folder in the library on this computer; the instrument never sees it")
         }
         _ => None,
     }
@@ -150,6 +167,7 @@ pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
 fn new_lines(ui: &mut egui::Ui, entries: &[Entry], acts: &mut Vec<Act>) {
     for entry in entries {
         match entry {
+            Entry::Recent => {}
             Entry::Rule => {
                 ui.separator();
             }
@@ -186,6 +204,11 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
 
     let mut file = vec![Do(C::Open), Entry::Sub("New", new_entries()), Rule];
     file.extend([
+        Do(C::Reconnect),
+        Do(C::PickLibrary),
+        Entry::Recent,
+        Do(C::RevealLibrary),
+        Rule,
         Do(C::Save),
         Do(C::Revert),
         Do(C::Export),
@@ -202,6 +225,7 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         Do(C::Browser),
         Do(C::Inspector),
         Do(C::Activity),
+        Do(C::AllFiles),
         Rule,
         Entry::Sub(
             "Theme",
@@ -358,6 +382,11 @@ const KEYED: [Command; 12] = [
     Command::Document,
 ];
 
+pub const OPEN_LIBRARY: &str = "Open library folder…";
+
+/// The title of [`Entry::Recent`]'s submenu.
+pub const RECENT: &str = "Open recent library";
+
 /// The minimum width of a drop-down menu, so its width does not change with which items
 /// are enabled and a long label keeps a gap before its key text.
 const MENU: f32 = 260.0;
@@ -416,6 +445,31 @@ impl DrawbarApp {
             | Command::Welcome
             | Command::CopyLog
             | Command::About => plain,
+            Command::PickLibrary => match crate::libraries::picking() {
+                Picking::On => plain,
+                Picking::TurnedOff => Offer {
+                    enabled: false,
+                    hint: Some(crate::libraries::TURNED_OFF),
+                    ..plain
+                },
+                Picking::Absent => return None,
+            },
+            Command::Reconnect => {
+                let library = self.browser.folders.reconnect.as_ref()?;
+                relabeled(format!("Reconnect {}", library.name))
+            }
+            Command::Recent(at) => {
+                let library = self.browser.folders.libraries.get(at)?;
+                Offer {
+                    label: library.name.clone(),
+                    ..check(library.open)
+                }
+            }
+            Command::RevealLibrary => {
+                let place = self.browser.folders.place.as_ref();
+                place.and_then(|at| at.reveal.as_ref()).map(|_| plain)?
+            }
+            Command::AllFiles => check(self.browser.folders.all_files),
             Command::Save | Command::Export => active.map(|_| plain)?,
             Command::Revert => {
                 let unsaved = self
@@ -479,6 +533,32 @@ impl DrawbarApp {
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
+            Command::PickLibrary => acts.push(Act::PickLibrary),
+            Command::Reconnect => acts.extend(
+                self.browser
+                    .folders
+                    .reconnect
+                    .as_ref()
+                    .map(|library| Act::OpenLibrary(library.root.clone())),
+            ),
+            Command::Recent(at) => acts.extend(
+                self.browser
+                    .folders
+                    .libraries
+                    .get(at)
+                    .filter(|library| !library.open)
+                    .map(|library| Act::OpenLibrary(library.root.clone())),
+            ),
+            Command::RevealLibrary => {
+                let place = self.browser.folders.place.as_ref();
+                if let Some(url) = place.and_then(|at| at.reveal.as_ref()) {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+            Command::AllFiles => {
+                let folders = &mut self.browser.folders;
+                folders.all_files = !folders.all_files;
+            }
             Command::Save => acts.extend(active.map(Act::SaveDoc)),
             Command::Revert => acts.extend(active.map(Act::Revert)),
             Command::Export => acts.extend(active.map(Act::Export)),
@@ -514,6 +594,7 @@ impl DrawbarApp {
                 self.about = Some(crate::about::About::new(
                     &self.device.state,
                     &self.workspace,
+                    self.store.as_ref(),
                 ))
             }
         }
@@ -661,6 +742,23 @@ impl DrawbarApp {
         for entry in entries {
             match entry {
                 Entry::Rule => owed_rule = drawn,
+                Entry::Recent => {
+                    let recent = self.recent();
+                    if recent.is_empty() {
+                        continue;
+                    }
+                    rule_if(ui, &mut owed_rule);
+                    ui.menu_button(RECENT, |ui| {
+                        drop_down_style(ui);
+                        for (command, offer) in &recent {
+                            if self.item(ui, *command, offer) {
+                                self.run(ui.ctx(), frame, *command, acts);
+                                ui.close();
+                            }
+                        }
+                    });
+                    drawn = true;
+                }
                 Entry::Sub(title, inner) => {
                     rule_if(ui, &mut owed_rule);
                     ui.menu_button(*title, |ui| {
@@ -682,6 +780,14 @@ impl DrawbarApp {
                 }
             }
         }
+    }
+
+    /// The lines of [`Entry::Recent`], as they are offered now.
+    pub(crate) fn recent(&self) -> Vec<(Command, Offer)> {
+        (0..)
+            .map(Command::Recent)
+            .map_while(|command| Some((command, self.offer(command)?)))
+            .collect()
     }
 
     /// One menu item: the check column, the label, and the key text at the right.
@@ -860,7 +966,7 @@ mod tests {
             match entry {
                 Entry::Do(command) => into.push(*command),
                 Entry::Sub(_, inner) => commands(inner, into),
-                Entry::Rule => {}
+                Entry::Rule | Entry::Recent => {}
             }
         }
     }

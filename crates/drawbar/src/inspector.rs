@@ -220,6 +220,9 @@ fn selection(
 ) {
     let checked: Vec<Item> = browser.picked().items().collect();
     let picked = checked.len();
+    for id in browser.picked().locals() {
+        workspace.hurry(id);
+    }
     let rows: Vec<Row> = checked
         .iter()
         .filter_map(|item| row_of(*item, workspace, &device.state, queue, browser.tags()))

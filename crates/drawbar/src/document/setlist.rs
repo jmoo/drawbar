@@ -385,7 +385,7 @@ pub fn ui(
     seen: &Catalog<'_>,
     sets: &mut Sets,
 ) -> Option<Item> {
-    let file = song(entity.entity.as_ref()?)?;
+    let file = song(entity.entity.as_deref()?)?;
     let saved = nord_format::from_stream(&mut std::io::Cursor::new(&entity.saved.bytes)).ok();
     let rows = read(file, saved.as_ref().and_then(song), seen);
     let (reading, ink) = health(&rows);
@@ -1078,7 +1078,7 @@ mod tests {
             device: &shown.device.state,
             workspace: &shown.workspace,
         };
-        let claim = claim(entity.entity.as_ref().expect("a set list decodes"), &seen)
+        let claim = claim(entity.entity.as_deref().expect("a set list decodes"), &seen)
             .expect("a vacant slot is trouble");
 
         assert_eq!(claim.words, "1 entry needs attention");
