@@ -1628,6 +1628,34 @@ mod tests {
         assert_eq!(after, ["b/sub", "b/sub/y.ne5p", "b/x.ne5p"]);
     }
 
+    /// A file renamed while the walk is in flight, into a folder still to be listed, is
+    /// listed once, where it was: the walk does not bring it back from where it went.
+    #[test]
+    fn a_file_renamed_while_the_walk_is_in_flight_is_not_listed_again() {
+        let files = ["a/x.ne5p", "top.ne5p"];
+        let mut fs = Claimed::of(files.map(|path| (path.to_string(), 1)));
+        fs.waiting.push_back(Cmd::Move {
+            from: path("top.ne5p"),
+            to: path("a/top.ne5p"),
+        });
+        let mut listed = Vec::new();
+        for event in listing(&mut fs, Vec::new()) {
+            match event {
+                Event::Listed { part, ran } => {
+                    listed.extend(named(&part).into_iter().map(|name| (name, ran)))
+                }
+                Event::Moved { result: Ok(()), .. } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        listed.sort();
+        let listed: Vec<(&str, u64)> = listed
+            .iter()
+            .map(|(name, ran)| (name.as_str(), *ran))
+            .collect();
+        assert_eq!(listed, [("a", 0), ("a/x.ne5p", 1), ("top.ne5p", 0)]);
+    }
+
     /// A file a command wrote while the walk is in flight is not listed again where the
     /// walk then comes to it.
     #[test]
