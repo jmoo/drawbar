@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use nord_format::accept::{Acceptance, Family};
+use nord_usb::op::Received;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
@@ -409,6 +410,13 @@ pub enum DeviceEvent {
         at: Location,
         /// Where the file is, in words a person can follow to it.
         place: String,
+    },
+    /// The occupant of a piano or sample slot something is queued for, read through its
+    /// checksum and not kept, since the instrument reports no checksum for those slots.
+    Summed {
+        class: ObjectClass,
+        at: Location,
+        received: Received,
     },
     Note(String),
     OpOk(String),
@@ -1358,6 +1366,33 @@ impl Device {
         self.state.banks.insert((class.to_raw(), bank), slots);
     }
 
+    /// Fill in a bank as a walk of a piano or sample library would have: a name and a
+    /// body length for each occupied slot, and no checksum, since those slots report none.
+    #[cfg(test)]
+    pub fn pretend_lengths(
+        &mut self,
+        class: ObjectClass,
+        bank: u32,
+        slots: &[Option<(&str, u32)>],
+    ) {
+        self.pretend_attached();
+        let slots = slots
+            .iter()
+            .enumerate()
+            .map(|(slot, held)| {
+                held.map(|(name, body_len)| ProgramInfo {
+                    location: Location::from_user(bank, slot as u32 + 1),
+                    body_len,
+                    format: "npno".into(),
+                    version: 540,
+                    crc32: None,
+                    name: name.to_string(),
+                })
+            })
+            .collect();
+        self.state.banks.insert((class.to_raw(), bank), slots);
+    }
+
     /// Give a class the banks the device would have reported, for a headless render.
     #[cfg(test)]
     pub fn pretend_geometry(&mut self, class: ObjectClass, banks: &[(&str, u32)]) {
@@ -1580,6 +1615,11 @@ impl Device {
                         shown(at)
                     ));
                 }
+                DeviceEvent::Summed {
+                    class,
+                    at,
+                    received,
+                } => queue.summed(class, at, &received, workspace),
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
                         "{} could not be restored; its bytes are in the local list as {name}",

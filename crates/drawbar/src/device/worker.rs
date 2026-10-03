@@ -19,7 +19,7 @@ use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload};
+use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload, Purpose};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -193,6 +193,44 @@ async fn execute<T: Transport>(
                 .map_err(spoil(gone, Some(at)))?;
             let note = format!("{}: {} dependencies", shown(at), deps.len());
             emit.send(DeviceEvent::Deps { class, at, deps });
+            Ok(Some(note))
+        }
+
+        // The instrument reports no checksum for a piano or sample slot, so its occupant
+        // is read through a CRC-32, and nothing of it is held.
+        DeviceCmd::Get {
+            class,
+            at,
+            why: Purpose::Compare,
+        } if class.is_library() => {
+            let read = device
+                .read(class, async |s| {
+                    op::read_into(s, at, &mut std::io::sink()).await
+                })
+                .await;
+            let received = match read {
+                Ok(received) => received,
+                Err(Error::DeviceStatus(op::VACANT)) => {
+                    emit.send(DeviceEvent::Vacant {
+                        class,
+                        at,
+                        why: Purpose::Compare,
+                    });
+                    return Ok(None);
+                }
+                Err(e) => return Err(spoil(gone, Some(at))(e)),
+            };
+            let note = format!(
+                "read {:?} from {} through its checksum ({} bytes)",
+                received.info.name,
+                shown(at),
+                received.info.body_len
+            );
+            emit.send(DeviceEvent::Summed {
+                class,
+                at,
+                received,
+            });
             Ok(Some(note))
         }
 
@@ -2660,6 +2698,50 @@ mod wire_tests {
             failed[0].contains(&format!("kept at {}", kept.display())),
             "{}",
             failed[0]
+        );
+    }
+
+    /// A piano slot something is queued for is read through its checksum: the queue hears
+    /// the body's length and CRC-32, nothing of the body is held, and nothing is kept.
+    #[test]
+    fn a_piano_slot_is_compared_through_its_checksum_in_bounded_memory() {
+        let len: u32 = 48 << 20;
+        let crc = occupant_crc(len);
+        let at = Location { bank: 0, slot: 0 };
+        let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]).holding(len, "npno");
+
+        let ((flow, events), largest) = crate::testing::largest_allocation(|| {
+            drive(
+                &mut device,
+                DeviceCmd::Get {
+                    class: ObjectClass::Piano,
+                    at,
+                    why: Purpose::Compare,
+                },
+            )
+        });
+
+        assert!(flow == Flow::Continue);
+        assert!(
+            largest < len as usize / 100,
+            "the largest allocation was {largest} bytes, of a {len}-byte occupant"
+        );
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let summed: Vec<(u32, u32)> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Summed { received, .. } => {
+                    Some((received.info.body_len, received.body_crc32))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summed, [(len, crc)]);
+        assert!(
+            !said
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::Got { .. })),
+            "no bytes reach the queue"
         );
     }
 

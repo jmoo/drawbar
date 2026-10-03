@@ -8,6 +8,7 @@ use std::io::Cursor;
 use std::ops::Range;
 
 use eframe::egui;
+use nord_usb::op::Received;
 use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
@@ -50,6 +51,16 @@ enum Read {
     /// The occupant's bytes, kept so that an edit made after this entry was queued is
     /// diffed against them without reading the slot again.
     Answered(Vec<u8>),
+    /// The length and CRC-32 of a piano or sample occupant's body, which was read through
+    /// its checksum and not kept.
+    Summed(Sum),
+}
+
+/// A wire body as its length and CRC-32.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Sum {
+    len: usize,
+    crc: u32,
 }
 
 /// How what is waiting differs from what the slot holds.
@@ -62,8 +73,9 @@ pub enum Diff {
     Fields(Vec<FieldDiff>),
     /// One of them has no registry, so the difference is an offset into the wire body.
     Bytes { first_at: usize },
-    /// The wire bodies' checksums differ. An asset resting in its file is compared by
-    /// checksum alone, so where its bytes first differ is not looked for.
+    /// The wire bodies differ in length or checksum. A piano or sample, and an asset
+    /// resting in its file, are compared by those alone, so where their bytes first
+    /// differ is not looked for.
     Checksum,
     /// There is nothing to replace.
     Empty,
@@ -327,7 +339,7 @@ pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, l
         };
         held.replaces = Occupancy::of(&device.state, held.class, held.at);
         held.read = Read::Unasked;
-        held.diff = verdict(entity, &held.replaces);
+        held.diff = verdict(held.class, entity, &held.replaces);
     }
     for id in queue.ids() {
         if let Some((class, at)) = queue.unread(id) {
@@ -345,15 +357,23 @@ pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Que
 
 /// The diff before the occupant's bytes have been read. A vacant slot has nothing to
 /// replace, and two bodies whose checksums match are identical, because the instrument
-/// reports the body's CRC-32 for a slot.
+/// reports the body's CRC-32 for a slot. A piano or sample slot reports none, but one
+/// whose body is another length than this asset's holds something else.
 ///
 /// ⚠️ The checksum is of the current bytes, which a send writes, and not of the saved
 /// baseline that [`crate::device::link`] matches a slot against.
-fn verdict(entity: &LocalEntity, replaces: &Occupancy) -> Diff {
-    let here = entity.container.as_ref().map(|held| held.body_crc32);
+fn verdict(class: ObjectClass, entity: &LocalEntity, replaces: &Occupancy) -> Diff {
+    let here = entity.container.as_ref();
+    let crc = here.map(|here| here.body_crc32);
+    let len = here.map(|here| here.body.len());
     match replaces {
         Occupancy::Vacant => Diff::Empty,
-        Occupancy::Held(held) if held.crc.is_some() && held.crc == here => Diff::Identical,
+        Occupancy::Held(held) if held.crc.is_some() && held.crc == crc => Diff::Identical,
+        Occupancy::Held(held)
+            if class.is_library() && len.is_some_and(|len| len != held.body_len as usize) =>
+        {
+            Diff::Checksum
+        }
         Occupancy::Held(_) | Occupancy::Unknown => Diff::Pending,
     }
 }
@@ -376,7 +396,8 @@ pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log
         held.stamp = entity.stamp;
         held.diff = match &held.read {
             Read::Answered(there) => compare_with(entity, there),
-            Read::Unasked | Read::Asked => verdict(entity, &held.replaces),
+            Read::Summed(there) => compare_sum(entity, *there),
+            Read::Unasked | Read::Asked => verdict(held.class, entity, &held.replaces),
         };
         moved.push(held.id);
     }
@@ -448,7 +469,7 @@ impl Queue {
             id: entity.id,
             class,
             at,
-            diff: verdict(entity, &replaces),
+            diff: verdict(class, entity, &replaces),
             replaces,
             read: Read::Unasked,
             stamp: entity.stamp,
@@ -476,7 +497,7 @@ impl Queue {
                 held.read = Read::Asked;
                 Some((held.class, held.at))
             }
-            Read::Asked | Read::Answered(_) => None,
+            Read::Asked | Read::Answered(_) | Read::Summed(_) => None,
         }
     }
 
@@ -504,6 +525,33 @@ impl Queue {
         held.read = Read::Answered(there.to_vec());
         held.stamp = entity.stamp;
         held.diff = compare_with(entity, there);
+    }
+
+    /// Record the occupant a compare read took only the checksum of, for a piano or sample
+    /// slot something is waiting for.
+    pub fn summed(
+        &mut self,
+        class: ObjectClass,
+        at: Location,
+        received: &Received,
+        workspace: &Workspace,
+    ) {
+        let Some(held) = self.waiting_for(class, at) else {
+            return;
+        };
+        if let Occupancy::Unknown = held.replaces {
+            held.replaces = Occupancy::Held(Occupant::of(&received.info));
+        }
+        let Some(entity) = workspace.get(held.id) else {
+            return;
+        };
+        let there = Sum {
+            len: received.info.body_len as usize,
+            crc: received.body_crc32,
+        };
+        held.read = Read::Summed(there);
+        held.stamp = entity.stamp;
+        held.diff = compare_sum(entity, there);
     }
 
     /// Record that the compare read of a slot something is waiting for found it empty.
@@ -613,6 +661,28 @@ fn compare_with(entity: &LocalEntity, there: &[u8]) -> Diff {
             Diff::Identical
         }
         _ => Diff::Checksum,
+    }
+}
+
+/// [`compare_with`] against an occupant known only by its body's length and checksum.
+fn compare_sum(entity: &LocalEntity, there: Sum) -> Diff {
+    if entity.unread() {
+        return Diff::Pending;
+    }
+    let here = match entity.rests() {
+        Some(_) => entity.container.as_ref().map(|here| Sum {
+            len: here.body.len(),
+            crc: here.body_crc32,
+        }),
+        None => wire_sum(&entity.bytes).map(|(body, crc)| Sum {
+            len: body.len(),
+            crc,
+        }),
+    };
+    match here {
+        None => Diff::Pending,
+        Some(here) if here == there => Diff::Identical,
+        Some(_) => Diff::Checksum,
     }
 }
 
@@ -1966,6 +2036,67 @@ mod tests {
             assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
             queue.arrived(class, at(0), "Grand", there, &workspace);
 
+            let diff = &queue.entry(id).unwrap().diff;
+            match identical {
+                true => assert!(matches!(diff, Diff::Identical), "the same body"),
+                false => assert!(matches!(diff, Diff::Checksum), "another body"),
+            }
+        }
+        assert_eq!(file.take_reads(), [], "nothing read the file");
+    }
+
+    /// A piano slot reports no checksum. One whose body is another length than the
+    /// asset's differs, and no read is asked for. One of the same length is read through
+    /// its checksum, and that read decides. Neither reads the asset's file.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_piano_slot_differs_by_length_or_else_by_a_read_through_its_checksum() {
+        let (mut workspace, mut log, _) = bench();
+        let dir = testing::Temp::new();
+        let bytes = testing::piano(40);
+        let file = testing::on_disk(&dir, "Upright.npno", &bytes);
+        let id = testing::rest(&mut workspace, "Upright.npno", file.clone());
+        workspace.settle_files(&mut log);
+        file.take_reads();
+        let (body, crc) = wire_sum(&bytes).expect("a piano library");
+        let len = body.len() as u32;
+        let class = ObjectClass::Piano;
+        let queued =
+            |workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log| {
+                enqueue(workspace, device, queue, log, id, class, at(0));
+            };
+
+        let (mut device, _tabs) = attached(&workspace);
+        device.pretend_lengths(class, 7, &[Some(("Grand", len + 1))]);
+        let mut queue = Queue::default();
+        queued(&workspace, &mut device, &mut queue, &mut log);
+        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Checksum));
+        assert!(device.queued().is_empty(), "the length settled it");
+
+        for (there, identical) in [(crc, true), (crc ^ 1, false)] {
+            let (mut device, mut tabs) = attached(&workspace);
+            device.pretend_lengths(class, 7, &[Some(("Grand", len))]);
+            let mut queue = Queue::default();
+            queued(&workspace, &mut device, &mut queue, &mut log);
+            assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
+            assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
+
+            device.pretend(DeviceEvent::Summed {
+                class,
+                at: at(0),
+                received: Received {
+                    info: ProgramInfo {
+                        location: at(0),
+                        body_len: len,
+                        format: "npno".into(),
+                        version: 540,
+                        crc32: None,
+                        name: "Grand".into(),
+                    },
+                    body_crc32: there,
+                },
+            });
+            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
             let diff = &queue.entry(id).unwrap().diff;
             match identical {
                 true => assert!(matches!(diff, Diff::Identical), "the same body"),
