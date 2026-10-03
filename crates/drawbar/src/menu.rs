@@ -153,12 +153,7 @@ fn new_lines(ui: &mut egui::Ui, entries: &[Entry], acts: &mut Vec<Act>) {
             Entry::Rule => {
                 ui.separator();
             }
-            Entry::Sub(title, inner) => {
-                ui.menu_button(*title, |ui| {
-                    drop_down_style(ui);
-                    new_lines(ui, inner, acts);
-                });
-            }
+            Entry::Sub(title, inner) => submenu(ui, title, |ui| new_lines(ui, inner, acts)),
             Entry::Do(command) => {
                 if item_button(ui, &Offer::of(*command), None) {
                     acts.extend(made(*command));
@@ -211,20 +206,6 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
                 .collect(),
         ),
     ];
-    let instrument = vec![
-        Do(C::Connect),
-        Do(C::Disconnect),
-        Rule,
-        Do(C::ReadEverything),
-        Do(C::ReadAgain),
-        Rule,
-        Do(C::ReviewQueue),
-        Do(C::SendAll),
-        Do(C::ClearQueue),
-        Do(C::Unqueue),
-        Rule,
-        Do(C::Listen),
-    ];
     let mut help = vec![
         Do(C::Guide),
         Do(C::WhatsNew),
@@ -247,12 +228,33 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         },
         Menu {
             title: "Instrument",
-            entries: instrument,
+            entries: instrument_entries(),
         },
         Menu {
             title: "Help",
             entries: help,
         },
+    ]
+}
+
+/// The Instrument menu's lines, which the attached instrument's pill also opens.
+fn instrument_entries() -> Vec<Entry> {
+    use Command as C;
+    use Entry::{Do, Rule};
+
+    vec![
+        Do(C::Connect),
+        Do(C::Disconnect),
+        Rule,
+        Do(C::ReadEverything),
+        Do(C::ReadAgain),
+        Rule,
+        Do(C::ReviewQueue),
+        Do(C::SendAll),
+        Do(C::ClearQueue),
+        Do(C::Unqueue),
+        Rule,
+        Do(C::Listen),
     ]
 }
 
@@ -647,6 +649,19 @@ impl DrawbarApp {
         response.on_hover_text("Menu  F10");
     }
 
+    /// The Instrument menu, dropping down from `pill` when it is clicked.
+    pub(crate) fn instrument_menu(
+        &mut self,
+        pill: &egui::Response,
+        frame: &mut eframe::Frame,
+        acts: &mut Vec<Act>,
+    ) {
+        egui::Popup::menu(pill).show(|ui| {
+            drop_down_style(ui);
+            self.entries(ui, frame, &instrument_entries(), acts);
+        });
+    }
+
     /// A menu's lines, leaving out what is not offered now and any rule left with
     /// nothing between it and the last.
     fn entries(
@@ -663,10 +678,7 @@ impl DrawbarApp {
                 Entry::Rule => owed_rule = drawn,
                 Entry::Sub(title, inner) => {
                     rule_if(ui, &mut owed_rule);
-                    ui.menu_button(*title, |ui| {
-                        drop_down_style(ui);
-                        self.entries(ui, frame, inner, acts);
-                    });
+                    submenu(ui, title, |ui| self.entries(ui, frame, inner, acts));
                     drawn = true;
                 }
                 Entry::Do(command) => {
@@ -719,6 +731,17 @@ pub fn marked(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
         ui.close();
     }
     clicked
+}
+
+/// A submenu's line in a drop-down: its label in the column the other items' labels
+/// start at, past the empty check column, and the arrow at the right.
+fn submenu(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
+    let button =
+        check(ui, title, false).right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW);
+    egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| {
+        drop_down_style(ui);
+        content(ui);
+    });
 }
 
 /// The button behind a checkable item: the check column, then the label.

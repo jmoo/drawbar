@@ -635,7 +635,7 @@ impl DrawbarApp {
         }
         let narrow = ui.ctx().screen_rect().width() < self.platform.narrow();
         self.theme_button(ui, frame);
-        self.instrument_pill(ui, narrow, acts);
+        self.instrument_pill(ui, frame, narrow, acts);
         self.midi_chip(ui, narrow);
         self.send_button(ui, narrow, acts);
     }
@@ -664,16 +664,22 @@ impl DrawbarApp {
         }
     }
 
-    /// The instrument as a pill with a lamp, or, with none attached, a dashed pill that
-    /// connects one.
-    fn instrument_pill(&self, ui: &mut egui::Ui, narrow: bool, acts: &mut Vec<Act>) {
+    /// The instrument as a pill with a lamp that opens the Instrument menu, or, with none
+    /// attached, a dashed pill that connects one.
+    fn instrument_pill(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        narrow: bool,
+        acts: &mut Vec<Act>,
+    ) {
         let visuals = ui.visuals().clone();
         let ink = visuals.widgets.inactive.fg_stroke.color;
         let label = |text: &str| (!narrow).then(|| text.to_string());
         match self.device.state.product() {
             Some(product) => {
                 let label = label(product);
-                Pill {
+                let pill = Pill {
                     glyph: Glyph::Keyboard,
                     mark: good(&visuals),
                     label: label.as_deref(),
@@ -686,6 +692,7 @@ impl DrawbarApp {
                 }
                 .show(ui)
                 .on_hover_text(format!("{product}: attached"));
+                self.instrument_menu(&pill, frame, acts);
             }
             None => {
                 let looking = matches!(
@@ -1484,6 +1491,66 @@ mod tests {
                     "{platform:?}: {label} at {pill:?} crowds the search at {search:?}"
                 );
             }
+        }
+    }
+
+    /// One frame of the whole app, with every word it painted and where.
+    fn words_at(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        screen: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Vec<testing::Word> {
+        let mut frame = eframe::Frame::_new_kittest();
+        let output = testing::run(ctx, testing::screen(screen, events), |ctx| {
+            app.update(ctx, &mut frame)
+        });
+        testing::painted(&output)
+    }
+
+    /// A click on the attached instrument's pill drops the Instrument menu down from it.
+    #[test]
+    fn the_instrument_pill_opens_the_instrument_menu() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        let product = app.device.state.product().unwrap().to_string();
+        let screen = egui::vec2(1440.0, 900.0);
+        let _ = settled(&ctx, &mut app, screen);
+        let said = words_at(&ctx, &mut app, screen, Vec::new());
+        assert!(!said.iter().any(|word| word.text == "Disconnect"), "closed");
+
+        let pill = testing::where_(&said, &product).center();
+        let _ = words_at(&ctx, &mut app, screen, testing::click(pill));
+        let _ = settled(&ctx, &mut app, screen);
+        let said = words_at(&ctx, &mut app, screen, Vec::new());
+        for item in [
+            "Disconnect",
+            "Read everything",
+            "Listen to MIDI controllers",
+        ] {
+            assert!(
+                said.iter().any(|word| word.text == item),
+                "{item}: {said:?}"
+            );
+        }
+    }
+
+    /// A submenu's label starts where its neighbors' labels do, past the check column.
+    #[test]
+    fn a_submenu_lines_up_with_the_items_around_it() {
+        let screen = egui::vec2(1440.0, 1400.0);
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.platform = Platform::Web;
+        let _ = settled(&ctx, &mut app, screen);
+        let f10 = pressed(egui::Key::F10, egui::Modifiers::NONE);
+        let _ = frame_of(&ctx, &mut app, screen, vec![f10]);
+        let _ = settled(&ctx, &mut app, screen);
+        let said = words_at(&ctx, &mut app, screen, Vec::new());
+        for (sub, item) in [("New", "Open…"), ("Theme", "Browser panel")] {
+            let (sub, item) = (testing::where_(&said, sub), testing::where_(&said, item));
+            assert_eq!(sub.left(), item.left(), "{sub:?} against {item:?}");
         }
     }
 
