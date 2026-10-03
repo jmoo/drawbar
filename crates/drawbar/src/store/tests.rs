@@ -1674,7 +1674,7 @@ fn a_file_past_the_most_drawbar_reads_is_listed_and_its_read_refused() {
         .unwrap();
     assert!(huge.unread());
     assert_eq!(huge.size(), MOST_BYTES + 1);
-    let VerifyState::Failed(why) = &huge.verify else {
+    let VerifyState::NotRead(why) = &huge.verify else {
         panic!("{}", huge.verify.detail());
     };
     assert!(why.contains("at most 1 GiB"), "{why}");

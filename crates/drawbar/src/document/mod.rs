@@ -297,7 +297,7 @@ impl Document {
         // and not yet decoded is decoded here.
         if let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) {
             let said = match &entity.verify {
-                VerifyState::Failed(why) => format!("“{}” could not be read: {why}", entity.name),
+                VerifyState::NotRead(why) => format!("“{}” could not be read: {why}", entity.name),
                 _ => "Reading…".to_string(),
             };
             workspace.hurry(id);

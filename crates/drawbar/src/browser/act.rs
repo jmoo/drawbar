@@ -418,7 +418,7 @@ fn ready(act: &Act, workspace: &Workspace, folders: &mut Folders) -> Ready {
         let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) else {
             continue;
         };
-        if let VerifyState::Failed(why) = &entity.verify {
+        if let VerifyState::NotRead(why) = &entity.verify {
             return Ready::Never(format!("“{}” could not be read: {why}.", entity.name));
         }
         workspace.hurry(id);

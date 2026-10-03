@@ -82,6 +82,8 @@ pub enum VerifyState {
     /// something needs it, and decoded off the frame, or at once by
     /// [`Workspace::read_now`] for whatever acts on it.
     Reading,
+    /// A file from the library that could not be read, and why.
+    NotRead(String),
 }
 
 impl VerifyState {
@@ -92,6 +94,7 @@ impl VerifyState {
             VerifyState::Reading => "reading…",
             VerifyState::Differs { .. } => "differs",
             VerifyState::Failed(_) => "failed",
+            VerifyState::NotRead(_) => "not read",
             VerifyState::NotApplicable(_) => "n/a",
         }
     }
@@ -103,7 +106,7 @@ impl VerifyState {
             VerifyState::Checking => "its checksum is being checked".into(),
             VerifyState::Reading => "it is still being read".into(),
             VerifyState::Differs { at } => format!("first difference at byte {at:#06x}"),
-            VerifyState::Failed(why) => why.clone(),
+            VerifyState::Failed(why) | VerifyState::NotRead(why) => why.clone(),
             VerifyState::NotApplicable(why) => (*why).to_string(),
         }
     }
@@ -111,7 +114,9 @@ impl VerifyState {
     pub fn color(&self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
             VerifyState::Ok | VerifyState::Checked => crate::app::good(visuals),
-            VerifyState::Differs { .. } | VerifyState::Failed(_) => crate::app::bad(visuals),
+            VerifyState::Differs { .. } | VerifyState::Failed(_) | VerifyState::NotRead(_) => {
+                crate::app::bad(visuals)
+            }
             VerifyState::Checking | VerifyState::Reading | VerifyState::NotApplicable(_) => {
                 visuals.weak_text_color()
             }
@@ -124,6 +129,7 @@ impl VerifyState {
             VerifyState::Checking => Some("checking…"),
             VerifyState::Reading => Some("reading…"),
             VerifyState::Failed(_) => Some("failed verification"),
+            VerifyState::NotRead(_) => Some("not read"),
             VerifyState::Ok
             | VerifyState::Checked
             | VerifyState::Differs { .. }
@@ -1726,7 +1732,7 @@ impl Workspace {
         };
         log.warn(format!("{}: {why}", entity.name));
         entity.parse_error = Some(why.clone());
-        entity.verify = VerifyState::Failed(why);
+        entity.verify = VerifyState::NotRead(why);
         self.revision += 1;
     }
 
