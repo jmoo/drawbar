@@ -19,7 +19,7 @@ use crate::browser::{Act, Browser, Item, Kind};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
-use crate::panel::{cut, signal_pill, GAP, GUTTER, INNER_RADIUS};
+use crate::panel::{cut, signal_pill, tonal_button, GAP, GUTTER, INNER_RADIUS};
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
@@ -471,11 +471,20 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
 /// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's Tags
 /// section, and added to something new from the row's Tag menu.
 fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
-    let wearing = wearing(picked, worn);
-    if wearing.is_empty() {
+    if picked.is_empty() {
         return;
     }
+    let wearing = wearing(picked, worn);
     card(ui, Head::fixed(Glyph::Tags, "Tags"), |ui| {
+        let made = tonal_button(ui, Some(Glyph::Plus), "New tag")
+            .on_hover_text("a new tag on everything selected, named as you type");
+        if made.clicked() {
+            acts.push(Act::NewTag(picked.to_vec()));
+        }
+        if wearing.is_empty() {
+            return;
+        }
+        ui.add_space(GAP);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::splat(5.0);
             for (id, name, on_all) in wearing {
@@ -935,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn the_selections_tags_are_chips_and_nothing_at_all_where_there_are_none() {
+    fn the_selections_tags_are_chips_beside_new_tag_and_nothing_without_a_selection() {
         let ctx = context();
         let mut labels = Tags::default();
         let (both, some) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
@@ -960,10 +969,41 @@ mod tests {
             testing::words(&output)
         };
         let said = painted(&[7, 8]);
-        for name in ["Sunday", "Loud"] {
+        for name in ["Sunday", "Loud", "New tag"] {
             assert!(said.contains(&name.to_string()), "{name}: {said:?}");
         }
-        assert!(painted(&[9]).is_empty(), "{:?}", painted(&[9]));
+        let untagged = painted(&[9]);
+        assert!(untagged.contains(&"New tag".to_string()), "{untagged:?}");
+        assert!(!untagged.contains(&"Sunday".to_string()), "{untagged:?}");
+        assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
+    }
+
+    /// New tag in the Tags card puts a new tag on everything selected, and nothing else.
+    #[test]
+    fn new_tag_in_the_card_tags_the_selection() {
+        let ctx = context();
+        egui_extras::install_image_loaders(&ctx);
+        let labels = Tags::default();
+        let mut acts = Vec::new();
+        let frame = |events: Vec<egui::Event>, acts: &mut Vec<Act>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(crate::shell::INSPECTOR)
+                    .show(ctx, |panel| tags(panel, &[7, 8], &labels, acts));
+            });
+            testing::where_(&testing::painted(&output), "New tag").center()
+        };
+        let button = frame(Vec::new(), &mut acts);
+        frame(testing::click(button), &mut acts);
+        assert!(
+            matches!(acts.as_slice(), [Act::NewTag(ids)] if ids == &[7, 8]),
+            "one new tag on the selection; got {} acts",
+            acts.len()
+        );
     }
 
     #[test]
