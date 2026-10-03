@@ -127,7 +127,9 @@ and **File ▸ Reconnect** followed by the folder's name opens yours again once
 you allow it. If you do not, the library that was open stays open. drawbar.app
 cannot show the folder in your file manager, and the browser's storage limits do
 not apply to it. Firefox and Safari cannot open a folder, so there the library is
-always the browser's own.
+always the browser's own. Brave turns folder access off, so there **Open library
+folder…** is grayed out until you turn on `brave://flags/#file-system-access-api`
+and relaunch Brave.
 
 A second tab opens a folder read-only while the first has it open, but a
 browser tab cannot tell that the desktop app has the same folder open. Open a

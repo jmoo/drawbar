@@ -36,8 +36,8 @@ pub use drag::{kinds_present, landing, qualifier, tagged, Carried, Held, Item, K
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
-pub use tree::library_items;
 pub use tree::new_menu;
+pub use tree::{library_items, offers_libraries};
 
 use act::{will_write, write_warnings};
 use drag::ghost;

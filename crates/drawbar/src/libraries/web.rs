@@ -17,7 +17,7 @@ use web_sys::{
     IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransaction, IdbTransactionMode,
 };
 
-use super::THIS_COMPUTER;
+use super::{Picking, THIS_COMPUTER};
 use crate::folders::Library;
 use crate::js::{describe, field};
 use crate::store::{permission, Picked, Root};
@@ -26,9 +26,19 @@ const DATABASE: &str = "drawbar";
 const STORE: &str = "libraries";
 const KEY: &str = "recent";
 
-/// Whether this browser lets a page open a folder on this computer.
-pub fn can_pick() -> bool {
-    web_sys::window().is_some_and(|window| field(&window, "showDirectoryPicker").is_some())
+/// Whether this browser lets a page open a folder on this computer. Brave has
+/// `showDirectoryPicker` only once a flag turns it on.
+pub fn picking() -> Picking {
+    let Some(window) = web_sys::window() else {
+        return Picking::Absent;
+    };
+    if field(&window, "showDirectoryPicker").is_some() {
+        return Picking::On;
+    }
+    match field(&window.navigator().into(), "brave") {
+        Some(_) => Picking::TurnedOff,
+        None => Picking::Absent,
+    }
 }
 
 /// What the libraries' requests came back with.

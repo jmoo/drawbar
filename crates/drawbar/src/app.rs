@@ -212,7 +212,7 @@ impl DrawbarApp {
     /// library open last once the list of them has been read back.
     #[cfg(target_arch = "wasm32")]
     pub fn new(cc: &eframe::CreationContext<'_>) -> DrawbarApp {
-        if !crate::libraries::can_pick() {
+        if crate::libraries::picking() != crate::libraries::Picking::On {
             let store = crate::store::default_root().map(|root| library(&cc.egui_ctx, root));
             return DrawbarApp::with_library(cc, store);
         }

@@ -758,8 +758,9 @@ impl DrawbarApp {
         }
         ui.menu_button("New", |ui| new_menu(ui, acts));
         ui.separator();
-        if crate::libraries::can_pick() || !self.browser.folders.libraries.is_empty() {
-            crate::browser::library_items(ui, &self.browser.folders, acts);
+        let picking = crate::libraries::picking();
+        if crate::browser::offers_libraries(&self.browser.folders, picking) {
+            crate::browser::library_items(ui, &self.browser.folders, picking, acts);
             ui.separator();
         }
         if let Some(id) = self.tabs.active() {

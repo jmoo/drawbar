@@ -19,6 +19,7 @@ use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::folders::{Folder, Folders, SHOW_ALL_FILES};
 use crate::icon::Glyph;
+use crate::libraries::Picking;
 use crate::newproject::Making;
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
@@ -483,10 +484,24 @@ fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
     acts.push(Act::Narrow(narrow));
 }
 
-/// The items that open another folder as the library, switch to a recent one, and show
-/// the open one's folder. Shown where this build can pick a folder, or where
+const OPEN_LIBRARY: &str = "Open library folder…";
+
+/// Whether a menu offers [`library_items`]: where this build can pick a folder, or could
+/// once the browser turns folder access on, or where
 /// [`crate::folders::Folders::libraries`] lists some.
-pub fn library_items(ui: &mut egui::Ui, folders: &crate::folders::Folders, acts: &mut Vec<Act>) {
+pub fn offers_libraries(folders: &crate::folders::Folders, picking: Picking) -> bool {
+    picking != Picking::Absent || !folders.libraries.is_empty()
+}
+
+/// The items that open another folder as the library, switch to a recent one, and show
+/// the open one's folder. Open library folder… is grayed out where the browser turns
+/// folder access off, and says on hover how to turn it on.
+pub fn library_items(
+    ui: &mut egui::Ui,
+    folders: &crate::folders::Folders,
+    picking: Picking,
+    acts: &mut Vec<Act>,
+) {
     if let Some(library) = &folders.reconnect {
         let label = format!("Reconnect {}", library.name);
         offer(
@@ -497,8 +512,13 @@ pub fn library_items(ui: &mut egui::Ui, folders: &crate::folders::Folders, acts:
             acts,
         );
     }
-    if crate::libraries::can_pick() {
-        offer(ui, "Open library folder…", None, Act::PickLibrary, acts);
+    match picking {
+        Picking::On => offer(ui, OPEN_LIBRARY, None, Act::PickLibrary, acts),
+        Picking::TurnedOff => {
+            ui.add_enabled(false, egui::Button::new(OPEN_LIBRARY))
+                .on_disabled_hover_text(crate::libraries::TURNED_OFF);
+        }
+        Picking::Absent => {}
     }
     if !folders.libraries.is_empty() {
         ui.menu_button("Open recent library", |ui| {
@@ -1059,9 +1079,10 @@ impl Browser {
                 if marked(ui, SHOW_ALL_FILES, all, None) {
                     browser.folders.all_files = !all;
                 }
-                if crate::libraries::can_pick() || !browser.folders.libraries.is_empty() {
+                let picking = crate::libraries::picking();
+                if offers_libraries(&browser.folders, picking) {
                     ui.separator();
-                    library_items(ui, &browser.folders, acts);
+                    library_items(ui, &browser.folders, picking, acts);
                 }
             });
         });
@@ -2050,6 +2071,60 @@ mod tests {
         for item in below {
             assert!(at(item) > rule, "{item} belongs below the rule: {said:?}");
         }
+    }
+
+    /// Open library folder… is offered where a folder can be picked, grayed out with the
+    /// way to turn folder access on where Brave turns it off, and missing elsewhere.
+    #[test]
+    fn open_library_folder_is_grayed_out_where_brave_turns_folder_access_off() {
+        let ctx = context();
+        ctx.style_mut(|style| style.interaction.tooltip_delay = 0.0);
+        let folders = Folders::default();
+        let frame = |picking: Picking, events: Vec<egui::Event>, time: f64| {
+            let mut acts = Vec::new();
+            let input = egui::RawInput {
+                time: Some(time),
+                ..testing::screen(egui::vec2(800.0, 600.0), events)
+            };
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    library_items(ui, &folders, picking, &mut acts);
+                });
+            });
+            (output, acts)
+        };
+        // Where the item was painted, and how its text was faded.
+        let item = |output: &egui::FullOutput| {
+            testing::shapes(output)
+                .into_iter()
+                .find_map(|(shape, _)| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == OPEN_LIBRARY => Some((
+                        egui::Rect::from_min_size(text.pos, text.galley.size()).center(),
+                        text.fallback_color.gamma_multiply(text.opacity_factor),
+                    )),
+                    _ => None,
+                })
+        };
+
+        let (output, _) = frame(Picking::Absent, Vec::new(), 0.0);
+        assert_eq!(item(&output), None);
+        assert!(!offers_libraries(&folders, Picking::Absent));
+
+        let (output, _) = frame(Picking::On, Vec::new(), 1.0);
+        let (at, ink) = item(&output).expect("offered");
+        let (_, acts) = frame(Picking::On, testing::click(at), 2.0);
+        assert!(matches!(acts.as_slice(), [Act::PickLibrary]));
+
+        assert!(offers_libraries(&folders, Picking::TurnedOff));
+        let (_, acts) = frame(Picking::TurnedOff, testing::click(at), 3.0);
+        assert!(acts.is_empty(), "a click does nothing");
+        frame(Picking::TurnedOff, vec![egui::Event::PointerMoved(at)], 4.0);
+        let (output, _) = frame(Picking::TurnedOff, Vec::new(), 5.0);
+        let (_, faded) = item(&output).expect("offered, grayed out");
+        assert_ne!(faded, ink, "grayed out");
+        let said = words(&output);
+        let hint = crate::libraries::TURNED_OFF;
+        assert!(said.iter().any(|word| word == hint), "{said:?}");
     }
 
     /// ⚠️ A row shows the sound's name without its format tag. The name the workspace
