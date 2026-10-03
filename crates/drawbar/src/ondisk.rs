@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui;
-use nord_format::cbin::{self, Generation, Header};
-use nord_format::crc::{Crc16Stream, Crc32Stream};
+use nord_format::cbin::{self, Header, Verifier};
+use nord_format::crc::Crc32Stream;
 use nord_format::formats::{npno, nsmp};
 
 use crate::work::{Job, Progress};
@@ -186,10 +186,7 @@ impl OnDisk {
         self.pass(
             ctx,
             summing,
-            |summing, chunk| {
-                summing.feed(chunk);
-                Ok(())
-            },
+            |summing, chunk| summing.feed(chunk),
             move |_, summed| {
                 let sums = summed?.finish()?;
                 let _ = file.crc.set(sums.crc);
@@ -299,84 +296,66 @@ pub struct Sums {
     pub body_crc32: u32,
 }
 
-/// A checksum pass in flight, fed the file's bytes in order.
-///
-/// It checks what [`cbin::inspect`] checks: a type-1 container stores the CRC-32 of its
-/// body at `0x18`, and a type-0 one the CRC-16 of every byte before its last two in
-/// them.
+/// A checksum pass in flight, fed the file's bytes in order: [`cbin::Verifier`]'s
+/// verdict, with the CRC-32s of the whole file and of its body.
 struct Summing {
-    generation: Generation,
     len: u64,
     /// How many bytes have been fed.
     at: u64,
     body: Range<u64>,
     file: Crc32Stream<'static>,
     body_crc: Crc32Stream<'static>,
-    /// The type-0 CRC-16, over every byte before the stored one.
-    head_crc: Option<Crc16Stream<'static>>,
-    /// The bytes of the stored checksum, where they sit in the file.
-    stored_at: Range<u64>,
-    stored: Vec<u8>,
+    verifier: Verifier,
 }
 
 impl Summing {
     fn new(header: &Header, len: u64) -> Summing {
         let generation = header.generation;
-        let stored_at = usize::try_from(len)
+        let start = generation.body_start().min(len);
+        // A checksum stored past the body's start trails it.
+        let end = usize::try_from(len)
             .ok()
             .and_then(|len| generation.checksum_range(len))
-            .map_or(0..0, |range| range.start as u64..range.end as u64);
-        let body_end = match generation {
-            Generation::V0 => stored_at.start,
-            Generation::V1 => len,
-        };
+            .map(|stored| stored.start as u64)
+            .filter(|&stored| stored >= start)
+            .unwrap_or(len);
         Summing {
-            generation,
             len,
             at: 0,
-            body: generation.body_start().min(body_end)..body_end,
+            body: start..end,
             file: Crc32Stream::new(),
             body_crc: Crc32Stream::new(),
-            head_crc: (generation == Generation::V0).then(Crc16Stream::new),
-            stored_at,
-            stored: Vec::new(),
+            verifier: Verifier::new(),
         }
     }
 
-    fn feed(&mut self, chunk: &[u8]) {
+    fn feed(&mut self, chunk: &[u8]) -> Result<(), String> {
         let span = self.at..self.at + chunk.len() as u64;
-        let within = |range: &Range<u64>| {
-            let start = range.start.clamp(span.start, span.end) - span.start;
-            let end = range.end.clamp(span.start, span.end) - span.start;
-            &chunk[start as usize..end as usize]
-        };
+        let start = self.body.start.clamp(span.start, span.end) - span.start;
+        let end = self.body.end.clamp(span.start, span.end) - span.start;
         self.file.update(chunk);
-        self.body_crc.update(within(&self.body));
-        if let Some(head) = &mut self.head_crc {
-            head.update(within(&(0..self.stored_at.start)));
-        }
-        self.stored.extend_from_slice(within(&self.stored_at));
+        self.body_crc.update(&chunk[start as usize..end as usize]);
+        self.verifier.update(chunk).map_err(|e| e.to_string())?;
         self.at = span.end;
+        Ok(())
     }
 
     fn finish(self) -> Result<Sums, String> {
         if self.at != self.len {
             return Err("the file changed while it was read".to_string());
         }
-        let stored = match (self.generation, self.stored.as_slice()) {
-            (Generation::V1, &[a, b, c, d]) => u32::from_le_bytes([a, b, c, d]),
-            (Generation::V0, &[a, b]) => u16::from_le_bytes([a, b]).into(),
-            _ => return Err("the file is too short to hold its checksum".to_string()),
-        };
-        let computed = match &self.head_crc {
-            Some(head) => head.value().into(),
-            None => self.body_crc.value(),
-        };
+        let info = self.verifier.finish().map_err(|e| e.to_string())?;
+        if self.body.end - self.body.start != info.body_len {
+            return Err(format!(
+                "the {}-byte body was taken as {:?}",
+                info.body_len, self.body
+            ));
+        }
         Ok(Sums {
             crc: self.file.value(),
             body: self.body,
-            stored,
-            checksum_ok: computed == stored,
+            stored: info.stored_checksum,
+            checksum_ok: info.checksum_ok,
             body_crc32: self.body_crc.value(),
         })
     }
@@ -661,7 +640,7 @@ mod tests {
                 let info = cbin::inspect(&mut Cursor::new(&bytes)).unwrap();
                 let mut summing = Summing::new(&info.header, bytes.len() as u64);
                 for chunk in bytes.chunks(7) {
-                    summing.feed(chunk);
+                    summing.feed(chunk).unwrap();
                 }
                 let sums = summing.finish().unwrap();
                 assert_eq!(sums.body.end - sums.body.start, info.body_len, "{name}");
