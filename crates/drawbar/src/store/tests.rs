@@ -31,8 +31,14 @@ impl Session {
 
     /// Open the library, and read nothing that nothing asks for.
     fn listed(root: &Temp) -> Session {
+        Session::within(root, MOST_BYTES)
+    }
+
+    /// [`Session::listed`], holding at most `budget` bytes whole.
+    fn within(root: &Temp, budget: u64) -> Session {
         let bench = Bench::new();
-        let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+        let mut store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+        store.budget(budget);
         let mut session = Session { store, bench };
         session.opened();
         session
@@ -101,11 +107,12 @@ impl Session {
         loop {
             let Bench {
                 workspace,
+                browser,
                 queue,
                 log,
                 ..
             } = &mut self.bench;
-            self.store.ask(workspace, queue, log);
+            self.store.ask(workspace, browser, queue, log);
             while self.bench.workspace.asking() {
                 assert!(self.next(), "the read answered");
             }
@@ -520,9 +527,9 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     assert_eq!(again.bench.workspace.listed().count(), 1);
 }
 
-/// A file with a tag that nothing has read is read in the background for its CRC once
-/// the library is listed, and the index keeps the CRC, so the file keeps its tag through
-/// a rename outside drawbar, while drawbar runs and while it does not.
+/// A file with a tag that nothing has read is read in the background once the library is
+/// listed, and the index keeps its CRC, so the file keeps its tag through a rename outside
+/// drawbar, while drawbar runs and while it does not.
 #[test]
 fn a_tagged_file_never_read_keeps_its_tag_through_a_rename_outside() {
     let root = Temp::new();
@@ -534,17 +541,15 @@ fn a_tagged_file_never_read_keeps_its_tag_through_a_rename_outside() {
     first.close();
 
     let mut second = Session::listed(&root);
-    assert!(second.bench.workspace.get(id).unwrap().unread());
+    second.answer_reads();
+    let Bench { workspace, log, .. } = &mut second.bench;
+    workspace.settle_files(log);
     second.autosave();
     second.settle();
     fs::rename(root.at("Grand.ne5p"), root.at("Piano.ne5p")).unwrap();
     second.refocus();
     assert_eq!(second.path(id).as_deref(), Some("Piano.ne5p"));
     assert!(second.bench.browser.tags.worn(id).contains(&tag));
-    assert!(
-        second.bench.workspace.get(id).unwrap().unread(),
-        "nothing showed it"
-    );
     second.close();
 
     fs::rename(root.at("Piano.ne5p"), root.at("Grand.ne5p")).unwrap();
@@ -2167,11 +2172,12 @@ fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
     session.bench.workspace.in_view([a]);
     let Bench {
         workspace,
+        browser,
         queue,
         log,
         ..
     } = &mut session.bench;
-    session.store.ask(workspace, queue, log);
+    session.store.ask(workspace, browser, queue, log);
     session.bench.workspace.in_view([b, c]);
     session.answer_reads();
     let workspace = &session.bench.workspace;
@@ -2282,6 +2288,82 @@ fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
     for (name, bytes) in names.iter().zip(&files) {
         assert_eq!(&root.read(name), bytes, "{name} was not written");
     }
+}
+
+/// Once the library is listed, each file the index tracks, here by a tag, is read and
+/// decoded in the background, so it can match its slot before anything shows it. A file
+/// the index does not track waits until something needs it.
+#[test]
+fn after_open_a_tracked_file_is_read_without_being_asked() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Tagged.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("Plain.ne5p"), with_gain(&program, "24")).unwrap();
+    let mut first = Session::listed(&root);
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    let tagged = first.named("Tagged.ne5p");
+    first.bench.browser.tags.set(tagged, tag, true);
+    first.close();
+
+    let mut second = Session::listed(&root);
+    second.answer_reads();
+    let Bench { workspace, log, .. } = &mut second.bench;
+    workspace.settle_files(log);
+    let entity = workspace.get(tagged).unwrap();
+    assert!(!entity.unread(), "read without being asked");
+    assert!(matches!(entity.verify, VerifyState::Ok));
+    assert!(entity.saved.crc32.is_some(), "it can match its slot");
+    let plain = second.named("Plain.ne5p");
+    assert!(second.bench.workspace.get(plain).unwrap().unread());
+}
+
+/// Past the budget, files the index does not track go before those it tracks, whenever
+/// they were needed. A read in the background lets go of no tracked file: one with no
+/// room is left unread, as if never asked for, until something needs it.
+#[test]
+fn untracked_files_go_before_tracked_ones_at_the_budget() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let len = program.len() as u64;
+    let names = ["T1.ne5p", "T2.ne5p", "T3.ne5p", "U.ne5p", "V.ne5p"];
+    for (n, name) in names.iter().enumerate() {
+        fs::write(
+            root.at(name),
+            with_gain(&program, &(12 * n + 12).to_string()),
+        )
+        .unwrap();
+    }
+    let mut first = Session::listed(&root);
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    for name in &names[..3] {
+        let id = first.named(name);
+        first.bench.browser.tags.set(id, tag, true);
+    }
+    first.close();
+
+    let mut second = Session::within(&root, 2 * len + 1);
+    second.answer_reads();
+    let unread = |session: &Session| -> Vec<String> {
+        let listed = session.bench.workspace.listed();
+        let unread = listed.filter(|entity| entity.unread());
+        let mut names: Vec<String> = unread.map(|entity| entity.name.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(unread(&second), ["T3.ne5p", "U.ne5p", "V.ne5p"]);
+    let t3 = second.bench.workspace.get(second.named("T3.ne5p")).unwrap();
+    assert_eq!(t3.verify.note(), Some("reading…"), "not refused, only left");
+
+    let [u, v] = ["U.ne5p", "V.ne5p"].map(|name| second.named(name));
+    second.read(&[u]);
+    assert_eq!(unread(&second), ["T1.ne5p", "T3.ne5p", "V.ne5p"]);
+    second.later();
+    second.read(&[v]);
+    assert_eq!(
+        unread(&second),
+        ["T1.ne5p", "T3.ne5p", "U.ne5p"],
+        "U was needed after T2, and goes first"
+    );
 }
 
 /// A file read and not edited is held once: the asset's bytes and what it was saved as

@@ -242,6 +242,10 @@ const PARTS_A_FRAME: usize = 4;
 /// How many files one [`Cmd::Fingerprint`] reads at most, and how many of their bytes.
 const PRINTS: (usize, u64) = (64, 64 << 20);
 
+/// How many files one background [`Cmd::Read`] asks for at most, and how many of their
+/// listed bytes. A read something needs runs after it.
+const FETCHES: (usize, u64) = (32, 16 << 20);
+
 /// An unsaved edit's bytes, as written to `working/`.
 struct Working {
     generation: u64,
@@ -288,6 +292,13 @@ pub struct Store {
     printed: BTreeSet<u64>,
     /// A [`Cmd::Fingerprint`] is in flight.
     fingerprinting: bool,
+    /// The tracked assets whose file is still to be read in the background, and every
+    /// one asked for so far, each asked for once unless it was refused for room. See
+    /// [`Store::fetch_tracked`].
+    unfetched: std::collections::VecDeque<u64>,
+    fetched: BTreeSet<u64>,
+    /// The assets of the background read in flight.
+    fetching: BTreeSet<u64>,
     /// Each rename sent that has not answered, from and to.
     moving: Vec<(LibPath, LibPath)>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
@@ -325,6 +336,9 @@ impl Store {
             unprinted: Default::default(),
             printed: BTreeSet::new(),
             fingerprinting: false,
+            unfetched: Default::default(),
+            fetched: BTreeSet::new(),
+            fetching: BTreeSet::new(),
             moving: Vec::new(),
             budget: MOST_BYTES,
             roomless: BTreeMap::new(),
@@ -445,7 +459,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        self.ask(workspace, queue, log);
+        self.ask(workspace, browser, queue, log);
         self.walk(browser);
         let mut released = false;
         let mut parts = 0;
@@ -507,7 +521,13 @@ impl Store {
     /// Ask the backend for the files of the unread assets something needs, reading at
     /// most what keeps the assets' whole bytes within [`MOST_BYTES`]. An asset refused
     /// for want of room is asked for again once room can be made for it.
-    pub(crate) fn ask(&mut self, workspace: &mut Workspace, queue: &Queue, log: &mut Log) {
+    pub(crate) fn ask(
+        &mut self,
+        workspace: &mut Workspace,
+        browser: &Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) {
         if !self.opened() || (!workspace.wants() && self.roomless.is_empty()) {
             return;
         }
@@ -515,7 +535,7 @@ impl Store {
             if workspace.get(id).is_none() {
                 continue;
             }
-            match self.make_room(len, workspace, queue) {
+            match self.make_room(len, Evict::Any, workspace, browser, queue) {
                 true => workspace.retry(id),
                 false => {
                     self.roomless.insert(id, len);
@@ -548,13 +568,21 @@ impl Store {
     }
 
     /// Make room for `need` more bytes held whole by letting go of the clean assets
-    /// needed least recently, each unread again until something needs it. Lets go of
-    /// nothing where that would not make the room. Returns whether `need` fits.
+    /// needed least recently, each unread again until something needs it. Those the
+    /// index tracks go after the rest, and only where `evict` allows. Lets go of nothing
+    /// where that would not make the room. Returns whether `need` fits.
     ///
     /// ⚠️ Only an asset its file can give back goes: one whose record says drawbar holds
     /// the file as last read or written, with nothing in flight over it, no working copy
     /// and no send waiting. See [`Workspace::evictable`] for what the workspace keeps.
-    fn make_room(&mut self, need: u64, workspace: &mut Workspace, queue: &Queue) -> bool {
+    fn make_room(
+        &mut self,
+        need: u64,
+        evict: Evict,
+        workspace: &mut Workspace,
+        browser: &Browser,
+        queue: &Queue,
+    ) -> bool {
         let wanted = held(workspace).saturating_add(need);
         if wanted <= self.budget {
             return true;
@@ -562,7 +590,7 @@ impl Store {
         if need > self.budget {
             return false;
         }
-        let mut clean: Vec<(u64, u64, u64)> = self
+        let mut clean: Vec<(bool, u64, u64, u64)> = self
             .records
             .iter()
             .filter(|(id, record)| {
@@ -570,15 +598,16 @@ impl Store {
                 saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
                     && !queue.holds(**id)
             })
-            .filter_map(|(id, _)| {
+            .filter_map(|(id, record)| {
                 let (seen, freed) = workspace.evictable(*id)?;
-                Some((seen, *id, freed))
+                let tracked = tracked(*id, record, workspace, browser);
+                (evict == Evict::Any || !tracked).then_some((tracked, seen, *id, freed))
             })
             .collect();
         clean.sort_unstable();
         let mut short = wanted - self.budget;
         let mut going = Vec::new();
-        for (_, id, freed) in clean {
+        for (_, _, id, freed) in clean {
             if short == 0 {
                 break;
             }
@@ -687,10 +716,13 @@ impl Store {
         &mut self,
         answers: Vec<(u64, Result<Found, Failure>)>,
         workspace: &mut Workspace,
+        browser: &Browser,
         queue: &Queue,
         log: &mut Log,
     ) {
+        let background = answers.iter().any(|(id, _)| self.fetching.contains(id));
         for (id, answer) in answers {
+            let behind = self.fetching.remove(&id);
             let unread = self.records.get(&id).map(|record| record.holds) == Some(Holds::Unread);
             let mut found = match answer {
                 Ok(found) if unread => found,
@@ -706,14 +738,22 @@ impl Store {
                 }
                 Err(Failure::Room(len)) => {
                     workspace.unasked(id);
-                    if self.make_room(len, workspace, queue) {
-                        workspace.again(id);
-                        continue;
+                    let evict = match behind {
+                        true => Evict::Untracked,
+                        false => Evict::Any,
+                    };
+                    let made = self.make_room(len, evict, workspace, browser, queue);
+                    match (made, behind) {
+                        (true, true) => self.unfetched.push_front(id),
+                        (true, false) => workspace.again(id),
+                        (false, true) => _ = self.fetched.remove(&id),
+                        (false, false) => {
+                            if len <= self.budget {
+                                self.roomless.insert(id, len);
+                            }
+                            workspace.unreadable(id, too_much(), log);
+                        }
                     }
-                    if len <= self.budget {
-                        self.roomless.insert(id, len);
-                    }
-                    workspace.unreadable(id, too_much(), log);
                     continue;
                 }
                 Err(Failure::Io(why)) => {
@@ -733,6 +773,9 @@ impl Store {
             record.fingerprint = Some(diff::kept(record.fingerprint, &found));
             record.holds = found.holds();
             workspace.took(id, found.bytes, found.file);
+        }
+        if background {
+            self.next_fetches(workspace);
         }
     }
 
@@ -829,7 +872,7 @@ impl Store {
                 log.error(format!("reading the library again: {why}"));
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
-            Event::Read(answers) => self.took(answers, workspace, queue, log),
+            Event::Read(answers) => self.took(answers, workspace, browser, queue, log),
             Event::Fingerprinted(files) => self.fingerprinted(files),
             Event::Moved { from, to, result } => match result {
                 _ if !self.answered_move(&from, &to) => {}
@@ -1397,6 +1440,7 @@ impl Store {
                 n => format!("{n} files on this computer."),
             });
         }
+        self.fetch_tracked(workspace, browser);
     }
 
     /// Record the stamps of an asset just restored, and the working copy it came back
@@ -1764,6 +1808,7 @@ impl Store {
         }
         if pass == Pass::Full {
             self.fingerprint_precious(workspace, browser);
+            self.fetch_tracked(workspace, browser);
         }
         done && !holds
     }
@@ -1771,7 +1816,8 @@ impl Store {
     /// Read in the background, for its CRC, each file that holds something no file can
     /// say (a tag, an unsaved edit, the slot it came off) where no CRC is known, so that
     /// a rename made outside drawbar keeps it. Once the listing is complete, a few files
-    /// at a time.
+    /// at a time. A file waiting for [`Store::fetch_tracked`] to read it whole is left to
+    /// that read.
     fn fingerprint_precious(&mut self, workspace: &Workspace, browser: &Browser) {
         if self.loading.is_some() || self.fingerprinting {
             return;
@@ -1781,12 +1827,11 @@ impl Store {
                 .records
                 .iter()
                 .filter(|(id, record)| {
-                    let slot = workspace
-                        .get(**id)
-                        .is_some_and(|entity| entity.origin.slot().is_some());
-                    let precious =
-                        slot || record.working.is_some() || !browser.tags.worn(**id).is_empty();
-                    precious && record.unprinted() && !self.printed.contains(id)
+                    tracked(**id, record, workspace, browser)
+                        && record.unprinted()
+                        && !self.printed.contains(id)
+                        && !self.fetching.contains(id)
+                        && !self.unfetched.contains(id)
                 })
                 .map(|(id, _)| *id)
                 .collect();
@@ -1794,6 +1839,76 @@ impl Store {
             self.unprinted.extend(wanted);
         }
         self.next_prints();
+    }
+
+    /// Read and decode in the background each unread file the index tracks (a tag, a
+    /// working copy, the slot it came off), so that it matches its slot on the
+    /// instrument without anything showing it, and its CRC is known. Once the listing is
+    /// complete, a few files at a time, each within the room left: such a read lets go
+    /// only of what the index does not track, and one refused for room is tried again at
+    /// the next full pass. Files the index does not track are read once something needs
+    /// them.
+    fn fetch_tracked(&mut self, workspace: &mut Workspace, browser: &Browser) {
+        if self.loading.is_some() || !self.opened() || !self.fetching.is_empty() {
+            return;
+        }
+        if self.unfetched.is_empty() {
+            let wanted: Vec<u64> = self
+                .records
+                .iter()
+                .filter(|(id, record)| {
+                    let waits = workspace
+                        .get(**id)
+                        .is_some_and(|entity| entity.unread() && entity.reading());
+                    record.holds == Holds::Unread
+                        && waits
+                        && tracked(**id, record, workspace, browser)
+                        && !self.fetched.contains(id)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            self.fetched.extend(&wanted);
+            self.unfetched.extend(wanted);
+        }
+        self.next_fetches(workspace);
+    }
+
+    /// Ask for the next few tracked files waiting to be read in the background.
+    fn next_fetches(&mut self, workspace: &mut Workspace) {
+        if !self.fetching.is_empty() || !self.opened() {
+            return;
+        }
+        let room = self.room(workspace);
+        let (most, most_bytes) = FETCHES;
+        let mut files = Vec::new();
+        let mut bytes = 0;
+        while files.len() < most && bytes < most_bytes {
+            let Some(id) = self.unfetched.pop_front() else {
+                break;
+            };
+            let unread = self
+                .records
+                .get(&id)
+                .filter(|record| record.holds == Holds::Unread);
+            let Some((path, print)) =
+                unread.and_then(|record| Some((record.path.clone()?, record.fingerprint)))
+            else {
+                continue;
+            };
+            let Some(len) = workspace.get(id).map(LocalEntity::size) else {
+                continue;
+            };
+            if !workspace.ask_behind(id) {
+                continue;
+            }
+            bytes += len;
+            self.fetching.insert(id);
+            files.push((id, path, print));
+        }
+        if files.is_empty() {
+            return;
+        }
+        self.send(Cmd::Read { files, room });
     }
 
     /// Ask for the CRCs of the next few files waiting for one.
@@ -2160,6 +2275,23 @@ fn ends(op: &Op) -> [&LibPath; 2] {
         Op::MakeDir(path) | Op::RemoveDir(path) => [path, path],
         Op::MoveDir { from, to } => [from, to],
     }
+}
+
+/// Which clean assets [`Store::make_room`] may let go of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Evict {
+    Any,
+    /// Only those the index does not track, for a read in the background.
+    Untracked,
+}
+
+/// Whether the index holds something about this asset that no file says: a tag, an
+/// unsaved edit kept as a working copy, or the slot it came off.
+fn tracked(id: u64, record: &Record, workspace: &Workspace, browser: &Browser) -> bool {
+    let slot = workspace
+        .get(id)
+        .is_some_and(|entity| entity.origin.slot().is_some());
+    slot || record.working.is_some() || !browser.tags.worn(id).is_empty()
 }
 
 /// How many bytes the assets hold whole, counting each read in flight at its file's listed

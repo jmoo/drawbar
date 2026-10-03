@@ -1948,6 +1948,17 @@ impl Workspace {
         }
     }
 
+    /// Count an unread asset as asked of the library for a read in the background, which
+    /// nothing waits on. Returns `false`, and counts nothing, where it is not unread or is
+    /// wanted or asked already.
+    pub fn ask_behind(&mut self, id: u64) -> bool {
+        let unread = self.get(id).is_some_and(LocalEntity::unread);
+        if !unread || self.wanted.get_mut().contains(&id) {
+            return false;
+        }
+        self.asked.insert(id)
+    }
+
     /// The library refused to read an asset asked of it, for want of room. It stays as it
     /// was until it is asked again.
     pub fn unasked(&mut self, id: u64) {
