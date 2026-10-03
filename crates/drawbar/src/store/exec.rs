@@ -147,7 +147,12 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 fn writes(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
-        Cmd::Open | Cmd::Scan { .. } | Cmd::Check { .. } | Cmd::Walk(_) | Cmd::Read { .. }
+        Cmd::Open
+            | Cmd::Scan { .. }
+            | Cmd::Check { .. }
+            | Cmd::Walk(_)
+            | Cmd::Read { .. }
+            | Cmd::Fingerprint(_)
     )
 }
 
@@ -177,6 +182,7 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
         // Outside an open's listing the whole tree has been listed already.
         Cmd::Walk(dir) => Some(Event::Walked { dir, ran: 0 }),
         Cmd::Read { files, room } => Some(Event::Read(read_all(fs, files, room).await)),
+        Cmd::Fingerprint(files) => Some(Event::Fingerprinted(fingerprints(fs, files).await)),
         Cmd::Commit {
             sidecar,
             working,
@@ -832,6 +838,29 @@ async fn fingerprint(fs: &impl Fs, found: &mut Found) {
     }
 }
 
+/// The CRC of each file whose [`Stat`] is the one its fingerprint gives.
+async fn fingerprints(
+    fs: &impl Fs,
+    files: Vec<(u64, LibPath, Fingerprint)>,
+) -> Vec<(u64, LibPath, Fingerprint)> {
+    let mut taken = Vec::new();
+    for (id, path, print) in files {
+        if !matches!(fs.stat(path.as_str()).await, Ok(Some(stat)) if stat == print.stat()) {
+            continue;
+        }
+        let mut found = Found::unread(path, print.stat());
+        fingerprint(fs, &mut found).await;
+        if let Some(crc) = found.crc {
+            let print = Fingerprint {
+                crc: Some(crc),
+                ..print
+            };
+            taken.push((id, found.path, print));
+        }
+    }
+    taken
+}
+
 /// A rescan's listing.
 ///
 /// A file `known` names is looked at wherever the walk went. Where drawbar holds its
@@ -1454,6 +1483,33 @@ mod tests {
             })
             .collect();
         assert_eq!(what, [(0, "resting"), (1, "whole"), (2, "refused")]);
+    }
+
+    /// A look for CRCs reads only the files still as their fingerprints say, and takes
+    /// each one's CRC.
+    #[test]
+    fn a_look_for_crcs_reads_only_the_files_that_did_not_move() {
+        let fs = Claimed::of(["Same.ne5p", "Moved.ne5p"].map(|path| (path.to_string(), 9)));
+        let print = |len| Fingerprint::unread(stat(len));
+        let asked = vec![
+            (1, path("Same.ne5p"), print(9)),
+            (2, path("Moved.ne5p"), print(8)),
+            (3, path("Gone.ne5p"), print(9)),
+        ];
+        let taken = now(fingerprints(&fs, asked));
+        let crc = nord_format::crc::crc32(b"Same.ne5p");
+        assert_eq!(
+            taken,
+            [(
+                1,
+                path("Same.ne5p"),
+                Fingerprint {
+                    crc: Some(crc),
+                    ..print(9)
+                }
+            )]
+        );
+        assert_eq!(fs.reads.get(), 1, "files read");
     }
 
     /// A rescan reads a file drawbar holds again only where its length or time moved,

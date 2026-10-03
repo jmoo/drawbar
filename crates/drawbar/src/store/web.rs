@@ -280,6 +280,7 @@ fn refused(cmd: Cmd, why: &str) -> Event {
         Cmd::Scan { .. } => Event::Scanned(Err(why.to_string())),
         Cmd::Check { .. } => Event::Checked(Err(why.to_string())),
         Cmd::Walk(dir) => Event::Walked { dir, ran: 0 },
+        Cmd::Fingerprint(_) => Event::Fingerprinted(Vec::new()),
         Cmd::Read { files, .. } => Event::Read(
             files
                 .into_iter()

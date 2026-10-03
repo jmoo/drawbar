@@ -411,6 +411,10 @@ pub enum Cmd {
         files: Vec<(u64, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
+    /// Take the CRC of each of these files, for the asset whose id comes with it, where
+    /// its [`Stat`] is still the one its fingerprint gives. Answered by
+    /// [`Event::Fingerprinted`].
+    Fingerprint(Vec<(u64, LibPath, Fingerprint)>),
     /// Write the `working` copies, then the index, then delete the working copies in
     /// `drop`. Working copies are named `<id>-<generation>`. Answered only on failure.
     Commit {
@@ -460,6 +464,10 @@ pub enum Event {
     /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),
+    /// The files a [`Cmd::Fingerprint`] found as their fingerprints said, each with its
+    /// asset's id and its fingerprint, now with its CRC. A file that moved, is gone or
+    /// did not read is left out.
+    Fingerprinted(Vec<(u64, LibPath, Fingerprint)>),
     Saved {
         id: u64,
         path: LibPath,

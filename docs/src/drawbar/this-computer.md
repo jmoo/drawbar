@@ -144,7 +144,11 @@ listed, it looks again only at the files it has read, and at the whole folder
 once the listing is done. A file whose size and modification time are what
 drawbar last saw is taken to be unchanged.
 
-- A sound renamed or moved outside drawbar keeps its tags.
+- A sound renamed or moved outside drawbar keeps its tags. drawbar recognizes it
+  by its contents, which it reads in the background for each file with tags,
+  unsaved edits or a slot it came from. A file renamed before that read, changed
+  as well as renamed, or holding the same contents as another shows up as a new
+  file, and the old one stays, marked missing.
 - A file changed outside drawbar is shown as it is now. If you had unsaved edits
   to it, drawbar asks: **Keep mine** (your next save writes over the file),
   **Take theirs**, or **Keep both** (yours becomes a new file beside it).

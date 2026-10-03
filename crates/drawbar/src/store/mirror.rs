@@ -239,6 +239,9 @@ fn by_path(rows: &BTreeMap<u64, Row>) -> BTreeMap<LibPath, u64> {
 /// frames fills the tree over several of them.
 const PARTS_A_FRAME: usize = 4;
 
+/// How many files one [`Cmd::Fingerprint`] reads at most, and how many of their bytes.
+const PRINTS: (usize, u64) = (64, 64 << 20);
+
 /// An unsaved edit's bytes, as written to `working/`.
 struct Working {
     generation: u64,
@@ -279,6 +282,12 @@ pub struct Store {
     /// The new id of each row the open gave one, with a working copy, and that copy's
     /// file, which the next full pass writes again under the new id.
     renamed: Vec<(u64, String)>,
+    /// The assets whose file is still to be read for its CRC in the background, and
+    /// every asset asked for so far, each of which is asked for once.
+    unprinted: std::collections::VecDeque<u64>,
+    printed: BTreeSet<u64>,
+    /// A [`Cmd::Fingerprint`] is in flight.
+    fingerprinting: bool,
     /// How many writing commands have been sent.
     sent: u64,
     /// How many commands have been sent since the open.
@@ -306,6 +315,9 @@ impl Store {
             name: None,
             stale: Vec::new(),
             renamed: Vec::new(),
+            unprinted: Default::default(),
+            printed: BTreeSet::new(),
+            fingerprinting: false,
             sent: 0,
             issued: 0,
         }
@@ -695,6 +707,7 @@ impl Store {
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
             Event::Read(answers) => self.took(answers, workspace, log),
+            Event::Fingerprinted(files) => self.fingerprinted(files),
             Event::Moved { from, to, result } => match result {
                 Ok(()) => {
                     if let Some(loading) = &mut self.loading {
@@ -1549,7 +1562,80 @@ impl Store {
                 self.committed = Some(sidecar);
             }
         }
+        if pass == Pass::Full {
+            self.fingerprint_precious(workspace, browser);
+        }
         done
+    }
+
+    /// Read in the background, for its CRC, each file that holds something no file can
+    /// say (a tag, an unsaved edit, the slot it came off) where no CRC is known, so that
+    /// a rename made outside drawbar keeps it. Once the listing is complete, a few files
+    /// at a time.
+    fn fingerprint_precious(&mut self, workspace: &Workspace, browser: &Browser) {
+        if self.loading.is_some() || self.fingerprinting {
+            return;
+        }
+        if self.unprinted.is_empty() {
+            let wanted: Vec<u64> = self
+                .records
+                .iter()
+                .filter(|(id, record)| {
+                    let slot = workspace
+                        .get(**id)
+                        .is_some_and(|entity| entity.origin.slot().is_some());
+                    let precious =
+                        slot || record.working.is_some() || !browser.tags.worn(**id).is_empty();
+                    precious && record.unprinted() && !self.printed.contains(id)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            self.printed.extend(&wanted);
+            self.unprinted.extend(wanted);
+        }
+        self.next_prints();
+    }
+
+    /// Ask for the CRCs of the next few files waiting for one.
+    fn next_prints(&mut self) {
+        let (most, most_bytes) = PRINTS;
+        let mut files = Vec::new();
+        let mut bytes = 0;
+        while files.len() < most && bytes < most_bytes {
+            let Some(id) = self.unprinted.pop_front() else {
+                break;
+            };
+            let Some(record) = self.records.get(&id).filter(|record| record.unprinted()) else {
+                continue;
+            };
+            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
+                continue;
+            };
+            bytes += print.len;
+            files.push((id, path.clone(), print));
+        }
+        if files.is_empty() {
+            return;
+        }
+        self.fingerprinting = true;
+        self.send(Cmd::Fingerprint(files));
+    }
+
+    /// Take in the CRCs of files whose fingerprint is still the one sent.
+    fn fingerprinted(&mut self, files: Vec<(u64, LibPath, Fingerprint)>) {
+        self.fingerprinting = false;
+        for (id, path, print) in files {
+            let Some(record) = self.records.get_mut(&id) else {
+                continue;
+            };
+            let same = record.fingerprint.map(|known| known.stat()) == Some(print.stat());
+            if record.unprinted() && same && record.path.as_ref() == Some(&path) {
+                record.fingerprint = Some(print);
+            }
+        }
+        if self.opened() {
+            self.next_prints();
+        }
     }
 
     /// Write again under its new id each working copy of a row the open gave one, and
@@ -1823,6 +1909,13 @@ impl Record {
             missing: false,
             holds: Holds::Whole,
         }
+    }
+
+    /// Whether its file is one drawbar knows, has not seen go missing, and holds
+    /// contents whose CRC was never taken.
+    fn unprinted(&self) -> bool {
+        let print = self.fingerprint.filter(|print| print.crc.is_none());
+        self.path.is_some() && print.is_some() && !self.missing
     }
 
     /// Recorded from what a listing found.

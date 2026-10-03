@@ -138,6 +138,17 @@ impl Session {
         }
     }
 
+    /// A pass on the autosave cadence: the files, the working copies and the index.
+    fn autosave(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            ..
+        } = &mut self.bench;
+        self.store.sync(workspace, browser, queue, Pass::Full);
+    }
+
     /// Write everything, and wait until the disk has it.
     fn sync(&mut self) {
         let Bench {
@@ -468,6 +479,40 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     assert_eq!(again.path(id).as_deref(), Some("Pianos/Grand.ne5p"));
     assert!(again.bench.browser.tags.worn(id).contains(&tag));
     assert_eq!(again.bench.workspace.listed().count(), 1);
+}
+
+/// A file with a tag that nothing has read is read in the background for its CRC once
+/// the library is listed, and the index keeps the CRC, so the file keeps its tag through
+/// a rename outside drawbar, while drawbar runs and while it does not.
+#[test]
+fn a_tagged_file_never_read_keeps_its_tag_through_a_rename_outside() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::listed(&root);
+    let id = first.only();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(id, tag, true);
+    first.close();
+
+    let mut second = Session::listed(&root);
+    assert!(second.bench.workspace.get(id).unwrap().unread());
+    second.autosave();
+    second.settle();
+    fs::rename(root.at("Grand.ne5p"), root.at("Piano.ne5p")).unwrap();
+    second.refocus();
+    assert_eq!(second.path(id).as_deref(), Some("Piano.ne5p"));
+    assert!(second.bench.browser.tags.worn(id).contains(&tag));
+    assert!(
+        second.bench.workspace.get(id).unwrap().unread(),
+        "nothing showed it"
+    );
+    second.close();
+
+    fs::rename(root.at("Piano.ne5p"), root.at("Grand.ne5p")).unwrap();
+    let third = Session::listed(&root);
+    assert_eq!(third.path(id).as_deref(), Some("Grand.ne5p"));
+    assert!(third.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(third.bench.workspace.listed().count(), 1, "not a new asset");
 }
 
 /// A file written again elsewhere, its time new and its length the same, is the asset
