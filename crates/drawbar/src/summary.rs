@@ -9,6 +9,7 @@ use nord_usb::ObjectClass;
 use serde::{Deserialize, Serialize};
 
 use crate::browser::Kind;
+use crate::store::LibPath;
 use crate::workspace::{LocalEntity, VerifyState};
 
 /// What a row draws from a decode of an asset's saved bytes.
@@ -122,7 +123,73 @@ impl Verdict {
     }
 }
 
+/// The projects that name one WAV.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Naming {
+    /// The projects naming it, by id.
+    pub by: Vec<u64>,
+    /// The projects not read this session or before, which may name it.
+    pub unknown: Vec<u64>,
+}
+
 /// A path as a project names it, with `/` between folders.
 fn slashed(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+/// The file a project in `dir` means by `named`: a path relative to its folder, `..`
+/// and `.` resolved. `None` for an absolute path, or one that leaves the library.
+pub fn resolve(dir: &LibPath, named: &str) -> Option<LibPath> {
+    let named = slashed(named);
+    if named.starts_with('/') || named.split('/').next()?.contains(':') {
+        return None;
+    }
+    let mut parts: Vec<&str> = dir.components().collect();
+    for part in named.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    LibPath::parse(&parts.join("/")).filter(|path| !path.is_root())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(text: &str) -> LibPath {
+        LibPath::parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_project_names_a_wav_relative_to_its_own_folder() {
+        let dir = path("Marimba");
+        assert_eq!(
+            resolve(&dir, "audio/c4.wav"),
+            Some(path("Marimba/audio/c4.wav"))
+        );
+        assert_eq!(
+            resolve(&dir, r"audio\c4.wav"),
+            Some(path("Marimba/audio/c4.wav"))
+        );
+        assert_eq!(resolve(&dir, "./c4.wav"), Some(path("Marimba/c4.wav")));
+        assert_eq!(
+            resolve(&dir, "../Shared/c4.wav"),
+            Some(path("Shared/c4.wav"))
+        );
+        assert_eq!(resolve(&LibPath::root(), "c4.wav"), Some(path("c4.wav")));
+    }
+
+    #[test]
+    fn a_wav_outside_the_library_resolves_to_nothing() {
+        let dir = path("Marimba");
+        assert_eq!(resolve(&dir, "../../c4.wav"), None);
+        assert_eq!(resolve(&dir, "/Users/jo/c4.wav"), None);
+        assert_eq!(resolve(&dir, r"C:\Samples\c4.wav"), None);
+        assert_eq!(resolve(&dir, ".."), None);
+    }
 }

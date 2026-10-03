@@ -23,7 +23,7 @@ use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
 use crate::store::{names, LibPath};
-use crate::summary::{Plays, Summary, Verdict};
+use crate::summary::{Naming, Plays, Summary, Verdict};
 use crate::work;
 
 /// Where an entity came from.
@@ -2094,6 +2094,32 @@ impl Workspace {
         if crc32.is_some() || known.is_some() {
             self.revision += 1;
         }
+    }
+
+    /// The projects listed here that name the WAV at `wav`: each one held, by what it
+    /// holds now, and each unread by what a read of it found before.
+    pub fn projects_naming(&self, wav: &LibPath) -> Naming {
+        let mut naming = Naming::default();
+        let projects = self
+            .listed()
+            .filter(|entity| crate::browser::Kind::of(entity) == crate::browser::Kind::Project);
+        for entity in projects {
+            let Some(dir) = entity.path.as_ref().map(LibPath::parent) else {
+                continue;
+            };
+            let Some(known) = Summary::of(entity) else {
+                naming.unknown.push(entity.id);
+                continue;
+            };
+            let resolved = known
+                .wavs
+                .iter()
+                .map(|named| crate::summary::resolve(&dir, named));
+            if resolved.flatten().any(|named| named == *wav) {
+                naming.by.push(entity.id);
+            }
+        }
+        naming
     }
 
     /// How many bytes the assets hold whole in memory, their baselines' included.

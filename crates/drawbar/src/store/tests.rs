@@ -2914,6 +2914,49 @@ fn two_libraries_share_no_entries() {
     assert_eq!(entity.saved.crc32, crc32);
 }
 
+/// Which projects name a WAV is answered from what was read of them, this session or
+/// before, without reading them again. A project never read is said to be unknown.
+#[test]
+fn the_projects_naming_a_wav_are_answered_from_what_was_read() {
+    use nord_format::formats::nsmpproj::{NewZone, Project};
+
+    let (root, shelf) = (Temp::new(), Temp::new());
+    fs::create_dir_all(root.at("Marimba/audio")).unwrap();
+    let zone = NewZone {
+        path: "audio/c4.wav".into(),
+        sample_rate: 44_100,
+        frames: 44_100,
+        root_key: 60,
+    };
+    let project = Project::new("Marimba", &[zone], 0).unwrap();
+    let bytes = nord_format::to_bytes(&nord_format::Entity::SampleProject(project)).unwrap();
+    fs::write(root.at("Marimba/Marimba.nsmpproj"), bytes).unwrap();
+    fs::write(root.at("Marimba/audio/c4.wav"), crate::testing::wav_bytes()).unwrap();
+    let wav = LibPath::parse("Marimba/audio/c4.wav").unwrap();
+
+    let mut first = Session::remembering(&root, &shelf);
+    let id = first.named("Marimba.nsmpproj");
+    let naming = first.bench.workspace.projects_naming(&wav);
+    assert_eq!(
+        (naming.by, naming.unknown),
+        (vec![], vec![id]),
+        "not read yet"
+    );
+    first.read_all();
+    let naming = first.bench.workspace.projects_naming(&wav);
+    assert_eq!(naming.by, [id], "read this session");
+    first.close();
+
+    let second = Session::remembering(&root, &shelf);
+    let id = second.named("Marimba.nsmpproj");
+    let workspace = &second.bench.workspace;
+    let naming = workspace.projects_naming(&wav);
+    assert_eq!((naming.by, naming.unknown), (vec![id], vec![]));
+    let elsewhere = LibPath::parse("audio/c4.wav").unwrap();
+    assert!(workspace.projects_naming(&elsewhere).by.is_empty());
+    assert_eq!(second.reads(), 0);
+}
+
 /// Nothing of the cache is written into the library: a library opened, read and closed
 /// holds only its own files, and a cache whose place would be inside the library is kept
 /// in memory only.
