@@ -783,14 +783,14 @@ fn stored_name(
     let decoded = || entity.entity.as_deref();
     match shape {
         Shape::Sample => {
-            let held = sample::snapshot(decoded()?)?.ok()?;
+            let held = sample::named(entity)?.ok()?;
             Some((
                 Named::Stored {
                     limit: Some(held.max_name_len),
                     variant: None,
                     width: NAME,
                 },
-                held.name,
+                renaming.0.unwrap_or(held.name),
             ))
         }
         Shape::Project => {
@@ -952,10 +952,7 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
     };
     match kind {
         Kind::Sample => {
-            let generation = entity
-                .entity
-                .as_deref()
-                .and_then(sample::snapshot)
+            let generation = sample::named(entity)
                 .and_then(Result::ok)
                 .map_or_else(String::new, |held| format!(" {}", held.generation));
             (
@@ -1246,7 +1243,7 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
             });
         }
     }
-    if let Some(stated) = entity.entity.as_deref().and_then(sample::stated) {
+    if let Some(stated) = sample::stated_of(entity) {
         cells.push(stated);
     }
     cells

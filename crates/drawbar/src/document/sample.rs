@@ -16,8 +16,13 @@
 use std::io::Cursor;
 
 use eframe::egui;
+use nord_format::cbin::Cbin;
+use nord_format::error::Error;
 use nord_format::formats::nsmp::codec::{self, Audio};
-use nord_format::formats::nsmp::{keymap, zone, KeyTable, Level, Sty};
+use nord_format::formats::nsmp::{
+    self, keymap, zone, Chain, Fields, KeyTable, Level, NarrowFields, Outline, Sty, StyV2,
+    WideFields, ZoneV3,
+};
 use nord_format::note;
 use nord_format::{Entity, Sample};
 
@@ -30,9 +35,10 @@ use crate::app;
 use crate::audio::Finger;
 use crate::icon::{icon, Glyph};
 use crate::midi::Played;
+use crate::ondisk::{self, OnDisk};
 use crate::panel::cut;
 use crate::room;
-use crate::workspace::Baseline;
+use crate::workspace::{Baseline, LocalEntity};
 
 fn sample(entity: &Entity) -> Option<&Sample> {
     match entity {
@@ -94,37 +100,150 @@ pub fn snapshot(entity: &Entity) -> Option<Result<Snapshot, String>> {
     Some(read(sample(entity)?))
 }
 
+/// An instrument resting in its file: the file, read by range, and its index.
+pub fn resting(entity: &LocalEntity) -> Option<(&OnDisk, &nsmp::Index)> {
+    let file = entity.rests()?;
+    match entity.indexed()? {
+        ondisk::Index::Sample(index) => Some((file, index)),
+        ondisk::Index::Piano(_) => None,
+    }
+}
+
+/// [`snapshot`] of an asset, decoded or resting in its file, as it was last saved.
+pub fn named(entity: &LocalEntity) -> Option<Result<Snapshot, String>> {
+    match resting(entity) {
+        Some((_, index)) => Some(outlined(index, index.outline(), &roots(index))),
+        None => snapshot(entity.entity.as_deref()?),
+    }
+}
+
+/// Each zone's root key as the index read it.
+pub fn roots(index: &nsmp::Index) -> Vec<u8> {
+    index.zones().iter().map(|span| span.root_key).collect()
+}
+
+/// [`snapshot`] of an instrument resting in its file, read through its index: `outline`
+/// is its fields as the index read them or as an edit left them, and `roots` each
+/// zone's root key, which the narrow chain keeps only in the stroke.
+pub fn outlined(index: &nsmp::Index, outline: &Outline, roots: &[u8]) -> Result<Snapshot, String> {
+    let (own, zones) = match outline.fields() {
+        Fields::V2(fields) => {
+            let tops = fields.zones().map_err(|e| e.to_string())?;
+            let tops = tops.iter().map(|zone| (zone.top_note, None));
+            (told_narrow(&fields)?, tops.collect::<Vec<_>>())
+        }
+        Fields::V3(fields) => {
+            let held = fields.zones().map_err(|e| e.to_string())?;
+            let tops = held.iter().map(|zone| (zone.top_note, zone.low_note));
+            (told_wide(&fields)?, tops.collect())
+        }
+    };
+    let spans = index.zones();
+    if zones.len() != spans.len() || roots.len() != spans.len() {
+        return Err(format!(
+            "the map holds {} zones where the index paired {} with strokes",
+            zones.len(),
+            spans.len()
+        ));
+    }
+    let placed =
+        zones
+            .into_iter()
+            .zip(spans)
+            .zip(roots)
+            .map(|(((top_note, low_note), span), root_key)| Placed {
+                root_key: *root_key,
+                top_note,
+                low_note,
+                bytes: (span.stream.end - span.stream.start) as usize,
+            });
+    Ok(gathered(
+        Named {
+            name: outline.name().map_err(|e| e.to_string())?,
+            max_name_len: outline.max_name_len(),
+            generation: outline.generation(),
+            zones_editable: outline.zones_are_editable(),
+            version: index.header().version,
+        },
+        own,
+        placed.collect(),
+    ))
+}
+
 fn read(sample: &Sample) -> Result<Snapshot, String> {
-    let told = told(sample)?;
-    Ok(Snapshot {
-        name: sample.name().map_err(|e| e.to_string())?,
-        max_name_len: sample.max_name_len(),
-        sub_name: told.sub_name,
-        generation: sample.generation(),
-        categories: told.categories,
-        zones: sample
-            .zones()
-            .map_err(|e| e.to_string())?
-            .iter()
+    let own = match sample {
+        Sample::V2(body) => told_narrow(body)?,
+        Sample::V3(body) => told_wide(body)?,
+    };
+    let zones = sample.zones().map_err(|e| e.to_string())?;
+    let placed = zones.iter().map(|zone| Placed {
+        root_key: zone.root_key,
+        top_note: zone.top_note,
+        low_note: zone.low_note,
+        bytes: zone.stream.len(),
+    });
+    let version = match sample {
+        Sample::V2(body) => body.header.version,
+        Sample::V3(body) => body.header.version,
+    };
+    Ok(gathered(
+        Named {
+            name: sample.name().map_err(|e| e.to_string())?,
+            max_name_len: sample.max_name_len(),
+            generation: sample.generation(),
+            zones_editable: sample.zones_are_editable(),
+            version,
+        },
+        own,
+        placed.collect(),
+    ))
+}
+
+/// What either chain states about the instrument as a whole.
+struct Named {
+    name: String,
+    max_name_len: usize,
+    generation: &'static str,
+    zones_editable: bool,
+    version: u32,
+}
+
+/// A zone's notes and the length of the stroke that plays it.
+struct Placed {
+    root_key: u8,
+    top_note: u8,
+    low_note: Option<u8>,
+    bytes: usize,
+}
+
+fn gathered(named: Named, own: Told, placed: Vec<Placed>) -> Snapshot {
+    Snapshot {
+        name: named.name,
+        max_name_len: named.max_name_len,
+        sub_name: own.sub_name,
+        generation: named.generation,
+        categories: own.categories,
+        zones: placed
+            .into_iter()
             .enumerate()
             .map(|(index, zone)| {
-                let stated = told.records.get(index).copied().unwrap_or_default();
+                let stated = own.records.get(index).copied().unwrap_or_default();
                 Zone {
                     root_key: zone.root_key,
                     top_note: zone.top_note,
                     low_note: zone.low_note,
                     gain: stated.gain,
                     velocity: stated.velocity,
-                    bytes: zone.stream.len(),
+                    bytes: zone.bytes,
                 }
             })
             .collect(),
-        zones_editable: sample.zones_are_editable(),
-        key_table: told.key_table,
-        record_len: told.record_len,
-        sound: sound(sample),
-        version: told.version,
-    })
+        zones_editable: named.zones_editable,
+        key_table: own.key_table,
+        record_len: own.record_len,
+        sound: own.sound,
+        version: named.version,
+    }
 }
 
 /// What one generation's own sections state, read once.
@@ -137,7 +256,7 @@ struct Told {
     record_len: usize,
     /// One per zone, in stored order.
     records: Vec<Stated>,
-    version: u32,
+    sound: Vec<(&'static str, String)>,
 }
 
 /// What a zone record states beyond its notes, where its generation holds it: the
@@ -148,45 +267,116 @@ struct Stated {
     velocity: Option<(u8, u8)>,
 }
 
-fn told(sample: &Sample) -> Result<Told, String> {
-    Ok(match sample {
-        Sample::V2(body) => Told {
-            sub_name: String::new(),
-            categories: body.categories(),
-            key_table: body.key_table().ok(),
-            // A `map` version with no zone layout means the zones did not read either,
-            // and the zone read's error is the one to show.
-            record_len: body
-                .chain()
-                .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
-            records: body
-                .zones()
-                .map_err(|e| e.to_string())?
-                .iter()
-                .map(|zone| Stated {
-                    gain: Some(zone.gain),
-                    velocity: None,
-                })
-                .collect(),
-            version: body.header.version,
+/// The narrow chain's sections, as a whole decode and an index's outline both read
+/// them.
+trait Narrow {
+    fn chain(&self) -> Result<Chain, Error>;
+    fn zones(&self) -> Result<Vec<zone::Zone>, Error>;
+    fn key_table(&self) -> Result<KeyTable, Error>;
+    fn sty(&self) -> Result<StyV2, Error>;
+    fn categories(&self) -> Vec<String>;
+}
+
+/// The wide chain's sections, as [`Narrow`] is the narrow one's.
+trait Wide {
+    fn sub_name(&self) -> Result<String, Error>;
+    fn zones(&self) -> Result<Vec<ZoneV3>, Error>;
+    fn zone_table(&self) -> Result<zone::Table, Error>;
+    fn sty(&self) -> Result<Sty, Error>;
+}
+
+macro_rules! narrow {
+    ($held:ty) => {
+        impl Narrow for $held {
+            fn chain(&self) -> Result<Chain, Error> {
+                <$held>::chain(self)
+            }
+            fn zones(&self) -> Result<Vec<zone::Zone>, Error> {
+                <$held>::zones(self)
+            }
+            fn key_table(&self) -> Result<KeyTable, Error> {
+                <$held>::key_table(self)
+            }
+            fn sty(&self) -> Result<StyV2, Error> {
+                <$held>::sty(self)
+            }
+            fn categories(&self) -> Vec<String> {
+                <$held>::categories(self)
+            }
+        }
+    };
+}
+
+macro_rules! wide {
+    ($held:ty) => {
+        impl Wide for $held {
+            fn sub_name(&self) -> Result<String, Error> {
+                <$held>::sub_name(self)
+            }
+            fn zones(&self) -> Result<Vec<ZoneV3>, Error> {
+                <$held>::zones(self)
+            }
+            fn zone_table(&self) -> Result<zone::Table, Error> {
+                <$held>::zone_table(self)
+            }
+            fn sty(&self) -> Result<Sty, Error> {
+                <$held>::sty(self)
+            }
+        }
+    };
+}
+
+narrow!(Cbin<nsmp::Sample>);
+narrow!(NarrowFields<'_>);
+wide!(Cbin<nsmp::SampleV3>);
+wide!(WideFields<'_>);
+
+fn told_narrow(body: &impl Narrow) -> Result<Told, String> {
+    Ok(Told {
+        sub_name: String::new(),
+        categories: body.categories(),
+        key_table: body.key_table().ok(),
+        // A `map` version with no zone layout means the zones did not read either,
+        // and the zone read's error is the one to show.
+        record_len: body
+            .chain()
+            .map_or(zone::RECORD_LEN, |chain| chain.zone_record_len()),
+        records: body
+            .zones()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|zone| Stated {
+                gain: Some(zone.gain),
+                velocity: None,
+            })
+            .collect(),
+        sound: match body.sty() {
+            Ok(sty) => sound_narrow(&sty),
+            Err(_) => Vec::new(),
         },
-        Sample::V3(body) => Told {
-            sub_name: body.sub_name().map_err(|e| e.to_string())?,
-            categories: Vec::new(),
-            key_table: None,
-            record_len: body
-                .zone_table()
-                .map_or(zone::RECORD_LEN, |table| table.wide.record_len()),
-            records: body
-                .zones()
-                .map_err(|e| e.to_string())?
-                .iter()
-                .map(|zone| Stated {
-                    gain: None,
-                    velocity: zone.velocity.map(|window| (window.low, window.high)),
-                })
-                .collect(),
-            version: body.header.version,
+    })
+}
+
+fn told_wide(body: &impl Wide) -> Result<Told, String> {
+    Ok(Told {
+        sub_name: body.sub_name().map_err(|e| e.to_string())?,
+        categories: Vec::new(),
+        key_table: None,
+        record_len: body
+            .zone_table()
+            .map_or(zone::RECORD_LEN, |table| table.wide.record_len()),
+        records: body
+            .zones()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|zone| Stated {
+                gain: None,
+                velocity: zone.velocity.map(|window| (window.low, window.high)),
+            })
+            .collect(),
+        sound: match body.sty() {
+            Ok(sty) => sound_wide(&sty),
+            Err(_) => Vec::new(),
         },
     })
 }
@@ -195,41 +385,41 @@ fn told(sample: &Sample) -> Result<Told, String> {
 ///
 /// The v2 preset carries the two velocity depths on a three-step scale; the wide ones
 /// carry the dynamics curve and its response instead.
-fn sound(sample: &Sample) -> Vec<(&'static str, String)> {
-    let on = |flag: bool| match flag {
+fn sound_narrow(sty: &StyV2) -> Vec<(&'static str, String)> {
+    vec![
+        ("Dynamics", on(sty.dynamics_enabled())),
+        (
+            "Velocity → amplitude",
+            sty.velocity_to_amplitude().to_string(),
+        ),
+        ("Velocity → timbre", sty.velocity_to_timbre().to_string()),
+    ]
+}
+
+fn sound_wide(sty: &Sty) -> Vec<(&'static str, String)> {
+    match sty {
+        Sty::V3(sty) => vec![
+            ("Dynamics", on(sty.dynamics_enabled())),
+            ("Dynamics curve", sty.dynamics_curve().to_string()),
+            ("Dynamics response", sty.dynamics_response().to_string()),
+        ],
+        Sty::V4(sty) => vec![
+            ("Dynamics", on(sty.dynamics_enabled())),
+            (
+                "Dynamics curve",
+                match sty.dynamics_curve() {
+                    Some(curve) => curve.to_string(),
+                    None => "none".to_string(),
+                },
+            ),
+        ],
+    }
+}
+
+fn on(flag: bool) -> String {
+    match flag {
         true => "on".to_string(),
         false => "off".to_string(),
-    };
-    match sample {
-        Sample::V2(body) => match body.sty() {
-            Ok(sty) => vec![
-                ("Dynamics", on(sty.dynamics_enabled())),
-                (
-                    "Velocity → amplitude",
-                    sty.velocity_to_amplitude().to_string(),
-                ),
-                ("Velocity → timbre", sty.velocity_to_timbre().to_string()),
-            ],
-            Err(_) => Vec::new(),
-        },
-        Sample::V3(body) => match body.sty() {
-            Ok(Sty::V3(sty)) => vec![
-                ("Dynamics", on(sty.dynamics_enabled())),
-                ("Dynamics curve", sty.dynamics_curve().to_string()),
-                ("Dynamics response", sty.dynamics_response().to_string()),
-            ],
-            Ok(Sty::V4(sty)) => vec![
-                ("Dynamics", on(sty.dynamics_enabled())),
-                (
-                    "Dynamics curve",
-                    match sty.dynamics_curve() {
-                        Some(curve) => curve.to_string(),
-                        None => "none".to_string(),
-                    },
-                ),
-            ],
-            Err(_) => Vec::new(),
-        },
     }
 }
 
@@ -483,6 +673,48 @@ impl Cache {
                 decoded: decode(entity, zone),
             },
         };
+        self.keep(held);
+    }
+
+    /// [`Cache::decode`] of a zone of an instrument resting in `file`, reading only the
+    /// range of the stroke that plays it. Returns whether the zone's answer is in, a
+    /// refusal included: `false` while that range is still being read, and the caller
+    /// asks again once it lands.
+    pub fn decode_resting(&mut self, file: &OnDisk, index: &nsmp::Index, zone: usize) -> bool {
+        if let Some(at) = self.zones.iter().position(|held| held.zone == zone) {
+            self.wanted = None;
+            let held = self.zones.remove(at);
+            self.keep(held);
+            return true;
+        }
+        let Some(span) = index.zones().get(zone) else {
+            return true;
+        };
+        let decoded = match file.read(span.stream.clone()) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(e) => Err(e.to_string()),
+            Ok(stream) => index
+                .zone(zone, &stream)
+                .map_err(|e| e.to_string())
+                .and_then(|audio| {
+                    codec::decode(audio.stream, audio.at, index.layout()).map_err(|e| e.to_string())
+                })
+                .map(|audio| Decoded {
+                    envelope: envelope(&audio.samples, audio.channels, COLUMNS),
+                    audio,
+                }),
+        };
+        self.wanted = None;
+        let placed = usize::try_from(span.stream.start).ok();
+        self.keep(Held {
+            zone,
+            placed: placed.map(|at| (at, (span.stream.end - span.stream.start) as usize)),
+            decoded,
+        });
+        true
+    }
+
+    fn keep(&mut self, held: Held) {
         self.zones.insert(0, held);
         self.zones.truncate(KEPT_ZONES);
     }
@@ -557,7 +789,9 @@ pub struct State {
 /// without giving the asset new bytes, and against a map read before the save every
 /// stored value would read as painted.
 struct Saved {
-    of: (u64, Option<u32>, usize),
+    /// The asset, the file it rests in by [`OnDisk::serial`], and the checksum and length
+    /// of the bytes it holds otherwise.
+    of: (u64, Option<u64>, Option<u32>, usize),
     /// `None` is a body that carries no map.
     table: Option<KeyTable>,
 }
@@ -1814,18 +2048,31 @@ fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
 /// baseline must be the saved bytes, not the working copy. Measured against itself,
 /// nothing would ever read as painted.
 pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
-    let of = (id, saved.crc32, saved.bytes.len());
+    let resting = saved.file.as_deref().and_then(|file| match &file.index {
+        ondisk::Index::Sample(index) => Some((file.serial, index)),
+        ondisk::Index::Piano(_) => None,
+    });
+    let of = match resting {
+        Some((serial, _)) => (id, Some(serial), None, 0),
+        None => (id, None, saved.crc32, saved.bytes.len()),
+    };
     if state.baseline.as_ref().is_some_and(|held| held.of == of) {
         return;
     }
-    let table = nord_format::from_stream(&mut Cursor::new(&saved.bytes))
-        .ok()
-        .as_ref()
-        .and_then(sample)
-        .and_then(|sample| match sample {
-            Sample::V2(body) => body.key_table().ok(),
-            Sample::V3(_) => None,
-        });
+    let table = match resting {
+        Some((_, index)) => match index.outline().fields() {
+            Fields::V2(fields) => fields.key_table().ok(),
+            Fields::V3(_) => None,
+        },
+        None => nord_format::from_stream(&mut Cursor::new(&saved.bytes))
+            .ok()
+            .as_ref()
+            .and_then(sample)
+            .and_then(|sample| match sample {
+                Sample::V2(body) => body.key_table().ok(),
+                Sample::V3(_) => None,
+            }),
+    };
     state.baseline = Some(Saved { of, table });
 }
 
@@ -1836,28 +2083,35 @@ pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
 /// neither has a setter.
 pub fn stated(entity: &Entity) -> Option<Cell> {
     match sample(entity)? {
-        Sample::V2(body) => {
-            let categories = body.categories();
-            match categories.is_empty() {
-                true => None,
-                false => Some(Cell {
-                    label: "Category",
-                    body: Body::Read(categories.join(", ")),
-                    hint: "the cat section, as the file holds it",
-                }),
-            }
-        }
-        Sample::V3(body) => {
-            let sub = body.sub_name().unwrap_or_default();
-            match sub.trim().is_empty() {
-                true => None,
-                false => Some(Cell {
-                    label: "Sub name",
-                    body: Body::Read(sub),
-                    hint: "the vendor's second name",
-                }),
-            }
-        }
+        Sample::V2(body) => identity(Some(body.categories()), None),
+        Sample::V3(body) => identity(None, Some(body.sub_name().unwrap_or_default())),
+    }
+}
+
+/// [`stated`] of an asset, decoded or resting in its file.
+pub fn stated_of(entity: &LocalEntity) -> Option<Cell> {
+    let Some((_, index)) = resting(entity) else {
+        return stated(entity.entity.as_deref()?);
+    };
+    match index.outline().fields() {
+        Fields::V2(fields) => identity(Some(fields.categories()), None),
+        Fields::V3(fields) => identity(None, Some(fields.sub_name().unwrap_or_default())),
+    }
+}
+
+fn identity(categories: Option<Vec<String>>, sub: Option<String>) -> Option<Cell> {
+    match (categories, sub) {
+        (Some(categories), _) if !categories.is_empty() => Some(Cell {
+            label: "Category",
+            body: Body::Read(categories.join(", ")),
+            hint: "the cat section, as the file holds it",
+        }),
+        (_, Some(sub)) if !sub.trim().is_empty() => Some(Cell {
+            label: "Sub name",
+            body: Body::Read(sub),
+            hint: "the vendor's second name",
+        }),
+        _ => None,
     }
 }
 

@@ -179,6 +179,7 @@ pub struct Wants {
 
 /// Requests from the Basic face that cannot run while the asset is borrowed for drawing:
 /// audio, or a new asset made from this one.
+#[derive(Clone, Copy)]
 enum Asked {
     Zone(sample::Ask),
     Root(piano::Ask),
@@ -279,9 +280,9 @@ pub struct Document {
     /// holds may come back after the tab that started it has closed. See
     /// [`Document::settle`].
     piano: piano::State,
-    /// A root the user asked to hear, and the document asking, while its stroke is read
-    /// from the file. It is asked again each frame until it decodes.
-    reading: Option<(u64, piano::Ask)>,
+    /// A root or zone the user asked to hear, and the document asking, while its stroke
+    /// is read from the file. It is asked again each frame until it decodes.
+    reading: Option<(u64, Asked)>,
 }
 
 impl Document {
@@ -308,16 +309,6 @@ impl Document {
             return Wants::default();
         }
         workspace.read_now([id], log);
-        // The sample editor works on the whole body, so an instrument resting in its file
-        // is read whole first, off the frame.
-        if workspace
-            .get(id)
-            .is_some_and(|entity| entity.rests().is_some() && shape(entity) == Shape::Sample)
-        {
-            workspace.wake(id);
-            ui.label(egui::RichText::new("Reading the instrument…").weak());
-            return Wants::default();
-        }
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
@@ -488,15 +479,16 @@ impl Document {
             }
         }
         // A request the user made since takes the place of one still waiting.
-        let heard = |asked: &Asked| matches!(asked, Asked::Root(ask) if !matches!(ask, piano::Ask::Show(_)));
+        let heard = |asked: &Asked| match asked {
+            Asked::Root(ask) => !matches!(ask, piano::Ask::Show(_)),
+            Asked::Zone(ask) => !matches!(ask, sample::Ask::Decode(_)),
+            _ => false,
+        };
         let waited = self
             .reading
             .take()
             .filter(|(on, _)| *on == id && !asked.iter().any(heard));
-        let asked = waited
-            .map(|(_, ask)| Asked::Root(ask))
-            .into_iter()
-            .chain(asked);
+        let asked = waited.map(|(_, ask)| ask).into_iter().chain(asked);
         for asked in asked {
             match asked {
                 Asked::Open(item) => wants.open = Some(item),
@@ -727,9 +719,7 @@ impl Document {
     ) -> Option<Asked> {
         match asset.shape {
             Shape::Wav | Shape::Undecoded => self.wav_body(ui),
-            Shape::Sample => self
-                .sample_body(ui, asset.decoded()?, sets)
-                .map(Asked::Zone),
+            Shape::Sample => self.sample_body(ui, asset.entity, sets).map(Asked::Zone),
             Shape::Project => {
                 self.project_body(ui, asset.decoded()?, sets);
                 None
@@ -774,10 +764,10 @@ impl Document {
     fn sample_body(
         &mut self,
         ui: &mut egui::Ui,
-        decoded: &nord_format::Entity,
+        entity: &LocalEntity,
         sets: &mut Sets,
     ) -> Option<sample::Ask> {
-        let snapshot = match sample::snapshot(decoded)? {
+        let snapshot = match self.sample_snapshot(entity)? {
             Ok(snapshot) => snapshot,
             Err(why) => {
                 ui.label(egui::RichText::new(why).color(crate::app::bad(ui.visuals())));
@@ -805,7 +795,7 @@ impl Document {
             }
             Shape::Piano => self.piano.meta(ui),
             Shape::Sample => {
-                if let Some(Ok(snapshot)) = asset.decoded().and_then(sample::snapshot) {
+                if let Some(Ok(snapshot)) = self.sample_snapshot(asset.entity) {
                     sample::metadata(ui, &snapshot);
                 }
             }
@@ -848,7 +838,7 @@ impl Document {
                 false
             }
             Shape::Sample => {
-                if let Some(Ok(snapshot)) = asset.decoded().and_then(sample::snapshot) {
+                if let Some(Ok(snapshot)) = self.sample_snapshot(asset.entity) {
                     capability::table(ui, &sample::capabilities(snapshot.generation));
                     capability::offsets(ui, &sample::offsets(&snapshot));
                 }
@@ -896,6 +886,16 @@ impl Document {
                 .map(Asked::Root)
                 .collect();
         }
+        if asset.shape == Shape::Sample {
+            let Some(Ok(snapshot)) = self.sample_snapshot(asset.entity) else {
+                return Vec::new();
+            };
+            let Some(open) = self.open.as_mut() else {
+                return Vec::new();
+            };
+            let asks = sample::map(ui, &mut open.sample, &snapshot, sets, played);
+            return asks.into_iter().map(Asked::Zone).collect();
+        }
         let (Some(open), Some(decoded)) = (self.open.as_mut(), asset.decoded()) else {
             return Vec::new();
         };
@@ -905,18 +905,13 @@ impl Document {
                     field::nav(ui, &mut open.fields, doc);
                 }
             }
-            Shape::Sample => {
-                if let Some(Ok(snapshot)) = sample::snapshot(decoded) {
-                    let asks = sample::map(ui, &mut open.sample, &snapshot, sets, played);
-                    return asks.into_iter().map(Asked::Zone).collect();
-                }
-            }
             Shape::Project => {
                 if let Some(Ok(snapshot)) = project::snapshot(decoded) {
                     project::map(ui, &mut open.sample, &snapshot, sets, played);
                 }
             }
             Shape::Piano
+            | Shape::Sample
             | Shape::SetList
             | Shape::Text
             | Shape::Verbatim
@@ -928,14 +923,10 @@ impl Document {
 
     /// Decode, play, strike, or save one zone of a sample instrument.
     fn zone_audio(&mut self, id: u64, ask: sample::Ask, workspace: &mut Workspace, log: &mut Log) {
-        let entity = workspace.get(id).and_then(|e| e.entity.as_deref());
         let (zone, ask) = match ask {
             sample::Ask::Decode(zone) => {
-                if !self.audio.due(zone) {
-                    return;
-                }
-                if let Some(decoded) = entity {
-                    self.audio.decode(decoded, zone);
+                if self.audio.due(zone) {
+                    self.decode_zone(id, ask, zone, workspace);
                 }
                 return;
             }
@@ -951,8 +942,8 @@ impl Document {
                 semitones,
                 finger,
             } => {
-                if let Some(decoded) = entity {
-                    self.audio.decode(decoded, zone);
+                if !self.decode_zone(id, ask, zone, workspace) {
+                    return;
                 }
                 (zone, Hear::Strike { semitones, finger })
             }
@@ -979,6 +970,33 @@ impl Document {
         );
     }
 
+    /// Decode one zone, from the bytes held or from its stroke's range of the file the
+    /// instrument rests in. Returns `false` while that range is still being read, and
+    /// asks again on the frames after.
+    fn decode_zone(
+        &mut self,
+        id: u64,
+        ask: sample::Ask,
+        zone: usize,
+        workspace: &Workspace,
+    ) -> bool {
+        let Some(entity) = workspace.get(id) else {
+            return true;
+        };
+        if let Some((file, index)) = sample::resting(entity) {
+            let answered = self.audio.decode_resting(file, index, zone);
+            // An open row asks for its waveform again by itself.
+            if !answered && !matches!(ask, sample::Ask::Decode(_)) {
+                self.reading = Some((id, Asked::Zone(ask)));
+            }
+            return answered;
+        }
+        if let Some(decoded) = entity.entity.as_deref() {
+            self.audio.decode(decoded, zone);
+        }
+        true
+    }
+
     /// Show, play, or save one root of a piano library. The stroke is decoded first,
     /// once, because every request needs it.
     fn root_audio(&mut self, id: u64, ask: piano::Ask, workspace: &mut Workspace, log: &mut Log) {
@@ -994,7 +1012,7 @@ impl Document {
             // An open row asks again by itself.
             Err(piano::Unheard::Reading) if matches!(ask, piano::Ask::Show(_)) => return,
             Err(piano::Unheard::Reading) => {
-                self.reading = Some((id, ask));
+                self.reading = Some((id, Asked::Root(ask)));
                 return;
             }
             // ⚠️ An open row asks for its waveform itself and shows why it has none.
@@ -1034,13 +1052,18 @@ impl Document {
     fn instrument_name(&self, id: u64, workspace: &Workspace) -> String {
         let entity = workspace.get(id);
         entity
-            .and_then(|e| e.entity.as_deref())
-            .and_then(sample::snapshot)
+            .and_then(|e| self.sample_snapshot(e))
             .and_then(Result::ok)
             .map(|snapshot| snapshot.name)
             .filter(|name| !name.trim().is_empty())
             .or_else(|| entity.map(|e| e.name.clone()))
             .unwrap_or_default()
+    }
+
+    /// What a sample instrument's document shows: its decode, or the index of the file
+    /// it rests in.
+    fn sample_snapshot(&self, entity: &LocalEntity) -> Option<Result<sample::Snapshot, String>> {
+        sample::named(entity)
     }
 
     /// Build an instrument from the open WAV as a new asset. The WAV is left unchanged.
@@ -1099,6 +1122,14 @@ impl Document {
             return Ok(());
         };
         let (before, edited) = (entity.stamp, shape(entity));
+        if edited == Shape::Sample && entity.rests().is_some() {
+            workspace.wake(id);
+            let why = "The instrument is read whole before it takes an edit; edit it again once \
+                       it has been read."
+                .to_string();
+            self.refused(Some(why.clone()));
+            return Err(why);
+        }
         // ⚠️ Works on the asset's own bytes, never a copy. A piano library is hundreds
         // of megabytes and every set of every frame comes through here; the piano arm
         // makes no bytes because its sets go into a plan.
@@ -1554,32 +1585,46 @@ mod tests {
         render_view(sets, kind, Face::Basic);
     }
 
-    /// A sample instrument resting in its file is read whole, off the frame, when its
-    /// document opens, and the editor draws once the read answers.
+    /// A sample instrument resting in its file opens from its index: the document draws
+    /// with nothing read whole, and an open row's waveform reads its own stroke's range
+    /// and nothing else, decoding to the audio a whole read decodes.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_resting_sample_is_read_whole_when_its_document_opens() {
+    fn a_resting_sample_opens_from_its_index_and_decodes_a_zone_from_its_range() {
+        let bytes = sample_bytes();
         let dir = testing::Temp::new();
-        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
         let mut open = Open::empty();
-        open.id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
 
-        let words = open.frame(Vec::new());
-        assert!(
-            words.iter().any(|word| word == "Reading the instrument…"),
-            "{words:?}"
-        );
-        assert!(open.workspace.waking(open.id));
-        assert!(
-            open.entity().rests().is_some(),
-            "nothing is held until the read answers"
-        );
-
-        open.workspace.settle_files(&mut open.log);
-        assert!(open.entity().rests().is_none(), "it is held whole");
-        assert!(!open.entity().is_unsaved());
-        let words = open.frame(Vec::new());
+        let words = open.twice();
         assert!(words.iter().any(|word| word == "Marimba"), "{words:?}");
+        assert!(words.iter().any(|word| word == "Zone 1"), "{words:?}");
+        assert!(!open.workspace.waking(open.id), "nothing reads it whole");
+        assert!(open.entity().rests().is_some() && open.entity().held_whole() == 0);
+        assert_eq!(file.take_reads(), [], "the frames read no stroke");
+
+        sample::pick_row(&mut open.state().sample, 0);
+        open.twice();
+        let crate::ondisk::Index::Sample(index) = &file.index else {
+            panic!("a sample's index")
+        };
+        let stroke = index.zones()[0].stream.clone();
+        assert_eq!(
+            file.take_reads(),
+            [stroke],
+            "one read, of the zone's stroke"
+        );
+        let decoded = open
+            .document
+            .audio
+            .get(0)
+            .expect("the open row asked for it");
+        let whole = nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let mut held = sample::Cache::default();
+        held.decode(&whole, 0);
+        let whole = held.get(0).unwrap().as_ref().unwrap();
+        assert!(decoded.as_ref().unwrap().audio == whole.audio);
     }
 
     /// Every kind, in both the dark and the light theme.
