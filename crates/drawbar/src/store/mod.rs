@@ -227,13 +227,25 @@ impl Fingerprint {
     }
 }
 
+/// How drawbar holds the contents of a file it knows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Holds {
+    /// Read whole, into memory.
+    Whole,
+    /// Left in its file and read by range, as the desktop leaves a piano or sample
+    /// instrument.
+    Resting,
+    /// Not read: drawbar knows its name, length and time.
+    Unread,
+}
+
 /// One file a listing found.
 #[derive(Clone, Debug)]
 pub struct Found {
     pub path: LibPath,
     pub stat: Stat,
-    /// The contents, when the listing was asked to read them: always on open, and on a
-    /// rescan for a file whose [`Stat`] is not the one the app knew.
+    /// The contents, where they were read: a file asked for, a file drawbar holds whose
+    /// [`Stat`] moved, and the file under a working copy at open.
     pub bytes: Option<Vec<u8>>,
     /// The file left on disk and indexed in place of `bytes`, where the backend reads a
     /// piano or sample instrument by range.
@@ -244,9 +256,29 @@ pub struct Found {
 }
 
 impl Found {
-    /// Whether the listing read the contents.
+    /// A file as a listing first finds it: its name, length and time, and nothing read.
+    pub fn unread(path: LibPath, stat: Stat) -> Found {
+        Found {
+            path,
+            stat,
+            bytes: None,
+            file: None,
+            crc: None,
+        }
+    }
+
+    /// Whether the contents were read.
     pub fn read(&self) -> bool {
         self.bytes.is_some() || self.file.is_some()
+    }
+
+    /// How drawbar holds what was found.
+    pub fn holds(&self) -> Holds {
+        match (&self.bytes, &self.file) {
+            (Some(_), _) => Holds::Whole,
+            (None, Some(_)) => Holds::Resting,
+            (None, None) => Holds::Unread,
+        }
     }
 
     /// The file's fingerprint, with the CRC where the listing took one.
@@ -343,17 +375,29 @@ pub enum Failure {
 /// [`Event::ReadOnly`].
 #[derive(Debug)]
 pub enum Cmd {
-    /// Read the index, and list and read every file. Where `.drawbar/` exists, take the
-    /// lock and sweep interrupted writes first; where it does not, write nothing. Answered
-    /// by [`Event::Opened`], then the listing in [`Event::Listed`] parts, breadth first,
+    /// Read the index, and list every file by its name, length and time. Nothing is read
+    /// but the file under each working copy the index names. Where `.drawbar/` exists,
+    /// take the lock and sweep interrupted writes first; where it does not, write
+    /// nothing. Answered by [`Event::Opened`], then the files the index names in
+    /// [`Event::Listed`] parts, then the rest of the listing in parts, breadth first,
     /// then [`Event::Complete`]. Only [`Event::Opened`] answers an open that failed.
+    ///
+    /// A [`Cmd::Read`] sent while the listing is in flight runs between two of its
+    /// folders.
     Open,
-    /// List the tree again, reading every file whose [`Stat`] is not the one `known`
-    /// holds under its path. Answered by [`Event::Scanned`].
+    /// List the tree again. A file `known` holds whole or resting is read again where its
+    /// [`Stat`] is not the known one; no other file is read. Answered by
+    /// [`Event::Scanned`].
     Scan {
-        known: std::collections::BTreeMap<LibPath, Fingerprint>,
-        /// The files of `known` the app leaves in place rather than holding whole.
-        resting: std::collections::BTreeSet<LibPath>,
+        known: std::collections::BTreeMap<LibPath, (Fingerprint, Holds)>,
+    },
+    /// Read each of these files for the asset whose id comes with it, reading at most
+    /// `room` bytes whole between them. A piano or sample instrument may be left resting
+    /// in its file instead, which takes none of `room`. The fingerprint is what drawbar
+    /// knew of the file. Answered by [`Event::Read`].
+    Read {
+        files: Vec<(u64, LibPath, Option<Fingerprint>)>,
+        room: u64,
     },
     /// Write the `working` copies, then the index, then delete the working copies in
     /// `drop`. Working copies are named `<id>-<generation>`. Answered only on failure.
@@ -389,6 +433,9 @@ pub enum Event {
     Listed(Listing),
     Complete(Complete),
     Scanned(Result<Listing, String>),
+    /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
+    /// for answers [`Failure::Moved`].
+    Read(Vec<(u64, Result<Found, Failure>)>),
     Saved {
         id: u64,
         path: LibPath,

@@ -2143,10 +2143,10 @@ mod tests {
         assert_eq!(browser.folders.censuses.get(), 1);
     }
 
-    /// A file not decoded yet is a row under its own name that says it is being read,
-    /// and drawing it puts it first in line.
+    /// A file not read yet is a row under its own name that says it is being read, and
+    /// drawing it asks for it.
     #[test]
-    fn a_row_not_decoded_yet_says_so_and_is_decoded_first() {
+    fn a_row_not_read_yet_says_so_and_is_asked_for() {
         let Bench {
             ctx,
             mut browser,
@@ -2161,11 +2161,13 @@ mod tests {
             name: "Grand.ne5p".into(),
             path: Some(LibPath::root().join("Grand.ne5p")),
             origin: crate::workspace::Origin::Fresh,
-            saved: Fresh::Program.bytes().unwrap(),
+            saved: Vec::new(),
             file: None,
+            unread: Some(1),
             unsaved: None,
         };
         workspace.restore(vec![saved], None, &mut log);
+        assert!(!workspace.wanted(1));
         let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("browser")
                 .exact_width(crate::shell::BROWSER)
@@ -2176,7 +2178,7 @@ mod tests {
         let said = words(&output);
         assert!(said.iter().any(|word| word == "Grand"), "{said:?}");
         assert!(said.iter().any(|word| word == "reading…"), "{said:?}");
-        assert!(workspace.hurried(1));
+        assert!(workspace.wanted(1));
     }
 
     /// `count` programs loose in the library, named `Sound 0000` on, in that order.
@@ -2265,26 +2267,26 @@ mod tests {
         assert!(painted_at(&output, "Sound 0000").is_none(), "the first row");
     }
 
-    /// The rows in view are decoded first, and a row out of view waits its turn.
+    /// The rows in view are asked for, and a row out of view is not.
     #[test]
-    fn only_the_rows_in_view_are_decoded_first() {
+    fn only_the_rows_in_view_are_asked_for() {
         let mut bench = Bench::new();
-        let bytes = Fresh::Program.bytes().unwrap();
         let saved = (1..=500)
             .map(|id| crate::workspace::Saved {
                 id,
                 name: format!("Sound {id:04}.ne5p"),
                 path: Some(LibPath::root().join(&format!("Sound {id:04}.ne5p"))),
                 origin: crate::workspace::Origin::Fresh,
-                saved: bytes.clone(),
+                saved: Vec::new(),
                 file: None,
+                unread: Some(1),
                 unsaved: None,
             })
             .collect();
         bench.workspace.restore(saved, None, &mut bench.log);
         frame(&mut bench, on_screen(Vec::new()), None);
-        assert!(bench.workspace.hurried(1), "the first row is in view");
-        assert!(!bench.workspace.hurried(500), "the last row is not");
+        assert!(bench.workspace.wanted(1), "the first row is in view");
+        assert!(!bench.workspace.wanted(500), "the last row is not");
     }
 
     /// A rename of a row out of view keeps its editor: what is typed into it renames the

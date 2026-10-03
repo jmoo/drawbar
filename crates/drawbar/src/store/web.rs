@@ -278,6 +278,12 @@ fn refused(cmd: Cmd, why: &str) -> Event {
     match cmd {
         Cmd::Open => Event::Opened(Err(why.to_string())),
         Cmd::Scan { .. } => Event::Scanned(Err(why.to_string())),
+        Cmd::Read { files, .. } => Event::Read(
+            files
+                .into_iter()
+                .map(|(id, _, _)| (id, Err(Failure::Io(why.to_string()))))
+                .collect(),
+        ),
         Cmd::Save { id, path, .. } => Event::Saved {
             id,
             path,
@@ -826,6 +832,14 @@ fn move_tree<'a>(
 impl Fs for Folder {
     fn stopped(&self) -> bool {
         self.inbox.borrow().closed
+    }
+
+    fn waiting(&mut self) -> Option<Cmd> {
+        self.inbox.borrow_mut().cmds.pop_front()
+    }
+
+    fn hold(&mut self, cmd: Cmd) {
+        self.inbox.borrow_mut().cmds.push_front(cmd);
     }
 
     async fn prepare(&mut self) -> io::Result<()> {

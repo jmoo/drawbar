@@ -17,7 +17,7 @@ use crate::shell::{Dock, Page, Shell};
 use crate::store::{names, LibPath};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
-use crate::workspace::{Fresh, LocalEntity, Origin, Workspace};
+use crate::workspace::{Fresh, LocalEntity, Origin, VerifyState, Workspace};
 
 /// What [`Act::LoadOnInstrument`] is called wherever it is offered.
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
@@ -193,11 +193,14 @@ pub enum Act {
 }
 
 impl Act {
-    /// The assets on this computer whose decode the act works from, which are decoded
-    /// before it runs if they are still being read.
+    /// The assets on this computer whose contents the act works from. It waits until
+    /// each has been read, and decodes it first where that is still to be done.
     pub fn reads(&self) -> Vec<u64> {
         match self {
             Act::Open(item) => item.local().into_iter().collect(),
+            Act::Overwrite { id, .. } | Act::MoveAs { id, .. } | Act::File { id, .. } => {
+                vec![*id]
+            }
             Act::Keep(id)
             | Act::KeepBoth(id)
             | Act::Send { id, .. }
@@ -217,8 +220,6 @@ impl Act {
             | Act::Resync
             | Act::ReadAgain(_)
             | Act::Import { .. }
-            | Act::Overwrite { .. }
-            | Act::MoveAs { .. }
             | Act::Forget(_)
             | Act::NewFolder
             | Act::NewFolderIn(_)
@@ -229,7 +230,6 @@ impl Act {
             | Act::RenameTag { .. }
             | Act::RemoveTag(_)
             | Act::SaveAsGig
-            | Act::File { .. }
             | Act::Copy { .. }
             | Act::LoadOnInstrument { .. }
             | Act::Unqueue(_)
@@ -396,6 +396,35 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
     }
 }
 
+/// Whether an act may run now.
+enum Ready {
+    Now,
+    /// An asset it reads is still being read.
+    Later,
+    /// An asset it reads could not be read, and this says so.
+    Never(String),
+}
+
+/// Whether every asset `act` reads has been read. One not read yet is asked for, and the
+/// act waits for it.
+fn ready(act: &Act, workspace: &Workspace) -> Ready {
+    let mut later = false;
+    for id in act.reads() {
+        let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) else {
+            continue;
+        };
+        if let VerifyState::Failed(why) = &entity.verify {
+            return Ready::Never(format!("“{}” could not be read: {why}.", entity.name));
+        }
+        workspace.hurry(id);
+        later = true;
+    }
+    match later {
+        true => Ready::Later,
+        false => Ready::Now,
+    }
+}
+
 /// Whether running this act puts something in the send queue or moves what is in it.
 fn enqueues(act: &Act) -> bool {
     matches!(
@@ -420,7 +449,20 @@ pub fn apply(
     queue: &mut Queue,
     log: &mut Log,
 ) {
-    for act in acts {
+    let mut held = std::mem::take(&mut browser.held);
+    held.extend(acts);
+    for act in held {
+        match ready(&act, workspace) {
+            Ready::Now => {}
+            Ready::Later => {
+                browser.held.push(act);
+                continue;
+            }
+            Ready::Never(why) => {
+                log.trouble(why);
+                continue;
+            }
+        }
         workspace.read_now(act.reads(), log);
         if enqueues(&act) {
             shell.show_page(Page::Queue);

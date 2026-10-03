@@ -13,7 +13,8 @@ use super::diff::{self, match_files, Known};
 use super::exec::working_name;
 use super::sidecar::{Row, Sidecar, VERSION};
 use super::{
-    names, Backend, Cmd, Complete, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened,
+    names, Backend, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing,
+    Opened, MOST_BYTES,
 };
 use crate::browser::Browser;
 use crate::folders::{Op, Where};
@@ -59,9 +60,8 @@ struct Record {
     /// The file went missing outside drawbar. Nothing writes it again until the asset
     /// is saved.
     missing: bool,
-    /// The last listing that read the file left it resting in place rather than read it
-    /// whole, and nothing has been saved over it since.
-    rests: bool,
+    /// How drawbar holds what the file holds, while nothing has been saved over it.
+    holds: Holds,
 }
 
 /// An open whose listing is still arriving: the index's rows, as the files listed so far
@@ -262,6 +262,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        self.ask(workspace, log);
         let mut released = false;
         let mut parts = 0;
         while parts < PARTS_A_FRAME {
@@ -294,6 +295,74 @@ impl Store {
         self.handle(event, workspace, browser, queue, log);
         browser.folders.place = Some(self.place());
         true
+    }
+
+    /// Ask the backend for the files of the unread assets something needs, reading at
+    /// most what keeps the assets' whole bytes within [`MOST_BYTES`].
+    pub(crate) fn ask(&mut self, workspace: &mut Workspace, log: &mut Log) {
+        if !self.opened() {
+            return;
+        }
+        let mut files = Vec::new();
+        for id in workspace.take_wanted() {
+            let record = self.records.get(&id);
+            let unread = record.filter(|record| record.holds == Holds::Unread);
+            match unread.and_then(|record| Some((record.path.clone()?, record.fingerprint))) {
+                Some((path, print)) => files.push((id, path, print)),
+                None => {
+                    let why = "drawbar knows no file that holds it".to_string();
+                    workspace.unreadable(id, why, log);
+                }
+            }
+        }
+        if files.is_empty() {
+            return;
+        }
+        let room = MOST_BYTES.saturating_sub(workspace.held_whole());
+        self.backend.send(Cmd::Read { files, room });
+    }
+
+    /// Take in the files read for the assets that asked. Each comes back as it is now: a
+    /// file whose length or time moved is held as what it holds, and its fingerprint
+    /// keeps the CRC known before only where the contents are the same.
+    fn took(
+        &mut self,
+        answers: Vec<(u64, Result<Found, Failure>)>,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) {
+        for (id, answer) in answers {
+            let unread = self.records.get(&id).map(|record| record.holds) == Some(Holds::Unread);
+            let mut found = match answer {
+                Ok(found) if unread => found,
+                Ok(_) => {
+                    workspace.took(id, None, None);
+                    continue;
+                }
+                Err(Failure::Moved) => {
+                    self.rescan();
+                    let why = "it is gone from the library folder".to_string();
+                    workspace.unreadable(id, why, log);
+                    continue;
+                }
+                Err(Failure::Io(why)) => {
+                    workspace.unreadable(id, why, log);
+                    continue;
+                }
+            };
+            let Some(record) = self.records.get_mut(&id) else {
+                continue;
+            };
+            let moved = record
+                .fingerprint
+                .is_none_or(|print| print.stat() != found.stat);
+            if let (true, Some(bytes)) = (moved, &found.bytes) {
+                found.crc = Some(nord_format::crc::crc32(bytes));
+            }
+            record.fingerprint = Some(diff::kept(record.fingerprint, &found));
+            record.holds = found.holds();
+            workspace.took(id, found.bytes, found.file);
+        }
     }
 
     /// Whether a rescan is waiting for its answer.
@@ -349,6 +418,7 @@ impl Store {
                 log.error(format!("reading the library again: {why}"));
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
+            Event::Read(answers) => self.took(answers, workspace, log),
             Event::Saved { id, path, result } => {
                 self.saved(id, path, result, workspace, browser, log)
             }
@@ -426,18 +496,14 @@ impl Store {
             return;
         }
         let mut known = BTreeMap::new();
-        let mut resting = BTreeSet::new();
         for record in self.records.values() {
             let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
                 continue;
             };
-            if record.rests {
-                resting.insert(path.clone());
-            }
-            known.insert(path.clone(), print);
+            known.insert(path.clone(), (print, record.holds));
         }
         self.scanning = true;
-        self.backend.send(Cmd::Scan { known, resting });
+        self.backend.send(Cmd::Scan { known });
     }
 
     /// Write everything, waiting for the saves in flight to answer, then let the library
@@ -644,10 +710,8 @@ impl Store {
         for found in files {
             let Some(id) = loading.by_path.get(&found.path).copied() else {
                 let id = loading.next;
-                if let Some(saved) = newcomer(id, found, &mut self.records) {
-                    loading.next = id.saturating_add(1);
-                    back.push(saved);
-                }
+                loading.next = id.saturating_add(1);
+                back.push(newcomer(id, found, &mut self.records));
                 continue;
             };
             loading.claimed.insert(id);
@@ -677,7 +741,7 @@ impl Store {
         found: Found,
         changed: bool,
     ) -> Option<(Saved, bool)> {
-        let row = loading.rows.get(&id).filter(|_| found.read())?;
+        let row = loading.rows.get(&id)?;
         let print = diff::kept(row.fingerprint, &found);
         let mine = loading
             .working
@@ -692,6 +756,7 @@ impl Store {
         let saved = Saved {
             id,
             name: found.path.leaf().to_string(),
+            unread: (!found.read()).then_some(found.stat.len),
             path: Some(found.path),
             origin: Origin::from(&row.origin),
             saved: found.bytes.unwrap_or_default(),
@@ -783,10 +848,8 @@ impl Store {
         }
         for found in matched.arrived {
             let id = loading.next;
-            if let Some(saved) = newcomer(id, found, &mut self.records) {
-                loading.next = id.saturating_add(1);
-                back.push(saved);
-            }
+            loading.next = id.saturating_add(1);
+            back.push(newcomer(id, found, &mut self.records));
         }
         self.restored(back, &loading, workspace, log);
         for id in &missing {
@@ -900,7 +963,6 @@ impl Store {
                 record.path = Some(found.path.clone());
                 if let Some(print) = &mut record.fingerprint {
                     *print = diff::kept(Some(*print), &found);
-                    record.rests = found.file.is_some();
                 }
             }
             if let Some(before) = before {
@@ -919,11 +981,8 @@ impl Store {
             let mut next = workspace.next_id();
             let mut back = Vec::new();
             for found in arrived {
-                let Some(saved) = newcomer(next, found, &mut self.records) else {
-                    continue;
-                };
+                back.push(newcomer(next, found, &mut self.records));
                 next = next.saturating_add(1);
-                back.push(saved);
             }
             let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
             log.say(match ids.len() {
@@ -940,7 +999,8 @@ impl Store {
         touched
     }
 
-    /// A file drawbar knew now holds something else.
+    /// A file drawbar knew now holds something else. One drawbar has not read is only
+    /// looked at again: what it holds is not known, and nothing shows it.
     fn changed(
         &mut self,
         id: u64,
@@ -949,7 +1009,13 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let Some(entity) = workspace.get(id).filter(|_| found.read()) else {
+        if !found.read() {
+            if let Some(record) = self.records.get_mut(&id) {
+                record.fingerprint = Some(found.fingerprint());
+            }
+            return;
+        }
+        let Some(entity) = workspace.get(id) else {
             return;
         };
         let mut print = found.fingerprint();
@@ -958,7 +1024,7 @@ impl Store {
         }
         let name = entity.name.clone();
         let unsaved = entity.is_unsaved();
-        let rests = found.file.is_some();
+        let holds = found.holds();
         match (unsaved, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file, log),
@@ -978,7 +1044,7 @@ impl Store {
             record.fingerprint = Some(print);
             record.saved = saved;
             record.missing = false;
-            record.rests = rests;
+            record.holds = holds;
         }
     }
 
@@ -1039,7 +1105,7 @@ impl Store {
             Ok(print) => {
                 record.fingerprint = Some(print);
                 record.missing = false;
-                record.rests = false;
+                record.holds = Holds::Whole;
                 browser.folders.missing.remove(&id);
                 return;
             }
@@ -1365,14 +1431,14 @@ impl Record {
             working: None,
             saving: false,
             missing: false,
-            rests: false,
+            holds: Holds::Whole,
         }
     }
 
-    /// Recorded from what a listing read.
+    /// Recorded from what a listing found.
     fn of_found(found: &Found, fingerprint: Fingerprint) -> Record {
         Record {
-            rests: found.file.is_some(),
+            holds: found.holds(),
             ..Record::of_file(found.path.clone(), fingerprint)
         }
     }
@@ -1488,22 +1554,19 @@ pub(crate) fn duplicates(
     (flagged, groups)
 }
 
-/// A file drawbar did not know, recorded under `id`, and the asset it becomes. `None` for
-/// a file the listing did not read.
-fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Option<Saved> {
-    if !found.read() {
-        return None;
-    }
+/// A file drawbar did not know, recorded under `id`, and the asset it becomes.
+fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Saved {
     records.insert(id, Record::of_found(&found, found.fingerprint()));
-    Some(Saved {
+    Saved {
         id,
         name: found.path.leaf().to_string(),
         origin: Origin::File(found.path.leaf().to_string()),
+        unread: (!found.read()).then_some(found.stat.len),
         path: Some(found.path),
         saved: found.bytes.unwrap_or_default(),
         file: found.file,
         unsaved: None,
-    })
+    }
 }
 
 /// An asset brought back from its working copy alone: the working copy is all there is,
@@ -1520,6 +1583,7 @@ fn saved_from(id: u64, row: &Row, bytes: Vec<u8>) -> Saved {
         origin: Origin::from(&row.origin),
         saved: bytes,
         file: None,
+        unread: None,
         unsaved: None,
     }
 }

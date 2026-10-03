@@ -283,6 +283,7 @@ pub(crate) fn rest(workspace: &mut Workspace, name: &str, file: Arc<crate::ondis
             origin: crate::workspace::Origin::File(name.to_string()),
             saved: Vec::new(),
             file: Some(file),
+            unread: None,
             unsaved: None,
         }],
         None,

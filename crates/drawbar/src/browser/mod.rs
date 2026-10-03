@@ -33,7 +33,7 @@ mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk, LOAD_ON_INSTRUMENT};
 pub use drag::{
-    families_present, kinds_present, landing, qualifier, Carried, Held, Item, Kind, Onto,
+    families_present, kinds_present, landing, qualifier, tagged, Carried, Held, Item, Kind, Onto,
 };
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
@@ -138,6 +138,8 @@ pub struct Browser {
     /// A slot to scroll to and select, once the branches holding it have been laid out.
     jump: Option<(ObjectClass, Location)>,
     rows: Rows,
+    /// Acts waiting for the assets they read to be read, in the order they were asked.
+    held: Vec<Act>,
 }
 
 impl Default for Browser {
@@ -153,6 +155,7 @@ impl Default for Browser {
             open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
             rows: Rows::default(),
+            held: Vec::new(),
         }
     }
 }
@@ -182,6 +185,7 @@ impl Browser {
         self.rename = None;
         self.ask = None;
         self.later.clear();
+        self.held.clear();
         self.folders.leave();
         self.tags = Tags::default();
         self.open

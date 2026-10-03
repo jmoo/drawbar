@@ -19,8 +19,7 @@ pub struct Known {
 /// Where each file landed.
 #[derive(Default)]
 pub struct Matched {
-    /// At the path drawbar knew, holding what it knew. A file whose [`super::Stat`] was
-    /// unchanged comes without its bytes.
+    /// At the path drawbar knew, holding what it knew.
     pub same: Vec<(u64, Found)>,
     /// At the path drawbar knew, holding something else.
     pub changed: Vec<(u64, Found)>,
@@ -32,12 +31,10 @@ pub struct Matched {
     pub arrived: Vec<Found>,
 }
 
-/// Whether a file at the path drawbar knew holds what `known` says it did. One listed
-/// without its contents was listed so because its [`super::Stat`] was the known one.
+/// Whether a file at the path drawbar knew holds what `known` says it did: its
+/// [`super::Stat`] is the known one, or else its CRC is. A file whose [`super::Stat`] moved
+/// and whose CRC was not taken is not known to.
 pub fn same(known: Option<Fingerprint>, found: &Found) -> bool {
-    if !found.read() {
-        return true;
-    }
     let Some(print) = known else {
         return false;
     };

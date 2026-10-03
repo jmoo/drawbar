@@ -22,12 +22,56 @@ struct Session {
 }
 
 impl Session {
+    /// Open the library and read every file it lists, as if each had been looked at.
     fn open(root: &Temp) -> Session {
+        let mut session = Session::listed(root);
+        session.read_all();
+        session
+    }
+
+    /// Open the library, and read nothing that nothing asks for.
+    fn listed(root: &Temp) -> Session {
         let bench = Bench::new();
         let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
         let mut session = Session { store, bench };
         session.opened();
         session
+    }
+
+    /// Ask for every file not read yet, and wait until each is read and decoded, and
+    /// each left resting is checked.
+    fn read_all(&mut self) {
+        self.ask_all();
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.settle_files(log);
+    }
+
+    /// Ask for every file not read yet, and wait until each is read.
+    fn ask_all(&mut self) {
+        let workspace = &self.bench.workspace;
+        let unread: Vec<u64> = workspace
+            .listed()
+            .filter(|entity| entity.unread())
+            .map(|entity| entity.id)
+            .collect();
+        workspace.in_view(unread);
+        self.answer_reads();
+    }
+
+    /// Send the reads asked for, and wait until each is answered. What they read is not
+    /// decoded yet.
+    fn answer_reads(&mut self) {
+        let Bench { workspace, log, .. } = &mut self.bench;
+        self.store.ask(workspace, log);
+        while self.bench.workspace.asking() {
+            assert!(self.next(), "the read answered");
+        }
+    }
+
+    /// The asset listed under `name`.
+    fn named(&self, name: &str) -> u64 {
+        let mut listed = self.bench.workspace.listed();
+        listed.find(|entity| entity.name == name).expect(name).id
     }
 
     /// Wait for the open's answer, and for every part of its listing.
@@ -1215,47 +1259,186 @@ fn a_large_tree_is_listed_whole() {
     assert_eq!(session.said("not listed"), 0);
 }
 
-/// A file the listing brings back is listed by its name before it is decoded, and the
-/// decodes run off the frame. Opening one decodes it at once.
+/// After an open's listing nothing is read: each file is an asset under its name, of the
+/// kind its name says and the length the listing gave. Only a file something asks for, a
+/// row in view or one picked, is read, and then decoded off the frame.
 #[test]
-fn a_file_not_decoded_yet_is_decoded_when_it_is_opened() {
+fn after_the_walk_nothing_is_read_until_something_asks_for_it() {
     let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
     fs::write(root.at("Other.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut session = Session::open(&root);
-    let named = |session: &Session, name: &str| {
-        let mut listed = session.bench.workspace.listed();
-        listed.find(|entity| entity.name == name).expect(name).id
-    };
-    let (grand, other) = (named(&session, "Grand.ne5p"), named(&session, "Other.ne5p"));
+    let mut session = Session::listed(&root);
+    let (grand, other) = (session.named("Grand.ne5p"), session.named("Other.ne5p"));
     for id in [grand, other] {
-        let entity = session.bench.workspace.get(id).unwrap();
-        assert_eq!(Kind::of(entity), Kind::Reading);
-        assert_eq!(entity.verify.note(), Some("reading…"));
+        let workspace = &session.bench.workspace;
+        let entity = workspace.get(id).unwrap();
+        assert!(entity.unread());
+        assert!(entity.bytes.is_empty() && entity.entity.is_none());
+        assert_eq!(Kind::of(entity), Kind::Program);
+        assert_eq!(entity.size(), program.len() as u64);
         assert!(!entity.is_unsaved());
+        assert!(!workspace.wanted(id));
     }
-    assert_eq!(session.bench.workspace.reading(), 2);
+    assert_eq!(
+        session.bench.workspace.reading(),
+        0,
+        "nothing is being read"
+    );
+
+    session.bench.workspace.in_view([grand]);
+    assert_eq!(session.bench.workspace.reading(), 1);
+    session.answer_reads();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.settle_files(log);
+    let entity = workspace.get(grand).unwrap();
+    assert!(!entity.unread());
+    assert!(matches!(entity.verify, VerifyState::Ok));
+    assert_eq!(Kind::of(entity), Kind::Program);
+    assert_eq!(entity.bytes, program);
+    assert!(!entity.is_unsaved());
+    assert!(workspace.get(other).unwrap().unread(), "not in view");
+    assert_eq!(workspace.reading(), 0);
+}
+
+/// What a listing finds is enough to search a library, narrow it by kind and count its
+/// folders: a row's name, kind and size come from the listing. The files here are not
+/// what their names say, and nothing reads them to find out.
+#[test]
+fn search_kinds_and_counts_work_on_files_not_read_yet() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Sets/Deep")).unwrap();
+    for (at, len) in [
+        ("Grand.ne5p", 10),
+        ("Sets/Gig.ne5t", 20),
+        ("Sets/Deep/Pad.ne5p", 30),
+        ("Piano.npno", 40),
+        ("notes.pdf", 50),
+    ] {
+        fs::write(root.at(at), vec![0xa5; len]).unwrap();
+    }
+    let session = Session::listed(&root);
+    let Bench {
+        workspace,
+        browser,
+        device,
+        queue,
+        ..
+    } = &session.bench;
+    let rows = |kind| {
+        let filter = crate::filter::Filter {
+            kind,
+            ..Default::default()
+        };
+        crate::library::rows(workspace, &device.state, queue, &browser.tags, &filter)
+    };
+    let names = |rows: &[crate::library::Row]| -> Vec<(String, u64)> {
+        let mut named: Vec<(String, u64)> = rows
+            .iter()
+            .map(|row| (row.name.clone(), row.size))
+            .collect();
+        named.sort();
+        named
+    };
+    let programs = rows(Some(Kind::Program));
+    assert_eq!(
+        names(&programs),
+        [("Grand.ne5p".into(), 10), ("Pad.ne5p".into(), 30)]
+    );
+    assert_eq!(names(&rows(Some(Kind::Piano))), [("Piano.npno".into(), 40)]);
+    assert_eq!(names(&rows(Some(Kind::SetList))), [("Gig.ne5t".into(), 20)]);
+    let all = crate::library::arrange(
+        rows(None),
+        "gig",
+        crate::library::Column::Name,
+        crate::library::Order::Up,
+    );
+    assert_eq!(names(&all), [("Gig.ne5t".into(), 20)]);
+
+    let folders = &browser.folders;
+    let sets = folders.id_of(&LibPath::parse("Sets").unwrap());
+    let deep = folders.id_of(&LibPath::parse("Sets/Deep").unwrap());
+    let counts = [None, sets, deep].map(|folder| folders.count(folder, workspace));
+    assert_eq!(counts, [4, 2, 1], "the library, Sets and Sets/Deep");
+
+    assert!(workspace.listed().all(|entity| entity.unread()));
+    assert_eq!(workspace.reading(), 0, "nothing is being read");
+}
+
+/// A row of the index that holds a working copy comes back at open with its edit over
+/// its file, which is read for it. A row without one is read only once something asks.
+#[test]
+fn an_indexed_row_with_a_working_copy_is_restored_at_open() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let (edited, other) = (first.create(), first.create());
+    first.sync();
+    let saved = first.bytes(edited);
+    let mine = with_gain(&saved, "96");
+    let log = &mut first.bench.log;
+    first
+        .bench
+        .workspace
+        .replace_bytes(edited, mine.clone(), log);
+    first.close();
+
+    let second = Session::listed(&root);
+    let entity = second.bench.workspace.get(edited).expect("under its id");
+    assert!(!entity.unread());
+    assert_eq!(entity.bytes, mine);
+    assert_eq!(entity.saved.bytes, saved, "what its file holds");
+    assert!(entity.is_unsaved());
+    assert!(second.bench.workspace.get(other).unwrap().unread());
+}
+
+/// A file changed after it is listed and before it is read is read as it is then, and
+/// is nobody's edit. A save over it is refused only where it changes after that read.
+#[test]
+fn a_file_is_checked_against_what_was_read_and_not_what_was_listed() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.named("Grand.ne5p");
+    let theirs = with_gain(&program, "12");
+    fs::write(root.at("Grand.ne5p"), &theirs).unwrap();
+    session.read_all();
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(entity.bytes, theirs);
+    assert!(!entity.is_unsaved());
+
+    let again = with_gain(&program, "64");
+    fs::write(root.at("Grand.ne5p"), &again).unwrap();
+    let mine = with_gain(&program, "96");
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, mine, log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(root.read("Grand.ne5p"), again, "not written over");
+    assert_eq!(session.said("was not saved, because it changed on disk"), 1);
+}
+
+/// An act on a file not read yet waits for it to be read, and decodes it before it runs.
+#[test]
+fn acting_on_a_file_not_read_yet_reads_and_decodes_it_first() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::listed(&root);
+    let grand = session.named("Grand.ne5p");
 
     let open = crate::browser::Act::Open(crate::browser::Item::Local(grand));
     session.bench.act(vec![open]);
+    assert!(!session.bench.tabs.holds(grand), "not before it is read");
+    assert!(session.bench.workspace.wanted(grand));
+    session.answer_reads();
+    assert!(session.bench.workspace.get(grand).unwrap().reading());
+    session.bench.act(Vec::new());
     assert!(session.bench.tabs.holds(grand), "its tab is open");
     let entity = session.bench.workspace.get(grand).unwrap();
     assert_eq!(Kind::of(entity), Kind::Program);
     assert!(matches!(entity.verify, VerifyState::Ok));
     assert_eq!(entity.bytes, program);
-    assert!(!entity.is_unsaved());
-    assert_eq!(
-        session.bench.workspace.reading(),
-        1,
-        "the other waits its turn"
-    );
-
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.settle_files(log);
-    let entity = workspace.get(other).unwrap();
-    assert_eq!(Kind::of(entity), Kind::Program);
-    assert_eq!(workspace.reading(), 0);
 }
 
 /// A library let go before its listing has all come back keeps, in its index, the rows
@@ -1281,11 +1464,11 @@ fn a_library_let_go_while_it_is_listed_keeps_what_its_index_held() {
     assert_eq!(third.path(id).as_deref(), Some("untitled.ne5p"));
 }
 
-/// Everything drawbar holds is in memory, so it reads only so much from one folder. A
-/// file past that is shown unread, and not read at all. The file here is sparse, so it
-/// takes no room on disk.
+/// Everything drawbar holds whole is in memory, so it reads only so much of one library.
+/// A file past that is listed like any other, and a read of it is refused before
+/// anything is read, and says why. The file here is sparse, so it takes no room on disk.
 #[test]
-fn a_file_past_the_most_drawbar_reads_is_shown_unread() {
+fn a_file_past_the_most_drawbar_reads_is_listed_and_its_read_refused() {
     let root = Temp::new();
     let huge = fs::File::create(root.at("Huge.nsmp")).unwrap();
     huge.set_len(MOST_BYTES + 1).unwrap();
@@ -1299,21 +1482,20 @@ fn a_file_past_the_most_drawbar_reads_is_shown_unread() {
         .listed()
         .map(|entity| entity.name.as_str())
         .collect();
-    assert_eq!(names, ["Small.ne5p"]);
-    let unread = &session.bench.browser.folders.unread;
-    assert_eq!(unread.len(), 1, "{unread:?}");
-    assert_eq!(unread[0].0.as_str(), "Huge.nsmp");
-    assert!(unread[0].1.contains("at most 1 GiB"), "{}", unread[0].1);
-    assert_eq!(
-        session.bench.browser.folders.clash(
-            &LibPath::root(),
-            "huge.NSMP",
-            &session.bench.workspace,
-            None
-        ),
-        crate::folders::Clash::Taken(crate::folders::Occupant::Other),
-        "its name is still taken"
-    );
+    assert_eq!(names, ["Huge.nsmp", "Small.ne5p"]);
+    let huge = session
+        .bench
+        .workspace
+        .get(session.named("Huge.nsmp"))
+        .unwrap();
+    assert!(huge.unread());
+    assert_eq!(huge.size(), MOST_BYTES + 1);
+    let VerifyState::Failed(why) = &huge.verify else {
+        panic!("{}", huge.verify.detail());
+    };
+    assert!(why.contains("at most 1 GiB"), "{why}");
+    let small = session.bench.workspace.get(session.named("Small.ne5p"));
+    assert!(matches!(small.unwrap().verify, VerifyState::Ok));
 }
 
 /// An id this session has given out already, here to views read before the library
@@ -1397,7 +1579,8 @@ fn a_large_piano_opens_and_draws_before_its_check_answers() {
     fs::write(root.at("Grand.npno"), &bytes).unwrap();
     drop(bytes);
 
-    let mut session = Session::open(&root);
+    let mut session = Session::listed(&root);
+    session.ask_all();
     let id = session.only();
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.rests().is_some(), "it rests in its file");
@@ -1438,7 +1621,8 @@ fn a_corrupted_piano_opens_and_then_shows_it_failed_verification() {
     bytes[last] ^= 0xff;
     fs::write(root.at("Broken.npno"), &bytes).unwrap();
 
-    let mut session = Session::open(&root);
+    let mut session = Session::listed(&root);
+    session.ask_all();
     let id = session.only();
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.rests().is_some());

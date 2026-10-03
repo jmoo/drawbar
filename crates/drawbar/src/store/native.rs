@@ -102,10 +102,12 @@ impl Backend {
             prepared: false,
             lock: None,
             stop: stop.clone(),
+            commands: Some(commands),
+            held: None,
         };
         let ctx = ctx.clone();
         let worker = std::thread::spawn(move || {
-            for cmd in commands {
+            while let Some(cmd) = disk.next() {
                 exec::execute(&mut disk, cmd, &mut |event| {
                     let _ = answers.send(event);
                     ctx.request_repaint();
@@ -177,9 +179,21 @@ struct Disk {
     /// The lock file, held open, and locked, while this library is written.
     lock: Option<File>,
     stop: Arc<AtomicBool>,
+    /// The commands sent, in order. `None` in a test that runs commands one by one.
+    commands: Option<Receiver<Cmd>>,
+    /// A command a listing took and put back, to run next.
+    held: Option<Cmd>,
 }
 
 impl Disk {
+    /// The next command to run, waiting for one, or `None` once the library is let go and
+    /// every command sent has run.
+    fn next(&mut self) -> Option<Cmd> {
+        self.held
+            .take()
+            .or_else(|| self.commands.as_ref()?.recv().ok())
+    }
+
     fn locate(&self, path: &str) -> io::Result<PathBuf> {
         let mut at = self.root.clone();
         for part in path.split('/').filter(|part| !part.is_empty()) {
@@ -297,6 +311,17 @@ fn parent(path: &Path) -> &Path {
 impl Fs for Disk {
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    fn waiting(&mut self) -> Option<Cmd> {
+        self.held
+            .take()
+            .or_else(|| self.commands.as_ref()?.try_recv().ok())
+    }
+
+    fn hold(&mut self, cmd: Cmd) {
+        debug_assert!(self.held.is_none(), "one command is put back at a time");
+        self.held = Some(cmd);
     }
 
     async fn prepare(&mut self) -> io::Result<()> {
@@ -456,6 +481,8 @@ mod tests {
             prepared: false,
             lock: None,
             stop: Arc::default(),
+            commands: None,
+            held: None,
         }
     }
 

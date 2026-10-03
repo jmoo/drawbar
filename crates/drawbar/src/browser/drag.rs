@@ -48,10 +48,8 @@ pub enum Kind {
     Project,
     /// A text note. No instrument holds one, so it has no folder and nothing sends it.
     Text,
-    /// Bytes that did not decode.
+    /// Bytes that did not decode, or a file drawbar does not open.
     Other,
-    /// Bytes from the library not decoded yet: what they are is not known.
-    Reading,
 }
 
 /// The kinds the instrument has a folder for, each with that folder's class.
@@ -69,7 +67,7 @@ const HOMES: [(Kind, ObjectClass); 6] = [
 
 impl Kind {
     /// Every kind, in the order any list of kinds uses.
-    pub const ALL: [Kind; 18] = [
+    pub const ALL: [Kind; 17] = [
         Kind::Program,
         Kind::SetList,
         Kind::Sample,
@@ -87,7 +85,6 @@ impl Kind {
         Kind::Project,
         Kind::Text,
         Kind::Other,
-        Kind::Reading,
     ];
 
     /// What an asset is.
@@ -97,10 +94,11 @@ impl Kind {
     ///
     /// Bytes that did not decode are a note when
     /// [`is_text`](crate::document::text::is_text) said so on arrival, and
-    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads.
+    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads,
+    /// and one not read or decoded yet is what its name says.
     pub fn of(entity: &LocalEntity) -> Kind {
-        if entity.reading() {
-            return Kind::Reading;
+        if entity.reading() || entity.unread() {
+            return Kind::of_name(&entity.name);
         }
         match entity.indexed() {
             Some(crate::ondisk::Index::Piano(_)) => return Kind::Piano,
@@ -130,6 +128,12 @@ impl Kind {
             Entity::Bundle(_) => Kind::Bundle,
             Entity::SampleProject(_) => Kind::Project,
         }
+    }
+
+    /// What a file of this name is, by its extension, before anything has read it.
+    /// [`Kind::Other`] for a file drawbar does not open.
+    pub fn of_name(name: &str) -> Kind {
+        tagged(name).map_or(Kind::Other, |(_, kind)| kind)
     }
 
     pub fn from_class(class: ObjectClass) -> Kind {
@@ -167,7 +171,6 @@ impl Kind {
             Kind::Project => "project",
             Kind::Text => "note",
             Kind::Other => "file",
-            Kind::Reading => "reading…",
         }
     }
 
@@ -186,7 +189,6 @@ impl Kind {
                 Kind::Bundle => "Bundles",
                 Kind::Project => "Sample Editor projects",
                 Kind::Text => "Notes",
-                Kind::Reading => "Being read",
                 _ => "Other",
             },
         }
@@ -212,9 +214,131 @@ impl Kind {
             Kind::Project => Glyph::FolderGit2,
             Kind::Text => Glyph::FileText,
             Kind::Other => Glyph::HardDrive,
-            Kind::Reading => Glyph::Clock,
         }
     }
+}
+
+/// The tag each kind of file drawbar opens is kept under, as `nord-format` reads it,
+/// each with the kind of asset it holds.
+const TAGS: [(&[&str], Kind); 15] = {
+    use crate::document::text;
+    use nord_format::formats::{
+        nc2, nc2d, nd2, nd3, ne3, ne4, ne5, ne6, ne7, ng2, nl4, nla1, no3, np, np2, np3, np4, np5,
+        npip, npno, ns2, ns3, ns4, nsclassic, nsmp, nsmpproj, nw, nw2,
+    };
+    [
+        (
+            &[
+                nc2::program::FORMAT,
+                nc2d::program::FORMAT,
+                nd2::program::FORMAT,
+                nd3::kit::FORMAT,
+                ne3::program::FORMAT,
+                ne4::program::FORMAT,
+                ne5::program::FORMAT,
+                ne6::program::FORMAT,
+                ne7::program::FORMAT,
+                ng2::program::FORMAT,
+                nl4::program::FORMAT,
+                nla1::program::FORMAT,
+                no3::program::FORMAT,
+                np::program::FORMAT,
+                np2::program::FORMAT,
+                np3::program::FORMAT,
+                np4::program::FORMAT,
+                np5::program::FORMAT,
+                ns2::program::FORMAT,
+                ns3::program::FORMAT,
+                ns4::program::FORMAT,
+                nsclassic::program::FORMAT,
+                nw::program::FORMAT,
+                nw2::program::FORMAT,
+            ],
+            Kind::Program,
+        ),
+        (&[ne5::song::FORMAT, ns3::song::FORMAT], Kind::SetList),
+        (&[nsmp::FORMAT], Kind::Sample),
+        (
+            &[npno::FORMAT, nsclassic::piano_library::FORMAT],
+            Kind::Piano,
+        ),
+        (
+            &[
+                ne4::live::FORMAT,
+                ne5::live::FORMAT,
+                ne6::live::FORMAT,
+                ne7::live::FORMAT,
+                ng2::live::FORMAT,
+                np::live::FORMAT,
+                np2::live::FORMAT,
+                np3::live::FORMAT,
+                np4::live::FORMAT,
+                np5::live::FORMAT,
+                ns2::live::FORMAT,
+                ns3::live::FORMAT,
+                ns4::live::FORMAT,
+                nw2::live::FORMAT,
+            ],
+            Kind::Live,
+        ),
+        (
+            &[
+                nc2::settings::FORMAT,
+                nc2d::settings::FORMAT,
+                ne4::settings::FORMAT,
+                ne5::settings::FORMAT,
+                ne6::settings::FORMAT,
+                ne7::settings::FORMAT,
+                ng2::settings::FORMAT,
+                nl4::settings::FORMAT,
+                nla1::settings::FORMAT,
+                no3::settings::FORMAT,
+                np::settings::FORMAT,
+                np2::settings::FORMAT,
+                np3::settings::FORMAT,
+                np4::settings::FORMAT,
+                np5::settings::FORMAT,
+                ns2::settings::FORMAT,
+                ns3::settings::FORMAT,
+                ns4::settings::FORMAT,
+                nw::settings::FORMAT,
+                nw2::settings::FORMAT,
+            ],
+            Kind::Settings,
+        ),
+        (
+            &[
+                ns2::synth::FORMAT,
+                ns3::synth::FORMAT,
+                ns4::synth::FORMAT,
+                nsclassic::synth::FORMAT,
+            ],
+            Kind::Synth,
+        ),
+        (
+            &[ne3::organ_preset::FORMAT, ns4::organ_preset::FORMAT],
+            Kind::OrganPreset,
+        ),
+        (&[ns4::piano_preset::FORMAT], Kind::PianoPreset),
+        (
+            &[nl4::performance::FORMAT, nla1::performance::FORMAT],
+            Kind::Performance,
+        ),
+        (&["mid", "syx"], Kind::LeadBank),
+        (&["cn3"], Kind::SampleLibrary),
+        (&[npip::pipe_library::FORMAT], Kind::PipeLibrary),
+        (&[nsmpproj::FORMAT], Kind::Project),
+        (&[text::EXTENSION], Kind::Text),
+    ]
+};
+
+/// The tag a file of this name is kept under, by its extension, and the kind of asset
+/// it holds. `None` for a file drawbar does not open.
+pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
+    let (_, extension) = name.rsplit_once('.')?;
+    TAGS.iter()
+        .flat_map(|(tags, kind)| tags.iter().map(move |tag| (*tag, *kind)))
+        .find(|(tag, _)| tag.trim_end_matches('\0').eq_ignore_ascii_case(extension))
 }
 
 /// The kinds present: what the list on this computer holds and what the attached
@@ -222,8 +346,6 @@ impl Kind {
 ///
 /// The union of both places, because a kind narrows what the library shows, and the
 /// library shows both.
-///
-/// An asset still being read has no kind yet, so it adds none.
 pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
     let here: Vec<Kind> = workspace
         .listed()
@@ -232,7 +354,7 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect();
     Kind::ALL
         .into_iter()
-        .filter(|kind| *kind != Kind::Reading && here.contains(kind))
+        .filter(|kind| here.contains(kind))
         .collect()
 }
 
@@ -395,9 +517,7 @@ pub fn landing(carried: &Held, onto: Onto) -> Result<Act, &'static str> {
         // A folder this app cannot name is no kind's home, so the kind check also keeps
         // drops out of it.
         (Item::Local(id), Onto::Slot { class, at }) => {
-            if carried.kind == Kind::Reading {
-                Err("it is still being read")
-            } else if carried.kind.home() != Some(class) {
+            if carried.kind.home() != Some(class) {
                 Err("that folder holds a different kind of thing")
             } else if !carried.fits {
                 Err("the instrument does not take files of that format")
@@ -460,6 +580,64 @@ pub(super) fn ghost(ctx: &egui::Context) {
 mod tests {
     use super::*;
     use crate::strings::folder;
+
+    /// Every tag `nord-format` reads a file under is one a name can carry, and the table
+    /// names each tag once.
+    #[test]
+    fn every_format_nord_format_reads_is_a_kind_of_name() {
+        for tag in nord_format::cbin_formats() {
+            let name = format!("x.{}", tag.trim_end_matches('\0').to_uppercase());
+            assert!(tagged(&name).is_some(), "{tag:?} has no kind");
+        }
+        let mut tags: Vec<&str> = TAGS
+            .iter()
+            .flat_map(|(tags, _)| tags.iter().copied())
+            .collect();
+        let named = tags.len();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(tags.len(), named, "a tag is named twice");
+        assert_eq!(Kind::of_name("no extension"), Kind::Other);
+        assert_eq!(Kind::of_name("scan.pdf"), Kind::Other);
+    }
+
+    /// A file's kind by its name is the kind its contents decode to: for every format
+    /// whose bytes are kept as stored, an empty file under its tag, and for the rest, a
+    /// new file of each kind drawbar makes.
+    #[test]
+    fn the_kind_a_name_says_is_the_kind_its_contents_decode_to() {
+        use nord_format::cbin::{Cbin, Header, RawBody};
+
+        let mut workspace = Workspace::new(eframe::egui::Context::default());
+        let mut log = crate::log::Log::default();
+        let mut decoded = 0;
+        let mut kind_of = |name: String, bytes: Vec<u8>| {
+            let id = workspace.ingest(name, crate::workspace::Origin::Fresh, bytes, &mut log);
+            let entity = workspace.get(id).expect("ingested");
+            entity.entity.is_some().then(|| Kind::of(entity))
+        };
+        for (tags, kind) in TAGS {
+            for tag in tags.iter().filter(|tag| tag.len() == 4) {
+                let mut file = std::io::Cursor::new(Vec::new());
+                let empty = Cbin {
+                    header: Header::new(tag, (0, 0), 0),
+                    body: RawBody(vec![0; 64]),
+                };
+                empty.write_to(&mut file).unwrap();
+                let name = format!("x.{tag}");
+                if let Some(found) = kind_of(name.clone(), file.into_inner()) {
+                    assert_eq!(found, kind, "{name}");
+                    decoded += 1;
+                }
+            }
+        }
+        assert!(decoded > 40, "{decoded} formats decoded empty");
+        for fresh in crate::workspace::Fresh::ALL {
+            let name = format!("x.{}", fresh.tag());
+            let found = kind_of(name.clone(), fresh.bytes().unwrap());
+            assert_eq!(found.unwrap_or(Kind::Text), Kind::of_name(&name), "{name}");
+        }
+    }
 
     /// The asset on this computer every drag fixture carries.
     const CARRIED: u64 = 1;

@@ -17,7 +17,7 @@ use crate::midi::Played;
 use crate::queue::Queue;
 use crate::strings;
 use crate::tags::Tags;
-use crate::workspace::{LocalEntity, Workspace};
+use crate::workspace::{LocalEntity, VerifyState, Workspace};
 
 mod advanced;
 pub mod capability;
@@ -293,6 +293,18 @@ impl Document {
         around: &Around<'_>,
     ) -> Wants {
         let played = around.played;
+        // A file not read yet is asked for, and the tab says so until it comes; one read
+        // and not yet decoded is decoded here.
+        if let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) {
+            let said = match &entity.verify {
+                VerifyState::Failed(why) => format!("“{}” could not be read: {why}", entity.name),
+                _ => "Reading…".to_string(),
+            };
+            workspace.hurry(id);
+            ui.label(egui::RichText::new(said).weak());
+            return Wants::default();
+        }
+        workspace.read_now([id], log);
         // The sample editor works on the whole body, so an instrument resting in its file
         // is read whole first, off the frame.
         if workspace

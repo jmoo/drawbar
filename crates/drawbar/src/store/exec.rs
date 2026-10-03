@@ -11,7 +11,9 @@ use std::io;
 use std::sync::Arc;
 
 use super::sidecar::{self, Read, Sidecar};
-use super::{Cmd, Complete, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened, Stat};
+use super::{
+    Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened, Stat,
+};
 use crate::ondisk::OnDisk;
 
 /// The sidecar. It is made at drawbar's first write to a library, never on open.
@@ -27,31 +29,15 @@ pub const TEMP: &str = ".drawbar-tmp";
 /// without its contents, and said to be not all listed.
 pub const MOST_ENTRIES: usize = 1_000_000;
 
-/// The most bytes one listing reads whole of files drawbar does not hold yet, counting
-/// what it holds whole already. Whatever drawbar holds whole is in memory; a file left
-/// resting in place, read by range, is not counted.
+/// The most bytes of a library's files drawbar reads whole into memory, counting what it
+/// holds whole already. A file left resting in place, read by range, is not counted.
 pub const MOST_BYTES: u64 = 1 << 30;
 
-/// The extensions drawbar opens besides the Nord formats' own tags.
-const OPENS: [&str; 5] = [
-    nord_format::formats::nsmpproj::FORMAT,
-    crate::document::text::EXTENSION,
-    "mid",
-    "syx",
-    "cn3",
-];
-
 /// Whether drawbar opens a file of this name, by its extension: a Nord file, a Sample
-/// Editor project, a note, a MIDI file or a SysEx dump. A listing reads no other file it
-/// does not already hold.
+/// Editor project, a note, a MIDI file or a SysEx dump. Any other file is listed by its
+/// name only.
 pub fn opens(name: &str) -> bool {
-    let Some((_, extension)) = name.rsplit_once('.') else {
-        return false;
-    };
-    nord_format::cbin_formats()
-        .map(|tag| tag.trim_end_matches('\0'))
-        .chain(OPENS)
-        .any(|opened| opened.eq_ignore_ascii_case(extension))
+    crate::browser::tagged(name).is_some()
 }
 
 /// What a listing says about one entry.
@@ -88,6 +74,13 @@ pub trait Fs {
     fn stopped(&self) -> bool {
         false
     }
+    /// The next command sent and not yet run, where one is already waiting. A listing
+    /// takes the ones it may run between two folders.
+    fn waiting(&mut self) -> Option<Cmd> {
+        None
+    }
+    /// Put back a command [`Fs::waiting`] gave, to run before any other.
+    fn hold(&mut self, cmd: Cmd);
     /// Create the root, `.drawbar/`, and its `tmp/` and `working/`, where missing.
     async fn prepare(&mut self) -> io::Result<()>;
     /// Hold the one-writer lock for as long as this lives. `Ok(false)` when another
@@ -142,19 +135,36 @@ pub fn execute(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 /// Run one command, handing each answer to `answer` as it is ready. An open answers in
 /// parts; the commands that answer only on failure say nothing when they succeed.
 pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
-    if !matches!(cmd, Cmd::Open | Cmd::Scan { .. }) {
+    match cmd {
+        Cmd::Open => {
+            if let Err(why) = open(fs, answer).await {
+                answer(Event::Opened(Err(why)));
+            }
+        }
+        cmd => step(fs, cmd, answer).await,
+    }
+}
+
+/// Whether a command writes, and so first takes the library.
+fn writes(cmd: &Cmd) -> bool {
+    !matches!(cmd, Cmd::Open | Cmd::Scan { .. } | Cmd::Read { .. })
+}
+
+/// Run any command but an open, which runs once, first.
+async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
+    if writes(&cmd) {
         if let Err(why) = take(fs).await {
             return answer(Event::ReadOnly(why));
         }
     }
     let answered = match cmd {
-        Cmd::Open => open(fs, answer)
-            .await
-            .err()
-            .map(|why| Event::Opened(Err(why))),
-        Cmd::Scan { known, resting } => Some(Event::Scanned(
-            scan(fs, known, &resting).await.map_err(|e| e.to_string()),
+        Cmd::Open => Some(Event::Opened(
+            Err("the library is open already".to_string()),
         )),
+        Cmd::Scan { known } => Some(Event::Scanned(
+            scan(fs, &known, answer).await.map_err(|e| e.to_string()),
+        )),
+        Cmd::Read { files, room } => Some(Event::Read(read_all(fs, files, room).await)),
         Cmd::Commit {
             sidecar,
             working,
@@ -193,6 +203,17 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
     };
     if let Some(event) = answered {
         answer(event);
+    }
+}
+
+/// Run the reads waiting, each as it comes, until a command that is not one is next.
+/// That one is left to run after the listing, and so is every command behind it.
+async fn reads_between(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) {
+    while let Some(cmd) = fs.waiting() {
+        match cmd {
+            Cmd::Read { files, room } => answer(Event::Read(read_all(fs, files, room).await)),
+            cmd => return fs.hold(cmd),
+        }
     }
 }
 
@@ -244,10 +265,16 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         swept += sweep(fs, TMP, |_| true).await;
         swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
     }
-    let known: BTreeMap<LibPath, Option<Fingerprint>> = sidecar
+    let rows: Vec<Row> = sidecar
         .assets
         .values()
-        .filter_map(|row| Some((row.path.clone()?, row.fingerprint)))
+        .filter_map(|row| {
+            Some(Row {
+                path: row.path.clone()?,
+                print: row.fingerprint,
+                working: row.working.is_some(),
+            })
+        })
         .collect();
     let walk = Walk::start(fs).await.map_err(|e| e.to_string())?;
     answer(Event::Opened(Ok(Opened {
@@ -257,11 +284,9 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         working,
         swept,
     })));
-    let resting = BTreeSet::new();
-    let mut lister = Lister::new(&known, false, &resting);
-    lister
-        .walk(fs, walk, &mut |part| answer(Event::Listed(part)))
-        .await;
+    let mut lister = Lister::default();
+    lister.rows(fs, rows, answer).await;
+    lister.walk(fs, walk, answer).await;
     let (last, strangers) = lister.finish(fs).await;
     answer(Event::Listed(last));
     let mut swept = 0;
@@ -276,25 +301,22 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     Ok(())
 }
 
-/// The whole tree again, in one listing.
+/// The whole tree again, in one listing. The reads sent while it runs are answered
+/// between its folders.
 async fn scan(
-    fs: &impl Fs,
-    known: BTreeMap<LibPath, Fingerprint>,
-    resting: &BTreeSet<LibPath>,
+    fs: &mut impl Fs,
+    known: &BTreeMap<LibPath, (Fingerprint, Holds)>,
+    answer: &mut impl FnMut(Event),
 ) -> io::Result<Listing> {
-    let walk = Walk::start(fs).await?;
-    let known = known
-        .into_iter()
-        .map(|(path, print)| (path, Some(print)))
-        .collect();
-    let mut lister = Lister::new(&known, true, resting);
-    let mut listing = Listing::default();
-    lister
-        .walk(fs, walk, &mut |part| listing.extend(part))
-        .await;
-    let (last, strangers) = lister.finish(fs).await;
-    listing.extend(last);
-    listing.files.extend(strangers);
+    let mut walk = Walk::start(fs).await?;
+    let mut rescan = Rescan::new(known);
+    while let Some(entries) = walk.next(fs).await.filter(|_| !fs.stopped()) {
+        for entry in entries {
+            rescan.take(fs, entry).await;
+        }
+        reads_between(fs, answer).await;
+    }
+    let mut listing = rescan.finish(fs).await;
     listing.sort();
     Ok(listing)
 }
@@ -428,102 +450,113 @@ impl Walk {
 /// How many entries one part of a listing covers before it is sent.
 const PART: usize = 256;
 
-/// How many bytes one part of a listing reads whole before it is sent.
-const PART_BYTES: u64 = 32 << 20;
+/// One row of the index, as an open looks for it.
+struct Row {
+    path: LibPath,
+    print: Option<Fingerprint>,
+    /// It holds a working copy, which is compared with the file, so the file is read.
+    working: bool,
+}
 
-/// One listing of the tree, as its parts are gathered.
+/// The listing an open sends in parts. It reads nothing but the files under working
+/// copies and, at the end, the files that may be rows of the index moved.
 ///
-/// Every file `known` names is listed and read, whatever its kind and wherever the walk
-/// went, except, where `loaded` says drawbar holds those files already, one whose
-/// [`Stat`] is the known one, which is listed unread. Every other file is read only when
-/// [`opens`] takes it and, unless the backend leaves it resting in place, it fits in
-/// [`MOST_BYTES`] with what the listing holds whole already, except the files `resting`
-/// names. A file the backend leaves on disk reuses the CRC `known` holds for it while its
-/// [`Stat`] is the known one.
-///
-/// A CRC is taken only where the contents decide: a known file whose [`Stat`] moved from
-/// one with a CRC, and a file at a new path whose length is that of a known file that is
-/// gone. Such a file may be the known one moved, so it is held back until the walk ends.
-struct Lister<'a> {
-    known: &'a BTreeMap<LibPath, Option<Fingerprint>>,
-    loaded: bool,
-    resting: &'a BTreeSet<LibPath>,
-    /// The lengths of the known files with a CRC.
+/// Every row of the index is looked at first, where the index says it is, and sent
+/// before the walk begins; the walk leaves those files out. A file the walk finds whose
+/// length is that of a row not found, where that row's CRC is known, may be that row's
+/// file moved, so it is held back until the walk ends and its CRC taken.
+#[derive(Default)]
+struct Lister {
+    /// Files already sent, which the walk leaves out.
+    told: BTreeSet<LibPath>,
+    /// The lengths of the rows not found whose CRC is known.
     lens: BTreeSet<u64>,
-    /// The known files looked at, and those of them found.
-    looked: BTreeSet<LibPath>,
-    found: BTreeSet<LibPath>,
+    /// Every folder sent so far.
     dirs: BTreeSet<LibPath>,
-    /// Bytes read whole, or held whole already.
-    holding: u64,
     part: Listing,
-    /// Entries looked at, and bytes read whole, for the part being gathered.
+    /// Entries looked at for the part being gathered.
     taken: usize,
-    read: u64,
-    /// Files at new paths that may be known ones moved.
+    /// Files at new paths that may be rows moved.
     strangers: Vec<Found>,
     /// The temporary siblings interrupted saves left.
     temps: Vec<String>,
 }
 
-impl<'a> Lister<'a> {
-    fn new(
-        known: &'a BTreeMap<LibPath, Option<Fingerprint>>,
-        loaded: bool,
-        resting: &'a BTreeSet<LibPath>,
-    ) -> Lister<'a> {
-        Lister {
-            lens: known
-                .values()
-                .filter_map(|print| Some(print.as_ref()?.contents()?.0))
-                .collect(),
-            known,
-            loaded,
-            resting,
-            looked: BTreeSet::new(),
-            found: BTreeSet::new(),
-            dirs: BTreeSet::new(),
-            holding: 0,
-            part: Listing::default(),
-            taken: 0,
-            read: 0,
-            strangers: Vec::new(),
-            temps: Vec::new(),
+impl Lister {
+    /// Look at every row where the index says it is, and send what is there. A row's
+    /// folders are sent with it, though the walk has not listed them yet.
+    async fn rows(&mut self, fs: &impl Fs, rows: Vec<Row>, answer: &mut impl FnMut(Event)) {
+        for row in rows {
+            let hidden = row.path.components().any(|part| part.starts_with('.'));
+            if hidden || !self.told.insert(row.path.clone()) {
+                continue;
+            }
+            self.taken += 1;
+            match fs.stat(row.path.as_str()).await {
+                Ok(Some(stat)) => self.row(fs, row, stat).await,
+                Ok(None) => {
+                    self.told.remove(&row.path);
+                    if let Some((len, _)) = row.print.and_then(|print| print.contents()) {
+                        self.lens.insert(len);
+                    }
+                }
+                Err(e) => self.part.unread.push((row.path, e.to_string())),
+            }
+            if self.taken >= PART {
+                answer(Event::Listed(self.cut()));
+            }
+        }
+        if self.taken > 0 {
+            answer(Event::Listed(self.cut()));
         }
     }
 
-    /// Take every entry the walk lists, handing `part` each part once it is full.
-    async fn walk(&mut self, fs: &impl Fs, mut walk: Walk, part: &mut impl FnMut(Listing)) {
+    /// A row found where the index says, read where it holds a working copy.
+    async fn row(&mut self, fs: &impl Fs, row: Row, stat: Stat) {
+        let mut dir = row.path.parent();
+        while !dir.is_root() && self.dirs.insert(dir.clone()) {
+            self.part.dirs.push(dir.clone());
+            dir = dir.parent();
+        }
+        let mut found = Found::unread(row.path, stat);
+        if row.working {
+            let unmoved = row.print.filter(|print| print.stat() == stat);
+            match read(fs, &found.path, unmoved).await {
+                Ok((bytes, file)) => (found.bytes, found.file) = (bytes, file),
+                Err(e) => return self.part.unread.push((found.path, e.to_string())),
+            }
+            if unmoved.is_none() && row.print.is_some_and(|print| print.crc.is_some()) {
+                found.crc = crc(&found);
+            }
+        }
+        self.part.files.push(found);
+    }
+
+    /// Take every entry the walk lists, sending each part once it is full. The reads sent
+    /// meanwhile are answered between folders.
+    async fn walk(&mut self, fs: &mut impl Fs, mut walk: Walk, answer: &mut impl FnMut(Event)) {
         while let Some(entries) = walk.next(fs).await.filter(|_| !fs.stopped()) {
             for entry in entries {
-                self.take(fs, entry).await;
-                if self.taken >= PART || self.read >= PART_BYTES {
-                    part(self.cut());
+                self.take(entry);
+                if self.taken >= PART {
+                    answer(Event::Listed(self.cut()));
                 }
             }
+            reads_between(fs, answer).await;
         }
     }
 
     /// The part gathered so far, in path order.
     fn cut(&mut self) -> Listing {
         self.taken = 0;
-        self.read = 0;
         let mut part = std::mem::take(&mut self.part);
         part.sort();
         part
     }
 
-    async fn take(&mut self, fs: &impl Fs, entry: Entry) {
+    fn take(&mut self, entry: Entry) {
         self.taken += 1;
-        let leaf = entry.path.rsplit('/').next().unwrap_or(&entry.path);
-        if entry.path.split('/').any(|part| part.starts_with('.')) {
-            let file = matches!(entry.kind, Kind::File(_) | Kind::Unread(_) | Kind::Other);
-            if file && leaf.starts_with('.') && leaf.ends_with(TEMP) {
-                self.temps.push(entry.path);
-            }
-            return;
-        }
-        let Some(path) = LibPath::parse(&entry.path) else {
+        let Some(path) = gathered(entry.path, &entry.kind, &mut self.temps) else {
             return;
         };
         match entry.kind {
@@ -533,124 +566,179 @@ impl<'a> Lister<'a> {
                 }
             }
             Kind::Unwalked => self.part.unwalked.push(path),
-            Kind::File(stat) => match self.known.get(&path) {
-                Some(print) => self.held(fs, path, stat, *print).await,
-                None => self.arrived(fs, path, stat).await,
-            },
-            // A file drawbar holds is looked at again, whatever the walk made of it.
-            Kind::Unread(_) | Kind::Other if self.known.contains_key(&path) => {
-                self.restat(fs, path).await
+            _ if self.told.contains(&path) => {}
+            Kind::File(_) if !opens(path.leaf()) => self.part.others.push(path),
+            Kind::File(stat) => {
+                let found = Found::unread(path, stat);
+                match self.lens.contains(&stat.len) {
+                    true => self.strangers.push(found),
+                    false => self.part.files.push(found),
+                }
             }
             Kind::Unread(why) => self.part.unread.push((path, why)),
             Kind::Other => self.part.others.push(path),
         }
     }
 
+    /// Read each file held back and take its CRC. Returns the last part, and the files
+    /// held back.
+    async fn finish(&mut self, fs: &impl Fs) -> (Listing, Vec<Found>) {
+        let mut strangers = std::mem::take(&mut self.strangers);
+        for found in strangers.iter_mut().filter(|_| !fs.stopped()) {
+            fingerprint(fs, found).await;
+        }
+        (self.cut(), strangers)
+    }
+}
+
+/// The path of an entry a listing takes, or `None` for one it leaves out: anything under
+/// a name starting with a dot, of which the temporary siblings interrupted saves left are
+/// gathered into `temps`, and a name that cannot be a path in a library.
+fn gathered(path: String, kind: &Kind, temps: &mut Vec<String>) -> Option<LibPath> {
+    if path.split('/').any(|part| part.starts_with('.')) {
+        let leaf = path.rsplit('/').next().unwrap_or(&path);
+        let file = matches!(kind, Kind::File(_) | Kind::Unread(_) | Kind::Other);
+        if file && leaf.starts_with('.') && leaf.ends_with(TEMP) {
+            temps.push(path);
+        }
+        return None;
+    }
+    LibPath::parse(&path)
+}
+
+/// Read a file a listing found, and take its CRC, where it reads.
+async fn fingerprint(fs: &impl Fs, found: &mut Found) {
+    if let Ok((bytes, file)) = read(fs, &found.path, None).await {
+        (found.bytes, found.file) = (bytes, file);
+        found.crc = crc(found);
+    }
+}
+
+/// A rescan's listing.
+///
+/// A file `known` names is looked at wherever the walk went. Where drawbar holds its
+/// contents and its [`Stat`] is not the known one, it is read again, with its CRC where
+/// the known one has a CRC; any other file is listed unread. A file at a new path whose
+/// length is that of a known file with a CRC is held back until the walk ends, and read
+/// for its CRC where that length is one of a known file not found.
+struct Rescan<'a> {
+    known: &'a BTreeMap<LibPath, (Fingerprint, Holds)>,
+    /// The lengths of the known files with a CRC.
+    lens: BTreeSet<u64>,
+    /// The known files looked at, and those of them found.
+    looked: BTreeSet<LibPath>,
+    found: BTreeSet<LibPath>,
+    dirs: BTreeSet<LibPath>,
+    listing: Listing,
+    strangers: Vec<Found>,
+    /// Never swept: only an open sweeps.
+    temps: Vec<String>,
+}
+
+impl<'a> Rescan<'a> {
+    fn new(known: &'a BTreeMap<LibPath, (Fingerprint, Holds)>) -> Rescan<'a> {
+        Rescan {
+            lens: known
+                .values()
+                .filter_map(|(print, _)| Some(print.contents()?.0))
+                .collect(),
+            known,
+            looked: BTreeSet::new(),
+            found: BTreeSet::new(),
+            dirs: BTreeSet::new(),
+            listing: Listing::default(),
+            strangers: Vec::new(),
+            temps: Vec::new(),
+        }
+    }
+
+    async fn take(&mut self, fs: &impl Fs, entry: Entry) {
+        let Some(path) = gathered(entry.path, &entry.kind, &mut self.temps) else {
+            return;
+        };
+        match entry.kind {
+            Kind::Dir => {
+                if self.dirs.insert(path.clone()) {
+                    self.listing.dirs.push(path);
+                }
+            }
+            Kind::Unwalked => self.listing.unwalked.push(path),
+            Kind::File(stat) => match self.known.get(&path) {
+                Some(held) => self.held(fs, path, stat, *held).await,
+                None => self.arrived(path, stat),
+            },
+            // A file drawbar holds is looked at again, whatever the walk made of it.
+            Kind::Unread(_) | Kind::Other if self.known.contains_key(&path) => {
+                self.restat(fs, path).await
+            }
+            Kind::Unread(why) => self.listing.unread.push((path, why)),
+            Kind::Other => self.listing.others.push(path),
+        }
+    }
+
     /// Look at a known file the walk listed without a [`Stat`], or did not reach. Its
     /// folders are listed, though the walk may not have listed inside them.
     async fn restat(&mut self, fs: &impl Fs, path: LibPath) {
-        let print = self.known.get(&path).copied().flatten();
+        let Some(held) = self.known.get(&path).copied() else {
+            return;
+        };
         match fs.stat(path.as_str()).await {
             Ok(Some(stat)) => {
                 let mut dir = path.parent();
                 while !dir.is_root() && self.dirs.insert(dir.clone()) {
-                    self.part.dirs.push(dir.clone());
+                    self.listing.dirs.push(dir.clone());
                     dir = dir.parent();
                 }
-                self.held(fs, path, stat, print).await
+                self.held(fs, path, stat, held).await
             }
             Ok(None) => {
                 self.looked.insert(path);
             }
             Err(e) => {
                 self.looked.insert(path.clone());
-                self.part.unread.push((path, e.to_string()));
+                self.listing.unread.push((path, e.to_string()));
             }
         }
     }
 
-    async fn held(&mut self, fs: &impl Fs, path: LibPath, stat: Stat, print: Option<Fingerprint>) {
+    async fn held(&mut self, fs: &impl Fs, path: LibPath, stat: Stat, held: (Fingerprint, Holds)) {
+        let (print, holds) = held;
         self.looked.insert(path.clone());
-        let unmoved = print.filter(|print| print.stat() == stat);
-        if self.loaded && unmoved.is_some() {
-            if !self.resting.contains(&path) {
-                self.holding = self.holding.saturating_add(stat.len);
-            }
+        let unmoved = print.stat() == stat;
+        if unmoved || holds == Holds::Unread {
             self.found.insert(path.clone());
-            self.push(Found {
-                path,
-                stat,
-                bytes: None,
-                file: None,
-                crc: None,
-            });
-            return;
+            return self.listing.files.push(Found::unread(path, stat));
         }
-        let (bytes, file) = match read(fs, &path, unmoved).await {
+        let (bytes, file) = match read(fs, &path, None).await {
             Ok(read) => read,
-            Err(e) => return self.part.unread.push((path, e.to_string())),
+            Err(e) => return self.listing.unread.push((path, e.to_string())),
         };
-        if bytes.is_some() {
-            self.holding = self.holding.saturating_add(stat.len);
-        }
         let mut found = Found {
-            path,
-            stat,
             bytes,
             file,
-            crc: None,
+            ..Found::unread(path, stat)
         };
-        if unmoved.is_none() && print.is_some_and(|print| print.crc.is_some()) {
+        if print.crc.is_some() {
             found.crc = crc(&found);
         }
         self.found.insert(found.path.clone());
-        self.push(found);
+        self.listing.files.push(found);
     }
 
-    async fn arrived(&mut self, fs: &impl Fs, path: LibPath, stat: Stat) {
+    fn arrived(&mut self, path: LibPath, stat: Stat) {
         if !opens(path.leaf()) {
-            return self.part.others.push(path);
+            return self.listing.others.push(path);
         }
-        let file = match fs.rest(path.as_str(), None).await {
-            Ok(file) => file,
-            Err(e) => return self.part.unread.push((path, e.to_string())),
-        };
-        let bytes = match file {
-            Some(_) => None,
-            None if self.holding.saturating_add(stat.len) > MOST_BYTES => {
-                return self.part.unread.push((path, too_much()));
-            }
-            None => match fs.read(path.as_str()).await {
-                Ok(bytes) => Some(bytes),
-                Err(e) => return self.part.unread.push((path, e.to_string())),
-            },
-        };
-        if bytes.is_some() {
-            self.holding = self.holding.saturating_add(stat.len);
-        }
-        let found = Found {
-            path,
-            stat,
-            bytes,
-            file,
-            crc: None,
-        };
+        let found = Found::unread(path, stat);
         match self.lens.contains(&stat.len) {
             true => self.strangers.push(found),
-            false => self.push(found),
+            false => self.listing.files.push(found),
         }
-    }
-
-    fn push(&mut self, found: Found) {
-        let read = found.bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
-        self.read = self.read.saturating_add(read);
-        self.part.files.push(found);
     }
 
     /// Look for the known files the walk did not reach, and take the CRC of each file
-    /// held back whose length is that of a known file still not found. Returns the last
-    /// part, and the files held back.
-    async fn finish(&mut self, fs: &impl Fs) -> (Listing, Vec<Found>) {
+    /// held back whose length is that of a known file still not found.
+    async fn finish(mut self, fs: &impl Fs) -> Listing {
         let unlooked: Vec<LibPath> = self
             .known
             .keys()
@@ -665,15 +753,15 @@ impl<'a> Lister<'a> {
             .known
             .iter()
             .filter(|(path, _)| !self.found.contains(*path))
-            .filter_map(|(_, print)| Some(print.as_ref()?.contents()?.0))
+            .filter_map(|(_, (print, _))| Some(print.contents()?.0))
             .collect();
-        let mut strangers = std::mem::take(&mut self.strangers);
-        for found in &mut strangers {
+        for mut found in std::mem::take(&mut self.strangers) {
             if missing.contains(&found.stat.len) {
-                found.crc = crc(found);
+                fingerprint(fs, &mut found).await;
             }
+            self.listing.files.push(found);
         }
-        (self.cut(), strangers)
+        self.listing
     }
 }
 
@@ -691,6 +779,50 @@ async fn read(
     }
 }
 
+/// The files [`Cmd::Read`] asks for, read in order until `room` runs out.
+async fn read_all(
+    fs: &impl Fs,
+    files: Vec<(u64, LibPath, Option<Fingerprint>)>,
+    mut room: u64,
+) -> Vec<(u64, Result<Found, Failure>)> {
+    let mut answers = Vec::new();
+    for (id, path, print) in files {
+        let answer = read_one(fs, path, print, room).await;
+        if let Ok(found) = &answer {
+            let read = found.bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            room = room.saturating_sub(read);
+        }
+        answers.push((id, answer));
+    }
+    answers
+}
+
+async fn read_one(
+    fs: &impl Fs,
+    path: LibPath,
+    print: Option<Fingerprint>,
+    room: u64,
+) -> Result<Found, Failure> {
+    let io = |e: io::Error| match e.kind() {
+        io::ErrorKind::NotFound => Failure::Moved,
+        _ => Failure::Io(e.to_string()),
+    };
+    let stat = fs.stat(path.as_str()).await.map_err(io)?;
+    let stat = stat.ok_or(Failure::Moved)?;
+    let unmoved = print.filter(|print| print.stat() == stat);
+    let file = fs.rest(path.as_str(), unmoved).await.map_err(io)?;
+    let bytes = match file {
+        Some(_) => None,
+        None if stat.len > room => return Err(Failure::Io(too_much())),
+        None => Some(fs.read(path.as_str()).await.map_err(io)?),
+    };
+    Ok(Found {
+        bytes,
+        file,
+        ..Found::unread(path, stat)
+    })
+}
+
 /// CRC-32 over the whole of what a listing read, or `None` where the file could not be
 /// read through.
 fn crc(found: &Found) -> Option<u32> {
@@ -703,8 +835,8 @@ fn crc(found: &Found) -> Option<u32> {
 
 fn too_much() -> String {
     format!(
-        "drawbar reads at most {} GiB from one library, and the files before this one \
-         already came to that",
+        "drawbar holds at most {} GiB of one library's files in memory, and the files read \
+         already come to that",
         MOST_BYTES >> 30
     )
 }
@@ -792,6 +924,7 @@ async fn remove(fs: &mut impl Fs, path: &LibPath, expect: Fingerprint) -> Result
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::future::Future;
 
     use super::*;
@@ -799,11 +932,12 @@ mod tests {
 
     /// A library whose files claim whatever size they are given, without taking it. The
     /// ones in `rests` are left in place, as the desktop leaves a sample instrument, and
-    /// the folders in `unreadable` cannot be read.
+    /// the folders in `unreadable` cannot be read. It counts the files it reads whole.
     struct Claimed {
         files: BTreeMap<String, u64>,
         rests: BTreeMap<String, Arc<OnDisk>>,
         unreadable: BTreeSet<String>,
+        reads: Cell<usize>,
     }
 
     impl Claimed {
@@ -812,6 +946,7 @@ mod tests {
                 files: files.into_iter().collect(),
                 rests: BTreeMap::new(),
                 unreadable: BTreeSet::new(),
+                reads: Cell::new(0),
             }
         }
     }
@@ -828,6 +963,9 @@ mod tests {
     }
 
     impl Fs for Claimed {
+        fn hold(&mut self, cmd: Cmd) {
+            panic!("nothing is waiting to be put back: {cmd:?}")
+        }
         async fn prepare(&mut self) -> io::Result<()> {
             Err(refused())
         }
@@ -860,6 +998,7 @@ mod tests {
             Ok(Vec::new())
         }
         async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            self.reads.set(self.reads.get() + 1);
             Ok(path.as_bytes().to_vec())
         }
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
@@ -902,35 +1041,23 @@ mod tests {
         }
     }
 
-    /// A sample instrument of the whole budget's size, left in its file, and a small
-    /// program after it in path order.
-    fn library(dir: &Temp) -> Claimed {
-        let file = on_disk(dir, "Marimba.nsmp", &sample_bytes());
-        Claimed {
-            rests: BTreeMap::from([("Marimba.nsmp".to_string(), file)]),
-            ..Claimed::of([
-                ("Marimba.nsmp".to_string(), MOST_BYTES),
-                ("Small.ne5p".to_string(), 10),
-            ])
-        }
+    fn path(text: &str) -> LibPath {
+        LibPath::parse(text).unwrap()
     }
 
-    fn paths(unread: &[(LibPath, String)]) -> Vec<&str> {
-        unread.iter().map(|(path, _)| path.as_str()).collect()
-    }
-
-    /// Every part of one listing, as an open sends them, the files held back last.
-    fn parts(
-        fs: &Claimed,
-        known: &BTreeMap<LibPath, Option<Fingerprint>>,
-        loaded: bool,
-        resting: &BTreeSet<LibPath>,
-    ) -> Vec<Listing> {
+    /// Every part of an open's listing over these rows of the index, the files held back
+    /// last.
+    fn parts(fs: &mut Claimed, rows: Vec<Row>) -> Vec<Listing> {
         now(async {
             let walk = Walk::start(fs).await.unwrap();
-            let mut lister = Lister::new(known, loaded, resting);
+            let mut lister = Lister::default();
             let mut parts = Vec::new();
-            lister.walk(fs, walk, &mut |part| parts.push(part)).await;
+            let mut answer = |event| match event {
+                Event::Listed(part) => parts.push(part),
+                other => panic!("{other:?}"),
+            };
+            lister.rows(fs, rows, &mut answer).await;
+            lister.walk(fs, walk, &mut answer).await;
             let (last, strangers) = lister.finish(fs).await;
             parts.push(last);
             parts.push(Listing {
@@ -941,55 +1068,140 @@ mod tests {
         })
     }
 
-    /// One listing, whole.
-    fn listed(fs: &Claimed, known: &BTreeMap<LibPath, Option<Fingerprint>>) -> Listing {
+    fn files(listing: &Listing) -> Vec<&str> {
+        listing
+            .files
+            .iter()
+            .map(|found| found.path.as_str())
+            .collect()
+    }
+
+    /// An open lists every file by name, length and time, and reads none of them, the
+    /// files the index names among them.
+    #[test]
+    fn an_open_lists_every_file_and_reads_none() {
+        let mut fs = Claimed::of(
+            ["Grand.ne5p", "a/Strings.ne5p", "a/b/Pad.ne5p", "notes.pdf"]
+                .map(|path| (path.to_string(), path.len() as u64)),
+        );
+        let rows = vec![Row {
+            path: path("a/Strings.ne5p"),
+            print: Some(Fingerprint {
+                crc: Some(7),
+                ..Fingerprint::unread(stat(14))
+            }),
+            working: false,
+        }];
         let mut listing = Listing::default();
-        for part in parts(fs, known, false, &BTreeSet::new()) {
+        for part in parts(&mut fs, rows) {
             listing.extend(part);
         }
         listing.sort();
-        listing
+        assert_eq!(
+            files(&listing),
+            ["Grand.ne5p", "a/Strings.ne5p", "a/b/Pad.ne5p"]
+        );
+        assert!(listing.files.iter().all(|found| !found.read()));
+        assert_eq!(listing.others, [path("notes.pdf")]);
+        assert_eq!(fs.reads.get(), 0, "files read");
     }
 
+    /// The files the index names come first, before the walk lists anything, with the
+    /// folders they are in. A row the index names twice is listed once.
     #[test]
-    fn a_file_left_in_place_takes_none_of_what_a_listing_reads() {
+    fn the_files_the_index_names_come_before_the_walk() {
+        let mut fs =
+            Claimed::of(["Top.ne5p", "deep/er/Known.ne5p"].map(|path| (path.to_string(), 1)));
+        let row = || Row {
+            path: path("deep/er/Known.ne5p"),
+            print: None,
+            working: false,
+        };
+        let parts = parts(&mut fs, vec![row(), row()]);
+        assert_eq!(files(&parts[0]), ["deep/er/Known.ne5p"]);
+        assert_eq!(parts[0].dirs, [path("deep"), path("deep/er")]);
+        let rest: Vec<&str> = parts[1..].iter().flat_map(files).collect();
+        assert_eq!(rest, ["Top.ne5p"], "the walk leaves the known file out");
+    }
+
+    /// The file under a working copy is read, since the copy is compared with it.
+    #[test]
+    fn the_file_under_a_working_copy_is_read_at_open() {
+        let mut fs = Claimed::of([("Grand.ne5p".to_string(), 10)]);
+        let rows = vec![Row {
+            path: path("Grand.ne5p"),
+            print: None,
+            working: true,
+        }];
+        let parts = parts(&mut fs, rows);
+        assert_eq!(parts[0].files[0].bytes.as_deref(), Some(&b"Grand.ne5p"[..]));
+        assert_eq!(fs.reads.get(), 1);
+    }
+
+    /// A read asked for leaves a sample instrument in its file, which takes none of the
+    /// room, and refuses a file that does not fit what room is left.
+    #[test]
+    fn a_read_leaves_an_instrument_in_place_and_stops_at_the_room_left() {
         let dir = Temp::new();
-        let fs = library(&dir);
-        let listed = listed(&fs, &BTreeMap::new());
-        assert_eq!(paths(&listed.unread), [] as [&str; 0]);
-        let read: Vec<(&str, bool, bool)> = listed
+        let file = on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let fs = Claimed {
+            rests: BTreeMap::from([("Marimba.nsmp".to_string(), file)]),
+            ..Claimed::of([
+                ("Marimba.nsmp".to_string(), MOST_BYTES),
+                ("Small.ne5p".to_string(), 10),
+                ("Large.ne5p".to_string(), 20),
+            ])
+        };
+        let asked = ["Marimba.nsmp", "Small.ne5p", "Large.ne5p"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, at)| (id as u64, path(at), None))
+            .collect();
+        let read = now(read_all(&fs, asked, 25));
+        let what: Vec<(u64, &str)> = read
+            .iter()
+            .map(|(id, answer)| {
+                let held = match answer {
+                    Ok(found) if found.file.is_some() => "resting",
+                    Ok(found) if found.bytes.is_some() => "whole",
+                    Ok(_) => "nothing",
+                    Err(_) => "refused",
+                };
+                (*id, held)
+            })
+            .collect();
+        assert_eq!(what, [(0, "resting"), (1, "whole"), (2, "refused")]);
+    }
+
+    /// A rescan reads a file drawbar holds again only where its length or time moved,
+    /// and never one it has not read.
+    #[test]
+    fn a_rescan_reads_again_only_what_drawbar_holds_and_what_moved() {
+        let mut fs = Claimed::of(
+            ["Held.ne5p", "Moved.ne5p", "Unread.ne5p", "New.ne5p"]
+                .map(|path| (path.to_string(), 10)),
+        );
+        let print = |len| Fingerprint::unread(stat(len));
+        let known = BTreeMap::from([
+            (path("Held.ne5p"), (print(10), Holds::Whole)),
+            (path("Moved.ne5p"), (print(9), Holds::Whole)),
+            (path("Unread.ne5p"), (print(9), Holds::Unread)),
+        ]);
+        let listing = now(scan(&mut fs, &known, &mut |event| panic!("{event:?}"))).unwrap();
+        let read: Vec<(&str, bool)> = listing
             .files
             .iter()
-            .map(|found| {
-                (
-                    found.path.as_str(),
-                    found.bytes.is_some(),
-                    found.file.is_some(),
-                )
-            })
+            .map(|found| (found.path.as_str(), found.read()))
             .collect();
         assert_eq!(
             read,
-            [("Marimba.nsmp", false, true), ("Small.ne5p", true, false)],
-            "(path, read whole, left in place)"
+            [
+                ("Held.ne5p", false),
+                ("Moved.ne5p", true),
+                ("New.ne5p", false),
+                ("Unread.ne5p", false)
+            ]
         );
-    }
-
-    /// On a rescan the listing does not look at a file it holds again, so the app says
-    /// which of them are left in place.
-    #[test]
-    fn a_held_file_counts_against_a_rescan_only_where_it_is_held_whole() {
-        let dir = Temp::new();
-        let fs = library(&dir);
-        let marimba = LibPath::parse("Marimba.nsmp").unwrap();
-        let known = BTreeMap::from([(marimba.clone(), Fingerprint::unread(stat(MOST_BYTES)))]);
-
-        let resting = BTreeSet::from([marimba]);
-        let listed = now(scan(&fs, known.clone(), &resting)).unwrap();
-        assert_eq!(paths(&listed.unread), [] as [&str; 0], "left in place");
-
-        let listed = now(scan(&fs, known, &BTreeSet::new())).unwrap();
-        assert_eq!(paths(&listed.unread), ["Small.ne5p"], "held whole");
     }
 
     fn walked(fs: &Claimed, most: usize) -> Vec<(String, bool)> {
@@ -1054,8 +1266,8 @@ mod tests {
         let files = levels
             .iter()
             .flat_map(|level| (0..PART).map(move |n| (format!("{level}{n:04}.ne5p"), 1)));
-        let fs = Claimed::of(files);
-        let parts = parts(&fs, &BTreeMap::new(), false, &BTreeSet::new());
+        let mut fs = Claimed::of(files);
+        let parts = parts(&mut fs, Vec::new());
         assert!(parts.len() > levels.len(), "{} parts", parts.len());
         let depths: Vec<Vec<usize>> = parts
             .iter()
@@ -1077,39 +1289,38 @@ mod tests {
     }
 
     /// A file at a new path waits for the end of the listing only where its length is that
-    /// of a file drawbar knew, and has its CRC taken only where that file is gone.
+    /// of a file the index names that is not where the index says, and is read there, its
+    /// CRC taken.
     #[test]
     fn a_file_that_may_be_one_moved_waits_for_the_end_and_is_fingerprinted() {
-        let fs = Claimed::of(["Grand.ne5p", "Moved.ne5p", "Other.ne5p"].map(|path| {
+        let mut fs = Claimed::of(["Grand.ne5p", "Moved.ne5p", "Other.ne5p"].map(|path| {
             let len = match path {
                 "Other.ne5p" => 3,
                 _ => path.len() as u64,
             };
             (path.to_string(), len)
         }));
-        let print = |len| {
-            Some(Fingerprint {
+        let row = |at: &str| Row {
+            path: path(at),
+            print: Some(Fingerprint {
                 crc: Some(7),
-                ..Fingerprint::unread(stat(len))
-            })
+                ..Fingerprint::unread(stat(10))
+            }),
+            working: false,
         };
-        let known = BTreeMap::from([
-            (LibPath::parse("Gone.ne5p").unwrap(), print(10)),
-            (LibPath::parse("Grand.ne5p").unwrap(), print(10)),
-        ]);
-        let parts = parts(&fs, &known, false, &BTreeSet::new());
+        let parts = parts(&mut fs, vec![row("Gone.ne5p"), row("Grand.ne5p")]);
         let strangers = &parts[parts.len() - 1].files;
         let held: Vec<(&str, bool)> = strangers
             .iter()
             .map(|found| (found.path.as_str(), found.crc.is_some()))
             .collect();
         assert_eq!(held, [("Moved.ne5p", true)], "(path, fingerprinted)");
-        let first: Vec<&str> = parts[0]
-            .files
+        assert_eq!(files(&parts[0]), ["Grand.ne5p"]);
+        let walked: Vec<&str> = parts[1..parts.len() - 1].iter().flat_map(files).collect();
+        assert_eq!(walked, ["Other.ne5p"]);
+        assert!(parts[..parts.len() - 1]
             .iter()
-            .map(|found| found.path.as_str())
-            .collect();
-        assert_eq!(first, ["Grand.ne5p", "Other.ne5p"]);
-        assert!(parts[0].files.iter().all(|found| found.crc.is_none()));
+            .flat_map(|part| &part.files)
+            .all(|found| found.crc.is_none() && !found.read()));
     }
 }

@@ -987,7 +987,6 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
             ),
             false => (tag, "these bytes did not decode".to_string()),
         },
-        Kind::Reading => ("reading…".to_string(), "it is still being read".to_string()),
         Kind::Live
         | Kind::Text
         | Kind::Synth
