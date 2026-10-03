@@ -78,14 +78,20 @@ pub enum Frame {
 impl Frame {
     /// The frame for this platform. On Linux, a GNOME session draws client-side decorations,
     /// so the app draws its own header bar; other desktops decorate the window themselves.
+    ///
+    /// The desktop is asked once per run: the window's decorations and the top bar must
+    /// agree.
     pub fn of(platform: Platform) -> Frame {
+        static LINUX: std::sync::OnceLock<Frame> = std::sync::OnceLock::new();
         match platform {
             Platform::Windows => Frame::Captions,
             Platform::Mac | Platform::Web => Frame::System,
-            Platform::Linux => match header_bar_desktop() {
-                true => Frame::HeaderBar(Layout::read(&gnome_button_layout())),
-                false => Frame::System,
-            },
+            Platform::Linux => LINUX
+                .get_or_init(|| match header_bar_desktop() {
+                    true => Frame::HeaderBar(Layout::read(&gnome_button_layout())),
+                    false => Frame::System,
+                })
+                .clone(),
         }
     }
 
@@ -226,7 +232,7 @@ pub fn mac_keyboard(ctx: &egui::Context) -> bool {
 /// system draws over the top bar sit on its center line instead of near its top edge.
 #[cfg(target_os = "macos")]
 pub fn center_traffic_lights(window: &impl raw_window_handle::HasWindowHandle) {
-    use objc2_app_kit::{NSToolbar, NSView, NSWindowToolbarStyle};
+    use objc2_app_kit::{NSTitlebarSeparatorStyle, NSToolbar, NSView, NSWindowToolbarStyle};
     use raw_window_handle::RawWindowHandle;
 
     let Ok(handle) = window.window_handle() else {
@@ -246,6 +252,7 @@ pub fn center_traffic_lights(window: &impl raw_window_handle::HasWindowHandle) {
     };
     window.setToolbar(Some(&NSToolbar::new(main)));
     window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+    window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
 }
 
 /// The width of one of Windows' caption buttons. They fill the bar's height.
@@ -264,8 +271,10 @@ pub fn captions(ui: &mut egui::Ui, rect: egui::Rect) -> f32 {
             egui::pos2(right - CAPTION, rect.top()),
             egui::pos2(right, rect.bottom()),
         );
+        // ⚠️ The window's top and right edges resize it, so the buttons stop short of them.
+        let pressable = box_.intersect(ui.ctx().screen_rect().shrink(GRIP));
         let response = ui.interact(
-            box_,
+            pressable,
             ui.id().with(("caption", button as u8)),
             egui::Sense::click(),
         );
@@ -416,6 +425,10 @@ fn press(ctx: &egui::Context, button: Button, maximized: bool) {
 /// Let the empty parts of the top bar move the window, and a double click on them
 /// maximize or restore it, as a title bar does. `bar` is the top bar's response.
 pub fn title_bar(ctx: &egui::Context, bar: &egui::Response) {
+    // A press on the window's edge is a resize, which [`edges`] has already begun.
+    if gripped(ctx).is_some() {
+        return;
+    }
     if bar.double_clicked() {
         let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
@@ -446,22 +459,27 @@ pub fn grip(size: egui::Vec2, at: egui::Pos2) -> Option<egui::ResizeDirection> {
     }
 }
 
-/// The resize border an undecorated window lacks: the cursor at its edges, and a press
-/// there hands the resize to the system. Nothing while maximized.
-pub fn edges(ctx: &egui::Context) {
-    let (maximized, at, pressed) = ctx.input(|input| {
+/// The edge or corner the pointer would resize now. None while maximized.
+fn gripped(ctx: &egui::Context) -> Option<egui::ResizeDirection> {
+    let (maximized, at) = ctx.input(|input| {
         (
             input.viewport().maximized.unwrap_or(false),
             input.pointer.hover_pos(),
-            input.pointer.primary_pressed(),
         )
     });
-    let (false, Some(at)) = (maximized, at) else {
+    match maximized {
+        true => None,
+        false => grip(ctx.screen_rect().size(), at?),
+    }
+}
+
+/// The resize border an undecorated window lacks: the cursor at its edges, and a press
+/// there hands the resize to the system. Nothing while maximized.
+pub fn edges(ctx: &egui::Context) {
+    let Some(direction) = gripped(ctx) else {
         return;
     };
-    let Some(direction) = grip(ctx.screen_rect().size(), at) else {
-        return;
-    };
+    let pressed = ctx.input(|input| input.pointer.primary_pressed());
     use egui::ResizeDirection as To;
     ctx.set_cursor_icon(match direction {
         To::North | To::South => egui::CursorIcon::ResizeVertical,

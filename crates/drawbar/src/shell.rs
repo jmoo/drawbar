@@ -12,11 +12,11 @@ use eframe::egui;
 use nord_usb::ObjectClass;
 
 use crate::app::{accent, bold, canvas, good, tint, ui as ui_text, warn, DrawbarApp, ThemeChoice};
-use crate::browser::{new_menu, Act};
+use crate::browser::Act;
 use crate::filter::Filter;
 use crate::icon::{painted, sized, Glyph};
 use crate::log::Level;
-use crate::menu::{key_text, search_key, Command};
+use crate::menu::{key_text, new_menu, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
 use crate::platform::{Frame, Platform, CRAMPED};
 use crate::strings::folder;
@@ -1651,8 +1651,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ ⌘R is the browser tab's reload. Left unconsumed, it reloads the page out from
-    /// under whatever is open, so it is consumed whether or not an instrument is attached.
+    /// ⚠️ ⌘R is bound with or without an instrument, so it never falls through to
+    /// anything else that would take it.
     #[test]
     fn the_read_everything_shortcut_is_taken_with_nothing_attached() {
         let ctx = egui::Context::default();

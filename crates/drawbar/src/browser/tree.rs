@@ -16,48 +16,12 @@ use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
-use crate::menu::marked;
-use crate::newproject::Making;
+use crate::menu::{marked, new_menu};
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
-use crate::workspace::{Fresh, LocalEntity, Workspace};
-
-/// The New menu. Above the separator are files an instrument holds: each family's
-/// defaults, and the two instrument files built from audio. Below it are files only this
-/// computer keeps: a note, a Sample Editor project, and a folder.
-///
-/// ⚠️ One menu, used everywhere. The tree's context menu, the File menu, the toolbar and
-/// the tab strip all offer "New", and four different menus of one name would be four
-/// things to learn. Connecting an instrument makes nothing on this computer, so it is on
-/// the tree's instrument row instead.
-pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-    for family in &Fresh::FAMILIES {
-        ui.menu_button(family.label, |ui| {
-            for kind in family.kinds {
-                entry(ui, *kind, acts);
-            }
-        });
-    }
-    for making in Making::FROM_WAVS.iter().filter(|it| it.instrument_file()) {
-        from_wavs(ui, *making, acts);
-    }
-    ui.separator();
-    for kind in Fresh::LOOSE {
-        entry(ui, kind, acts);
-    }
-    for making in Making::FROM_WAVS.iter().filter(|it| !it.instrument_file()) {
-        from_wavs(ui, *making, acts);
-    }
-    offer(
-        ui,
-        "New folder",
-        Some("groups the list on this computer; the instrument never sees it"),
-        Act::NewFolder,
-        acts,
-    );
-}
+use crate::workspace::{LocalEntity, Workspace};
 
 /// A menu item that runs `act` and closes the menu.
 fn offer(ui: &mut egui::Ui, label: &str, hint: Option<&str>, act: Act, acts: &mut Vec<Act>) {
@@ -69,17 +33,6 @@ fn offer(ui: &mut egui::Ui, label: &str, hint: Option<&str>, act: Act, acts: &mu
         acts.push(act);
         ui.close();
     }
-}
-
-/// One kind this app creates from a default.
-fn entry(ui: &mut egui::Ui, kind: Fresh, acts: &mut Vec<Act>) {
-    offer(ui, kind.label(), kind.note(), Act::New(kind), acts);
-}
-
-/// One kind built from audio files, which asks for the files before it exists.
-fn from_wavs(ui: &mut egui::Ui, making: Making, acts: &mut Vec<Act>) {
-    let (item, hint) = making.item();
-    offer(ui, item, Some(hint), Act::NewFromWavs(making), acts);
 }
 
 /// A row of the tree with something under it.
@@ -1319,61 +1272,7 @@ fn destination(held: &Queued) -> String {
 mod tests {
     use super::*;
     use crate::testing::{self, context, words, Bench};
-
-    /// ⚠️ Everything built from audio is on the New menu. One pick of WAVs can make any
-    /// of them, and a menu offering only some would hide what the dialog does.
-    #[test]
-    fn the_new_menu_offers_everything_a_pick_of_wavs_makes() {
-        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
-        });
-        let said = words(&output);
-        for making in Making::FROM_WAVS {
-            let item = making.item().0;
-            assert!(said.iter().any(|word| word == item), "{item} is missing");
-        }
-        assert!(said.iter().any(|word| word == "New folder"));
-    }
-
-    /// ⚠️ The New menu's separator splits files an instrument holds from files only this
-    /// computer keeps. A kind on the wrong side would misstate where the new file can go.
-    #[test]
-    fn the_new_menu_parts_instrument_files_from_the_rest() {
-        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
-        });
-        let said = words(&output);
-        let at = |word: &str| {
-            said.iter()
-                .position(|held| held == word)
-                .unwrap_or_else(|| panic!("{word} is missing: {said:?}"))
-        };
-        let rule = Fresh::FAMILIES
-            .iter()
-            .map(|family| at(family.label))
-            .chain(
-                Making::FROM_WAVS
-                    .iter()
-                    .filter(|making| making.instrument_file())
-                    .map(|making| at(making.item().0)),
-            )
-            .max()
-            .expect("the instrument files are above it");
-        let below: Vec<&str> = Fresh::LOOSE
-            .iter()
-            .map(|kind| kind.label())
-            .chain(
-                Making::FROM_WAVS
-                    .iter()
-                    .filter(|making| !making.instrument_file())
-                    .map(|making| making.item().0),
-            )
-            .chain(["New folder"])
-            .collect();
-        for item in below {
-            assert!(at(item) > rule, "{item} belongs below the rule: {said:?}");
-        }
-    }
+    use crate::workspace::Fresh;
 
     /// ⚠️ A row shows the sound's name without its format tag. The name the workspace
     /// holds keeps the tag; only the drawn text drops it.

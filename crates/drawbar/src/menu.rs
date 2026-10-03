@@ -76,20 +76,106 @@ pub struct Offer {
 }
 
 impl Offer {
-    fn plain(label: impl Into<String>) -> Offer {
+    /// A command as its item looks when nothing about the moment changes it.
+    fn of(command: Command) -> Offer {
         Offer {
-            label: label.into(),
+            label: label(command).to_string(),
             enabled: true,
             checked: None,
-            hint: None,
+            hint: hint(command),
         }
     }
+}
 
-    fn check(label: impl Into<String>, on: bool) -> Offer {
-        Offer {
-            checked: Some(on),
-            ..Offer::plain(label)
+/// The words of a command's item, before anything about the moment changes them.
+pub fn label(command: Command) -> &'static str {
+    match command {
+        Command::Open => "Open…",
+        Command::New(kind) => kind.label(),
+        Command::FromWavs(making) => making.item().0,
+        Command::NewFolder => "New folder",
+        Command::Save => "Save",
+        Command::Revert => "Revert to saved",
+        Command::Export => "Export…",
+        Command::CloseTab => "Close tab",
+        Command::Quit => "Quit",
+        Command::Keyboard => "Keyboard",
+        Command::Document => "Document",
+        Command::Browser => "Browser panel",
+        Command::Inspector => "Inspector panel",
+        Command::Activity => "Activity log",
+        Command::Theme(choice) => choice.name(),
+        Command::Connect => "Connect…",
+        Command::Disconnect => "Disconnect",
+        Command::ReadEverything => "Read everything",
+        Command::ReadAgain => "Read again",
+        Command::ReviewQueue => "Review send queue…",
+        Command::SendAll => "Send all",
+        Command::ClearQueue => "Clear send queue",
+        Command::Unqueue => "Remove from queue",
+        Command::Listen => "Listen to MIDI controllers",
+        Command::Guide => "User guide",
+        Command::WhatsNew => "What's new",
+        Command::Welcome => "Welcome",
+        Command::CopyLog => "Copy activity log",
+        Command::About => "About drawbar",
+    }
+}
+
+/// What a command's item says on hover, when it has more to say than its label.
+fn hint(command: Command) -> Option<&'static str> {
+    match command {
+        Command::New(kind) => kind.note(),
+        Command::FromWavs(making) => Some(making.item().1),
+        Command::NewFolder => {
+            Some("groups the list on this computer; the instrument never sees it")
         }
+        _ => None,
+    }
+}
+
+/// The New menu. Above the separator are files an instrument holds: each family's
+/// defaults, and the two instrument files built from audio. Below it are files only this
+/// computer keeps: a note, a Sample Editor project, and a folder.
+///
+/// ⚠️ One menu, used everywhere. The tree's context menu, the File menu, the top bar and
+/// the tab row all offer "New", and four different menus of one name would be four
+/// things to learn. Connecting an instrument makes nothing on this computer, so it is on
+/// the tree's instrument row instead.
+pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+    drop_down_style(ui);
+    new_lines(ui, &new_entries(), acts);
+}
+
+fn new_lines(ui: &mut egui::Ui, entries: &[Entry], acts: &mut Vec<Act>) {
+    for entry in entries {
+        match entry {
+            Entry::Rule => {
+                ui.separator();
+            }
+            Entry::Sub(title, inner) => {
+                ui.menu_button(*title, |ui| {
+                    drop_down_style(ui);
+                    new_lines(ui, inner, acts);
+                });
+            }
+            Entry::Do(command) => {
+                if item_button(ui, &Offer::of(*command), None) {
+                    acts.extend(made(*command));
+                    ui.close();
+                }
+            }
+        }
+    }
+}
+
+/// What a New line asks for.
+fn made(command: Command) -> Option<Act> {
+    match command {
+        Command::New(kind) => Some(Act::New(kind)),
+        Command::FromWavs(making) => Some(Act::NewFromWavs(making)),
+        Command::NewFolder => Some(Act::NewFolder),
+        _ => None,
     }
 }
 
@@ -255,9 +341,9 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored: ⇧⌘S
 /// must be taken before ⌘S, or asking to review the send queue would save the open
 /// document and lose its revert. A bound key is consumed whether or not its command is
-/// offered now, so it never falls through to a shorter one, and ⌘R never reaches the
-/// browser tab as a reload.
-const KEYED: [Command; 13] = [
+/// offered now, so it never falls through to a shorter one. In a browser, `index.html`
+/// also keeps each of these keys from the browser's own action.
+const KEYED: [Command; 12] = [
     Command::ReviewQueue,
     Command::Export,
     Command::Browser,
@@ -270,7 +356,6 @@ const KEYED: [Command; 13] = [
     Command::Quit,
     Command::Keyboard,
     Command::Document,
-    Command::Unqueue,
 ];
 
 /// The minimum width of a drop-down menu, so its width does not change with which items
@@ -294,73 +379,68 @@ impl DrawbarApp {
         let attached = self.attached();
         let active = self.tabs.active();
         let waiting = self.queue.len();
+        let plain = Offer::of(command);
+        let check = |on| Offer {
+            checked: Some(on),
+            ..Offer::of(command)
+        };
+        let relabeled = |label: String| Offer {
+            label,
+            ..Offer::of(command)
+        };
         Some(match command {
-            Command::Open => Offer::plain("Open…"),
-            Command::New(kind) => Offer {
-                hint: kind.note(),
-                ..Offer::plain(kind.label())
-            },
-            Command::FromWavs(making) => {
-                let (item, hint) = making.item();
-                Offer {
-                    hint: Some(hint),
-                    ..Offer::plain(item)
-                }
-            }
-            Command::NewFolder => Offer {
-                hint: Some("groups the list on this computer; the instrument never sees it"),
-                ..Offer::plain("New folder")
-            },
-            Command::Save => active.map(|_| Offer::plain("Save"))?,
+            Command::Open
+            | Command::New(_)
+            | Command::FromWavs(_)
+            | Command::NewFolder
+            | Command::Guide
+            | Command::WhatsNew
+            | Command::Welcome
+            | Command::CopyLog
+            | Command::About => plain,
+            Command::Save | Command::Export => active.map(|_| plain)?,
             Command::Revert => {
                 let unsaved = self
                     .workspace
                     .get(active?)
                     .is_some_and(crate::workspace::LocalEntity::is_unsaved);
-                unsaved.then(|| Offer::plain("Revert to saved"))?
+                unsaved.then_some(plain)?
             }
-            Command::Export => active.map(|_| Offer::plain("Export…"))?,
-            Command::CloseTab => {
-                (self.tabs.showing() != Spot::Library).then(|| Offer::plain("Close tab"))?
-            }
-            Command::Quit => Offer::plain("Quit"),
-            Command::Keyboard => {
-                attached.then(|| Offer::check("Keyboard", self.tabs.showing() == Spot::Keyboard))?
-            }
+            Command::CloseTab => (self.tabs.showing() != Spot::Library).then_some(plain)?,
+            Command::Quit => match self.platform {
+                Platform::Mac => relabeled("Quit drawbar".to_string()),
+                Platform::Windows | Platform::Linux | Platform::Web => plain,
+            },
+            Command::Keyboard => attached.then(|| check(self.tabs.showing() == Spot::Keyboard))?,
             Command::Document => {
                 let id = self.tabs.last_document()?;
-                Offer::check("Document", self.tabs.showing() == Spot::Document(id))
+                check(self.tabs.showing() == Spot::Document(id))
             }
-            Command::Browser => Offer::check("Browser panel", self.shell.open(Dock::Browser)),
-            Command::Inspector => Offer::check("Inspector panel", self.shell.open(Dock::Inspector)),
-            Command::Activity => Offer::check("Activity log", self.shell.log_open),
-            Command::Theme(choice) => Offer::check(choice.name(), self.theme == choice),
-            Command::Connect => (!attached).then(|| Offer::plain("Connect…"))?,
-            Command::Disconnect => attached.then(|| Offer::plain("Disconnect"))?,
-            Command::ReadEverything => attached.then(|| Offer::plain("Read everything"))?,
+            Command::Browser => check(self.shell.open(Dock::Browser)),
+            Command::Inspector => check(self.shell.open(Dock::Inspector)),
+            Command::Activity => check(self.shell.log_open),
+            Command::Theme(choice) => check(self.theme == choice),
+            Command::Connect => (!attached).then_some(plain)?,
+            Command::Disconnect | Command::ReadEverything | Command::ReviewQueue => {
+                attached.then_some(plain)?
+            }
             Command::ReadAgain => {
                 let class = self.open_class().filter(|_| attached)?;
-                Offer::plain(format!("Read {} again", folder(class)))
+                relabeled(format!("Read {} again", folder(class)))
             }
-            Command::ReviewQueue => attached.then(|| Offer::plain("Review send queue…"))?,
             Command::SendAll => {
-                (attached && waiting > 0).then(|| Offer::plain(format!("Send all ({waiting})")))?
+                (attached && waiting > 0).then(|| relabeled(format!("Send all ({waiting})")))?
             }
-            Command::ClearQueue => {
-                (attached && waiting > 0).then(|| Offer::plain("Clear send queue"))?
+            Command::ClearQueue => (attached && waiting > 0).then_some(plain)?,
+            Command::Unqueue => (attached && !self.queued_picks().is_empty()).then_some(plain)?,
+            Command::Listen => {
+                let supported = crate::midi::supported();
+                Offer {
+                    enabled: supported,
+                    hint: (!supported).then_some(crate::midi::UNSUPPORTED),
+                    ..check(self.midi.on())
+                }
             }
-            Command::Unqueue => (attached && !self.queued_picks().is_empty())
-                .then(|| Offer::plain("Remove from queue"))?,
-            Command::Listen => Offer {
-                enabled: crate::midi::supported(),
-                hint: Some(crate::midi::UNSUPPORTED),
-                ..Offer::check("Listen to MIDI controllers", self.midi.on())
-            },
-            Command::Guide => Offer::plain("User guide"),
-            Command::WhatsNew => Offer::plain("What's new"),
-            Command::Welcome => Offer::plain("Welcome"),
-            Command::CopyLog => Offer::plain("Copy activity log"),
-            Command::About => Offer::plain("About drawbar"),
         })
     }
 
@@ -378,9 +458,9 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Open => acts.push(Act::OpenFiles),
-            Command::New(kind) => acts.push(Act::New(kind)),
-            Command::FromWavs(making) => acts.push(Act::NewFromWavs(making)),
-            Command::NewFolder => acts.push(Act::NewFolder),
+            Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
+                acts.extend(made(command))
+            }
             Command::Save => acts.extend(active.map(Act::SaveDoc)),
             Command::Revert => acts.extend(active.map(Act::Revert)),
             Command::Export => acts.extend(active.map(Act::Export)),
@@ -570,21 +650,24 @@ impl DrawbarApp {
     /// One menu item: the check column, the label, and the key text at the right.
     fn item(&self, ui: &mut egui::Ui, command: Command, offer: &Offer) -> bool {
         let mac = crate::platform::mac_keyboard(ui.ctx());
-        let mut button = check(ui, &offer.label, offer.checked == Some(true));
-        if let Some(keys) = key_text(command, self.platform, mac) {
-            button =
-                button.shortcut_text(egui::RichText::new(keys).font(egui::FontId::monospace(10.5)));
-        }
-        let response = ui.add_enabled(offer.enabled, button);
-        let response = match (offer.enabled, offer.hint) {
-            (false, Some(why)) => response.on_disabled_hover_text(why),
-            (true, Some(note)) if !matches!(command, Command::Listen) => {
-                response.on_hover_text(note)
-            }
-            _ => response,
-        };
-        response.clicked()
+        item_button(ui, offer, key_text(command, self.platform, mac))
     }
+}
+
+/// One menu item: the check column, the label, and `keys` at the right. Its hint shows
+/// on hover, enabled or not.
+fn item_button(ui: &mut egui::Ui, offer: &Offer, keys: Option<String>) -> bool {
+    let mut button = check(ui, &offer.label, offer.checked == Some(true));
+    if let Some(keys) = keys {
+        button =
+            button.shortcut_text(egui::RichText::new(keys).font(egui::FontId::monospace(10.5)));
+    }
+    let response = ui.add_enabled(offer.enabled, button);
+    let response = match offer.hint {
+        Some(hint) => response.on_hover_text(hint).on_disabled_hover_text(hint),
+        None => response,
+    };
+    response.clicked()
 }
 
 /// A menu item with a check mark showing whether what it names is on, closing the menu
@@ -674,6 +757,62 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{self, context, words};
+
+    /// ⚠️ Everything built from audio is on the New menu. One pick of WAVs can make any
+    /// of them, and a menu offering only some would hide what the dialog does.
+    #[test]
+    fn the_new_menu_offers_everything_a_pick_of_wavs_makes() {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
+        });
+        let said = words(&output);
+        for making in Making::FROM_WAVS {
+            let item = making.item().0;
+            assert!(said.iter().any(|word| word == item), "{item} is missing");
+        }
+        assert!(said.iter().any(|word| word == "New folder"));
+    }
+
+    /// ⚠️ The New menu's separator splits files an instrument holds from files only this
+    /// computer keeps. A kind on the wrong side would misstate where the new file can go.
+    #[test]
+    fn the_new_menu_parts_instrument_files_from_the_rest() {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
+        });
+        let said = words(&output);
+        let at = |word: &str| {
+            said.iter()
+                .position(|held| held == word)
+                .unwrap_or_else(|| panic!("{word} is missing: {said:?}"))
+        };
+        let rule = Fresh::FAMILIES
+            .iter()
+            .map(|family| at(family.label))
+            .chain(
+                Making::FROM_WAVS
+                    .iter()
+                    .filter(|making| making.instrument_file())
+                    .map(|making| at(making.item().0)),
+            )
+            .max()
+            .expect("the instrument files are above it");
+        let below: Vec<&str> = Fresh::LOOSE
+            .iter()
+            .map(|kind| kind.label())
+            .chain(
+                Making::FROM_WAVS
+                    .iter()
+                    .filter(|making| !making.instrument_file())
+                    .map(|making| making.item().0),
+            )
+            .chain(["New folder"])
+            .collect();
+        for item in below {
+            assert!(at(item) > rule, "{item} belongs below the rule: {said:?}");
+        }
+    }
 
     fn commands(entries: &[Entry], into: &mut Vec<Command>) {
         for entry in entries {
@@ -769,6 +908,41 @@ mod tests {
             key_text(Command::Quit, Platform::Linux, false).as_deref(),
             Some("Ctrl+Q")
         );
+    }
+
+    /// The page stops the browser acting on a key, by its modifiers and its key's name.
+    fn page_name(keys: egui::KeyboardShortcut) -> String {
+        let with = keys.modifiers;
+        let mut held: Vec<String> = [
+            (with.command, "mod"),
+            (with.ctrl && !with.command, "ctrl"),
+            (with.alt, "alt"),
+            (with.shift, "shift"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_string())
+        .collect();
+        held.push(keys.logical_key.name().to_lowercase());
+        held.join("+")
+    }
+
+    /// ⚠️ A browser acts on ⌘R and the rest even when the app takes them: it would reload
+    /// the page out from under unsaved work. Every key the web build binds is kept from
+    /// it.
+    #[test]
+    fn the_page_keeps_every_key_the_web_build_binds_from_the_browser() {
+        let page = include_str!("../index.html");
+        for mac in [true, false] {
+            let bound = KEYED
+                .iter()
+                .filter_map(|command| shortcut(*command, Platform::Web, mac))
+                .chain([search_key()]);
+            for keys in bound {
+                let name = format!("\"{}\"", page_name(keys));
+                assert!(page.contains(&name), "index.html does not take {name}");
+            }
+        }
     }
 
     /// ⚠️ A key with more modifiers is matched before any key it contains, or egui's

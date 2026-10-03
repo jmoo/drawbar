@@ -10,7 +10,7 @@ use eframe::egui;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, IsMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::menu::{menus, shortcut, Command, Entry, Offer};
+use crate::menu::{label, menus, shortcut, Command, Entry, Offer};
 use crate::platform::Platform;
 
 /// One native item and what it last showed, so it is only touched when that changes.
@@ -38,7 +38,7 @@ pub struct MenuBar {
 impl MenuBar {
     /// Build the menus and hand them to the application. Call once, on the main thread,
     /// after the application has finished launching.
-    pub fn install(ctx: &egui::Context) -> Option<MenuBar> {
+    pub fn install(ctx: &egui::Context) -> Result<MenuBar, muda::Error> {
         let menu = Menu::new();
         let mut lines = Vec::new();
 
@@ -52,13 +52,13 @@ impl MenuBar {
         append(&app, &PredefinedMenuItem::show_all(None));
         append(&app, &PredefinedMenuItem::separator());
         append(&app, &plain(&mut lines, Command::Quit, "Quit drawbar"));
-        menu.append(&app).ok()?;
+        menu.append(&app)?;
 
         let mut help = None;
         for drawn in menus(Platform::Mac) {
             let submenu = Submenu::new(drawn.title, true);
             fill(&submenu, &drawn.entries, &mut lines);
-            menu.append(&submenu).ok()?;
+            menu.append(&submenu)?;
             if drawn.title == "Help" {
                 help = Some(submenu);
             }
@@ -69,8 +69,7 @@ impl MenuBar {
         append(&window, &PredefinedMenuItem::maximize(Some("Zoom")));
         append(&window, &PredefinedMenuItem::separator());
         append(&window, &PredefinedMenuItem::fullscreen(None));
-        menu.insert(&window, menu.items().len().saturating_sub(1))
-            .ok()?;
+        menu.insert(&window, menu.items().len().saturating_sub(1))?;
 
         menu.init_for_nsapp();
         window.set_as_windows_menu_for_nsapp();
@@ -85,7 +84,7 @@ impl MenuBar {
             let _ = send.send(event.id);
             ctx.request_repaint();
         }));
-        Some(MenuBar {
+        Ok(MenuBar {
             _menu: menu,
             lines,
             picked,
@@ -158,7 +157,7 @@ fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>) {
                 append(submenu, &child);
             }
             Entry::Do(command) => {
-                let resting = resting(*command);
+                let resting = label(*command);
                 match checkable(*command) {
                     true => {
                         let item = CheckMenuItem::new(resting, true, false, accelerator(*command));
@@ -201,41 +200,6 @@ fn checkable(command: Command) -> bool {
             | Command::Theme(_)
             | Command::Listen
     )
-}
-
-/// The label a command's item shows while the command is not offered.
-fn resting(command: Command) -> &'static str {
-    match command {
-        Command::Open => "Open…",
-        Command::New(kind) => kind.label(),
-        Command::FromWavs(making) => making.item().0,
-        Command::NewFolder => "New folder",
-        Command::Save => "Save",
-        Command::Revert => "Revert to saved",
-        Command::Export => "Export…",
-        Command::CloseTab => "Close tab",
-        Command::Quit => "Quit drawbar",
-        Command::Keyboard => "Keyboard",
-        Command::Document => "Document",
-        Command::Browser => "Browser panel",
-        Command::Inspector => "Inspector panel",
-        Command::Activity => "Activity log",
-        Command::Theme(choice) => choice.name(),
-        Command::Connect => "Connect…",
-        Command::Disconnect => "Disconnect",
-        Command::ReadEverything => "Read everything",
-        Command::ReadAgain => "Read again",
-        Command::ReviewQueue => "Review send queue…",
-        Command::SendAll => "Send all",
-        Command::ClearQueue => "Clear send queue",
-        Command::Unqueue => "Remove from queue",
-        Command::Listen => "Listen to MIDI controllers",
-        Command::Guide => "User guide",
-        Command::WhatsNew => "What's new",
-        Command::Welcome => "Welcome",
-        Command::CopyLog => "Copy activity log",
-        Command::About => "About drawbar",
-    }
 }
 
 /// The native key equivalent of a command's shortcut.

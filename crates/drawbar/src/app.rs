@@ -242,7 +242,14 @@ impl DrawbarApp {
     /// system has.
     #[cfg(target_os = "macos")]
     pub fn in_mac_window(mut self, cc: &eframe::CreationContext<'_>) -> DrawbarApp {
-        self.menubar = crate::menubar::MenuBar::install(&cc.egui_ctx);
+        match crate::menubar::MenuBar::install(&cc.egui_ctx) {
+            Ok(bar) => self.menubar = Some(bar),
+            Err(e) => {
+                self.log.error(format!("the menu bar: {e}"));
+                self.log
+                    .trouble("drawbar could not build its menu bar; the menus are not there.");
+            }
+        }
         crate::platform::center_traffic_lights(cc);
         self
     }
@@ -258,7 +265,13 @@ impl DrawbarApp {
         let Some(mut bar) = self.menubar.take() else {
             return;
         };
-        for command in bar.picked() {
+        let picked = bar.picked();
+        // ⚠️ A pick from the menu bar is not an egui event, so nothing else asks for the
+        // frame that shows what it did.
+        if !picked.is_empty() {
+            ctx.request_repaint();
+        }
+        for command in picked {
             if self.offer(command).is_some_and(|offer| offer.enabled) {
                 self.run(ctx, frame, command, acts);
             }

@@ -395,12 +395,38 @@
     </svg>
 
     <script type="module">
-      /* The search box's key. A browser outside the Mac keeps Ctrl+K for its own search
-         unless the page stops it; the app still receives the key. */
+      /* Keys the app binds that the browser would also act on: ⌘R would reload the page
+         out from under unsaved work. A key the browser takes before the page sees it is
+         still the browser's. A test in `menu.rs` keeps this list to the app's keys. */
+      const TAKEN = new Set([
+        "mod+k",
+        "mod+o",
+        "mod+s",
+        "mod+r",
+        "mod+shift+e",
+        "mod+shift+s",
+        "mod+alt+b",
+        "mod+alt+i",
+        "mod+alt+l",
+        "alt+w",
+        "alt+2",
+        "alt+3",
+        "ctrl+w",
+        "ctrl+2",
+        "ctrl+3",
+      ]);
+      const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
       addEventListener(
         "keydown",
         (event) => {
-          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+          const held = [
+            (MAC ? event.metaKey : event.ctrlKey) && "mod",
+            MAC && event.ctrlKey && "ctrl",
+            event.altKey && "alt",
+            event.shiftKey && "shift",
+            event.code.replace(/^(Key|Digit)/, "").toLowerCase(),
+          ];
+          if (TAKEN.has(held.filter(Boolean).join("+"))) {
             event.preventDefault();
           }
         },
