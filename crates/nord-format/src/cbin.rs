@@ -29,7 +29,7 @@
 //! The container reads and writes in one forward pass with O(1) state; body allocation
 //! belongs to the body type.
 
-use crate::crc::{Crc16Stream, Crc32Stream};
+use crate::crc::{crc16_patched, crc32_patched, Change, Crc16Stream, Crc32Stream};
 use crate::error::{try_vec, Error, ParseError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -218,32 +218,58 @@ impl<B> std::ops::DerefMut for Cbin<B> {
     }
 }
 
-/// One checksum accumulator, whichever the generation uses.
+/// One checksum accumulator, whichever the generation uses, with the crc32 of what it
+/// is fed after priming.
 enum Hash {
-    V0(Crc16Stream<'static>),
+    /// The crc16, and the crc32 the type-0 file does not store.
+    V0(Crc16Stream<'static>, Crc32Stream<'static>),
+    /// The crc32, which is both.
     V1(Crc32Stream<'static>),
 }
 
 impl Hash {
-    /// The accumulator for `header`'s generation, having seen whatever of the header
-    /// that generation's checksum covers.
-    fn primed(header: &Header) -> Hash {
-        match header.generation {
-            // The crc16 covers the header too. Re-encoding is exact: the magic is
-            // verified and the other header bytes are held in `header`.
-            Generation::V0 => {
-                let mut hash = Crc16Stream::new();
-                hash.update(&header.head_bytes());
-                Hash::V0(hash)
-            }
+    /// The accumulator for `generation`, having seen nothing.
+    fn new(generation: Generation) -> Hash {
+        match generation {
+            Generation::V0 => Hash::V0(Crc16Stream::new(), Crc32Stream::new()),
             Generation::V1 => Hash::V1(Crc32Stream::new()),
         }
     }
 
+    /// The accumulator for `header`'s generation, having seen whatever of the header
+    /// that generation's checksum covers.
+    fn primed(header: &Header) -> Hash {
+        let mut hash = Hash::new(header.generation);
+        // The crc16 covers the header too. Re-encoding is exact: the magic is verified
+        // and the other header bytes are held in `header`.
+        if let Hash::V0(crc16, _) = &mut hash {
+            crc16.update(&header.head_bytes());
+        }
+        hash
+    }
+
     fn update(&mut self, bytes: &[u8]) {
         match self {
-            Hash::V0(h) => h.update(bytes),
+            Hash::V0(crc16, crc32) => {
+                crc16.update(bytes);
+                crc32.update(bytes);
+            }
             Hash::V1(h) => h.update(bytes),
+        }
+    }
+
+    /// The checksum so far, a crc16 widened.
+    fn value(&self) -> u32 {
+        match self {
+            Hash::V0(h, _) => h.value().into(),
+            Hash::V1(h) => h.value(),
+        }
+    }
+
+    /// The crc32 of the bytes fed since priming: of a body, the one a slot reports.
+    fn body_crc32(&self) -> u32 {
+        match self {
+            Hash::V0(_, h) | Hash::V1(h) => h.value(),
         }
     }
 }
@@ -315,13 +341,14 @@ pub fn read_raw(r: &mut (impl Read + Seek)) -> Result<Cbin<RawBody>, Error> {
     read_inner(r, None)
 }
 
-/// Read a container's header and scope a reader to the rest of the stream as its body.
-/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
-/// type-0 file.
-fn open<'a, R: Read + Seek>(
-    r: &'a mut R,
+/// Read a container's header and find its body in the rest of the stream, reading no
+/// body byte. With `format`, the file must carry that tag. Returns the stored crc32,
+/// zero for a type-0 file, and the body's position in the stream, the type-0 trailer
+/// excluded.
+fn locate<R: Read + Seek>(
+    r: &mut R,
     format: Option<&'static str>,
-) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
+) -> Result<(Header, u32, Range<u64>), Error> {
     let start = r.stream_position()?;
     let (header, stored_crc32) = read_header(r)?;
     if let Some(expected) = format {
@@ -335,24 +362,275 @@ fn open<'a, R: Read + Seek>(
     }
 
     let end = stream_end(r)?;
-    let overhead = header.generation.body_start() + header.generation.trailer_len();
-    if end < start + overhead {
-        return Err(ParseError::AssertFail(format!(
-            "{}: {} bytes is shorter than the {overhead}-byte container",
+    let len = end.checked_sub(start).ok_or_else(|| {
+        ParseError::AssertFail(format!(
+            "{}: the stream ends at byte {end}, before the container's start at byte {start}",
             name(&header, format),
-            end - start,
+        ))
+    })?;
+    let overhead = header.generation.body_start() + header.generation.trailer_len();
+    if len < overhead {
+        return Err(ParseError::AssertFail(format!(
+            "{}: {len} bytes is shorter than the {overhead}-byte container",
+            name(&header, format),
         ))
         .into());
     }
+    let body_start = start + header.generation.body_start();
+    let body_end = start + len - header.generation.trailer_len();
+    Ok((header, stored_crc32, body_start..body_end))
+}
+
+/// Read a container's header and scope a reader to the rest of the stream as its body.
+/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
+/// type-0 file.
+fn open<'a, R: Read + Seek>(
+    r: &'a mut R,
+    format: Option<&'static str>,
+) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
+    let (header, stored_crc32, body) = locate(r, format)?;
     let reader = BodyReader {
         inner: r,
-        start: start + header.generation.body_start(),
-        len: end - start - overhead,
+        start: body.start,
+        len: body.end - body.start,
         pos: 0,
         hashed: 0,
         hash: Hash::primed(&header),
     };
     Ok((header, stored_crc32, reader))
+}
+
+/// Read the header of a `format` file and find its body, reading no body byte: the
+/// body's position in the stream, the type-0 trailer excluded.
+///
+/// ⚠️ Nothing is verified past the header. The checksum covers every body byte, so
+/// only [`inspect`] or a whole read checks it.
+pub(crate) fn locate_body(
+    r: &mut (impl Read + Seek),
+    format: &'static str,
+) -> Result<(Header, Range<u64>), Error> {
+    let (header, _, body) = locate(r, Some(format))?;
+    Ok((header, body))
+}
+
+/// Read the header of a `format` file, find its body and read its stored checksum,
+/// reading no body byte. A type-0 file's crc16 is read from its trailer.
+///
+/// ⚠️ The checksum is not verified, as [`locate_body`] verifies nothing.
+pub(crate) fn locate_sealed(
+    r: &mut (impl Read + Seek),
+    format: &'static str,
+) -> Result<(Header, Range<u64>, Seal), Error> {
+    let (header, stored_crc32, body) = locate(r, Some(format))?;
+    let generation = header.generation;
+    let start = body.start - generation.body_start();
+    let seal = match generation {
+        Generation::V1 => Seal {
+            generation,
+            stored: stored_crc32,
+            at: start + 0x18..start + 0x1c,
+            covers: body.clone(),
+            file: start..body.end,
+        },
+        Generation::V0 => {
+            let mut trailer = [0u8; 2];
+            read_at(r, body.end, &mut trailer)?;
+            Seal {
+                generation,
+                stored: u16::from_le_bytes(trailer).into(),
+                at: body.end..body.end + 2,
+                covers: start..body.end,
+                file: start..body.end + 2,
+            }
+        }
+    };
+    Ok((header, body, seal))
+}
+
+/// Where a file keeps its checksum, the bytes it covers, and the value it stores, as
+/// positions in the stream it was read from. Enough to restate the checksum after an
+/// in-place edit without reading the bytes the edit leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Seal {
+    generation: Generation,
+    /// The type-1 crc32, or the type-0 crc16 widened.
+    stored: u32,
+    /// The checksum's own bytes.
+    at: Range<u64>,
+    covers: Range<u64>,
+    /// The whole file, header and trailer included.
+    file: Range<u64>,
+}
+
+impl Seal {
+    /// The patch that writes each edit, and the checksum they leave the file with.
+    ///
+    /// Edits must lie inside what the checksum covers, keep their length, and not
+    /// overlap. The checksum is derived from the stored one, not from the bytes, so it is
+    /// right exactly when the stored one was; [`Patch::copy`] checks that.
+    pub(crate) fn patch(&self, mut edits: Vec<Edit<'_>>) -> Result<Patch, Error> {
+        edits.sort_by_key(|edit| edit.at);
+        let mut changes = Vec::with_capacity(edits.len());
+        let mut end = self.covers.start;
+        for edit in &edits {
+            let past = u64::try_from(edit.old.len())
+                .ok()
+                .and_then(|len| edit.at.checked_add(len));
+            match past {
+                Some(past) if edit.at >= end && past <= self.covers.end => end = past,
+                _ => return Err(outside(edit.at, &self.covers)),
+            }
+            changes.push(Change {
+                at: edit.at - self.covers.start,
+                old: edit.old,
+                new: &edit.new,
+            });
+        }
+        let len = self.covers.end - self.covers.start;
+        let (stored, bytes) = match self.generation {
+            Generation::V1 => {
+                let crc = crc32_patched(self.stored, len, &changes)?;
+                (crc, crc.to_le_bytes().to_vec())
+            }
+            Generation::V0 => {
+                let crc = crc16_patched(self.stored as u16, len, &changes)?;
+                (crc.into(), crc.to_le_bytes().to_vec())
+            }
+        };
+        let mut splices: Vec<Splice> = edits
+            .into_iter()
+            .map(|edit| Splice {
+                at: edit.at,
+                bytes: edit.new,
+            })
+            .collect();
+        splices.push(Splice {
+            at: self.at.start,
+            bytes,
+        });
+        splices.sort_by_key(|splice| splice.at);
+        Ok(Patch {
+            splices,
+            seal: Seal {
+                stored,
+                ..self.clone()
+            },
+        })
+    }
+}
+
+/// Bytes an in-place edit writes at a stream position, over the `old` bytes there.
+#[derive(Debug, Clone)]
+pub(crate) struct Edit<'a> {
+    pub at: u64,
+    pub old: &'a [u8],
+    pub new: Vec<u8>,
+}
+
+/// An edit at `at`, overlapping another or reaching outside the checksummed `covers`.
+fn outside(at: u64, covers: &Range<u64>) -> Error {
+    ParseError::OutOfBounds {
+        value: format!("an edit at byte {at}"),
+        bound: format!("one clear of the edits before it, within the checksummed bytes {covers:?}"),
+    }
+    .into()
+}
+
+/// Same-length replacements for some of a file's bytes, its checksum among them: an
+/// in-place edit, made without reading the bytes it leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Patch {
+    splices: Vec<Splice>,
+    /// The checksum the patched file stores.
+    seal: Seal,
+}
+
+/// Bytes to write at a position of the stream a [`Patch`] was made against, over as
+/// many bytes as they hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Splice {
+    pub at: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Bytes [`Patch::copy`] moves per read.
+const COPY_CHUNK: usize = 1 << 16;
+
+impl Patch {
+    /// Every replacement, in ascending position and none overlapping another. One is
+    /// the checksum.
+    pub fn splices(&self) -> &[Splice] {
+        &self.splices
+    }
+
+    /// Copy the file through from `from`, the stream the patch was made against, to
+    /// `to`, writing each splice in place of the bytes it covers. Memory is one chunk.
+    ///
+    /// The copy's checksum is computed as it streams and must be the one the patch
+    /// wrote. A source that changed since the patch was made, or whose stored checksum
+    /// was already wrong, is refused, with `to` holding the whole copy.
+    pub fn copy(&self, from: &mut (impl Read + Seek), to: &mut impl Write) -> Result<(), Error> {
+        from.seek(SeekFrom::Start(self.seal.file.start))?;
+        let mut hash = Hash::new(self.seal.generation);
+        let mut buf = try_vec(COPY_CHUNK)?;
+        let mut pos = self.seal.file.start;
+        for splice in self.splices.iter().map(Some).chain([None]) {
+            let until = splice.map_or(self.seal.file.end, |splice| splice.at);
+            while pos < until {
+                let n = (until - pos).min(COPY_CHUNK as u64) as usize;
+                from.read_exact(&mut buf[..n])?;
+                self.emit(pos, &buf[..n], to, &mut hash)?;
+                pos += n as u64;
+            }
+            if let Some(splice) = splice {
+                let len = splice.bytes.len() as u64;
+                let skip =
+                    i64::try_from(len).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                from.seek(SeekFrom::Current(skip))?;
+                self.emit(pos, &splice.bytes, to, &mut hash)?;
+                pos += len;
+            }
+        }
+        let (computed, expected) = (hash.value(), self.seal.stored);
+        if computed != expected {
+            return Err(ParseError::AssertFail(format!(
+                "the patched copy checksums to {computed:#010x}, not the {expected:#010x} the \
+                 patch derived: the source is not the file it was made against, or its stored \
+                 checksum was already wrong"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Write `bytes`, which sit at stream position `pos`, hashing the part the checksum
+    /// covers.
+    fn emit(
+        &self,
+        pos: u64,
+        bytes: &[u8],
+        to: &mut impl Write,
+        hash: &mut Hash,
+    ) -> Result<(), Error> {
+        to.write_all(bytes)?;
+        let covers = &self.seal.covers;
+        let end = pos + bytes.len() as u64;
+        let from = covers.start.clamp(pos, end) - pos;
+        let until = covers.end.clamp(pos, end) - pos;
+        hash.update(&bytes[from as usize..until as usize]);
+        Ok(())
+    }
+}
+
+/// The stream position of offset `at` into a body at `body`, or `None` past its end.
+pub(crate) fn body_position(body: &Range<u64>, at: u64) -> Option<u64> {
+    body.start.checked_add(at).filter(|&pos| pos <= body.end)
+}
+
+/// Fill `buf` from position `at` of the stream.
+pub(crate) fn read_at(r: &mut (impl Read + Seek), at: u64, buf: &mut [u8]) -> io::Result<()> {
+    r.seek(SeekFrom::Start(at))?;
+    r.read_exact(buf)
 }
 
 /// The format to name in an error: the expected tag when one was asked for, and the
@@ -384,26 +662,7 @@ fn read_inner<B: Body>(
 
 impl<B: Body> Cbin<B> {
     pub fn write_to(&self, w: &mut (impl Write + Seek)) -> Result<(), Error> {
-        let start = w.stream_position()?;
-        let hash = Hash::primed(&self.header);
-        w.write_all(&self.header.head_bytes())?;
-        if self.header.generation == Generation::V1 {
-            // The crc32 is not known yet; a placeholder holds its word until the
-            // body has streamed past, then one seek patches it.
-            w.write_all(&[0u8; 20])?;
-        }
-
-        let body_start = start + self.header.generation.body_start();
-        let mut writer = BodyWriter {
-            inner: w,
-            pos: 0,
-            hash,
-        };
-        self.body.write(&mut writer)?;
-        let BodyWriter {
-            pos: written, hash, ..
-        } = writer;
-
+        let written = write_with(&self.header, w, |writer| self.body.write(writer))?;
         if let Some(expected) = B::LEN {
             if written != expected {
                 return Err(ParseError::WrongBodyLength {
@@ -414,17 +673,48 @@ impl<B: Body> Cbin<B> {
                 .into());
             }
         }
-
-        match hash {
-            Hash::V1(h) => {
-                w.seek(SeekFrom::Start(start + 0x18))?;
-                w.write_all(&h.value().to_le_bytes())?;
-                w.seek(SeekFrom::Start(body_start + written))?;
-            }
-            Hash::V0(h) => w.write_all(&h.value().to_le_bytes())?,
-        }
         Ok(())
     }
+}
+
+/// Write a container: `header`, the body `body` streams out in one forward pass, and
+/// the checksum over it. Returns the body's length.
+///
+/// The type-1 crc32 sits ahead of the body, so a placeholder holds its word until the
+/// body has streamed past, then one seek back writes it. Nothing but the checksum
+/// accumulator is held.
+pub(crate) fn write_with<W: Write + Seek>(
+    header: &Header,
+    w: &mut W,
+    body: impl FnOnce(&mut BodyWriter<'_, W>) -> Result<(), Error>,
+) -> Result<u64, Error> {
+    let start = w.stream_position()?;
+    let hash = Hash::primed(header);
+    w.write_all(&header.head_bytes())?;
+    if header.generation == Generation::V1 {
+        w.write_all(&[0u8; 20])?;
+    }
+
+    let body_start = start + header.generation.body_start();
+    let mut writer = BodyWriter {
+        inner: w,
+        pos: 0,
+        hash,
+    };
+    body(&mut writer)?;
+    let BodyWriter {
+        pos: written, hash, ..
+    } = writer;
+
+    match hash {
+        Hash::V1(h) => {
+            w.seek(SeekFrom::Start(start + 0x18))?;
+            w.write_all(&h.value().to_le_bytes())?;
+            w.seek(SeekFrom::Start(body_start + written))?;
+        }
+        Hash::V0(h, _) => w.write_all(&h.value().to_le_bytes())?,
+    }
+    Ok(written)
 }
 
 /// A body kept verbatim: bytes in, bytes out, checksum verified, nothing decoded.
@@ -464,6 +754,13 @@ pub struct Info {
     pub checksum_ok: bool,
     /// The checksum the file stores: the type-1 crc32, or the type-0 crc16 widened.
     pub stored_checksum: u32,
+    /// The crc32 of the body, the type-0 trailer excluded: the checksum an instrument
+    /// reports for the slot holding this body, so a file and a slot compare without
+    /// hashing either body again.
+    ///
+    /// ⚠️ Computed from the bytes, never read. A type-1 file stores the same number
+    /// when its checksum is right; a type-0 file stores only a crc16 over the whole file.
+    pub body_crc32: u32,
 }
 
 /// One streaming pass over any CBIN file, with no knowledge of the body. It runs in
@@ -471,13 +768,224 @@ pub struct Info {
 pub fn inspect(r: &mut (impl Read + Seek)) -> Result<Info, Error> {
     let (header, stored_crc32, reader) = open(r, None)?;
     let body_len = reader.len();
-    let (computed, stored) = reader.finish(stored_crc32)?;
+    let Finished {
+        computed,
+        stored,
+        body_crc32,
+    } = reader.finish(stored_crc32)?;
     Ok(Info {
         header,
         body_len,
         checksum_ok: computed == stored,
         stored_checksum: stored,
+        body_crc32,
     })
+}
+
+impl Header {
+    /// The header at the start of `prefix`, validated as a read validates it. A type-0
+    /// header takes 0x18 bytes and a type-1 header 0x2c; a shorter prefix is refused.
+    pub fn from_prefix(prefix: &[u8]) -> Result<Header, Error> {
+        let mut prefix = prefix;
+        Ok(read_header(&mut prefix)?.0)
+    }
+}
+
+/// [`inspect`] over bytes the caller supplies: a whole file, in order, in chunks of any
+/// size. Nothing is read from anywhere, so the source may be asynchronous.
+///
+/// Memory is the header and the trailer.
+pub struct Verifier {
+    state: Verifying,
+}
+
+enum Verifying {
+    /// The bytes seen so far, before the header is whole.
+    Prefix(Vec<u8>),
+    Body {
+        header: Header,
+        stored_crc32: u32,
+        hash: Hash,
+        body_len: u64,
+        /// The last bytes seen, not yet hashed: they may be the type-0 trailer.
+        held: Vec<u8>,
+    },
+}
+
+impl Default for Verifier {
+    fn default() -> Verifier {
+        Verifier::new()
+    }
+}
+
+impl Verifier {
+    pub fn new() -> Verifier {
+        Verifier {
+            state: Verifying::Prefix(Vec::new()),
+        }
+    }
+
+    /// The next bytes of the file. A header that does not validate is refused as soon
+    /// as it is whole.
+    pub fn update(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let Verifying::Prefix(prefix) = &mut self.state else {
+            self.body(bytes);
+            return Ok(());
+        };
+        let taken = bytes.len().min(HEADER_MAX - prefix.len());
+        prefix.extend_from_slice(&bytes[..taken]);
+        let Some((header, stored_crc32, used)) = whole_header(prefix)? else {
+            return Ok(());
+        };
+        let prefix = std::mem::take(prefix);
+        self.state = Verifying::Body {
+            hash: Hash::primed(&header),
+            header,
+            stored_crc32,
+            body_len: 0,
+            held: Vec::new(),
+        };
+        self.body(&prefix[used..]);
+        self.body(&bytes[taken..]);
+        Ok(())
+    }
+
+    /// Hash every byte of `bytes` but the last ones that could be a trailer, holding
+    /// those back until more arrive.
+    fn body(&mut self, bytes: &[u8]) {
+        let Verifying::Body {
+            header,
+            hash,
+            body_len,
+            held,
+            ..
+        } = &mut self.state
+        else {
+            unreachable!("called once the header is whole")
+        };
+        let trailer = header.generation.trailer_len() as usize;
+        let (hashed, kept) = match bytes.len().checked_sub(trailer) {
+            Some(past) => {
+                hash.update(held);
+                *body_len += held.len() as u64;
+                held.clear();
+                bytes.split_at(past)
+            }
+            None => {
+                let past = (held.len() + bytes.len()).saturating_sub(trailer);
+                hash.update(&held[..past]);
+                *body_len += past as u64;
+                held.drain(..past);
+                (&[][..], bytes)
+            }
+        };
+        hash.update(hashed);
+        *body_len += hashed.len() as u64;
+        held.extend_from_slice(kept);
+    }
+
+    /// The verdict, once the last byte has been supplied: what [`inspect`] reports for
+    /// the same file, refusing what it refuses.
+    pub fn finish(self) -> Result<Info, Error> {
+        let Verifying::Body {
+            header,
+            stored_crc32,
+            hash,
+            body_len,
+            held,
+        } = self.state
+        else {
+            return Err(
+                ParseError::AssertFail("the file ends inside its container header".into()).into(),
+            );
+        };
+        let stored = match header.generation {
+            Generation::V1 => stored_crc32,
+            Generation::V0 => match *held.as_slice() {
+                [a, b] => u16::from_le_bytes([a, b]).into(),
+                _ => {
+                    return Err(ParseError::AssertFail(format!(
+                        "{}: the file ends before its 2-byte checksum trailer",
+                        tag_str(&header.tag)
+                    ))
+                    .into())
+                }
+            },
+        };
+        Ok(Info {
+            checksum_ok: hash.value() == stored,
+            header,
+            body_len,
+            stored_checksum: stored,
+            body_crc32: hash.body_crc32(),
+        })
+    }
+}
+
+impl Verifier {
+    /// The checksum the bytes supplied call for, and where it goes: the splice that seals
+    /// them as [`Cbin::write_to`] seals a container it writes. What the bytes hold where the
+    /// checksum goes is not read, so they may be a container written with any checksum,
+    /// such as one whose body was written before its checksum could be known.
+    pub fn seal(self) -> Result<Splice, Error> {
+        let Verifying::Body {
+            header,
+            hash,
+            body_len,
+            held,
+            ..
+        } = self.state
+        else {
+            return Err(
+                ParseError::AssertFail("the file ends inside its container header".into()).into(),
+            );
+        };
+        let trailer = header.generation.trailer_len();
+        let len = header
+            .generation
+            .body_start()
+            .checked_add(body_len)
+            .and_then(|len| len.checked_add(trailer))
+            .and_then(|len| usize::try_from(len).ok());
+        let at = len.and_then(|len| header.generation.checksum_range(len));
+        let (Some(at), true) = (at, held.len() as u64 == trailer) else {
+            return Err(ParseError::AssertFail(format!(
+                "{}: the file ends before its checksum",
+                tag_str(&header.tag)
+            ))
+            .into());
+        };
+        let bytes = match hash {
+            Hash::V0(h, _) => h.value().to_le_bytes().to_vec(),
+            Hash::V1(h) => h.value().to_le_bytes().to_vec(),
+        };
+        Ok(Splice {
+            at: at.start as u64,
+            bytes,
+        })
+    }
+}
+
+/// The longest header: a type-1 header with its checksum and pad.
+const HEADER_MAX: usize = 0x2c;
+
+/// The header, its stored crc32 and its length, once `prefix` holds all of it.
+fn whole_header(prefix: &[u8]) -> Result<Option<(Header, u32, usize)>, Error> {
+    if prefix.len() < HEAD_LEN {
+        return Ok(None);
+    }
+    // `read_header` refuses a type word that names neither generation.
+    let generation = match le_u32(prefix, 4) {
+        1 => Generation::V1,
+        _ => Generation::V0,
+    };
+    let used = generation.body_start() as usize;
+    if prefix.len() < used {
+        return Ok(None);
+    }
+    let mut head = &prefix[..used];
+    let (header, stored_crc32) = read_header(&mut head)?;
+    Ok(Some((header, stored_crc32, used)))
 }
 
 /// A read view scoped to the body: position 0 is the first body byte, [`len`] is
@@ -513,24 +1021,30 @@ impl<R: Read + Seek> BodyReader<'_, R> {
         self.len - self.pos
     }
 
-    /// Drain to the end and return the computed and the stored checksum. `stored_crc32`
-    /// is the header's word for a type-1 file; a type-0 file's crc16 is read from the
-    /// trailer.
-    fn finish(mut self, stored_crc32: u32) -> io::Result<(u32, u32)> {
+    /// Drain to the end and return the checksums. `stored_crc32` is the header's word for
+    /// a type-1 file; a type-0 file's crc16 is read from the trailer.
+    fn finish(mut self, stored_crc32: u32) -> io::Result<Finished> {
         self.seek(SeekFrom::Start(self.len))?;
-        match self.hash {
-            Hash::V1(h) => Ok((h.value(), stored_crc32)),
-            Hash::V0(h) => {
+        let stored = match self.hash {
+            Hash::V1(_) => stored_crc32,
+            Hash::V0(..) => {
                 let mut trailer = [0u8; 2];
                 self.inner.read_exact(&mut trailer)?;
-                Ok((h.value().into(), u16::from_le_bytes(trailer).into()))
+                u16::from_le_bytes(trailer).into()
             }
-        }
+        };
+        Ok(Finished {
+            computed: self.hash.value(),
+            stored,
+            body_crc32: self.hash.body_crc32(),
+        })
     }
 
     /// Drain to the end, then check the checksum against the stored one.
     fn verify(self, generation: Generation, stored_crc32: u32, format: &str) -> Result<(), Error> {
-        let (computed, stored) = self.finish(stored_crc32)?;
+        let Finished {
+            computed, stored, ..
+        } = self.finish(stored_crc32)?;
         if computed == stored {
             return Ok(());
         }
@@ -546,6 +1060,14 @@ impl<R: Read + Seek> BodyReader<'_, R> {
         })
         .into())
     }
+}
+
+/// What a drained [`BodyReader`] found: the checksum the bytes call for, the one the
+/// file stores, a crc16 widened in a type-0 file, and the body's crc32.
+struct Finished {
+    computed: u32,
+    stored: u32,
+    body_crc32: u32,
 }
 
 impl<R: Read + Seek> Read for BodyReader<'_, R> {
@@ -843,6 +1365,7 @@ mod tests {
             assert_eq!(info.body_len, 3);
             assert!(info.checksum_ok);
             assert_eq!(info.stored_checksum, stored);
+            assert_eq!(info.body_crc32, crc32(&[1, 2, 3]), "{generation:?}");
             let at = generation.checksum_range(bytes.len()).unwrap();
             assert_eq!(bytes[at.clone()], stored.to_le_bytes()[..at.len()]);
 
@@ -908,6 +1431,46 @@ mod tests {
         assert!(read::<Five>(&mut Cursor::new(truncated), "test").is_err());
     }
 
+    /// A stream cut to `keep` bytes as soon as its end is looked for, as a file
+    /// truncated between the header read and the length check is.
+    struct Truncated {
+        bytes: Cursor<Vec<u8>>,
+        keep: usize,
+    }
+
+    impl Read for Truncated {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.bytes.read(buf)
+        }
+    }
+
+    impl Seek for Truncated {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            if let SeekFrom::End(_) = pos {
+                self.bytes.get_mut().truncate(self.keep);
+            }
+            self.bytes.seek(pos)
+        }
+    }
+
+    #[test]
+    fn a_file_truncated_before_its_container_starts_is_refused() {
+        let at = 8;
+        let mut bytes = vec![0; at];
+        bytes.extend(v1_file(&[1, 2, 3, 4, 5]));
+        let mut r = Truncated {
+            bytes: Cursor::new(bytes),
+            keep: at / 2,
+        };
+        r.bytes.set_position(at as u64);
+        let err = locate_body(&mut r, "test").unwrap_err();
+        assert!(
+            matches!(&err, Error::Parse(ParseError::AssertFail(why))
+                if why.contains("ends at byte 4, before the container's start at byte 8")),
+            "refused for the wrong reason: {err}",
+        );
+    }
+
     #[test]
     fn raw_bodies_round_trip_any_tag() {
         let bytes = v0_file(&[1, 2, 3, 4, 5, 6, 7]);
@@ -917,5 +1480,245 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         file.write_to(&mut out).unwrap();
         assert_eq!(out.into_inner(), bytes);
+    }
+
+    /// The body edits as `(body offset, bytes)`, applied to `body`.
+    fn edited_body(body: &[u8], edits: &[(usize, &[u8])]) -> Vec<u8> {
+        let mut out = body.to_vec();
+        for (at, bytes) in edits {
+            out[*at..*at + bytes.len()].copy_from_slice(bytes);
+        }
+        out
+    }
+
+    /// The patch making `edits` to the file at `lead` bytes into `stream`.
+    fn patch(stream: &[u8], lead: usize, edits: &[(usize, &[u8])]) -> Result<Patch, Error> {
+        let mut r = Cursor::new(stream);
+        r.set_position(lead as u64);
+        let (_, body, seal) = locate_sealed(&mut r, "test")?;
+        let edits = edits
+            .iter()
+            .map(|(at, bytes)| {
+                let pos = body.start + *at as u64;
+                Edit {
+                    at: pos,
+                    old: &stream[pos as usize..pos as usize + bytes.len()],
+                    new: bytes.to_vec(),
+                }
+            })
+            .collect();
+        seal.patch(edits)
+    }
+
+    fn copied(patch: &Patch, stream: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        patch.copy(&mut Cursor::new(stream), &mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn a_patched_copy_is_the_file_written_whole_with_the_edits() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let edits: [(usize, &[u8]); 3] = [(150_000, b"tail"), (3, b"head"), (70_000, &[0; 9])];
+        let edited = edited_body(&body, &edits);
+        for (file, whole) in [
+            (v1_file(&body), v1_file(&edited)),
+            (v0_file(&body), v0_file(&edited)),
+        ] {
+            let mut stream = b"lead".to_vec();
+            stream.extend_from_slice(&file);
+            let patch = patch(&stream, 4, &edits).unwrap();
+            assert_eq!(copied(&patch, &stream).unwrap(), whole);
+            assert_eq!(
+                patch.splices().len(),
+                edits.len() + 1,
+                "one splice is the checksum"
+            );
+        }
+    }
+
+    #[test]
+    fn edits_that_overlap_or_leave_the_checksummed_bytes_are_refused() {
+        let body = [0u8; 64];
+        for file in [v1_file(&body), v0_file(&body)] {
+            let overlapping: [(usize, &[u8]); 2] = [(10, &[1; 4]), (12, &[2; 4])];
+            assert!(patch(&file, 0, &overlapping).is_err());
+            let (_, body, seal) = locate_sealed(&mut Cursor::new(&file), "test").unwrap();
+            let past = Edit {
+                at: body.end - 2,
+                old: &[0; 3],
+                new: vec![1; 3],
+            };
+            assert!(seal.patch(vec![past]).is_err());
+        }
+        let file = v1_file(&body);
+        let (_, _, seal) = locate_sealed(&mut Cursor::new(&file), "test").unwrap();
+        let header = Edit {
+            at: 0x08,
+            old: &file[0x08..0x0c],
+            new: b"tset".to_vec(),
+        };
+        assert!(seal.patch(vec![header]).is_err());
+    }
+
+    #[test]
+    fn a_copy_of_a_source_changed_outside_the_splices_is_refused() {
+        let body = [0x5au8; 300];
+        for file in [v1_file(&body), v0_file(&body)] {
+            let patch = patch(&file, 0, &[(100, b"new")]).unwrap();
+            let mut changed = file.clone();
+            changed[0x2c + 200] ^= 1;
+            let error = copied(&patch, &changed).unwrap_err().to_string();
+            assert!(
+                error.contains("not the file it was made against"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_copy_of_a_source_whose_stored_checksum_was_wrong_is_refused() {
+        let mut file = v1_file(&[1u8; 40]);
+        file[0x18] ^= 0xff;
+        let patch = patch(&file, 0, &[(0, b"x")]).unwrap();
+        assert!(copied(&patch, &file).is_err());
+    }
+
+    /// What a check concluded: the facts it reports, or that it refused.
+    fn verdict(info: Result<Info, Error>) -> Option<(Header, u64, bool, u32, u32)> {
+        info.ok().map(|info| {
+            (
+                info.header,
+                info.body_len,
+                info.checksum_ok,
+                info.stored_checksum,
+                info.body_crc32,
+            )
+        })
+    }
+
+    /// The body's crc32 is the one a type-1 header stores, whatever either generation
+    /// stores and however the file is checked. The expected values are the ISO-HDLC
+    /// check value and the crc32 of nothing.
+    #[test]
+    fn the_body_crc32_is_computed_from_the_body_of_either_generation() {
+        for (body, expected) in [(&b"123456789"[..], 0xcbf4_3926), (&[][..], 0)] {
+            for (generation, bytes) in [
+                (Generation::V1, v1_file(body)),
+                (Generation::V0, v0_file(body)),
+            ] {
+                let info = inspect(&mut Cursor::new(&bytes)).unwrap();
+                assert_eq!(info.body_crc32, expected, "{generation:?}, inspected");
+                let info = verified(&bytes, 5).unwrap();
+                assert_eq!(info.body_crc32, expected, "{generation:?}, streamed");
+            }
+        }
+        let mut corrupt = v1_file(b"123456789");
+        corrupt[0x18] ^= 0xff;
+        let info = inspect(&mut Cursor::new(&corrupt)).unwrap();
+        assert!(!info.checksum_ok);
+        assert_eq!(info.body_crc32, 0xcbf4_3926, "computed, not read");
+    }
+
+    fn verified(bytes: &[u8], chunk: usize) -> Result<Info, Error> {
+        let mut verifier = Verifier::new();
+        for piece in bytes.chunks(chunk) {
+            verifier.update(piece)?;
+        }
+        verifier.finish()
+    }
+
+    /// Every cut and every single-bit flip of each file, against `inspect`.
+    #[test]
+    fn a_streamed_check_agrees_with_inspect_however_the_file_is_cut() {
+        let mut files = Vec::new();
+        for len in [0, 1, 2, 5, 300] {
+            let body: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            files.push(v1_file(&body));
+            files.push(v0_file(&body));
+        }
+        let mut variants = Vec::new();
+        for file in &files {
+            variants.extend((0..=file.len()).map(|len| file[..len].to_vec()));
+            for at in 0..file.len() {
+                let mut flipped = file.clone();
+                flipped[at] ^= 1 << (at % 8);
+                variants.push(flipped);
+            }
+        }
+        let (mut accepted, mut refused, mut failed) = (0, 0, 0);
+        for bytes in &variants {
+            let whole = verdict(inspect(&mut Cursor::new(bytes)));
+            match &whole {
+                None => refused += 1,
+                Some((_, _, true, ..)) => accepted += 1,
+                Some(_) => failed += 1,
+            }
+            for chunk in [1, 2, 3, 7, 0x2c, 64, bytes.len().max(1)] {
+                assert_eq!(
+                    verdict(verified(bytes, chunk)),
+                    whole,
+                    "{} bytes in chunks of {chunk}",
+                    bytes.len()
+                );
+            }
+        }
+        assert!(accepted > 0 && refused > 0 && failed > 0);
+    }
+
+    /// The splice a seal answers is the checksum a write stores, of either generation,
+    /// whatever the supplied file held in its place and however it was cut.
+    #[test]
+    fn a_seal_is_the_checksum_a_write_stores() {
+        for len in [0, 1, 300] {
+            let body: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            for file in [v1_file(&body), v0_file(&body)] {
+                let generation = Header::from_prefix(&file).unwrap().generation;
+                let at = generation.checksum_range(file.len()).unwrap();
+                let mut blank = file.clone();
+                blank[at.clone()].fill(0);
+                for chunk in [1, 3, 0x2c, file.len()] {
+                    let mut verifier = Verifier::new();
+                    for piece in blank.chunks(chunk) {
+                        verifier.update(piece).unwrap();
+                    }
+                    let seal = verifier.seal().unwrap();
+                    assert_eq!(seal.at, at.start as u64, "{generation:?}, {len}-byte body");
+                    assert_eq!(
+                        seal.bytes,
+                        file[at.clone()],
+                        "{generation:?}, {len}-byte body"
+                    );
+                }
+            }
+        }
+        let v0 = v0_file(&[1, 2, 3]);
+        let mut cut = Verifier::new();
+        cut.update(&v0[..0x18 + 1]).unwrap();
+        assert!(
+            cut.seal().is_err(),
+            "a type-0 file too short for its trailer"
+        );
+        let mut header = Verifier::new();
+        header.update(&v0[..4]).unwrap();
+        assert!(header.seal().is_err(), "a file cut inside its header");
+    }
+
+    #[test]
+    fn a_header_reads_from_a_prefix_as_a_read_does() {
+        let v1 = v1_file(&[1, 2, 3]);
+        let v0 = v0_file(&[1, 2, 3]);
+        assert_eq!(
+            Header::from_prefix(&v1[..0x2c]).unwrap().generation,
+            Generation::V1
+        );
+        assert_eq!(
+            Header::from_prefix(&v0[..0x18]).unwrap().generation,
+            Generation::V0
+        );
+        assert!(Header::from_prefix(&v1[..0x2b]).is_err());
+        let mut padded = v1.clone();
+        padded[0x20] = 1;
+        assert!(Header::from_prefix(&padded).is_err());
     }
 }

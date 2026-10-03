@@ -63,6 +63,9 @@ pub enum Layout {
 pub const V5_FROM_VERSION: u32 = 500;
 
 impl Layout {
+    /// Every generation, oldest first.
+    pub const ALL: [Layout; 3] = [Layout::V2, Layout::V3, Layout::V4];
+
     /// The layout implied by a `format × 100 + revision` content version, or `None`
     /// for a version at or above [`V5_FROM_VERSION`].
     pub fn from_version(version: u32) -> Option<Layout> {
@@ -71,6 +74,15 @@ impl Layout {
             v if v >= super::V4_FROM_VERSION => Some(Layout::V4),
             v if v >= super::V3_FROM_VERSION => Some(Layout::V3),
             _ => Some(Layout::V2),
+        }
+    }
+
+    /// The generation's name in a report: `v2`, `v3` or `v4`.
+    pub const fn generation(self) -> &'static str {
+        match self {
+            Layout::V2 => "v2",
+            Layout::V3 => "v3",
+            Layout::V4 => "v4",
         }
     }
 
@@ -709,6 +721,22 @@ mod tests {
     use super::*;
 
     const BOTH: [Layout; 2] = [Layout::V2, Layout::V3];
+
+    /// Every content version below the generations this codec does not describe has a
+    /// layout among the generations, and no two generations share a name or extension.
+    #[test]
+    fn every_generation_is_listed_once_under_its_own_names() {
+        for version in [0, 299, 300, 399, 400, V5_FROM_VERSION - 1] {
+            let layout = Layout::from_version(version).unwrap();
+            assert!(Layout::ALL.contains(&layout), "{version}");
+        }
+        for (at, layout) in Layout::ALL.iter().enumerate() {
+            for other in &Layout::ALL[at + 1..] {
+                assert_ne!(layout.generation(), other.generation());
+                assert_ne!(layout.extension(), other.extension());
+            }
+        }
+    }
 
     /// The terminator: flag 1, width 1, count = the layout's cell size.
     fn terminator(layout: Layout) -> Vec<u8> {

@@ -466,6 +466,7 @@ pub fn build(
                 id,
             )?,
             audio: Cow::Owned(coded.audio),
+            from: None,
         });
     }
     Ok(library)
@@ -650,6 +651,7 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
                 stroke.id(),
             )?,
             audio: Cow::Owned(coded.audio),
+            from: None,
         });
     }
     Ok(Rebuilt {

@@ -11,6 +11,10 @@ use std::io::{Read, Write};
 
 pub const MAGIC: &[u8; 4] = b"MThd";
 
+/// The file's extension, which [`Identity::format`](crate::Identity::format) gives in
+/// place of a CBIN tag.
+pub const FORMAT: &str = "mid";
+
 /// One `.mid` file, verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Midi {

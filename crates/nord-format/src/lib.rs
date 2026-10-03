@@ -15,7 +15,11 @@
 //!
 //! [`from_path`] and [`from_stream`] sniff any supported file and decode it into an
 //! [`Entity`]. [`to_bytes`] and [`Entity::write_to`] serialize it again.
-//! [`cbin_formats`] lists the CBIN format tags the reader dispatches.
+//! [`cbin_formats`] lists the CBIN format tags the reader dispatches, and
+//! [`formats::by_extension`] says which of them a file's name says it holds.
+//! [`formats::npno::Index`] and [`formats::nsmp::Index`] locate each stroke of a large
+//! piano library or sample instrument without reading its audio, so one stroke can be
+//! read by range.
 //!
 //! Every supported file reads and writes however much of its body decodes. Decoded
 //! values are views over the stored body, bits that no field claims survive untouched,
@@ -129,8 +133,8 @@ macro_rules! roles {
         )*
 
         /// Every CBIN tag a role enum holds, with the reader it dispatches to.
-        const ROLE_READERS: &[(&str, ReadCbin)] = &[
-            $($(($($module)::+::FORMAT, |mut r| {
+        const ROLE_READERS: &[CbinReader] = &[
+            $($(($($module)::+::FORMAT, EntityKind::$role, |mut r| {
                 Ok(Entity::$role($role::$variant($($module)::+::read_from(&mut r)?)))
             }),)*)*
         ];
@@ -421,12 +425,13 @@ impl Sample {
     }
 
     /// The generation to name in a report, taken from the content version, not the
-    /// file name.
+    /// file name: one of [`nsmp::codec::Layout::generation`]'s names.
     pub fn generation(&self) -> &'static str {
+        use nsmp::codec::Layout;
         match self {
-            Sample::V2(_) => "v2",
-            Sample::V3(s) if s.header.version >= nsmp::V4_FROM_VERSION => "v4",
-            Sample::V3(_) => "v3",
+            Sample::V2(_) => Layout::V2.generation(),
+            Sample::V3(s) if s.header.version >= nsmp::V4_FROM_VERSION => Layout::V4.generation(),
+            Sample::V3(_) => Layout::V3.generation(),
         }
     }
 
@@ -531,6 +536,29 @@ pub enum Entity {
     Bundle(Bundle),
 }
 
+/// Which [`Entity`] variant a file decodes to, without its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntityKind {
+    Cne3,
+    Live,
+    Midi,
+    OrganPreset,
+    Piano,
+    PianoLibrary,
+    PianoPreset,
+    PipeLibrary,
+    Performance,
+    Program,
+    Sample,
+    SampleProject,
+    Settings,
+    Song,
+    Synth,
+    Sysex,
+    #[cfg(feature = "bundle")]
+    Bundle,
+}
+
 /// Sniff `reader` and decode one supported file into an [`Entity`]. The inverse is
 /// [`to_bytes`]. The leading bytes identify the container, and a CBIN body is then
 /// dispatched on the format tag at offset 8.
@@ -556,12 +584,15 @@ pub fn from_stream(reader: &mut (impl Read + Seek + Sized)) -> Result<Entity, Er
 /// Reads one CBIN file whose tag the table has already matched.
 type ReadCbin = fn(&mut dyn ReadSeek) -> Result<Entity, Error>;
 
+/// One CBIN tag [`from_stream`] reads, what it decodes to, and its reader.
+type CbinReader = (&'static str, EntityKind, ReadCbin);
+
 trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 
 /// Every CBIN tag outside the role enums, with the reader it dispatches to.
-const LIBRARY_READERS: &[(&str, ReadCbin)] = &[
-    (nsmp::FORMAT, |mut r| {
+const LIBRARY_READERS: &[CbinReader] = &[
+    (nsmp::FORMAT, EntityKind::Sample, |mut r| {
         let file: Cbin<nsmp::AnyBody> = cbin::read(&mut r, nsmp::FORMAT)?;
         let header = file.header;
         Ok(Entity::Sample(match file.body {
@@ -569,33 +600,39 @@ const LIBRARY_READERS: &[(&str, ReadCbin)] = &[
             nsmp::AnyBody::V3(body) => Sample::V3(Cbin { header, body }),
         }))
     }),
-    (npno::FORMAT, |mut r| {
+    (npno::FORMAT, EntityKind::Piano, |mut r| {
         Ok(Entity::Piano(npno::Piano::read_from(&mut r)?))
     }),
-    (npip::pipe_library::FORMAT, |mut r| {
-        Ok(Entity::PipeLibrary(npip::pipe_library::read_from(&mut r)?))
-    }),
-    (nsclassic::piano_library::FORMAT, |mut r| {
-        Ok(Entity::PianoLibrary(nsclassic::piano_library::read_from(
-            &mut r,
-        )?))
-    }),
+    (
+        npip::pipe_library::FORMAT,
+        EntityKind::PipeLibrary,
+        |mut r| Ok(Entity::PipeLibrary(npip::pipe_library::read_from(&mut r)?)),
+    ),
+    (
+        nsclassic::piano_library::FORMAT,
+        EntityKind::PianoLibrary,
+        |mut r| {
+            Ok(Entity::PianoLibrary(nsclassic::piano_library::read_from(
+                &mut r,
+            )?))
+        },
+    ),
 ];
 
 /// Every CBIN tag [`from_stream`] reads, with the reader it dispatches to.
-fn cbin_readers() -> impl Iterator<Item = &'static (&'static str, ReadCbin)> {
+pub(crate) fn cbin_readers() -> impl Iterator<Item = &'static CbinReader> {
     LIBRARY_READERS.iter().chain(ROLE_READERS)
 }
 
 /// Every CBIN format tag [`from_stream`] reads, NULs preserved.
 pub fn cbin_formats() -> impl Iterator<Item = &'static str> {
-    cbin_readers().map(|(format, _)| *format)
+    cbin_readers().map(|(format, ..)| *format)
 }
 
 /// One CBIN file, dispatched by the tag at offset 8.
 fn read_cbin(reader: &mut (impl Read + Seek), tag: &str) -> Result<Entity, Error> {
-    let (_, read) = cbin_readers()
-        .find(|(format, _)| *format == tag)
+    let (_, _, read) = cbin_readers()
+        .find(|(format, ..)| *format == tag)
         .ok_or_else(|| ParseError::UnknownFormat(tag.to_string()))?;
     read(reader)
 }
@@ -663,6 +700,40 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
+
+    #[test]
+    fn an_electro_5_program_plays_its_piano_then_its_sample_and_not_a_zero_id() {
+        use crate::bits::Packed;
+        use crate::components::{LibraryRef, PianoRef, SampleRef};
+        use crate::fields::Library;
+
+        let plays = |piano: u32, sample: u32| {
+            let made = || {
+                let mut body = ne5::program::new(Default::default());
+                body.piano_panel.id = PianoRef::from_bits(piano.into()).unwrap();
+                body.sample_panel.id = SampleRef::from_bits(sample.into()).unwrap();
+                body
+            };
+            let program = Entity::Program(Program::Electro5(made())).plays();
+            let live = Entity::Live(Live::Electro5(made())).plays();
+            assert_eq!(live, program, "a live slot is a program");
+            program
+        };
+        let piano = LibraryRef {
+            library: Library::Piano,
+            id: 0xdead_beef,
+        };
+        let sample = LibraryRef {
+            library: Library::Sample,
+            id: 0x5a,
+        };
+        assert_eq!(plays(0, 0), Some(vec![]));
+        assert_eq!(plays(0, 0x5a), Some(vec![sample]));
+        assert_eq!(plays(0xdead_beef, 0x5a), Some(vec![piano, sample]));
+
+        let settings = Entity::Settings(Settings::Electro5(ne5::settings::new()));
+        assert_eq!(settings.plays(), None);
+    }
 
     /// A registry read and written through the entity lands on the same field the
     /// body's own accessors reach, so neither consumer needs to name the body type.
@@ -975,6 +1046,51 @@ impl Entity {
         with_registry!(self, &mut)
     }
 
+    /// The piano and the sample a program plays, piano first, by the ids the instrument
+    /// knows them by: the ids its USB `DEPENDENCIES` reply gives for the program's slot.
+    /// A reference holding zero names nothing, and is left out.
+    ///
+    /// `None` for a body whose dependencies this crate does not read: every body but the
+    /// Electro 5 program and live slot.
+    pub fn plays(&self) -> Option<Vec<components::LibraryRef>> {
+        let (piano, sample) = match self {
+            Entity::Program(Program::Electro5(body)) | Entity::Live(Live::Electro5(body)) => {
+                (body.piano_panel.id.into(), body.sample_panel.id.into())
+            }
+            _ => return None,
+        };
+        Some(
+            [piano, sample]
+                .into_iter()
+                .filter(|reference: &components::LibraryRef| reference.id != 0)
+                .collect(),
+        )
+    }
+
+    /// Which variant this is.
+    pub fn kind(&self) -> EntityKind {
+        match self {
+            Entity::Cne3(_) => EntityKind::Cne3,
+            Entity::Live(_) => EntityKind::Live,
+            Entity::Midi(_) => EntityKind::Midi,
+            Entity::OrganPreset(_) => EntityKind::OrganPreset,
+            Entity::Piano(_) => EntityKind::Piano,
+            Entity::PianoLibrary(_) => EntityKind::PianoLibrary,
+            Entity::PianoPreset(_) => EntityKind::PianoPreset,
+            Entity::PipeLibrary(_) => EntityKind::PipeLibrary,
+            Entity::Performance(_) => EntityKind::Performance,
+            Entity::Program(_) => EntityKind::Program,
+            Entity::Sample(_) => EntityKind::Sample,
+            Entity::SampleProject(_) => EntityKind::SampleProject,
+            Entity::Settings(_) => EntityKind::Settings,
+            Entity::Song(_) => EntityKind::Song,
+            Entity::Synth(_) => EntityKind::Synth,
+            Entity::Sysex(_) => EntityKind::Sysex,
+            #[cfg(feature = "bundle")]
+            Entity::Bundle(_) => EntityKind::Bundle,
+        }
+    }
+
     /// The entity's [`Identity`]: its human label and the tag its file carries.
     pub fn identity(&self) -> Identity {
         let id = |kind, format| Identity { kind, format };
@@ -996,9 +1112,9 @@ impl Entity {
             Entity::Sample(Sample::V2(_)) => id("sample instrument", nsmp::FORMAT),
             Entity::Sample(Sample::V3(_)) => id("sample instrument (nsmp3/nsmp4)", nsmp::FORMAT),
             Entity::SampleProject(_) => id("Sample Editor project", nsmpproj::FORMAT),
-            Entity::Sysex(_) => id("SysEx dump", "syx"),
-            Entity::Midi(_) => id("MIDI file", "mid"),
-            Entity::Cne3(_) => id("Electro 2 library", "cn3"),
+            Entity::Sysex(_) => id("SysEx dump", sysex::FORMAT),
+            Entity::Midi(_) => id("MIDI file", midi::FORMAT),
+            Entity::Cne3(_) => id("Electro 2 library", cn3::FORMAT),
             #[cfg(feature = "bundle")]
             Entity::Bundle(_) => id("bundle", "zip"),
         }
