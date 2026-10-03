@@ -552,11 +552,17 @@ impl Browser {
     ) {
         if action == Bulk::Tag {
             let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
-            ui.add_enabled_ui(!locals.is_empty(), |ui| {
-                ui.menu_button(action.label(), |ui| self.tag_items(ui, &locals, acts))
-                    .response
-                    .on_disabled_hover_text(action.nothing());
-            });
+            // ⚠️ Drawn in `ui` itself, not a scope: a scope is a region of its own, and a
+            // button in it cannot move to the next row of a wrapping layout.
+            match locals.is_empty() {
+                true => {
+                    ui.add_enabled(false, egui::Button::new(action.label()))
+                        .on_disabled_hover_text(action.nothing());
+                }
+                false => {
+                    ui.menu_button(action.label(), |ui| self.tag_items(ui, &locals, acts));
+                }
+            }
             return;
         }
         let wanted = bulk(action, checked, state);

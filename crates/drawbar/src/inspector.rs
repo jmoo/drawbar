@@ -346,6 +346,9 @@ fn bulk_actions(
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+        // ⚠️ Unwrapped, so a button short of room moves to the next row instead of
+        // folding its label into the room left.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         crate::panel::tonal(ui);
         for action in Bulk::ALL {
             browser.bulk_item(ui, action, checked, workspace, &device.state, acts);
@@ -1009,8 +1012,9 @@ mod tests {
         assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
     }
 
-    /// The Selection card offers every action on the selection, whole and inside the card
-    /// at the narrowest the inspector gets, and Queue for sending queues what is selected.
+    /// The Selection card offers every action on the selection, whole, on one line, and
+    /// inside the card at any width the inspector takes, and Queue for sending queues what
+    /// is selected.
     #[test]
     fn the_selection_card_offers_every_action_on_the_selection() {
         let Bench {
@@ -1028,7 +1032,8 @@ mod tests {
         browser.check(Item::Local(id));
         let screen = egui::vec2(800.0, 900.0);
 
-        for width in [crate::shell::SIDE_LEAST, crate::shell::INSPECTOR] {
+        let least = crate::shell::SIDE_LEAST as usize;
+        for width in (least..=400).step_by(4).map(|width| width as f32) {
             let mut acts = Vec::new();
             let mut frame = |events: Vec<egui::Event>| {
                 let input = testing::screen(screen, events);
@@ -1050,11 +1055,17 @@ mod tests {
             };
             frame(Vec::new());
             let said = frame(Vec::new());
+            let line = testing::where_(&said, "Selection").height();
             for action in Bulk::ALL {
                 let word = testing::where_(&said, action.label());
                 assert!(
-                    word.left() >= screen.x - width && word.right() <= screen.x,
-                    "{width}: {} at {word:?} is cut off",
+                    word.left() >= screen.x - width && word.right() <= screen.x - GUTTER,
+                    "{width}: {} at {word:?} runs past the card",
+                    action.label()
+                );
+                assert!(
+                    word.height() < 1.5 * line,
+                    "{width}: {} at {word:?} folds onto more than one line",
                     action.label()
                 );
             }
