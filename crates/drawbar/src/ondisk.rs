@@ -158,31 +158,11 @@ impl OnDisk {
     /// Every byte of the file, read on this thread.
     ///
     /// ⚠️ On the desktop that is hundreds of megabytes for a piano library. The browser
-    /// cannot wait for a read, and refuses: [`OnDisk::whole_then`] reads it off the frame.
+    /// cannot wait for a read, and refuses.
     pub fn whole(&self) -> io::Result<Vec<u8>> {
         #[cfg(test)]
         self.reads.lock().expect("unpoisoned").push(0..self.len);
         self.source.whole(self.len)
-    }
-
-    /// Read the whole file off the frame and hand it to `then`.
-    pub fn whole_then<T: Send + 'static>(
-        self: &Arc<Self>,
-        ctx: &egui::Context,
-        then: impl FnOnce(&Progress, Vec<u8>) -> Result<T, String> + Send + 'static,
-    ) -> Job<Result<T, String>> {
-        let len = self.len;
-        let gathered = Gathered::with(len);
-        self.pass(
-            ctx,
-            gathered,
-            |gathered, chunk| gathered.take(chunk),
-            move |progress, gathered| match gathered {
-                Ok(Gathered(Ok(bytes))) if bytes.len() as u64 == len => then(progress, bytes),
-                Ok(Gathered(Ok(_))) => Err("the file changed while it was read".to_string()),
-                Ok(Gathered(Err(why))) | Err(why) => Err(why),
-            },
-        )
     }
 
     /// Check the file's stored checksum in one streaming pass off the frame, taking the
@@ -292,31 +272,6 @@ impl nord_usb::FileSource for &OnDisk {
 
 /// How much a streaming pass reads at a time.
 const CHUNK: usize = 4 << 20;
-
-/// The bytes of a whole read, gathered chunk by chunk, or why there is no room for them.
-struct Gathered(Result<Vec<u8>, String>);
-
-impl Gathered {
-    fn with(len: u64) -> Gathered {
-        let unfit = || format!("its {len} bytes do not fit in memory");
-        let mut bytes = Vec::new();
-        let room = usize::try_from(len)
-            .ok()
-            .and_then(|len| bytes.try_reserve_exact(len).ok());
-        Gathered(room.map(|_| bytes).ok_or_else(unfit))
-    }
-
-    fn take(&mut self, chunk: &[u8]) -> Result<(), String> {
-        match &mut self.0 {
-            Ok(bytes) if bytes.len() + chunk.len() <= bytes.capacity() => {
-                bytes.extend_from_slice(chunk);
-                Ok(())
-            }
-            Ok(_) => Err("the file changed while it was read".to_string()),
-            Err(why) => Err(why.clone()),
-        }
-    }
-}
 
 /// What a checksum pass found: the file's own CRC-32, and what the container says of its
 /// body.

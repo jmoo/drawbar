@@ -201,7 +201,6 @@ stateDiagram-v2
     Reading --> Resting: piano or sample
     Reading --> NotRead: gone, error or no room
     NotRead --> Reading: room made
-    Resting --> Whole: woken
     Resting --> Unsaved: edited
     Whole --> Unsaved: edited
     Whole --> Remembered: evicted

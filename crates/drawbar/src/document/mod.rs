@@ -1730,7 +1730,6 @@ mod tests {
         let words = open.twice();
         assert!(words.iter().any(|word| word == "Marimba"), "{words:?}");
         assert!(words.iter().any(|word| word == "Zone 1"), "{words:?}");
-        assert!(!open.workspace.waking(open.id), "nothing reads it whole");
         assert!(open.entity().rests().is_some() && open.entity().held_whole() == 0);
         assert_eq!(file.take_reads(), [], "the frames read no stroke");
 

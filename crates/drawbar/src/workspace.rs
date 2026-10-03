@@ -665,10 +665,8 @@ impl LocalEntity {
     /// The whole body: the bytes held, or a read of the file it rests in.
     ///
     /// ⚠️ A read of a file reads all of it, hundreds of megabytes for a piano library, on
-    /// the calling thread. A send reads the file a chunk at a time, and a copy is made by
-    /// the library, so neither asks. The browser refuses it, and an act that needs it
-    /// reads the file whole off the frame first
-    /// ([`Workspace::wake`]).
+    /// the calling thread, and the browser refuses it. A send reads the file a chunk at a
+    /// time, and a copy of it is made by the library, so neither asks.
     pub fn whole(&self) -> std::io::Result<Cow<'_, [u8]>> {
         if self.unread() {
             return Err(std::io::Error::other(UNREAD));
@@ -1241,10 +1239,6 @@ pub struct Workspace {
     /// time, in the order they arrived.
     checks: VecDeque<(u64, Arc<OnDisk>)>,
     checking: Option<Check>,
-    /// Assets being read whole out of the files they rested in.
-    waking: Vec<Wake>,
-    /// The files, by [`OnDisk::serial`], a read whole out of failed. Each is read once.
-    unwoken: std::collections::BTreeSet<u64>,
     /// Assets whose file is being copied in, each with what it is a copy of. Each is
     /// unread until its copy lands.
     arriving: std::collections::BTreeMap<u64, CopyOf>,
@@ -1309,13 +1303,6 @@ struct Check {
     job: work::Job<Result<ondisk::Sums, String>>,
 }
 
-/// A file being read whole and decoded off the frame.
-struct Wake {
-    id: u64,
-    file: Arc<OnDisk>,
-    job: work::Job<Result<LocalEntity, String>>,
-}
-
 impl Workspace {
     pub fn new(ctx: egui::Context) -> Workspace {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1339,8 +1326,6 @@ impl Workspace {
             draft: None,
             checks: VecDeque::new(),
             checking: None,
-            waking: Vec::new(),
-            unwoken: Default::default(),
             arriving: Default::default(),
             picked: Vec::new(),
             undecoded: VecDeque::new(),
@@ -1803,93 +1788,6 @@ impl Workspace {
             entity.verify = verify;
         }
         self.revision += 1;
-    }
-
-    /// Read an asset resting in its file whole, off the frame, for a send, which carries
-    /// the whole body. It stays resting until the read answers, and a file whose read
-    /// failed is not read again.
-    pub fn wake(&mut self, id: u64) {
-        if self.waking.iter().any(|held| held.id == id) {
-            return;
-        }
-        let Some(entity) = self.get(id) else {
-            return;
-        };
-        let Some(file) = entity.rests().cloned() else {
-            return;
-        };
-        if self.unwoken.contains(&file.serial) {
-            return;
-        }
-        let (name, origin, stamp) = (entity.name.clone(), entity.origin.clone(), entity.stamp);
-        let job = file.whole_then(&self.ctx, move |_, bytes| {
-            Ok(LocalEntity::new(id, name, origin, bytes.into(), stamp))
-        });
-        self.waking.push(Wake { id, file, job });
-    }
-
-    /// Whether the read whole out of the file an asset rests in failed.
-    pub fn unwoken(&self, id: u64) -> bool {
-        self.get(id)
-            .and_then(LocalEntity::rests)
-            .is_some_and(|file| self.unwoken.contains(&file.serial))
-    }
-
-    /// Whether an asset is being read whole out of its file.
-    #[cfg(test)]
-    pub fn waking(&self, id: u64) -> bool {
-        self.waking.iter().any(|held| held.id == id)
-    }
-
-    /// Fold in the reads that have answered.
-    fn woken(&mut self, log: &mut Log) {
-        let mut answered = Vec::new();
-        for wake in std::mem::take(&mut self.waking) {
-            match wake.job.poll() {
-                work::Answer::Running => self.waking.push(wake),
-                answer => answered.push((wake.id, wake.file, answer)),
-            }
-        }
-        for (id, file, answer) in answered {
-            self.wakes(id, &file, answer, log);
-        }
-    }
-
-    fn wakes(
-        &mut self,
-        id: u64,
-        file: &Arc<OnDisk>,
-        answer: work::Answer<Result<LocalEntity, String>>,
-        log: &mut Log,
-    ) {
-        let answer = match answer {
-            work::Answer::Running => return,
-            work::Answer::Answered(answer) => answer,
-            work::Answer::Died => Err("the read stopped without an answer".to_string()),
-        };
-        let Some(entity) = self.get(id) else {
-            return;
-        };
-        if !entity.rests().is_some_and(|held| Arc::ptr_eq(held, file)) {
-            return;
-        }
-        match answer {
-            Ok(made) => {
-                log.info(format!("{}: read whole", entity.name));
-                self.swap(id, false, |_| made);
-            }
-            Err(why) => {
-                let name = entity.name.clone();
-                self.unwoken.insert(file.serial);
-                log.error(format!("{name}: {why}"));
-                log.trouble(format!("“{name}” could not be read."));
-                if let Some(entity) = self.get_mut(id) {
-                    entity.parse_error = Some(why.clone());
-                    entity.verify = VerifyState::Failed(why);
-                }
-                self.revision += 1;
-            }
-        }
     }
 
     /// How many assets something needs that are still being read or decoded.
@@ -2461,7 +2359,6 @@ impl Workspace {
             let answer = check.job.poll();
             self.checked(answer, log);
         }
-        self.woken(log);
         self.decode(log);
         opened
     }
@@ -2480,10 +2377,6 @@ impl Workspace {
         while let Some(check) = &self.checking {
             let answer = check.job.wait();
             self.checked(answer, log);
-        }
-        for Wake { id, file, job } in std::mem::take(&mut self.waking) {
-            let answer = job.wait();
-            self.wakes(id, &file, answer, log);
         }
     }
 
@@ -2969,7 +2862,6 @@ impl Workspace {
         let held = |id: u64| entities.iter().any(|entity| entity.id == id);
         self.checks.retain(|(id, _)| held(*id));
         self.edits.retain(|id, _| held(*id));
-        self.waking.retain(|wake| held(wake.id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));
         self.wanted.get_mut().retain(|id| held(*id));
