@@ -52,23 +52,29 @@ counts the files drawbar opens in it and in every folder inside it. Beside This
 computer it counts the whole library.
 
 A large library comes in a part at a time, the top of the tree first, and the
-status bar counts the files as they arrive. Each file shows by its name at once,
-marked **reading…**, and is decoded and checked in the background. Opening,
-sending or exporting one still being read reads it straight away. Until the
-whole library is listed, its folders cannot be renamed or removed.
+status bar counts the files as they arrive. drawbar lists each file by its name,
+size and date without opening it, so searching, the kinds in the tree and the
+counts beside folders work while the rest is still arriving. A file is read when
+you need it: when its row is in view, when you select or open it, or when you
+send, export, copy or move it. Until then its row says **reading…** and its kind
+comes from its extension. Whether it matches a slot on the instrument by its
+contents, and the library a program needs, show once it is read. A file stays
+read until the library closes.
 
-drawbar lists at most a million files and folders in a library, and reads at
-most 1 GiB of files from it. Past either limit it says so: a folder it did not
-list in full, or could not read, shows **not all listed**, and a file it did not
-read is marked **not read**.
+You can rename, move and make folders while a library is still being listed. A
+folder you remove waits until everything in it has been listed.
+
+drawbar lists at most a million files and folders in a library, and holds at most
+1 GiB of its files in memory. A folder it did not list in full, or could not
+read, shows **not all listed**. A file it could not read, or one past the 1 GiB,
+is marked **not read**.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so on the
 desktop they stay in their files: drawbar holds in memory only the part it shows
-or plays, and reads a sample whole when you open it. Each time the library
-opens, each one's checksum is checked in the background. Its row says
-**checking…** until that is done, and **failed verification** if the file does
-not match its checksum. Such a file is not sent. What stays in its file does
-not count toward the 1 GiB.
+or plays, and reads a sample whole when you open it. When one is read, its
+checksum is checked in the background. Its row says **checking…** until that
+is done, and **failed verification** if the file does not match its checksum.
+Such a file is not sent. What stays in its file does not count toward the 1 GiB.
 
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.
@@ -131,8 +137,10 @@ moment can also both open it to write.
 ## Changes made outside drawbar
 
 drawbar looks at the folder again whenever its window comes back to the front,
-and before it sends anything to the instrument. A file whose size and
-modification time are what drawbar last saw is taken to be unchanged.
+and before it sends anything to the instrument. While a library is still being
+listed, it looks again only at the files it has read, and at the whole folder
+once the listing is done. A file whose size and modification time are what
+drawbar last saw is taken to be unchanged.
 
 - A sound renamed or moved outside drawbar keeps its tags.
 - A file changed outside drawbar is shown as it is now. If you had unsaved edits
