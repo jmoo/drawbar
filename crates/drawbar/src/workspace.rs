@@ -483,6 +483,8 @@ pub struct LocalEntity {
     ///
     /// [`Workspace::forget_writes`] clears it when the instrument goes.
     pub wrote: Option<Wrote>,
+    /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
+    seen: std::cell::Cell<u64>,
 }
 
 impl LocalEntity {
@@ -529,6 +531,7 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
+            seen: Default::default(),
         }
     }
 
@@ -582,6 +585,7 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
+            seen: Default::default(),
         }
     }
 
@@ -1197,6 +1201,8 @@ pub struct Workspace {
     /// Decodes running off the frame, each of a few assets, and every asset in them.
     decoding: Vec<Decode>,
     flying: std::collections::BTreeSet<u64>,
+    /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
+    frame: u64,
 }
 
 /// Assets decoded off the frame, each answered with the stamp of the bytes decoded.
@@ -1260,6 +1266,7 @@ impl Workspace {
             asked: Default::default(),
             decoding: Vec::new(),
             flying: Default::default(),
+            frame: 1,
         }
     }
 
@@ -1646,6 +1653,7 @@ impl Workspace {
             link: entity.link,
             wrote: entity.wrote,
             pending: entity.pending,
+            seen: entity.seen.clone(),
             saved,
             ..made
         };
@@ -1820,11 +1828,16 @@ impl Workspace {
 
     /// Something needs `id`: its row is in view, it is picked, or it is open. One not
     /// read yet is asked of the library, and one not decoded yet is decoded ahead of the
-    /// others.
+    /// others. Either way it is needed now, and is not let go for room until a frame
+    /// passes without it being needed.
     pub fn hurry(&self, id: u64) {
-        let Some(entity) = self.get(id).filter(|entity| entity.reading()) else {
+        let Some(entity) = self.get(id) else {
             return;
         };
+        entity.seen.set(self.frame);
+        if !entity.reading() {
+            return;
+        }
         if !entity.unread() {
             self.hurried.borrow_mut().insert(id);
         } else if !self.asked.contains(&id) && self.wanted.borrow_mut().insert(id) {
@@ -1832,8 +1845,7 @@ impl Workspace {
         }
     }
 
-    /// [`Workspace::hurry`] for every asset whose row is in view, for a list that draws
-    /// only those rows.
+    /// [`Workspace::hurry`] for each of these assets, as for the rows a list draws.
     pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
         for id in ids {
             self.hurry(id);
@@ -1859,16 +1871,16 @@ impl Workspace {
         !self.asked.is_empty()
     }
 
-    /// The library's answer to an asset asked for: its bytes, decoded off the frame ahead
-    /// of anything else waiting, or the file it rests in, or nothing, when the library no
-    /// longer has its file and it stays unread. They are what it was saved as, since
-    /// nothing edits an asset not read.
+    /// The library's answer to an asset asked for: its bytes, decoded off the frame, ahead
+    /// of anything else waiting where something needs it now, or the file it rests in, or
+    /// nothing, when the library no longer has its file and it stays unread. They are
+    /// what it was saved as, since nothing edits an asset not read.
     pub fn took(&mut self, id: u64, bytes: Option<Vec<u8>>, file: Option<Arc<OnDisk>>) {
         self.asked.remove(&id);
         let Some(entity) = self.get(id).filter(|entity| entity.unread()) else {
             return;
         };
-        let stamp = entity.stamp;
+        let (stamp, needed) = (entity.stamp, self.needed_now(entity));
         match (bytes, file) {
             (Some(bytes), _) => {
                 self.swap(id, false, |held| {
@@ -1876,7 +1888,9 @@ impl Workspace {
                     LocalEntity::undecoded(id, name, origin, bytes.into(), stamp)
                 });
                 self.undecoded.push_back(id);
-                self.hurried.get_mut().insert(id);
+                if needed {
+                    self.hurried.get_mut().insert(id);
+                }
             }
             (None, Some(file)) => self.rest(id, file, stamp),
             (None, None) => {}
@@ -1924,6 +1938,72 @@ impl Workspace {
         self.wanted.get_mut().insert(id);
     }
 
+    /// Ask the library again for an asset whose read was refused for want of room, now
+    /// that room has been made for it.
+    pub fn again(&mut self, id: u64) {
+        self.asked.remove(&id);
+        if self.get(id).is_some_and(LocalEntity::unread) {
+            self.wanted.get_mut().insert(id);
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// The library refused to read an asset asked of it, for want of room. It stays as it
+    /// was until it is asked again.
+    pub fn unasked(&mut self, id: u64) {
+        self.asked.remove(&id);
+    }
+
+    /// Whether something needed this asset this frame or the last. See
+    /// [`Workspace::hurry`].
+    fn needed_now(&self, entity: &LocalEntity) -> bool {
+        let seen = entity.seen.get();
+        seen > 0 && seen + 1 >= self.frame
+    }
+
+    /// The frame something last needed this asset in, 0 for never, and how many bytes
+    /// letting it go would free. `None` where it must be kept whole: it is a view, unsaved
+    /// or holding an editor's pending edit, unread or resting in its file, or needed now.
+    pub fn evictable(&self, id: u64) -> Option<(u64, u64)> {
+        let entity = self.get(id)?;
+        let held = entity.held_whole();
+        let kept = !entity.kept
+            || entity.is_unsaved()
+            || entity.unread()
+            || entity.rests().is_some()
+            || self.needed_now(entity);
+        (!kept && held > 0).then_some((entity.seen.get(), held))
+    }
+
+    /// Let go of what a clean asset holds whole and what it decodes to, so it is unread
+    /// again under a new stamp, which this returns. It keeps the checksum a slot holding
+    /// it would report, so it still matches that slot. `None`, and nothing let go, where
+    /// [`Workspace::evictable`] keeps it.
+    pub fn evict(&mut self, id: u64) -> Option<u64> {
+        self.evictable(id)?;
+        let entity = self.get(id)?;
+        let (len, crc32) = (entity.size(), entity.saved.crc32);
+        let stamp = self.stamp();
+        self.swap(id, false, |held| {
+            let (name, origin) = (held.name.clone(), held.origin.clone());
+            let mut listed = LocalEntity::listed(id, name, origin, len, stamp);
+            listed.saved.crc32 = crc32;
+            listed
+        });
+        Some(stamp)
+    }
+
+    /// An unread asset's file changed on disk: the checksum it kept from before it was let
+    /// go no longer stands for it.
+    pub fn stale(&mut self, id: u64) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
+            return;
+        };
+        if entity.saved.crc32.take().is_some() {
+            self.revision += 1;
+        }
+    }
+
     /// How many bytes the assets hold whole in memory, their baselines' included.
     pub fn held_whole(&self) -> u64 {
         self.entities.iter().map(LocalEntity::held_whole).sum()
@@ -1933,10 +2013,11 @@ impl Workspace {
     /// decoded: something is about to act on what they decode to.
     pub fn read_now(&mut self, ids: impl IntoIterator<Item = u64>, log: &mut Log) {
         for id in ids {
-            let Some(entity) = self.get(id).filter(|entity| entity.reading()) else {
+            let Some(entity) = self.get(id) else {
                 continue;
             };
-            if entity.unread() {
+            entity.seen.set(self.frame);
+            if !entity.reading() || entity.unread() {
                 continue;
             }
             let (stamp, decoded) = (entity.stamp, Decoded::of(&entity.bytes));
@@ -2134,6 +2215,7 @@ impl Workspace {
     /// that have answered and start the next, and return the files picked to open, by
     /// name. Call once per frame.
     pub fn poll(&mut self, log: &mut Log) -> Vec<(String, Vec<u8>)> {
+        self.frame += 1;
         let mut opened = Vec::new();
         while let Ok(message) = self.rx.try_recv() {
             match message {
@@ -2458,6 +2540,7 @@ impl Workspace {
             wrote,
             pending,
             path,
+            seen: entity.seen.clone(),
             ..replaced
         };
         Some(verify)

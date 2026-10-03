@@ -139,6 +139,14 @@ impl Tabs {
         })
     }
 
+    /// The documents a tab is open on, active or not.
+    pub fn documents(&self) -> impl Iterator<Item = u64> + '_ {
+        self.open.iter().filter_map(|spot| match spot {
+            Spot::Document(id) => Some(*id),
+            Spot::Library | Spot::Keyboard => None,
+        })
+    }
+
     /// Whether a tab is open on this document, active or not.
     pub fn holds(&self, id: u64) -> bool {
         self.open.contains(&Spot::Document(id))

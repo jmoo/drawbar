@@ -58,8 +58,7 @@ counts beside folders work while the rest is still arriving. A file is read when
 you need it: when its row is in view, when you select or open it, or when you
 send, export, copy or move it. Until then its row says **reading…** and its kind
 comes from its extension. Whether it matches a slot on the instrument by its
-contents, and the library a program needs, show once it is read. A file stays
-read until the library closes.
+contents, and the library a program needs, show once it is read.
 
 You can rename, move and make folders while a library is still being listed. A
 folder you remove waits until everything in it has been listed.
@@ -67,7 +66,12 @@ folder you remove waits until everything in it has been listed.
 drawbar lists at most a million files and folders in a library, and holds at most
 1 GiB of its files in memory. A folder it did not list in full, or could not
 read, shows **not all listed**. A file it could not read is marked **not read**.
-So is one past the 1 GiB, until there is room for it again.
+
+When reading a file would go past the 1 GiB, drawbar lets go of the files you
+used least recently, and reads one again when you need it. It keeps every file
+that is open, selected, in view, unsaved or waiting to be sent. A file that would
+go past the 1 GiB with only those held is marked **not read** until there is room
+for it again.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so on the
 desktop they stay in their files: drawbar holds in memory only the part it shows

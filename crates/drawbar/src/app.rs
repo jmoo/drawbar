@@ -635,6 +635,9 @@ impl eframe::App for DrawbarApp {
             .into_iter()
             .map(|(name, bytes)| browser::Act::Import { name, bytes })
             .collect();
+        // What is open or picked is needed whatever is drawn, so the library keeps it.
+        let needed = self.tabs.documents().chain(self.browser.picked().locals());
+        self.workspace.in_view(needed);
         let released = match &mut self.store {
             Some(store) => {
                 store.focus(ctx.input(|input| input.focused));

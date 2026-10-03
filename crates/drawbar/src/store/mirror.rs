@@ -293,7 +293,7 @@ pub struct Store {
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
     /// The assets whose read was refused for want of room, each with its file's length,
-    /// to ask for again once that much is free. One that could never fit is not.
+    /// to ask for again once room can be made for it. One that could never fit is not.
     roomless: BTreeMap<u64, u64>,
     /// How many writing commands have been sent.
     sent: u64,
@@ -445,7 +445,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        self.ask(workspace, log);
+        self.ask(workspace, queue, log);
         self.walk(browser);
         let mut released = false;
         let mut parts = 0;
@@ -505,24 +505,24 @@ impl Store {
     }
 
     /// Ask the backend for the files of the unread assets something needs, reading at
-    /// most what keeps the assets' whole bytes within [`MOST_BYTES`], counting each read
-    /// still in flight at its file's listed length. An asset refused for want of room
-    /// is asked for again once there is room for it.
-    pub(crate) fn ask(&mut self, workspace: &mut Workspace, log: &mut Log) {
+    /// most what keeps the assets' whole bytes within [`MOST_BYTES`]. An asset refused
+    /// for want of room is asked for again once room can be made for it.
+    pub(crate) fn ask(&mut self, workspace: &mut Workspace, queue: &Queue, log: &mut Log) {
         if !self.opened() || (!workspace.wants() && self.roomless.is_empty()) {
             return;
         }
-        let held = workspace
-            .held_whole()
-            .saturating_add(workspace.asked_whole());
-        let room = self.budget.saturating_sub(held);
-        self.roomless.retain(|id, len| {
-            let waits = *len > room && workspace.get(*id).is_some();
-            if !waits {
-                workspace.retry(*id);
+        for (id, len) in std::mem::take(&mut self.roomless) {
+            if workspace.get(id).is_none() {
+                continue;
             }
-            waits
-        });
+            match self.make_room(len, workspace, queue) {
+                true => workspace.retry(id),
+                false => {
+                    self.roomless.insert(id, len);
+                }
+            }
+        }
+        let room = self.room(workspace);
         let mut files = Vec::new();
         for id in workspace.take_wanted() {
             let record = self.records.get(&id);
@@ -539,6 +539,65 @@ impl Store {
             return;
         }
         self.send(Cmd::Read { files, room });
+    }
+
+    /// How many more bytes the assets may hold whole: the budget, less what they hold and
+    /// each read in flight at its file's listed length.
+    fn room(&self, workspace: &Workspace) -> u64 {
+        self.budget.saturating_sub(held(workspace))
+    }
+
+    /// Make room for `need` more bytes held whole by letting go of the clean assets
+    /// needed least recently, each unread again until something needs it. Lets go of
+    /// nothing where that would not make the room. Returns whether `need` fits.
+    ///
+    /// ⚠️ Only an asset its file can give back goes: one whose record says drawbar holds
+    /// the file as last read or written, with nothing in flight over it, no working copy
+    /// and no send waiting. See [`Workspace::evictable`] for what the workspace keeps.
+    fn make_room(&mut self, need: u64, workspace: &mut Workspace, queue: &Queue) -> bool {
+        let wanted = held(workspace).saturating_add(need);
+        if wanted <= self.budget {
+            return true;
+        }
+        if need > self.budget {
+            return false;
+        }
+        let mut clean: Vec<(u64, u64, u64)> = self
+            .records
+            .iter()
+            .filter(|(id, record)| {
+                let saved = workspace.get(**id).map(|entity| entity.saved.stamp);
+                saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
+                    && !queue.holds(**id)
+            })
+            .filter_map(|(id, _)| {
+                let (seen, freed) = workspace.evictable(*id)?;
+                Some((seen, *id, freed))
+            })
+            .collect();
+        clean.sort_unstable();
+        let mut short = wanted - self.budget;
+        let mut going = Vec::new();
+        for (_, id, freed) in clean {
+            if short == 0 {
+                break;
+            }
+            short = short.saturating_sub(freed);
+            going.push(id);
+        }
+        if short > 0 {
+            return false;
+        }
+        for id in going {
+            let Some(stamp) = workspace.evict(id) else {
+                continue;
+            };
+            if let Some(record) = self.records.get_mut(&id) {
+                record.saved = stamp;
+                record.holds = Holds::Unread;
+            }
+        }
+        true
     }
 
     /// Ask the backend to list the folders whose removal waits on what is in them. Once
@@ -628,6 +687,7 @@ impl Store {
         &mut self,
         answers: Vec<(u64, Result<Found, Failure>)>,
         workspace: &mut Workspace,
+        queue: &Queue,
         log: &mut Log,
     ) {
         for (id, answer) in answers {
@@ -645,6 +705,11 @@ impl Store {
                     continue;
                 }
                 Err(Failure::Room(len)) => {
+                    workspace.unasked(id);
+                    if self.make_room(len, workspace, queue) {
+                        workspace.again(id);
+                        continue;
+                    }
                     if len <= self.budget {
                         self.roomless.insert(id, len);
                     }
@@ -764,7 +829,7 @@ impl Store {
                 log.error(format!("reading the library again: {why}"));
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
-            Event::Read(answers) => self.took(answers, workspace, log),
+            Event::Read(answers) => self.took(answers, workspace, queue, log),
             Event::Fingerprinted(files) => self.fingerprinted(files),
             Event::Moved { from, to, result } => match result {
                 _ if !self.answered_move(&from, &to) => {}
@@ -1496,6 +1561,7 @@ impl Store {
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(found.fingerprint());
             }
+            workspace.stale(id);
             return;
         }
         let Some(entity) = workspace.get(id) else {
@@ -2059,6 +2125,19 @@ impl Record {
         }
     }
 
+    /// Whether drawbar holds its file whole as last read or written, under the baseline
+    /// stamped `saved`, with no save, working copy or rename over it: what it holds can
+    /// be read again from the file.
+    fn rereadable(&self, saved: u64, moving: &[(LibPath, LibPath)]) -> bool {
+        let still = self.saved == saved && self.fingerprint.is_some();
+        let settled = self
+            .path
+            .as_ref()
+            .is_some_and(|path| !unsettled(moving, path));
+        let idle = !self.saving && !self.missing && self.working.is_none();
+        self.holds == Holds::Whole && still && settled && idle
+    }
+
     /// Whether its file is one drawbar knows, has not seen go missing, and holds
     /// contents whose CRC was never taken.
     fn unprinted(&self) -> bool {
@@ -2081,6 +2160,14 @@ fn ends(op: &Op) -> [&LibPath; 2] {
         Op::MakeDir(path) | Op::RemoveDir(path) => [path, path],
         Op::MoveDir { from, to } => [from, to],
     }
+}
+
+/// How many bytes the assets hold whole, counting each read in flight at its file's listed
+/// length.
+fn held(workspace: &Workspace) -> u64 {
+    workspace
+        .held_whole()
+        .saturating_add(workspace.asked_whole())
 }
 
 /// Whether `path` is in, is, or holds either side of one of these renames.

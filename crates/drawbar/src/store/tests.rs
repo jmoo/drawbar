@@ -95,14 +95,39 @@ impl Session {
         self.answer_reads();
     }
 
-    /// Send the reads asked for, and wait until each is answered. What they read is not
-    /// decoded yet.
+    /// Send the reads asked for, and wait until each is answered, a read refused for room
+    /// and asked again included. What they read is not decoded yet.
     fn answer_reads(&mut self) {
-        let Bench { workspace, log, .. } = &mut self.bench;
-        self.store.ask(workspace, log);
-        while self.bench.workspace.asking() {
-            assert!(self.next(), "the read answered");
+        loop {
+            let Bench {
+                workspace,
+                queue,
+                log,
+                ..
+            } = &mut self.bench;
+            self.store.ask(workspace, queue, log);
+            while self.bench.workspace.asking() {
+                assert!(self.next(), "the read answered");
+            }
+            if !self.bench.workspace.wants() {
+                return;
+            }
         }
+    }
+
+    /// Something needs these assets now: read and decode each not read yet.
+    fn read(&mut self, ids: &[u64]) {
+        self.bench.workspace.in_view(ids.iter().copied());
+        self.answer_reads();
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.settle_files(log);
+    }
+
+    /// Two frames pass in which nothing needs any asset.
+    fn later(&mut self) {
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.poll(log);
+        workspace.poll(log);
     }
 
     /// The asset listed under `name`.
@@ -2140,8 +2165,13 @@ fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
     let [a, b, c] = ["A.ne5p", "B.ne5p", "C.ne5p"].map(|name| session.named(name));
 
     session.bench.workspace.in_view([a]);
-    let Bench { workspace, log, .. } = &mut session.bench;
-    session.store.ask(workspace, log);
+    let Bench {
+        workspace,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.ask(workspace, queue, log);
     session.bench.workspace.in_view([b, c]);
     session.answer_reads();
     let workspace = &session.bench.workspace;
@@ -2171,6 +2201,87 @@ fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
     let entity = session.bench.workspace.get(c).unwrap();
     assert!(!entity.unread(), "read once there is room");
     assert_eq!(entity.saved.bytes, with_gain(&program, "36"));
+}
+
+/// Past the budget, a read lets go of the clean assets needed least recently, each unread
+/// again until something needs it, and never of one that is unsaved, waiting to be sent,
+/// or needed now. Where nothing else can go, the read is refused, and is read once
+/// something can.
+#[test]
+fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let len = program.len() as u64;
+    let names = ["A.ne5p", "B.ne5p", "C.ne5p", "D.ne5p", "E.ne5p", "F.ne5p"];
+    let files: Vec<Vec<u8>> = (1..=6)
+        .map(|n| with_gain(&program, &(n * 12).to_string()))
+        .collect();
+    for (name, bytes) in names.iter().zip(&files) {
+        fs::write(root.at(name), bytes).unwrap();
+    }
+    let mut session = Session::listed(&root);
+    let budget = 5 * len + 1;
+    session.store.budget(budget);
+    let [a, b, c, d, e, f] = names.map(|name| session.named(name));
+    let unread = |session: &Session| -> Vec<u64> {
+        let listed = session.bench.workspace.listed();
+        listed
+            .filter(|entity| entity.unread())
+            .map(|entity| entity.id)
+            .collect()
+    };
+
+    session.read(&[a]);
+    session.later();
+    session.read(&[b, c, d, e]);
+    session.later();
+    session.read(&[f]);
+    assert_eq!(unread(&session), [a], "the one needed least recently");
+    let evicted = session.bench.workspace.get(a).unwrap();
+    assert!(evicted.bytes.is_empty() && evicted.entity.is_none());
+    assert_eq!(evicted.verify.note(), Some("reading…"));
+    assert!(evicted.saved.crc32.is_some(), "it still matches its slot");
+    assert!(session.bench.workspace.held_whole() <= budget);
+
+    let Bench {
+        workspace,
+        device,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    workspace.replace_bytes(b, with_gain(&program, "96"), log);
+    device.pretend_attached();
+    let slot = Location { bank: 0, slot: 0 };
+    crate::queue::enqueue(workspace, device, queue, log, c, ObjectClass::Program, slot);
+    assert!(queue.holds(c));
+    let budget = 6 * len + 1;
+    session.store.budget(budget);
+    session.later();
+    session.bench.workspace.in_view([e, f]);
+    session.read(&[a]);
+    assert_eq!(unread(&session), [d], "unsaved, queued and needed now stay");
+
+    session.read(&[d]);
+    let refused = session.bench.workspace.get(d).unwrap();
+    assert!(refused.unread(), "nothing else can go");
+    let VerifyState::NotRead(why) = &refused.verify else {
+        panic!("{}", refused.verify.detail());
+    };
+    assert!(why.contains("at most 1 GiB"), "{why}");
+
+    session.later();
+    session.answer_reads();
+    assert!(!session.bench.workspace.get(d).unwrap().unread());
+    assert!(session.bench.workspace.held_whole() <= budget);
+    for id in [b, c] {
+        assert!(!session.bench.workspace.get(id).unwrap().unread());
+    }
+
+    session.sync();
+    for (name, bytes) in names.iter().zip(&files) {
+        assert_eq!(&root.read(name), bytes, "{name} was not written");
+    }
 }
 
 /// A file read and not edited is held once: the asset's bytes and what it was saved as

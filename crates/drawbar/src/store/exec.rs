@@ -1179,8 +1179,8 @@ fn crc(found: &Found) -> Option<u32> {
 /// Why a read [`Failure::Room`] refused did not run.
 pub fn too_much() -> String {
     format!(
-        "drawbar holds at most {} GiB of one library's files in memory, and the files read \
-         or being read already come to that",
+        "drawbar holds at most {} GiB of one library's files in memory, and the files open, \
+         selected, in view, unsaved or waiting to be sent already come to that",
         MOST_BYTES >> 30
     )
 }
