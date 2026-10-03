@@ -7,15 +7,24 @@ use std::rc::Rc;
 
 use eframe::egui;
 
+#[cfg(target_arch = "wasm32")]
 use crate::device::DeviceState;
 use crate::log::Log;
 use crate::sheet;
 use crate::store::Store;
 use crate::telemetry::{self, Undelivered};
+#[cfg(target_arch = "wasm32")]
 use crate::workspace::Workspace;
 
 /// The widest the sheet grows.
 const WIDE: f32 = 520.0;
+
+/// The height the sheet needs around its scrolling middle, so a long message scrolls and
+/// Send stays on screen.
+const AROUND: f32 = 140.0;
+
+/// The shortest the scrolling middle gets, however short the window.
+const FEWEST: f32 = 120.0;
 
 /// The longest message, in characters. The collector refuses longer ones.
 const LONGEST: usize = 5_000;
@@ -28,6 +37,7 @@ const CONTACT: usize = 200;
 const LOG: usize = 60_000;
 
 /// How long to wait before trying again once a send found no one, in seconds.
+#[cfg(target_arch = "wasm32")]
 const RETRY: f64 = 15.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,6 +75,12 @@ enum State {
     Sent,
 }
 
+/// What the reader pressed.
+enum Pressed {
+    Send,
+    Close,
+}
+
 /// The sheet while it is open.
 pub struct Report {
     /// Made when the sheet opens, so a send that is retried arrives once.
@@ -81,6 +97,7 @@ pub struct Report {
     state: State,
 }
 
+#[cfg(target_arch = "wasm32")]
 impl Report {
     pub fn problem(device: &DeviceState, workspace: &Workspace, store: Option<&Store>) -> Report {
         Report::new(Kind::Problem, device, workspace, store)
@@ -148,43 +165,55 @@ impl Report {
     /// Move the send along: collect an answer, or try again once the wait is over.
     fn advance(&mut self, ctx: &egui::Context, log: &Log) {
         let now = ctx.input(|input| input.time);
-        match &self.state {
-            State::Sending(slot) => {
-                let answer = slot.borrow_mut().take();
-                self.state = match answer {
-                    None => return,
-                    Some(Ok(())) => State::Sent,
-                    Some(Err(Undelivered::Unreachable)) => State::Waiting { since: now },
-                    Some(Err(Undelivered::Refused(status))) if status >= 500 => {
-                        State::Waiting { since: now }
-                    }
-                    Some(Err(Undelivered::Refused(status))) => State::Refused(status),
-                };
-            }
-            State::Waiting { since } => {
-                if now - since >= RETRY && telemetry::online() {
-                    self.send(ctx, log);
-                } else {
-                    ctx.request_repaint_after(std::time::Duration::from_secs(1));
-                }
-            }
-            State::Drafting | State::Refused(_) | State::Sent => {}
+        self.collect(now);
+        let State::Waiting { since } = self.state else {
+            return;
+        };
+        if now - since >= RETRY && telemetry::online() {
+            self.send(ctx, log);
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
+    }
+}
+
+impl Report {
+    /// Take the collector's answer, if it has come, at `now`. A server error is waited
+    /// out like no answer at all.
+    fn collect(&mut self, now: f64) {
+        let State::Sending(slot) = &self.state else {
+            return;
+        };
+        let Some(answer) = slot.borrow_mut().take() else {
+            return;
+        };
+        self.state = match answer {
+            Ok(()) => State::Sent,
+            Err(Undelivered::Unreachable) => State::Waiting { since: now },
+            Err(Undelivered::Refused(status)) if status >= 500 => State::Waiting { since: now },
+            Err(Undelivered::Refused(status)) => State::Refused(status),
+        };
     }
 
     fn busy(&self) -> bool {
         matches!(self.state, State::Sending(_) | State::Waiting { .. })
     }
 
-    /// Returns whether the reader is done with it.
-    fn show(&mut self, ui: &mut egui::Ui, log: &Log) -> bool {
-        self.advance(ui.ctx(), log);
+    fn show(&mut self, ui: &mut egui::Ui, log: &Log) -> Option<Pressed> {
         ui.set_width(sheet::width(ui.ctx(), WIDE));
         ui.add_space(sheet::PAD);
-        sheet::section(ui, |ui| match self.state {
-            State::Sent => self.thanks(ui),
-            _ => self.form(ui, log),
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("report")
+            .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+            .show(ui, |ui| {
+                // The scrollbar floats over the content; keep the form out from under it.
+                let scroll = ui.spacing().scroll;
+                ui.set_width(ui.available_width() - scroll.bar_width - scroll.bar_outer_margin);
+                sheet::section(ui, |ui| match self.state {
+                    State::Sent => self.thanks(ui),
+                    _ => self.form(ui, log),
+                });
+            });
         let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
         let mut closed = false;
         let mut send = false;
@@ -205,10 +234,10 @@ impl Report {
                 }
             },
         );
-        if send {
-            self.send(ui.ctx(), log);
+        if closed || escaped {
+            return Some(Pressed::Close);
         }
-        closed || escaped
+        send.then_some(Pressed::Send)
     }
 
     fn form(&mut self, ui: &mut egui::Ui, log: &Log) {
@@ -354,16 +383,108 @@ fn none(text: &str) -> &str {
     }
 }
 
-/// Draw the sheet if it is open, and close it when the reader is done.
+/// Draw the sheet if it is open, send it when asked, and close it when the reader is
+/// done.
+#[cfg(target_arch = "wasm32")]
 pub fn dialog(ctx: &egui::Context, open: &mut Option<Report>, log: &Log) {
     let Some(report) = open.as_mut() else {
         return;
     };
-    if egui::Modal::new(egui::Id::new("report"))
+    report.advance(ctx, log);
+    let pressed = egui::Modal::new(egui::Id::new("report"))
         .frame(sheet::frame(&ctx.style().visuals))
         .show(ctx, |ui| report.show(ui, log))
-        .inner
-    {
-        *open = None;
+        .inner;
+    match pressed {
+        Some(Pressed::Send) => report.send(ctx, log),
+        Some(Pressed::Close) => *open = None,
+        None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing;
+
+    /// The state a send reaches once the collector's `answer` arrives at 1 s.
+    fn after(answer: Result<(), Undelivered>) -> State {
+        let mut report = report(State::Sending(Rc::new(RefCell::new(Some(answer)))));
+        report.collect(1.0);
+        report.state
+    }
+
+    #[test]
+    fn a_server_error_is_waited_out_and_a_refusal_is_final() {
+        assert!(matches!(after(Ok(())), State::Sent));
+        assert!(matches!(
+            after(Err(Undelivered::Unreachable)),
+            State::Waiting { since } if since == 1.0
+        ));
+        assert!(matches!(
+            after(Err(Undelivered::Refused(503))),
+            State::Waiting { .. }
+        ));
+        assert!(matches!(
+            after(Err(Undelivered::Refused(413))),
+            State::Refused(413)
+        ));
+    }
+
+    #[test]
+    fn a_send_still_out_stays_sending() {
+        let mut report = report(State::Sending(Rc::default()));
+        report.collect(1.0);
+        assert!(matches!(report.state, State::Sending(_)));
+    }
+
+    fn report(state: State) -> Report {
+        Report {
+            id: "23456789ab".to_string(),
+            kind: Kind::Problem,
+            text: "The sample would not send.\n".repeat(40),
+            contact: String::new(),
+            with_faults: true,
+            with_build: true,
+            with_log: true,
+            faults: vec!["put: transport".to_string()],
+            build: "Version: 0.10.0\n".to_string(),
+            state,
+        }
+    }
+
+    /// The shell refuses a smaller screen than this, so a long message scrolls and the
+    /// sheet's button stays on screen in every state.
+    #[test]
+    fn the_sheet_keeps_its_button_on_the_smallest_screen_the_shell_allows() {
+        let size = crate::shell::LEAST;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        for (name, state, button) in [
+            ("drafting", State::Drafting, "Send"),
+            ("sending", State::Sending(Rc::default()), "Send"),
+            ("waiting", State::Waiting { since: 0.0 }, "Send"),
+            ("refused", State::Refused(403), "Send"),
+            ("sent", State::Sent, "Close"),
+        ] {
+            let mut report = report(state);
+            let ctx = testing::context();
+            egui_extras::install_image_loaders(&ctx);
+            let log = Log::default();
+            let mut said = Vec::new();
+            // Twice, because a scroll area sizes itself from the previous frame's content.
+            for _ in 0..2 {
+                let output = testing::run(&ctx, testing::screen(size, Vec::new()), |ctx| {
+                    egui::Modal::new(egui::Id::new("report"))
+                        .frame(sheet::frame(&ctx.style().visuals))
+                        .show(ctx, |ui| report.show(ui, &log));
+                });
+                said = testing::painted(&output);
+            }
+            let drawn = testing::where_(&said, button);
+            assert!(
+                screen.contains_rect(drawn.expand(6.0)),
+                "{button} is off a {size:?} screen while {name}: {drawn:?}"
+            );
+        }
     }
 }

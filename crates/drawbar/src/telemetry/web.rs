@@ -8,7 +8,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::Storage;
 
-use super::{firsts, instrument, language, record, Event, ENDPOINT, ORIGIN};
+use super::{firsts, instrument, language, record, Event, Undelivered, ENDPOINT, ORIGIN};
 use crate::js::field;
 
 /// `off` while the operator has turned sharing off. `index.html` reads the same key.
@@ -234,15 +234,6 @@ fn referrer(window: &web_sys::Window) -> String {
 /// Whether the browser believes it is online.
 pub fn online() -> bool {
     web_sys::window().is_some_and(|window| window.navigator().on_line())
-}
-
-/// Why a report did not arrive.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Undelivered {
-    /// No answer: offline, or the collector was out of reach.
-    Unreachable,
-    /// The collector answered with this status.
-    Refused(u16),
 }
 
 /// Send a report, `body` being its JSON. Sent whether or not sharing is on: the operator
