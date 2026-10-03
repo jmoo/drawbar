@@ -155,6 +155,8 @@ impl OnDisk {
     /// ⚠️ On the desktop that is hundreds of megabytes for a piano library. The browser
     /// cannot wait for a read, and refuses: [`OnDisk::whole_then`] reads it off the frame.
     pub fn whole(&self) -> io::Result<Vec<u8>> {
+        #[cfg(test)]
+        self.reads.lock().expect("unpoisoned").push(0..self.len);
         self.source.whole(self.len)
     }
 
@@ -245,7 +247,7 @@ impl OnDisk {
                 .is_ok_and(|crc| crc == nord_format::crc::crc32(bytes))
     }
 
-    /// The ranges read so far, emptied.
+    /// The ranges read so far, a read of the whole file among them, emptied.
     #[cfg(test)]
     pub fn take_reads(&self) -> Vec<Range<u64>> {
         std::mem::take(&mut self.reads.lock().expect("unpoisoned"))

@@ -414,6 +414,32 @@ pub enum Failure {
     Io(String),
 }
 
+/// What a file copied into the library is a copy of, as the app asks for it.
+#[derive(Clone, Debug)]
+pub enum CopyOf {
+    /// A file outside the library.
+    Outside(Outside),
+    /// The file the asset with this id rests in, byte for byte, from wherever it is when
+    /// the copy is sent.
+    Asset(u64),
+    /// A piano or sample instrument resting in the library, with an edit written through
+    /// it as it is copied.
+    Edited(Arc<OnDisk>, Arc<Rewrite>),
+}
+
+/// What a [`Cmd::Import`] copies.
+#[derive(Debug)]
+pub enum Source {
+    /// A file outside the library.
+    Outside(Outside),
+    /// A file of the library, byte for byte, which must still hold what its fingerprint
+    /// says.
+    Library(LibPath, Fingerprint),
+    /// A piano or sample instrument resting in the library, with an edit written through
+    /// it as it is copied.
+    Edited(Arc<OnDisk>, Arc<Rewrite>),
+}
+
 /// What the app asks a backend to do. Each runs after the one sent before it.
 ///
 /// Every command that writes first makes `.drawbar/` where there is none and takes the
@@ -487,14 +513,14 @@ pub enum Cmd {
         edit: Arc<Rewrite>,
         expect: Fingerprint,
     },
-    /// Copy a file from outside the library to `path`, as [`Cmd::Save`] writes one: a new
-    /// file when `expect` is `None`, otherwise over a file that must still hold what
-    /// `expect` says. Nothing is read whole: a piano or sample instrument is left resting
-    /// in the copy, and any other file is left unread. Answered by [`Event::Imported`].
+    /// Copy a file to `path`, as [`Cmd::Save`] writes one: a new file when `expect` is
+    /// `None`, otherwise over a file that must still hold what `expect` says. Nothing is
+    /// read whole: a piano or sample instrument is left resting in the copy, and any other
+    /// file is left unread. Answered by [`Event::Imported`].
     Import {
         id: u64,
         path: LibPath,
-        from: Outside,
+        from: Source,
         expect: Option<Fingerprint>,
     },
     /// Answered only on failure.

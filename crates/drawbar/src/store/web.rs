@@ -1240,6 +1240,12 @@ impl Fs for Folder {
     }
 
     /// ⚠️ As [`Fs::create`], the check and the move are two steps.
+    async fn copy(&mut self, path: &str, from: &str, over: bool) -> io::Result<()> {
+        let from = snapshot(&self.file(from).await?).await?;
+        self.copy_in(path, &from, over).await
+    }
+
+    /// ⚠️ As [`Fs::create`], the check and the move are two steps.
     async fn rewrite(
         &mut self,
         path: &str,

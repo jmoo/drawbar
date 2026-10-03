@@ -23,7 +23,7 @@ use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
 use crate::rewrite::Rewrite;
-use crate::store::{names, LibPath, Outside};
+use crate::store::{names, CopyOf, LibPath, Outside};
 use crate::summary::{Naming, Plays, Summary, Verdict};
 use crate::work;
 
@@ -1236,9 +1236,9 @@ pub struct Workspace {
     waking: Vec<Wake>,
     /// The files, by [`OnDisk::serial`], a read whole out of failed. Each is read once.
     unwoken: std::collections::BTreeSet<u64>,
-    /// Assets whose file is being copied in from outside the library, each with the file
-    /// it comes from. Each is unread until its copy lands.
-    arriving: std::collections::BTreeMap<u64, Outside>,
+    /// Assets whose file is being copied in, each with what it is a copy of. Each is
+    /// unread until its copy lands.
+    arriving: std::collections::BTreeMap<u64, CopyOf>,
     /// The files File ▸ Open… picked, not yet taken.
     picked: Vec<Outside>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
@@ -2334,15 +2334,14 @@ impl Workspace {
         (id, arrival)
     }
 
-    /// Take the file outside the library at `from`, `len` bytes, onto this computer at
-    /// `path`: an asset unread until the library has copied the file there, which it then
-    /// reads as any file of its own.
-    pub fn arrive(&mut self, path: LibPath, from: Outside, len: u64) -> u64 {
+    /// Take a copy of `from`, about `len` bytes, onto this computer at `path`: an asset
+    /// unread until the library has copied the file there, which it then reads as any
+    /// file of its own.
+    pub fn arrive(&mut self, path: LibPath, origin: Origin, from: CopyOf, len: u64) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let name = path.leaf().to_string();
         let stamp = self.stamp();
-        let origin = Origin::File(name.clone());
         self.entities.push(LocalEntity {
             path: Some(path),
             ..LocalEntity::listed(id, name, origin, len, stamp)
@@ -2352,9 +2351,9 @@ impl Workspace {
         id
     }
 
-    /// Copy the file outside the library at `from`, `len` bytes, over the file of the
-    /// asset `id`, which is unread until the copy lands. Its tags and its place stay.
-    pub fn arrive_over(&mut self, id: u64, from: Outside, len: u64) {
+    /// Copy `from`, about `len` bytes, over the file of the asset `id`, which is unread
+    /// until the copy lands. Its tags and its place stay.
+    pub fn arrive_over(&mut self, id: u64, from: CopyOf, len: u64) {
         self.relist(id, len);
         if self.get(id).is_some() {
             self.arriving.insert(id, from);
@@ -2362,20 +2361,39 @@ impl Workspace {
     }
 
     /// Copy `from` in again for an asset whose copy did not land.
-    pub fn arrive_again(&mut self, id: u64, from: Outside) {
+    pub fn arrive_again(&mut self, id: u64, from: CopyOf) {
         if self.get(id).is_some() {
             self.arriving.insert(id, from);
         }
     }
 
-    /// The file outside the library an asset's copy comes from, while it is arriving.
-    pub fn arriving(&self, id: u64) -> Option<&Outside> {
+    /// What an asset's copy is a copy of, while it is arriving.
+    pub fn arriving(&self, id: u64) -> Option<&CopyOf> {
         self.arriving.get(&id)
     }
 
+    /// The arriving assets whose copies are of the file `id` rests in.
+    pub fn copies_of(&self, id: u64) -> impl Iterator<Item = u64> + '_ {
+        let copies = self.arriving.iter();
+        copies
+            .filter(move |(_, from)| matches!(from, CopyOf::Asset(source) if *source == id))
+            .map(|(copy, _)| *copy)
+    }
+
     /// An asset's copy has answered: it no longer arrives.
-    pub fn arrived(&mut self, id: u64) -> Option<Outside> {
+    pub fn arrived(&mut self, id: u64) -> Option<CopyOf> {
         self.arriving.remove(&id)
+    }
+
+    /// What a copy of an asset resting in its file is a copy of: the file with the edit
+    /// an editor holds of it written through, or the file as it is. `None` for one that
+    /// does not rest in a file.
+    pub fn copy_of(&self, id: u64) -> Option<CopyOf> {
+        self.get(id)?.rests()?;
+        Some(match self.edit_of(id) {
+            Some((from, edit)) => CopyOf::Edited(from.clone(), edit.clone()),
+            None => CopyOf::Asset(id),
+        })
     }
 
     /// Let go of what an asset holds, unread again as a file of `len` bytes under a new

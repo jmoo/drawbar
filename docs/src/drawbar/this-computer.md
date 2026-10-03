@@ -94,8 +94,9 @@ held is marked **not read** until there is room for it again.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so they
 stay in their files: drawbar holds in memory only the part it shows or plays,
-and reads one whole when you send it or copy it. Saving an edit of one writes
-its file again from itself, and exporting or sending one saves it first. When one is read, its checksum is checked in the background. Its row says
+and reads one whole only to send it. Saving an edit of one writes its file
+again from itself, exporting or sending one saves it first, and duplicating one
+copies its file. When one is read, its checksum is checked in the background. Its row says
 **checking…** until that is done, and **failed verification** if the file does
 not match its checksum. Such a file is not sent. What stays in its file does
 not count toward the 1 GiB.

@@ -14,8 +14,8 @@ use super::diff::{self, match_files, Known};
 use super::exec::{too_much, working_name};
 use super::sidecar::{Row, Sidecar, VERSION};
 use super::{
-    names, Backend, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing,
-    Opened, Outside, MOST_BYTES,
+    names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, LibPath,
+    Listing, Opened, Source, MOST_BYTES,
 };
 use crate::browser::Browser;
 use crate::folders::{Folders, Op, Where};
@@ -1950,12 +1950,15 @@ impl Store {
             None => {
                 self.records.remove(&id);
                 workspace.forget(id);
-                if let Some(from) = from {
-                    log.trouble(format!(
-                        "“{name}” was not copied into the library, because {why}. It is kept \
-                         in memory instead."
-                    ));
-                    workspace.read_outside(name, from);
+                match from {
+                    Some(CopyOf::Outside(from)) => {
+                        log.trouble(format!(
+                            "“{name}” was not copied into the library, because {why}. It is \
+                             kept in memory instead."
+                        ));
+                        workspace.read_outside(name, from);
+                    }
+                    _ => log.trouble(format!("“{name}” was not made, because {why}.")),
                 }
             }
         }
@@ -2335,7 +2338,7 @@ impl Store {
     fn file(
         &mut self,
         entity: &LocalEntity,
-        arriving: Option<&Outside>,
+        arriving: Option<&CopyOf>,
         waiting: &[(LibPath, LibPath)],
     ) -> bool {
         let (true, Some(path)) = (entity.kept, &entity.path) else {
@@ -2355,8 +2358,7 @@ impl Store {
             return false;
         }
         if let Some(from) = arriving {
-            self.import(entity, path, from);
-            return true;
+            return self.import(entity, path, from, waiting);
         }
         let bytes = || entity.saved.bytes.to_vec();
         if !self
@@ -2433,15 +2435,35 @@ impl Store {
         !waits
     }
 
-    /// Send the copy an asset arriving from outside the library waits on: a new file at
-    /// its path, or a copy over the file it has, unless a copy is in flight already.
-    fn import(&mut self, entity: &LocalEntity, path: &LibPath, from: &Outside) {
+    /// Send the copy an arriving asset waits on: a new file at its path, or a copy over
+    /// the file it has, unless a copy is in flight already. Returns `false` where the
+    /// file it copies has a save or a rename to answer first, and the copy waits.
+    fn import(
+        &mut self,
+        entity: &LocalEntity,
+        path: &LibPath,
+        from: &CopyOf,
+        waiting: &[(LibPath, LibPath)],
+    ) -> bool {
+        let from = match from {
+            CopyOf::Outside(file) => Source::Outside(file.clone()),
+            CopyOf::Edited(file, edit) => Source::Edited(file.clone(), edit.clone()),
+            CopyOf::Asset(source) => {
+                let source = self.records.get(source).filter(|source| !source.saving);
+                let found =
+                    source.and_then(|source| Some((source.path.clone()?, source.fingerprint?)));
+                match found {
+                    Some((at, print)) if !unsettled(waiting, &at) => Source::Library(at, print),
+                    _ => return false,
+                }
+            }
+        };
         let record = self
             .records
             .entry(entity.id)
             .or_insert_with(|| Record::of_file(path.clone(), None));
         if record.saving {
-            return;
+            return true;
         }
         record.saving = true;
         record.saved = entity.saved.stamp;
@@ -2450,9 +2472,10 @@ impl Store {
         self.write(Cmd::Import {
             id: entity.id,
             path,
-            from: from.clone(),
+            from,
             expect,
         });
+        true
     }
 
     /// Write a working copy for an edit not yet saved, or drop the one a save made
@@ -2515,6 +2538,11 @@ impl Store {
             .filter(|id| workspace.get(*id).is_none())
             .collect();
         for id in gone {
+            // A file a copy is still to be sent of waits for it.
+            let copied = |copy: u64| self.records.get(&copy).is_some_and(|held| held.saving);
+            if !workspace.copies_of(id).all(copied) {
+                continue;
+            }
             let Some(record) = self.records.get_mut(&id) else {
                 continue;
             };

@@ -3402,3 +3402,135 @@ fn a_plan_over_a_resting_piano_is_saved_through_its_file() {
     assert!(entity.rests().is_some() && !entity.is_unsaved());
     assert_eq!(entity.held_whole(), 0);
 }
+
+impl Session {
+    /// Hold an edit renaming the sample instrument `id` rests in, as its document does,
+    /// without saving it, and return the bytes a whole edit makes of `bytes`.
+    fn edit_resting(&mut self, id: u64, bytes: &[u8]) -> Vec<u8> {
+        self.rename_resting(id, "Vibes");
+        let workspace = &mut self.bench.workspace;
+        workspace.edit_not_saved(id);
+        crate::document::sample::apply(bytes, &[("name".into(), "Vibes".into())]).unwrap()
+    }
+}
+
+/// A sample instrument resting in its file is duplicated by copying the file, beside
+/// it, and the copy rests in its own file. Nothing holds either whole.
+#[test]
+fn a_resting_sample_is_duplicated_by_copying_its_file() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let file = session
+        .bench
+        .workspace
+        .get(id)
+        .unwrap()
+        .rests()
+        .unwrap()
+        .clone();
+    session
+        .bench
+        .act(vec![crate::browser::Act::DuplicateLocal(id)]);
+    session.sync();
+
+    assert_eq!(file.take_reads(), [], "nothing read it");
+    assert!(root.read("Zoned copy.nsmp") == bytes);
+    assert!(root.read("Zoned.nsmp") == bytes);
+    let workspace = &session.bench.workspace;
+    let copy = session.named("Zoned copy.nsmp");
+    assert!(
+        workspace.get(copy).unwrap().rests().is_some(),
+        "the copy rests"
+    );
+    assert_eq!(workspace.held_whole(), 0);
+}
+
+/// A duplicate of a sample instrument holding an unsaved edit over its file carries the
+/// edit, written through as the file is copied, and leaves the edit unsaved where it was.
+#[test]
+fn a_duplicate_of_a_resting_samples_edit_carries_the_edit() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let edited = session.edit_resting(id, &bytes);
+    session
+        .bench
+        .act(vec![crate::browser::Act::DuplicateLocal(id)]);
+    session.sync();
+
+    assert!(root.read("Zoned copy.nsmp") == edited);
+    assert!(
+        root.read("Zoned.nsmp") == bytes,
+        "the original is not saved"
+    );
+    let workspace = &session.bench.workspace;
+    assert!(workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(workspace.held_whole(), 0);
+}
+
+/// Keep both, over a sample instrument holding an unsaved edit over its file, writes the
+/// edit beside the file under a free name and takes the file as it is.
+#[test]
+fn keep_both_writes_a_resting_samples_edit_beside_its_file() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let edited = session.edit_resting(id, &bytes);
+    let file = session
+        .bench
+        .workspace
+        .get(id)
+        .unwrap()
+        .rests()
+        .unwrap()
+        .clone();
+    session.bench.act(vec![crate::browser::Act::KeepBoth(id)]);
+    session.sync();
+
+    assert_eq!(file.take_reads(), [], "nothing read it");
+    assert!(root.read("Zoned 2.nsmp") == edited);
+    assert!(root.read("Zoned.nsmp") == bytes);
+    let workspace = &session.bench.workspace;
+    assert!(
+        !workspace.get(id).unwrap().is_unsaved(),
+        "the file is taken as it is"
+    );
+    assert!(workspace.edit_of(id).is_none());
+    let mine = session.named("Zoned 2.nsmp");
+    assert!(session.bench.workspace.get(mine).unwrap().rests().is_some());
+}
+
+/// A sample instrument resting in its file, renamed onto a taken name and overwriting
+/// what is there, is copied over that file, which keeps its asset; its own file goes.
+#[test]
+fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
+    let root = Temp::new();
+    let ours = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
+    let theirs = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184);
+    fs::write(root.at("Kept.nsmp"), &theirs).unwrap();
+    fs::write(root.at("Moved.nsmp"), &ours).unwrap();
+    let mut session = Session::listed(&root);
+    session.ask_all();
+    let (kept, moved) = (session.named("Kept.nsmp"), session.named("Moved.nsmp"));
+    let workspace = &session.bench.workspace;
+    let file = workspace.get(moved).unwrap().rests().unwrap().clone();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(kept, tag, true);
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.nsmp".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+
+    assert!(root.read("Kept.nsmp") == ours);
+    assert_eq!(file.take_reads(), [], "nothing read it");
+    assert!(
+        !root.at("Moved.nsmp").exists(),
+        "the file it came from is gone"
+    );
+    assert!(session.bench.workspace.get(moved).is_none());
+    assert!(session.bench.browser.tags.worn(kept).contains(&tag));
+    let entity = session.bench.workspace.get(kept).unwrap();
+    assert!(entity.rests().is_some() && entity.held_whole() == 0);
+}

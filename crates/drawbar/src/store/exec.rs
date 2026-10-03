@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::sidecar::{self, Read, Sidecar};
 use super::{
     Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened, Outside,
-    Stat,
+    Source, Stat,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -118,6 +118,8 @@ pub trait Fs {
     /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of a copy of the file
     /// outside the library at `from`, which is never held whole.
     async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()>;
+    /// [`Fs::copy_in`] of the library's own file at `from`.
+    async fn copy(&mut self, path: &str, from: &str, over: bool) -> io::Result<()>;
     /// [`Fs::create`] of the file `edit` makes of `from`, a piano or sample instrument
     /// resting in the library, which is read by range and never held whole; or, where
     /// `over` names the [`Stat`] of the file at `path`, [`Fs::replace`] of it. A source
@@ -649,7 +651,9 @@ impl Follow {
                 from: from.clone(),
                 to: to.clone(),
             },
-            Cmd::Save { path, .. } | Cmd::Import { path, .. } => Follow::Wrote(path.clone()),
+            Cmd::Save { path, .. } | Cmd::Import { path, .. } | Cmd::Rewrite { path, .. } => {
+                Follow::Wrote(path.clone())
+            }
             Cmd::MakeDir(path) => Follow::Made(path.clone()),
             Cmd::RemoveDir(path) => Follow::Removed(path.clone()),
             _ => Follow::Nothing,
@@ -665,6 +669,7 @@ fn failed(event: &Event) -> bool {
             | Event::ReadOnly(_)
             | Event::Saved { result: Err(_), .. }
             | Event::Imported { result: Err(_), .. }
+            | Event::Rewritten { result: Err(_), .. }
             | Event::Moved { result: Err(_), .. }
     )
 }
@@ -1335,24 +1340,47 @@ async fn landed(fs: &impl Fs, path: &LibPath) -> Result<Found, Failure> {
     })
 }
 
-/// Copy the file at `from` into the library at `path`, and find it there as a listing
-/// would: resting, where it is a piano or sample instrument, and otherwise unread.
+/// Copy `from` into the library at `path`, and find it there as a listing would:
+/// resting, where it is a piano or sample instrument, and otherwise unread.
 async fn import(
     fs: &mut impl Fs,
     path: &LibPath,
-    from: &Outside,
+    from: &Source,
     expect: Option<Fingerprint>,
 ) -> Result<Found, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
-    match expect {
-        None => match fs.copy_in(path.as_str(), from, false).await {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Moved),
-            copied => copied.map_err(io)?,
-        },
-        Some(expect) => match still(fs, path, &expect).await.map_err(io)? {
-            Some(true) => fs.copy_in(path.as_str(), from, true).await.map_err(io)?,
-            Some(false) | None => return Err(Failure::Moved),
-        },
+    let changed = || Failure::Io("the file it copies changed on disk".to_string());
+    if let Source::Library(source, held) = from {
+        if still(fs, source, held).await.map_err(io)? != Some(true) {
+            return Err(changed());
+        }
+    }
+    let over = match expect {
+        None => None,
+        Some(expect) => {
+            if still(fs, path, &expect).await.map_err(io)? != Some(true) {
+                return Err(Failure::Moved);
+            }
+            Some(
+                fs.stat(path.as_str())
+                    .await
+                    .map_err(io)?
+                    .ok_or(Failure::Moved)?,
+            )
+        }
+    };
+    let copied = match from {
+        Source::Outside(file) => fs.copy_in(path.as_str(), file, over.is_some()).await,
+        Source::Library(source, _) => {
+            fs.copy(path.as_str(), source.as_str(), over.is_some())
+                .await
+        }
+        Source::Edited(file, edit) => fs.rewrite(path.as_str(), file, edit, over).await,
+    };
+    match copied {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Moved),
+        Err(e) if rewrite::is_changed(&e) => return Err(changed()),
+        copied => copied.map_err(io)?,
     }
     landed(fs, path).await
 }
@@ -1489,6 +1517,10 @@ mod tests {
             Ok(())
         }
         async fn copy_in(&mut self, _: &str, _: &Outside, _: bool) -> io::Result<()> {
+            Err(refused())
+        }
+
+        async fn copy(&mut self, _: &str, _: &str, _: bool) -> io::Result<()> {
             Err(refused())
         }
 

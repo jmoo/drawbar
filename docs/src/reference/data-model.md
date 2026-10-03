@@ -393,10 +393,17 @@ then. An export or send of an asset holding such an edit waits for it to be
 saved first. An edit held this way has no working copy, so opening another
 library asks before discarding it.
 
-Some acts still need the whole file. They read it whole off the frame first
-(`Workspace::wake`): a send, Keep both, Duplicate, and an Overwrite that replaces
-another file. In the browser the act waits for that read. Exporting a resting
-file copies it across without reading it into memory.
+Duplicate, Keep both, and an Overwrite that puts a resting file over another, are
+copies the library makes too (`Workspace::arrive`, `store::CopyOf`): `Cmd::Import`
+copies the library's own file byte for byte (`std::fs::copy` on the desktop,
+which clones the file where the disk can, and slice by slice through the writer
+in the browser), or writes the edit held of it through as it copies. The copy's
+asset is unread until it lands, then rests in it, and a file a copy is still to be
+sent of is not deleted before it is.
+
+A send still needs the whole file. It reads it whole off the frame first
+(`Workspace::wake`), and in the browser the send waits for that read. Exporting a
+resting file copies it across without reading it into memory.
 
 ## The store protocol
 
@@ -417,7 +424,7 @@ asynchronously.
 | `Fingerprint` | `Fingerprinted`: the CRCs of files whose stat has not moved. |
 | `Save` | `Saved`: the new fingerprint, or why not. |
 | `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
-| `Import` | `Imported`: the copy of a file from outside, found as a listing finds it, or why not. |
+| `Import` | `Imported`: a copy of a file from outside or of the library's own, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
 | `Commit`, `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |
 

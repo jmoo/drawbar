@@ -14,7 +14,7 @@ use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Page, Shell};
-use crate::store::{names, outside_len, LibPath, Outside};
+use crate::store::{names, outside_len, CopyOf, LibPath, Outside};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Origin, VerifyState, Workspace};
@@ -61,6 +61,13 @@ pub enum Act {
         id: u64,
         bytes: Vec<u8>,
         gone: Option<u64>,
+    },
+    /// Copy the file the asset `from` rests in, with any edit held of it, over the file
+    /// of the asset `id`, which keeps its id, folder and tags, and remove `from`: the
+    /// overwrite of an asset renamed or moved onto a name, where it rests in its file.
+    CopyOver {
+        id: u64,
+        from: u64,
     },
     /// Move an asset into a folder, or the top level for `None`, under `name`.
     MoveAs {
@@ -234,6 +241,7 @@ impl Act {
             | Act::Import { .. }
             | Act::Take { .. }
             | Act::TakeOver { .. }
+            | Act::CopyOver { .. }
             | Act::Forget(_)
             | Act::NewFolder
             | Act::NewFolderIn(_)
@@ -422,9 +430,7 @@ enum Ready {
 /// The assets an act carries whole: a send, or a copy of what they hold.
 fn carries(act: &Act, queue: &Queue) -> Vec<u64> {
     match act {
-        Act::KeepBoth(id)
-        | Act::DuplicateLocal(id)
-        | Act::WriteBack(id)
+        Act::WriteBack(id)
         | Act::Send { id, .. }
         | Act::Retarget { id, .. }
         | Act::Replace { id, .. } => vec![*id],
@@ -561,6 +567,7 @@ pub fn apply(
                     log.say(format!("Replaced “{}”.", entity.name));
                 }
             }
+            Act::CopyOver { id, from } => copy_over(browser, workspace, tabs, queue, log, id, from),
             Act::MoveAs { id, folder, name } => match browser.folders.dir(folder) {
                 Some(dir) => put(browser, workspace, log, id, dir, name),
                 None => log.say("That folder is gone, so nothing moved."),
@@ -774,27 +781,23 @@ fn put(
         Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
         Clash::Taken(occupant) => {
             let folder = browser.folders.id_of(&dir);
-            // The overwrite it offers carries it whole, and the browser reads that first.
-            if cfg!(target_arch = "wasm32") {
-                if let Ready::Later = wake(workspace, id) {
-                    return browser.held.push(Act::MoveAs { id, folder, name });
-                }
-            }
-            let Some(entity) = workspace.get(id) else {
-                return;
-            };
             let free = browser.folders.free(&dir, &name, workspace);
             let both = vec![Act::MoveAs {
                 id,
                 folder,
                 name: free.clone(),
             }];
-            let over = match entity.whole() {
-                Ok(bytes) => over(occupant, workspace, bytes.into_owned(), Some(id)),
-                Err(e) => {
-                    log.error(format!("{}: {e}", entity.name));
-                    None
-                }
+            // One resting in its file is copied over by the library, never held whole.
+            let over = match entity.rests() {
+                Some(_) => overwritable(occupant, workspace)
+                    .map(|held| vec![Act::CopyOver { id: held, from: id }]),
+                None => match entity.whole() {
+                    Ok(bytes) => over(occupant, workspace, bytes.into_owned(), Some(id)),
+                    Err(e) => {
+                        log.error(format!("{}: {e}", entity.name));
+                        None
+                    }
+                },
             };
             browser.ask_clash(&name, &dir, over, both, &free);
         }
@@ -886,7 +889,8 @@ fn take(
     };
     match browser.folders.clash(&dir, &name, workspace, None) {
         Clash::Free => {
-            workspace.arrive(dir.join(&name), from, len);
+            let origin = Origin::File(name.clone());
+            workspace.arrive(dir.join(&name), origin, CopyOf::Outside(from), len);
         }
         Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
         Clash::Taken(occupant) => {
@@ -914,7 +918,7 @@ fn take_over(workspace: &mut Workspace, log: &mut Log, id: u64, from: Outside) {
     };
     let name = entity.name.clone();
     match outside_len(&from) {
-        Some(len) => workspace.arrive_over(id, from, len),
+        Some(len) => workspace.arrive_over(id, CopyOf::Outside(from), len),
         None => log.trouble(format!("The file to put over “{name}” could not be read.")),
     }
 }
@@ -936,11 +940,48 @@ fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u
     put(browser, workspace, log, id, path.parent(), name);
 }
 
+/// Copy the file the asset `from` rests in over the file of the asset `id`, and remove
+/// `from`.
+fn copy_over(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    tabs: &mut Tabs,
+    queue: &mut Queue,
+    log: &mut Log,
+    id: u64,
+    from: u64,
+) {
+    let (Some(copy), Some(source)) = (workspace.copy_of(from), workspace.get(from)) else {
+        return;
+    };
+    let len = source.size();
+    workspace.arrive_over(id, copy, len);
+    remove(browser, workspace, tabs, queue, log, from);
+    if let Some(entity) = workspace.get(id) {
+        log.say(format!("Replaced “{}”.", entity.name));
+    }
+}
+
 fn duplicate(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
     let dir = workspace
         .get(id)
         .and_then(|entity| entity.path.as_ref())
         .map(LibPath::parent);
+    // One resting in its file is copied by the library, never held whole.
+    if let (Some(dir), Some(copy)) = (dir.clone(), workspace.copy_of(id)) {
+        let Some(source) = workspace.get(id) else {
+            return;
+        };
+        let named = crate::strings::display_name(&source.name);
+        let wanted = names::portable(&crate::strings::tagged(
+            &source.name,
+            &format!("{named} copy"),
+        ));
+        let name = browser.folders.free(&dir, &wanted, workspace);
+        let (origin, len) = (source.origin.clone(), source.size());
+        workspace.arrive(dir.join(&name), origin, copy, len);
+        return;
+    }
     let Some(copy) = workspace.duplicate(id, log) else {
         return;
     };
@@ -962,6 +1003,12 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         .as_ref()
         .map_or_else(LibPath::root, LibPath::parent);
     let name = browser.folders.free(&dir, &entity.name, workspace);
+    // One resting in its file is copied by the library, with the edit held of it.
+    if let Some(copy) = workspace.copy_of(id) {
+        let (origin, len) = (entity.origin.clone(), entity.size());
+        workspace.arrive(dir.join(&name), origin, copy, len);
+        return workspace.revert(id, log);
+    }
     let mine = match entity.whole() {
         Ok(mine) => mine.into_owned(),
         Err(e) => {

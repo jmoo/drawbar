@@ -438,6 +438,22 @@ impl Fs for Disk {
         self.place(temp, path, over)
     }
 
+    /// The copy is the system's own, which on a disk that can shares the source's blocks
+    /// rather than writing them again.
+    async fn copy(&mut self, path: &str, from: &str, over: bool) -> io::Result<()> {
+        if !over {
+            self.free(path)?;
+        }
+        let temp = self.locate(&temp_for(path))?;
+        let copied = fs::copy(self.locate(from)?, &temp)
+            .and_then(|_| File::options().write(true).open(&temp)?.sync_all());
+        if let Err(e) = copied {
+            let _ = fs::remove_file(&temp);
+            return Err(e);
+        }
+        self.place(temp, path, over)
+    }
+
     async fn rewrite(
         &mut self,
         path: &str,
@@ -699,6 +715,59 @@ mod tests {
             [".drawbar", "Grand.npno"],
             "no copy is left"
         );
+    }
+
+    /// A piano library of a vendor's size is copied byte for byte, and copied with an
+    /// edit written through it, with nothing near its size held at once.
+    #[test]
+    fn a_large_piano_is_copied_with_no_buffer_near_its_size() {
+        use crate::rewrite::Rewrite;
+        use crate::store::Source;
+
+        let root = Temp::new();
+        let bytes = large_piano();
+        fs::write(root.at("Grand.npno"), &bytes).unwrap();
+        let file = File::open(root.at("Grand.npno")).unwrap();
+        let from = Arc::new(OnDisk::open(file, None).unwrap().unwrap());
+        let crate::ondisk::Index::Piano(index) = &from.index else {
+            panic!("a piano library")
+        };
+        let mut library = index.library().clone();
+        library.set_name("Edited").unwrap();
+        let stat = stat(&fs::metadata(root.at("Grand.npno")).unwrap());
+        let import = |name: &str, from: Source| Cmd::Import {
+            id: 1,
+            path: LibPath::root().join(name),
+            from,
+            expect: None,
+        };
+        let copied = import(
+            "Copy.npno",
+            Source::Library(
+                LibPath::root().join("Grand.npno"),
+                Fingerprint::unread(stat),
+            ),
+        );
+        let edited = import(
+            "Edited.npno",
+            Source::Edited(from, Arc::new(Rewrite::Piano(library))),
+        );
+
+        for (name, cmd) in [("Copy.npno", copied), ("Edited.npno", edited)] {
+            let (answer, largest) =
+                crate::testing::largest_allocation(|| execute(&mut disk(&root), cmd));
+            assert!(largest < 8 << 20, "{name}: {largest} bytes held at once");
+            let Some(Event::Imported {
+                result: Ok(found), ..
+            }) = answer
+            else {
+                panic!("{name}: {answer:?}")
+            };
+            assert!(found.file.is_some(), "{name} rests in its file");
+        }
+        assert!(root.read("Copy.npno") == bytes);
+        let info = nord_format::cbin::inspect(&mut File::open(root.at("Edited.npno")).unwrap());
+        assert!(info.unwrap().checksum_ok);
     }
 
     /// A file whose stat moves while its edit is written is not written over, and the
