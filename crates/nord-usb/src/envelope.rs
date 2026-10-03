@@ -7,7 +7,7 @@
 use crate::error::{Error, Result};
 use crate::wire::Location;
 use nord_format::cbin::{self, Cbin, Generation, Header, RawBody, Verifier};
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 /// CRC-32/ISO-HDLC over a wire body. The type-1 container carries the same checksum,
@@ -45,20 +45,37 @@ pub fn tag(header: &Header) -> String {
 /// ⚠️ Read from the header bytes without parsing: this must work for a file whose
 /// checksum is bad, because that file may be a slot's last remaining copy.
 pub fn unchecked_tag(file: &[u8]) -> Option<String> {
-    file.get(8..12)
-        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
-        .map(|tag| String::from_utf8_lossy(tag).into_owned())
+    file.get(8..12).and_then(tag_text)
+}
+
+/// Four bytes as a format tag, where they are one.
+fn tag_text(tag: &[u8]) -> Option<String> {
+    (tag.len() == 4 && tag.iter().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| String::from_utf8_lossy(tag).into_owned())
 }
 
 /// Filename for the bytes rescued from a slot: the location as the instrument labels
 /// it, and the object's own format tag, or `bin` without one, so the file can be
 /// written straight back. The checksum is not verified.
 pub fn rescue_name(at: Location, backup: &[u8]) -> String {
-    let format = unchecked_tag(backup).unwrap_or_else(|| "bin".to_string());
+    rescued(at, unchecked_tag(backup).as_deref())
+}
+
+/// [`rescue_name`] for a slot whose object the device reported as `format`, before any
+/// of its bytes are read.
+pub fn rescue_name_for(at: Location, format: &str) -> String {
+    rescued(at, tag_text(format.as_bytes()).as_deref())
+}
+
+/// Every rescued file's name starts with this.
+pub const RESCUED: &str = "nord-rescued-";
+
+fn rescued(at: Location, format: Option<&str>) -> String {
     format!(
-        "nord-rescued-{}-{}.{format}",
+        "{RESCUED}{}-{}.{}",
         at.user_bank(),
-        at.user_slot()
+        at.user_slot(),
+        format.unwrap_or("bin")
     )
 }
 
@@ -126,6 +143,91 @@ impl FileSource for &[u8] {
         buf.copy_from_slice(bytes);
         Ok(())
     }
+}
+
+/// A file read by position through [`Seek`], such as a [`std::fs::File`]. Its length is
+/// taken once, when it is wrapped.
+pub struct Positional<R> {
+    inner: R,
+    len: u64,
+}
+
+impl<R: Seek> Positional<R> {
+    pub fn new(mut inner: R) -> io::Result<Positional<R>> {
+        let len = inner.seek(SeekFrom::End(0))?;
+        Ok(Positional { inner, len })
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: Read + Seek> FileSource for Positional<R> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.inner.seek(SeekFrom::Start(offset))?;
+        self.inner.read_exact(buf)
+    }
+}
+
+/// Where the bytes of a file read off the instrument go: a file on disk, a file in a
+/// browser's storage, memory, or nowhere when only their checksum is wanted. A read hands
+/// it one transfer chunk at a time, so the whole file is never held at once.
+///
+/// No `Send` bound, for the reason [`Transport`](crate::transport::Transport) gives.
+#[allow(async_fn_in_trait)]
+pub trait FileSink {
+    /// Write `buf` at `offset`, growing the file as needed. A gap a write leaves before
+    /// `offset` is filled by a later write.
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()>;
+}
+
+impl FileSink for Vec<u8> {
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        let start = usize::try_from(offset).map_err(|_| io::ErrorKind::OutOfMemory)?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or(io::ErrorKind::OutOfMemory)?;
+        if self.len() < end {
+            self.resize(end, 0);
+        }
+        self[start..end].copy_from_slice(buf);
+        Ok(())
+    }
+}
+
+impl FileSink for io::Sink {
+    async fn write_at(&mut self, _offset: u64, _buf: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FileSink for std::fs::File {
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.write_all(buf)
+    }
+}
+
+/// [`unwrap`] for a file read through a [`FileSource`], a transfer chunk at a time: the
+/// header, once every byte has been checked against the stored checksum.
+pub async fn verify(file: &mut impl FileSource) -> Result<Header> {
+    Ok(open(file, crate::op::WRITE_CHUNK).await?.header)
+}
+
+/// The header [`wrap`] would put ahead of a body whose CRC-32 is `body_crc32`, for a body
+/// written apart from it.
+pub(crate) fn header(format: &str, at: Location, version: u32, body_crc32: u32) -> Result<Vec<u8>> {
+    let mut head = wrap(format, at, version, &[])?;
+    let stored = Generation::V1
+        .checksum_range(head.len())
+        .ok_or_else(|| Error::Envelope("a type-1 header has no room for its checksum".into()))?;
+    head[stored].copy_from_slice(&body_crc32.to_le_bytes());
+    Ok(head)
 }
 
 /// A file opened through a [`FileSource`] and verified as [`unwrap`] verifies one: its
@@ -342,6 +444,35 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
         let err = pollster::block_on(file.read_at(u64::MAX, &mut buf)).expect_err("past usize");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A read writes the body behind the header's room and the header last, so memory
+    /// takes a write past its end and keeps what was written there.
+    #[test]
+    fn a_vec_takes_a_write_past_its_end_and_one_into_its_gap() {
+        let mut file = Vec::new();
+        pollster::block_on(file.write_at(3, &[4, 5])).unwrap();
+        assert_eq!(file, [0, 0, 0, 4, 5]);
+        pollster::block_on(file.write_at(0, &[1, 2, 3])).unwrap();
+        assert_eq!(file, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_positional_file_reads_by_offset_and_not_past_its_end() {
+        let mut file = Positional::new(Cursor::new(vec![1u8, 2, 3, 4])).unwrap();
+        assert_eq!(FileSource::len(&file), 4);
+        let mut buf = [0; 2];
+        pollster::block_on(file.read_at(2, &mut buf)).unwrap();
+        assert_eq!(buf, [3, 4]);
+        let err = pollster::block_on(file.read_at(3, &mut buf)).expect_err("one byte short");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_rescue_named_before_its_read_takes_the_reported_tag() {
+        let at = Location { bank: 0, slot: 0 };
+        assert_eq!(rescue_name_for(at, "npno"), "nord-rescued-1-1.npno");
+        assert_eq!(rescue_name_for(at, "nsp\0"), "nord-rescued-1-1.bin");
     }
 
     #[test]
