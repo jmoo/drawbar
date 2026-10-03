@@ -571,10 +571,12 @@ pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     ui.interact(drawn.rect, drawn.id.with("chevron"), egui::Sense::click())
 }
 
+/// The length of a dash, and of the gap after it.
+const DASH: f32 = 3.0;
+
 /// A dashed rectangle: the border for something absent, or for an action with nothing
 /// to act on. egui draws dashes along a line, so a rectangle is four lines.
 pub fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
-    const DASH: f32 = 3.0;
     let corners = [
         rect.left_top(),
         rect.right_top(),
@@ -585,6 +587,171 @@ pub fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stro
     for side in corners.windows(2) {
         painter.extend(egui::Shape::dashed_line(side, stroke, DASH, DASH));
     }
+}
+
+/// [`dashed_rect`] with rounded corners: the border for an empty card.
+pub fn dashed_round_rect(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    radius: f32,
+    stroke: egui::Stroke,
+) {
+    let mut path = Vec::new();
+    egui::epaint::tessellator::path::rounded_rectangle(
+        &mut path,
+        rect,
+        egui::epaint::CornerRadiusF32::same(radius),
+    );
+    if let Some(first) = path.first().copied() {
+        path.push(first);
+    }
+    painter.extend(egui::Shape::dashed_line(&path, stroke, DASH, DASH));
+}
+
+/// The height of a [`tonal_button`].
+pub const TONAL: f32 = 30.0;
+
+/// A glyph and a word on a quiet fill that darkens under the pointer: a view's own
+/// action, beside its title.
+pub fn tonal_button(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
+    const PAD_X: f32 = 11.0;
+    let font = crate::app::ui().resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, egui::Color32::PLACEHOLDER);
+    let width = PAD_X + GLYPH + GAP + galley.size().x + PAD_X;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, TONAL), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let look = ui.style().interact(&response);
+    let (fill, ink) = (look.weak_bg_fill, look.fg_stroke.color);
+    ui.painter().rect_filled(rect, ROW_RADIUS, fill);
+    let mark = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + PAD_X + GLYPH / 2.0, rect.center().y),
+        egui::Vec2::splat(GLYPH),
+    );
+    crate::icon::painted(ui, glyph, mark, ink);
+    ui.painter().galley(
+        egui::pos2(mark.right() + GAP, rect.center().y - galley.size().y / 2.0),
+        galley,
+        ink,
+    );
+    response
+}
+
+/// How tall a view's header block is: [`view_header`]'s title and subtitle with the
+/// padding around them.
+pub const VIEW_HEADER: f32 = 56.0;
+
+/// The padding around a view header's contents, and the side padding of the bands under
+/// it.
+pub const VIEW_PAD: f32 = 16.0;
+
+/// A view's header block: a tile tinted by `signal` holding the view's glyph, a title
+/// over a quieter subtitle, and `trailing` laid out from the right edge.
+///
+/// The title and subtitle are cut short before they reach what `trailing` drew.
+pub fn view_header<R>(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    signal: egui::Color32,
+    title: &str,
+    subtitle: &str,
+    trailing: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    const TILE: f32 = 28.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), VIEW_HEADER),
+        egui::Sense::hover(),
+    );
+    let inner = egui::Rect::from_min_max(
+        rect.min + egui::vec2(VIEW_PAD, 14.0),
+        rect.max - egui::vec2(VIEW_PAD, 10.0),
+    );
+    let mut right = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    right.spacing_mut().item_spacing.x = 4.0;
+    let held = trailing(&mut right);
+    let taken = right.min_rect().width();
+
+    let visuals = ui.visuals().clone();
+    let tile = egui::Rect::from_min_size(
+        egui::pos2(inner.left(), inner.center().y - TILE / 2.0),
+        egui::Vec2::splat(TILE),
+    );
+    ui.painter()
+        .rect_filled(tile, 8.0, crate::app::tint(signal, 0.16));
+    crate::icon::painted(
+        ui,
+        glyph,
+        egui::Rect::from_center_size(tile.center(), egui::Vec2::splat(15.0)),
+        signal,
+    );
+    let words = inner
+        .with_min_x(tile.right() + 10.0)
+        .with_max_x(inner.right() - taken - 10.0);
+    let painter = ui.painter_at(words);
+    let title_font = egui::FontId::new(15.0, crate::app::bold());
+    let subtitle_font = egui::FontId::proportional(11.5);
+    let tall = |font: &egui::FontId| ui.fonts(|fonts| fonts.row_height(font));
+    let (high, low) = (tall(&title_font), tall(&subtitle_font));
+    let top = words.center().y - (high + low) / 2.0;
+    cut(
+        &painter,
+        words.left(),
+        top + high / 2.0,
+        words.width(),
+        title,
+        egui::TextFormat::simple(title_font, visuals.widgets.active.fg_stroke.color),
+    );
+    cut(
+        &painter,
+        words.left(),
+        top + high + low / 2.0,
+        words.width(),
+        subtitle,
+        egui::TextFormat::simple(subtitle_font, crate::app::caption(&visuals)),
+    );
+    held
+}
+
+/// A pill painted from `left` and centered on `middle`, for a cell that is painted rather
+/// than laid out: [`pill`]'s look, with its word cut to fit `room`. Returns the rect
+/// painted, which is empty when there is no room.
+pub fn pill_at(
+    painter: &egui::Painter,
+    left: f32,
+    middle: f32,
+    room: f32,
+    text: &str,
+    ink: egui::Color32,
+    fill: egui::Color32,
+) -> egui::Rect {
+    const PAD_X: f32 = 7.0;
+    if room <= 2.0 * PAD_X || text.is_empty() {
+        return egui::Rect::NOTHING;
+    }
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(egui::FontId::monospace(10.5), ink),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room - 2.0 * PAD_X);
+    let galley = painter.layout_job(job);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(left, middle - PILL / 2.0),
+        egui::vec2(galley.size().x + 2.0 * PAD_X, PILL),
+    );
+    painter.rect_filled(rect, PILL / 2.0, fill);
+    painter.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    rect
 }
 
 /// Style the buttons in a bar to blend with it: no fill and no border until the pointer
