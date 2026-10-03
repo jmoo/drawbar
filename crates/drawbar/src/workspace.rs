@@ -22,6 +22,7 @@ use crate::log::Log;
 use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
+use crate::rewrite::Rewrite;
 use crate::store::{names, LibPath, Outside};
 use crate::summary::{Naming, Plays, Summary, Verdict};
 use crate::work;
@@ -1251,8 +1252,28 @@ pub struct Workspace {
     /// Decodes running off the frame, each of a few assets, and every asset in them.
     decoding: Vec<Decode>,
     flying: std::collections::BTreeSet<u64>,
+    /// The edit an editor holds of each asset resting in its file, as the rewrite that
+    /// writes it. See [`Workspace::hold_edit`].
+    edits: std::collections::BTreeMap<u64, Edit>,
     /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
     frame: u64,
+}
+
+/// An edit of an asset resting in its file: the file it was made over, the rewrite that
+/// writes it, and how far a save of it has got.
+struct Edit {
+    from: Arc<OnDisk>,
+    rewrite: Arc<Rewrite>,
+    save: Save,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Save {
+    No,
+    /// The store has still to send it.
+    Asked,
+    /// The store has sent it and not heard back.
+    Sent,
 }
 
 /// Assets decoded off the frame, each answered with the stamp of the bytes decoded.
@@ -1319,6 +1340,7 @@ impl Workspace {
             asked: Default::default(),
             decoding: Vec::new(),
             flying: Default::default(),
+            edits: Default::default(),
             frame: 1,
         }
     }
@@ -1629,6 +1651,7 @@ impl Workspace {
     /// Count an asset as unsaved again, because the save it was counted saved by did not
     /// land.
     pub fn unsave(&mut self, id: u64, log: &mut Log) {
+        self.edit_not_saved(id);
         if !self.hold(id, log) {
             return;
         }
@@ -1676,6 +1699,13 @@ impl Workspace {
     /// Leave an asset's bytes in `file`, which holds them, under `stamp`, and check the
     /// file's checksum off the frame.
     fn rest(&mut self, id: u64, file: Arc<OnDisk>, stamp: u64) {
+        let over = self
+            .edits
+            .get(&id)
+            .map(|held| (Arc::ptr_eq(&held.from, &file), held.save));
+        if let Some((false, Save::No | Save::Asked)) = over {
+            self.edits.remove(&id);
+        }
         self.swap(id, false, |held| {
             LocalEntity::resting(
                 id,
@@ -2590,8 +2620,12 @@ impl Workspace {
     /// return whether that changed. See [`LocalEntity::is_unsaved`].
     ///
     /// ⚠️ Only the editor holding the edit can tell, so it must call this on every frame
-    /// the answer might change. The bytes are the saved ones either way.
+    /// the answer might change. The bytes are the saved ones either way. An asset that
+    /// holds no edit lets go of the one [`Workspace::hold_edit`] held.
     pub fn mark_pending(&mut self, id: u64, pending: bool) -> bool {
+        if !pending {
+            self.hold_edit(id, None);
+        }
         let Some(entity) = self.get_mut(id) else {
             return false;
         };
@@ -2600,6 +2634,90 @@ impl Workspace {
         }
         self.revision += 1;
         true
+    }
+
+    /// Hold the edit an editor keeps of an asset resting in its file, as the rewrite that
+    /// writes it, or let it go with `None`. The editor still says whether it holds one
+    /// through [`Workspace::mark_pending`].
+    ///
+    /// ⚠️ A save already sent carries on with the edit it was sent with.
+    pub fn hold_edit(&mut self, id: u64, rewrite: Option<Rewrite>) {
+        let save = self.edits.get(&id).map_or(Save::No, |held| held.save);
+        let from = self.get(id).and_then(LocalEntity::rests).cloned();
+        match (rewrite, from) {
+            (Some(rewrite), Some(from)) => {
+                let rewrite = Arc::new(rewrite);
+                self.edits.insert(
+                    id,
+                    Edit {
+                        from,
+                        rewrite,
+                        save,
+                    },
+                );
+            }
+            _ if save == Save::Sent => {}
+            _ => {
+                self.edits.remove(&id);
+            }
+        }
+    }
+
+    /// The edit an editor holds of an asset resting in its file: the file it was made
+    /// over, and the rewrite that writes it.
+    pub fn edit_of(&self, id: u64) -> Option<(&Arc<OnDisk>, &Arc<Rewrite>)> {
+        self.edits.get(&id).map(|held| (&held.from, &held.rewrite))
+    }
+
+    /// Ask the store to save the edit held of an asset resting in its file into that
+    /// file. Returns whether there is an edit to save.
+    pub fn save_edit(&mut self, id: u64) -> bool {
+        let Some(held) = self.edits.get_mut(&id) else {
+            return false;
+        };
+        if held.save == Save::No {
+            held.save = Save::Asked;
+            self.revision += 1;
+        }
+        true
+    }
+
+    /// Whether a save of an asset's edit is asked for and not yet answered.
+    pub fn saving_edit(&self, id: u64) -> bool {
+        self.edits
+            .get(&id)
+            .is_some_and(|held| held.save != Save::No)
+    }
+
+    /// The assets whose edits the store is asked to save and has not sent.
+    pub(crate) fn edits_to_save(&self) -> Vec<u64> {
+        let asked = self
+            .edits
+            .iter()
+            .filter(|(_, held)| held.save == Save::Asked);
+        asked.map(|(id, _)| *id).collect()
+    }
+
+    /// Take an edit the store is asked to save, as it sends the save.
+    pub(crate) fn send_edit(&mut self, id: u64) -> Option<(Arc<OnDisk>, Arc<Rewrite>)> {
+        let held = self.edits.get_mut(&id)?;
+        held.save = Save::Sent;
+        Some((held.from.clone(), held.rewrite.clone()))
+    }
+
+    /// An edit's save did not land. The edit stays, and is saved again only when asked.
+    pub fn edit_not_saved(&mut self, id: u64) {
+        if let Some(held) = self.edits.get_mut(&id) {
+            held.save = Save::No;
+            self.revision += 1;
+        }
+    }
+
+    /// An edit's save landed in `file`, which the asset now rests in, holding no edit.
+    pub fn edit_saved(&mut self, id: u64, file: Arc<OnDisk>) {
+        self.edits.remove(&id);
+        self.mark_pending(id, false);
+        self.adopt_file(id, file);
     }
 
     /// Make the current bytes the saved baseline.
@@ -2782,6 +2900,7 @@ impl Workspace {
     /// file.
     pub fn forget(&mut self, id: u64) -> Option<LocalEntity> {
         self.arriving.remove(&id);
+        self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
         self.moved();
@@ -2806,6 +2925,7 @@ impl Workspace {
         let entities = &self.entities;
         let held = |id: u64| entities.iter().any(|entity| entity.id == id);
         self.checks.retain(|(id, _)| held(*id));
+        self.edits.retain(|id, _| held(*id));
         self.waking.retain(|wake| held(wake.id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));

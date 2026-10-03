@@ -92,6 +92,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::ondisk::OnDisk;
+use crate::rewrite::Rewrite;
 
 /// Where an entry sits in a library: its names from the root down, joined by `/`. The
 /// root itself is the empty path.
@@ -476,6 +477,16 @@ pub enum Cmd {
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].
     Move { from: LibPath, to: LibPath },
+    /// Write over the file at `path`, which must still hold what `expect` says, the file
+    /// `edit` makes of `from`, the piano or sample instrument resting there, read by range.
+    /// Nothing is read or written whole. Answered by [`Event::Rewritten`].
+    Rewrite {
+        id: u64,
+        path: LibPath,
+        from: Arc<OnDisk>,
+        edit: Arc<Rewrite>,
+        expect: Fingerprint,
+    },
     /// Copy a file from outside the library to `path`, as [`Cmd::Save`] writes one: a new
     /// file when `expect` is `None`, otherwise over a file that must still hold what
     /// `expect` says. Nothing is read whole: a piano or sample instrument is left resting
@@ -525,6 +536,12 @@ pub enum Event {
         id: u64,
         path: LibPath,
         result: Result<Fingerprint, Failure>,
+    },
+    /// What a [`Cmd::Rewrite`] wrote, as a listing finds it.
+    Rewritten {
+        id: u64,
+        path: LibPath,
+        result: Result<Found, Failure>,
     },
     /// What a [`Cmd::Import`] copied, as a listing finds it.
     Imported {

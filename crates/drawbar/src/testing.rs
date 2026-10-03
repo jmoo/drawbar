@@ -267,6 +267,42 @@ pub(crate) fn sample_bytes() -> Vec<u8> {
         .unwrap()
 }
 
+/// A sample instrument of three zones under `layout`, whose stroke ids are out of file
+/// order, each playing `frames` frames of a ramp.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn zoned_sample(
+    layout: nord_format::formats::nsmp::codec::Layout,
+    frames: usize,
+) -> Vec<u8> {
+    use nord_format::formats::nsmp::encode::{self, Instrument, NewZone, Preset};
+
+    let source: Vec<i16> = (0..frames).map(|k| ((k % 64) as i16 - 32) * 256).collect();
+    let zone = |global_id, root_key, top_note| NewZone {
+        source: &source,
+        channels: 1,
+        root_key,
+        top_note,
+        global_id,
+        loops: None,
+        secondary_start: encode::default_secondary_start(frames, None),
+        shift: None,
+        gain: 1.0,
+        loop_decay: encode::DEFAULT_LOOP_DECAY,
+    };
+    let instrument = Instrument {
+        name: "Zoned",
+        map_gain: 1.0,
+        predictor: encode::Predictor::Minimizing,
+        layout,
+        preset: Preset::default(),
+    };
+    let zones = [zone(3, 84, 127), zone(1, 60, 71), zone(2, 48, 59)];
+    encode::multi_zone(instrument, &zones)
+        .expect("the encoder lays out an instrument")
+        .to_bytes()
+        .expect("the instrument writes")
+}
+
 /// `bytes` written to `name` in `dir` and indexed in place, as a library opens a piano or
 /// sample instrument.
 #[cfg(not(target_arch = "wasm32"))]

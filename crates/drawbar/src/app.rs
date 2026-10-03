@@ -542,10 +542,10 @@ impl DrawbarApp {
         let unkept = self
             .store
             .as_ref()
-            .map(|store| store.unkept(&self.workspace))
+            .map(|store| (store.unkept(&self.workspace), !store.takes_files()))
             .unwrap_or_default();
-        if !discard && !unkept.is_empty() {
-            self.browser.ask_leave(&unkept, root);
+        if !discard && !unkept.0.is_empty() {
+            self.browser.ask_leave(&unkept.0, unkept.1, root);
             return;
         }
         if let Some(store) = self.store.take() {

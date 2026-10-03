@@ -61,6 +61,12 @@ impl OnDisk {
     pub fn reader(&self) -> BufReader<At<'_>> {
         self.source.reader()
     }
+
+    /// [`OnDisk::reader`] unbuffered: each read is one read of the file at its position,
+    /// for a caller that reads in ranges of its own.
+    pub fn at(&self) -> At<'_> {
+        At::new(&self.source.file, self.len)
+    }
 }
 
 impl Source {

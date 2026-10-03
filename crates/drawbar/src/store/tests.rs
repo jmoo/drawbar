@@ -3231,3 +3231,132 @@ fn a_file_gone_from_the_library_is_forgotten() {
         .collect();
     assert_eq!(paths, ["Kept.ne5p"]);
 }
+
+/// A library holding a three-zone sample instrument, opened, with the instrument resting
+/// in its file, and the instrument's bytes.
+fn resting_sample(root: &Temp) -> (Session, u64, Vec<u8>) {
+    let bytes = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
+    fs::write(root.at("Zoned.nsmp"), &bytes).unwrap();
+    let mut session = Session::listed(root);
+    session.ask_all();
+    let id = session.only();
+    assert!(session.bench.workspace.get(id).unwrap().rests().is_some());
+    (session, id, bytes)
+}
+
+impl Session {
+    /// Hold an edit renaming the sample instrument `id` rests in, as its document does,
+    /// and ask for it to be saved.
+    fn rename_resting(&mut self, id: u64, name: &str) {
+        let workspace = &mut self.bench.workspace;
+        let file = workspace.get(id).and_then(|entity| entity.rests()).unwrap();
+        let crate::ondisk::Index::Sample(index) = &file.index else {
+            panic!("a sample instrument")
+        };
+        let mut outline = index.outline().clone();
+        outline.set_name(name).unwrap();
+        workspace.hold_edit(id, Some(crate::rewrite::Rewrite::Sample(outline)));
+        workspace.mark_pending(id, true);
+        assert!(workspace.save_edit(id));
+    }
+}
+
+/// An edit of a sample instrument resting in its file is saved by copying the file
+/// through with the edited sections in place: the file then holds what a whole decode,
+/// the same edit and a whole write make, and the asset rests in it, holding nothing
+/// whole and nothing unsaved.
+#[test]
+fn an_edit_of_a_resting_sample_is_saved_through_its_file() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let before = session
+        .bench
+        .workspace
+        .get(id)
+        .unwrap()
+        .rests()
+        .unwrap()
+        .serial;
+
+    session.rename_resting(id, "Vibes");
+    session.sync();
+
+    let whole = crate::document::sample::apply(&bytes, &[("name".into(), "Vibes".into())]);
+    assert!(root.read("Zoned.nsmp") == whole.unwrap());
+    let workspace = &session.bench.workspace;
+    let entity = workspace.get(id).unwrap();
+    let file = entity.rests().expect("it rests in the file the save wrote");
+    assert_ne!(file.serial, before);
+    assert!(!entity.is_unsaved() && !workspace.saving_edit(id));
+    assert!(workspace.edit_of(id).is_none());
+    assert_eq!(entity.held_whole(), 0);
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "Zoned.nsmp"],
+        "no copy is left"
+    );
+}
+
+/// A file changed in place under its index, keeping its length and time, is not saved
+/// over: the copy's checksum is not the one the edit restated. The file keeps what was
+/// written there, and the edit is kept, unsaved.
+#[test]
+fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let path = root.at("Zoned.nsmp");
+    let time = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut theirs = bytes.clone();
+    let last = theirs.len() - 3;
+    theirs[last] ^= 0x40;
+    fs::write(&path, &theirs).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|file| file.set_modified(time))
+        .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), time);
+
+    session.rename_resting(id, "Vibes");
+    session.sync();
+
+    assert!(
+        root.read("Zoned.nsmp") == theirs,
+        "nothing was written over it"
+    );
+    let workspace = &session.bench.workspace;
+    assert!(workspace.get(id).unwrap().is_unsaved());
+    assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
+    assert_eq!(session.said("was not saved"), 1);
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "Zoned.nsmp"],
+        "no copy is left"
+    );
+}
+
+/// An edit held over a file it rests in has no working copy, so letting the library go
+/// would lose it, and it is named before another library opens.
+#[test]
+fn an_unsaved_edit_of_a_resting_sample_is_named_before_the_library_goes() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    assert_eq!(session.store.unkept(&session.bench.workspace), [""; 0]);
+
+    let workspace = &mut session.bench.workspace;
+    let file = workspace.get(id).and_then(|entity| entity.rests()).unwrap();
+    let crate::ondisk::Index::Sample(index) = &file.index else {
+        panic!("a sample instrument")
+    };
+    let mut outline = index.outline().clone();
+    outline.set_name("Vibes").unwrap();
+    workspace.hold_edit(id, Some(crate::rewrite::Rewrite::Sample(outline)));
+    workspace.mark_pending(id, true);
+    session.autosave();
+    assert_eq!(
+        session.store.unkept(&session.bench.workspace),
+        ["Zoned.nsmp"]
+    );
+    let working = root.at(".drawbar/working");
+    assert!(!working.exists() || root.names(".drawbar/working").is_empty());
+}

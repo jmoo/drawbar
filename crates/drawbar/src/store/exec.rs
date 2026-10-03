@@ -16,6 +16,7 @@ use super::{
     Stat,
 };
 use crate::ondisk::OnDisk;
+use crate::rewrite::{self, Rewrite};
 
 /// The sidecar. It is made at drawbar's first write to a library, never on open.
 pub const DIR: &str = ".drawbar";
@@ -117,6 +118,17 @@ pub trait Fs {
     /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of a copy of the file
     /// outside the library at `from`, which is never held whole.
     async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()>;
+    /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of the file `edit` makes of
+    /// `from`, a piano or sample instrument resting in the library, which is read by
+    /// range and never held whole. A source that changed since its index was read is
+    /// refused with [`crate::rewrite::changed`], and nothing is placed.
+    async fn rewrite(
+        &mut self,
+        path: &str,
+        from: &OnDisk,
+        edit: &Rewrite,
+        over: bool,
+    ) -> io::Result<()>;
     /// Rename a file or folder. Refused when another entry is at `to`.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
     async fn make_dir(&mut self, path: &str) -> io::Result<()>;
@@ -183,6 +195,10 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
                     let result = Err(Failure::Io(why.clone()));
                     answer(Event::Imported { id, path, result });
                 }
+                Cmd::Rewrite { id, path, .. } => {
+                    let result = Err(Failure::Io(why.clone()));
+                    answer(Event::Rewritten { id, path, result });
+                }
                 _ => {}
             }
             return answer(Event::ReadOnly(why));
@@ -218,6 +234,16 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
         } => {
             let result = save(fs, &path, &bytes, expect).await;
             Some(Event::Saved { id, path, result })
+        }
+        Cmd::Rewrite {
+            id,
+            path,
+            from,
+            edit,
+            expect,
+        } => {
+            let result = rewrite_over(fs, &path, &from, &edit, expect).await;
+            Some(Event::Rewritten { id, path, result })
         }
         Cmd::Move { from, to } => {
             let result = fs.rename(from.as_str(), to.as_str()).await;
@@ -1267,6 +1293,45 @@ async fn save(
     Ok(Fingerprint::of(stat, bytes))
 }
 
+/// Write the file `edit` makes of `from` over the file at `path`, which must still hold
+/// what `expect` says, and find it there as a listing would.
+async fn rewrite_over(
+    fs: &mut impl Fs,
+    path: &LibPath,
+    from: &OnDisk,
+    edit: &Rewrite,
+    expect: Fingerprint,
+) -> Result<Found, Failure> {
+    let io = |e: io::Error| match rewrite::is_changed(&e) {
+        true => Failure::Moved,
+        false => Failure::Io(e.to_string()),
+    };
+    match still(fs, path, &expect).await.map_err(io)? {
+        Some(true) => fs
+            .rewrite(path.as_str(), from, edit, true)
+            .await
+            .map_err(io)?,
+        Some(false) | None => return Err(Failure::Moved),
+    }
+    landed(fs, path).await
+}
+
+/// The file just written at `path`, as a listing finds it: resting, where it is a piano
+/// or sample instrument, and otherwise unread.
+async fn landed(fs: &impl Fs, path: &LibPath) -> Result<Found, Failure> {
+    let io = |e: io::Error| Failure::Io(e.to_string());
+    let stat = fs
+        .stat(path.as_str())
+        .await
+        .map_err(io)?
+        .ok_or_else(|| Failure::Io("the file was gone as soon as it was written".into()))?;
+    let file = fs.rest(path.as_str(), None).await.map_err(io)?;
+    Ok(Found {
+        file,
+        ..Found::unread(path.clone(), stat)
+    })
+}
+
 /// Copy the file at `from` into the library at `path`, and find it there as a listing
 /// would: resting, where it is a piano or sample instrument, and otherwise unread.
 async fn import(
@@ -1286,16 +1351,7 @@ async fn import(
             Some(false) | None => return Err(Failure::Moved),
         },
     }
-    let stat = fs
-        .stat(path.as_str())
-        .await
-        .map_err(io)?
-        .ok_or_else(|| Failure::Io("the file was gone as soon as it was copied".into()))?;
-    let file = fs.rest(path.as_str(), None).await.map_err(io)?;
-    Ok(Found {
-        file,
-        ..Found::unread(path.clone(), stat)
-    })
+    landed(fs, path).await
 }
 
 /// Remove a folder drawbar has emptied. macOS leaves a `.DS_Store` in any folder Finder
@@ -1434,6 +1490,10 @@ mod tests {
         }
 
         async fn replace(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
+            Err(refused())
+        }
+
+        async fn rewrite(&mut self, _: &str, _: &OnDisk, _: &Rewrite, _: bool) -> io::Result<()> {
             Err(refused())
         }
         async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {

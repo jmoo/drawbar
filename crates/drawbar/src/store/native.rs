@@ -14,6 +14,7 @@ use eframe::egui;
 use super::exec::{self, Children, Fs, Kind, TEMP, TMP, WORKING};
 use super::{Cmd, Event, Fingerprint, Outside, Stat};
 use crate::ondisk::OnDisk;
+use crate::rewrite::Rewrite;
 
 /// The folder the default library is, inside drawbar's own data.
 const LIBRARY: &str = "library";
@@ -434,6 +435,20 @@ impl Fs for Disk {
             io::copy(&mut File::open(from)?, file)?;
             Ok(())
         })?;
+        self.place(temp, path, over)
+    }
+
+    async fn rewrite(
+        &mut self,
+        path: &str,
+        from: &OnDisk,
+        edit: &Rewrite,
+        over: bool,
+    ) -> io::Result<()> {
+        if !over {
+            self.free(path)?;
+        }
+        let temp = self.stage(path, |file| edit.write(from, file))?;
         self.place(temp, path, over)
     }
 

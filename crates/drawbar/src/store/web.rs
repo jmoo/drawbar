@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::io;
+use std::ops::{AsyncFnMut, Range};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
@@ -38,6 +39,7 @@ use super::exec::{self, Children, Fs, Kind, TMP, WORKING};
 use super::{names, Cmd, Event, Failure, Fingerprint, Outside, Stat};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
+use crate::rewrite::{Pieces, Rewrite};
 use crate::room::measure as size;
 
 /// Where the writer is served, beside the page. The version keeps a cached writer from
@@ -303,6 +305,11 @@ fn refused(cmd: Cmd, why: &str) -> Event {
             path,
             result: Err(Failure::Io(why.to_string())),
         },
+        Cmd::Rewrite { id, path, .. } => Event::Rewritten {
+            id,
+            path,
+            result: Err(Failure::Io(why.to_string())),
+        },
         Cmd::Move { from, to } => Event::Moved {
             from,
             to,
@@ -482,17 +489,15 @@ impl Writer {
     async fn write(&self, temp: &str, contents: Contents<'_>) -> io::Result<()> {
         let wrote = async {
             self.ask("begin", temp, &[]).await?;
-            let mut at = 0;
-            while let Some(data) = contents.chunk(at).await? {
-                let len = data.byte_length() as usize;
-                self.ask(
-                    "write",
-                    temp,
-                    &[("at", (at as f64).into()), ("data", data.into())],
-                )
+            contents
+                .each(async |at, data| {
+                    let at = (at as f64).into();
+                    let data = data.into();
+                    self.ask("write", temp, &[("at", at), ("data", data)])
+                        .await
+                        .map(|_| ())
+                })
                 .await?;
-                at += len;
-            }
             self.ask("end", temp, &[]).await
         }
         .await;
@@ -503,46 +508,72 @@ impl Writer {
     }
 }
 
-/// What a write puts in a file: bytes this tab holds, or a file the browser handed it,
-/// which crosses to the file a slice at a time without passing through this tab's memory.
+/// What a write puts in a file: bytes this tab holds, a file the browser handed it,
+/// which crosses to the file a slice at a time without passing through this tab's memory,
+/// or an edit of a file resting in the library, laid out as the pieces of that file it
+/// keeps and the bytes the edit holds.
 #[derive(Clone, Copy)]
 enum Contents<'a> {
     Bytes(&'a [u8]),
     Blob(&'a web_sys::Blob),
+    Edited(&'a Pieces, &'a File),
 }
 
 impl Contents<'_> {
-    fn len(&self) -> usize {
-        match self {
-            Contents::Bytes(bytes) => bytes.len(),
-            Contents::Blob(blob) => blob.size() as usize,
-        }
-    }
-
-    /// The chunk that starts at `at`, or `None` past the end.
-    async fn chunk(&self, at: usize) -> io::Result<Option<js_sys::ArrayBuffer>> {
-        let end = self.len().min(at.saturating_add(CHUNK));
-        if at >= end {
-            return Ok(None);
-        }
+    /// Hand the file to `write` a chunk at a time, each with where it goes.
+    async fn each(
+        &self,
+        mut write: impl AsyncFnMut(u64, js_sys::ArrayBuffer) -> io::Result<()>,
+    ) -> io::Result<()> {
         match self {
             Contents::Bytes(bytes) => {
-                let data = Uint8Array::new_with_length((end - at) as u32);
-                data.copy_from(&bytes[at..end]);
-                Ok(Some(data.buffer()))
+                let read = async |range: Range<u64>| {
+                    Ok(buffer(&bytes[range.start as usize..range.end as usize]))
+                };
+                chunked(bytes.len() as u64, read, write).await
             }
             Contents::Blob(blob) => {
-                let slice = blob
-                    .slice_with_f64_and_f64(at as f64, end as f64)
-                    .map_err(failed)?;
-                let data: js_sys::ArrayBuffer = settle(slice.array_buffer()).await?;
-                if data.byte_length() as usize != end - at {
-                    return Err(io::Error::other("the file changed while it was copied"));
-                }
-                Ok(Some(data))
+                let read = async |range: Range<u64>| {
+                    let slice = blob
+                        .slice_with_f64_and_f64(range.start as f64, range.end as f64)
+                        .map_err(failed)?;
+                    let data: js_sys::ArrayBuffer = settle(slice.array_buffer()).await?;
+                    match u64::from(data.byte_length()) == range.end - range.start {
+                        true => Ok(data),
+                        false => Err(io::Error::other("the file changed while it was copied")),
+                    }
+                };
+                chunked(blob.size() as u64, read, write).await
+            }
+            Contents::Edited(pieces, from) => {
+                let read = async |range| crate::ondisk::slice(from, range).await;
+                let put = async |at, bytes: Vec<u8>| write(at, buffer(&bytes)).await;
+                crate::rewrite::stream(pieces, read, put).await
             }
         }
     }
+}
+
+/// Hand `len` bytes, each chunk `read` gives, to `write`, in order.
+async fn chunked(
+    len: u64,
+    mut read: impl AsyncFnMut(Range<u64>) -> io::Result<js_sys::ArrayBuffer>,
+    mut write: impl AsyncFnMut(u64, js_sys::ArrayBuffer) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut at = 0;
+    while at < len {
+        let end = len.min(at + CHUNK as u64);
+        write(at, read(at..end).await?).await?;
+        at = end;
+    }
+    Ok(())
+}
+
+/// `bytes`, copied into a buffer of their own that can be handed to the writer.
+fn buffer(bytes: &[u8]) -> js_sys::ArrayBuffer {
+    let data = Uint8Array::new_with_length(bytes.len() as u32);
+    data.copy_from(bytes);
+    data.buffer()
 }
 
 /// The writer, started if it has not been.
@@ -775,12 +806,19 @@ impl Folder {
             settle(dir.get_file_handle_with_options(&leaf, &options)).await?;
         let stream: FileSystemWritableFileStream = settle(file.create_writable()).await?;
         let wrote = async {
-            let mut at = 0;
-            while let Some(data) = contents.chunk(at).await? {
-                at += data.byte_length() as usize;
-                let writing = stream.write_with_buffer_source(&data).map_err(failed)?;
-                JsFuture::from(writing).await.map_err(failed)?;
-            }
+            let mut end = 0;
+            contents
+                .each(async |at, data| {
+                    if at != end {
+                        let seeking = stream.seek_with_f64(at as f64).map_err(failed)?;
+                        JsFuture::from(seeking).await.map_err(failed)?;
+                    }
+                    end = at + u64::from(data.byte_length());
+                    let writing = stream.write_with_buffer_source(&data).map_err(failed)?;
+                    JsFuture::from(writing).await.map_err(failed)?;
+                    Ok(())
+                })
+                .await?;
             JsFuture::from(stream.close()).await.map_err(failed)
         }
         .await;
@@ -1195,6 +1233,30 @@ impl Fs for Folder {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         let temp = self.stage(path, Contents::Blob(from)).await?;
+        if over {
+            self.forget(path);
+        }
+        self.place(&temp, path).await
+    }
+
+    /// ⚠️ As [`Fs::create`], the check and the move are two steps.
+    async fn rewrite(
+        &mut self,
+        path: &str,
+        from: &OnDisk,
+        edit: &Rewrite,
+        over: bool,
+    ) -> io::Result<()> {
+        if !over && self.taken(path).await? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let snapshot = from
+            .snapshot()
+            .ok_or_else(|| io::Error::other("drawbar no longer reads that file"))?;
+        let pieces = edit.pieces(from)?;
+        let temp = self
+            .stage(path, Contents::Edited(&pieces, &snapshot))
+            .await?;
         if over {
             self.forget(path);
         }

@@ -411,16 +411,18 @@ impl Store {
         self.records.values().any(|record| record.saving)
     }
 
-    /// The names of the assets that letting this library go would lose: where nothing may
-    /// be written here, each edit not already kept as a working copy, and each asset
-    /// never written to a file.
+    /// The names of the assets that letting this library go would lose: each edit an
+    /// editor holds over a file it rests in, which no working copy keeps, and where
+    /// nothing may be written here, each edit not already kept as a working copy and each
+    /// asset never written to a file.
     pub fn unkept(&self, workspace: &Workspace) -> Vec<String> {
-        if self.open() {
-            return Vec::new();
-        }
+        let open = self.open();
         workspace
             .listed()
             .filter(|entity| {
+                if open {
+                    return entity.rests().is_some() && entity.is_unsaved();
+                }
                 let record = self.records.get(&entity.id);
                 let written = record.is_some_and(|record| record.fingerprint.is_some());
                 let held = record
@@ -965,6 +967,9 @@ impl Store {
             }
             Event::Imported { id, path, result } => {
                 self.imported(id, path, result, workspace, browser, log)
+            }
+            Event::Rewritten { id, path, result } => {
+                self.rewritten(id, path, result, workspace, browser, log)
             }
             Event::ReadOnly(why) => self.refused(why, workspace, log),
             Event::Failed(why) => {
@@ -1811,6 +1816,89 @@ impl Store {
         ));
     }
 
+    /// Take in what the save of an edit of a file resting in the library wrote: the asset
+    /// rests in the new file. An edit not saved stays, and so does the file it was over.
+    fn rewritten(
+        &mut self,
+        id: u64,
+        path: LibPath,
+        result: Result<Found, Failure>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let Some(record) = self.records.get_mut(&id) else {
+            return;
+        };
+        record.saving = false;
+        let why = match result {
+            Ok(found) => {
+                record.fingerprint = Some(found.fingerprint());
+                record.missing = false;
+                record.holds = found.holds();
+                record.summarized = None;
+                browser.folders.missing.remove(&id);
+                match found.file {
+                    Some(file) => workspace.edit_saved(id, file),
+                    // A file that no longer indexes is read again like any other.
+                    None => {
+                        workspace.edit_not_saved(id);
+                        workspace.mark_pending(id, false);
+                        workspace.relist(id, found.stat.len);
+                    }
+                }
+                return;
+            }
+            Err(Failure::Moved) => {
+                self.rescan();
+                "it changed on disk since drawbar read it".to_string()
+            }
+            Err(Failure::Room(_)) => too_much(),
+            Err(Failure::Io(why)) => why,
+        };
+        workspace.edit_not_saved(id);
+        let name = workspace
+            .get(id)
+            .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
+        log.error(format!("saving {path}: {why}"));
+        log.trouble(format!(
+            "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
+        ));
+    }
+
+    /// Send the saves asked for of edits of files resting in the library, each once the
+    /// save or move before it has answered.
+    ///
+    /// ⚠️ An asset whose file is missing, or was never written, has nothing to rewrite, and
+    /// its save is refused here.
+    fn send_edits(&mut self, workspace: &mut Workspace, waiting: &[(LibPath, LibPath)]) {
+        for id in workspace.edits_to_save() {
+            let record = self.records.get_mut(&id);
+            let held = record.and_then(|record| {
+                let (path, expect) = (record.path.clone()?, record.fingerprint?);
+                (!record.missing).then_some((record, path, expect))
+            });
+            let Some((record, path, expect)) = held else {
+                workspace.edit_not_saved(id);
+                continue;
+            };
+            if record.saving || unsettled(waiting, &path) {
+                continue;
+            }
+            let Some((from, edit)) = workspace.send_edit(id) else {
+                continue;
+            };
+            record.saving = true;
+            self.write(Cmd::Rewrite {
+                id,
+                path,
+                from,
+                edit,
+                expect,
+            });
+        }
+    }
+
     /// Take in what a copy from outside the library found where it landed. A copy whose
     /// name was taken first is placed again; one that failed is read into memory instead,
     /// as a file kept nowhere yet, and an overwrite that failed leaves the file as it was.
@@ -1938,6 +2026,7 @@ impl Store {
                 self.working(entity, queue, &mut writes, &mut drops);
             }
         }
+        self.send_edits(workspace, &waiting);
         self.forget_gone(workspace, &mut drops);
         for op in removals {
             self.tree_op(op);

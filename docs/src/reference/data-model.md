@@ -226,7 +226,9 @@ stateDiagram-v2
   limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
   snapshot the page took of it.
 - **Unsaved.** Its stamp differs from its baseline's. At the next full pass its
-  bytes are written to `working/` under a new generation.
+  bytes are written to `working/` under a new generation. An edit of a resting
+  asset stays an edit held over its file, with no working copy, and the asset
+  stays resting until the save writes the file again.
 - **Saving.** Saving moves the baseline to the current bytes, and the store
   writes the baseline to the file. A baseline that rests in its file needs no
   write. A save refused because the file changed, one that failed, and one sent
@@ -369,11 +371,26 @@ folder whose tree row it fell on. The desktop windowing reports no drop point, s
 there a drop lands at the top level unless the pointer moved over the window while
 the files hovered.
 
+A sample's document draws from the index's outline, and an open zone reads its
+own stroke's range. An edit of it is held over the file as the sets made since
+it was saved, and the outline they make (`document::sample::Edits`). The
+workspace holds the rewrite that saves it (`Workspace::hold_edit`, `rewrite.rs`),
+and a save sends `Cmd::Rewrite`: the backend copies the file through into a
+temporary with the edited sections spliced in and the checksum restated, then
+puts it over the file, and the asset rests in what it wrote. On the desktop the
+copy is `cbin::Patch::copy` over the open handle; in the browser it is laid out
+as the ranges of the file it keeps and the bytes the edit holds, and each range
+is sliced from the `File` and handed to the writer. Either way the copy's
+checksum is checked as it streams, so a file changed since its index was read is
+refused and left as it is. An export or send of an asset holding such an edit
+waits for it to be saved first. An edit held this way has no working copy, so
+opening another library asks before discarding it.
+
 Some acts still need the whole file. They read it whole off the frame first
-(`Workspace::wake`): opening a sample in its editor, laying out a piano edit to
-save it, a send, Keep both, Duplicate, and an Overwrite that replaces another
-file. In the browser the act waits for that read. Exporting a resting file
-copies it across without reading it into memory.
+(`Workspace::wake`): laying out a piano edit to save it, a send, Keep both,
+Duplicate, and an Overwrite that replaces another file. In the browser the act
+waits for that read. Exporting a resting file copies it across without reading
+it into memory.
 
 ## The store protocol
 
@@ -393,6 +410,7 @@ asynchronously.
 | `Read` | `Read`: each file, held whole or resting, or why not. |
 | `Fingerprint` | `Fingerprinted`: the CRCs of files whose stat has not moved. |
 | `Save` | `Saved`: the new fingerprint, or why not. |
+| `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
 | `Import` | `Imported`: the copy of a file from outside, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
 | `Commit`, `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |

@@ -1548,7 +1548,7 @@ fn renamed(typed: &str, stored: Option<&str>) -> Option<String> {
 
 /// The document an act must wait for, where the act would carry that document's bytes
 /// out of this app.
-fn waits_on(act: &Act) -> Option<u64> {
+pub(super) fn waits_on(act: &Act) -> Option<u64> {
     match act {
         Act::SaveDoc(id) | Act::WriteBack(id) | Act::Export(id) | Act::Send { id, .. } => Some(*id),
         _ => None,

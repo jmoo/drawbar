@@ -33,6 +33,7 @@ pub mod newproject;
 pub mod ondisk;
 pub mod panel;
 pub mod queue;
+pub mod rewrite;
 pub mod room;
 pub mod sheet;
 pub mod shell;

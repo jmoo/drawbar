@@ -37,6 +37,7 @@ use crate::icon::{icon, Glyph};
 use crate::midi::Played;
 use crate::ondisk::{self, OnDisk};
 use crate::panel::cut;
+use crate::rewrite::Rewrite;
 use crate::room;
 use crate::workspace::{Baseline, LocalEntity};
 
@@ -423,9 +424,88 @@ fn on(flag: bool) -> String {
     }
 }
 
+/// What an edit writes to: a whole decode, or the outline an index read, which take the
+/// same sets and answer alike.
+trait Settable {
+    fn zone_count(&self) -> Result<usize, Error>;
+    fn set_name(&mut self, name: &str) -> Result<(), Error>;
+    fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error>;
+    fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error>;
+    fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error>;
+    /// The narrow chain's keyboard map. `None` on the wide chain, whose map this editor
+    /// does not write.
+    fn key_table(&self) -> Option<Result<KeyTable, Error>>;
+    fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error>;
+}
+
+impl Settable for Sample {
+    fn zone_count(&self) -> Result<usize, Error> {
+        Ok(self.zones()?.len())
+    }
+    fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        Sample::set_name(self, name)
+    }
+    fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        Sample::set_root_key(self, index, note)
+    }
+    fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        Sample::set_zone_top_note(self, index, note)
+    }
+    fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        Sample::set_zone_low_note(self, index, note)
+    }
+    fn key_table(&self) -> Option<Result<KeyTable, Error>> {
+        match self {
+            Sample::V2(body) => Some(body.key_table()),
+            Sample::V3(_) => None,
+        }
+    }
+    fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
+        match self {
+            Sample::V2(body) => body.set_key_table(table),
+            Sample::V3(_) => Err(Error::Parse(nord_format::error::ParseError::AssertFail(
+                WIDE_MAP.to_string(),
+            ))),
+        }
+    }
+}
+
+impl Settable for Outline {
+    fn zone_count(&self) -> Result<usize, Error> {
+        match self.fields() {
+            Fields::V2(fields) => Ok(fields.zones()?.len()),
+            Fields::V3(fields) => Ok(fields.zones()?.len()),
+        }
+    }
+    fn set_name(&mut self, name: &str) -> Result<(), Error> {
+        Outline::set_name(self, name)
+    }
+    fn set_root_key(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        Outline::set_root_key(self, index, note)
+    }
+    fn set_zone_top_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        Outline::set_zone_top_note(self, index, note)
+    }
+    fn set_zone_low_note(&mut self, index: usize, note: u8) -> Result<(), Error> {
+        Outline::set_zone_low_note(self, index, note)
+    }
+    fn key_table(&self) -> Option<Result<KeyTable, Error>> {
+        match self.fields() {
+            Fields::V2(fields) => Some(fields.key_table()),
+            Fields::V3(_) => None,
+        }
+    }
+    fn set_key_table(&mut self, table: &KeyTable) -> Result<(), Error> {
+        Outline::set_key_table(self, table)
+    }
+}
+
+/// Why a key set is refused on the wide chain.
+const WIDE_MAP: &str = "only a v2 instrument carries a keyboard map this editor writes";
+
 /// Apply one `path = value`. Paths are the CLI's: `name`, `zone1.root_key`,
 /// `zone1.top_note`, `zone1.low_note`.
-fn set(sample: &mut Sample, path: &str, value: &str) -> Result<(), String> {
+fn set(sample: &mut impl Settable, path: &str, value: &str) -> Result<(), String> {
     if path == "name" {
         return sample.set_name(value).map_err(|e| e.to_string());
     }
@@ -438,7 +518,7 @@ fn set(sample: &mut Sample, path: &str, value: &str) -> Result<(), String> {
         .ok_or_else(unknown)?;
     // Checked here so the message speaks the panel's 1-based numbering, not the format
     // crate's 0-based one.
-    let zones = sample.zones().map_err(|e| e.to_string())?.len();
+    let zones = sample.zone_count().map_err(|e| e.to_string())?;
     if index > zones {
         return Err(format!("there is no zone {index}: this sample has {zones}"));
     }
@@ -505,11 +585,11 @@ fn detune_units(cents: f64) -> i32 {
 ///
 /// The map is one field: two key edits are one write, and a key's other half is carried
 /// over rather than reset to neutral.
-fn apply_keys(sample: &mut Sample, sets: &[(String, String)]) -> Result<(), String> {
-    let Sample::V2(body) = sample else {
-        return Err("only a v2 instrument carries a keyboard map this editor writes".into());
-    };
-    let mut table = body.key_table().map_err(|e| e.to_string())?;
+fn apply_keys(sample: &mut impl Settable, sets: &[(String, String)]) -> Result<(), String> {
+    let mut table = sample
+        .key_table()
+        .ok_or(WIDE_MAP)?
+        .map_err(|e| e.to_string())?;
     for (path, value) in sets {
         let (note, field) = key_path(path).ok_or_else(|| format!("unknown field {path:?}"))?;
         let held = table.key(note).map_err(|e| e.to_string())?;
@@ -521,7 +601,7 @@ fn apply_keys(sample: &mut Sample, sets: &[(String, String)]) -> Result<(), Stri
         .map_err(|e| e.to_string())?;
         table.set_key(note, level).map_err(|e| e.to_string())?;
     }
-    body.set_key_table(&table).map_err(|e| e.to_string())
+    sample.set_key_table(&table).map_err(|e| e.to_string())
 }
 
 /// Apply every set to a fresh decode and re-encode, the same all-or-nothing rule the
@@ -530,6 +610,12 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<Vec<u8>, String>
     let mut entity =
         nord_format::from_stream(&mut Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let sample = sample_mut(&mut entity).ok_or("not a sample instrument")?;
+    applied(sample, sets)?;
+    nord_format::to_bytes(&entity).map_err(|e| e.to_string())
+}
+
+/// Apply every set: the fields first, then every key of the keyboard map in one write.
+fn applied(sample: &mut impl Settable, sets: &[(String, String)]) -> Result<(), String> {
     let (table, fields): (Sets, Sets) = sets
         .iter()
         .cloned()
@@ -540,7 +626,156 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<Vec<u8>, String>
     if !table.is_empty() {
         apply_keys(sample, &table)?;
     }
-    nord_format::to_bytes(&entity).map_err(|e| e.to_string())
+    Ok(())
+}
+
+/// An instrument resting in its file as an edit leaves it: its fields outside the audio,
+/// and each zone's root key, which the narrow chain keeps only in the stroke.
+#[derive(Clone)]
+pub struct Outlined {
+    outline: Outline,
+    roots: Vec<u8>,
+}
+
+impl Outlined {
+    /// The instrument as its index read it, with `sets` applied, all or none.
+    fn of(index: &nsmp::Index, sets: &[(String, String)]) -> Result<Outlined, String> {
+        let mut outline = index.outline().clone();
+        applied(&mut outline, sets)?;
+        let spans = index.zones();
+        let mut roots = roots(index);
+        let narrow = matches!(outline.fields(), Fields::V2(_));
+        for (path, value) in sets {
+            let Some(zone) = path
+                .strip_suffix(".root_key")
+                .and_then(|zone| zone.strip_prefix("zone"))
+                .and_then(|n| n.parse::<usize>().ok())
+                .and_then(|n| n.checked_sub(1))
+            else {
+                continue;
+            };
+            let note = note::parse(value)?;
+            // The narrow chain's root is the stroke's, which every zone it plays shares.
+            for (at, span) in spans.iter().enumerate() {
+                let shares = narrow && span.stream == spans[zone].stream;
+                if at == zone || shares {
+                    roots[at] = note;
+                }
+            }
+        }
+        Ok(Outlined { outline, roots })
+    }
+
+    /// What the document shows of it.
+    pub fn snapshot(&self, index: &nsmp::Index) -> Result<Snapshot, String> {
+        outlined(index, &self.outline, &self.roots)
+    }
+}
+
+/// The edits held of instruments resting in their files, by asset.
+///
+/// ⚠️ Each keeps the sets made since the file was saved, not only the outline they make.
+/// A set names the value it leaves, so played again over the file a save wrote they
+/// change nothing, and over a file changed outside drawbar they make the same edit of
+/// it.
+#[derive(Default)]
+pub struct Edits(std::collections::HashMap<u64, Edit>);
+
+struct Edit {
+    sets: Sets,
+    /// The [`OnDisk::serial`] of the file `made` is an edit of.
+    over: u64,
+    made: Outlined,
+    /// Whether the workspace holds this edit's rewrite.
+    held: bool,
+}
+
+impl Edits {
+    /// Take one frame's sets into the edit of an instrument resting in `file`, all of them
+    /// or none.
+    pub fn take(
+        &mut self,
+        id: u64,
+        file: &OnDisk,
+        index: &nsmp::Index,
+        sets: &[(String, String)],
+    ) -> Result<(), String> {
+        let held = self.0.get(&id).filter(|edit| edit.over == file.serial);
+        let mut all = held.map(|edit| edit.sets.clone()).unwrap_or_default();
+        all.extend(sets.iter().cloned());
+        self.make(id, file, index, all)
+    }
+
+    /// The edit `sets` make of `file`, kept where it changes anything.
+    fn make(
+        &mut self,
+        id: u64,
+        file: &OnDisk,
+        index: &nsmp::Index,
+        sets: Sets,
+    ) -> Result<(), String> {
+        let made = Outlined::of(index, &sets)?;
+        let patch = index.patch(&made.outline).map_err(|e| e.to_string())?;
+        // One splice is the checksum, restated as it was.
+        if patch.splices().len() <= 1 {
+            self.0.remove(&id);
+            return Ok(());
+        }
+        let over = file.serial;
+        let held = false;
+        self.0.insert(
+            id,
+            Edit {
+                sets,
+                over,
+                made,
+                held,
+            },
+        );
+        Ok(())
+    }
+
+    /// Follow the file an instrument rests in: an edit of another file is made again over
+    /// this one. One that no longer applies is let go, and this says why.
+    pub fn follow(&mut self, id: u64, file: &OnDisk, index: &nsmp::Index) -> Result<(), String> {
+        if self.0.get(&id).is_none_or(|edit| edit.over == file.serial) {
+            return Ok(());
+        }
+        let edit = self.0.remove(&id).expect("held above");
+        self.make(id, file, index, edit.sets)
+    }
+
+    /// Whether an edit is held of `id` that changes its file.
+    pub fn pending(&self, id: u64) -> bool {
+        self.0.contains_key(&id)
+    }
+
+    /// The instrument resting in `file` as its edit leaves it.
+    pub fn outlined(&self, id: u64, file: &OnDisk) -> Option<&Outlined> {
+        let edit = self.0.get(&id).filter(|edit| edit.over == file.serial)?;
+        Some(&edit.made)
+    }
+
+    /// The rewrite that saves the edit of `id`, where the workspace does not hold it yet.
+    pub fn unheld(&mut self, id: u64) -> Option<Rewrite> {
+        let edit = self.0.get_mut(&id).filter(|edit| !edit.held)?;
+        edit.held = true;
+        Some(Rewrite::Sample(edit.made.outline.clone()))
+    }
+
+    /// The name the edit of `id` gives the instrument, where it holds one.
+    pub fn name(&self, id: u64) -> Option<String> {
+        self.0.get(&id)?.made.outline.name().ok()
+    }
+
+    /// Every asset an edit is held of.
+    pub fn ids(&self) -> Vec<u64> {
+        self.0.keys().copied().collect()
+    }
+
+    pub fn forget(&mut self, id: u64) {
+        self.0.remove(&id);
+    }
 }
 
 /// The range a zone covers, in plain words.

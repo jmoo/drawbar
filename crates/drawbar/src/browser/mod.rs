@@ -611,8 +611,14 @@ impl Browser {
     }
 
     /// Ask before another library opens in place of one that cannot keep the assets
-    /// named in `unkept`.
-    pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
+    /// named in `unkept`: because it is read-only, or because each is an edit held over
+    /// a file it rests in.
+    pub(crate) fn ask_leave(
+        &mut self,
+        unkept: &[String],
+        read_only: bool,
+        root: crate::store::Root,
+    ) {
         const SHOWN: usize = 5;
         let mut names: Vec<String> = unkept
             .iter()
@@ -622,13 +628,19 @@ impl Browser {
         if unkept.len() > SHOWN {
             names.push(format!("and {} more", unkept.len() - SHOWN));
         }
+        let why = match read_only {
+            true => {
+                "Nothing can be written to the library open now, so opening another \
+                     discards what is unsaved in it"
+            }
+            false => {
+                "An unsaved edit of a sample or piano is kept only until its library \
+                      is let go, so opening another discards it. Save it first to keep it"
+            }
+        };
         self.raise(Ask::new(
             "Discard what this library cannot keep?".to_string(),
-            Some(format!(
-                "Nothing can be written to the library open now, so opening another \
-                 discards what is unsaved in it: {}.",
-                names.join(", ")
-            )),
+            Some(format!("{why}: {}.", names.join(", "))),
             "Discard",
             vec![Act::OpenLibraryDiscarding(root)],
         ));
