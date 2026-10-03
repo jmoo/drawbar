@@ -448,11 +448,11 @@ pub fn check(entity: &LocalEntity, plan: &Plan) -> Result<(), String> {
 }
 
 /// The rewrite that saves `plan` into the library `index` read, laid out from the index,
-/// which reads no audio: `None` where the plan edits nothing. The plan is checked as
-/// [`check`] checks it.
+/// which reads no audio: `None` where it leaves the library as the index read it, as
+/// over a file that already holds the plan. The plan is checked as [`check`] checks it.
 pub fn rewrite_over(index: &npno::Index, plan: &Plan) -> Result<Option<Rewrite>, String> {
     let library = replanned(index.library().clone(), plan)?;
-    Ok((!plan.is_empty()).then_some(Rewrite::Piano(library)))
+    Ok((library != *index.library()).then_some(Rewrite::Piano(library)))
 }
 
 /// [`planned`] over a library already read.

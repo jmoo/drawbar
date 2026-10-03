@@ -3744,6 +3744,31 @@ fn an_edit_their_file_already_holds_is_let_go_without_asking() {
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
 }
 
+/// A file saved over outside drawbar with what an unsaved piano plan over it makes leaves
+/// the plan nothing to change, so it is let go and nothing is asked.
+#[test]
+fn a_piano_plan_their_file_already_holds_is_let_go_without_asking() {
+    let root = Temp::new();
+    let bytes = piano_rooted(&[48, 60, 72], 4);
+    fs::write(root.at("Grand.npno"), &bytes).unwrap();
+    let mut session = Session::listed(&root);
+    session.ask_all();
+    let id = session.only();
+    let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
+    let theirs = crate::document::piano::rebuild(&bytes, &plan).unwrap();
+    let workspace = &mut session.bench.workspace;
+    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan)));
+    assert!(workspace.edit_of(id).is_some(), "the plan applies");
+    fs::write(root.at("Grand.npno"), &theirs).unwrap();
+
+    session.settle();
+
+    let workspace = &session.bench.workspace;
+    assert!(workspace.edit(id).is_none());
+    assert!(!workspace.get(id).unwrap().is_unsaved());
+    assert!(session.bench.browser.asking().is_none(), "nothing to ask");
+}
+
 /// A library holding a three-zone sample instrument and a piano library, each resting in
 /// its file, with an unsaved edit held of each, and the ids and edits.
 fn edited_pair(root: &Temp) -> (Session, [(u64, crate::rewrite::Edit); 2]) {
