@@ -426,7 +426,7 @@ impl Walk {
         let first = self
             .folders
             .iter()
-            .position(|folder| urgent.iter().any(|dir| within(folder, dir.as_str())));
+            .position(|folder| urgent.iter().any(|dir| nested(folder, dir.as_str())));
         let prefix = self.folders.remove(first.unwrap_or(0))?;
         let unwalked = |path| Entry {
             path,
@@ -468,10 +468,11 @@ impl Walk {
         Ok(entries)
     }
 
-    /// Whether a folder in `dir`, or `dir` itself, is still to be listed.
+    /// Whether `dir`, a folder in it, or a folder it is in is still to be listed. A
+    /// folder `dir` is in may hold the way down to it.
     fn waits_in(&self, dir: &LibPath) -> bool {
         let dir = dir.as_str();
-        self.root.is_some() || self.folders.iter().any(|folder| within(folder, dir))
+        self.root.is_some() || self.folders.iter().any(|folder| nested(folder, dir))
     }
 
     /// Follow a folder renamed while the walk is in flight.
@@ -502,6 +503,11 @@ fn within(path: &str, dir: &str) -> bool {
         || path
             .strip_prefix(dir)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Whether one of two folders is the other or inside it.
+fn nested(a: &str, b: &str) -> bool {
+    within(a, b) || within(b, a)
 }
 
 /// How many entries one part of a listing covers before it is sent.
@@ -1654,6 +1660,23 @@ mod tests {
             "{events:?}"
         );
         assert!(listed(&events, "a/1.ne5p") > Some(walked), "{events:?}");
+    }
+
+    /// A folder asked for below the folders the walk has reached is answered only once
+    /// the walk has come down to it and listed it whole, and the way down comes first.
+    #[test]
+    fn a_folder_asked_for_deep_below_the_walk_is_answered_once_it_is_listed() {
+        let files = ["a/b/c/deep.ne5p", "a/top.ne5p", "z/other.ne5p"];
+        let mut fs = Claimed::of(files.map(|path| (path.to_string(), 1)));
+        fs.waiting.push_back(Cmd::Walk(path("a/b/c")));
+        let events = listing(&mut fs, Vec::new());
+        let walked = events
+            .iter()
+            .position(|event| matches!(event, Event::Walked { dir, .. } if dir.as_str() == "a/b/c"))
+            .expect("the folder is answered");
+        let deep = listed(&events, "a/b/c/deep.ne5p");
+        assert!(deep < Some(walked), "{events:?}");
+        assert!(listed(&events, "z/other.ne5p") > Some(walked), "{events:?}");
     }
 
     /// Where among the answers the part listing `name` is.
