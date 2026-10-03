@@ -682,7 +682,11 @@ them. Chrome cannot move a folder whole, so a folder moves file by file, and an
 interrupted move leaves its files split between the two names, none lost. A
 rename that changes only case moves through a free name beside the folder,
 `<name>.<n>.drawbar-move`, since on a disk that ignores case the new name reaches
-the folder itself, and a folder is never removed where it is the one moved into. The
+the folder itself, and a folder is never removed where it is the one moved into.
+A folder such a rename left under that name when the tab closed is put back at
+the next open, under the spelling the index's rows use, before the listing
+looks for them; where another folder has the name it stays, and the log says
+so. The
 first write to the private file system also asks the browser to keep it through
 a shortage of space. A tab opens a new library only once the one before it has
 run its last command and let go of its lock.

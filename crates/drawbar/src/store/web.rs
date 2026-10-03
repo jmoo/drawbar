@@ -905,7 +905,7 @@ impl Folder {
     /// A free name beside the folder `from`, to move it through.
     async fn aside(&self, from: &str) -> io::Result<String> {
         for n in 1..100 {
-            let aside = format!("{from}.{n}.drawbar-move");
+            let aside = names::aside(from, n);
             if !self.taken(&aside).await? {
                 return Ok(aside);
             }

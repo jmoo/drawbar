@@ -387,6 +387,9 @@ pub struct Opened {
     pub working: std::collections::BTreeMap<u64, Vec<u8>>,
     /// How many leftovers of interrupted writes were removed.
     pub swept: usize,
+    /// Folders an interrupted rename left under the name it moved them through, that
+    /// could not be put back because another entry has their name.
+    pub stranded: Vec<LibPath>,
 }
 
 /// The end of an open's listing.

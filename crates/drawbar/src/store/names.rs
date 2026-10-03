@@ -76,6 +76,22 @@ pub fn inside(path: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// What the name a folder moves through ends in: `<name>.<n>.drawbar-move`.
+const MOVING: &str = ".drawbar-move";
+
+/// The `n`-th name beside the folder `from` that it can move through.
+pub fn aside(from: &str, n: u32) -> String {
+    format!("{from}.{n}{MOVING}")
+}
+
+/// The name of the folder whose move left it at `name`, where `name` is one [`aside`]
+/// gives.
+pub fn moved_through(name: &str) -> Option<&str> {
+    let (folder, n) = name.strip_suffix(MOVING)?.rsplit_once('.')?;
+    let numbered = !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    (numbered && !folder.is_empty()).then_some(folder)
+}
+
 /// The renames that move the folder `from` to `to` one at a time, where a folder cannot
 /// move whole: `to` itself, or, where the two differ only in case, `aside` and then `to`,
 /// so no step moves a folder onto itself on a disk that ignores case. `aside` is a free
@@ -160,6 +176,15 @@ mod tests {
     /// A folder renamed in case alone moves through a name beside it, so no step's
     /// destination is its own source on a disk that ignores case; any other move is one
     /// step.
+    #[test]
+    fn a_name_moved_through_names_the_folder_it_was_moved_from() {
+        assert_eq!(moved_through(&aside("cello", 3)), Some("cello"));
+        assert_eq!(moved_through("cello.v2.1.drawbar-move"), Some("cello.v2"));
+        assert_eq!(moved_through("cello.drawbar-move"), None);
+        assert_eq!(moved_through("cello.x.drawbar-move"), None);
+        assert_eq!(moved_through("cello.1.drawbar-mover"), None);
+    }
+
     #[test]
     fn a_case_only_folder_rename_never_moves_a_folder_onto_itself() {
         let steps = folder_steps("Gigs/cello", "Gigs/Cello", "Gigs/cello.1.drawbar-move");

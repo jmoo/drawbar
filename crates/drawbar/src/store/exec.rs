@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
-    Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened, Outside,
-    Source, Stat,
+    names, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened,
+    Outside, Source, Stat,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -440,6 +440,10 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
             })
         })
         .collect();
+    let stranded = match sweeps {
+        true => unstrand(fs, &rows).await,
+        false => Vec::new(),
+    };
     let walk = Walk::start(fs).await.map_err(|e| e.to_string())?;
     answer(Event::Opened(Ok(Opened {
         writable,
@@ -447,6 +451,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         sidecar,
         working,
         swept,
+        stranded,
     })));
     let mut lister = Lister::default();
     lister.list(fs, rows, walk, answer).await;
@@ -470,6 +475,59 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
 
 /// The whole tree again, in one listing. The reads sent while it runs are answered
 /// between its folders.
+/// Put back each folder an interrupted rename left under the name it moved it through
+/// ([`names::aside`]), in the folders where the index's rows lie: under the spelling of
+/// its name the rows use, so they match it, or under its own. Returns those left where
+/// they are, because another entry already has the name.
+///
+/// ⚠️ Only the folders above a row are looked in. One no row lies under is listed under
+/// the name it moved through, which loses nothing, since no row is to match it.
+async fn unstrand(fs: &mut impl Fs, rows: &[Row]) -> Vec<LibPath> {
+    let mut named: BTreeMap<String, BTreeSet<String>> =
+        BTreeMap::from([(String::new(), BTreeSet::new())]);
+    for row in rows {
+        let parts: Vec<&str> = row.path.components().collect();
+        for at in 0..parts.len().saturating_sub(1) {
+            let dir = parts[..at].join("/");
+            named.entry(dir).or_default().insert(parts[at].to_string());
+        }
+    }
+    let mut stranded = Vec::new();
+    for (dir, folders) in named {
+        let Ok(held) = fs.names(&dir).await else {
+            continue;
+        };
+        for name in &held {
+            let Some(folder) = names::moved_through(name) else {
+                continue;
+            };
+            let from = joined(&dir, name);
+            if fs.stat(&from).await.ok().flatten().is_some() {
+                continue;
+            }
+            let key = names::key(folder);
+            let wanted = folders.iter().find(|row| names::key(row) == key);
+            let wanted = wanted.map_or(folder, String::as_str);
+            let taken = held
+                .iter()
+                .any(|other| other != name && names::key(other) == key);
+            let to = joined(&dir, wanted);
+            if taken || fs.rename(&from, &to).await.is_err() {
+                stranded.extend(LibPath::parse(&from));
+            }
+        }
+    }
+    stranded
+}
+
+/// `name` in the folder `dir`, both joined by `/`.
+fn joined(dir: &str, name: &str) -> String {
+    match dir.is_empty() {
+        true => name.to_string(),
+        false => format!("{dir}/{name}"),
+    }
+}
+
 async fn scan(
     fs: &mut impl Fs,
     known: &BTreeMap<LibPath, (Fingerprint, Holds)>,

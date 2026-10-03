@@ -4001,3 +4001,54 @@ fn an_edit_copy_of_another_version_leaves_the_library_read_only() {
     second.close();
     assert_eq!(fs::read(&at).unwrap(), newer.as_bytes(), "the copy is left");
 }
+
+/// A library whose `Gigs/Cello` holds a tagged program, opened and closed, then left as
+/// a case-only rename interrupted after its first step leaves it: the folder under the
+/// name it moved through.
+fn stranded(root: &Temp) -> (u64, u64) {
+    fs::create_dir_all(root.at("Gigs/Cello")).unwrap();
+    fs::write(
+        root.at("Gigs/Cello/Grand.ne5p"),
+        Fresh::Program.bytes().unwrap(),
+    )
+    .unwrap();
+    let mut first = Session::open(root);
+    let grand = first.only();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(grand, tag, true);
+    first.autosave();
+    first.close();
+    fs::rename(root.at("Gigs/Cello"), root.at("Gigs/cello.1.drawbar-move")).unwrap();
+    (grand, tag)
+}
+
+/// A folder an interrupted rename left under the name it moved through is put back at
+/// open under the spelling the index's rows use, once, and its rows and tags match it.
+#[test]
+fn a_folder_left_mid_rename_is_put_back_where_its_rows_say() {
+    let root = Temp::new();
+    let (grand, tag) = stranded(&root);
+
+    let second = Session::open(&root);
+    assert_eq!(root.names("Gigs"), ["Cello"]);
+    assert_eq!(root.names("Gigs/Cello"), ["Grand.ne5p"]);
+    assert_eq!(second.path(grand).as_deref(), Some("Gigs/Cello/Grand.ne5p"));
+    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
+    assert_eq!(second.said("interrupted rename"), 0);
+}
+
+/// Where another folder already has its name, a folder left mid-rename stays where it
+/// is, and the log says so once.
+#[test]
+fn a_folder_left_mid_rename_beside_one_of_its_name_stays_and_is_named() {
+    let root = Temp::new();
+    stranded(&root);
+    fs::create_dir_all(root.at("Gigs/CELLO")).unwrap();
+
+    let second = Session::open(&root);
+    let mut held = root.names("Gigs");
+    held.sort_by_key(|name| name.to_lowercase());
+    assert_eq!(held, ["CELLO", "cello.1.drawbar-move"]);
+    assert_eq!(root.names("Gigs/cello.1.drawbar-move"), ["Grand.ne5p"]);
+    assert_eq!(second.said("interrupted rename"), 1);
+}
