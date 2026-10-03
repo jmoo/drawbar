@@ -77,6 +77,7 @@
                 gh
                 jq
                 mdbook
+                mdbook-mermaid
                 rust-analyzer
               ];
             };

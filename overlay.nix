@@ -444,7 +444,10 @@ let
       filter = path: type: !(type == "directory" && hasSuffix "/book" path);
     };
 
-    nativeBuildInputs = [ final.mdbook ];
+    nativeBuildInputs = [
+      final.mdbook
+      final.mdbook-mermaid
+    ];
 
     dontConfigure = true;
     dontInstall = true;
@@ -458,6 +461,9 @@ let
         echo "mdbook rendered no index.html" >&2
         exit 1
       fi
+
+      # mdBook copies `additional-js` and nothing beside it.
+      cp LICENSE-mermaid.txt "$out/"
       runHook postBuild
     '';
 

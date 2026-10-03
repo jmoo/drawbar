@@ -219,6 +219,12 @@ kbd,
   color: var(--db-ink);
 }
 
+/* A ```mermaid block, which docs/mermaid-init.js replaces with its drawing. */
+.content pre.mermaid {
+  padding: 1.4rem 1.6rem;
+  text-align: center;
+}
+
 .content pre > .buttons {
   background: transparent;
 }
