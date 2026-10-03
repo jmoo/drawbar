@@ -366,6 +366,10 @@ const MENU: f32 = 260.0;
 const ITEM: f32 = 28.0;
 const SECTION: f32 = 24.0;
 
+/// The room a drop-down keeps under its last line: its frame and a gap above the window's
+/// bottom edge.
+const MENU_FOOT: f32 = 16.0;
+
 /// The padding at each end of a title in Windows' menu bar.
 const TITLE_PAD: f32 = 9.0;
 
@@ -577,7 +581,8 @@ impl DrawbarApp {
     }
 
     /// Linux's and the web's menus: one button at the right of the bar, holding every
-    /// menu as a titled section.
+    /// menu as a titled section, or as a submenu each when the sections would run past
+    /// the bottom of the window.
     pub(crate) fn menu_button(
         &mut self,
         ui: &mut egui::Ui,
@@ -595,6 +600,18 @@ impl DrawbarApp {
         let response = egui::containers::menu::MenuButton::from_button(button)
             .ui(ui, |ui| {
                 drop_down_style(ui);
+                let flat = egui::Id::new("menu_flat_height");
+                let room = ui.ctx().screen_rect().bottom() - ui.min_rect().top() - MENU_FOOT;
+                let tall = ui.ctx().data(|data| data.get_temp::<f32>(flat));
+                if tall.is_some_and(|tall| tall > room) {
+                    for menu in &menus {
+                        ui.menu_button(menu.title, |ui| {
+                            drop_down_style(ui);
+                            self.entries(ui, frame, &menu.entries, acts);
+                        });
+                    }
+                    return;
+                }
                 for (index, menu) in menus.iter().enumerate() {
                     if index > 0 {
                         ui.separator();
@@ -602,6 +619,9 @@ impl DrawbarApp {
                     section_title(ui, menu.title);
                     self.entries(ui, frame, &menu.entries, acts);
                 }
+                // ⚠️ Measured only while flat, so the nested form never decides it fits.
+                let height = ui.min_rect().height();
+                ui.ctx().data_mut(|data| data.insert_temp(flat, height));
             })
             .0;
         if f10 {

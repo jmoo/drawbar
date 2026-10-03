@@ -1470,6 +1470,26 @@ mod tests {
         }
     }
 
+    /// The one-button menu lists every section's items while they fit under it, and
+    /// offers each section as a submenu in a window too short for them.
+    #[test]
+    fn the_menu_button_nests_its_sections_when_the_window_is_short() {
+        for (height, flat) in [(1400.0, true), (LEAST.y, false)] {
+            let screen = egui::vec2(1440.0, height);
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            app.platform = Platform::Web;
+            let _ = settled(&ctx, &mut app, screen);
+            let f10 = pressed(egui::Key::F10, egui::Modifiers::NONE);
+            let _ = frame_of(&ctx, &mut app, screen, vec![f10]);
+            let painted = settled(&ctx, &mut app, screen);
+            for title in ["File", "View", "Instrument", "Help"] {
+                assert!(painted.wrote(title), "{height}: {title}");
+            }
+            assert_eq!(painted.wrote("Open…"), flat, "{height}: File's items");
+        }
+    }
+
     /// The bar's search box sits on the window's center line while both sides fit
     /// beside it, and otherwise between the two sides, never narrower than its least.
     #[test]
