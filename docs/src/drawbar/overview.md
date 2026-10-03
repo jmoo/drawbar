@@ -33,7 +33,8 @@ The menus are where each system keeps them:
   some keys for its tabs, so Close tab and the View keys use ⌥ (⌃ on a Mac) in
   place of ⌘.
 
-Each menu item shows its key, written the way your system writes it.
+Each menu item shows its key, written the way your system writes it. In a window
+too short for the whole ☰ menu, each menu becomes a submenu of it.
 
 ## The activity log
 
