@@ -1381,6 +1381,17 @@ mod tests {
         }
     }
 
+    /// egui writes modifiers as symbols only when the body font draws ⌥, ⌃, ⇧ and ⌘, and
+    /// spells them out otherwise.
+    #[test]
+    fn a_mac_menu_names_its_modifier_keys_by_their_symbols() {
+        let ctx = testing::context();
+        ctx.set_os(egui::os::OperatingSystem::Mac);
+        testing::run(&ctx, egui::RawInput::default(), |_| {});
+        assert_eq!(ctx.format_shortcut(&key::EXPORT), "⇧⌘E");
+        assert_eq!(ctx.format_shortcut(&key::INSPECTOR), "⌥⌘I");
+    }
+
     /// The gate depends only on the screen size and the layout metrics: collapsed docks
     /// and the kind of device do not make room the shell does not have.
     #[test]
