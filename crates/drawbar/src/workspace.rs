@@ -127,7 +127,7 @@ impl Container {
         let start = usize::try_from(info.header.generation.body_start()).ok()?;
         let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
         let body = start..end;
-        let body_crc32 = nord_usb::envelope::crc32(bytes.get(body.clone())?);
+        let body_crc32 = nord_format::crc::crc32(bytes.get(body.clone())?);
         // `Header` omits the generation-specific checksum field, so the stored value is
         // read here for display.
         let (checksum_label, checksum) = match info.header.generation {
@@ -1443,7 +1443,7 @@ mod tests {
             .expect("a fresh program is a CBIN file");
         assert_eq!(container.header.generation, Generation::V1);
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
-        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        let hashed = nord_format::crc::crc32(&body.body.0);
         assert_eq!(container.body_crc32, hashed);
         assert_eq!(
             container.body_crc32,
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(container.checksum_label, "crc16:");
 
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
-        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        let hashed = nord_format::crc::crc32(&body.body.0);
         assert_eq!(container.body_crc32, hashed);
         assert_eq!(entity.saved.crc32, Some(hashed));
     }

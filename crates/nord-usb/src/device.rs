@@ -8,13 +8,14 @@
 //!   raw [`Session`], and attempt cleanup before returning.
 //! - [`Geometry`] holds the instrument's partition and bank tables, so walks and library
 //!   writes are bounded and sized by numbers the device supplied.
-//! - [`Device::write`] sizes a library's cleaning pass from that partition's
-//!   [`AllocationUnit`] and the body it is about to send.
+//! - [`Device::write`] and [`Device::write_from`] size a library's cleaning pass from
+//!   that partition's [`AllocationUnit`] and the body they are about to send.
 //! - [`Device::take_changed`] carries the instrument's change notification out of the
 //!   transaction it arrived in.
 //!
 //! This module sends no frames itself; [`op`] and [`Session`] do.
 
+use crate::envelope::FileSource;
 use crate::error::{Error, Result};
 use crate::op;
 use crate::session::{ReadOnly, ReadWrite, Session};
@@ -201,13 +202,26 @@ impl<T: Transport> Device<T> {
         &mut self,
         class: ObjectClass,
         at: Location,
-        file: &[u8],
+        mut file: &[u8],
+        name: &str,
+        timestamp: u32,
+    ) -> Result<()> {
+        self.write_from(class, at, &mut file, name, timestamp).await
+    }
+
+    /// [`Self::write`], reading the file one transfer chunk at a time as
+    /// [`op::write_from`] does.
+    pub async fn write_from(
+        &mut self,
+        class: ObjectClass,
+        at: Location,
+        file: &mut impl FileSource,
         name: &str,
         timestamp: u32,
     ) -> Result<()> {
         let unit = self.geometry().await?.allocation_unit(class)?;
         self.destructive(class, async |s| {
-            op::write(s, unit, at, file, name, timestamp).await
+            op::write_from(s, unit, at, file, name, timestamp).await
         })
         .await
     }

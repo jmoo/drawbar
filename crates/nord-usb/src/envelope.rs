@@ -6,14 +6,9 @@
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
-use nord_format::cbin::{self, Cbin, Header, RawBody};
-use std::io::Cursor;
-
-/// CRC-32/ISO-HDLC over a wire body. The type-1 container carries the same checksum,
-/// and the device reports it in `0x1e` object info.
-pub fn crc32(data: &[u8]) -> u32 {
-    nord_format::crc::crc32(data)
-}
+use nord_format::cbin::{self, Cbin, Generation, Header, RawBody, Verifier};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 
 /// A wire slot as the header's `(bank, slot)` pair. Both are zero-indexed, one below
 /// the display.
@@ -44,20 +39,37 @@ pub fn tag(header: &Header) -> String {
 /// ⚠️ Read from the header bytes without parsing: this must work for a file whose
 /// checksum is bad, because that file may be a slot's last remaining copy.
 pub fn unchecked_tag(file: &[u8]) -> Option<String> {
-    file.get(8..12)
-        .filter(|tag| tag.iter().all(|b| b.is_ascii_alphanumeric()))
-        .map(|tag| String::from_utf8_lossy(tag).into_owned())
+    file.get(8..12).and_then(tag_text)
+}
+
+/// Four bytes as a format tag, where they are one.
+fn tag_text(tag: &[u8]) -> Option<String> {
+    (tag.len() == 4 && tag.iter().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| String::from_utf8_lossy(tag).into_owned())
 }
 
 /// Filename for the bytes rescued from a slot: the location as the instrument labels
 /// it, and the object's own format tag, or `bin` without one, so the file can be
 /// written straight back. The checksum is not verified.
 pub fn rescue_name(at: Location, backup: &[u8]) -> String {
-    let format = unchecked_tag(backup).unwrap_or_else(|| "bin".to_string());
+    rescued(at, unchecked_tag(backup).as_deref())
+}
+
+/// [`rescue_name`] for a slot whose object the device reported as `format`, before any
+/// of its bytes are read.
+pub fn rescue_name_for(at: Location, format: &str) -> String {
+    rescued(at, tag_text(format.as_bytes()).as_deref())
+}
+
+/// Every rescued file's name starts with this.
+pub const RESCUED: &str = "nord-rescued-";
+
+fn rescued(at: Location, format: Option<&str>) -> String {
     format!(
-        "nord-rescued-{}-{}.{format}",
+        "{RESCUED}{}-{}.{}",
         at.user_bank(),
-        at.user_slot()
+        at.user_slot(),
+        format.unwrap_or("bin")
     )
 }
 
@@ -83,6 +95,8 @@ pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec
     Ok(out.into_inner())
 }
 
+const BARE_HEADER: &str = "the file is a bare CBIN header with no body to send";
+
 /// The inverse of [`wrap`]: split file bytes into the header and the body the wire
 /// carries. The checksum is verified.
 pub fn unwrap(file: &[u8]) -> Result<Cbin<RawBody>> {
@@ -90,11 +104,200 @@ pub fn unwrap(file: &[u8]) -> Result<Cbin<RawBody>> {
         cbin::read_raw(&mut Cursor::new(file)).map_err(|e| Error::Envelope(e.to_string()))?;
     // A container may hold an empty body, but the body is the whole payload of a write.
     if read.body.0.is_empty() {
-        return Err(Error::Envelope(
-            "the file is a bare CBIN header with no body to send".into(),
-        ));
+        return Err(Error::Envelope(BARE_HEADER.into()));
     }
     Ok(read)
+}
+
+/// Where the bytes of a file to send come from: a file on disk, a browser `File`, or
+/// memory. A write reads it in pieces no larger than one transfer chunk, so the whole
+/// file is never held at once.
+///
+/// No `Send` bound, for the reason [`Transport`](crate::transport::Transport) gives.
+#[allow(async_fn_in_trait, clippy::len_without_is_empty)]
+pub trait FileSource {
+    /// The file's length in bytes, taken once before the first read.
+    fn len(&self) -> u64;
+
+    /// Fill `buf` with the bytes starting at `offset`. Bytes past the end are an error,
+    /// such as [`io::ErrorKind::UnexpectedEof`], never a short read.
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+}
+
+impl FileSource for &[u8] {
+    fn len(&self) -> u64 {
+        <[u8]>::len(self) as u64
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let bytes = usize::try_from(offset)
+            .ok()
+            .and_then(|start| self.get(start..start.checked_add(buf.len())?))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        buf.copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// A file read by position through [`Seek`], such as a [`std::fs::File`]. Its length is
+/// taken once, when it is wrapped.
+pub struct Positional<R> {
+    inner: R,
+    len: u64,
+}
+
+impl<R: Seek> Positional<R> {
+    pub fn new(mut inner: R) -> io::Result<Positional<R>> {
+        let len = inner.seek(SeekFrom::End(0))?;
+        Ok(Positional { inner, len })
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: Read + Seek> FileSource for Positional<R> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.inner.seek(SeekFrom::Start(offset))?;
+        self.inner.read_exact(buf)
+    }
+}
+
+/// Where the bytes of a file read off the instrument go: a file on disk, a file in a
+/// browser's storage, memory, or nowhere when only their checksum is wanted. A read hands
+/// it one transfer chunk at a time, so the whole file is never held at once.
+///
+/// No `Send` bound, for the reason [`Transport`](crate::transport::Transport) gives.
+#[allow(async_fn_in_trait)]
+pub trait FileSink {
+    /// Write `buf` at `offset`, growing the file as needed. A gap a write leaves before
+    /// `offset` is filled by a later write.
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()>;
+}
+
+impl FileSink for Vec<u8> {
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        let start = usize::try_from(offset).map_err(|_| io::ErrorKind::OutOfMemory)?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or(io::ErrorKind::OutOfMemory)?;
+        if self.len() < end {
+            self.resize(end, 0);
+        }
+        self[start..end].copy_from_slice(buf);
+        Ok(())
+    }
+}
+
+impl FileSink for io::Sink {
+    async fn write_at(&mut self, _offset: u64, _buf: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FileSink for std::fs::File {
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.write_all(buf)
+    }
+}
+
+/// [`unwrap`] for a file read through a [`FileSource`], a transfer chunk at a time: the
+/// header, once every byte has been checked against the stored checksum.
+pub async fn verify(file: &mut impl FileSource) -> Result<Header> {
+    Ok(open(file, crate::op::WRITE_CHUNK).await?.header)
+}
+
+/// The header [`wrap`] would put ahead of a body whose CRC-32 is `body_crc32`, for a body
+/// written apart from it.
+pub(crate) fn header(format: &str, at: Location, version: u32, body_crc32: u32) -> Result<Vec<u8>> {
+    let mut head = wrap(format, at, version, &[])?;
+    let stored = Generation::V1
+        .checksum_range(head.len())
+        .ok_or_else(|| Error::Envelope("a type-1 header has no room for its checksum".into()))?;
+    head[stored].copy_from_slice(&body_crc32.to_le_bytes());
+    Ok(head)
+}
+
+/// A file opened through a [`FileSource`] and verified as [`unwrap`] verifies one: its
+/// header, and where in the file the body the wire carries lies.
+pub(crate) struct Opened {
+    pub header: Header,
+    pub body: Range<usize>,
+    /// The file's bytes before the body and after it, as they were verified.
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    stored: u32,
+}
+
+fn envelope(e: nord_format::error::Error) -> Error {
+    Error::Envelope(e.to_string())
+}
+
+impl Opened {
+    /// A check that has seen the file up to its body.
+    pub fn verifier(&self) -> Result<Verifier> {
+        let mut verifier = Verifier::new();
+        verifier.update(&self.head).map_err(envelope)?;
+        Ok(verifier)
+    }
+
+    /// Whether `verifier`, having seen the whole body, finds the checksum the file
+    /// stored when it was opened.
+    pub fn matches(&self, mut verifier: Verifier) -> Result<bool> {
+        verifier.update(&self.tail).map_err(envelope)?;
+        let info = verifier.finish().map_err(envelope)?;
+        Ok(info.checksum_ok && info.stored_checksum == self.stored)
+    }
+}
+
+/// [`unwrap`] through a [`FileSource`]: the header is read alone, and the rest in
+/// pieces of `chunk` bytes, which are checked against the stored checksum and dropped.
+pub(crate) async fn open(file: &mut impl FileSource, chunk: usize) -> Result<Opened> {
+    let len = usize::try_from(file.len()).map_err(|_| {
+        Error::InvalidArgument("the file is larger than this platform can address".into())
+    })?;
+    let mut head = vec![0; len.min(Generation::V1.body_start() as usize)];
+    file.read_at(0, &mut head).await?;
+    let header = Header::from_prefix(&head).map_err(envelope)?;
+    head.truncate(header.generation.body_start() as usize);
+
+    let mut verifier = Verifier::new();
+    verifier.update(&head).map_err(envelope)?;
+    let mut buf = vec![0; chunk.min(len - head.len())];
+    for at in (head.len()..len).step_by(chunk) {
+        let piece = &mut buf[..chunk.min(len - at)];
+        file.read_at(at as u64, piece).await?;
+        verifier.update(piece).map_err(envelope)?;
+    }
+    let info = verifier.finish().map_err(envelope)?;
+    if !info.checksum_ok {
+        return Err(Error::Envelope(format!(
+            "{}: stored checksum {:#x} does not match the file",
+            tag(&info.header),
+            info.stored_checksum
+        )));
+    }
+
+    // The body lies within a file whose length is a `usize`.
+    let body = head.len()..head.len() + info.body_len as usize;
+    if body.is_empty() {
+        return Err(Error::Envelope(BARE_HEADER.into()));
+    }
+    let mut tail = vec![0; len - body.end];
+    file.read_at(body.end as u64, &mut tail).await?;
+    Ok(Opened {
+        header: info.header,
+        body,
+        head,
+        tail,
+        stored: info.stored_checksum,
+    })
 }
 
 #[cfg(test)]
@@ -160,6 +363,110 @@ mod tests {
         let bytes = bytes.into_inner();
         assert!(cbin::read_raw(&mut Cursor::new(&bytes)).is_ok());
         assert!(unwrap(&bytes).is_err(), "an empty body has nothing to send");
+    }
+
+    fn file(generation: Generation, tag: &str, body: &[u8]) -> Vec<u8> {
+        let file = Cbin {
+            header: Header {
+                generation,
+                ..Header::new(tag, (6, 9), 4)
+            },
+            body: RawBody(body.to_vec()),
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        file.write_to(&mut bytes).unwrap();
+        bytes.into_inner()
+    }
+
+    /// For every truncation and every flipped bit of type-1 and type-0 files, `open`
+    /// accepts exactly what `unwrap` accepts, and finds the same header and body.
+    #[test]
+    fn opening_through_a_source_accepts_exactly_what_unwrap_accepts() {
+        let body = hex(BODY);
+        let files = [
+            [hex(HEADER), body.clone()].concat(),
+            file(Generation::V0, "nspg", &body),
+            // Shorter than a type-1 header, so the header read is the whole file.
+            file(Generation::V0, "nspg", &body[..5]),
+            file(Generation::V1, "ne5p", &[]),
+        ];
+        let mut cases = Vec::new();
+        for file in &files {
+            cases.extend((0..=file.len()).map(|len| file[..len].to_vec()));
+            for at in 0..file.len() {
+                for bit in 0..8 {
+                    let mut flipped = file.clone();
+                    flipped[at] ^= 1 << bit;
+                    cases.push(flipped);
+                }
+            }
+        }
+
+        let (mut accepted, mut refused) = (0, 0);
+        for (i, case) in cases.iter().enumerate() {
+            let whole = unwrap(case);
+            for chunk in [1, 7, 4096] {
+                let opened = pollster::block_on(open(&mut case.as_slice(), chunk));
+                match (&whole, opened) {
+                    (Ok(whole), Ok(opened)) => {
+                        assert_eq!(opened.header, whole.header, "case {i}");
+                        assert_eq!(case[opened.body], whole.body.0[..], "case {i}");
+                        accepted += 1;
+                    }
+                    (Err(_), Err(_)) => refused += 1,
+                    (whole, opened) => panic!(
+                        "case {i}, chunk {chunk}: unwrap {:?} but open {:?}",
+                        whole.as_ref().map(|_| ()),
+                        opened.map(|_| ())
+                    ),
+                }
+            }
+        }
+        assert!(
+            accepted > 0 && refused > 0,
+            "{accepted} accepted, {refused} refused"
+        );
+    }
+
+    #[test]
+    fn a_slice_refuses_a_read_past_its_end() {
+        let mut file: &[u8] = &[1, 2, 3];
+        let mut buf = [0; 2];
+        pollster::block_on(file.read_at(1, &mut buf)).unwrap();
+        assert_eq!(buf, [2, 3]);
+        let err = pollster::block_on(file.read_at(2, &mut buf)).expect_err("one byte short");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        let err = pollster::block_on(file.read_at(u64::MAX, &mut buf)).expect_err("past usize");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A read writes the body behind the header's room and the header last, so memory
+    /// takes a write past its end and keeps what was written there.
+    #[test]
+    fn a_vec_takes_a_write_past_its_end_and_one_into_its_gap() {
+        let mut file = Vec::new();
+        pollster::block_on(file.write_at(3, &[4, 5])).unwrap();
+        assert_eq!(file, [0, 0, 0, 4, 5]);
+        pollster::block_on(file.write_at(0, &[1, 2, 3])).unwrap();
+        assert_eq!(file, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_positional_file_reads_by_offset_and_not_past_its_end() {
+        let mut file = Positional::new(Cursor::new(vec![1u8, 2, 3, 4])).unwrap();
+        assert_eq!(FileSource::len(&file), 4);
+        let mut buf = [0; 2];
+        pollster::block_on(file.read_at(2, &mut buf)).unwrap();
+        assert_eq!(buf, [3, 4]);
+        let err = pollster::block_on(file.read_at(3, &mut buf)).expect_err("one byte short");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_rescue_named_before_its_read_takes_the_reported_tag() {
+        let at = Location { bank: 0, slot: 0 };
+        assert_eq!(rescue_name_for(at, "npno"), "nord-rescued-1-1.npno");
+        assert_eq!(rescue_name_for(at, "nsp\0"), "nord-rescued-1-1.bin");
     }
 
     #[test]
