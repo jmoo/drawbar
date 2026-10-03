@@ -585,6 +585,11 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
     ) {
+        // A file's record went to `to` as its rename was sent; a folder holds no record.
+        let file = self
+            .records
+            .values()
+            .any(|record| record.path.as_ref() == Some(to));
         for record in self.records.values_mut() {
             if let Some(back) = record.path.as_ref().and_then(|at| at.moved(to, from)) {
                 record.path = Some(back);
@@ -595,8 +600,19 @@ impl Store {
                 loading.unmoved(rename);
             }
         }
-        workspace.relocate(to, from);
-        browser.folders.follow_back(to, from);
+        // ⚠️ The folder changes not yet sent have moved the workspace on already. Those
+        // after a folder's rename name the folder by its new name, and are moved back
+        // with it; a file's rename is undone where those changes have put the file.
+        match file {
+            true => {
+                let folders = &browser.folders;
+                workspace.relocate(&folders.ahead(to), &folders.ahead(from));
+            }
+            false => {
+                workspace.relocate(to, from);
+                browser.folders.follow_back(to, from);
+            }
+        }
     }
 
     /// Forget a rename now answered. `false` for one this store did not send.
@@ -1396,7 +1412,7 @@ impl Store {
         for (id, found) in matched.renamed {
             touched.insert(id);
             let before = workspace.get(id).map(|entity| entity.name.clone());
-            workspace.place(id, found.path.clone());
+            workspace.place(id, browser.folders.ahead(&found.path));
             if let Some(record) = self.records.get_mut(&id) {
                 record.path = Some(found.path.clone());
                 if let Some(print) = &mut record.fingerprint {
@@ -1430,6 +1446,15 @@ impl Store {
             workspace.restore(back, Some(next), log);
             for id in ids {
                 self.settle(id, workspace, &BTreeMap::new());
+                // The disk has it where it was before the folder changes still to send.
+                let path = self
+                    .records
+                    .get(&id)
+                    .and_then(|record| record.path.as_ref());
+                let ahead = path.map(|path| browser.folders.ahead(path));
+                if ahead.as_ref().is_some_and(|ahead| Some(ahead) != path) {
+                    workspace.place(id, ahead.expect("checked"));
+                }
             }
         }
         touched

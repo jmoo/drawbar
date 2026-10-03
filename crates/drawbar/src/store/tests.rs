@@ -1867,6 +1867,36 @@ fn a_file_moved_into_a_folder_whose_rename_is_unanswered_waits_for_it() {
     assert_eq!(session.path(id).as_deref(), Some("Gig/f.ne5p"));
 }
 
+/// A folder renamed while a rename of a file in it has not answered waits for it. Where
+/// the disk refuses the file's rename, since a file drawbar does not know has the name,
+/// the file keeps its old name inside the renamed folder, with its tag.
+#[test]
+fn a_folder_renamed_while_a_file_in_it_is_renamed_waits_for_it() {
+    let (root, mut session, folder, tag) = gig();
+    let id = session.only();
+    fs::write(root.at("Gig/b.ne5p"), b"theirs").unwrap();
+    session
+        .bench
+        .workspace
+        .place(id, LibPath::parse("Gig/b.ne5p").unwrap());
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Files);
+    session.rename_folder(folder, "Set");
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set"]);
+    assert_eq!(root.names("Set"), ["a.ne5p", "b.ne5p"]);
+    assert_eq!(fs::read(root.at("Set/b.ne5p")).unwrap(), b"theirs");
+    assert_eq!(session.path(id).as_deref(), Some("Set/a.ne5p"));
+    assert!(session.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(session.said("did not change as asked"), 1);
+}
+
 /// A folder removed while the library is still being listed waits until everything in
 /// it has been listed, and then the usual rules apply: it goes, and what was in it moves
 /// up, unless it holds a file drawbar does not.

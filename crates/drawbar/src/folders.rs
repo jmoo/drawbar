@@ -513,6 +513,19 @@ impl Folders {
         }
     }
 
+    /// Where `path`, as the disk has it, will be once the changes not yet sent have run.
+    pub(crate) fn ahead(&self, path: &LibPath) -> LibPath {
+        let mut at = path.clone();
+        for op in &self.ops {
+            if let Op::MoveDir { from, to } = op {
+                if let Some(moved) = at.moved(from, to) {
+                    at = moved;
+                }
+            }
+        }
+        at
+    }
+
     /// Put back changes taken and not sent, ahead of any made since.
     pub(crate) fn hold(&mut self, ops: Vec<Op>) {
         self.ops.splice(0..0, ops);
