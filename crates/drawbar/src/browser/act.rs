@@ -6,7 +6,7 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::{Item, Kind};
 use super::Browser;
 use crate::device::{
-    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
+    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Payload, Purpose,
 };
 use crate::filter::Narrow;
 use crate::folders::{Clash, Folders, Occupant};
@@ -427,24 +427,10 @@ enum Ready {
     Never(String),
 }
 
-/// The assets an act carries whole: the ones a send writes.
-fn carries(act: &Act, queue: &Queue) -> Vec<u64> {
-    match act {
-        Act::WriteBack(id)
-        | Act::Send { id, .. }
-        | Act::Retarget { id, .. }
-        | Act::Replace { id, .. } => vec![*id],
-        Act::SendChecked(ids) => ids.clone(),
-        Act::SendAll => will_write(queue).map(|held| held.id).collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// Whether every asset `act` reads has been read, and everything in a folder it removes
 /// has been listed. One not read yet is asked for, and so is the listing of a folder, and
-/// the act waits for them. In the browser, which cannot read a file whole on the frame,
-/// an asset the act carries whole that rests in its file is read whole first.
-fn ready(act: &Act, workspace: &mut Workspace, queue: &Queue, folders: &mut Folders) -> Ready {
+/// the act waits for them.
+fn ready(act: &Act, workspace: &mut Workspace, folders: &mut Folders) -> Ready {
     if let Some(dir) = removing(act, folders).filter(|dir| !folders.listed_whole(dir)) {
         folders.walk(&dir);
         return Ready::Later;
@@ -460,32 +446,10 @@ fn ready(act: &Act, workspace: &mut Workspace, queue: &Queue, folders: &mut Fold
         workspace.hurry(id);
         later = true;
     }
-    if cfg!(target_arch = "wasm32") {
-        for id in carries(act, queue) {
-            match wake(workspace, id) {
-                Ready::Now => {}
-                Ready::Later => later = true,
-                never => return never,
-            }
-        }
-    }
     match later {
         true => Ready::Later,
         false => Ready::Now,
     }
-}
-
-/// Whether an asset is held whole, and otherwise read it whole: `Later` while that runs,
-/// and `Never` once it has failed.
-fn wake(workspace: &mut Workspace, id: u64) -> Ready {
-    let Some(entity) = workspace.get(id).filter(|entity| entity.rests().is_some()) else {
-        return Ready::Now;
-    };
-    if workspace.unwoken(id) {
-        return Ready::Never(format!("“{}” could not be read.", entity.name));
-    }
-    workspace.wake(id);
-    Ready::Later
 }
 
 /// The folder an act removes, if it removes one.
@@ -523,7 +487,7 @@ pub fn apply(
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
-        match ready(&act, workspace, queue, &mut browser.folders) {
+        match ready(&act, workspace, &mut browser.folders) {
             Ready::Now => {}
             Ready::Later => {
                 browser.held.push(act);
@@ -1143,24 +1107,16 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
+    // The whole batch is checked before the first delete-then-write.
     let batch = match grouped(queue, workspace) {
         Ok(batch) => batch,
         Err((name, e)) => {
             log.error(format!("{name}: {e}"));
-            return log.trouble(format!("“{name}” could not be read, so nothing was sent."));
+            return log.trouble(format!(
+                "Nothing was sent: “{name}” cannot be sent. The details are below."
+            ));
         }
     };
-    // Validate the whole batch before the first delete-then-write.
-    for item in batch.iter().flat_map(|(_, items)| items) {
-        if let Err(e) = nord_usb::envelope::unwrap(&item.bytes) {
-            log.error(format!("{}: {e}", item.name));
-            log.trouble(format!(
-                "“{}” is not a file the instrument takes, so nothing was sent.",
-                item.name
-            ));
-            return;
-        }
-    }
     for (class, items) in batch {
         device.send(DeviceCmd::SendAll { class, items }, log);
     }
@@ -1170,11 +1126,9 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
 type Batch = (ObjectClass, Vec<Outgoing>);
 
 /// What will be written, grouped by folder in queue order. A session belongs to a
-/// folder, so a batch is split by folder. An asset whose file does not read stops the
-/// batch, named with why.
-///
-/// ⚠️ An asset resting in its file is read whole here, on the frame.
-fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, std::io::Error)> {
+/// folder, so a batch is split by folder. An asset the instrument must not be sent stops
+/// the batch, named with why. An asset resting in its file is sent from it, unread here.
+fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, String)> {
     let mut by_class: Vec<Batch> = Vec::new();
     for held in will_write(queue) {
         let Some(entity) = workspace.get(held.id) else {
@@ -1184,10 +1138,7 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, 
             id: entity.id,
             at: held.at,
             name: entity.name.clone(),
-            bytes: entity
-                .whole()
-                .map_err(|e| (entity.name.clone(), e))?
-                .into_owned(),
+            payload: Payload::of(entity).map_err(|e| (entity.name.clone(), e))?,
         };
         match by_class.iter_mut().find(|(class, _)| *class == held.class) {
             Some((_, items)) => items.push(item),
@@ -1408,30 +1359,26 @@ fn save_doc(
         ));
     };
     // Refused before the write.
-    if let Err(e) = entity.sendable() {
-        log.error(format!("{}: {e}", entity.name));
-        return log.trouble(format!(
-            "“{}” is not a file the instrument takes.",
-            entity.name
-        ));
-    }
+    let payload = match Payload::of(entity) {
+        Ok(payload) => payload,
+        Err(e) => {
+            log.error(format!("{}: {e}", entity.name));
+            return log.trouble(format!(
+                "“{}” is not a file the instrument takes.",
+                entity.name
+            ));
+        }
+    };
     if let Some(note) = write_note(&device.state, class, entity).filter(|_| ask) {
         return browser.ask_write(&entity.name, place(class, at), note, Act::WriteBack(id));
     }
-    let bytes = match entity.whole() {
-        Ok(bytes) => bytes.into_owned(),
-        Err(e) => {
-            log.error(format!("{}: {e}", entity.name));
-            return log.trouble(format!("“{}” could not be read.", entity.name));
-        }
-    };
     device.send(
         DeviceCmd::Put {
             id,
             class,
             at,
             name: entity.name.clone(),
-            bytes,
+            payload,
         },
         log,
     );
@@ -1551,7 +1498,7 @@ mod tests {
             id,
             class: ObjectClass::Program,
             at: at(3),
-            bytes: bench.workspace.get(id).unwrap().bytes.to_vec(),
+            sent: crate::device::Payload::Bytes(bench.workspace.get(id).unwrap().bytes.to_vec()),
         });
         bench.device.poll(
             &mut bench.log,
@@ -1560,6 +1507,71 @@ mod tests {
             &mut bench.queue,
         );
         assert!(!bench.workspace.get(id).unwrap().is_unsaved());
+    }
+
+    /// A piano resting in its file is queued and batched without being read: the batch
+    /// carries the file, and once it lands the asset stands on the slot with the
+    /// checksum of the file, saved as the file, which nothing holds whole.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_resting_piano_is_sent_from_its_file_and_stands_on_the_slot_it_landed_in() {
+        use std::sync::Arc;
+
+        let mut bench = Bench::new();
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(40));
+        let id = crate::testing::rest(&mut bench.workspace, "Upright.npno", file.clone());
+        bench.workspace.settle_files(&mut bench.log);
+        let crc32 = bench.workspace.get(id).unwrap().saved.crc32;
+        assert!(crc32.is_some(), "its check answered");
+        file.take_reads();
+
+        let class = ObjectClass::Piano;
+        let at = Location::from_user(1, 1);
+        bench.device.pretend_scanned(class, 1, &[""]);
+        bench.act(vec![Act::Send { id, class, at }, Act::SendAll]);
+
+        let Some(DeviceCmd::SendAll { items, .. }) = bench.device.queued().back() else {
+            panic!("a batch was asked for")
+        };
+        let [item] = items.as_slice() else {
+            panic!("{} items", items.len())
+        };
+        let Payload::File {
+            file: sent,
+            crc32: said,
+        } = &item.payload
+        else {
+            panic!("the batch carries bytes in place of the file")
+        };
+        assert!(Arc::ptr_eq(sent, &file), "the file it rests in");
+        assert_eq!(Some(*said), crc32);
+        assert_eq!(file.take_reads(), [], "nothing read it");
+        let sent = item.payload.clone();
+
+        // Dispatching the write drops what the walk said of the bank it changes.
+        bench.device.pump();
+        bench.device.pretend(crate::device::DeviceEvent::Sent {
+            id,
+            class,
+            at,
+            sent,
+        });
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
+
+        assert!(bench.queue.is_empty(), "it is no longer owed");
+        let entity = bench.workspace.get(id).unwrap();
+        assert_eq!(entity.link, Some((class, at)));
+        assert!(entity.wrote.is_some_and(|wrote| Some(wrote.crc32) == crc32));
+        assert!(entity.rests().is_some_and(|held| Arc::ptr_eq(held, &file)));
+        assert!(!entity.is_unsaved());
+        assert_eq!(entity.held_whole(), 0, "nothing holds it whole");
+        assert_eq!(file.take_reads(), [], "and nothing read it");
     }
 
     #[test]
@@ -2492,7 +2504,9 @@ mod tests {
             id: ids[0],
             class,
             at: at(0),
-            bytes: bench.workspace.get(ids[0]).unwrap().bytes.to_vec(),
+            sent: crate::device::Payload::Bytes(
+                bench.workspace.get(ids[0]).unwrap().bytes.to_vec(),
+            ),
         });
         bench.device.pretend(DeviceEvent::OpFailed(
             "Programs 7:2 is occupied, and the instrument does not overwrite in place".into(),

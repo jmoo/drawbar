@@ -18,7 +18,7 @@ use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
-use super::{DeviceCmd, DeviceEvent, Outgoing, Partition};
+use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -219,9 +219,9 @@ async fn execute<T: Transport>(
             class,
             at,
             name,
-            bytes,
+            payload,
         } => {
-            let note = put_one(device, class, at, &name, bytes.clone(), emit, gone)
+            let note = put_one(device, class, at, &name, &payload, emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
             // Reported as sent only once its session has closed.
@@ -229,7 +229,7 @@ async fn execute<T: Transport>(
                 id,
                 class,
                 at,
-                bytes,
+                sent: payload,
             });
             Ok(Some(note))
         }
@@ -303,7 +303,7 @@ async fn put<T: Transport>(
     unit: AllocationUnit,
     at: Location,
     what: &str,
-    bytes: Vec<u8>,
+    payload: &Payload,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
@@ -350,13 +350,23 @@ async fn put<T: Transport>(
         }
     }
 
-    let written = op::write(s, unit, at, &bytes, &write_name, timestamp).await;
+    let written = match payload {
+        Payload::Bytes(bytes) => op::write(s, unit, at, bytes, &write_name, timestamp).await,
+        Payload::File { file, .. } => {
+            op::write_from(s, unit, at, &mut &**file, &write_name, timestamp).await
+        }
+    };
 
     Ok(match (written, backup) {
         (Ok(()), _) => Ok(wrote(class, at, what, &write_name)),
+        (Err(Error::Io(e)), None) => Err(unreadable(what, &e)),
         (Err(e), None) => Err(spoil(gone, Some(at))(e)),
         // Restore the occupant before reporting the original error.
         (Err(e), Some(backup)) => {
+            let e = match e {
+                Error::Io(e) => unreadable(what, &e),
+                e => e.to_string(),
+            };
             emit.send(DeviceEvent::Note(format!(
                 "the write failed and {}; putting the original back",
                 aftermath(class, at)
@@ -388,6 +398,14 @@ async fn put<T: Transport>(
             }
         }
     })
+}
+
+/// Why a write stopped when the file it was sending stopped reading partway.
+fn unreadable(what: &str, e: &std::io::Error) -> String {
+    format!(
+        "“{what}” could not be read from its file while it was sent ({e}). The file may \
+         have changed or moved on disk"
+    )
 }
 
 fn aftermath(class: ObjectClass, at: Location) -> String {
@@ -438,7 +456,7 @@ async fn put_one<T: Transport>(
     class: ObjectClass,
     at: Location,
     what: &str,
-    bytes: Vec<u8>,
+    payload: &Payload,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
@@ -449,7 +467,7 @@ async fn put_one<T: Transport>(
     let unit = geometry.allocation_unit(class)?;
     device
         .destructive(class, async |s| {
-            put(s, unit, at, what, bytes, emit, gone).await
+            put(s, unit, at, what, payload, emit, gone).await
         })
         .await
 }
@@ -505,7 +523,7 @@ async fn batch<T: Transport>(
                 if let Some(why) = refused {
                     return Ok(Some(format!("{}: {why}", shown(item.at))));
                 }
-                match put(s, unit, item.at, &item.name, item.bytes.clone(), emit, gone).await? {
+                match put(s, unit, item.at, &item.name, &item.payload, emit, gone).await? {
                     Ok(note) => {
                         *done += 1;
                         emit.send(DeviceEvent::Note(note));
@@ -513,7 +531,7 @@ async fn batch<T: Transport>(
                             id: item.id,
                             class,
                             at: item.at,
-                            bytes: item.bytes.clone(),
+                            sent: item.payload.clone(),
                         });
                     }
                     Err(why) => return Ok(Some(why)),
@@ -992,8 +1010,10 @@ mod wire_tests {
 
     use super::*;
     use crate::device::Purpose;
+    use crate::ondisk::OnDisk;
     use nord_usb::wire::{cmd, ui, Message, Service};
     use nord_usb::Transport;
+    use std::sync::Arc;
 
     /// Minimal instrument state for exercising complete worker commands.
     struct Puppet {
@@ -1009,6 +1029,11 @@ mod wire_tests {
         focus: Option<Location>,
         refuses_first_write: bool,
         refuses_every_write: bool,
+        /// Whether the body bytes a write carries are kept in [`Puppet::heard`]. A
+        /// forgetful one keeps only their checksum and length.
+        keeps_data: bool,
+        data: nord_format::crc::Crc32Stream<'static>,
+        data_len: u64,
     }
 
     /// The Electro 5's bank division, which a default Puppet uses.
@@ -1038,7 +1063,40 @@ mod wire_tests {
                 focus: None,
                 refuses_first_write: false,
                 refuses_every_write: false,
+                keeps_data: true,
+                data: nord_format::crc::Crc32Stream::new(),
+                data_len: 0,
             }
+        }
+
+        /// Whether `msg` is a chunk of a write the instrument does not answer: every chunk
+        /// but the one that ends the body `BEGIN_WRITE` announced.
+        fn unacknowledged(&self, msg: &Message) -> bool {
+            let word = |args: &[u8], at: usize| {
+                u32::from_be_bytes(args[at..at + 4].try_into().expect("four bytes"))
+            };
+            let program =
+                |command| msg.command == command && matches!(msg.service, Service::Program);
+            if !program(cmd::WRITE_DATA) {
+                return false;
+            }
+            let announced = self
+                .heard
+                .iter()
+                .rev()
+                .find(|heard| {
+                    heard.command == cmd::BEGIN_WRITE && matches!(heard.service, Service::Program)
+                })
+                .map(|begin| word(&begin.args, 8));
+            let end = word(&msg.args, 8) + word(&msg.args, 12);
+            announced.is_some_and(|len| end < len)
+        }
+
+        /// Keep only the checksum and length of what each write carries, so a write
+        /// as large as a library holds nothing of it.
+        fn forgetful(mut self) -> Puppet {
+            self.keeps_data = false;
+            self
         }
 
         fn deaf() -> Puppet {
@@ -1254,7 +1312,8 @@ mod wire_tests {
         async fn write(&mut self, buf: &[u8]) -> nord_usb::Result<()> {
             let msg = Message::decode(buf)?;
             let spoken = matches!(msg.service, Service::Ui)
-                && matches!(msg.command, ui::LABEL | ui::PERCENT);
+                && matches!(msg.command, ui::LABEL | ui::PERCENT)
+                || self.unacknowledged(&msg);
             let (status, payload) = match self.answer(&msg) {
                 Some(answered) => answered,
                 None => (0, vec![0; 32]),
@@ -1265,6 +1324,16 @@ mod wire_tests {
                 self.replies.push_back(
                     Message::new(msg.service, msg.subsystem, msg.command + 1, args).encode(),
                 );
+            }
+            let mut msg = msg;
+            if msg.command == cmd::WRITE_DATA && matches!(msg.service, Service::Program) {
+                // The address, the offset and the length, then the chunk.
+                let chunk = &msg.args[16..];
+                self.data.update(chunk);
+                self.data_len += chunk.len() as u64;
+                if !self.keeps_data {
+                    msg.args.truncate(16);
+                }
             }
             self.heard.push(msg);
             Ok(())
@@ -1368,7 +1437,7 @@ mod wire_tests {
                     class,
                     at,
                     name: "Africa-Split.ne5p".into(),
-                    bytes: a_program(),
+                    payload: Payload::Bytes(a_program()),
                 },
             );
 
@@ -1467,7 +1536,7 @@ mod wire_tests {
                 class: ObjectClass::Program,
                 at,
                 name: "Africa-Split.ne5p".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
 
@@ -1495,7 +1564,7 @@ mod wire_tests {
                 class: ObjectClass::Program,
                 at,
                 name: "Africa-Split.ne5p".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
@@ -1525,7 +1594,7 @@ mod wire_tests {
             id: slot as u64,
             at: Location { bank: 6, slot },
             name: name.into(),
-            bytes: bytes.clone(),
+            payload: Payload::Bytes(bytes.clone()),
         };
         let mut device = Puppet::new(1);
         let (flow, events) = drive(
@@ -1562,7 +1631,7 @@ mod wire_tests {
             class,
             at,
             name: "Africa-Split.ne5p".into(),
-            bytes: a_program(),
+            payload: Payload::Bytes(a_program()),
         };
 
         let mut live = Puppet::stocked(&[("Live", 3)], &[(at, "Live 3")]);
@@ -1591,7 +1660,7 @@ mod wire_tests {
                 class: ObjectClass::Live,
                 at,
                 name: "Africa-Split.ne5l".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
         assert!(flow == Flow::Continue);
@@ -1610,7 +1679,7 @@ mod wire_tests {
                 class: ObjectClass::Program,
                 at: Location { bank: 6, slot: 3 },
                 name: "   ".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
         assert!(flow == Flow::Continue);
@@ -1629,7 +1698,7 @@ mod wire_tests {
                 class: ObjectClass::Program,
                 at,
                 name: "   ".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
 
@@ -1643,7 +1712,7 @@ mod wire_tests {
             id: slot as u64,
             at: Location { bank: 6, slot },
             name: name.into(),
-            bytes: bytes.clone(),
+            payload: Payload::Bytes(bytes.clone()),
         };
         let mut device = Puppet::new(1);
         let (flow, _) = drive(
@@ -2054,7 +2123,7 @@ mod wire_tests {
                 class: ObjectClass::Program,
                 at: Location { bank: 0, slot: 3 },
                 name: "Africa-Split.ne5p".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
         assert!(flow == Flow::Continue, "not a disconnection");
@@ -2088,7 +2157,7 @@ mod wire_tests {
                 class: ObjectClass::Program,
                 at: Location { bank: 6, slot: 0 },
                 name: "Africa-Split.ne5p".into(),
-                bytes: a_program(),
+                payload: Payload::Bytes(a_program()),
             },
         );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
@@ -2105,6 +2174,167 @@ mod wire_tests {
             counted(&device, cmd::BEGIN_WRITE),
             0,
             "and nothing was sent"
+        );
+    }
+
+    /// A piano library resting in a file of its own under a fresh folder, with its bytes.
+    fn resting_piano(blocks: u16) -> (crate::testing::Temp, Arc<OnDisk>, Vec<u8>) {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::piano(blocks);
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &bytes);
+        (dir, file, bytes)
+    }
+
+    /// A write of `payload` to bank 1 slot 1 of the piano library.
+    fn put_piano(payload: Payload) -> DeviceCmd {
+        DeviceCmd::Put {
+            id: 1,
+            class: ObjectClass::Piano,
+            at: Location { bank: 0, slot: 0 },
+            name: "Upright.npno".into(),
+            payload,
+        }
+    }
+
+    /// The wire body of `file`, and its CRC-32: what the frames of a write carry, and the
+    /// checksum a slot holding it reports.
+    fn wire_body(file: &[u8]) -> (std::ops::Range<usize>, u32) {
+        let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(file)).unwrap();
+        let start = info.header.generation.body_start() as usize;
+        let body = start..start + info.body_len as usize;
+        let crc = nord_format::crc::crc32(&file[body.clone()]);
+        (body, crc)
+    }
+
+    /// Every frame sent, encoded, with the timestamp `BEGIN_WRITE` carries cleared, since
+    /// two writes a second apart differ there and nowhere else.
+    fn frames(device: &Puppet) -> Vec<Vec<u8>> {
+        device
+            .heard
+            .iter()
+            .map(|msg| {
+                let mut msg = msg.clone();
+                if msg.command == cmd::BEGIN_WRITE && matches!(msg.service, Service::Program) {
+                    msg.args[16..20].fill(0);
+                }
+                msg.encode()
+            })
+            .collect()
+    }
+
+    /// A piano library of a vendor's size is sent from its file a transfer chunk at a
+    /// time. No read of it and no allocation comes near its size, and the frames carry its
+    /// body.
+    #[test]
+    fn a_resting_piano_is_sent_without_ever_being_held_whole() {
+        let (_dir, file, bytes) = resting_piano(u16::MAX);
+        let len = bytes.len();
+        assert!(len > 200_000_000, "{len} bytes is a vendor's size");
+        let (body, crc32) = wire_body(&bytes);
+        drop(bytes);
+
+        let mut device = Puppet::stocked(&[("Bank 1", 4000)], &[]).forgetful();
+        let payload = Payload::File {
+            file: file.clone(),
+            crc32,
+        };
+        let ((flow, events), largest) =
+            crate::testing::largest_allocation(|| drive(&mut device, put_piano(payload)));
+
+        assert!(flow == Flow::Continue);
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert_eq!(failures(&said), Vec::<&str>::new());
+        assert!(
+            said.iter()
+                .any(|event| matches!(event, DeviceEvent::Sent { .. })),
+            "it landed"
+        );
+        assert!(
+            largest < len / 100,
+            "the largest allocation was {largest} bytes, of a {len}-byte file"
+        );
+        let reads = file.take_reads();
+        let widest = reads.iter().map(|read| read.end - read.start).max();
+        assert!(
+            widest.is_some_and(|widest| widest <= 64 << 10),
+            "the widest read was {widest:?} bytes"
+        );
+        assert_eq!(
+            device.data_len,
+            body.len() as u64,
+            "the frames carry the body"
+        );
+        assert_eq!(device.data.value(), crc32, "and the body is the file's");
+    }
+
+    /// Sent from its file or from memory, one file makes the same exchange, frame for
+    /// frame.
+    #[test]
+    fn a_file_sent_from_disk_makes_the_exchange_its_bytes_make() {
+        let (_dir, file, bytes) = resting_piano(40);
+        assert!(bytes.len() > 3 * 32720, "a body of several chunks");
+        let at = Location { bank: 0, slot: 0 };
+        let mut sent = Vec::new();
+        for payload in [
+            Payload::File { file, crc32: 0 },
+            Payload::Bytes(bytes.clone()),
+        ] {
+            let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]);
+            let (flow, events) = drive(&mut device, put_piano(payload));
+            assert!(flow == Flow::Continue);
+            let said: Vec<DeviceEvent> = events.try_iter().collect();
+            assert_eq!(failures(&said), Vec::<&str>::new());
+            sent.push(frames(&device));
+        }
+        let (from_disk, from_memory) = (&sent[0], &sent[1]);
+        assert_eq!(from_disk.len(), from_memory.len(), "frames sent");
+        let differs = from_disk.iter().zip(from_memory).position(|(a, b)| a != b);
+        assert_eq!(differs, None, "the first frame that differs");
+    }
+
+    /// A file that stops reading partway through its transfer fails the send as a refused
+    /// write does: the occupant is put back, the instrument stays attached, nothing is
+    /// reported sent, and the failure names the file.
+    #[test]
+    fn a_file_that_vanishes_mid_send_puts_the_occupant_back_and_says_so() {
+        let (_dir, file, _) = resting_piano(40);
+        let payload = || Payload::File {
+            file: file.clone(),
+            crc32: 0,
+        };
+        drive(
+            &mut Puppet::stocked(&[("Bank 1", 400)], &[]),
+            put_piano(payload()),
+        );
+        let reads = file.take_reads().len();
+        // The last two reads are the transfer's last two chunks.
+        file.vanish_after(reads - 2);
+
+        let at = Location { bank: 0, slot: 0 };
+        let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]);
+        let (flow, events) = drive(&mut device, put_piano(payload()));
+
+        assert!(flow == Flow::Continue, "a file is not the instrument");
+        assert_eq!(
+            written_names(&device),
+            ["Upright", "Grand"],
+            "sent, then restored"
+        );
+        assert!(
+            device.data_len > 0,
+            "it failed partway through the transfer"
+        );
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert!(!said
+            .iter()
+            .any(|event| matches!(event, DeviceEvent::Sent { .. })));
+        let failed = failures(&said);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].contains("“Upright.npno” could not be read from its file")
+                && failed[0].contains("1:1 was restored"),
+            "{}",
+            failed[0]
         );
     }
 

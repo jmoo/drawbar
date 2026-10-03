@@ -303,6 +303,33 @@ pub(crate) fn zoned_sample(
         .expect("the instrument writes")
 }
 
+/// A piano library of three strokes, each of `blocks` blocks of audio, every key mapped to
+/// the nearest. `u16::MAX` blocks is the most a stroke record can state, which makes a
+/// library a vendor's size: about 200 MB in all.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn piano(blocks: u16) -> Vec<u8> {
+    use nord_format::formats::npno::synthetic::{take, Build};
+    use nord_format::formats::npno::Bank;
+
+    const ROOTS: [u8; 3] = [48, 60, 72];
+    Build {
+        version: 0x464,
+        channels: 1,
+        takes: ROOTS
+            .into_iter()
+            .map(|root| take(root, Bank::Attack, 0, blocks))
+            .collect(),
+        map: (21..=108)
+            .map(|key: u8| {
+                let root = ROOTS.into_iter().min_by_key(|root| root.abs_diff(key));
+                (key, root.expect("three roots"))
+            })
+            .collect(),
+    }
+    .bytes()
+    .expect("the builder lays out a library")
+}
+
 /// The system allocator, noting the largest single allocation a thread makes while it
 /// watches.
 pub(crate) struct Watching;

@@ -373,6 +373,14 @@ impl Baseline {
         }
     }
 
+    /// Whether a slot holding `bytes` reports what a slot holding these does: the same
+    /// length and the same checksum. Nothing is read.
+    fn reports(&self, bytes: &[u8]) -> bool {
+        self.size() == bytes.len() as u64
+            && self.crc32.is_some()
+            && self.crc32 == Container::read(bytes).map(|held| held.body_crc32)
+    }
+
     /// Whether these are `bytes`. Never, for bytes not read yet.
     fn holds(&self, bytes: &[u8]) -> bool {
         match (&self.file, self.unread) {
@@ -657,8 +665,9 @@ impl LocalEntity {
     /// The whole body: the bytes held, or a read of the file it rests in.
     ///
     /// ⚠️ A read of a file reads all of it, hundreds of megabytes for a piano library, on
-    /// the calling thread. Only a send, which carries the whole body, asks. The browser
-    /// refuses it, and a send reads the file whole off the frame first
+    /// the calling thread. A send reads the file a chunk at a time, and a copy is made by
+    /// the library, so neither asks. The browser refuses it, and an act that needs it
+    /// reads the file whole off the frame first
     /// ([`Workspace::wake`]).
     pub fn whole(&self) -> std::io::Result<Cow<'_, [u8]>> {
         if self.unread() {
@@ -2746,8 +2755,8 @@ impl Workspace {
     pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
         let resting = self
             .get(id)
-            .and_then(LocalEntity::rests)
-            .map(|file| file.holds(&sent));
+            .filter(|entity| entity.rests().is_some())
+            .map(|entity| entity.saved.reports(&sent));
         match resting {
             Some(true) => {
                 if let Some(entity) = self.get_mut(id) {
@@ -2775,6 +2784,42 @@ impl Workspace {
         entity.saved = Baseline::read(sent, stamp);
         entity.link = Some((class, at));
         entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
+        self.revision += 1;
+    }
+
+    /// Record a write that sent the file `file` to a slot, read from it a chunk at a time:
+    /// the file is the saved baseline, and the slot becomes the link. `crc32` is the
+    /// checksum a slot holding the file reports.
+    ///
+    /// ⚠️ An asset saved as something else while the file was sent is saved as the file
+    /// again, under a stamp of its own, for the reason [`Workspace::landed`] gives.
+    pub fn landed_file(
+        &mut self,
+        id: u64,
+        class: ObjectClass,
+        at: Location,
+        file: Arc<OnDisk>,
+        crc32: u32,
+    ) {
+        let moved = self.get(id).is_some_and(|entity| {
+            let saved = &entity.saved;
+            saved.size() != file.len || saved.crc32 != Some(crc32)
+        });
+        let stamp = match moved {
+            true => Some(self.stamp()),
+            false => None,
+        };
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        if let Some(stamp) = stamp {
+            entity.saved = Baseline {
+                crc32: Some(crc32),
+                ..Baseline::on_disk(file, stamp)
+            };
+        }
+        entity.link = Some((class, at));
+        entity.wrote = Some(Wrote { class, at, crc32 });
         self.revision += 1;
     }
 

@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 use eframe::egui;
 use nord_format::accept::{Acceptance, Family};
@@ -19,6 +20,7 @@ use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
+use crate::ondisk::OnDisk;
 use crate::queue::Queue;
 use crate::strings::{counted, folder, place, shown};
 use crate::tabs::Tabs;
@@ -92,13 +94,13 @@ pub enum DeviceCmd {
         why: Purpose,
     },
     Put {
-        /// The asset on this computer these bytes came from. The [`DeviceEvent::Sent`] this
+        /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
         /// raises names it, so a lone put settles the queue as a batch does.
         id: u64,
         class: ObjectClass,
         at: Location,
         name: String,
-        bytes: Vec<u8>,
+        payload: Payload,
     },
     /// Every queued object of one class, written inside a single session.
     ///
@@ -165,7 +167,35 @@ pub struct Outgoing {
     pub id: u64,
     pub at: Location,
     pub name: String,
-    pub bytes: Vec<u8>,
+    pub payload: Payload,
+}
+
+/// What a write sends: the bytes an asset holds, or the file it rests in, which the
+/// write reads a transfer chunk at a time and never whole.
+#[derive(Clone)]
+pub enum Payload {
+    Bytes(Vec<u8>),
+    File {
+        file: Arc<OnDisk>,
+        /// The checksum a slot holding the file reports, from the check that cleared it
+        /// to be sent. See [`crate::workspace::Container::body_crc32`].
+        crc32: u32,
+    },
+}
+
+impl Payload {
+    /// What sending `entity` writes, or why the instrument must not be sent it.
+    pub fn of(entity: &LocalEntity) -> Result<Payload, String> {
+        entity.sendable()?;
+        match (entity.rests(), &entity.container) {
+            (None, _) => Ok(Payload::Bytes(entity.bytes.to_vec())),
+            (Some(file), Some(container)) => Ok(Payload::File {
+                file: file.clone(),
+                crc32: container.body_crc32,
+            }),
+            (Some(_), None) => Err("its checksum has not been checked".into()),
+        }
+    }
 }
 
 /// How the status strip describes one operation.
@@ -354,10 +384,11 @@ pub enum DeviceEvent {
         id: u64,
         class: ObjectClass,
         at: Location,
-        /// The bytes the write carried: what the slot now holds and what the asset is saved
-        /// as from here on (see [`Workspace::landed`]). The asset may hold something else
-        /// by now, since a write takes as long as the instrument takes.
-        bytes: Vec<u8>,
+        /// What the write carried: what the slot now holds and what the asset is saved as
+        /// from here on (see [`Workspace::landed`] and [`Workspace::landed_file`]). The
+        /// asset may hold something else by now, since a write takes as long as the
+        /// instrument takes.
+        sent: Payload,
     },
     /// A slot's former contents, which a failed write and a failed restore left with
     /// nowhere else to go.
@@ -1536,10 +1567,15 @@ impl Device {
                     id,
                     class,
                     at,
-                    bytes,
+                    sent,
                 } => {
                     queue.forget(id);
-                    workspace.landed(id, class, at, bytes);
+                    match sent {
+                        Payload::Bytes(bytes) => workspace.landed(id, class, at, bytes),
+                        Payload::File { file, crc32 } => {
+                            workspace.landed_file(id, class, at, file, crc32)
+                        }
+                    }
                 }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
@@ -1912,13 +1948,66 @@ mod tests {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
-            bytes: workspace.get(landed).unwrap().bytes.to_vec(),
+            sent: Payload::Bytes(workspace.get(landed).unwrap().bytes.to_vec()),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
         assert!(!queue.holds(landed), "it was written");
         assert!(queue.holds(still_owed), "still waiting");
         assert_eq!(queue.ids(), vec![still_owed]);
+    }
+
+    /// A file that lands after its asset was saved as something else leaves the asset
+    /// saved as the file: what the slot holds. The edit saved meanwhile is still on this
+    /// computer, now unsaved against the file.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_file_that_lands_after_another_save_is_what_its_asset_is_saved_as() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        device.pretend_attached();
+        let (mut log, mut tabs, mut queue) = (Log::default(), Tabs::default(), Queue::default());
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::piano(4);
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &bytes);
+        let id = crate::testing::rest(&mut workspace, "Upright.npno", file.clone());
+        workspace.settle_files(&mut log);
+        let crc32 = workspace.get(id).unwrap().saved.crc32.unwrap();
+        let sent = Payload::of(workspace.get(id).unwrap()).unwrap();
+
+        // The last byte of its audio, changed, under a checksum that agrees.
+        let mut edited = bytes.clone();
+        let last = edited.len() - 1;
+        edited[last] ^= 1;
+        let v1 = nord_format::cbin::Generation::V1;
+        let body = nord_format::crc::crc32(&edited[v1.body_start() as usize..]);
+        let stored = v1.checksum_range(edited.len()).unwrap();
+        edited[stored].copy_from_slice(&body.to_le_bytes());
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.mark_saved(id);
+        assert!(!workspace.get(id).unwrap().is_unsaved());
+
+        let at = Location::from_user(1, 1);
+        device.pretend(DeviceEvent::Sent {
+            id,
+            class: ObjectClass::Piano,
+            at,
+            sent,
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(entity.bytes, edited, "the edit is kept");
+        assert!(entity.is_unsaved(), "and is not what the slot holds");
+        assert!(entity
+            .saved
+            .file
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &file)));
+        assert_eq!(entity.saved.crc32, Some(crc32));
+        assert_eq!(entity.link, Some((ObjectClass::Piano, at)));
+        assert_eq!(file.take_reads(), [], "nothing read the file");
     }
 
     /// One program on this computer, and the body checksum a walk would report for the
@@ -2355,7 +2444,7 @@ mod tests {
                 id,
                 class,
                 at,
-                bytes: sent,
+                sent: Payload::Bytes(sent),
             });
             device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -2462,7 +2551,7 @@ mod tests {
             id,
             class,
             at,
-            bytes: sent.clone(),
+            sent: Payload::Bytes(sent.clone()),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -2497,7 +2586,7 @@ mod tests {
                     class,
                     at,
                     name: "Africa Split".into(),
-                    bytes: vec![0; 4],
+                    payload: Payload::Bytes(vec![0; 4]),
                 },
                 &mut log,
             );
@@ -2622,7 +2711,7 @@ mod tests {
                 class,
                 at: Location { bank: 6, slot: 9 },
                 name: "Africa Split".into(),
-                bytes: vec![0; 4],
+                payload: Payload::Bytes(vec![0; 4]),
             },
             &mut log,
         );
@@ -2751,7 +2840,7 @@ mod tests {
             class: ObjectClass::Program,
             at: Location { bank: 6, slot: 3 },
             name: "Africa Split".into(),
-            bytes: Vec::new(),
+            payload: Payload::Bytes(Vec::new()),
         };
         let words = cmd.words();
         assert_eq!(words.doing, "Sending “Africa Split” to Programs 7:4…");
