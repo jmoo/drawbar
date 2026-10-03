@@ -181,8 +181,6 @@ enum Asked {
     /// The header's Export, offered by a body with nothing to edit.
     Export,
     Open(crate::browser::Item),
-    /// The Advanced link under a section the instrument is not using.
-    Advanced,
 }
 
 /// The state one open document keeps between frames.
@@ -261,8 +259,8 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
-    /// The Advanced table's filter, selected cell, and last byte diff. One table serves
-    /// every tab; see [`Advanced::leave`].
+    /// The Advanced table's filter and selected cell. One table serves every tab; see
+    /// [`Advanced::leave`].
     advanced: Advanced,
     /// Decoded audio for zones shown in open rows, dropped when their strokes change.
     audio: sample::Cache,
@@ -437,7 +435,7 @@ impl Document {
                         // then the body, which is the longest and so goes last.
                         Face::Advanced => {
                             self.states(ui, asset, doc.as_ref());
-                            details = self.advanced.meta(ui, entity, device);
+                            details = Advanced::meta(ui, entity, device);
                             typed = self.deep(
                                 ui,
                                 asset,
@@ -460,9 +458,6 @@ impl Document {
         for asked in asked {
             match asked {
                 Asked::Open(item) => wants.open = Some(item),
-                Asked::Advanced => {
-                    self.views.insert(id, Face::Advanced);
-                }
                 Asked::Export => self.export(ui.ctx(), id, workspace),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
@@ -698,8 +693,8 @@ impl Document {
             }
             Shape::Fields => {
                 let open = self.open.as_mut()?;
-                field::body(ui, &open.ctx, &mut open.fields, doc?, piano, sets)
-                    .then_some(Asked::Advanced)
+                field::body(ui, &open.ctx, &mut open.fields, doc?, piano, sets);
+                None
             }
             Shape::Text => {
                 let open = self.open.as_mut()?;
@@ -1841,23 +1836,18 @@ mod tests {
     }
 
     /// A group is not in use when the file's state leaves its controls without effect.
-    /// Its controls are hidden, and the section names the group.
+    /// Basic folds it away, and the registration in use is drawn.
     #[test]
-    fn a_group_the_instrument_is_not_using_is_named() {
+    fn a_group_the_instrument_is_not_using_is_not_drawn() {
         let mut open = Open::fresh(Fresh::Program);
         let said = open.twice();
-        let idle: Vec<&String> = said
-            .iter()
-            .filter(|word| word.contains("stored but not in use"))
-            .collect();
-        assert!(!idle.is_empty(), "{said:?}");
         assert!(
-            idle.iter().any(|line| line.contains("Vox")),
-            "a B3 program keeps the other models' registrations: {idle:?}"
+            said.iter().any(|word| word == "B3 · Preset 1"),
+            "the B3 registrations are in use: {said:?}"
         );
         assert!(
-            idle.iter().all(|line| line.contains("Kept, not cleared")),
-            "{idle:?}"
+            !said.iter().any(|word| word.contains("Vox")),
+            "a B3 program keeps the other models' registrations out of sight: {said:?}"
         );
     }
 
@@ -1890,7 +1880,7 @@ mod tests {
         let placed = open.painted(Vec::new());
         let top = |word: &str| testing::where_(&placed, word).top();
 
-        let order = ["About this file", "Container", "Changes", "Every field"];
+        let order = ["About this file", "Container", "Every field"];
         for pair in order.windows(2) {
             assert!(
                 top(pair[0]) < top(pair[1]),
@@ -1982,16 +1972,25 @@ mod tests {
         );
     }
 
-    /// An unpolished label should look unpolished. Cells show names in capitals.
+    /// A field with no label is named after its path, in the type every caption uses.
     #[test]
-    fn a_path_with_no_label_shows_a_name_derived_from_the_path() {
-        let said = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap()).twice();
+    fn a_path_with_no_label_is_captioned_like_any_other() {
+        let mut open = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap());
+        open.frame(Vec::new());
+        let output = open.output(Vec::new());
         assert!(!strings::known("synth_a_volume"));
-        assert!(
-            said.iter().any(|word| word == "SYNTH A VOLUME"),
-            "{:?}",
-            &said[..said.len().min(40)]
-        );
+        let font = testing::painted(&output)
+            .into_iter()
+            .find(|word| word.text == "SYNTH A VOLUME")
+            .expect("the caption is painted")
+            .galley
+            .job
+            .sections[0]
+            .format
+            .font_id
+            .family
+            .clone();
+        assert_eq!(font, egui::FontFamily::Proportional);
     }
 
     #[test]
@@ -2019,7 +2018,7 @@ mod tests {
     }
 
     /// The Advanced face paints for a program with an edit and for a settings file
-    /// without one, including the container grid, the byte diff, and the folded dump.
+    /// without one, including the container grid and the folded dump.
     #[test]
     fn the_advanced_face_paints() {
         render_view(
@@ -2742,12 +2741,7 @@ mod tests {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
-        for section in ["Container", "Changes"] {
-            assert!(
-                said.iter().any(|word| word == section),
-                "{section}: {said:?}"
-            );
-        }
+        assert!(said.iter().any(|word| word == "Container"), "{said:?}");
     }
 
     #[test]

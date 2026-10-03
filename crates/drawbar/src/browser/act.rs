@@ -48,15 +48,13 @@ pub enum Act {
         ids: Vec<u64>,
         tag: u64,
     },
-    /// A new, empty tag, with its rename editor open.
-    NewTag(String),
+    /// A new tag on these assets, with its rename editor open and in view.
+    NewTag(Vec<u64>),
     RenameTag {
         id: u64,
         name: String,
     },
     RemoveTag(u64),
-    /// Put the selected assets on this computer under a new tag.
-    SaveAsGig,
     /// Put an asset in a folder, or out of the one it is in.
     File {
         id: u64,
@@ -358,12 +356,15 @@ pub fn apply(
                     browser.tags.set(id, tag, false);
                 }
             }
-            Act::NewTag(wanted) => match browser.tags.make(&wanted) {
+            Act::NewTag(ids) => match browser.tags.make("New tag") {
                 // ⚠️ Edit the unique name chosen by `make`, not its generic seed: two
                 // tags with one name would show as one row twice.
                 Some(id) => {
+                    tag_all(browser, workspace, log, &ids, id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
+                    browser.sections.tags = true;
+                    shell.browser_open = true;
                 }
                 None => log.trouble("The tag list is full, so there is no new tag."),
             },
@@ -374,23 +375,6 @@ pub fn apply(
                 browser.tags.remove(id);
                 // ⚠️ A removed tag must also stop filtering the library.
                 shell.filter.forget_tag(id);
-            }
-            Act::SaveAsGig => {
-                let ids = browser.selection.locals();
-                match ids.is_empty() {
-                    true => {
-                        log.say("Nothing on this computer is selected, so there is no gig to save.")
-                    }
-                    false => match browser.tags.make("New gig") {
-                        Some(tag) => {
-                            tag_all(browser, workspace, log, &ids, tag);
-                            let name = browser.tags.name_of(tag).unwrap_or_default().to_string();
-                            browser.start_rename(Item::Tag(tag), &name);
-                        }
-                        None => log
-                            .trouble("The tag list is full, so there is no gig to save it under."),
-                    },
-                }
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}

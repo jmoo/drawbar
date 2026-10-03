@@ -131,10 +131,8 @@ pub enum Shape {
 /// One registry body, divided the way it will be drawn.
 pub struct Doc<'a> {
     sections: Vec<Sect<'a>>,
-    /// Registered fields no group named, in registry order.
-    leftovers: Vec<&'a Field>,
-    /// The titles of the top-level groups the instrument is not using.
-    idle: Vec<&'static str>,
+    /// How many registered fields no group places. Only the Advanced table lists them.
+    unplaced: usize,
     shape: Shape,
     /// Every field a section draws, so the Advanced table can flag the rest.
     shown: HashSet<&'a str>,
@@ -154,8 +152,6 @@ struct Sect<'a> {
     title: String,
     fields: Vec<&'a Field>,
     cards: Vec<Card<'a>>,
-    /// The titles of the groups under this one the instrument is not using.
-    idle: Vec<&'static str>,
     count: usize,
 }
 
@@ -195,12 +191,10 @@ enum Cell<'a> {
 
 /// The document a decoded body is drawn as.
 pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
-    let (mut sections, leftovers, idle, shape) = match nord_format::panel::of(decoded) {
+    let (mut sections, unplaced, shape) = match nord_format::panel::of(decoded) {
         Some(layout) => authored(layout, fields),
-        None if crate::fields::is_electro5_settings(decoded) => {
-            (menus(fields), Vec::new(), Vec::new(), Shape::Menus)
-        }
-        None => (flat(fields), Vec::new(), Vec::new(), Shape::Flat),
+        None if crate::fields::is_electro5_settings(decoded) => (menus(fields), 0, Shape::Menus),
+        None => (flat(fields), 0, Shape::Flat),
     };
     let morphs = slots_of(fields);
     for section in &mut sections {
@@ -220,8 +214,7 @@ pub fn of<'a>(decoded: &nord_format::Entity, fields: &'a [Field]) -> Doc<'a> {
         .collect();
     Doc {
         sections,
-        leftovers,
-        idle,
+        unplaced,
         shape,
         shown,
         picks,
@@ -239,17 +232,6 @@ impl Doc<'_> {
     /// under their parameter's control.
     pub fn shows(&self, path: &str) -> bool {
         self.shown.contains(path)
-    }
-
-    /// How many fields no group placed, and how many of those the strings table names.
-    /// The named ones are what the "Also stored" section holds.
-    pub fn unplaced(&self) -> (usize, usize) {
-        let named = self
-            .leftovers
-            .iter()
-            .filter(|field| strings::known(&field.path))
-            .count();
-        (self.leftovers.len(), named)
     }
 }
 
@@ -287,49 +269,28 @@ fn which_slot(path: &str) -> Option<usize> {
         .position(|(suffix, _, _)| leaf.ends_with(suffix))
 }
 
-/// The sections of a body the library lays out, the fields no group placed, the titles
-/// of the idle top-level groups, and the shape.
-fn authored<'a>(
-    layout: &'a Panel,
-    fields: &'a [Field],
-) -> (Vec<Sect<'a>>, Vec<&'a Field>, Vec<&'static str>, Shape) {
+/// The sections of a body the library lays out, how many fields no group placed, and
+/// the shape. A group the instrument is not using is folded away.
+fn authored<'a>(layout: &'a Panel, fields: &'a [Field]) -> (Vec<Sect<'a>>, usize, Shape) {
     let resolved = layout.resolve(fields);
     let mut sections = Vec::new();
-    let mut idle = Vec::new();
     for (nth, placed) in resolved.sections.iter().enumerate() {
         if !placed.relevant {
-            idle.push(placed.group.title);
             continue;
         }
         let mut cards = Vec::new();
-        let mut under = Vec::new();
-        hoist(&placed.groups, None, fields, &mut cards, &mut under);
+        hoist(&placed.groups, None, fields, &mut cards);
         sections.push(Sect {
             key: format!("s{nth}"),
             title: placed.group.title.to_string(),
             fields: placed.fields.clone(),
             cards,
-            idle: under,
             count: 0,
         });
     }
-    let named: Vec<&Field> = resolved
-        .leftovers
-        .iter()
-        .copied()
-        .filter(|field| strings::known(&field.path))
-        .collect();
-    if !named.is_empty() {
-        sections.push(plain_sect(
-            "also".to_string(),
-            strings::Section::Other.title(),
-            named,
-        ));
-    }
     (
         sections,
-        resolved.leftovers,
-        idle,
+        resolved.leftovers.len(),
         Shape::Authored {
             exhaustive: layout.exhaustive,
         },
@@ -345,11 +306,9 @@ fn hoist<'a>(
     under: Option<&str>,
     fields: &'a [Field],
     into: &mut Vec<Card<'a>>,
-    idle: &mut Vec<&'static str>,
 ) {
     for group in groups {
         if !group.relevant {
-            idle.push(group.group.title);
             continue;
         }
         let title = match under {
@@ -363,11 +322,12 @@ fn hoist<'a>(
             pick,
             selected: pick.is_some_and(|selection| selection.selected(fields)),
         });
-        hoist(&group.groups, Some(&title), fields, into, idle);
+        hoist(&group.groups, Some(&title), fields, into);
     }
 }
 
-/// The settings body, in the order of the instrument's menus.
+/// The settings body, in the order of the instrument's menus. A field no menu names is
+/// left to the Advanced table.
 ///
 /// ⚠️ The library has no layout for the settings body, so the sections come from this
 /// app's table in `strings::FIELDS`.
@@ -378,7 +338,7 @@ fn menus(fields: &[Field]) -> Vec<Sect<'_>> {
         .filter_map(|(nth, section)| {
             let rows: Vec<&Field> = fields
                 .iter()
-                .filter(|field| strings::section(&field.path) == *section)
+                .filter(|field| strings::section(&field.path) == Some(*section))
                 .collect();
             (!rows.is_empty()).then(|| plain_sect(format!("m{nth}"), section.title(), rows))
         })
@@ -401,7 +361,6 @@ fn plain_sect<'a>(key: String, title: &str, rows: Vec<&'a Field>) -> Sect<'a> {
         title: title.to_string(),
         fields: rows,
         cards: Vec::new(),
-        idle: Vec::new(),
         count: 0,
     }
 }
@@ -645,7 +604,7 @@ impl Chip {
     }
 }
 
-/// Draw the whole document. Returns whether something asked for the Advanced face.
+/// Draw the whole document.
 pub fn body(
     ui: &mut egui::Ui,
     ctx: &Ctx,
@@ -653,8 +612,7 @@ pub fn body(
     doc: &Doc<'_>,
     piano: &mut PianoLookup,
     sets: &mut Sets,
-) -> bool {
-    let mut to_advanced = false;
+) {
     state.view_top = ui.clip_rect().top();
     let mut tops = Vec::with_capacity(doc.sections.len());
     if state.lens.is_some() {
@@ -669,15 +627,13 @@ pub fn body(
             );
         }
         tops.push((section.key.clone(), top));
-        to_advanced |= drew(ui, ctx, state, doc, section, piano, sets);
+        drew(ui, ctx, state, doc, section, piano, sets);
         ui.add_space(6.0);
         ui.separator();
     }
     state.jump = None;
     state.tops = tops;
     state.active = active(state);
-    to_advanced |= foot(ui, doc);
-    to_advanced
 }
 
 /// The last section whose top is above the scroll region's top.
@@ -727,9 +683,8 @@ fn banner(ui: &mut egui::Ui, state: &mut State) {
         .hline(rect.x_range(), rect.bottom() - 0.5, rule);
 }
 
-/// One section: its controls, the cards under it, the stored alternatives side by side,
-/// and the line naming what is stored but idle. Returns whether its Advanced link was
-/// clicked.
+/// One section: its controls, the cards under it, and the stored alternatives side by
+/// side.
 fn drew(
     ui: &mut egui::Ui,
     ctx: &Ctx,
@@ -738,7 +693,7 @@ fn drew(
     section: &Sect<'_>,
     piano: &mut PianoLookup,
     sets: &mut Sets,
-) -> bool {
+) {
     let quiet = app::caption(ui.visuals());
     let reading = strings::counted(section.count, "field", "fields");
     controls::heading(ui, &section.title, "", Some((&reading, quiet)));
@@ -771,7 +726,6 @@ fn drew(
     if !alternatives.is_empty() {
         side_by_side(ui, ctx, state, doc, &alternatives, piano, sets);
     }
-    idle_line(ui, &section.idle)
 }
 
 /// The stored alternatives, side by side: one is playing and the others are kept.
@@ -882,72 +836,6 @@ fn card_title(ui: &mut egui::Ui, title: &str, playing: Option<bool>) -> bool {
     });
     ui.add_space(4.0);
     clicked
-}
-
-/// The line a section ends with when something under it is stored but idle. Returns
-/// whether its Advanced link was clicked.
-fn idle_line(ui: &mut egui::Ui, idle: &[&'static str]) -> bool {
-    if idle.is_empty() {
-        return false;
-    }
-    let quiet = app::caption(ui.visuals());
-    let mut asked = false;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.add_space(12.0);
-        icon(ui, Glyph::EyeOff, 11.0, quiet);
-        ui.label(
-            egui::RichText::new(format!(
-                "{} {} stored but not in use for the state this file holds. Kept, not cleared.",
-                strings::listed(idle),
-                match idle.len() {
-                    1 => "is",
-                    _ => "are",
-                }
-            ))
-            .font(egui::FontId::proportional(READING))
-            .color(quiet),
-        );
-        asked = ui
-            .add(
-                egui::Label::new(
-                    egui::RichText::new("Advanced")
-                        .font(egui::FontId::proportional(READING))
-                        .color(app::accent(ui.visuals())),
-                )
-                .sense(egui::Sense::click()),
-            )
-            .on_hover_text("every field, including the ones this face does not draw")
-            .clicked();
-    });
-    asked
-}
-
-/// The line under the last section: what the layout does not place.
-fn foot(ui: &mut egui::Ui, doc: &Doc<'_>) -> bool {
-    let quiet = app::caption(ui.visuals());
-    let mut asked = false;
-    if !doc.idle.is_empty() {
-        asked |= idle_line(ui, &doc.idle);
-    }
-    let unplaced = doc.leftovers.len();
-    if matches!(doc.shape, Shape::Authored { exhaustive: false }) && unplaced > 0 {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.add_space(12.0);
-            icon(ui, Glyph::CircleAlert, 11.0, quiet);
-            ui.label(
-                egui::RichText::new(format!(
-                    "{unplaced} fields the layout does not place. They are under Advanced, \
-                     and under {} once the strings table names them.",
-                    strings::Section::Other.title()
-                ))
-                .font(egui::FontId::proportional(READING))
-                .color(quiet),
-            );
-        });
-    }
-    asked
 }
 
 /// A run of fields as cells, wrapping where the window is narrow.
@@ -1142,43 +1030,31 @@ fn outline(ui: &egui::Ui, rect: egui::Rect, neutral: bool) {
     );
 }
 
-/// The name over a control: the app's label for it, or the prettified path in monospace
-/// where the table has no label yet.
+/// The name over a control, with its path under the pointer.
 fn caption(ui: &mut egui::Ui, field: &Field, edited: bool) {
     named_caption(ui, &field.path, edited, note(field));
 }
 
 /// The same caption for a bare path, used by the register that draws nine fields.
 fn named_caption(ui: &mut egui::Ui, path: &str, edited: bool, note: &str) {
-    let known = strings::known(path);
     let quiet = app::caption(ui.visuals());
     let response = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add(egui::Label::new(
                 egui::RichText::new(strings::label(path).to_uppercase())
-                    .font(match known {
-                        true => egui::FontId::proportional(LABEL),
-                        false => egui::FontId::monospace(LABEL),
-                    })
+                    .font(egui::FontId::proportional(LABEL))
                     .color(quiet),
             ));
             if edited {
                 app::dot(ui, app::warn(ui.visuals()), DOT);
             }
-            if !known {
-                icon(ui, Glyph::Tag, 9.0, quiet);
-            }
         })
         .response;
-    let mut hint = path.to_string();
-    if !known {
-        hint.push_str(": no label yet, showing the prettified path");
-    }
-    if !note.is_empty() {
-        hint.push_str(" · ");
-        hint.push_str(note);
-    }
+    let hint = match note {
+        "" => path.to_string(),
+        note => format!("{path} · {note}"),
+    };
     response.on_hover_text(hint);
 }
 
@@ -1904,16 +1780,13 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
             "authored — exhaustive".to_string(),
             "every field the body declares is placed".to_string(),
         ),
-        Shape::Authored { exhaustive: false } => {
-            let (unplaced, named) = doc.unplaced();
-            (
-                "authored".to_string(),
-                format!(
-                    "{unplaced} fields no group names; {named} of them show under {}",
-                    strings::Section::Other.title()
-                ),
-            )
-        }
+        Shape::Authored { exhaustive: false } => (
+            "authored".to_string(),
+            format!(
+                "{} fields no group places; only Every field lists them",
+                doc.unplaced
+            ),
+        ),
         Shape::Menus => (
             "menus".to_string(),
             "this app's own table, in the order the instrument's menus run".to_string(),
@@ -2085,8 +1958,7 @@ mod tests {
         let (fields, _) = apply(&Fresh::Stage4Program.bytes().unwrap(), &[]).unwrap();
         let doc = Doc {
             sections: Vec::new(),
-            leftovers: Vec::new(),
-            idle: Vec::new(),
+            unplaced: 0,
             shape: Shape::Flat,
             shown: HashSet::new(),
             picks: HashSet::new(),
@@ -2142,8 +2014,7 @@ mod tests {
         morphs.remove("organ_a_volume");
         let doc = Doc {
             sections: Vec::new(),
-            leftovers: Vec::new(),
-            idle: Vec::new(),
+            unplaced: 0,
             shape: Shape::Flat,
             shown: HashSet::new(),
             picks: HashSet::new(),
@@ -2189,7 +2060,7 @@ mod tests {
     }
 
     /// Every control the Electro 5 view offers comes from the library's layout, and a
-    /// group the instrument is not using is named as idle.
+    /// group the instrument is not using is left out.
     #[test]
     fn the_electro5_document_is_the_librarys_layout() {
         let (bytes, fields) = electro5();
@@ -2204,31 +2075,43 @@ mod tests {
             .collect();
         assert!(titles.contains(&"Keyboard & split"), "{titles:?}");
         assert!(titles.contains(&"Organ"), "{titles:?}");
-        // A fresh program plays organ on both parts, so the Piano group is idle: named,
-        // never simply missing.
+        // A fresh program plays organ on both parts, so the Piano group is folded away.
         assert!(!titles.contains(&"Piano"), "{titles:?}");
-        assert!(doc.idle.contains(&"Piano"), "{:?}", doc.idle);
-        let (unplaced, named) = doc.unplaced();
-        assert!(unplaced > 0);
-        assert!(named <= unplaced, "{named} named of {unplaced} unplaced");
+        assert!(doc.unplaced > 0);
     }
 
-    /// The "Also stored" section holds the unplaced fields the strings table names, and
-    /// no others.
+    /// Basic draws what a panel group places or a settings menu names, and nothing else.
     #[test]
-    fn the_layout_line_counts_what_also_stored_will_hold() {
+    fn basic_draws_no_field_the_layout_or_the_menus_leave_out() {
         let (bytes, fields) = electro5();
         let decoded =
             nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
         let doc = of(&decoded, &fields);
-        let (unplaced, named) = doc.unplaced();
-        let also = doc
-            .sections
-            .iter()
-            .find(|section| section.title == strings::Section::Other.title())
-            .expect("the named leftovers have a section");
-        assert_eq!(also.fields.len(), named);
-        assert!(named < unplaced, "{named} of {unplaced} are named");
+        let unplaced = ne5::program::PANEL.resolve(&fields).leftovers;
+        assert!(
+            unplaced
+                .iter()
+                .any(|field| field.path == "center_panel.unknown_boolean1"),
+            "the layout places no group around the unnamed bit"
+        );
+        for field in unplaced {
+            assert!(!doc.shows(&field.path), "{} is drawn", field.path);
+        }
+
+        let bytes = Fresh::Settings.bytes().expect("a fresh settings file");
+        let decoded =
+            nord_format::from_stream(&mut std::io::Cursor::new(&bytes)).expect("it decodes");
+        let (fields, _) = apply(&bytes, &[]).expect("it reads");
+        let doc = of(&decoded, &fields);
+        assert_eq!(doc.shape, Shape::Menus);
+        for field in &fields {
+            assert_eq!(
+                doc.shows(&field.path),
+                strings::section(&field.path).is_some(),
+                "{}",
+                field.path
+            );
+        }
     }
 
     /// The transpose pair is one control, so the layout must put both halves in the same

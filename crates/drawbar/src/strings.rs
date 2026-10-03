@@ -10,10 +10,9 @@
 
 use std::borrow::Borrow;
 
-use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use crate::browser::Kind;
+use crate::browser::{Kind, Qualifier};
 
 /// A part of a document, named the way the panel divides itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,9 +29,6 @@ pub enum Section {
     Midi,
     Sound,
     Startup,
-    /// Anything the table does not place, including a field newly declared in
-    /// `nord-format`.
-    Other,
 }
 
 impl Section {
@@ -48,7 +44,6 @@ impl Section {
             Section::Midi => "MIDI",
             Section::Sound => "Sound",
             Section::Startup => "At power-on",
-            Section::Other => "Also stored",
         }
     }
 }
@@ -58,12 +53,11 @@ impl Section {
 pub const UNPREFIXED: &str = "General";
 
 /// The sections a settings document shows, in menu order.
-pub const SETTINGS_SECTIONS: [Section; 5] = [
+pub const SETTINGS_SECTIONS: [Section; 4] = [
     Section::System,
     Section::Midi,
     Section::Sound,
     Section::Startup,
-    Section::Other,
 ];
 
 /// Each section's registry paths and their labels.
@@ -285,9 +279,10 @@ pub fn label(path: &str) -> String {
     prettify(path)
 }
 
-/// Which part of the document a field belongs in.
-pub fn section(path: &str) -> Section {
-    entry(path).map_or(Section::Other, |(section, _)| section)
+/// Which part of the document a field belongs in, or `None` where the table places it
+/// nowhere, as with a field newly declared in `nord-format`.
+pub fn section(path: &str) -> Option<Section> {
+    entry(path).map(|(section, _)| section)
 }
 
 /// Whether the table maps this path, which tells a real label from a fallback.
@@ -570,14 +565,14 @@ pub fn fitting(fits: usize, of: usize, product: &str) -> Option<String> {
     (fits < of).then(|| format!("{fits} of {of} fit the {product}"))
 }
 
-/// A row's kind, prefixed with the family where the kind alone would not say which
-/// instrument the file is for: `Stage 4 program`.
+/// A row's kind, prefixed where the kind alone would not say which of its kind the file
+/// is: `Stage 4 program`, `v3 sample`.
 ///
-/// [`crate::browser::qualifier`] decides when; this is the only place a family name is
+/// [`crate::browser::qualifier`] decides when; this is the only place a qualifier is
 /// prefixed.
-pub fn kind_word(kind: Kind, family: Option<Family>) -> String {
-    match family {
-        Some(family) => format!("{} {}", family.label(), kind.chip()),
+pub fn kind_word(kind: Kind, qualifier: Option<Qualifier>) -> String {
+    match qualifier {
+        Some(qualifier) => format!("{} {}", qualifier.label(), kind.chip()),
         None => kind.chip().to_string(),
     }
 }
@@ -618,7 +613,7 @@ mod tests {
     fn an_unmapped_path_falls_back_to_a_prettified_leaf() {
         assert_eq!(label("center_panel.brand_new_knob"), "Brand new knob");
         assert_eq!(label("nonesuch"), "Nonesuch");
-        assert_eq!(section("center_panel.brand_new_knob"), Section::Other);
+        assert_eq!(section("center_panel.brand_new_knob"), None);
         assert!(!known("center_panel.brand_new_knob"));
     }
 

@@ -220,17 +220,69 @@ pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
         .collect()
 }
 
-/// The family to put before an asset's kind word, or `None` when the word alone is
-/// clear. Shared by the tree and the library's table, which draw the same word.
+/// What goes before a kind's word to say which of its kind an asset is: a program's
+/// family, or a sample instrument's generation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Qualifier {
+    Family(Family),
+    /// `v2`, `v3` or `v4`, as [`nord_format::Sample::generation`] spells it.
+    Generation(&'static str),
+}
+
+impl Qualifier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Qualifier::Family(family) => family.label(),
+            Qualifier::Generation(generation) => generation,
+        }
+    }
+}
+
+/// The families and sample generations of the assets on this computer, which decide
+/// whether a kind's word alone is clear.
+pub struct Kept {
+    families: Vec<Family>,
+    generations: Vec<&'static str>,
+}
+
+impl Kept {
+    /// Files that name no family (the shared library formats, the carriers, bytes that
+    /// did not decode) add none, so a list of samples spans no families.
+    pub fn of(workspace: &Workspace) -> Kept {
+        let here: Vec<Family> = workspace
+            .listed()
+            .filter_map(|entity| Family::of_tag(&entity.tag()))
+            .collect();
+        let mut generations: Vec<&'static str> =
+            workspace.listed().filter_map(generation).collect();
+        generations.sort_unstable();
+        generations.dedup();
+        Kept {
+            families: Family::ALL
+                .into_iter()
+                .filter(|family| here.contains(family))
+                .collect(),
+            generations,
+        }
+    }
+}
+
+/// The qualifier to put before an asset's kind word, or `None` when the word alone is
+/// clear. Shared by the tree, the library's table and the inspector, which draw the same
+/// word.
 pub fn qualifier(
     entity: &LocalEntity,
-    kept: &[Family],
+    kept: &Kept,
     instrument: Option<Family>,
-) -> Option<Family> {
+) -> Option<Qualifier> {
+    if let Some(generation) = generation(entity) {
+        return (kept.generations.len() > 1).then_some(Qualifier::Generation(generation));
+    }
     let family = Family::of_tag(&entity.tag());
-    qualified(kept, family, instrument)
+    qualified(&kept.families, family, instrument)
         .then_some(family)
         .flatten()
+        .map(Qualifier::Family)
 }
 
 /// Whether a kind's word needs the family before it.
@@ -245,19 +297,11 @@ fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>)
     matches!((asset, instrument), (Some(asset), Some(held)) if asset != held)
 }
 
-/// The families of the assets on this computer, in [`Family::ALL`] order.
-///
-/// Files that name no family (the shared library formats, the carriers, bytes that did
-/// not decode) add none, so a list of samples spans no families.
-pub fn families_present(workspace: &Workspace) -> Vec<Family> {
-    let here: Vec<Family> = workspace
-        .listed()
-        .filter_map(|entity| Family::of_tag(&entity.tag()))
-        .collect();
-    Family::ALL
-        .into_iter()
-        .filter(|family| here.contains(family))
-        .collect()
+fn generation(entity: &LocalEntity) -> Option<&'static str> {
+    match entity.entity.as_ref()? {
+        Entity::Sample(sample) => Some(sample.generation()),
+        _ => None,
+    }
 }
 
 /// One row of the tree.
@@ -536,6 +580,45 @@ mod tests {
         assert!(
             qualified(&[Family::Stage4], s4, e5),
             "not this instrument's"
+        );
+    }
+
+    #[test]
+    fn a_samples_generation_is_named_only_where_the_list_holds_more_than_one() {
+        use crate::log::Log;
+        use crate::strings::kind_word;
+        use crate::workspace::{Fresh, Origin};
+
+        let mut workspace = Workspace::new(crate::testing::context());
+        let mut log = Log::default();
+        let mut add = |workspace: &mut Workspace, name: &str, bytes: &[u8]| {
+            let origin = Origin::File(name.into());
+            workspace.ingest(name.into(), origin, bytes.to_vec(), &mut log)
+        };
+        let word = |workspace: &Workspace, id| {
+            let entity = workspace.get(id).unwrap();
+            let qualifier = qualifier(entity, &Kept::of(workspace), None);
+            kind_word(Kind::of(entity), qualifier)
+        };
+        let v2 = add(
+            &mut workspace,
+            "drawbar-pad.nsmp",
+            include_bytes!("../../../nord-format/tests/fixtures/demo/drawbar-pad.nsmp"),
+        );
+        assert_eq!(word(&workspace, v2), "sample", "one generation on the list");
+
+        let v4 = add(
+            &mut workspace,
+            "drawbar-pad.nsmp4",
+            include_bytes!("../../../nord-format/tests/fixtures/demo/drawbar-pad.nsmp4"),
+        );
+        let program = workspace.create(Fresh::Program, &mut log).unwrap();
+        assert_eq!(word(&workspace, v2), "v2 sample");
+        assert_eq!(word(&workspace, v4), "v4 sample");
+        assert_eq!(
+            word(&workspace, program),
+            "program",
+            "a program takes no generation"
         );
     }
 

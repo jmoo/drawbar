@@ -11,7 +11,7 @@ use nord_format::cbin::Generation;
 use super::capability::{facts, Fact};
 use super::{controls, sample};
 use crate::app;
-use crate::browser::Kind;
+use crate::browser::{Kind, Qualifier};
 use crate::icon::Glyph;
 use crate::room;
 use crate::strings::kind_word;
@@ -66,7 +66,7 @@ fn stated(entity: &LocalEntity) -> Vec<Fact> {
         },
         Fact {
             key: "Model",
-            value: kind_word(kind, Family::of_tag(&tag)),
+            value: kind_word(kind, Family::of_tag(&tag).map(Qualifier::Family)),
             note: "what the tag is accepted as",
         },
     ];

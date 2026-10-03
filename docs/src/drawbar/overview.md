@@ -26,6 +26,11 @@ renames.
 
 ## Reading the Library
 
+The **kind** column adds the instrument family, as in `Stage 4 program`, when
+the list holds more than one family or a sound is not for the connected
+instrument. It adds the generation, as in `v3 sample`, when the list holds sample
+instruments of more than one generation.
+
 The **where** column says where a sound lives: on this computer, on the keyboard,
 or both, with `=` when the two copies match and `≠` when they differ. A name in
 italics with a `*` has unsaved edits. The dot at the end of a row is green when
@@ -35,9 +40,11 @@ explanation.
 
 ## Folders and tags
 
-Folders group sounds on this computer; the instrument never sees them. Tags label
-sounds without moving them, and a sound can carry several. Both come from a row's
-menu or the **New** menu. Removing a folder or a tag deletes no sounds.
+Folders group sounds on this computer; the instrument never sees them. Make one
+with **New ▸ New folder**. Tags label sounds without moving them, and a sound can
+carry several. **Tag ▸ New tag…** in a row's menu puts a new tag on the selected
+sounds and opens its name for typing. Removing a folder or a tag deletes no
+sounds.
 
 ## MIDI controllers
 

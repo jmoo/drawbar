@@ -15,7 +15,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, families_present, qualifier, Act, Browser, Bulk, Item, Kind};
+use crate::browser::{cell_ink, qualifier, Act, Browser, Bulk, Item, Kept, Kind, Qualifier};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
@@ -168,9 +168,9 @@ impl Needs {
 pub struct Row {
     pub item: Item,
     pub kind: Kind,
-    /// The family to put in front of the kind's word, where the word alone would not say
-    /// whose files these are. [`crate::browser::qualifier`] decides it.
-    pub family: Option<Family>,
+    /// What to put in front of the kind's word, where the word alone would not say which
+    /// of its kind this is. [`crate::browser::qualifier`] decides it.
+    pub qualifier: Option<Qualifier>,
     pub name: String,
     pub tags: usize,
     /// It holds something other than what it was last saved as. Only a row on this
@@ -208,7 +208,7 @@ pub fn rows(
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
-    let kept = families_present(workspace);
+    let kept = Kept::of(workspace);
     let instrument = device.product().and_then(Family::from_product);
     for entity in workspace.listed() {
         // Claim the row's slot so the instrument's list does not repeat it.
@@ -290,7 +290,7 @@ pub fn row_of(
                 device,
                 queue,
                 tags.worn(id).len(),
-                &families_present(workspace),
+                &Kept::of(workspace),
                 instrument,
             ))
         }
@@ -306,13 +306,13 @@ fn local(
     device: &DeviceState,
     queue: &Queue,
     tags: usize,
-    kept: &[Family],
+    kept: &Kept,
     instrument: Option<Family>,
 ) -> Row {
     Row {
         item: Item::Local(entity.id),
         kind: Kind::of(entity),
-        family: qualifier(entity, kept, instrument),
+        qualifier: qualifier(entity, kept, instrument),
         name: entity.name.clone(),
         tags,
         unsaved: entity.is_unsaved(),
@@ -327,8 +327,8 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
     Row {
         item: Item::Slot { class, at },
         kind: Kind::from_class(class),
-        // A slot is the instrument's own, so its kind word never needs a family.
-        family: None,
+        // A slot is the instrument's own, so its kind word never needs a qualifier.
+        qualifier: None,
         name: info.name.trim().to_string(),
         tags: 0,
         unsaved: false,
@@ -628,7 +628,7 @@ fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
 
 /// The word in the KIND column, which the glyph beside it also represents.
 fn word(row: &Row) -> String {
-    crate::strings::kind_word(row.kind, row.family)
+    crate::strings::kind_word(row.kind, row.qualifier)
 }
 
 /// A row with no address sorts after every row that has one.
@@ -1363,7 +1363,7 @@ mod tests {
         Row {
             item: Item::Local(size),
             kind,
-            family: None,
+            qualifier: None,
             name: name.to_string(),
             tags: 0,
             unsaved: false,

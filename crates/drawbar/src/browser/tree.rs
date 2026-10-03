@@ -10,9 +10,9 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
-use super::drag::{kinds_present, qualifier, Item, Kind, Onto};
+use super::drag::{kinds_present, qualifier, Item, Kept, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
-use super::{Ask, Browser, Click};
+use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
@@ -99,7 +99,7 @@ pub(super) enum Branch {
 pub(super) struct Sections {
     places: bool,
     kinds: bool,
-    tags: bool,
+    pub(super) tags: bool,
 }
 
 impl Default for Sections {
@@ -176,11 +176,11 @@ pub(super) fn bank_branch(class: ObjectClass, bank: u64) -> Branch {
     Branch::Bank(class.to_raw(), bank)
 }
 
-/// What a local row's kind word needs from outside the row: the families on this
-/// computer's list, and the attached instrument's family. Read once a frame, because
-/// every row asks the same question of the whole list.
+/// What a local row's kind word needs from outside the row: what this computer's list
+/// holds, and the attached instrument's family. Read once a frame, because every row asks
+/// the same question of the whole list.
 struct Naming {
-    kept: Vec<Family>,
+    kept: Kept,
     instrument: Option<Family>,
 }
 
@@ -276,7 +276,7 @@ impl Browser {
         self.computer_row(ui, workspace, device, filter, acts);
         if self.open.contains(&Branch::Computer) {
             let naming = Naming {
-                kept: super::families_present(workspace),
+                kept: Kept::of(workspace),
                 instrument: device.state.product().and_then(Family::from_product),
             };
             for id in self.folder_ids() {
@@ -680,13 +680,6 @@ impl Browser {
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(id), acts);
         ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
-        offer(
-            ui,
-            "Save as gig…",
-            Some("puts the selection under a new tag"),
-            Act::SaveAsGig,
-            acts,
-        );
         ui.separator();
         offer(ui, "Remove from list", None, Act::Remove(id), acts);
     }
@@ -734,7 +727,7 @@ impl Browser {
         if !self.tags.all().is_empty() {
             ui.separator();
         }
-        offer(ui, "New tag…", None, Act::SaveAsGig, acts);
+        offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1165,7 +1158,7 @@ impl Browser {
             self.ask = Some(Ask {
                 title: format!("Delete “{name}” from {}?", place(class, at)),
                 note: Some("It is removed from the instrument. There is no undo.".into()),
-                verb: "Delete",
+                verb: Verb::Delete,
                 acts: vec![Act::DeleteSlot { class, at }],
             });
             ui.close();
@@ -1275,7 +1268,7 @@ impl Browser {
             },
         );
         if drawn.response.clicked() {
-            acts.push(Act::NewTag("New tag".into()));
+            acts.push(Act::NewTag(Vec::new()));
         }
     }
 

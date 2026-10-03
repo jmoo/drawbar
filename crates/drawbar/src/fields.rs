@@ -5,7 +5,6 @@
 //! there makes it editable here.
 
 use std::io::Cursor;
-use std::ops::Range;
 
 use nord_format::fields::Field;
 use nord_format::{Entity, Settings, Song};
@@ -96,58 +95,6 @@ pub fn changed(saved: &[u8], current: &[u8]) -> Vec<String> {
         .zip(&after)
         .filter(|(before, after)| before.path == after.path && before.value != after.value)
         .map(|(_, after)| after.path.clone())
-        .collect()
-}
-
-/// One byte that changed.
-pub struct DiffRow {
-    pub at: usize,
-    pub before: u8,
-    pub after: u8,
-    /// `  (body crc32)` when the byte is a checksum, not an edit.
-    pub note: &'static str,
-}
-
-/// Where a CBIN file keeps its checksum and what to call it, or `None` for bytes that
-/// are not a CBIN file.
-///
-/// ⚠️ The two generations store it in different places. In a type-0 file `0x18` is body
-/// data, and annotating it as the type-1 crc32 would label a real edit as a checksum.
-fn checksum_bytes(file: &[u8]) -> Option<(Range<usize>, &'static str)> {
-    if file.len() < 8 || &file[0..4] != nord_format::cbin::MAGIC {
-        return None;
-    }
-    match u32::from_le_bytes(file[4..8].try_into().ok()?) {
-        0 => Some((file.len() - 2..file.len(), "  (file crc16)")),
-        1 => Some((0x18..0x1c, "  (body crc32)")),
-        _ => None,
-    }
-}
-
-/// The bytes that changed.
-///
-/// The checksum changes with any body change; those rows are annotated so they do not
-/// read as a second, unexplained edit. Bytes of different lengths cannot be paired, so
-/// that returns no rows.
-pub fn byte_diff(before: &[u8], after: &[u8]) -> Vec<DiffRow> {
-    if before.len() != after.len() {
-        return Vec::new();
-    }
-    let checksum = checksum_bytes(after);
-    before
-        .iter()
-        .zip(after)
-        .enumerate()
-        .filter(|(_, (b, a))| b != a)
-        .map(|(at, (&b, &a))| DiffRow {
-            at,
-            before: b,
-            after: a,
-            note: match &checksum {
-                Some((range, label)) if range.contains(&at) => label,
-                _ => "",
-            },
-        })
         .collect()
 }
 
@@ -244,26 +191,6 @@ mod tests {
             .find(|f| f.path == "center_panel.transpose_enabled")
             .unwrap();
         assert_eq!(enabled.value, "false");
-    }
-
-    #[test]
-    fn the_checksum_bytes_are_annotated_as_bookkeeping() {
-        let bytes = program();
-        let (_, edited) = apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        let diff = byte_diff(&bytes, &edited);
-        assert!(!diff.is_empty());
-        // A fresh program is type-1, so the crc32 sits at 0x18..0x1c.
-        let annotated: Vec<usize> = diff
-            .iter()
-            .filter(|row| row.note.contains("crc32"))
-            .map(|row| row.at)
-            .collect();
-        assert!(annotated.iter().all(|at| (0x18..0x1c).contains(at)));
-        assert!(!annotated.is_empty(), "the crc32 must have moved");
-        assert!(
-            diff.iter().any(|row| row.note.is_empty()),
-            "the edit itself must show as an unannotated byte",
-        );
     }
 
     /// Every body the library decodes into fields reads and writes here.
