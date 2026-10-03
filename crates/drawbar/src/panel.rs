@@ -33,6 +33,9 @@ pub const CARD_RADIUS: u8 = 12;
 /// The rounding of a card inside a card: an inspector section, a note, a diff.
 pub const INNER_RADIUS: u8 = 10;
 
+/// The rounding of a [`group_frame`].
+const GROUP_RADIUS: u8 = 8;
+
 /// The rounding of a list row, and how far a row stands in from its card's edges.
 pub const ROW_RADIUS: u8 = 7;
 pub const ROW_INSET: f32 = 6.0;
@@ -249,6 +252,15 @@ pub fn chip(
             );
         })
         .response
+}
+
+/// The frame around a group of controls: no stroke, and a fill a step lighter than the
+/// card it sits on.
+pub fn group_frame(visuals: &egui::Visuals) -> egui::Frame {
+    egui::Frame::new()
+        .fill(visuals.panel_fill.lerp_to_gamma(visuals.window_fill, 0.7))
+        .corner_radius(GROUP_RADIUS)
+        .inner_margin(8)
 }
 
 /// A section label or a column head in the shell, in the caller's sentence case.
