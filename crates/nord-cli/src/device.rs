@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use nord_format::accept::{Acceptance, Family};
-use nord_usb::envelope;
+use nord_usb::envelope::{self, Positional};
 use nord_usb::op;
 use nord_usb::transport::{Transport, UsbTransport};
 use nord_usb::wire::{Bank, Location, ProgramInfo, Status};
-use nord_usb::{op as usb_op, Device, Geometry, ObjectClass, ReadOnly, Session};
+use nord_usb::{op as usb_op, Device, FileSource, Geometry, ObjectClass, ReadOnly, Session};
 
 use crate::slot::{addr, noun, shown};
 use crate::ui::Ui;
@@ -512,6 +512,9 @@ pub fn get(
         return Err("--body writes a file; give -o a path".into());
     }
     let mut device = open_usb()?;
+    if let (Some(path), false) = (&out, body) {
+        return get_into(ui, &mut device, at, class, path);
+    }
     let (info, file) = read_object(&mut device, at, class, body)?;
 
     if let Some(path) = out {
@@ -542,6 +545,38 @@ pub fn get(
         info.version
     ));
     crate::summary::print(ui, &entity);
+    Ok(())
+}
+
+/// [`get`] into a file, written a transfer chunk at a time as it arrives, so that a piano
+/// is never held whole.
+fn get_into<T: Transport + Recorded>(
+    ui: &Ui,
+    device: &mut Device<T>,
+    at: Location,
+    class: ObjectClass,
+    path: &Path,
+) -> Result<(), String> {
+    let mut read = None;
+    crate::edit::replace_with(path, |file| {
+        let received = transact(device, format!("{} get {}", noun(class), addr(at)), |d| {
+            nord_usb::block_on(d.read(class, async |s| {
+                usb_op::info(s, at).await?;
+                usb_op::read_into(s, at, file).await
+            }))
+        })
+        .map_err(|e| explain(e, at))?;
+        read = Some(received);
+        Ok(())
+    })?;
+    let info = read.expect("a written file was read").info;
+    ui.note(format!(
+        "read {:?} ({} bytes) from {} -> {}",
+        info.name,
+        u64::from(info.body_len) + nord_format::cbin::Generation::V1.body_start(),
+        shown(at),
+        path.display(),
+    ));
     Ok(())
 }
 
@@ -742,9 +777,31 @@ pub fn put(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let file = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // Fail before touching the device if the file is not what it claims to be.
-    envelope::unwrap(&file).map_err(|e| e.to_string())?;
+    let (mut file, stem, stamp) = open_put(&path)?;
+    send(
+        ui,
+        &mut file,
+        at,
+        class,
+        confirmed,
+        &path.display().to_string(),
+        Some(&stem),
+        stamp,
+    )
+}
+
+/// The file a `put` sends, checked whole against its checksum, read a transfer chunk at a
+/// time, before anything touches the device. With it, the name the slot takes from the
+/// file's stem, and the file's modification time, as Nord Sound Manager sends.
+fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u32>), String> {
+    let at_path = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut file = std::fs::File::open(path)
+        .and_then(Positional::new)
+        .map_err(at_path)?;
+    nord_usb::block_on(envelope::verify(&mut file)).map_err(|e| match e {
+        nord_usb::Error::Io(e) => at_path(e),
+        e => e.to_string(),
+    })?;
     // The write carries the slot's name, and the file has none, so the stem supplies it.
     let stem = path
         .file_stem()
@@ -756,8 +813,7 @@ pub fn put(
                 path.display()
             )
         })?;
-    // The file's modification time, as Nord Sound Manager sends.
-    let stamp = std::fs::metadata(&path)
+    let stamp = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -769,32 +825,22 @@ pub fn put(
                 path.display()
             )
         })?;
-
-    send(
-        ui,
-        &file,
-        at,
-        class,
-        confirmed,
-        &path.display().to_string(),
-        Some(&stem),
-        stamp,
-    )
+    Ok((file, stem, stamp))
 }
 
-/// Send an already validated file into a slot, describing the target first. `edit`
-/// shares this, passing bytes instead of a path.
+/// Send an already validated file into a slot, describing the target first, reading it a
+/// transfer chunk at a time. `edit` shares this, passing bytes instead of a file.
 ///
 /// ⚠️ On most classes an occupied destination is replaced, not overwritten. The
 /// instrument answers status 4 to a write aimed at an occupied slot, so this reads the
 /// occupant, deletes it, writes, and puts the occupant back if the write fails. The slot
-/// is empty in between, and the only copy of its contents is in this process. The
-/// classes that [overwrite in place](ObjectClass::overwrites_in_place) skip the delete
+/// is empty in between, and the only copy of its contents is in this process, or for an
+/// occupant larger than [`HELD_OCCUPANT`], in the file it was read into. The classes that [overwrite in place](ObjectClass::overwrites_in_place) skip the delete
 /// and keep the same backup-and-restore guard.
 #[allow(clippy::too_many_arguments)]
 pub fn send(
     ui: &Ui,
-    file: &[u8],
+    file: &mut impl FileSource,
     at: Location,
     class: ObjectClass,
     confirmed: bool,
@@ -828,7 +874,7 @@ fn send_with<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
     spill_into: &Path,
-    file: &[u8],
+    file: &mut impl FileSource,
     at: Location,
     class: ObjectClass,
     confirmed: bool,
@@ -915,7 +961,7 @@ fn send_with<T: Transport + Recorded>(
     // The file names its model in its tag and the instrument names its own in the
     // product string, so this is the last check before the write. Bytes with no tag
     // cannot be checked, and `put` has already refused those.
-    if let Some(tag) = envelope::unchecked_tag(file) {
+    if let Some(tag) = head_tag(file).map_err(|e| format!("{what}: {e}"))? {
         match admit(device.transport().product(), class, &tag) {
             Admit::Takes => {}
             Admit::Warn(why) => ui.warn(why),
@@ -927,24 +973,21 @@ fn send_with<T: Transport + Recorded>(
     // After consent: for a piano this read takes minutes, and nobody should wait through
     // it only to be asked whether they meant it.
     let backup = match &existing {
-        Some(_) => Some(
-            transact(device, format!("{} read {}", noun(class), addr(at)), |d| {
-                nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await))
-            })
-            // Nothing is deleted until the backup is in hand.
-            .map_err(|e| {
-                format!(
-                    "could not read {} back before replacing it, so it was left alone: {}",
-                    shown(at),
-                    explain(e, at)
-                )
-            })?,
-        ),
+        // Nothing is deleted until the backup is in hand.
+        Some(info) => Some(back_up(ui, device, spill_into, class, info).map_err(|e| {
+            format!(
+                "could not read {} back before replacing it, so it was left alone: {e}",
+                shown(at),
+            )
+        })?),
         None => None,
     };
 
     // Read before deletion so geometry failure leaves the occupant intact.
-    read_geometry(device)?;
+    if let Err(e) = read_geometry(device) {
+        discard(ui, backup.as_ref());
+        return Err(e);
+    }
 
     if let (Some(backup), false) = (&backup, in_place) {
         ui.note(format!("deleting {} to make room", shown(at)));
@@ -958,6 +1001,7 @@ fn send_with<T: Transport + Recorded>(
             // read that timed out) may have come after the delete, and this process then
             // holds the only copy of the slot's contents.
             if let nord_usb::Error::DeviceStatus(_) = e {
+                discard(ui, Some(backup));
                 return Err(format!("deleting {}: {}", shown(at), explain(e, at)));
             }
             return Err(spill(
@@ -986,12 +1030,13 @@ fn send_with<T: Transport + Recorded>(
         transact(
             device,
             put_intent(class, what, at, &write_name, timestamp),
-            |d| nord_usb::block_on(d.write(class, at, file, &write_name, timestamp)),
+            |d| nord_usb::block_on(d.write_from(class, at, file, &write_name, timestamp)),
         )
     };
 
     match (written, backup) {
-        (Ok(()), _) => {
+        (Ok(()), backup) => {
+            discard(ui, backup.as_ref());
             ui.note(format!("wrote {what} -> {}", shown(at)));
             Ok(())
         }
@@ -1011,17 +1056,26 @@ fn send_with<T: Transport + Recorded>(
                 .unwrap_or_else(|| write_name.clone());
             let restore = transact(
                 device,
-                put_intent(
-                    class,
-                    &envelope::rescue_name(at, &backup),
-                    at,
-                    &restore_name,
-                    timestamp,
-                ),
-                |d| nord_usb::block_on(d.write(class, at, &backup, &restore_name, timestamp)),
+                put_intent(class, &backup.file_name(at), at, &restore_name, timestamp),
+                |d| match &backup {
+                    Backup::Held(bytes) => {
+                        nord_usb::block_on(d.write(class, at, bytes, &restore_name, timestamp))
+                    }
+                    Backup::Kept(path) => {
+                        let mut kept = std::fs::File::open(path).and_then(Positional::new)?;
+                        nord_usb::block_on(d.write_from(
+                            class,
+                            at,
+                            &mut kept,
+                            &restore_name,
+                            timestamp,
+                        ))
+                    }
+                },
             );
             match restore {
                 Ok(()) => {
+                    discard(ui, Some(&backup));
                     ui.note(format!("restored {}", shown(at)));
                     Err(format!(
                         "{} ({} was restored, and is unchanged)",
@@ -1049,6 +1103,117 @@ fn send_with<T: Transport + Recorded>(
     }
 }
 
+/// The format tag in the first bytes of `file`, where they hold one. A file too short to
+/// hold one has none.
+fn head_tag(file: &mut impl FileSource) -> std::io::Result<Option<String>> {
+    let mut head = [0; 12];
+    match nord_usb::block_on(file.read_at(0, &mut head)) {
+        Ok(()) => Ok(envelope::unchecked_tag(&head)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Occupants whose body is at most this many bytes, such as programs, set lists and the
+/// smaller samples, are held in memory while a write replaces them. A larger one, a piano
+/// or most samples, is read into a file in the rescue directory instead.
+const HELD_OCCUPANT: u32 = 1 << 20;
+
+/// What a replace keeps of a slot's occupant until the new object has landed.
+enum Backup {
+    Held(Vec<u8>),
+    /// A file named as its rescue would be, deleted once it is not needed.
+    Kept(PathBuf),
+}
+
+impl Backup {
+    /// The name the restore's recording gives the file it writes.
+    fn file_name(&self, at: Location) -> String {
+        match self {
+            Backup::Held(bytes) => envelope::rescue_name(at, bytes),
+            Backup::Kept(path) => path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+        }
+    }
+}
+
+/// Read the occupant of `info.location` so it can be put back: into memory when it is
+/// small, and otherwise into a new file in `dir`, a transfer chunk at a time. A read that
+/// fails leaves no file behind.
+fn back_up<T: Transport + Recorded>(
+    ui: &Ui,
+    device: &mut Device<T>,
+    dir: &Path,
+    class: ObjectClass,
+    info: &ProgramInfo,
+) -> Result<Backup, String> {
+    let at = info.location;
+    let intent = format!("{} read {}", noun(class), addr(at));
+    if info.body_len <= HELD_OCCUPANT {
+        return transact(device, intent, |d| {
+            nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await))
+        })
+        .map(Backup::Held)
+        .map_err(|e| explain(e, at));
+    }
+    let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))?;
+    ui.note(format!(
+        "reading {} into {} to put back if the write fails",
+        shown(at),
+        path.display()
+    ));
+    let read = transact(device, intent, |d| {
+        nord_usb::block_on(d.read(class, async |s| {
+            usb_op::read_into(s, at, &mut file).await?;
+            Ok(file.sync_all()?)
+        }))
+    });
+    match read {
+        Ok(()) => Ok(Backup::Kept(path)),
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            Err(explain(e, at))
+        }
+    }
+}
+
+/// A new file in `dir` named `name`, or `name` with a number before its extension where a
+/// file already has that name, so an earlier rescue is never written over.
+fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, std::fs::File), String> {
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
+    for n in 1..=100 {
+        let path = match n {
+            1 => dir.join(name),
+            n => dir.join(format!("{stem}-{n}.{extension}")),
+        };
+        match std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "{}: a hundred rescues of this slot are already there",
+        dir.join(name).display()
+    ))
+}
+
+/// Let a backup go once the slot holds what it should. A file that cannot be deleted is
+/// reported, and left.
+fn discard(ui: &Ui, backup: Option<&Backup>) {
+    if let Some(Backup::Kept(path)) = backup {
+        if let Err(e) = std::fs::remove_file(path) {
+            ui.warn(format!("{} is no longer needed: {e}", path.display()));
+        }
+    }
+}
+
 /// Whether to skip the write and report a failure, so the restore and rescue paths can
 /// be exercised against a real instrument. Test tool: otherwise a transport failure at
 /// this point is only reachable by pulling the cable mid-operation.
@@ -1064,28 +1229,32 @@ fn fail_after_delete() -> bool {
     false
 }
 
-/// Last resort: the slot's former contents exist only in this process. Save them to disk
-/// before exiting, and say where they went.
+/// Last resort: the slot's former contents exist only in this process, or in the file it
+/// read them into. Make sure they are on disk before exiting, and say where they are.
 ///
 /// Both paths that can leave a slot without its contents reach this (a delete that may
 /// have landed before its transaction failed, and a write whose restore also failed), so
 /// the next step is worded once.
-fn spill(ui: &Ui, dir: &Path, at: Location, backup: &[u8], lost: String) -> String {
-    let path = dir.join(envelope::rescue_name(at, backup));
-    match crate::edit::replace_file(&path, backup) {
-        Ok(()) => {
+fn spill(ui: &Ui, dir: &Path, at: Location, backup: &Backup, lost: String) -> String {
+    let path = match backup {
+        Backup::Held(bytes) => {
+            let path = dir.join(envelope::rescue_name(at, bytes));
+            if let Err(io) = crate::edit::replace_file(&path, bytes) {
+                return format!(
+                    "{lost}, and its former contents could not be saved either ({io}); {} \
+                     bytes are lost",
+                    bytes.len(),
+                );
+            }
             ui.warn(format!("wrote the original to {}", path.display()));
-            format!(
-                "{lost}; its former contents were saved to {}; send them back with `put`",
-                path.display(),
-            )
+            path
         }
-        Err(io) => format!(
-            "{lost}, and its former contents could not be saved either ({io}); {} bytes \
-             are lost",
-            backup.len(),
-        ),
-    }
+        Backup::Kept(path) => path.clone(),
+    };
+    format!(
+        "{lost}; its former contents were saved to {}; send them back with `put`",
+        path.display(),
+    )
 }
 
 /// Validate the write allocation before removing an occupant that may need restoring.
@@ -2172,9 +2341,9 @@ mod tests {
             include_str!("../../nord-usb/tests/scripts/program/put_7-10_overwrite.script");
         const FILE: &[u8] = include_bytes!("../../nord-usb/tests/scripts/program/prog_8-14.ne5p");
         const GEOMETRY: &str = include_str!("../../nord-usb/tests/scripts/device/geometry.script");
-        const AT: Location = Location { bank: 6, slot: 9 };
+        pub(super) const AT: Location = Location { bank: 6, slot: 9 };
         const NAME: &str = "prog-8-14";
-        const STAMP: u32 = 0x6a89_f433;
+        pub(super) const STAMP: u32 = 0x6a89_f433;
 
         /// The recorded transactions a put runs through: check-address, info, read,
         /// geometry, delete, write.
@@ -2182,7 +2351,7 @@ mod tests {
         /// ⚠️ The geometry read is spliced in from its own recording. The put was
         /// captured against a build that already held the partition table, so the
         /// capture has no frames for the transaction this one opens before deleting.
-        fn recorded() -> Vec<Vec<Step>> {
+        pub(super) fn recorded() -> Vec<Vec<Step>> {
             let steps = |text| {
                 Script::parse(text)
                     .expect("a recorded exchange parses")
@@ -2222,7 +2391,7 @@ mod tests {
                 &Ui::piped(),
                 &mut device,
                 spill_into,
-                FILE,
+                &mut { FILE },
                 AT,
                 ObjectClass::Program,
                 true,
@@ -2232,7 +2401,7 @@ mod tests {
             )
         }
 
-        fn rescued(dir: &Path) -> Vec<String> {
+        pub(super) fn rescued(dir: &Path) -> Vec<String> {
             std::fs::read_dir(dir)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -2312,6 +2481,320 @@ mod tests {
             assert!(err.contains("out of range"), "{err}");
             assert!(!err.contains("saved to"), "{err}");
             assert_eq!(rescued(&dir), Vec::<String>::new());
+        }
+    }
+
+    /// Large objects stream: a put reads its file a transfer chunk at a time, and an
+    /// occupant too large to hold is read into a file and put back from it. Each exchange
+    /// is the recorded put's, with its occupant and file made large.
+    mod streaming {
+        use super::losing_the_occupant::{recorded, rescued, AT, STAMP};
+        use super::*;
+        use nord_usb::transport::{ReplayTransport, Step};
+        use nord_usb::wire::{cmd, ui, Message, Service};
+
+        /// The body bytes one transfer frame carries.
+        const CHUNK: usize = 32720;
+
+        /// A body whose every chunk differs, so a chunk at the wrong offset is caught.
+        fn body(len: usize) -> Vec<u8> {
+            (0..len as u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+                .collect()
+        }
+
+        fn ask(command: u32, args: Vec<u8>) -> Step {
+            Step::Out(Message::program(command, args).encode())
+        }
+
+        fn answer(command: u32, status: u32, payload: &[u8]) -> Step {
+            let args = [&status.to_be_bytes()[..], payload].concat();
+            Step::In(Message::new(Service::Program, cmd::SUBSYSTEM, command + 1, args).encode())
+        }
+
+        fn tell(msg: Message) -> Step {
+            Step::Out(msg.encode())
+        }
+
+        fn words(of: &[u32]) -> Vec<u8> {
+            of.iter().flat_map(|w| w.to_be_bytes()).collect()
+        }
+
+        fn slot() -> Vec<u8> {
+            words(&[AT.bank, AT.slot])
+        }
+
+        /// One transaction: the recorded open, `steps`, the recorded close.
+        fn session(steps: Vec<Step>) -> Vec<Step> {
+            let write = recorded().pop().expect("the recorded write");
+            let mut out = write[..4].to_vec();
+            out.extend(steps);
+            out.extend_from_slice(&write[12..]);
+            out
+        }
+
+        /// The occupant's `INFO` reply: a program of `len` body bytes with checksum `crc`.
+        fn info(len: usize, crc: u32) -> Step {
+            let mut p = words(&[AT.bank, AT.slot, len as u32]);
+            p.extend_from_slice(b"ne5p");
+            p.extend_from_slice(&words(&[4, u32::MAX, u32::MAX, 3]));
+            p.extend_from_slice(b"Big");
+            p.extend_from_slice(&crc.to_be_bytes());
+            answer(cmd::INFO, 0, &p)
+        }
+
+        /// The read of `body`, as `op::read_into` asks for it.
+        fn read(body: &[u8]) -> Vec<Step> {
+            let mut steps = vec![
+                ask(cmd::INFO, slot()),
+                info(body.len(), nord_format::crc::crc32(body)),
+                tell(ui::label("Uploading...").unwrap()),
+                ask(cmd::BEGIN_READ, slot()),
+                answer(cmd::BEGIN_READ, 0, &slot()),
+            ];
+            let mut painted = None;
+            for (i, chunk) in body.chunks(CHUNK).enumerate() {
+                let asked = words(&[AT.bank, AT.slot, (i * CHUNK) as u32, chunk.len() as u32]);
+                steps.push(ask(cmd::READ, asked.clone()));
+                steps.push(answer(cmd::READ, 0, &[&asked[..], chunk].concat()));
+                let pct = ((i * CHUNK + chunk.len()) * 100 / body.len()) as u16;
+                if painted != Some(pct) {
+                    steps.push(tell(ui::percent(pct)));
+                    painted = Some(pct);
+                }
+            }
+            steps.push(ask(cmd::END_TRANSFER, slot()));
+            steps.push(answer(cmd::END_TRANSFER, 0, &slot()));
+            steps
+        }
+
+        /// The write of `body` named `name`, answered `refused` at `BEGIN_WRITE` when set.
+        fn write(body: &[u8], name: &str, refused: Option<u32>) -> Vec<Step> {
+            let begin = op::begin_write_args(AT, body.len(), b"ne5p", STAMP, name).unwrap();
+            let mut steps = vec![
+                tell(ui::label("Downloading...").unwrap()),
+                ask(cmd::BEGIN_WRITE, begin),
+            ];
+            if let Some(status) = refused {
+                steps.push(answer(cmd::BEGIN_WRITE, status, &[]));
+                return steps;
+            }
+            steps.push(answer(cmd::BEGIN_WRITE, 0, &slot()));
+            let mut painted = None;
+            for (i, chunk) in body.chunks(CHUNK).enumerate() {
+                let end = i * CHUNK + chunk.len();
+                steps.push(ask(
+                    cmd::WRITE_DATA,
+                    op::write_data_args(AT, i * CHUNK, chunk).unwrap(),
+                ));
+                if end == body.len() {
+                    steps.push(answer(cmd::WRITE_DATA, 0, &slot()));
+                }
+                let pct = (end * 100 / body.len()) as u16;
+                if painted != Some(pct) {
+                    steps.push(tell(ui::percent(pct)));
+                    painted = Some(pct);
+                }
+            }
+            steps.push(ask(cmd::END_TRANSFER, slot()));
+            steps.push(answer(cmd::END_TRANSFER, 0, &slot()));
+            steps
+        }
+
+        /// The address check, then the `INFO` that finds `occupant`, or finds the slot
+        /// empty without one.
+        fn checked(occupant: Option<&[u8]>) -> Vec<Step> {
+            let put = recorded();
+            let mut steps = put[0].clone();
+            steps.extend(session(match occupant {
+                Some(body) => vec![
+                    ask(cmd::INFO, slot()),
+                    info(body.len(), nord_format::crc::crc32(body)),
+                ],
+                None => vec![
+                    ask(cmd::INFO, slot()),
+                    answer(cmd::INFO, usb_op::VACANT, &[]),
+                ],
+            }));
+            steps
+        }
+
+        /// The recorded geometry, and the recorded delete when `delete` is set.
+        fn geometry(delete: bool) -> Vec<Step> {
+            let put = recorded();
+            let last = put.len() - 1 - usize::from(!delete);
+            put[3..last].concat()
+        }
+
+        /// A file served through the trait, as a disk serves one, recording each read's
+        /// length.
+        struct Served {
+            bytes: Vec<u8>,
+            reads: Vec<usize>,
+        }
+
+        impl FileSource for Served {
+            fn len(&self) -> u64 {
+                self.bytes.len() as u64
+            }
+
+            async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+                self.reads.push(buf.len());
+                let start = offset as usize;
+                let bytes = self
+                    .bytes
+                    .get(start..start + buf.len())
+                    .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+                buf.copy_from_slice(bytes);
+                Ok(())
+            }
+        }
+
+        fn send_over(
+            steps: Vec<Step>,
+            spill_into: &Path,
+            file: &mut impl FileSource,
+        ) -> (Result<(), String>, bool) {
+            let mut device = Device::new(ReplayTransport::new(steps));
+            let sent = send_with(
+                &Ui::piped(),
+                &mut device,
+                spill_into,
+                file,
+                AT,
+                ObjectClass::Program,
+                true,
+                "big.ne5p",
+                Some("big"),
+                Some(STAMP),
+            );
+            (sent, device.transport().is_exhausted())
+        }
+
+        /// A file of many chunks reaches an empty slot with the frames its bytes make,
+        /// and the file is never asked for more than one chunk at a time.
+        #[test]
+        fn a_large_file_is_put_a_chunk_at_a_time() {
+            let dir = crate::edit::tests::scratch("put-streams");
+            let body = body(40 * CHUNK + 1234);
+            let file = envelope::wrap("ne5p", AT, 4, &body).unwrap();
+            let mut steps = checked(None);
+            steps.extend(geometry(false));
+            steps.extend(session(write(&body, "big", None)));
+
+            let mut served = Served {
+                bytes: file,
+                reads: Vec::new(),
+            };
+            let (sent, exhausted) = send_over(steps, &dir, &mut served);
+            sent.unwrap();
+            assert!(exhausted, "the exchange ran to its end");
+            let widest = served.reads.iter().max().copied();
+            assert!(
+                widest.is_some_and(|widest| widest <= CHUNK),
+                "the widest read was {widest:?} bytes"
+            );
+            assert_eq!(rescued(&dir), Vec::<String>::new());
+        }
+
+        /// A damaged file is refused before the device is opened, by its path.
+        #[test]
+        fn a_damaged_file_is_refused_before_the_put_begins() {
+            let dir = crate::edit::tests::scratch("put-damaged");
+            let path = dir.join("big.ne5p");
+            let mut file = envelope::wrap("ne5p", AT, 4, &body(3 * CHUNK)).unwrap();
+            std::fs::write(&path, &file).unwrap();
+            let (_, stem, _) = open_put(&path).expect("an intact file opens");
+            assert_eq!(stem, "big");
+
+            *file.last_mut().unwrap() ^= 1;
+            std::fs::write(&path, &file).unwrap();
+            let refused = open_put(&path).err().expect("a damaged file is refused");
+            assert!(refused.contains("checksum"), "{refused}");
+        }
+
+        /// An occupant too large to hold is read into a file beside the rescues, put back
+        /// from it when the write is refused, and the file is deleted once it has.
+        #[test]
+        fn a_large_occupant_is_put_back_from_the_file_it_was_read_into() {
+            let dir = crate::edit::tests::scratch("put-kept-restored");
+            let occupant = body(64 * CHUNK + 99);
+            let new = body(2 * CHUNK);
+            let mut steps = checked(Some(&occupant));
+            steps.extend(session(read(&occupant)));
+            steps.extend(geometry(true));
+            steps.extend(session(write(&new, "big", Some(4))));
+            steps.extend(session(write(&occupant, "Big", None)));
+
+            let file = envelope::wrap("ne5p", AT, 4, &new).unwrap();
+            let (sent, exhausted) = send_over(steps, &dir, &mut file.as_slice());
+            let err = sent.unwrap_err();
+            assert!(err.contains("was restored, and is unchanged"), "{err}");
+            assert!(exhausted, "the restore sent the occupant's own frames");
+            assert_eq!(rescued(&dir), Vec::<String>::new(), "the backup is let go");
+        }
+
+        /// When the restore is refused too, the file the occupant was read into is the
+        /// rescue, already on disk, and a whole file that `put` takes back.
+        #[test]
+        fn a_large_occupant_whose_restore_is_refused_stays_in_its_file() {
+            let dir = crate::edit::tests::scratch("put-kept-rescued");
+            let occupant = body(64 * CHUNK + 99);
+            let new = body(2 * CHUNK);
+            let mut steps = checked(Some(&occupant));
+            steps.extend(session(read(&occupant)));
+            steps.extend(geometry(true));
+            steps.extend(session(write(&new, "big", Some(4))));
+            steps.extend(session(write(&occupant, "Big", Some(4))));
+
+            let file = envelope::wrap("ne5p", AT, 4, &new).unwrap();
+            let (sent, exhausted) = send_over(steps, &dir, &mut file.as_slice());
+            let err = sent.unwrap_err();
+            assert!(err.contains("restoring failed as well"), "{err}");
+            assert!(err.contains("were saved to"), "{err}");
+            assert!(exhausted);
+            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
+            let saved = std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap();
+            assert!(
+                saved == envelope::wrap("ne5p", AT, 4, &occupant).unwrap(),
+                "the rescue is the occupant's file"
+            );
+        }
+
+        /// A `get` into a file writes the file as the read arrives, and the file is the
+        /// one the instrument's bytes make.
+        #[test]
+        fn a_large_get_is_written_to_its_file() {
+            let dir = crate::edit::tests::scratch("get-streams");
+            let occupant = body(64 * CHUNK + 99);
+            let mut steps = vec![
+                ask(cmd::INFO, slot()),
+                info(occupant.len(), nord_format::crc::crc32(&occupant)),
+            ];
+            steps.extend(read(&occupant));
+            let mut device = Device::new(ReplayTransport::new(session(steps)));
+            let path = dir.join("big.ne5p");
+
+            get_into(&Ui::piped(), &mut device, AT, ObjectClass::Program, &path).unwrap();
+            assert!(device.transport().is_exhausted());
+            assert!(
+                std::fs::read(&path).unwrap() == envelope::wrap("ne5p", AT, 4, &occupant).unwrap(),
+                "the file is the occupant's"
+            );
+            assert_eq!(rescued(&dir), ["big.ne5p"], "no temporary is left");
+        }
+
+        /// An earlier rescue of the same slot is never written over by a later backup.
+        #[test]
+        fn a_backup_never_takes_an_earlier_rescues_name() {
+            let dir = crate::edit::tests::scratch("put-kept-beside");
+            std::fs::write(dir.join("nord-rescued-7-10.ne5p"), b"earlier").unwrap();
+            let (path, _) = fresh(&dir, "nord-rescued-7-10.ne5p").unwrap();
+            assert_eq!(path, dir.join("nord-rescued-7-10-2.ne5p"));
+            assert_eq!(
+                std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap(),
+                b"earlier"
+            );
         }
     }
 
