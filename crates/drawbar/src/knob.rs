@@ -17,6 +17,9 @@ const DRAG_FOR_SWEEP: f32 = 220.0;
 
 const DIAL: f32 = 42.0;
 
+/// The width of the unlit sweep, the lit arc, and the pointer.
+const STROKE: f32 = 3.0;
+
 /// The keys that turn a focused knob, and by how much. When several are pressed at once
 /// the first listed wins.
 const STEPS: [(egui::Key, i64); 6] = [
@@ -251,15 +254,13 @@ fn paint(
 
     // The traveled arc over a faint full sweep: the lit part shows how far the knob is
     // turned, like the panel's own scale.
-    let track = egui::Stroke::new(2.0_f32, crate::app::unlit(visuals));
-    painter.add(egui::Shape::line(
-        arc(center, radius - 1.0, 0.0, 1.0),
-        track,
-    ));
+    let sweep = radius - STROKE / 2.0;
+    let track = egui::Stroke::new(STROKE, crate::app::unlit(visuals));
+    painter.add(egui::Shape::line(arc(center, sweep, 0.0, 1.0), track));
     let from = origin(min, max);
     if (at - from).abs() > f32::EPSILON {
-        let lit = egui::Stroke::new(2.5_f32, crate::app::accent(visuals));
-        painter.add(egui::Shape::line(arc(center, radius - 1.0, from, at), lit));
+        let lit = egui::Stroke::new(STROKE, crate::app::accent(visuals));
+        painter.add(egui::Shape::line(arc(center, sweep, from, at), lit));
     }
 
     let body = radius - 5.0;
@@ -276,7 +277,7 @@ fn paint(
             on_dial(center, body * 0.30, pointer),
             on_dial(center, body * 0.86, pointer),
         ],
-        egui::Stroke::new(2.5_f32, widget.fg_stroke.color),
+        egui::Stroke::new(STROKE, widget.fg_stroke.color),
     );
 }
 

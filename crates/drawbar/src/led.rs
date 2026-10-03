@@ -10,6 +10,13 @@ const LENS: f32 = 9.0;
 const PAD: egui::Vec2 = egui::vec2(8.0, 5.0);
 /// The gap between the lens and its label.
 const GAP: f32 = 5.0;
+/// The button's rounding, a step rounder than a plain control's.
+const RADIUS: f32 = 7.0;
+/// A lit lens's halo: a ring this wide around it, under a glow this wide.
+const RING: f32 = 2.0;
+const GLOW: u8 = 8;
+/// White at 4 %, premultiplied.
+const TOP_LIGHT: egui::Color32 = egui::Color32::from_rgba_premultiplied(10, 10, 10, 10);
 
 /// A lit button labeled `word`. Returns the state it was switched to.
 ///
@@ -43,19 +50,35 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
         let visuals = ui.visuals();
         let widget = ui.style().interact(&response);
         let painter = ui.painter();
-        painter.rect_filled(rect, 4.0, widget.bg_fill);
+        painter.rect_filled(rect, RADIUS, widget.bg_fill);
+        // A raised button catches a faint light along its top edge.
+        if visuals.dark_mode {
+            painter.hline(
+                rect.x_range().shrink(RADIUS),
+                rect.top() + 0.5,
+                egui::Stroke::new(1.0_f32, TOP_LIGHT),
+            );
+        }
         let edge = match response.has_focus() {
             true => visuals.selection.stroke,
             false => widget.bg_stroke,
         };
-        painter.rect_stroke(rect, 4.0, edge, egui::StrokeKind::Inside);
+        painter.rect_stroke(rect, RADIUS, edge, egui::StrokeKind::Inside);
 
         let lens = egui::pos2(rect.left() + PAD.x + LENS / 2.0, rect.center().y);
         let lit = crate::app::accent(visuals);
         match showing {
             // The glow shows "on" at a glance; the lens alone is just a dot.
             true => {
-                painter.circle_filled(lens, LENS / 2.0 + 2.0, lit.gamma_multiply(0.30));
+                let glow = egui::Shadow {
+                    offset: [0, 0],
+                    blur: GLOW,
+                    spread: 0,
+                    color: crate::app::tint(lit, 0.45),
+                };
+                let disc = egui::Rect::from_center_size(lens, egui::Vec2::splat(LENS));
+                painter.add(glow.as_shape(disc, LENS / 2.0));
+                painter.circle_filled(lens, LENS / 2.0 + RING, crate::app::tint(lit, 0.22));
                 painter.circle_filled(lens, LENS / 2.0, lit);
             }
             false => {
