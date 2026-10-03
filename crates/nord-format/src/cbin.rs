@@ -649,26 +649,7 @@ fn read_inner<B: Body>(
 
 impl<B: Body> Cbin<B> {
     pub fn write_to(&self, w: &mut (impl Write + Seek)) -> Result<(), Error> {
-        let start = w.stream_position()?;
-        let hash = Hash::primed(&self.header);
-        w.write_all(&self.header.head_bytes())?;
-        if self.header.generation == Generation::V1 {
-            // The crc32 is not known yet; a placeholder holds its word until the
-            // body has streamed past, then one seek patches it.
-            w.write_all(&[0u8; 20])?;
-        }
-
-        let body_start = start + self.header.generation.body_start();
-        let mut writer = BodyWriter {
-            inner: w,
-            pos: 0,
-            hash,
-        };
-        self.body.write(&mut writer)?;
-        let BodyWriter {
-            pos: written, hash, ..
-        } = writer;
-
+        let written = write_with(&self.header, w, |writer| self.body.write(writer))?;
         if let Some(expected) = B::LEN {
             if written != expected {
                 return Err(ParseError::WrongBodyLength {
@@ -679,17 +660,48 @@ impl<B: Body> Cbin<B> {
                 .into());
             }
         }
-
-        match hash {
-            Hash::V1(h) => {
-                w.seek(SeekFrom::Start(start + 0x18))?;
-                w.write_all(&h.value().to_le_bytes())?;
-                w.seek(SeekFrom::Start(body_start + written))?;
-            }
-            Hash::V0(h) => w.write_all(&h.value().to_le_bytes())?,
-        }
         Ok(())
     }
+}
+
+/// Write a container: `header`, the body `body` streams out in one forward pass, and
+/// the checksum over it. Returns the body's length.
+///
+/// The type-1 crc32 sits ahead of the body, so a placeholder holds its word until the
+/// body has streamed past, then one seek back writes it. Nothing but the checksum
+/// accumulator is held.
+pub(crate) fn write_with<W: Write + Seek>(
+    header: &Header,
+    w: &mut W,
+    body: impl FnOnce(&mut BodyWriter<'_, W>) -> Result<(), Error>,
+) -> Result<u64, Error> {
+    let start = w.stream_position()?;
+    let hash = Hash::primed(header);
+    w.write_all(&header.head_bytes())?;
+    if header.generation == Generation::V1 {
+        w.write_all(&[0u8; 20])?;
+    }
+
+    let body_start = start + header.generation.body_start();
+    let mut writer = BodyWriter {
+        inner: w,
+        pos: 0,
+        hash,
+    };
+    body(&mut writer)?;
+    let BodyWriter {
+        pos: written, hash, ..
+    } = writer;
+
+    match hash {
+        Hash::V1(h) => {
+            w.seek(SeekFrom::Start(start + 0x18))?;
+            w.write_all(&h.value().to_le_bytes())?;
+            w.seek(SeekFrom::Start(body_start + written))?;
+        }
+        Hash::V0(h) => w.write_all(&h.value().to_le_bytes())?,
+    }
+    Ok(written)
 }
 
 /// A body kept verbatim: bytes in, bytes out, checksum verified, nothing decoded.
