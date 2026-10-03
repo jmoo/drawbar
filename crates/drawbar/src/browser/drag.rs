@@ -338,7 +338,17 @@ const TAGS: [(&[&str], Kind); 15] = {
 /// The tag a file of this name is kept under, by its extension, and the kind of asset
 /// it holds. `None` for a file drawbar does not open.
 pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
+    use nord_format::formats::nsmp::{self, codec::Layout};
+
     let (_, extension) = name.rsplit_once('.')?;
+    // A sample instrument's extension names its generation, and its tag does not.
+    let generation = [Layout::V3, Layout::V4]
+        .iter()
+        .any(|layout| layout.extension().eq_ignore_ascii_case(extension));
+    let extension = match generation {
+        true => nsmp::FORMAT,
+        false => extension,
+    };
     TAGS.iter()
         .flat_map(|(tags, kind)| tags.iter().map(move |tag| (*tag, *kind)))
         .find(|(tag, _)| tag.trim_end_matches('\0').eq_ignore_ascii_case(extension))
@@ -626,6 +636,20 @@ mod tests {
         assert_eq!(tags.len(), named, "a tag is named twice");
         assert_eq!(Kind::of_name("no extension"), Kind::Other);
         assert_eq!(Kind::of_name("scan.pdf"), Kind::Other);
+    }
+
+    /// A sample instrument's extension names its generation, and each is a sample kept
+    /// under the one tag every generation stores.
+    #[test]
+    fn every_sample_generations_extension_is_a_sample() {
+        for name in ["Pad.nsmp", "Tone.nsmp3", "Strings.NSMP4"] {
+            assert_eq!(
+                tagged(name),
+                Some((nord_format::formats::nsmp::FORMAT, Kind::Sample)),
+                "{name}"
+            );
+        }
+        assert_eq!(tagged("Pad.nsmp5"), None, "no generation writes it");
     }
 
     /// A file's kind by its name is the kind its contents decode to: for every format
