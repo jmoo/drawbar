@@ -1334,31 +1334,11 @@ fn footer(
             bottom: ROW_INSET as i8,
         })
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            // The actions first, from the right, so the sentence takes only the room they
+            // leave and is shortened rather than run under them.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    egui::RichText::new(format!("{} selected", picked.len()))
-                        .text_style(ui_text())
-                        .strong(),
-                );
                 ui.scope(|ui| {
-                    crate::panel::flat(ui);
-                    if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("clear").text_style(ui_text()),
-                        ))
-                        .on_hover_text("clear the selection, or press Escape")
-                        .clicked()
-                    {
-                        browser.unpick();
-                    }
-                });
-                ui.label(
-                    egui::RichText::new(consequence(picked, device, queue))
-                        .text_style(ui_text())
-                        .weak(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     tonal(ui);
                     let attached = device.connected();
                     if attached && ui.button("Review send queue").clicked() {
@@ -1369,6 +1349,33 @@ fn footer(
                     for action in Bulk::ALL.iter().rev() {
                         browser.bulk_item(ui, *action, &checked, workspace, device, acts);
                     }
+                });
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} selected", picked.len()))
+                            .text_style(ui_text())
+                            .strong(),
+                    );
+                    ui.scope(|ui| {
+                        crate::panel::flat(ui);
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("clear").text_style(ui_text()),
+                            ))
+                            .on_hover_text("clear the selection, or press Escape")
+                            .clicked()
+                        {
+                            browser.unpick();
+                        }
+                    });
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(consequence(picked, device, queue))
+                                .text_style(ui_text())
+                                .weak(),
+                        )
+                        .truncate(),
+                    );
                 });
             });
         });
@@ -2314,6 +2321,49 @@ mod tests {
             click(2, egui::Modifiers::NONE),
             1,
             "a plain click selected its row alone"
+        );
+    }
+
+    /// In a narrow library the footer's sentence is shortened to the room its actions
+    /// leave, rather than drawn under them.
+    #[test]
+    fn the_footers_sentence_stops_short_of_its_actions() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.check(Item::Local(id));
+
+        let mut said = Vec::new();
+        for _ in 0..2 {
+            let input = testing::screen(egui::vec2(700.0, 540.0), Vec::new());
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show(ctx, |ui| {
+                        library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                    });
+            });
+            said = testing::painted(&output);
+        }
+        let sentence = said
+            .iter()
+            .find(|word| word.text.starts_with("Nothing selected"))
+            .expect("the footer says what a send would do");
+        let first = testing::where_(&said, Bulk::Queue.label());
+        assert!(
+            sentence.rect.right() <= first.left(),
+            "the sentence ends at {} and the first action starts at {}",
+            sentence.rect.right(),
+            first.left()
         );
     }
 
