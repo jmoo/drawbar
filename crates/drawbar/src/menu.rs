@@ -802,8 +802,7 @@ pub fn marked(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
 /// A submenu's line in a drop-down: its label in the column the other items' labels
 /// start at, past the empty check column, and the arrow at the right.
 fn submenu(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
-    let button =
-        check(ui, title, false).right_text(SUBMENU);
+    let button = check(ui, title, false).right_text(SUBMENU);
     egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| {
         drop_down_style(ui);
         content(ui);
