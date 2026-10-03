@@ -685,8 +685,8 @@ pub fn review(
     let frame = egui::Frame::new()
         .fill(visuals.panel_fill)
         .stroke(visuals.widgets.noninteractive.bg_stroke)
-        .corner_radius(14)
-        .shadow(visuals.popup_shadow);
+        .corner_radius(crate::sheet::SHEET_RADIUS)
+        .shadow(visuals.window_shadow);
     let before = acts.len();
     let mut open = true;
     let shown = egui::Modal::new(egui::Id::new("review"))

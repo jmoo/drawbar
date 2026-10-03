@@ -28,7 +28,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             let app = drawbar::DrawbarApp::new(cc);
             #[cfg(target_os = "macos")]
-            let app = app.with_menu_bar(&cc.egui_ctx);
+            let app = app.in_mac_window(cc);
             Ok(Box::new(app))
         }),
     )

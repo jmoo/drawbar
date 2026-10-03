@@ -405,7 +405,9 @@ pub fn apply(
             Act::ClearQueue => queue.clear(),
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
-            Act::AskSendAll | Act::ReviewQueue => shell.review_open = true,
+            // ⚠️ The queue always belongs to an attached instrument; with none there is
+            // nothing to review.
+            Act::AskSendAll | Act::ReviewQueue => shell.review_open = device.state.connected(),
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }

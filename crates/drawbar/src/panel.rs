@@ -1,4 +1,4 @@
-//! Shared chrome: section and dock headers, table column widths, chips and pills, dashed
+//! Shared chrome: section headers, table column widths, chips and pills, dashed
 //! borders, flat buttons for bars, and tonal buttons for cards.
 
 use std::ops::Range;
@@ -10,10 +10,6 @@ use crate::icon::{icon, painted, Glyph};
 
 /// How tall a section header is, wherever it is drawn.
 pub const HEADER: f32 = 26.0;
-
-/// How tall a dock's own header is: the tab strip's height, so the strip and every dock
-/// header beside it form one line across the window.
-pub const DOCK: f32 = crate::tabs::HEIGHT;
 
 /// A bar's padding at each end, and the gap between its parts. The title bar, the
 /// toolbar, the tab strip, and every header share them, so their contents line up down
@@ -43,18 +39,14 @@ pub const ROW_INSET: f32 = 6.0;
 /// The height of a pill: a badge, a chip, a state on a row.
 pub const PILL: f32 = 18.0;
 
-/// The size of the collapse triangle, and of the grip before a dock header's title.
+/// The size of the collapse triangle.
 const CHEVRON: f32 = 12.0;
-const GRIP: f32 = 12.0;
 
 /// The triangle's opacity after a section label, relative to the label's ink.
 const CHEVRON_ALPHA: f32 = 0.7;
 
 /// The size of the count at a section header's right end.
 const COUNT: f32 = 10.5;
-
-/// The grip's opacity relative to the caption color. It is decoration, not a control.
-const GRIP_ALPHA: f32 = 0.6;
 
 /// The width a table column asks for: a fixed width, a share of what the fixed columns
 /// leave, or a share that stops growing at `max` px and leaves the rest to the other
@@ -458,109 +450,6 @@ pub fn panel_header(
     response
 }
 
-/// A button in a card's body: a glyph and a word on a tonal fill, with no border.
-///
-/// It rests on `bg-inactive` and turns `bg-hovered` under the pointer, so it reads as a
-/// control without the weight of a bordered button.
-pub fn tonal_button(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
-    const HEIGHT: f32 = 28.0;
-    const RADIUS: u8 = 7;
-    const SIDE: f32 = 10.0;
-    const ICON: f32 = 12.0;
-    const TEXT: f32 = 12.0;
-
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        egui::FontId::proportional(TEXT),
-        egui::Color32::PLACEHOLDER,
-    );
-    let width = SIDE + ICON + GAP + galley.size().x + SIDE;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click());
-    let widgets = &ui.visuals().widgets;
-    let state = match response.hovered() {
-        true => &widgets.hovered,
-        false => &widgets.inactive,
-    };
-    let (fill, ink) = (state.weak_bg_fill, state.fg_stroke.color);
-    let painter = ui.painter();
-    painter.rect_filled(rect, RADIUS, fill);
-    let middle = rect.center().y;
-    let mut x = rect.left() + SIDE;
-    painted(
-        ui,
-        glyph,
-        egui::Rect::from_min_size(egui::pos2(x, middle - ICON / 2.0), egui::Vec2::splat(ICON)),
-        ink,
-    );
-    x += ICON + GAP;
-    let height = galley.size().y;
-    painter.galley(egui::pos2(x, middle - height / 2.0), galley, ink);
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    response
-}
-
-/// A dock's own header: a grip and a [`caps`] title, with nothing to click.
-///
-/// ⚠️ A dock collapses from its toolbar toggle and the View menu. A header with its own
-/// triangle would look like one of the sections beneath it.
-pub fn dock_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
-    let fill = ui.visuals().faint_bg_color;
-    let response = bar(ui, DOCK, fill, |ui| {
-        let ink = crate::app::caption(ui.visuals());
-        icon(
-            ui,
-            Glyph::GripVertical,
-            GRIP,
-            ink.gamma_multiply(GRIP_ALPHA),
-        );
-        ui.label(caps(title).color(ink));
-    });
-    let stroke = egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
-    let rect = response.rect;
-    ui.painter()
-        .hline(rect.x_range(), rect.bottom() - 0.5, stroke);
-    response
-}
-
-/// A dock header with its own controls: [`dock_header`]'s bar, holding the bottom dock's
-/// controls in place of a title.
-pub fn strip<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
-    let fill = ui.visuals().faint_bg_color;
-    bar(ui, DOCK, fill, contents)
-}
-
-/// The bar a header is drawn into: full bleed, padded at each end, laid out left to
-/// right. The response is the whole bar, so a header can be clicked as one thing.
-///
-/// `resting` is the bar's fill when the pointer is elsewhere; under the pointer the fill
-/// is always `faint_bg_color`.
-fn bar<R>(
-    ui: &mut egui::Ui,
-    height: f32,
-    resting: egui::Color32,
-    contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::click(),
-    );
-    let fill = match response.hovered() {
-        true => ui.visuals().faint_bg_color,
-        false => resting,
-    };
-    ui.painter().rect_filled(rect, 0.0, fill);
-    let mut inner = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(PAD, 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    inner.spacing_mut().item_spacing.x = GAP;
-    contents(&mut inner);
-    response
-}
-
 /// The triangle that shows whether a section is open, with its own click response.
 pub fn chevron(ui: &mut egui::Ui, open: bool) -> egui::Response {
     let glyph = match open {
@@ -822,26 +711,21 @@ mod tests {
         }
     }
 
-    /// A section header stands in from the card's edges like the rows under it, and a
-    /// dock header spans the full width; each takes its kind's height, so a dock's body
-    /// always starts at the same place.
+    /// A section header stands in from the card's edges like the rows under it, at its
+    /// own height.
     #[test]
-    fn a_header_claims_its_own_height_and_its_own_width() {
+    fn a_header_claims_its_own_height_and_stands_in_like_a_row() {
         let mut section = egui::Rect::ZERO;
-        let mut dock = egui::Rect::ZERO;
         let mut card = egui::Rect::ZERO;
         testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 card = ui.available_rect_before_wrap();
                 section = panel_header(ui, "Places", None, &mut true).rect;
-                dock = dock_header(ui, "browser").rect;
             });
         });
         assert_eq!(section.height(), HEADER);
-        assert_eq!(dock.height(), crate::tabs::HEIGHT);
         assert_eq!(section.left(), card.left() + ROW_INSET);
         assert_eq!(section.right(), card.right() - ROW_INSET);
-        assert_eq!(dock.width(), card.width());
     }
 
     /// Run frames with the pointer over the header or away from it, and return the
@@ -910,21 +794,6 @@ mod tests {
             (count.right() - (rect.right() - PAD)).abs() < 0.5,
             "{count:?} in {rect:?}"
         );
-    }
-
-    /// A dock header names the dock, not a section, and has nothing to click.
-    #[test]
-    fn a_dock_header_keeps_its_own_color_whether_or_not_it_is_pointed_at() {
-        let ctx = context();
-        let faint = ctx.style().visuals.faint_bg_color;
-        for pointed_at in [false, true] {
-            let (output, rect) = pointed(&ctx, pointed_at, |ui| dock_header(ui, "browser"));
-            assert_eq!(
-                fills(&output, rect),
-                vec![faint],
-                "pointed at: {pointed_at}"
-            );
-        }
     }
 
     #[test]

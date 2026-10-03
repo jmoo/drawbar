@@ -222,6 +222,32 @@ pub fn mac_keyboard(ctx: &egui::Context) -> bool {
     )
 }
 
+/// Give the window the taller title bar of a unified toolbar, so the traffic lights the
+/// system draws over the top bar sit on its center line instead of near its top edge.
+#[cfg(target_os = "macos")]
+pub fn center_traffic_lights(window: &impl raw_window_handle::HasWindowHandle) {
+    use objc2_app_kit::{NSToolbar, NSView, NSWindowToolbarStyle};
+    use raw_window_handle::RawWindowHandle;
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let Some(main) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    // SAFETY: an AppKit handle's view is a live `NSView` for as long as its window is,
+    // and the marker above proves this is the main thread AppKit requires.
+    let view: &NSView = unsafe { appkit.ns_view.cast::<NSView>().as_ref() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    window.setToolbar(Some(&NSToolbar::new(main)));
+    window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+}
+
 /// The width of one of Windows' caption buttons. They fill the bar's height.
 pub const CAPTION: f32 = 46.0;
 

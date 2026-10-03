@@ -237,11 +237,13 @@ impl DrawbarApp {
         app
     }
 
-    /// The app with the macOS menu bar installed. Only the window's own app, never a test,
-    /// may own the one menu bar the system has.
+    /// The app with the macOS menu bar installed and its window's title bar fitted to the
+    /// top bar. Only the window's own app, never a test, may own the one menu bar the
+    /// system has.
     #[cfg(target_os = "macos")]
-    pub fn with_menu_bar(mut self, ctx: &egui::Context) -> DrawbarApp {
-        self.menubar = crate::menubar::MenuBar::install(ctx);
+    pub fn in_mac_window(mut self, cc: &eframe::CreationContext<'_>) -> DrawbarApp {
+        self.menubar = crate::menubar::MenuBar::install(&cc.egui_ctx);
+        crate::platform::center_traffic_lights(cc);
         self
     }
 
@@ -455,6 +457,8 @@ impl eframe::App for DrawbarApp {
         self.browser_card(ctx, &mut acts);
         self.inspector_card(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
+        // An instrument that goes away takes its queue's review with it.
+        self.shell.review_open &= self.attached();
         if self.shell.review_open {
             self.shell.review_open = crate::queue::review(
                 ctx,

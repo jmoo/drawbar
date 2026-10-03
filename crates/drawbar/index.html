@@ -395,6 +395,18 @@
     </svg>
 
     <script type="module">
+      /* The search box's key. A browser outside the Mac keeps Ctrl+K for its own search
+         unless the page stops it; the app still receives the key. */
+      addEventListener(
+        "keydown",
+        (event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+            event.preventDefault();
+          }
+        },
+        { capture: true },
+      );
+
       const WASM = "./pkg/drawbar_bg.wasm";
       const MB = 1024 * 1024;
 
@@ -411,9 +423,9 @@
         "white",
       ];
       const STOP = {
-        black: { fill: "#2a2a2e", ink: "#ffffff" },
+        black: { fill: "#303036", ink: "#ffffff" },
         brown: { fill: "#6b4a33", ink: "#ffffff" },
-        white: { fill: "#d8d6d0", ink: "#000000" },
+        white: { fill: "#e4e1da", ink: "#000000" },
       };
 
       /* A stop slides 89px down its 104px track in the eight clicks a drawbar has. */

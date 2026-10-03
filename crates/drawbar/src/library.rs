@@ -1360,7 +1360,8 @@ fn footer(
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     tonal(ui);
-                    if ui.button("Review send queue").clicked() {
+                    let attached = device.connected();
+                    if attached && ui.button("Review send queue").clicked() {
                         acts.push(Act::ReviewQueue);
                     }
                     // Reversed: the strip runs right to left, so [`Bulk::ALL`]'s first

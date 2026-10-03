@@ -25,6 +25,9 @@ pub(crate) const GAP: f32 = 4.0;
 /// not.
 pub(crate) const PAD: f32 = 20.0;
 
+/// The rounding of a sheet, and of the send queue's review.
+pub(crate) const SHEET_RADIUS: u8 = 14;
+
 /// The minimum space between a sheet and the window's edge.
 const MARGIN: f32 = 24.0;
 
@@ -51,13 +54,8 @@ pub(crate) fn frame(visuals: &egui::Visuals) -> egui::Frame {
     egui::Frame::new()
         .fill(visuals.panel_fill)
         .stroke(visuals.widgets.noninteractive.bg_stroke)
-        .corner_radius(egui::CornerRadius::same(2))
-        .shadow(egui::Shadow {
-            offset: [0, 18],
-            blur: 48,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(115),
-        })
+        .corner_radius(egui::CornerRadius::same(SHEET_RADIUS))
+        .shadow(visuals.window_shadow)
 }
 
 /// A section of a sheet: its content, in from the side edges by [`PAD`].
@@ -135,6 +133,11 @@ pub(crate) fn foot(
     let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
     egui::Frame::new()
         .fill(fill)
+        .corner_radius(egui::CornerRadius {
+            sw: SHEET_RADIUS,
+            se: SHEET_RADIUS,
+            ..egui::CornerRadius::ZERO
+        })
         .inner_margin(egui::Margin::symmetric(PAD as i8, 12))
         .show(ui, |ui| {
             let top = ui.max_rect().top() - 12.0;
