@@ -1,5 +1,5 @@
 //! Shared chrome: section and dock headers, table column widths, chips and pills, dashed
-//! borders, and flat buttons for bars.
+//! borders, flat buttons for bars, and tonal buttons for cards.
 
 use std::ops::Range;
 
@@ -458,6 +458,49 @@ pub fn panel_header(
     response
 }
 
+/// A button in a card's body: a glyph and a word on a tonal fill, with no border.
+///
+/// It rests on `bg-inactive` and turns `bg-hovered` under the pointer, so it reads as a
+/// control without the weight of a bordered button.
+pub fn tonal_button(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
+    const HEIGHT: f32 = 28.0;
+    const RADIUS: u8 = 7;
+    const SIDE: f32 = 10.0;
+    const ICON: f32 = 12.0;
+    const TEXT: f32 = 12.0;
+
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(TEXT),
+        egui::Color32::PLACEHOLDER,
+    );
+    let width = SIDE + ICON + GAP + galley.size().x + SIDE;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click());
+    let widgets = &ui.visuals().widgets;
+    let state = match response.hovered() {
+        true => &widgets.hovered,
+        false => &widgets.inactive,
+    };
+    let (fill, ink) = (state.weak_bg_fill, state.fg_stroke.color);
+    let painter = ui.painter();
+    painter.rect_filled(rect, RADIUS, fill);
+    let middle = rect.center().y;
+    let mut x = rect.left() + SIDE;
+    painted(
+        ui,
+        glyph,
+        egui::Rect::from_min_size(egui::pos2(x, middle - ICON / 2.0), egui::Vec2::splat(ICON)),
+        ink,
+    );
+    x += ICON + GAP;
+    let height = galley.size().y;
+    painter.galley(egui::pos2(x, middle - height / 2.0), galley, ink);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    response
+}
+
 /// A dock's own header: a grip and a [`caps`] title, with nothing to click.
 ///
 /// ⚠️ A dock collapses from its toolbar toggle and the View menu. A header with its own
@@ -791,5 +834,48 @@ mod tests {
             .filter(|fill| fill.a() > 0)
             .collect();
         assert!(under.is_empty(), "the bar painted a track: {under:?}");
+    }
+
+    /// A tonal button rests on the inactive fill, turns the hovered fill under the
+    /// pointer, and answers a click.
+    #[test]
+    fn a_tonal_button_shows_the_pointer_with_its_fill_and_takes_a_click() {
+        let ctx = context();
+        let widgets = ctx.style().visuals.widgets.clone();
+        let button = |ui: &mut egui::Ui| tonal_button(ui, Glyph::Plus, "New tag");
+        for (under_pointer, fill) in [
+            (false, widgets.inactive.weak_bg_fill),
+            (true, widgets.hovered.weak_bg_fill),
+        ] {
+            let (output, rect) = pointed(&ctx, under_pointer, button);
+            assert_eq!(rect.height(), 28.0);
+            assert_eq!(
+                fills(&output, rect),
+                vec![fill],
+                "pointed at: {under_pointer}"
+            );
+            assert!(testing::words(&output).contains(&"New tag".to_string()));
+        }
+
+        let at = std::cell::Cell::new(egui::Pos2::ZERO);
+        let mut clicked = false;
+        // The first frame only learns where the button is; the second presses it.
+        for press in [false, true] {
+            let input = egui::RawInput {
+                events: match press {
+                    true => testing::click(at.get()),
+                    false => Vec::new(),
+                },
+                ..Default::default()
+            };
+            testing::run(&ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = button(ui);
+                    at.set(response.rect.center());
+                    clicked |= response.clicked();
+                });
+            });
+        }
+        assert!(clicked);
     }
 }
