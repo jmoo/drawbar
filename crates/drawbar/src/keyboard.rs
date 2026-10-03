@@ -716,7 +716,7 @@ fn plays(at: Location, workspace: &Workspace) -> Option<String> {
         .entities()
         .iter()
         .find(|held| held.origin.slot() == Some((ObjectClass::SetList, at)))?;
-    let nord_format::Entity::Song(nord_format::Song::Electro5(song)) = entity.entity.as_ref()?
+    let nord_format::Entity::Song(nord_format::Song::Electro5(song)) = entity.entity.as_deref()?
     else {
         return None;
     };

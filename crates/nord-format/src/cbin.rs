@@ -315,13 +315,14 @@ pub fn read_raw(r: &mut (impl Read + Seek)) -> Result<Cbin<RawBody>, Error> {
     read_inner(r, None)
 }
 
-/// Read a container's header and scope a reader to the rest of the stream as its body.
-/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
-/// type-0 file.
-fn open<'a, R: Read + Seek>(
-    r: &'a mut R,
+/// Read a container's header and find its body in the rest of the stream, reading no
+/// body byte. With `format`, the file must carry that tag. Returns the stored crc32,
+/// zero for a type-0 file, and the body's position in the stream, the type-0 trailer
+/// excluded.
+fn locate<R: Read + Seek>(
+    r: &mut R,
     format: Option<&'static str>,
-) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
+) -> Result<(Header, u32, Range<u64>), Error> {
     let start = r.stream_position()?;
     let (header, stored_crc32) = read_header(r)?;
     if let Some(expected) = format {
@@ -335,24 +336,66 @@ fn open<'a, R: Read + Seek>(
     }
 
     let end = stream_end(r)?;
-    let overhead = header.generation.body_start() + header.generation.trailer_len();
-    if end < start + overhead {
-        return Err(ParseError::AssertFail(format!(
-            "{}: {} bytes is shorter than the {overhead}-byte container",
+    let len = end.checked_sub(start).ok_or_else(|| {
+        ParseError::AssertFail(format!(
+            "{}: the stream ends at byte {end}, before the container's start at byte {start}",
             name(&header, format),
-            end - start,
+        ))
+    })?;
+    let overhead = header.generation.body_start() + header.generation.trailer_len();
+    if len < overhead {
+        return Err(ParseError::AssertFail(format!(
+            "{}: {len} bytes is shorter than the {overhead}-byte container",
+            name(&header, format),
         ))
         .into());
     }
+    let body_start = start + header.generation.body_start();
+    let body_end = start + len - header.generation.trailer_len();
+    Ok((header, stored_crc32, body_start..body_end))
+}
+
+/// Read a container's header and scope a reader to the rest of the stream as its body.
+/// With `format`, the file must carry that tag. Returns the stored crc32, zero for a
+/// type-0 file.
+fn open<'a, R: Read + Seek>(
+    r: &'a mut R,
+    format: Option<&'static str>,
+) -> Result<(Header, u32, BodyReader<'a, R>), Error> {
+    let (header, stored_crc32, body) = locate(r, format)?;
     let reader = BodyReader {
         inner: r,
-        start: start + header.generation.body_start(),
-        len: end - start - overhead,
+        start: body.start,
+        len: body.end - body.start,
         pos: 0,
         hashed: 0,
         hash: Hash::primed(&header),
     };
     Ok((header, stored_crc32, reader))
+}
+
+/// Read the header of a `format` file and find its body, reading no body byte: the
+/// body's position in the stream, the type-0 trailer excluded.
+///
+/// ⚠️ Nothing is verified past the header. The checksum covers every body byte, so
+/// only [`inspect`] or a whole read checks it.
+pub(crate) fn locate_body(
+    r: &mut (impl Read + Seek),
+    format: &'static str,
+) -> Result<(Header, Range<u64>), Error> {
+    let (header, _, body) = locate(r, Some(format))?;
+    Ok((header, body))
+}
+
+/// The stream position of offset `at` into a body at `body`, or `None` past its end.
+pub(crate) fn body_position(body: &Range<u64>, at: u64) -> Option<u64> {
+    body.start.checked_add(at).filter(|&pos| pos <= body.end)
+}
+
+/// Fill `buf` from position `at` of the stream.
+pub(crate) fn read_at(r: &mut (impl Read + Seek), at: u64, buf: &mut [u8]) -> io::Result<()> {
+    r.seek(SeekFrom::Start(at))?;
+    r.read_exact(buf)
 }
 
 /// The format to name in an error: the expected tag when one was asked for, and the
@@ -906,6 +949,46 @@ mod tests {
         // A type-1 header is longer than this whole file, so it cannot even be read.
         let truncated = &v1_file(&[1, 2, 3, 4, 5])[..0x2b];
         assert!(read::<Five>(&mut Cursor::new(truncated), "test").is_err());
+    }
+
+    /// A stream cut to `keep` bytes as soon as its end is looked for, as a file
+    /// truncated between the header read and the length check is.
+    struct Truncated {
+        bytes: Cursor<Vec<u8>>,
+        keep: usize,
+    }
+
+    impl Read for Truncated {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.bytes.read(buf)
+        }
+    }
+
+    impl Seek for Truncated {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            if let SeekFrom::End(_) = pos {
+                self.bytes.get_mut().truncate(self.keep);
+            }
+            self.bytes.seek(pos)
+        }
+    }
+
+    #[test]
+    fn a_file_truncated_before_its_container_starts_is_refused() {
+        let at = 8;
+        let mut bytes = vec![0; at];
+        bytes.extend(v1_file(&[1, 2, 3, 4, 5]));
+        let mut r = Truncated {
+            bytes: Cursor::new(bytes),
+            keep: at / 2,
+        };
+        r.bytes.set_position(at as u64);
+        let err = locate_body(&mut r, "test").unwrap_err();
+        assert!(
+            matches!(&err, Error::Parse(ParseError::AssertFail(why))
+                if why.contains("ends at byte 4, before the container's start at byte 8")),
+            "refused for the wrong reason: {err}",
+        );
     }
 
     #[test]

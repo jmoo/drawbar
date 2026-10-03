@@ -8,14 +8,15 @@
 //! Every file the reader recognizes, wherever it sits, is a specimen. Each one
 //! must pass its container checksum, parse, re-encode to the same bytes, decode
 //! no value its components cannot name, and match its `<file>.oracle.json`
-//! sidecar if it has one. On a sample (every fixture, every specimen with a
-//! sidecar, and one of each container shape among the rest), every registry
-//! field must also take a new value without changing another. The fixtures must
-//! hold a file of every type the reader dispatches. In the corpus, each claim
-//! about every specimen of a kind runs once per specimen of that kind, so a tree
-//! without that kind runs none. A file ending `.kernel.tsv` is an oracle for the
-//! sample codec's interpolation kernel. Nothing here names a model, a directory,
-//! or a file in the corpus.
+//! sidecar if it has one. A piano library or sample instrument must also index to
+//! the bytes a whole read gives each stroke or zone, without reading the audio. On
+//! a sample (every fixture, every specimen with a sidecar, and one of each
+//! container shape among the rest), every registry field must also take a new
+//! value without changing another. The fixtures must hold a file of every type the
+//! reader dispatches. In the corpus, each claim about every specimen of a kind runs
+//! once per specimen of that kind, so a tree without that kind runs none. A file
+//! ending `.kernel.tsv` is an oracle for the sample codec's interpolation kernel.
+//! Nothing here names a model, a directory, or a file in the corpus.
 //!
 //! ```sh
 //! cargo test -p nord-format --test corpus                        # the fixtures
@@ -35,6 +36,7 @@ macro_rules! ensure {
     };
 }
 
+mod index;
 #[cfg(feature = "corpus")]
 mod invariants;
 mod kernel;
@@ -127,6 +129,8 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
             return Err("re-encode changed the bytes".into());
         }
     }
+
+    index::check(&bytes, &entity).map_err(Failed::from)?;
 
     let unwritten = info
         .as_ref()

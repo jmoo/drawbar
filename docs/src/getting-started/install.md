@@ -3,7 +3,8 @@
 ## In the browser
 
 Open [drawbar.app](https://drawbar.app/). Nothing to install, and your files stay
-in the browser's own storage.
+in the browser's own storage. Chrome and Edge can keep them in a folder on your
+computer instead.
 
 Only Chrome and Edge can connect to an instrument, because Firefox and Safari do
 not support WebUSB. Files work in any browser. Which browsers can play the key

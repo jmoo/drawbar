@@ -139,6 +139,14 @@ impl Tabs {
         })
     }
 
+    /// The documents a tab is open on, active or not.
+    pub fn documents(&self) -> impl Iterator<Item = u64> + '_ {
+        self.open.iter().filter_map(|spot| match spot {
+            Spot::Document(id) => Some(*id),
+            Spot::Library | Spot::Keyboard => None,
+        })
+    }
+
     /// Whether a tab is open on this document, active or not.
     pub fn holds(&self, id: u64) -> bool {
         self.open.contains(&Spot::Document(id))
@@ -464,7 +472,7 @@ mod tests {
         let said = words(&mut tabs, &ws);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
 
-        let bytes = ws.get(id).unwrap().bytes.clone();
+        let bytes = ws.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         ws.replace_bytes(id, edited, &mut log);

@@ -12,7 +12,8 @@
 //!
 //! ⚠️ Nothing decodes to draw a frame. The facts the sections read (the roots, the
 //! layers, the banks, and what each costs) are read from the saved baseline once and
-//! kept. A stroke's audio is decoded only when someone asks to hear it.
+//! kept. A stroke's audio is decoded only when someone asks to hear it. A library resting
+//! in its file is read through its index, and a stroke's audio from its own range.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
@@ -36,6 +37,7 @@ use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
 use crate::midi;
+use crate::ondisk::{self, OnDisk};
 use crate::panel::cut;
 use crate::room;
 use crate::strings;
@@ -62,6 +64,22 @@ pub fn snapshot(entity: &Entity) -> Option<Result<Snapshot, String>> {
     Some(read(piano(entity)?))
 }
 
+/// [`snapshot`] of an asset, decoded or resting in its file.
+pub fn named(entity: &LocalEntity) -> Option<Result<Snapshot, String>> {
+    if let Some(ondisk::Index::Piano(index)) = entity.indexed() {
+        let (name, variant) = index.library().name();
+        return Some(Ok(Snapshot { name, variant }));
+    }
+    snapshot(entity.entity.as_deref()?)
+}
+
+/// Whether an asset is a piano library this document reads, decoded or resting in its
+/// file.
+fn is_piano(entity: &LocalEntity) -> bool {
+    entity.entity.as_deref().and_then(piano).is_some()
+        || matches!(entity.indexed(), Some(ondisk::Index::Piano(_)))
+}
+
 fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
     let (name, variant) = piano.name().map_err(|e| e.to_string())?;
     Ok(Snapshot { name, variant })
@@ -70,12 +88,92 @@ fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
 /// The stretch of keyboard the map draws: a full piano, A0 to C8.
 const SPAN: Span = Span { low: 21, high: 108 };
 
-/// The length and checksum of the bytes the asset was last saved as, which is enough to
-/// tell two baselines apart. A save changes both.
-type Mark = (usize, Option<u32>);
+/// What tells two baselines apart. A save changes it.
+///
+/// ⚠️ A baseline resting in its file is marked by the indexing of the file, which a rescan
+/// replaces whenever the file changed, and not by a checksum, which is known only once
+/// the file is checked: a mark that moved when the check answered would discard the plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    /// Bytes held whole: their length, and the checksum a slot holding them reports.
+    Held(u64, Option<u32>),
+    /// A file left on disk, by its [`crate::ondisk::OnDisk::serial`].
+    Resting(u64),
+}
+
+impl Default for Mark {
+    fn default() -> Mark {
+        Mark::Held(0, None)
+    }
+}
 
 fn mark(entity: &LocalEntity) -> Mark {
-    (entity.saved.bytes.len(), entity.saved.crc32)
+    match &entity.saved.file {
+        Some(file) => Mark::Resting(file.serial),
+        None => Mark::Held(entity.saved.bytes.len() as u64, entity.saved.crc32),
+    }
+}
+
+/// Where a document's strokes are read from: bytes held whole, or a file left on disk and
+/// read by range through its index.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Held(&'a [u8]),
+    File(&'a OnDisk, &'a npno::Index),
+}
+
+impl<'a> Source<'a> {
+    /// The bytes the asset holds now.
+    fn of(entity: &'a LocalEntity) -> Source<'a> {
+        Source::from(entity.rests().map(|file| &**file), &entity.bytes)
+    }
+
+    /// The bytes the asset was last saved as.
+    fn saved(entity: &'a LocalEntity) -> Source<'a> {
+        Source::from(entity.saved.file.as_deref(), &entity.saved.bytes)
+    }
+
+    fn from(file: Option<&'a OnDisk>, bytes: &'a [u8]) -> Source<'a> {
+        match file.map(|file| (file, &file.index)) {
+            Some((file, ondisk::Index::Piano(index))) => Source::File(file, index),
+            _ => Source::Held(bytes),
+        }
+    }
+
+    /// Run `f` over the stroke directory. Held bytes carry each stroke's audio; a file's
+    /// index carries none, and [`Source::decode`] reads it.
+    fn with<T>(&self, f: impl FnOnce(&npno::Library<'_>) -> T) -> Result<T, String> {
+        match self {
+            Source::Held(bytes) => Ok(f(&npno::Library::borrow(bytes).map_err(|e| e.to_string())?)),
+            Source::File(_, index) => Ok(f(index.library())),
+        }
+    }
+
+    /// Decode the `at`-th stroke of the directory, reading only its own range of a file.
+    fn decode(&self, at: usize) -> Result<Played, String> {
+        let error = |e: nord_format::error::Error| e.to_string();
+        let (audio, channels) = match self {
+            Source::Held(bytes) => {
+                let library = npno::Library::borrow(bytes).map_err(error)?;
+                let stroke = library.strokes().get(at).ok_or("no such stroke")?;
+                (
+                    npno::codec::decode(stroke, library.channels()),
+                    library.channels(),
+                )
+            }
+            Source::File(file, index) => {
+                let range = index.audio_ranges().get(at).ok_or("no such stroke")?;
+                let read = file.read(range.clone()).map_err(|e| e.to_string())?;
+                let stroke = index.stroke(at, &read).map_err(error)?;
+                let channels = index.library().channels();
+                (npno::codec::decode(&stroke, channels), channels)
+            }
+        };
+        audio.map_err(error).map(|audio| Played {
+            samples: audio.interleaved(),
+            channels,
+        })
+    }
 }
 
 /// Every edit a piano document holds, against the baseline it is an edit of.
@@ -240,7 +338,21 @@ impl Plan {
 /// editor adds, so throwing a switch costs one walk of the stroke directory. It starts
 /// from the baseline every time, so turning a switch back on restores its strokes.
 pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, String> {
-    let mut library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
+    replanned(
+        npno::Library::borrow(saved).map_err(|e| e.to_string())?,
+        plan,
+    )
+}
+
+/// Whether the library the asset was last saved as takes `plan`, checked as [`planned`]
+/// checks it. No audio is read, so a library resting in its file is checked through its
+/// index alone.
+pub fn check(entity: &LocalEntity, plan: &Plan) -> Result<(), String> {
+    Source::saved(entity).with(|library| replanned(library.clone(), plan).map(|_| ()))?
+}
+
+/// [`planned`] over a library already read.
+fn replanned<'a>(mut library: npno::Library<'a>, plan: &Plan) -> Result<npno::Library<'a>, String> {
     if let Some(name) = &plan.name {
         library.set_name(name).map_err(|e| e.to_string())?;
     }
@@ -413,8 +525,34 @@ struct Facts {
 }
 
 impl Facts {
+    /// The facts of what the asset was last saved as.
+    fn saved(entity: &LocalEntity) -> Result<Facts, String> {
+        match Source::saved(entity) {
+            Source::Held(bytes) => Facts::of(bytes),
+            Source::File(file, index) => {
+                let sizes: Vec<u64> = index
+                    .audio_ranges()
+                    .iter()
+                    .map(|range| range.end - range.start)
+                    .collect();
+                Facts::read(index.library(), &sizes, file.len)
+            }
+        }
+    }
+
     fn of(saved: &[u8]) -> Result<Facts, String> {
         let library = npno::Library::borrow(saved).map_err(|e| e.to_string())?;
+        let sizes: Vec<u64> = library
+            .strokes()
+            .iter()
+            .map(|stroke| stroke.audio().len() as u64)
+            .collect();
+        Facts::read(&library, &sizes, saved.len() as u64)
+    }
+
+    /// The facts of `library`, whose `i`-th stroke's audio is `sizes[i]` bytes, in a file
+    /// `total` bytes long.
+    fn read(library: &npno::Library<'_>, sizes: &[u64], total: u64) -> Result<Facts, String> {
         let (name, variant) = library.name();
         let notes = library.roots();
         let roots: Vec<Root> = notes
@@ -430,11 +568,11 @@ impl Facts {
 
         let mut grouped: BTreeMap<(usize, u8, Option<Bank>), u64> = BTreeMap::new();
         let mut strikes: Vec<Strike> = Vec::with_capacity(library.strokes().len());
-        for stroke in library.strokes() {
+        for (stroke, size) in library.strokes().iter().zip(sizes) {
             let root = of_note[&stroke.root];
             *grouped
                 .entry((root, stroke.layer(), stroke.bank()))
-                .or_default() += stroke.audio().len() as u64;
+                .or_default() += size;
             strikes.push(Strike {
                 root,
                 bank: stroke.bank_code(),
@@ -465,7 +603,7 @@ impl Facts {
             variant,
             stream: library.stream_version(),
             channels: library.channels(),
-            total: saved.len() as u64,
+            total,
             strokes: library.strokes().len(),
             roots,
             of_note,
@@ -790,7 +928,7 @@ impl Cache {
 
     /// Drop the waveform of each root whose loudest kept stroke a changed plan has
     /// moved. A rename, a tune, or a trim leaves every waveform as it was.
-    fn replan(&mut self, bytes: &[u8], plan: &Plan) {
+    fn replan(&mut self, source: Source<'_>, plan: &Plan) {
         if self.under == *plan {
             return;
         }
@@ -798,13 +936,13 @@ impl Cache {
         if self.shapes.is_empty() {
             return;
         }
-        let library = npno::Library::borrow(bytes).ok();
-        self.shapes.retain(|root, drawn| {
-            drawn.from
-                == library
-                    .as_ref()
-                    .and_then(|library| pick(library, plan, *root))
+        let shapes = &mut self.shapes;
+        let read = source.with(|library| {
+            shapes.retain(|root, drawn| drawn.from == pick(library, plan, *root));
         });
+        if read.is_err() {
+            self.shapes.retain(|_, drawn| drawn.from.is_none());
+        }
     }
 
     /// Whether the row asking for `root` has already been drawn showing that it is
@@ -841,9 +979,9 @@ impl Cache {
     /// Decode one root's loudest kept attack stroke and draw its waveform, once. A
     /// refusal is remembered like a success: asking again would only produce it a
     /// second time.
-    fn decode(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
+    fn decode(&mut self, source: Source<'_>, plan: &Plan, root: u8) -> Result<(), String> {
         self.wanted = None;
-        let answer = self.stroke(bytes, plan, root);
+        let answer = self.stroke(source, plan, root);
         if !self.shapes.contains_key(&root) {
             let shape = match (&answer, self.newest(root)) {
                 (Ok(()), Some((_, played))) => Ok(sample::envelope(
@@ -854,9 +992,10 @@ impl Cache {
                 (Ok(()), None) => Err("the stroke decoded into nothing".to_string()),
                 (Err(why), _) => Err(why.clone()),
             };
-            let from = npno::Library::borrow(bytes)
+            let from = source
+                .with(|library| pick(library, plan, root))
                 .ok()
-                .and_then(|library| pick(&library, plan, root));
+                .flatten();
             self.shapes.insert(root, Drawn { from, shape });
         }
         answer
@@ -866,19 +1005,15 @@ impl Cache {
     ///
     /// ⚠️ One stroke, whatever else the library holds: the audio of a whole root is more
     /// than this app ever needs at once.
-    fn stroke(&mut self, bytes: &[u8], plan: &Plan, root: u8) -> Result<(), String> {
-        let library = npno::Library::borrow(bytes).map_err(|e| e.to_string())?;
-        let stroke = loudest(&library, plan, root)?;
-        let key = picked(root, stroke);
+    fn stroke(&mut self, source: Source<'_>, plan: &Plan, root: u8) -> Result<(), String> {
+        let (at, key) = source.with(|library| {
+            let at = loudest(library, plan, root)?;
+            Ok::<_, String>((at, picked(root, &library.strokes()[at])))
+        })??;
         if let Some(held) = self.touch(key) {
             return held.as_ref().map(|_| ()).map_err(String::clone);
         }
-        let made = npno::codec::decode(stroke, library.channels())
-            .map_err(|e| e.to_string())
-            .map(|audio| Played {
-                samples: audio.interleaved(),
-                channels: library.channels(),
-            });
+        let made = source.decode(at);
         let answer = made.as_ref().map(|_| ()).map_err(String::clone);
         self.strokes.insert(0, (key, made));
         self.strokes.truncate(KEPT_STROKES);
@@ -886,20 +1021,18 @@ impl Cache {
     }
 }
 
-/// The root's loudest [`Bank::Attack`] stroke the plan keeps: the recording a key on it
-/// plays at the top of the velocity range, by [`Stroke::layer`](npno::Stroke::layer)'s
-/// law. Confirmed on hardware.
-fn loudest<'a>(
-    library: &'a npno::Library<'a>,
-    plan: &Plan,
-    root: u8,
-) -> Result<&'a npno::Stroke<'a>, String> {
+/// Where in the directory the root's loudest [`Bank::Attack`] stroke the plan keeps sits:
+/// the recording a key on it plays at the top of the velocity range, by
+/// [`Stroke::layer`](npno::Stroke::layer)'s law. Confirmed on hardware.
+fn loudest(library: &npno::Library<'_>, plan: &Plan, root: u8) -> Result<usize, String> {
     library
         .strokes()
         .iter()
-        .filter(|stroke| stroke.root == root && stroke.bank() == Some(Bank::Attack))
-        .filter(|stroke| plan.keeps_layer(root, stroke.layer()))
-        .min_by_key(|stroke| stroke.layer())
+        .enumerate()
+        .filter(|(_, stroke)| stroke.root == root && stroke.bank() == Some(Bank::Attack))
+        .filter(|(_, stroke)| plan.keeps_layer(root, stroke.layer()))
+        .min_by_key(|(_, stroke)| stroke.layer())
+        .map(|(at, _)| at)
         .ok_or_else(|| {
             format!(
                 "root {} has no attack stroke left to play",
@@ -912,7 +1045,7 @@ fn loudest<'a>(
 fn pick(library: &npno::Library<'_>, plan: &Plan, root: u8) -> Option<Pick> {
     loudest(library, plan, root)
         .ok()
-        .map(|stroke| picked(root, stroke))
+        .map(|at| picked(root, &library.strokes()[at]))
 }
 
 fn picked(root: u8, stroke: &npno::Stroke<'_>) -> Pick {
@@ -1034,7 +1167,7 @@ impl State {
     /// [`Extras::default`] for anything that is not a piano library, which leaves the
     /// header's own rules in charge.
     pub fn begin(&mut self, id: u64, entity: &LocalEntity, device: &DeviceState) -> Extras {
-        if entity.entity.as_ref().and_then(piano).is_none() {
+        if !is_piano(entity) {
             self.open = None;
             return Extras::default();
         }
@@ -1047,7 +1180,7 @@ impl State {
             self.open = Some(Open {
                 id,
                 baseline,
-                facts: Facts::of(&entity.saved.bytes),
+                facts: Facts::saved(entity),
             });
             self.view = View::default();
             // The figures go with the facts they were worked out from.
@@ -1065,7 +1198,7 @@ impl State {
         }
         self.draft = plan.clone();
         self.audio.follow(id, entity.stamp);
-        self.audio.replan(&entity.bytes, plan);
+        self.audio.replan(Source::of(entity), plan);
         self.free = room::free_bytes(ObjectClass::Piano, device);
         self.summarize();
         let standing = self.standing(id);
@@ -1217,7 +1350,19 @@ impl State {
     /// start or join the apply that puts it there. Returns the act where it is free to
     /// run now.
     pub fn hold(&mut self, ctx: &egui::Context, act: Act, workspace: &Workspace) -> Option<Act> {
-        let Some(id) = waits_on(&act).filter(|id| self.pending(*id)) else {
+        let waits = match &act {
+            // Every asset on this computer leaves with its library, so each plan over one
+            // is laid out first, one at a time.
+            Act::OpenLibrary(_) => self
+                .plans
+                .keys()
+                .copied()
+                .filter(|id| self.pending(*id))
+                .filter(|id| workspace.get(*id).is_some_and(|entity| entity.kept))
+                .min(),
+            _ => waits_on(&act).filter(|id| self.pending(*id)),
+        };
+        let Some(id) = waits else {
             return Some(act);
         };
         self.held.push((id, act));
@@ -1236,9 +1381,18 @@ impl State {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        let saved = entity.saved.bytes.clone();
+        // ⚠️ A baseline resting in its file is read whole here, off the frame.
+        let file = entity.saved.file.clone();
+        let held = entity.saved.bytes.clone();
         let laying = plan.clone();
         let job = work::run(ctx, move |progress| {
+            let saved = match file {
+                Some(file) => {
+                    progress.say("reading the library");
+                    file.whole().map_err(|e| e.to_string())?.into()
+                }
+                None => held,
+            };
             let library = planned(&saved, &laying)?;
             progress.say(format!("laying out {} strokes", library.strokes().len()));
             materialize(&library)
@@ -1322,7 +1476,7 @@ impl State {
     pub fn decode(&mut self, entity: &LocalEntity, root: u8) -> Result<(), String> {
         let held = self.plans.get(&entity.id);
         self.audio
-            .decode(&entity.bytes, held.unwrap_or(&Plan::default()), root)
+            .decode(Source::of(entity), held.unwrap_or(&Plan::default()), root)
     }
 
     /// Whether an open row asking for `root` has already spent a frame showing that it
@@ -4373,9 +4527,8 @@ mod tests {
             // What [`Document::replan`] does with the plan a frame left behind: try it
             // over the baseline, and keep it where the library takes it.
             if let Some(plan) = self.state.drafted() {
-                let saved = self.workspace.get(self.id).unwrap().saved.bytes.clone();
-                match planned(&saved, &plan) {
-                    Ok(_) => self.state.commit(plan),
+                match check(self.workspace.get(self.id).unwrap(), &plan) {
+                    Ok(()) => self.state.commit(plan),
                     Err(_) => self.state.discard(),
                 }
             }
@@ -4599,7 +4752,13 @@ mod tests {
     #[test]
     fn a_switch_thrown_leaves_the_bytes_alone_and_the_header_says_so() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        let saved = editor
+            .workspace
+            .get(editor.id)
+            .unwrap()
+            .saved
+            .bytes
+            .to_vec();
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         let held = editor.workspace.get(editor.id).unwrap();
@@ -4683,7 +4842,13 @@ mod tests {
     #[test]
     fn a_save_waits_for_the_plan_to_be_laid_over_the_library() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        let saved = editor
+            .workspace
+            .get(editor.id)
+            .unwrap()
+            .saved
+            .bytes
+            .to_vec();
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
 
         let held = editor
@@ -4705,6 +4870,28 @@ mod tests {
         assert!(
             !editor.state.pending(editor.id),
             "the bytes hold the plan now",
+        );
+    }
+
+    /// The assets of a library leave the window when another opens, so the switch waits
+    /// until every plan over one of them has reached its bytes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn opening_another_library_waits_for_the_plan_to_be_laid_out() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        let elsewhere = std::path::PathBuf::from("/elsewhere");
+
+        let held = editor.state.hold(
+            &editor.ctx,
+            Act::OpenLibrary(elsewhere.clone()),
+            &editor.workspace,
+        );
+        assert!(held.is_none(), "the switch is held back");
+        let applied = editor.awaited();
+        assert!(
+            matches!(applied.acts.as_slice(), [Act::OpenLibrary(at)] if *at == elsewhere),
+            "and let go once the plan is laid out"
         );
     }
 
@@ -4733,7 +4920,13 @@ mod tests {
     #[test]
     fn a_plan_changed_during_an_apply_starts_it_again() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        let saved = editor
+            .workspace
+            .get(editor.id)
+            .unwrap()
+            .saved
+            .bytes
+            .to_vec();
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         assert!(editor
             .state
@@ -4989,6 +5182,73 @@ mod tests {
             !state.audio.strokes.iter().any(|(held, _)| *held == loudest),
             "the first stroke asked for is the first to go",
         );
+    }
+
+    /// Auditioning a library resting in its file reads that one stroke's range and
+    /// nothing else, and hears what the whole file holds there. Drawing the document
+    /// reads no audio at all.
+    #[test]
+    fn an_audition_of_a_resting_library_reads_exactly_its_strokes_range() {
+        let dir = testing::Temp::new();
+        let saved = coded();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &saved);
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let id = testing::rest(&mut workspace, "Test Piano.npno", file.clone());
+        let entity = workspace.get(id).expect("it is open");
+        assert!(entity.bytes.is_empty(), "the library is not held");
+
+        let mut state = State::default();
+        state.begin(id, entity, &Device::new(ctx).state);
+        assert!(state.facts().is_some(), "the facts read from the index");
+        assert_eq!(file.take_reads(), [], "drawing it read no audio");
+
+        state.decode(entity, ROOTS[1]).expect("it decodes");
+        let ondisk::Index::Piano(index) = &file.index else {
+            panic!("a piano's index");
+        };
+        let at = loudest(index.library(), &Plan::default(), ROOTS[1]).expect("a stroke");
+        assert_eq!(file.take_reads(), [index.audio_ranges()[at].clone()]);
+        let whole = Source::Held(&saved).decode(at).expect("it decodes whole");
+        assert_eq!(
+            state.sound(ROOTS[1]).expect("it is ready").samples,
+            whole.samples,
+            "the range holds the stroke a whole read finds",
+        );
+    }
+
+    /// A plan over a library resting in its file is checked through the index and laid
+    /// out off the frame from a read of the file. What it was saved as stays in the
+    /// file, and a revert leaves the library resting there again.
+    #[test]
+    fn a_plan_over_a_resting_library_lays_out_from_its_file_and_reverts_to_it() {
+        let dir = testing::Temp::new();
+        let saved = bytes();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &saved);
+        let mut editor = Editor::new(facts().total * 2);
+        editor.id = testing::rest(&mut editor.workspace, "Test Piano.npno", file);
+
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        let plan = editor.state.plans[&editor.id].clone();
+        assert!(
+            plan.banks.contains(&Bank::Release),
+            "the index took the plan"
+        );
+        editor.apply();
+        let edited = editor.workspace.get(editor.id).expect("it is open");
+        assert_eq!(edited.bytes, rebuild(&saved, &plan).unwrap());
+        assert!(edited.is_unsaved());
+        assert!(edited.rests().is_none(), "the edit is held");
+        assert!(
+            edited.saved.bytes.is_empty() && edited.saved.file.is_some(),
+            "what it was saved as is left in the file",
+        );
+
+        editor.workspace.revert(editor.id, &mut editor.log);
+        editor.state.forget(editor.id);
+        let reverted = editor.workspace.get(editor.id).expect("it is open");
+        assert!(reverted.rests().is_some(), "it rests in its file again");
+        assert!(reverted.bytes.is_empty() && !reverted.is_unsaved());
     }
 
     /// An open row draws the waveform of the root's loudest kept stroke and asks for

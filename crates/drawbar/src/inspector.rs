@@ -78,6 +78,9 @@ fn selection(
         body(ui, |ui| faint(ui, "Nothing is selected."));
         return acts;
     }
+    for id in browser.picked().locals() {
+        workspace.hurry(id);
+    }
     let rows: Vec<Row> = browser
         .picked()
         .items()

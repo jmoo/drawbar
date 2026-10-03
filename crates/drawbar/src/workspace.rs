@@ -6,10 +6,13 @@
 //!
 //! [`crate::browser`] draws the list; this module holds the model and the file dialogs.
 
+use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 use eframe::egui;
-use nord_format::accept::Slot;
+use nord_format::accept::{self, Slot};
 use nord_format::cbin::{Cbin, Generation, Header};
 use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
 use nord_format::{Entity, OrganPreset, PianoPreset, Program, Synth};
@@ -17,7 +20,10 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::log::Log;
 use crate::newproject::{Draft, Making};
+use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
+use crate::store::{names, LibPath};
+use crate::work;
 
 /// Where an entity came from.
 #[derive(Clone)]
@@ -59,6 +65,11 @@ impl Origin {
 #[derive(Clone)]
 pub enum VerifyState {
     Ok,
+    /// A file left on disk whose stored checksum matches its body. A file that large is
+    /// checked by its checksum, never re-encoded.
+    Checked,
+    /// A file left on disk whose checksum is still being checked.
+    Checking,
     /// Offset of the first byte that came back different.
     Differs {
         at: usize,
@@ -67,14 +78,23 @@ pub enum VerifyState {
     Failed(String),
     /// Nothing to check, and why.
     NotApplicable(&'static str),
+    /// A file from the library not decoded yet, or not read yet. It is read once
+    /// something needs it, and decoded off the frame, or at once by
+    /// [`Workspace::read_now`] for whatever acts on it.
+    Reading,
+    /// A file from the library that could not be read, and why.
+    NotRead(String),
 }
 
 impl VerifyState {
     pub fn badge(&self) -> &'static str {
         match self {
-            VerifyState::Ok => "ok",
+            VerifyState::Ok | VerifyState::Checked => "ok",
+            VerifyState::Checking => "checking…",
+            VerifyState::Reading => "reading…",
             VerifyState::Differs { .. } => "differs",
             VerifyState::Failed(_) => "failed",
+            VerifyState::NotRead(_) => "not read",
             VerifyState::NotApplicable(_) => "n/a",
         }
     }
@@ -82,17 +102,38 @@ impl VerifyState {
     pub fn detail(&self) -> String {
         match self {
             VerifyState::Ok => "re-encoded byte-for-byte".into(),
+            VerifyState::Checked => "its stored checksum matches its body".into(),
+            VerifyState::Checking => "its checksum is being checked".into(),
+            VerifyState::Reading => "it is still being read".into(),
             VerifyState::Differs { at } => format!("first difference at byte {at:#06x}"),
-            VerifyState::Failed(why) => why.clone(),
+            VerifyState::Failed(why) | VerifyState::NotRead(why) => why.clone(),
             VerifyState::NotApplicable(why) => (*why).to_string(),
         }
     }
 
     pub fn color(&self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
-            VerifyState::Ok => crate::app::good(visuals),
-            VerifyState::Differs { .. } | VerifyState::Failed(_) => crate::app::bad(visuals),
-            VerifyState::NotApplicable(_) => visuals.weak_text_color(),
+            VerifyState::Ok | VerifyState::Checked => crate::app::good(visuals),
+            VerifyState::Differs { .. } | VerifyState::Failed(_) | VerifyState::NotRead(_) => {
+                crate::app::bad(visuals)
+            }
+            VerifyState::Checking | VerifyState::Reading | VerifyState::NotApplicable(_) => {
+                visuals.weak_text_color()
+            }
+        }
+    }
+
+    /// What a row says about it, where it says anything.
+    pub fn note(&self) -> Option<&'static str> {
+        match self {
+            VerifyState::Checking => Some("checking…"),
+            VerifyState::Reading => Some("reading…"),
+            VerifyState::Failed(_) => Some("failed verification"),
+            VerifyState::NotRead(_) => Some("not read"),
+            VerifyState::Ok
+            | VerifyState::Checked
+            | VerifyState::Differs { .. }
+            | VerifyState::NotApplicable(_) => None,
         }
     }
 }
@@ -124,31 +165,50 @@ pub struct Container {
 impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
-        let start = usize::try_from(info.header.generation.body_start()).ok()?;
-        let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
-        let body = start..end;
+        let body = body_of(&info)?;
         let body_crc32 = nord_usb::envelope::crc32(bytes.get(body.clone())?);
-        // `Header` omits the generation-specific checksum field, so the stored value is
-        // read here for display.
-        let (checksum_label, checksum) = match info.header.generation {
-            Generation::V0 => {
-                let tail = bytes.get(bytes.len().checked_sub(2)?..)?;
-                let crc = u16::from_le_bytes(tail.try_into().ok()?);
-                ("crc16:", format!("{crc:#06x}"))
-            }
-            Generation::V1 => {
-                let crc = u32::from_le_bytes(bytes.get(0x18..0x1c)?.try_into().ok()?);
-                ("crc32:", format!("{crc:#010x}"))
+        Some(Container::of(info, body, body_crc32))
+    }
+
+    /// The facts of a file left on disk, in one streaming pass over it, and a second over
+    /// the body where the stored checksum cannot stand for the body's CRC-32. The file's
+    /// own CRC is taken first, where no pass has taken it yet.
+    fn of_file(file: &OnDisk) -> Result<Container, String> {
+        use std::io::{Read as _, Seek as _};
+
+        file.crc().map_err(|e| e.to_string())?;
+        let info = nord_format::cbin::inspect(&mut file.reader()).map_err(|e| e.to_string())?;
+        let body = body_of(&info).ok_or("the body is larger than this machine can address")?;
+        let body_crc32 = match (info.header.generation, info.checksum_ok) {
+            (Generation::V1, true) => info.stored_checksum,
+            _ => {
+                let mut reader = file.reader();
+                reader
+                    .seek(std::io::SeekFrom::Start(body.start as u64))
+                    .and_then(|_| ondisk::crc_of(&mut reader.take(body.len() as u64)))
+                    .map_err(|e| e.to_string())?
             }
         };
-        Some(Container {
+        Ok(Container::of(info, body, body_crc32))
+    }
+
+    fn of(
+        info: nord_format::cbin::Info,
+        body: std::ops::Range<usize>,
+        body_crc32: u32,
+    ) -> Container {
+        let (checksum_label, checksum) = match info.header.generation {
+            Generation::V0 => ("crc16:", format!("{:#06x}", info.stored_checksum)),
+            Generation::V1 => ("crc32:", format!("{:#010x}", info.stored_checksum)),
+        };
+        Container {
             header: info.header,
             body,
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
             body_crc32,
-        })
+        }
     }
 
     pub fn tag(&self) -> String {
@@ -161,6 +221,69 @@ impl Container {
     }
 }
 
+/// Where the body sits in a file `inspect` read.
+fn body_of(info: &nord_format::cbin::Info) -> Option<std::ops::Range<usize>> {
+    let start = usize::try_from(info.header.generation.body_start()).ok()?;
+    let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
+    Some(start..end)
+}
+
+/// An asset's bytes, which its saved baseline shares while they are the same bytes. An
+/// edit puts new bytes in place; nothing writes through a shared allocation.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Bytes(Arc<[u8]>);
+
+impl Bytes {
+    /// Whether these and `other` are one allocation, held once.
+    pub fn shares(&self, other: &Bytes) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(bytes: Vec<u8>) -> Bytes {
+        Bytes(bytes.into())
+    }
+}
+
+impl PartialEq<[u8]> for Bytes {
+    fn eq(&self, other: &[u8]) -> bool {
+        *self.0 == *other
+    }
+}
+
+impl PartialEq<&[u8]> for Bytes {
+    fn eq(&self, other: &&[u8]) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl PartialEq<Vec<u8>> for Bytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// What an asset was last saved as: the bytes, and the checksum a slot holding them
 /// would report.
 ///
@@ -168,7 +291,7 @@ impl Container {
 /// streams the whole body, and every listed row asks for it while the library is shown.
 #[derive(Clone, Default)]
 pub struct Baseline {
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
     /// The checksum a slot holding these bytes would report. [`crate::device::link`] and
     /// [`crate::library::agrees`] both decide on it.
     ///
@@ -181,16 +304,66 @@ pub struct Baseline {
     /// costs time proportional to the library's size, and the header alone asks twice a
     /// frame.
     pub stamp: u64,
+    /// The file that holds these bytes, read by range and never held: `bytes` is then
+    /// empty, and `crc32` is `None` until the file's checksum has been checked.
+    pub file: Option<Arc<OnDisk>>,
+    /// CRC-32 over all of `bytes`, where it was taken as they arrived. See
+    /// [`Baseline::whole_crc`].
+    pub(crate) bytes_crc: Option<u32>,
+    /// The length of the file that holds these bytes, while nothing has read it: `bytes`
+    /// is then empty, and `file` is `None`.
+    pub unread: Option<u64>,
 }
 
 impl Baseline {
     /// The baseline of bytes not yet inspected, stamped with `stamp`.
-    pub(crate) fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
+    pub(crate) fn read(bytes: Bytes, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
         Baseline {
+            bytes_crc: Some(nord_format::crc::crc32(&bytes)),
             bytes,
             crc32,
             stamp,
+            file: None,
+            unread: None,
+        }
+    }
+
+    fn on_disk(file: Arc<OnDisk>, stamp: u64) -> Baseline {
+        Baseline {
+            bytes: Bytes::default(),
+            crc32: None,
+            stamp,
+            file: Some(file),
+            bytes_crc: None,
+            unread: None,
+        }
+    }
+
+    /// CRC-32 over the whole of these bytes, where something has taken it: the file's,
+    /// for a baseline resting in it, once its check has read it.
+    pub fn whole_crc(&self) -> Option<u32> {
+        match &self.file {
+            Some(file) => file.known_crc(),
+            None => self.bytes_crc,
+        }
+    }
+
+    /// How many bytes these are.
+    pub fn size(&self) -> u64 {
+        match (&self.file, self.unread) {
+            (Some(file), _) => file.len,
+            (None, Some(len)) => len,
+            (None, None) => self.bytes.len() as u64,
+        }
+    }
+
+    /// Whether these are `bytes`. Never, for bytes not read yet.
+    fn holds(&self, bytes: &[u8]) -> bool {
+        match (&self.file, self.unread) {
+            (Some(file), _) => file.holds(bytes),
+            (None, Some(_)) => false,
+            (None, None) => self.bytes == bytes,
         }
     }
 }
@@ -208,14 +381,69 @@ pub struct Wrote {
     pub crc32: u32,
 }
 
+/// What a set of bytes decodes to, worked out once, when they land.
+struct Decoded {
+    container: Option<Container>,
+    entity: Option<Box<Entity>>,
+    parse_error: Option<String>,
+    verify: VerifyState,
+    is_text: bool,
+    /// CRC-32 over all the bytes, where they were read through.
+    crc: Option<u32>,
+}
+
+impl Decoded {
+    /// What a decode that never answered leaves.
+    fn failed(why: &str) -> Decoded {
+        Decoded {
+            container: None,
+            entity: None,
+            parse_error: Some(why.to_string()),
+            verify: VerifyState::Failed(why.to_string()),
+            is_text: false,
+            crc: None,
+        }
+    }
+
+    fn of(bytes: &[u8]) -> Decoded {
+        let (entity, parse_error) = match nord_format::from_stream(&mut std::io::Cursor::new(bytes))
+        {
+            Ok(entity) => (Some(Box::new(entity)), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let verify = match &entity {
+            Some(entity) => verify(entity, bytes),
+            None => VerifyState::NotApplicable("the file did not decode"),
+        };
+        Decoded {
+            container: Container::read(bytes),
+            entity,
+            parse_error,
+            verify,
+            is_text: crate::document::text::is_text(bytes),
+            crc: Some(nord_format::crc::crc32(bytes)),
+        }
+    }
+}
+
 /// One object held in memory: its bytes, what they decode to, and how they got here.
 pub struct LocalEntity {
     /// Stable across reordering, so a selection survives a removal.
     pub id: u64,
     pub name: String,
+    /// Where its file is in the library. `None` for a view of a slot, and for a kept
+    /// asset whose file has not been placed yet.
+    ///
+    /// ⚠️ While it is set, [`LocalEntity::name`] is its last component. Set both through
+    /// [`Workspace::place`].
+    pub path: Option<LibPath>,
     pub origin: Origin,
-    pub bytes: Vec<u8>,
-    pub entity: Option<Entity>,
+    /// ⚠️ Empty while the asset [`rests`](LocalEntity::rests) in its file. Anything that
+    /// needs the whole body asks [`LocalEntity::whole`], and its length is
+    /// [`LocalEntity::size`].
+    pub bytes: Bytes,
+    /// Boxed, since a decode is kilobytes and most assets of a large library have none.
+    pub entity: Option<Box<Entity>>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     /// Whether the bytes are a note, from [`crate::document::text::is_text`].
@@ -255,40 +483,207 @@ pub struct LocalEntity {
     ///
     /// [`Workspace::forget_writes`] clears it when the instrument goes.
     pub wrote: Option<Wrote>,
+    /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
+    seen: std::cell::Cell<u64>,
 }
 
 impl LocalEntity {
-    fn new(id: u64, name: String, origin: Origin, bytes: Vec<u8>, stamp: u64) -> LocalEntity {
-        let container = Container::read(&bytes);
-        let (entity, parse_error) =
-            match nord_format::from_stream(&mut std::io::Cursor::new(&bytes)) {
-                Ok(entity) => (Some(entity), None),
-                Err(e) => (None, Some(e.to_string())),
-            };
-        let verify = match &entity {
-            Some(entity) => verify(entity, &bytes),
-            None => VerifyState::NotApplicable("the file did not decode"),
-        };
-        let is_text = crate::document::text::is_text(&bytes);
-        let mut held = LocalEntity {
+    fn new(id: u64, name: String, origin: Origin, bytes: Bytes, stamp: u64) -> LocalEntity {
+        let decoded = Decoded::of(&bytes);
+        let mut held = LocalEntity::undecoded(id, name, origin, bytes, stamp);
+        held.decoded(decoded);
+        held
+    }
+
+    /// An asset whose file nothing has read yet, `len` bytes long. It is
+    /// [`VerifyState::Reading`], and its kind is what its name says.
+    fn listed(id: u64, name: String, origin: Origin, len: u64, stamp: u64) -> LocalEntity {
+        let mut held = LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp);
+        held.saved.unread = Some(len);
+        held
+    }
+
+    /// An asset whose bytes are not decoded yet, as [`VerifyState::Reading`] says. Until
+    /// [`LocalEntity::decoded`] it has no decode, no container, and the kind its name
+    /// says.
+    fn undecoded(id: u64, name: String, origin: Origin, bytes: Bytes, stamp: u64) -> LocalEntity {
+        LocalEntity {
             id,
             name,
+            path: None,
             origin,
+            saved: Baseline {
+                bytes: bytes.clone(),
+                crc32: None,
+                stamp,
+                file: None,
+                bytes_crc: None,
+                unread: None,
+            },
             bytes,
-            entity,
-            parse_error,
-            container,
-            is_text,
-            verify,
-            saved: Baseline::default(),
+            entity: None,
+            parse_error: None,
+            container: None,
+            is_text: false,
+            verify: VerifyState::Reading,
             pending: false,
             kept: true,
             stamp,
             link: None,
             wrote: None,
+            seen: Default::default(),
+        }
+    }
+
+    /// Whether its bytes are still to be decoded, or read.
+    pub fn reading(&self) -> bool {
+        matches!(self.verify, VerifyState::Reading)
+    }
+
+    /// Whether it holds nothing but a file nothing has read yet: no bytes, no decode, and
+    /// the length and kind its listing gave.
+    pub fn unread(&self) -> bool {
+        self.saved.unread.is_some() && self.stamp == self.saved.stamp
+    }
+
+    /// Take what its bytes decode to. They are what it was saved as, since nothing can
+    /// edit an asset still being read.
+    fn decoded(&mut self, decoded: Decoded) {
+        self.saved.crc32 = decoded.container.as_ref().map(|held| held.body_crc32);
+        self.saved.bytes_crc = decoded.crc;
+        self.container = decoded.container;
+        self.entity = decoded.entity;
+        self.parse_error = decoded.parse_error;
+        self.verify = decoded.verify;
+        self.is_text = decoded.is_text;
+    }
+
+    /// An asset whose bytes are the file `file` holds, left there and read by range. It
+    /// decodes nothing, and its checksum is [`VerifyState::Checking`] until
+    /// [`Workspace::poll`] has checked it.
+    fn resting(
+        id: u64,
+        name: String,
+        origin: Origin,
+        file: Arc<OnDisk>,
+        stamp: u64,
+    ) -> LocalEntity {
+        LocalEntity {
+            id,
+            name,
+            path: None,
+            origin,
+            bytes: Bytes::default(),
+            entity: None,
+            parse_error: None,
+            container: None,
+            is_text: false,
+            verify: VerifyState::Checking,
+            saved: Baseline::on_disk(file, stamp),
+            pending: false,
+            kept: true,
+            stamp,
+            link: None,
+            wrote: None,
+            seen: Default::default(),
+        }
+    }
+
+    /// The file holding this asset's bytes, while they are the saved ones and are left
+    /// there: [`LocalEntity::bytes`] is then empty.
+    pub fn rests(&self) -> Option<&Arc<OnDisk>> {
+        self.saved
+            .file
+            .as_ref()
+            .filter(|_| self.stamp == self.saved.stamp)
+    }
+
+    /// The index of the file this asset rests in, unless its check failed.
+    pub fn indexed(&self) -> Option<&ondisk::Index> {
+        let file = self.rests()?;
+        (!matches!(self.verify, VerifyState::Failed(_))).then_some(&file.index)
+    }
+
+    /// How many bytes the asset is.
+    pub fn size(&self) -> u64 {
+        match (self.rests(), self.unread()) {
+            (Some(file), _) => file.len,
+            (None, true) => self.saved.size(),
+            (None, false) => self.bytes.len() as u64,
+        }
+    }
+
+    /// The whole body: the bytes held, or a read of the file it rests in.
+    ///
+    /// ⚠️ A read of a file reads all of it, hundreds of megabytes for a piano library, on
+    /// the calling thread. Only an act that carries the whole body asks: a send, a copy,
+    /// an overwrite.
+    pub fn whole(&self) -> std::io::Result<Cow<'_, [u8]>> {
+        if self.unread() {
+            return Err(std::io::Error::other(UNREAD));
+        }
+        match self.rests() {
+            Some(file) => file.whole().map(Cow::Owned),
+            None => Ok(Cow::Borrowed(&self.bytes)),
+        }
+    }
+
+    /// Whether the instrument can be sent this, and why not: bytes that are not what they
+    /// claim to be must never reach a delete-then-write.
+    pub fn sendable(&self) -> Result<(), String> {
+        if self.unread() {
+            return Err(UNREAD.to_string());
+        }
+        let Some(file) = self.rests() else {
+            return nord_usb::envelope::unwrap(&self.bytes)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
         };
-        held.saved = held.baseline();
-        held
+        match (&self.verify, &self.container) {
+            (VerifyState::Checked, Some(container)) if container.body_len() > 0 => Ok(()),
+            (VerifyState::Checked, _) => {
+                Err("the file is a bare CBIN header with no body to send".into())
+            }
+            (VerifyState::Checking, _) => {
+                Err(format!("its {} bytes are still being checked", file.len))
+            }
+            (state, _) => Err(state.detail()),
+        }
+    }
+
+    /// How many bytes it holds whole in memory: its bytes, and its baseline's where they
+    /// are not the same allocation.
+    pub fn held_whole(&self) -> u64 {
+        let saved = match self.saved.bytes.shares(&self.bytes) {
+            true => 0,
+            false => self.saved.bytes.len(),
+        };
+        (self.bytes.len() + saved) as u64
+    }
+
+    /// Whether it holds `bytes`. Never, while it is unread.
+    fn holds(&self, bytes: &[u8]) -> bool {
+        match self.rests() {
+            Some(file) => file.holds(bytes),
+            None => !self.unread() && self.bytes == bytes,
+        }
+    }
+
+    /// The extension its bytes call for. See [`format_tag`]. One not read yet takes the
+    /// one its name carries.
+    pub fn format_tag(&self) -> String {
+        match (self.rests(), self.listed_tag()) {
+            (Some(file), _) => file.index.tag().to_string(),
+            (None, Some(tag)) => tag.to_string(),
+            (None, None) => format_tag(&self.bytes),
+        }
+    }
+
+    /// The tag its name carries, while its bytes are not decoded.
+    fn listed_tag(&self) -> Option<&'static str> {
+        let undecoded = self.reading() || self.unread();
+        let (tag, _) = crate::browser::tagged(&self.name).filter(|_| undecoded)?;
+        Some(tag)
     }
 
     /// Whether it holds something other than what it was last saved as, an editor's
@@ -307,6 +702,9 @@ impl LocalEntity {
             bytes: self.bytes.clone(),
             crc32: self.container.as_ref().map(|held| held.body_crc32),
             stamp: self.stamp,
+            file: None,
+            bytes_crc: None,
+            unread: None,
         }
     }
 
@@ -320,11 +718,15 @@ impl LocalEntity {
     /// A note has neither, so its tag comes from its bytes being text. See
     /// [`crate::document::text::is_text`].
     pub fn tag(&self) -> String {
-        match (&self.entity, &self.container) {
+        match (self.entity.as_deref(), &self.container) {
             (Some(entity), _) => entity.identity().format.to_string(),
             (None, Some(container)) => container.tag(),
             (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
-            (None, None) => "?".into(),
+            (None, None) => match (self.rests(), self.listed_tag()) {
+                (Some(file), _) => file.index.tag().to_string(),
+                (None, Some(tag)) => tag.to_string(),
+                (None, None) => "?".into(),
+            },
         }
     }
 
@@ -336,6 +738,9 @@ impl LocalEntity {
         wire_body(&self.bytes)
     }
 }
+
+/// Why an asset not read yet has no bytes to hand over.
+const UNREAD: &str = "it has not been read yet";
 
 /// A file's body as the wire carries it, without its container, or `None` for bytes no
 /// container this app unwraps.
@@ -366,10 +771,26 @@ pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
 /// The filename an export suggests for a name: made path-safe, and given the extension
 /// the bytes call for unless the name already carries one.
 fn export_filename(name: &str, bytes: &[u8]) -> String {
+    tagged_filename(name, || format_tag(bytes))
+}
+
+/// [`export_filename`] with the extension `tag` gives.
+fn tagged_filename(name: &str, tag: impl FnOnce() -> String) -> String {
     let stem = filename_stem(name);
     match crate::strings::carries_tag(&stem) {
         true => stem,
-        false => format!("{stem}.{}", format_tag(bytes)),
+        false => format!("{stem}.{}", tag()),
+    }
+}
+
+/// The filename a kept asset's file takes when the app chooses it: the name made one the
+/// library's rule allows, and given the extension the bytes call for unless it already
+/// carries one.
+pub(crate) fn library_filename(entity: &LocalEntity) -> String {
+    let stem = names::portable(&entity.name);
+    match crate::strings::carries_tag(&stem) {
+        true => stem,
+        false => names::portable(&format!("{stem}.{}", entity.format_tag())),
     }
 }
 
@@ -700,9 +1121,15 @@ enum Arrival {
 pub struct Saved {
     pub id: u64,
     pub name: String,
+    pub path: Option<LibPath>,
     pub origin: Origin,
-    /// What it was last saved as.
+    /// What it was last saved as. Empty where `file` holds it, or where it is unread.
     pub saved: Vec<u8>,
+    /// The file holding what it was last saved as, left there and read by range.
+    pub file: Option<Arc<OnDisk>>,
+    /// The length of the file holding what it was last saved as, where nothing has read
+    /// that file yet.
+    pub unread: Option<u64>,
     /// What it holds now, if that differs from what it was saved as.
     pub unsaved: Option<Vec<u8>>,
 }
@@ -723,18 +1150,90 @@ enum Incoming {
     Failed(String),
 }
 
+/// Something taken from the listed assets, and the revision and layout it was taken at.
+#[derive(Default)]
+struct Taken<T> {
+    at: Option<(u64, u64)>,
+    value: T,
+}
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
+    /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
+    at: std::cell::RefCell<(u64, std::collections::HashMap<u64, usize>)>,
     next_id: u64,
     /// Bumped by every change to the list, so the shell can tell when the store is
     /// behind without comparing every asset's bytes.
     revision: u64,
+    /// Bumped by every change to which assets are listed, or to their names and paths.
+    layout: u64,
+    families: std::cell::RefCell<Taken<Vec<accept::Family>>>,
+    kinds: std::cell::RefCell<Taken<Vec<crate::browser::Kind>>>,
+    /// How many times [`Workspace::families_present`] has been taken.
+    #[cfg(test)]
+    pub(crate) families_taken: std::cell::Cell<usize>,
+    /// How many times [`Workspace::kinds`] has been taken.
+    #[cfg(test)]
+    pub(crate) kinds_taken: std::cell::Cell<usize>,
+    /// How many times the list has been searched end to end for an id.
+    #[cfg(test)]
+    pub(crate) searched: std::cell::Cell<usize>,
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
     /// The WAVs a New pick came back with, waiting on their root keys. See
     /// [`crate::newproject`].
     draft: Option<Draft>,
+    /// Assets resting in their files whose checksums are still to be checked, one at a
+    /// time, in the order they arrived.
+    checks: VecDeque<(u64, Arc<OnDisk>)>,
+    checking: Option<Check>,
+    /// Assets being read whole out of the files they rested in.
+    waking: Vec<Wake>,
+    /// Assets whose bytes are still to be decoded, in the order they arrived, and those
+    /// asked for first.
+    undecoded: VecDeque<u64>,
+    hurried: std::cell::RefCell<std::collections::BTreeSet<u64>>,
+    /// Unread assets something needs, not yet asked of the library, and those asked and
+    /// not yet answered.
+    wanted: std::cell::RefCell<std::collections::BTreeSet<u64>>,
+    asked: std::collections::BTreeSet<u64>,
+    /// Decodes running off the frame, each of a few assets, and every asset in them.
+    decoding: Vec<Decode>,
+    flying: std::collections::BTreeSet<u64>,
+    /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
+    frame: u64,
+}
+
+/// Assets decoded off the frame, each answered with the stamp of the bytes decoded.
+struct Decode {
+    ids: Vec<u64>,
+    job: work::Job<Vec<(u64, u64, Decoded)>>,
+}
+
+/// How many decodes run at once, and how many assets and bytes one takes. The browser
+/// has one thread, so there one runs inline each frame, and takes less.
+#[cfg(not(target_arch = "wasm32"))]
+const DECODES: usize = 8;
+#[cfg(not(target_arch = "wasm32"))]
+const DECODE: (usize, u64) = (64, 16 << 20);
+#[cfg(target_arch = "wasm32")]
+const DECODES: usize = 1;
+#[cfg(target_arch = "wasm32")]
+const DECODE: (usize, u64) = (16, 2 << 20);
+
+/// A file's checksum being checked off the frame.
+struct Check {
+    id: u64,
+    file: Arc<OnDisk>,
+    job: work::Job<Result<Container, String>>,
+}
+
+/// A file being read whole and decoded off the frame.
+struct Wake {
+    id: u64,
+    file: Arc<OnDisk>,
+    job: work::Job<Result<LocalEntity, String>>,
 }
 
 impl Workspace {
@@ -742,12 +1241,32 @@ impl Workspace {
         let (tx, rx) = std::sync::mpsc::channel();
         Workspace {
             entities: Vec::new(),
+            at: Default::default(),
+            families: Default::default(),
+            kinds: Default::default(),
+            #[cfg(test)]
+            families_taken: Default::default(),
+            #[cfg(test)]
+            kinds_taken: Default::default(),
+            #[cfg(test)]
+            searched: Default::default(),
             next_id: 1,
             revision: 0,
+            layout: 1,
             ctx,
             tx,
             rx,
             draft: None,
+            checks: VecDeque::new(),
+            checking: None,
+            waking: Vec::new(),
+            undecoded: VecDeque::new(),
+            hurried: Default::default(),
+            wanted: Default::default(),
+            asked: Default::default(),
+            decoding: Vec::new(),
+            flying: Default::default(),
+            frame: 1,
         }
     }
 
@@ -759,6 +1278,116 @@ impl Workspace {
     /// Counts changes to the list, not to any one asset.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Counts changes to which assets are listed and to their names and paths, so a view
+    /// of where they are is taken again only when it would differ.
+    pub fn layout(&self) -> u64 {
+        self.layout
+    }
+
+    /// The families of the listed assets, in [`accept::Family::ALL`] order.
+    ///
+    /// Files that name no family (the shared library formats, the carriers, bytes that did
+    /// not decode) add none, so a list of samples spans no families. Taken again only
+    /// when the list or one of its assets changes, so a frame that draws a family word
+    /// per row does not take it per row.
+    pub fn families_present(&self) -> Vec<accept::Family> {
+        self.taken(&self.families, || {
+            #[cfg(test)]
+            self.families_taken.set(self.families_taken.get() + 1);
+            let here: std::collections::HashSet<accept::Family> = self
+                .listed()
+                .filter_map(|entity| accept::Family::of_tag(&entity.tag()))
+                .collect();
+            accept::Family::ALL
+                .into_iter()
+                .filter(|family| here.contains(family))
+                .collect()
+        })
+    }
+
+    /// The kinds of the listed assets, in [`crate::browser::Kind::ALL`] order. Taken again
+    /// only when the list or one of its assets changes, as the families are.
+    pub fn kinds(&self) -> Vec<crate::browser::Kind> {
+        use crate::browser::Kind;
+        self.taken(&self.kinds, || {
+            #[cfg(test)]
+            self.kinds_taken.set(self.kinds_taken.get() + 1);
+            let mut here = Vec::new();
+            for kind in self.listed().map(Kind::of) {
+                if !here.contains(&kind) {
+                    here.push(kind);
+                }
+            }
+            Kind::ALL
+                .into_iter()
+                .filter(|kind| here.contains(kind))
+                .collect()
+        })
+    }
+
+    /// What `held` last took, or `take` again where the list has changed since.
+    fn taken<T: Clone>(&self, held: &std::cell::RefCell<Taken<T>>, take: impl FnOnce() -> T) -> T {
+        let now = Some((self.revision, self.layout));
+        let mut held = held.borrow_mut();
+        if held.at != now {
+            *held = Taken {
+                at: now,
+                value: take(),
+            };
+        }
+        held.value.clone()
+    }
+
+    /// Record a change to which assets are held, or to their names or paths.
+    fn moved(&mut self) {
+        self.revision += 1;
+        self.layout += 1;
+    }
+
+    /// Where each id sits in the list, taken again where the layout moved since.
+    fn positions(&self) -> std::cell::RefMut<'_, (u64, std::collections::HashMap<u64, usize>)> {
+        let mut at = self.at.borrow_mut();
+        if at.0 != self.layout {
+            #[cfg(test)]
+            self.searched.set(self.searched.get() + 1);
+            let positions = self.entities.iter().enumerate();
+            *at = (
+                self.layout,
+                positions
+                    .map(|(position, entity)| (entity.id, position))
+                    .collect(),
+            );
+        }
+        at
+    }
+
+    /// Where `id` sits in the list.
+    fn position(&self, id: u64) -> Option<usize> {
+        let at = self.positions();
+        // A change to the list that did not bump the layout is caught here: the list is
+        // searched rather than another asset handed back.
+        match at.1.get(&id) {
+            Some(&position)
+                if self
+                    .entities
+                    .get(position)
+                    .is_some_and(|held| held.id == id) =>
+            {
+                Some(position)
+            }
+            _ => {
+                #[cfg(test)]
+                self.searched.set(self.searched.get() + 1);
+                self.entities.iter().position(|held| held.id == id)
+            }
+        }
+    }
+
+    fn get_mut(&mut self, id: u64) -> Option<&mut LocalEntity> {
+        let position = self.position(id)?;
+        self.entities.get_mut(position)
     }
 
     /// Everything held in memory, views included. The local **list** is
@@ -773,7 +1402,7 @@ impl Workspace {
     }
 
     pub fn get(&self, id: u64) -> Option<&LocalEntity> {
-        self.entities.iter().find(|e| e.id == id)
+        self.entities.get(self.position(id)?)
     }
 
     /// Whether this is a view of a slot and not on this computer.
@@ -787,7 +1416,7 @@ impl Workspace {
     /// which is edited and sent back like any other and goes when its tab closes.
     pub fn view(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
         let (id, _) = self.add(name, origin, bytes, log);
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return id;
         };
         entity.kept = false;
@@ -813,14 +1442,14 @@ impl Workspace {
 
     /// Promote a view into the local list, with its edits and its place in the queue.
     pub fn keep(&mut self, id: u64, log: &mut Log) {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
         if std::mem::replace(&mut entity.kept, true) {
             return;
         }
         let name = entity.name.clone();
-        self.revision += 1;
+        self.moved();
         log.say(format!("“{name}” is on this computer."));
     }
 
@@ -857,7 +1486,7 @@ impl Workspace {
         if self.entities.len() == before && rescued.is_empty() {
             return;
         }
-        self.revision += 1;
+        self.moved();
     }
 
     /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
@@ -870,9 +1499,634 @@ impl Workspace {
 
     /// Rename an asset held here. Nothing leaves this computer.
     pub fn rename(&mut self, id: u64, name: String) {
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             entity.name = name;
+            self.moved();
+        }
+    }
+
+    /// Put an asset's file at `path`, which also names it.
+    pub fn place(&mut self, id: u64, path: LibPath) {
+        if let Some(entity) = self.get_mut(id) {
+            entity.name = path.leaf().to_string();
+            entity.path = Some(path);
+            self.moved();
+        }
+    }
+
+    /// Forget where an asset's file was to go, so it is placed again under a free name.
+    pub fn unplace(&mut self, id: u64) {
+        if let Some(entity) = self.get_mut(id) {
+            entity.path = None;
+            self.moved();
+        }
+    }
+
+    /// Move every asset under the folder `from` to the same place under `to`.
+    pub fn relocate(&mut self, from: &LibPath, to: &LibPath) {
+        for entity in &mut self.entities {
+            if let Some(moved) = entity.path.as_ref().and_then(|at| at.moved(from, to)) {
+                entity.name = moved.leaf().to_string();
+                entity.path = Some(moved);
+            }
+        }
+        self.moved();
+    }
+
+    /// Take bytes that were saved over this asset's file from outside the app. They are
+    /// both what it holds and what it was saved as.
+    ///
+    /// ⚠️ Only for an asset with nothing unsaved. Over an unsaved edit, see
+    /// [`Workspace::rebase`].
+    pub fn adopt(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+        self.replace_bytes(id, bytes, log);
+        self.mark_saved(id);
+    }
+
+    /// [`Workspace::adopt`] for a file left on disk: the asset rests in it.
+    pub fn adopt_file(&mut self, id: u64, file: Arc<OnDisk>) {
+        let stamp = self.stamp();
+        self.rest(id, file, stamp);
+    }
+
+    /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
+    /// writes the edit over them, and a revert takes them.
+    pub fn rebase(&mut self, id: u64, theirs: Vec<u8>, log: &mut Log) {
+        if !self.hold(id, log) {
+            return self.adopt(id, theirs, log);
+        }
+        let stamp = self.stamp_for(id, &theirs);
+        if let Some(entity) = self.get_mut(id) {
+            entity.saved = Baseline::read(theirs.into(), stamp);
+        }
+    }
+
+    /// [`Workspace::rebase`] onto a file left on disk.
+    pub fn rebase_file(&mut self, id: u64, theirs: Arc<OnDisk>, log: &mut Log) {
+        if !self.hold(id, log) {
+            return self.adopt_file(id, theirs);
+        }
+        let stamp = self.stamp();
+        if let Some(entity) = self.get_mut(id) {
+            entity.saved = Baseline::on_disk(theirs.clone(), stamp);
+        }
+        self.check(id, theirs);
+    }
+
+    /// Count an asset as unsaved again, because the save it was counted saved by did not
+    /// land.
+    pub fn unsave(&mut self, id: u64, log: &mut Log) {
+        if !self.hold(id, log) {
+            return;
+        }
+        let stamp = self.stamp();
+        if let Some(entity) = self.get_mut(id) {
+            if !entity.is_unsaved() {
+                entity.saved.stamp = stamp;
+            }
+        }
+    }
+
+    /// Read an asset resting in its file into memory, decoded, so that its saved baseline
+    /// can move away from those bytes. Returns `false` where the file could not be read,
+    /// and the asset still rests.
+    ///
+    /// ⚠️ Reads and decodes the whole file on this thread. It runs only where a file
+    /// changed on disk, or a save failed, under an asset that still rests.
+    fn hold(&mut self, id: u64, log: &mut Log) -> bool {
+        let Some(entity) = self.get(id) else {
+            return true;
+        };
+        let Some(file) = entity.rests() else {
+            return true;
+        };
+        match file.whole() {
+            Ok(bytes) => {
+                self.swap(id, true, |held| {
+                    LocalEntity::new(
+                        id,
+                        held.name.clone(),
+                        held.origin.clone(),
+                        bytes.into(),
+                        held.stamp,
+                    )
+                });
+                true
+            }
+            Err(e) => {
+                log.error(format!("{}: {e}", entity.name));
+                false
+            }
+        }
+    }
+
+    /// Leave an asset's bytes in `file`, which holds them, under `stamp`, and check the
+    /// file's checksum off the frame.
+    fn rest(&mut self, id: u64, file: Arc<OnDisk>, stamp: u64) {
+        self.swap(id, false, |held| {
+            LocalEntity::resting(
+                id,
+                held.name.clone(),
+                held.origin.clone(),
+                file.clone(),
+                stamp,
+            )
+        });
+        self.check(id, file);
+    }
+
+    /// Put `made` in place of an asset, keeping what an asset keeps whatever bytes it
+    /// holds: where its file is, whether it is kept, its link, its last write and its
+    /// pending edit, and its saved baseline where `keep_saved` says so.
+    fn swap(&mut self, id: u64, keep_saved: bool, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        let made = made(entity);
+        let saved = match keep_saved {
+            true => std::mem::take(&mut entity.saved),
+            false => made.saved,
+        };
+        *entity = LocalEntity {
+            path: entity.path.take(),
+            kept: entity.kept,
+            link: entity.link,
+            wrote: entity.wrote,
+            pending: entity.pending,
+            seen: entity.seen.clone(),
+            saved,
+            ..made
+        };
+        self.revision += 1;
+    }
+
+    /// Check the checksum of `file`, which holds an asset's saved bytes, once the checks
+    /// before it have answered.
+    fn check(&mut self, id: u64, file: Arc<OnDisk>) {
+        self.checks.push_back((id, file));
+        self.next_check();
+    }
+
+    fn next_check(&mut self) {
+        if self.checking.is_some() {
+            return;
+        }
+        let Some((id, file)) = self.checks.pop_front() else {
+            return;
+        };
+        let read = file.clone();
+        let job = work::run(&self.ctx, move |_| Container::of_file(&read));
+        self.checking = Some(Check { id, file, job });
+    }
+
+    /// Fold in the check that has answered, where one has, and start the next.
+    fn checked(&mut self, answer: work::Answer<Result<Container, String>>, log: &mut Log) {
+        let answer = match answer {
+            work::Answer::Running => return,
+            work::Answer::Answered(answer) => answer,
+            work::Answer::Died => Err("the check stopped without an answer".to_string()),
+        };
+        let Some(Check { id, file, .. }) = self.checking.take() else {
+            return;
+        };
+        self.next_check();
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        // An answer about a file the asset no longer stands on is dropped.
+        if !entity
+            .saved
+            .file
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &file))
+        {
+            return;
+        }
+        let verify = match &answer {
+            Ok(container) if container.checksum_ok => VerifyState::Checked,
+            Ok(_) => VerifyState::Failed("the stored checksum does not match the body".into()),
+            Err(why) => VerifyState::Failed(why.clone()),
+        };
+        entity.saved.crc32 = match &verify {
+            VerifyState::Checked => answer.as_ref().ok().map(|held| held.body_crc32),
+            _ => None,
+        };
+        let name = entity.name.clone();
+        match &verify {
+            VerifyState::Checked => log.info(format!(
+                "{name}: {} ({} bytes), checksum ok",
+                file.index.tag(),
+                file.len
+            )),
+            other => log.warn(format!(
+                "{name}: verify {}: {}",
+                other.badge(),
+                other.detail()
+            )),
+        }
+        // An edit made while the file was checked has a decode and a verify of its own.
+        if entity.rests().is_some() {
+            entity.parse_error = match &verify {
+                VerifyState::Failed(why) => Some(why.clone()),
+                _ => None,
+            };
+            entity.container = answer.ok();
+            entity.verify = verify;
+        }
+        self.revision += 1;
+    }
+
+    /// Read an asset resting in its file whole, off the frame, for an editor that works on
+    /// the whole body. It stays resting until the read answers.
+    pub fn wake(&mut self, id: u64) {
+        if self.waking.iter().any(|held| held.id == id) {
+            return;
+        }
+        let Some(entity) = self.get(id) else {
+            return;
+        };
+        let Some(file) = entity.rests().cloned() else {
+            return;
+        };
+        let (name, origin, stamp, read) = (
+            entity.name.clone(),
+            entity.origin.clone(),
+            entity.stamp,
+            file.clone(),
+        );
+        let job = work::run(&self.ctx, move |_| {
+            let bytes = read.whole().map_err(|e| e.to_string())?;
+            Ok(LocalEntity::new(id, name, origin, bytes.into(), stamp))
+        });
+        self.waking.push(Wake { id, file, job });
+    }
+
+    /// Whether an asset is being read whole out of its file.
+    #[cfg(test)]
+    pub fn waking(&self, id: u64) -> bool {
+        self.waking.iter().any(|held| held.id == id)
+    }
+
+    /// Fold in the reads that have answered.
+    fn woken(&mut self, log: &mut Log) {
+        let mut answered = Vec::new();
+        for wake in std::mem::take(&mut self.waking) {
+            match wake.job.poll() {
+                work::Answer::Running => self.waking.push(wake),
+                answer => answered.push((wake.id, wake.file, answer)),
+            }
+        }
+        for (id, file, answer) in answered {
+            self.wakes(id, &file, answer, log);
+        }
+    }
+
+    fn wakes(
+        &mut self,
+        id: u64,
+        file: &Arc<OnDisk>,
+        answer: work::Answer<Result<LocalEntity, String>>,
+        log: &mut Log,
+    ) {
+        let answer = match answer {
+            work::Answer::Running => return,
+            work::Answer::Answered(answer) => answer,
+            work::Answer::Died => Err("the read stopped without an answer".to_string()),
+        };
+        let Some(entity) = self.get(id) else {
+            return;
+        };
+        if !entity.rests().is_some_and(|held| Arc::ptr_eq(held, file)) {
+            return;
+        }
+        match answer {
+            Ok(made) => {
+                log.info(format!("{}: read whole for editing", entity.name));
+                self.swap(id, false, |_| made);
+            }
+            Err(why) => {
+                let name = entity.name.clone();
+                log.error(format!("{name}: {why}"));
+                log.trouble(format!("“{name}” could not be read."));
+                if let Some(entity) = self.get_mut(id) {
+                    entity.parse_error = Some(why.clone());
+                    entity.verify = VerifyState::Failed(why);
+                }
+                self.revision += 1;
+            }
+        }
+    }
+
+    /// How many assets something needs that are still being read or decoded.
+    pub fn reading(&self) -> usize {
+        let decoding = self.entities.iter().filter(|entity| {
+            let undecoded = entity.reading() && !entity.unread();
+            undecoded || self.asked.contains(&entity.id)
+        });
+        decoding.count() + self.wanted.borrow().len()
+    }
+
+    /// Something needs `id`: its row is in view, it is picked, or it is open. One not
+    /// read yet is asked of the library, and one not decoded yet is decoded ahead of the
+    /// others. Either way it is needed now, and is not let go for room until a frame
+    /// passes without it being needed.
+    pub fn hurry(&self, id: u64) {
+        let Some(entity) = self.get(id) else {
+            return;
+        };
+        entity.seen.set(self.frame);
+        if !entity.reading() {
+            return;
+        }
+        if !entity.unread() {
+            self.hurried.borrow_mut().insert(id);
+        } else if !self.asked.contains(&id) && self.wanted.borrow_mut().insert(id) {
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// [`Workspace::hurry`] for each of these assets, as for the rows a list draws.
+    pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
+        for id in ids {
+            self.hurry(id);
+        }
+    }
+
+    /// The unread assets something needs, which the library is now asked for.
+    pub fn take_wanted(&mut self) -> Vec<u64> {
+        let wanted = std::mem::take(self.wanted.get_mut());
+        self.asked.extend(wanted.iter().copied());
+        wanted.into_iter().collect()
+    }
+
+    /// Whether `id` is wanted or asked of the library and not yet answered.
+    #[cfg(test)]
+    pub fn wanted(&self, id: u64) -> bool {
+        self.wanted.borrow().contains(&id) || self.asked.contains(&id)
+    }
+
+    /// Whether any read asked of the library is still to be answered.
+    #[cfg(test)]
+    pub fn asking(&self) -> bool {
+        !self.asked.is_empty()
+    }
+
+    /// The library's answer to an asset asked for: its bytes, decoded off the frame, ahead
+    /// of anything else waiting where something needs it now, or the file it rests in, or
+    /// nothing, when the library no longer has its file and it stays unread. They are
+    /// what it was saved as, since nothing edits an asset not read.
+    pub fn took(&mut self, id: u64, bytes: Option<Vec<u8>>, file: Option<Arc<OnDisk>>) {
+        self.asked.remove(&id);
+        let Some(entity) = self.get(id).filter(|entity| entity.unread()) else {
+            return;
+        };
+        let (stamp, needed) = (entity.stamp, self.needed_now(entity));
+        match (bytes, file) {
+            (Some(bytes), _) => {
+                self.swap(id, false, |held| {
+                    let (name, origin) = (held.name.clone(), held.origin.clone());
+                    LocalEntity::undecoded(id, name, origin, bytes.into(), stamp)
+                });
+                self.undecoded.push_back(id);
+                if needed {
+                    self.hurried.get_mut().insert(id);
+                }
+            }
+            (None, Some(file)) => self.rest(id, file, stamp),
+            (None, None) => {}
+        }
+    }
+
+    /// The library could not read an asset asked for, and why. It stays unread, and is
+    /// not asked for again.
+    pub fn unreadable(&mut self, id: u64, why: String, log: &mut Log) {
+        self.asked.remove(&id);
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
+            return;
+        };
+        log.warn(format!("{}: {why}", entity.name));
+        entity.parse_error = Some(why.clone());
+        entity.verify = VerifyState::NotRead(why);
+        self.revision += 1;
+    }
+
+    /// Whether something needs an unread asset not yet asked of the library.
+    pub fn wants(&self) -> bool {
+        !self.wanted.borrow().is_empty()
+    }
+
+    /// The listed length of every file asked of the library and not yet answered.
+    pub fn asked_whole(&self) -> u64 {
+        let asked = self.asked.iter().filter_map(|id| self.get(*id));
+        asked
+            .filter(|entity| entity.unread())
+            .map(LocalEntity::size)
+            .sum()
+    }
+
+    /// Ask the library again for an asset it could not read, as something needs it.
+    pub fn retry(&mut self, id: u64) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
+            return;
+        };
+        if !matches!(entity.verify, VerifyState::NotRead(_)) {
+            return;
+        }
+        entity.parse_error = None;
+        entity.verify = VerifyState::Reading;
+        self.revision += 1;
+        self.wanted.get_mut().insert(id);
+    }
+
+    /// Ask the library again for an asset whose read was refused for want of room, now
+    /// that room has been made for it.
+    pub fn again(&mut self, id: u64) {
+        self.asked.remove(&id);
+        if self.get(id).is_some_and(LocalEntity::unread) {
+            self.wanted.get_mut().insert(id);
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// Count an unread asset as asked of the library for a read in the background, which
+    /// nothing waits on. Returns `false`, and counts nothing, where it is not unread or is
+    /// wanted or asked already.
+    pub fn ask_behind(&mut self, id: u64) -> bool {
+        let unread = self.get(id).is_some_and(LocalEntity::unread);
+        if !unread || self.wanted.get_mut().contains(&id) {
+            return false;
+        }
+        self.asked.insert(id)
+    }
+
+    /// The library refused to read an asset asked of it, for want of room. It stays as it
+    /// was until it is asked again.
+    pub fn unasked(&mut self, id: u64) {
+        self.asked.remove(&id);
+    }
+
+    /// Whether something needed this asset this frame or the last. See
+    /// [`Workspace::hurry`].
+    fn needed_now(&self, entity: &LocalEntity) -> bool {
+        let seen = entity.seen.get();
+        seen > 0 && seen + 1 >= self.frame
+    }
+
+    /// The frame something last needed this asset in, 0 for never, and how many bytes
+    /// letting it go would free. `None` where it must be kept whole: it is a view, unsaved
+    /// or holding an editor's pending edit, unread or resting in its file, or needed now.
+    pub fn evictable(&self, id: u64) -> Option<(u64, u64)> {
+        let entity = self.get(id)?;
+        let held = entity.held_whole();
+        let kept = !entity.kept
+            || entity.is_unsaved()
+            || entity.unread()
+            || entity.rests().is_some()
+            || self.needed_now(entity);
+        (!kept && held > 0).then_some((entity.seen.get(), held))
+    }
+
+    /// Let go of what a clean asset holds whole and what it decodes to, so it is unread
+    /// again under a new stamp, which this returns. It keeps the checksum a slot holding
+    /// it would report, so it still matches that slot. `None`, and nothing let go, where
+    /// [`Workspace::evictable`] keeps it.
+    pub fn evict(&mut self, id: u64) -> Option<u64> {
+        self.evictable(id)?;
+        let entity = self.get(id)?;
+        let (len, crc32) = (entity.size(), entity.saved.crc32);
+        let stamp = self.stamp();
+        self.swap(id, false, |held| {
+            let (name, origin) = (held.name.clone(), held.origin.clone());
+            let mut listed = LocalEntity::listed(id, name, origin, len, stamp);
+            listed.saved.crc32 = crc32;
+            listed
+        });
+        Some(stamp)
+    }
+
+    /// An unread asset's file changed on disk: the checksum it kept from before it was let
+    /// go no longer stands for it.
+    pub fn stale(&mut self, id: u64) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
+            return;
+        };
+        if entity.saved.crc32.take().is_some() {
             self.revision += 1;
+        }
+    }
+
+    /// How many bytes the assets hold whole in memory, their baselines' included.
+    pub fn held_whole(&self) -> u64 {
+        self.entities.iter().map(LocalEntity::held_whole).sum()
+    }
+
+    /// Decode these assets now, on this thread, where they are read and still to be
+    /// decoded: something is about to act on what they decode to.
+    pub fn read_now(&mut self, ids: impl IntoIterator<Item = u64>, log: &mut Log) {
+        for id in ids {
+            let Some(entity) = self.get(id) else {
+                continue;
+            };
+            entity.seen.set(self.frame);
+            if !entity.reading() || entity.unread() {
+                continue;
+            }
+            let (stamp, decoded) = (entity.stamp, Decoded::of(&entity.bytes));
+            self.take_decode(id, stamp, decoded, log);
+        }
+    }
+
+    /// Fold in the decodes that have answered, and start the next.
+    fn decode(&mut self, log: &mut Log) {
+        for Decode { ids, job } in std::mem::take(&mut self.decoding) {
+            match job.poll() {
+                work::Answer::Running => self.decoding.push(Decode { ids, job }),
+                answer => self.decodes(ids, answer, log),
+            }
+        }
+        self.next_decodes();
+        #[cfg(target_arch = "wasm32")]
+        if !self.decoding.is_empty() || !self.undecoded.is_empty() {
+            self.ctx.request_repaint();
+        }
+    }
+
+    fn decodes(
+        &mut self,
+        ids: Vec<u64>,
+        answer: work::Answer<Vec<(u64, u64, Decoded)>>,
+        log: &mut Log,
+    ) {
+        for id in &ids {
+            self.flying.remove(id);
+        }
+        let decoded = match answer {
+            work::Answer::Running => return,
+            work::Answer::Answered(decoded) => decoded,
+            work::Answer::Died => {
+                let why = "the decode stopped without an answer";
+                ids.into_iter()
+                    .filter_map(|id| Some((id, self.get(id)?.stamp, Decoded::failed(why))))
+                    .collect()
+            }
+        };
+        for (id, stamp, decoded) in decoded {
+            self.take_decode(id, stamp, decoded, log);
+        }
+    }
+
+    /// Give an asset what its bytes decode to, unless it no longer holds those bytes or
+    /// has its decode already.
+    fn take_decode(&mut self, id: u64, stamp: u64, decoded: Decoded, log: &mut Log) {
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        if !entity.reading() || entity.stamp != stamp {
+            return;
+        }
+        entity.decoded(decoded);
+        if let Some(e) = &entity.parse_error {
+            log.warn(format!("{}: {e}", entity.name));
+        }
+        self.revision += 1;
+    }
+
+    /// Start decodes, up to [`DECODES`] at once, of the assets asked for first and then
+    /// of the rest in the order they arrived.
+    fn next_decodes(&mut self) {
+        while self.decoding.len() < DECODES {
+            let (most, most_bytes) = DECODE;
+            let mut chunk = Vec::new();
+            let mut bytes = 0;
+            while chunk.len() < most && bytes < most_bytes {
+                let next = self.hurried.get_mut().pop_first();
+                let Some(id) = next.or_else(|| self.undecoded.pop_front()) else {
+                    break;
+                };
+                if self.flying.contains(&id) {
+                    continue;
+                }
+                let Some(entity) = self.get(id).filter(|entity| entity.reading()) else {
+                    continue;
+                };
+                if entity.unread() {
+                    continue;
+                }
+                bytes += entity.bytes.len() as u64;
+                chunk.push((id, entity.stamp, entity.bytes.clone()));
+            }
+            if chunk.is_empty() {
+                return;
+            }
+            let ids: Vec<u64> = chunk.iter().map(|(id, _, _)| *id).collect();
+            self.flying.extend(ids.iter().copied());
+            let job = work::run(&self.ctx, move |_| {
+                chunk
+                    .into_iter()
+                    .map(|(id, stamp, bytes)| (id, stamp, Decoded::of(&bytes)))
+                    .collect()
+            });
+            self.decoding.push(Decode { ids, job });
         }
     }
 
@@ -890,7 +2144,7 @@ impl Workspace {
     ) -> (u64, Arrival) {
         let id = self.next_id;
         self.next_id += 1;
-        let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
+        let entity = LocalEntity::new(id, name, origin, bytes.into(), self.stamp());
         let arrival = match (&entity.parse_error, &entity.verify) {
             // A note has no format to decode, so a parse error on text is not a
             // failure.
@@ -927,6 +2181,7 @@ impl Workspace {
             }
         };
         self.entities.push(entity);
+        self.layout += 1;
         (id, arrival)
     }
 
@@ -960,24 +2215,54 @@ impl Workspace {
     fn stamp_for(&mut self, id: u64, bytes: &[u8]) -> u64 {
         match self
             .get(id)
-            .map(|entity| (entity.stamp, entity.bytes == bytes))
+            .map(|entity| (entity.stamp, entity.holds(bytes)))
         {
             Some((stamp, true)) => stamp,
             _ => self.stamp(),
         }
     }
 
-    /// Drain whatever the pickers finished with. Call once per frame.
-    pub fn poll(&mut self, log: &mut Log) {
+    /// Drain whatever the pickers finished with, fold in the checks, reads and decodes
+    /// that have answered and start the next, and return the files picked to open, by
+    /// name. Call once per frame.
+    pub fn poll(&mut self, log: &mut Log) -> Vec<(String, Vec<u8>)> {
+        self.frame += 1;
+        let mut opened = Vec::new();
         while let Ok(message) = self.rx.try_recv() {
             match message {
-                Incoming::Opened { name, bytes } => {
-                    self.ingest(name.clone(), Origin::File(name), bytes, log);
-                }
+                Incoming::Opened { name, bytes } => opened.push((name, bytes)),
                 Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
             }
+        }
+        if let Some(check) = &self.checking {
+            let answer = check.job.poll();
+            self.checked(answer, log);
+        }
+        self.woken(log);
+        self.decode(log);
+        opened
+    }
+
+    /// Wait for every check, read and decode in flight, and fold them in.
+    #[cfg(test)]
+    pub fn settle_files(&mut self, log: &mut Log) {
+        loop {
+            self.next_decodes();
+            let Some(Decode { ids, job }) = self.decoding.pop() else {
+                break;
+            };
+            let answer = job.wait();
+            self.decodes(ids, answer, log);
+        }
+        while let Some(check) = &self.checking {
+            let answer = check.job.wait();
+            self.checked(answer, log);
+        }
+        for Wake { id, file, job } in std::mem::take(&mut self.waking) {
+            let answer = job.wait();
+            self.wakes(id, &file, answer, log);
         }
     }
 
@@ -1037,18 +2322,30 @@ impl Workspace {
     /// back to the instrument.
     pub fn export_name(&self, id: u64) -> Option<String> {
         let entity = self.get(id)?;
-        Some(export_filename(&entity.name, &entity.bytes))
+        Some(match entity.rests() {
+            Some(file) => tagged_filename(&entity.name, || file.index.tag().to_string()),
+            None => export_filename(&entity.name, &entity.bytes),
+        })
     }
 
     pub fn export(&self, id: u64) {
-        let Some(entity) = self.entities.iter().find(|e| e.id == id) else {
+        let Some(entity) = self.get(id) else {
             return;
         };
         let name = match self.export_name(id) {
             Some(name) => name,
             None => return,
         };
-        self.save_bytes(name, entity.bytes.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(file) = entity.rests() {
+            let (tx, ctx, file) = (self.tx.clone(), self.ctx.clone(), file.clone());
+            spawn(async move {
+                let _ = tx.send(save_file(name, file).await);
+                ctx.request_repaint();
+            });
+            return;
+        }
+        self.save_bytes(name, entity.bytes.to_vec());
     }
 
     /// Hand bytes to the user under `name`, through this target's way of saving a file.
@@ -1068,11 +2365,26 @@ impl Workspace {
     /// ⚠️ A pending edit has not reached the bytes, so restoring them changes nothing.
     /// Reverting a piano library's plan only clears the flag.
     pub fn revert(&mut self, id: u64, log: &mut Log) {
-        let Some(saved) = self.get(id).map(|entity| entity.saved.bytes.clone()) else {
+        let Some(entity) = self.get(id) else {
             return;
         };
+        let (resting, file, stamp) = (
+            entity.rests().is_some(),
+            entity.saved.file.clone(),
+            entity.saved.stamp,
+        );
+        let in_memory = !resting && file.is_none() && entity.saved.unread.is_none();
+        let saved = in_memory.then(|| entity.saved.bytes.clone());
         let dropped = self.mark_pending(id, false);
-        if self.respell(id, saved).is_none() && !dropped {
+        let restored = match (resting, file, saved) {
+            (false, Some(file), _) => {
+                self.rest(id, file, stamp);
+                true
+            }
+            (false, None, Some(saved)) => self.respell(id, saved).is_some(),
+            _ => false,
+        };
+        if !restored && !dropped {
             return;
         }
         if let Some(entity) = self.get(id) {
@@ -1086,7 +2398,7 @@ impl Workspace {
     /// ⚠️ Only the editor holding the edit can tell, so it must call this on every frame
     /// the answer might change. The bytes are the saved ones either way.
     pub fn mark_pending(&mut self, id: u64, pending: bool) -> bool {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return false;
         };
         if std::mem::replace(&mut entity.pending, pending) == pending {
@@ -1101,10 +2413,12 @@ impl Workspace {
     /// ⚠️ The bytes do not change, so the stamp stays and caches over them stay valid.
     /// The list revision moves, so the store is written again without the unsaved copy.
     pub fn mark_saved(&mut self, id: u64) {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
-        if !entity.is_unsaved() {
+        // Resting in its file, it holds what it was saved as, and only an editor's pending
+        // edit, which the bytes do not hold, can make it unsaved.
+        if !entity.is_unsaved() || entity.rests().is_some() {
             return;
         }
         entity.saved = entity.baseline();
@@ -1123,9 +2437,33 @@ impl Workspace {
     /// about a slot this app does not have to read back, and [`crate::device::link`]
     /// keeps it until a walk of that slot says otherwise.
     pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+        let resting = self
+            .get(id)
+            .and_then(LocalEntity::rests)
+            .map(|file| file.holds(&sent));
+        match resting {
+            Some(true) => {
+                if let Some(entity) = self.get_mut(id) {
+                    entity.link = Some((class, at));
+                    entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
+                }
+                self.revision += 1;
+                return;
+            }
+            // The file changed under the send, and what the instrument now holds is what
+            // was sent.
+            Some(false) => {
+                self.respell(id, sent.clone().into());
+            }
+            None => {}
+        }
         let stamp = self.stamp_for(id, &sent);
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
+        };
+        let sent = match stamp == entity.stamp {
+            true => entity.bytes.clone(),
+            false => sent.into(),
         };
         entity.saved = Baseline::read(sent, stamp);
         entity.link = Some((class, at));
@@ -1148,7 +2486,7 @@ impl Workspace {
     /// The decode and the verify run again: an editor's output is bytes like any other and
     /// is checked the same way as a file from disk.
     pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        let Some(verify) = self.respell(id, bytes) else {
+        let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
         let note = self.get(id).is_some_and(|held| held.is_text);
@@ -1169,18 +2507,28 @@ impl Workspace {
     /// and its revert are measured against the same bytes. The link and the last write
     /// are kept too, because both are evidence about a slot, which an edit here says
     /// nothing about.
-    fn respell(&mut self, id: u64, bytes: Vec<u8>) -> Option<VerifyState> {
-        if self.get(id).is_none_or(|entity| entity.bytes == bytes) {
+    fn respell(&mut self, id: u64, bytes: Bytes) -> Option<VerifyState> {
+        if self.get(id).is_none_or(|entity| entity.holds(&bytes)) {
             return None;
+        }
+        // The baseline of an asset still being decoded stays, and is read here. One whose
+        // file was never read keeps a baseline only that file holds.
+        if let Some(entity) = self
+            .get_mut(id)
+            .filter(|entity| entity.reading() && !entity.unread())
+        {
+            let saved = std::mem::take(&mut entity.saved.bytes);
+            entity.saved = Baseline::read(saved, entity.saved.stamp);
         }
         let stamp = self.stamp();
         // The baseline stays, but whether the asset holds it may change. A revert, or an
         // edit made and then undone, puts back what it was saved as.
         let held = self
             .get(id)
-            .is_some_and(|entity| entity.saved.bytes == bytes);
-        let entity = self.entities.iter_mut().find(|e| e.id == id)?;
+            .is_some_and(|entity| entity.saved.holds(&bytes));
+        let entity = self.get_mut(id)?;
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
+        let path = entity.path.take();
         let saved = std::mem::take(&mut entity.saved);
         let saved = Baseline {
             stamp: match held {
@@ -1188,6 +2536,10 @@ impl Workspace {
                 false => saved.stamp,
             },
             ..saved
+        };
+        let bytes = match held {
+            true => saved.bytes.clone(),
+            false => bytes,
         };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
@@ -1198,28 +2550,76 @@ impl Workspace {
             saved,
             wrote,
             pending,
+            path,
+            seen: entity.seen.clone(),
             ..replaced
         };
         Some(verify)
     }
 
     pub fn duplicate(&mut self, id: u64, log: &mut Log) -> Option<u64> {
-        let source = self.entities.iter().find(|e| e.id == id)?;
+        let source = self.get(id)?;
         let name = crate::strings::tagged(
             &source.name,
             &format!("{} copy", crate::strings::display_name(&source.name)),
         );
-        let (origin, bytes) = (source.origin.clone(), source.bytes.clone());
+        let bytes = match source.whole() {
+            Ok(bytes) => bytes.into_owned(),
+            Err(e) => {
+                log.error(format!("{}: {e}", source.name));
+                log.trouble(format!(
+                    "“{}” could not be read, so it was not copied.",
+                    source.name
+                ));
+                return None;
+            }
+        };
+        let origin = source.origin.clone();
         Some(self.ingest(name, origin, bytes, log))
     }
 
     pub fn remove(&mut self, id: u64, log: &mut Log) {
-        let Some(at) = self.entities.iter().position(|e| e.id == id) else {
-            return;
-        };
+        if let Some(gone) = self.forget(id) {
+            log.say(format!("Removed “{}” from this computer.", gone.name));
+        }
+    }
+
+    /// Let go of an asset without a word, as when it turns out to be another asset's
+    /// file.
+    pub fn forget(&mut self, id: u64) -> Option<LocalEntity> {
+        let at = self.position(id)?;
         let gone = self.entities.remove(at);
-        self.revision += 1;
-        log.say(format!("Removed “{}” from this computer.", gone.name));
+        self.moved();
+        Some(gone)
+    }
+
+    /// Let go of every asset on this computer, as another library takes its place, and
+    /// return their ids. The views of slots stay.
+    pub fn close_library(&mut self) -> Vec<u64> {
+        let gone = self.listed().map(|entity| entity.id).collect();
+        self.entities.retain(|entity| !entity.kept);
+        self.let_go();
+        self.moved();
+        gone
+    }
+
+    /// Drop the checks, reads and decodes waiting on assets no longer held, so that the
+    /// files' handles close.
+    ///
+    /// ⚠️ A check or read already running holds its file until it answers.
+    fn let_go(&mut self) {
+        let entities = &self.entities;
+        let held = |id: u64| entities.iter().any(|entity| entity.id == id);
+        self.checks.retain(|(id, _)| held(*id));
+        self.waking.retain(|wake| held(wake.id));
+        self.undecoded.retain(|id| held(*id));
+        self.hurried.get_mut().retain(|id| held(*id));
+        self.wanted.get_mut().retain(|id| held(*id));
+        self.asked.retain(|id| held(*id));
+        if self.checking.as_ref().is_some_and(|check| !held(check.id)) {
+            self.checking = None;
+        }
+        self.next_check();
     }
 
     /// The next id a new asset would take, for the store to carry over.
@@ -1227,21 +2627,33 @@ impl Workspace {
         self.next_id
     }
 
+    /// Give no new asset an id below `next`, which a library opening has handed out.
+    pub fn reserve(&mut self, next: u64) {
+        self.next_id = self.next_id.max(next);
+    }
+
     /// Restore what a previous session held, and return how many assets were refused.
     ///
-    /// Every asset is decoded and verified on the way in: bytes from a store have been
-    /// somewhere this app does not control and get no more trust than bytes from a disk.
-    /// An id is refused if it leaves no room for the next id or is already in the list.
-    ///
-    /// ⚠️ Restore decodes and re-encodes every asset before the first wasm frame. The
-    /// tab cannot yield while checking up to the store budget.
+    /// Every asset is verified on the way in: bytes from a store have been somewhere
+    /// this app does not control and get no more trust than bytes from a disk. An asset
+    /// held whole is decoded and re-encoded off the frame, a few at a time, and is
+    /// [`VerifyState::Reading`] until then; one holding an unsaved edit is decoded here.
+    /// One resting in its file decodes nothing, and its checksum is checked off the
+    /// frame. See [`Workspace::poll`]. One unread holds nothing until
+    /// [`Workspace::took`]. An id is refused if it leaves no room for the next id or is
+    /// already in the list.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
         let mut refused = 0;
+        // Kept current with each asset restored, so an id is looked up, not searched for.
+        let mut held = std::mem::take(&mut *self.positions());
         for Saved {
             id,
             name,
+            path,
             origin,
             saved,
+            file,
+            unread,
             unsaved,
         } in saved
         {
@@ -1249,31 +2661,81 @@ impl Workspace {
                 refused += 1;
                 continue;
             };
-            if self.entities.iter().any(|e| e.id == id) {
+            // Every id held is below the next one, so only an id below it can be held.
+            if id < self.next_id && held.1.contains_key(&id) {
                 refused += 1;
                 continue;
             }
             let stamp = self.stamp();
-            let bytes = unsaved.unwrap_or_else(|| saved.clone());
-            // The saved and held bytes share a stamp only when they are the same bytes.
-            let held = match bytes == saved {
-                true => stamp,
-                false => self.stamp(),
-            };
-            let entity = LocalEntity {
-                saved: Baseline::read(saved, held),
-                ..LocalEntity::new(id, name, origin, bytes, stamp)
+            let entity = match (file, unsaved, unread) {
+                (None, None, Some(len)) => LocalEntity {
+                    path,
+                    ..LocalEntity::listed(id, name, origin, len, stamp)
+                },
+                (Some(file), None, _) => {
+                    self.checks.push_back((id, file.clone()));
+                    LocalEntity {
+                        path,
+                        ..LocalEntity::resting(id, name, origin, file, stamp)
+                    }
+                }
+                (Some(file), Some(bytes), _) => {
+                    let held = self.stamp();
+                    self.checks.push_back((id, file.clone()));
+                    LocalEntity {
+                        saved: Baseline::on_disk(file, held),
+                        path,
+                        ..LocalEntity::new(id, name, origin, bytes.into(), stamp)
+                    }
+                }
+                (None, None, None) => {
+                    self.undecoded.push_back(id);
+                    LocalEntity {
+                        path,
+                        ..LocalEntity::undecoded(id, name, origin, saved.into(), stamp)
+                    }
+                }
+                (None, Some(bytes), Some(len)) => {
+                    let saved = Baseline {
+                        stamp: self.stamp(),
+                        unread: Some(len),
+                        ..Baseline::default()
+                    };
+                    LocalEntity {
+                        saved,
+                        path,
+                        ..LocalEntity::new(id, name, origin, bytes.into(), stamp)
+                    }
+                }
+                (None, Some(bytes), None) => {
+                    // The saved and held bytes share a stamp, and are held once, only when
+                    // they are the same bytes.
+                    let saved = Bytes::from(saved);
+                    let (held, bytes) = match saved == bytes {
+                        true => (stamp, saved.clone()),
+                        false => (self.stamp(), bytes.into()),
+                    };
+                    LocalEntity {
+                        saved: Baseline::read(saved, held),
+                        path,
+                        ..LocalEntity::new(id, name, origin, bytes, stamp)
+                    }
+                }
             };
             if let Some(e) = &entity.parse_error {
                 log.warn(format!("{}: {e}", entity.name));
             }
             self.next_id = self.next_id.max(next);
+            held.1.insert(id, self.entities.len());
             self.entities.push(entity);
         }
         if let Some(next) = next_id {
             self.next_id = self.next_id.max(next);
         }
-        self.revision += 1;
+        self.moved();
+        held.0 = self.layout;
+        *self.at.get_mut() = held;
+        self.next_check();
         refused
     }
 
@@ -1296,6 +2758,17 @@ impl Workspace {
 /// Hand `bytes` to the user under `name`, however this target saves a file.
 #[cfg(not(target_arch = "wasm32"))]
 async fn save(name: String, bytes: Vec<u8>) -> Incoming {
+    save_from(name, bytes.len() as u64, bytes.as_slice()).await
+}
+
+/// [`save`] for an asset resting in its file: the file is copied across, never held.
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_file(name: String, file: Arc<OnDisk>) -> Incoming {
+    save_from(name, file.len, file.reader()).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_from(name: String, len: u64, source: impl std::io::Read) -> Incoming {
     let Some(handle) = rfd::AsyncFileDialog::new()
         .set_file_name(&name)
         .save_file()
@@ -1303,27 +2776,25 @@ async fn save(name: String, bytes: Vec<u8>) -> Incoming {
     else {
         return Incoming::Note(format!("{name}: save canceled"));
     };
-    match write_beside(handle.path(), &bytes) {
-        Ok(()) => Incoming::Note(format!(
-            "wrote {} ({} bytes)",
-            handle.file_name(),
-            bytes.len(),
-        )),
+    match write_beside(handle.path(), source) {
+        Ok(()) => Incoming::Note(format!("wrote {} ({len} bytes)", handle.file_name())),
         Err(e) => Incoming::Failed(format!("{name}: {e}")),
     }
 }
 
-/// Write `bytes` to a sibling of `path` and rename it over `path`.
+/// Write what `source` yields to a sibling of `path` and rename it over `path`.
 ///
 /// ⚠️ A library is hundreds of megabytes, and a write that stopped halfway would leave
 /// the chosen file as neither the old nor the new one. The rename is the only moment the
 /// chosen path changes, and the temp file is removed if anything fails.
 #[cfg(not(target_arch = "wasm32"))]
-fn write_beside(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_beside(path: &std::path::Path, mut source: impl std::io::Read) -> std::io::Result<()> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(".tmp");
     let temp = std::path::PathBuf::from(temp);
-    let wrote = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path));
+    let wrote = std::fs::File::create(&temp)
+        .and_then(|mut out| std::io::copy(&mut source, &mut out))
+        .and_then(|_| std::fs::rename(&temp, path));
     if wrote.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
@@ -1382,12 +2853,12 @@ pub(crate) fn as_type_0(bytes: &[u8]) -> Vec<u8> {
 /// ⚠️ wasm has one thread and cannot block: the future has to go to the microtask
 /// queue, never to a thread, or the picker never resolves.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(future: F) {
+pub(crate) fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(future: F) {
     std::thread::spawn(move || nord_usb::block_on(future));
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
+pub(crate) fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
     wasm_bindgen_futures::spawn_local(future);
 }
 
@@ -1396,7 +2867,31 @@ mod tests {
     use super::*;
 
     fn ingest(name: &str, bytes: Vec<u8>) -> LocalEntity {
-        LocalEntity::new(1, name.into(), Origin::Fresh, bytes, 0)
+        LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
+    }
+
+    /// Closing a library lets go of the files its assets rested in, checks still waiting
+    /// their turn included, so no handle to the library it left stays open.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn closing_the_library_lets_go_of_the_files_its_assets_rest_in() {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let mut workspace = Workspace::new(egui::Context::default());
+        let files: Vec<Arc<OnDisk>> = ["First.nsmp", "Second.nsmp", "Third.nsmp"]
+            .into_iter()
+            .map(|name| {
+                let file = crate::testing::on_disk(&dir, name, &bytes);
+                crate::testing::rest(&mut workspace, name, file.clone());
+                file
+            })
+            .collect();
+        let waiting = &files[2];
+        assert!(Arc::strong_count(waiting) > 2, "its check waits its turn");
+
+        workspace.close_library();
+        assert_eq!(workspace.listed().count(), 0);
+        assert_eq!(Arc::strong_count(waiting), 1, "only this test holds it");
     }
 
     /// The number a file and a slot are compared on is the CRC-32 of the wire body, and
@@ -1598,7 +3093,7 @@ mod tests {
         assert_eq!(workspace.entities().len(), 2);
 
         // Edited, it stays a view; kept, it stops being one and keeps its edit.
-        let edited = workspace.get(viewed).unwrap().bytes.clone();
+        let edited = workspace.get(viewed).unwrap().bytes.to_vec();
         workspace.replace_bytes(viewed, [edited, vec![]].concat(), &mut log);
         assert!(workspace.is_view(viewed));
         workspace.keep(viewed, &mut log);
@@ -1642,7 +3137,7 @@ mod tests {
         let mut log = Log::default();
         let at = Location { bank: 6, slot: 3 };
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let sent = workspace.get(id).unwrap().bytes.clone();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
         workspace.landed(id, ObjectClass::Program, at, sent.clone());
         let wrote = |workspace: &Workspace| {
             workspace
@@ -1715,7 +3210,7 @@ mod tests {
         let owed = view(&mut workspace, 1, &mut log);
         let untouched = view(&mut workspace, 2, &mut log);
 
-        let bytes = workspace.get(edited).unwrap().bytes.clone();
+        let bytes = workspace.get(edited).unwrap().bytes.to_vec();
         workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
         let mut queue = Queue::default();
         crate::queue::enqueue(
@@ -1781,7 +3276,7 @@ mod tests {
         let path = dir.join("Royal Grand.npno");
         std::fs::write(&path, b"what was there before").expect("a file to replace");
 
-        write_beside(&path, b"the bytes the editor made").expect("it writes");
+        write_beside(&path, &b"the bytes the editor made"[..]).expect("it writes");
         assert_eq!(
             std::fs::read(&path).expect("it is there"),
             b"the bytes the editor made"
@@ -1793,7 +3288,7 @@ mod tests {
         assert_eq!(left, [path.file_name().expect("a name")], "{left:?}");
 
         let nowhere = dir.join("no-such-folder").join("Royal Grand.npno");
-        assert!(write_beside(&nowhere, b"anything").is_err());
+        assert!(write_beside(&nowhere, &b"anything"[..]).is_err());
         assert!(!nowhere.with_extension("npno.tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1882,7 +3377,7 @@ mod tests {
         let mut log = Log::default();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let opened = workspace.get(id).unwrap().bytes.clone();
+        let opened = workspace.get(id).unwrap().bytes.to_vec();
         let stamp = |workspace: &Workspace| workspace.get(id).unwrap().stamp;
         let first = stamp(&workspace);
 
@@ -1914,7 +3409,7 @@ mod tests {
         let mut log = Log::default();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let opened = workspace.get(id).unwrap().bytes.clone();
+        let opened = workspace.get(id).unwrap().bytes.to_vec();
         let unsaved = |workspace: &Workspace| workspace.get(id).unwrap().is_unsaved();
         assert!(!unsaved(&workspace), "a fresh asset starts saved");
 
@@ -1989,7 +3484,7 @@ mod tests {
         let mut log = Log::default();
         let at = Location { bank: 6, slot: 3 };
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let sent = workspace.get(id).unwrap().bytes.clone();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
@@ -2099,7 +3594,7 @@ mod tests {
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
 
         // An edit: new bytes, same name.
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
@@ -2119,8 +3614,8 @@ mod tests {
         );
     }
 
-    /// What a previous session held comes back decoded and checked, keeping its name,
-    /// its origin and its id.
+    /// What a previous session held comes back keeping its name, its origin and its id,
+    /// and is decoded and checked off the frame.
     #[test]
     fn a_restored_asset_keeps_what_it_was() {
         let ctx = egui::Context::default();
@@ -2130,8 +3625,11 @@ mod tests {
             vec![Saved {
                 id: 9,
                 name: "Africa-Split.ne5p".into(),
+                path: None,
                 origin: Origin::Fresh,
                 saved: Fresh::Program.bytes().unwrap(),
+                file: None,
+                unread: None,
                 unsaved: None,
             }],
             Some(10),
@@ -2139,11 +3637,115 @@ mod tests {
         );
         let entity = workspace.get(9).expect("restored under its own id");
         assert_eq!(entity.name, "Africa-Split.ne5p");
+        assert!(entity.reading());
+        assert_eq!(
+            crate::browser::Kind::of(entity),
+            crate::browser::Kind::Program,
+            "what its name says"
+        );
+        assert!(!entity.is_unsaved());
+        workspace.settle_files(&mut log);
+        let entity = workspace.get(9).unwrap();
         assert!(matches!(entity.verify, VerifyState::Ok));
+        assert_eq!(
+            crate::browser::Kind::of(entity),
+            crate::browser::Kind::Program
+        );
         assert!(!entity.is_unsaved());
         // A new asset cannot land on an id something restored is already using.
         let fresh = workspace.create(Fresh::Live, &mut log).unwrap();
         assert!(fresh >= 10);
+    }
+
+    /// An id already held is refused, in the same restore or a later one; a free id
+    /// below the next one is not.
+    #[test]
+    fn a_restore_refuses_only_the_ids_already_held() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let saved = |id| Saved {
+            id,
+            name: format!("{id}.ne5p"),
+            path: None,
+            origin: Origin::Fresh,
+            saved: Fresh::Program.bytes().unwrap(),
+            file: None,
+            unread: None,
+            unsaved: None,
+        };
+        assert_eq!(
+            workspace.restore(vec![saved(5), saved(5)], None, &mut log),
+            1
+        );
+        assert_eq!(
+            workspace.restore(vec![saved(5), saved(3)], None, &mut log),
+            1
+        );
+        let ids: Vec<u64> = workspace.listed().map(|entity| entity.id).collect();
+        assert_eq!(ids, [5, 3]);
+    }
+
+    /// A restore in parts, as a listing brings a library back, looks each id up rather
+    /// than searching the list for it, however many assets it already holds.
+    #[test]
+    fn a_restore_in_parts_never_searches_the_list_per_asset() {
+        const PARTS: u64 = 8;
+        const PART: u64 = 256;
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let listed = |id| Saved {
+            id,
+            name: format!("{id}.ne5p"),
+            path: None,
+            origin: Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(10),
+            unsaved: None,
+        };
+        // Ids arrive out of order, each below the next id the listing has given out.
+        for part in 0..PARTS {
+            let ids = (0..PART).map(|n| 1 + n * PARTS + part);
+            let refused =
+                workspace.restore(ids.map(listed).collect(), Some(1 + PARTS * PART), &mut log);
+            assert_eq!(refused, 0);
+        }
+        assert_eq!(workspace.listed().count() as u64, PARTS * PART);
+        let searched = workspace.searched.get();
+        assert!(searched <= PARTS as usize, "searched {searched} times");
+    }
+
+    /// The assets asked for first are decoded first, whatever order the rest arrived in.
+    #[test]
+    fn an_asset_hurried_is_decoded_before_the_others() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let held = DECODES * DECODE.0 + 1;
+        let saved = (1..=held as u64).map(|id| Saved {
+            id,
+            name: format!("{id}.ne5p"),
+            path: None,
+            origin: Origin::Fresh,
+            saved: bytes.clone(),
+            file: None,
+            unread: None,
+            unsaved: None,
+        });
+        workspace.restore(saved.collect(), None, &mut log);
+        let last = held as u64;
+        workspace.hurry(last);
+        workspace.next_decodes();
+        assert!(
+            workspace.flying.contains(&last),
+            "the last to arrive goes first"
+        );
+        assert!(
+            !workspace.flying.contains(&(last - 1)),
+            "one more than fits waits"
+        );
+        workspace.settle_files(&mut log);
+        assert_eq!(workspace.reading(), 0);
     }
 
     /// A flipped body byte is reported: the container's checksum no longer matches, and

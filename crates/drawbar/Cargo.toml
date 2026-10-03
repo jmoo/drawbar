@@ -2,7 +2,7 @@
 name = "drawbar"
 description = "Your Nord's sounds, in a window: browse, edit and send programs, samples and pianos, in the browser or on the desktop"
 edition.workspace = true
-rust-version = "1.88"
+rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
 version = "0.9.1"
@@ -17,7 +17,6 @@ name = "drawbar"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.22"
 # glow (WebGL2 / OpenGL) makes a smaller wasm module than the default wgpu backend,
 # and every browser with WebUSB has WebGL2.
 eframe = { version = "0.32", default-features = false, features = [
@@ -32,6 +31,9 @@ nord-format = { path = "../nord-format", version = "0.7.1", features = [
   "bundle",
 ] }
 rfd = "0.15"
+# The library's index. eframe's `persistence` already builds both.
+ron = "0.10"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests
@@ -49,6 +51,12 @@ nord-usb = { path = "../nord-usb", version = "0.7.1", features = [
 ] }
 # `playback` alone: the decoders are for files, and drawbar feeds it raw samples.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+# The `file:` URL that shows the library's folder. eframe already builds it.
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+# The open-file limit, raised at start. Linux builds already ship it, through eframe.
+rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -67,11 +75,34 @@ web-sys = { version = "0.3", features = [
   "BaseAudioContext",
   "Blob",
   "BlobPropertyBag",
+  "DirectoryPickerOptions",
   "Document",
+  "DomException",
   "Element",
+  "File",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemHandle",
+  "FileSystemHandleKind",
+  "FileSystemHandlePermissionDescriptor",
+  "FileSystemPermissionMode",
+  "FileSystemWritableFileStream",
   "Headers",
   "HtmlAnchorElement",
   "HtmlCanvasElement",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "Lock",
+  "LockManager",
+  "LockOptions",
+  "MessageEvent",
   "MidiAccess",
   "MidiInput",
   "MidiInputMap",
@@ -83,6 +114,7 @@ web-sys = { version = "0.3", features = [
   "RequestInit",
   "Response",
   "Storage",
+  "StorageManager",
   "Url",
   "Usb",
   "UsbConnectionEvent",
@@ -90,6 +122,8 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceFilter",
   "UsbDeviceRequestOptions",
   "Window",
+  "Worker",
+  "WritableStream",
 ] }
 nord-usb = { path = "../nord-usb", version = "0.7.1", default-features = false, features = [
   "web",

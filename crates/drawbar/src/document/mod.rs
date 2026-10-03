@@ -17,7 +17,7 @@ use crate::midi::Played;
 use crate::queue::Queue;
 use crate::strings;
 use crate::tags::Tags;
-use crate::workspace::{LocalEntity, Workspace};
+use crate::workspace::{LocalEntity, VerifyState, Workspace};
 
 mod advanced;
 pub mod capability;
@@ -94,14 +94,19 @@ impl<'a> Asset<'a> {
     }
 
     fn decoded(&self) -> Option<&'a nord_format::Entity> {
-        self.entity.entity.as_ref()
+        self.entity.entity.as_deref()
     }
 }
 
 fn shape(entity: &LocalEntity) -> Shape {
     use nord_format::Entity as E;
 
-    let Some(decoded) = &entity.entity else {
+    match entity.indexed() {
+        Some(crate::ondisk::Index::Piano(_)) => return Shape::Piano,
+        Some(crate::ondisk::Index::Sample(_)) => return Shape::Sample,
+        None => {}
+    }
+    let Some(decoded) = entity.entity.as_deref() else {
         // ⚠️ Checked before `is_text`, so a WAV always opens in the encode panel and
         // never as text.
         if encode::is_wav(&entity.bytes) {
@@ -288,11 +293,33 @@ impl Document {
         around: &Around<'_>,
     ) -> Wants {
         let played = around.played;
+        // A file not read yet is asked for, and the tab says so until it comes; one read
+        // and not yet decoded is decoded here.
+        if let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) {
+            let said = match &entity.verify {
+                VerifyState::NotRead(why) => format!("“{}” could not be read: {why}", entity.name),
+                _ => "Reading…".to_string(),
+            };
+            workspace.hurry(id);
+            ui.label(egui::RichText::new(said).weak());
+            return Wants::default();
+        }
+        workspace.read_now([id], log);
+        // The sample editor works on the whole body, so an instrument resting in its file
+        // is read whole first, off the frame.
+        if workspace
+            .get(id)
+            .is_some_and(|entity| entity.rests().is_some() && shape(entity) == Shape::Sample)
+        {
+            workspace.wake(id);
+            ui.label(egui::RichText::new("Reading the instrument…").weak());
+            return Wants::default();
+        }
         let Some(entity) = workspace.get(id) else {
             return Wants::default();
         };
         let stamp = entity.stamp;
-        let decoded = entity.entity.as_ref();
+        let decoded = entity.entity.as_deref();
         let registry = decoded.map(fields::fields_of).unwrap_or_default();
         let viewing = workspace.is_view(id);
         let asset = Asset::of(entity);
@@ -521,7 +548,7 @@ impl Document {
             return;
         };
         let checked = match workspace.get(id) {
-            Some(entity) => piano::planned(&entity.saved.bytes, &plan).map(|_| ()),
+            Some(entity) => piano::check(entity, &plan),
             None => return,
         };
         match checked {
@@ -549,6 +576,12 @@ impl Document {
     /// [`LocalEntity::is_unsaved`]. Call this wherever a plan is committed or laid out.
     fn note_pending(&self, id: u64, workspace: &mut Workspace) -> bool {
         workspace.mark_pending(id, self.pends(id))
+    }
+
+    /// Let go of what is kept about an asset that has left the workspace.
+    pub fn forget(&mut self, id: u64) {
+        self.views.remove(&id);
+        self.piano.forget(id);
     }
 
     /// Hold back acts that would carry a piano library's bytes while its plan is not yet
@@ -882,7 +915,7 @@ impl Document {
 
     /// Decode, play, strike, or save one zone of a sample instrument.
     fn zone_audio(&mut self, id: u64, ask: sample::Ask, workspace: &mut Workspace, log: &mut Log) {
-        let entity = workspace.get(id).and_then(|e| e.entity.as_ref());
+        let entity = workspace.get(id).and_then(|e| e.entity.as_deref());
         let (zone, ask) = match ask {
             sample::Ask::Decode(zone) => {
                 if !self.audio.due(zone) {
@@ -979,7 +1012,7 @@ impl Document {
     fn instrument_name(&self, id: u64, workspace: &Workspace) -> String {
         let entity = workspace.get(id);
         entity
-            .and_then(|e| e.entity.as_ref())
+            .and_then(|e| e.entity.as_deref())
             .and_then(sample::snapshot)
             .and_then(Result::ok)
             .map(|snapshot| snapshot.name)
@@ -1073,7 +1106,7 @@ impl Document {
             workspace.replace_bytes(id, out, log);
         }
         if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
-            if let Some(decoded) = &held.entity {
+            if let Some(decoded) = held.entity.as_deref() {
                 self.audio.carry(id, (before, held.stamp), decoded);
             }
         }
@@ -1435,7 +1468,7 @@ mod tests {
         }
 
         fn set(&mut self, sets: &[(&str, &str)]) {
-            let bytes = self.entity().bytes.clone();
+            let bytes = self.entity().bytes.to_vec();
             let sets: Vec<(String, String)> = sets
                 .iter()
                 .map(|(path, value)| ((*path).to_string(), (*value).to_string()))
@@ -1499,6 +1532,33 @@ mod tests {
         render_view(sets, kind, Face::Basic);
     }
 
+    /// A sample instrument resting in its file is read whole, off the frame, when its
+    /// document opens, and the editor draws once the read answers.
+    #[test]
+    fn a_resting_sample_is_read_whole_when_its_document_opens() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+
+        let words = open.frame(Vec::new());
+        assert!(
+            words.iter().any(|word| word == "Reading the instrument…"),
+            "{words:?}"
+        );
+        assert!(open.workspace.waking(open.id));
+        assert!(
+            open.entity().rests().is_some(),
+            "nothing is held until the read answers"
+        );
+
+        open.workspace.settle_files(&mut open.log);
+        assert!(open.entity().rests().is_none(), "it is held whole");
+        assert!(!open.entity().is_unsaved());
+        let words = open.frame(Vec::new());
+        assert!(words.iter().any(|word| word == "Marimba"), "{words:?}");
+    }
+
     /// Every kind, in both the dark and the light theme.
     #[test]
     fn every_kind_shows_the_header_and_names_its_faces() {
@@ -1525,7 +1585,7 @@ mod tests {
     #[test]
     fn the_headers_words_never_run_under_its_controls() {
         let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.clone();
+        let bytes = open.entity().bytes.to_vec();
         open.id = open.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -1681,7 +1741,7 @@ mod tests {
     fn typing_in_a_samples_name_box_writes_the_name_the_file_stores() {
         let mut open = Open::file("whatever.nsmp", sample_bytes());
         let stored = |open: &Open| {
-            sample::snapshot(open.entity().entity.as_ref().unwrap())
+            sample::snapshot(open.entity().entity.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
                 .name
@@ -1709,7 +1769,7 @@ mod tests {
     fn a_stored_name_box_holds_no_more_bytes_than_the_field_does() {
         let mut open = Open::file("whatever.nsmp", sample_bytes());
         let held = |open: &Open| {
-            sample::snapshot(open.entity().entity.as_ref().expect("it decoded"))
+            sample::snapshot(open.entity().entity.as_deref().expect("it decoded"))
                 .expect("an instrument")
                 .expect("it reads")
         };
@@ -1813,7 +1873,7 @@ mod tests {
     #[test]
     fn the_loud_action_carries_the_count_where_there_is_somewhere_to_send_it() {
         let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.clone();
+        let bytes = open.entity().bytes.to_vec();
         open.id = open.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -2103,7 +2163,7 @@ mod tests {
     fn a_refused_cell_keeps_its_error() {
         let mut open = Open::fresh(Fresh::Program);
         open.frame(Vec::new());
-        let (id, before) = (open.id, open.entity().bytes.clone());
+        let (id, before) = (open.id, open.entity().bytes.to_vec());
 
         // The same call the frame makes, so this covers how the table handles the
         // library's answer.
@@ -2255,7 +2315,7 @@ mod tests {
         } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
         let local = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
         assert!(local.name.is_none(), "nothing has been asked");
@@ -2291,7 +2351,7 @@ mod tests {
             .workspace
             .create(Fresh::Program, &mut open.log)
             .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.clone();
+        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
         let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
             .expect("a program can name a piano");
         open.id = open.workspace.ingest(
@@ -2361,7 +2421,7 @@ mod tests {
         } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
 
         // Nothing scanned: the dial stays numeric.
@@ -2619,7 +2679,7 @@ mod tests {
         open.frame(vec![testing::button(PAGE_CORNER, true)]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
 
-        let written = String::from_utf8(open.entity().bytes.clone()).expect("still text");
+        let written = String::from_utf8(open.entity().bytes.to_vec()).expect("still text");
         assert!(written.contains('X'), "X is in the bytes: {written:?}");
         assert_eq!(
             written.replace('X', ""),
@@ -2780,7 +2840,7 @@ mod tests {
             .find(|e| e.id != id)
             .expect("an instrument was added");
         assert_eq!(made.name, "Marimba hit.nsmp");
-        let snapshot = sample::snapshot(made.entity.as_ref().expect("it decoded"))
+        let snapshot = sample::snapshot(made.entity.as_deref().expect("it decoded"))
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.name, "Marimba hit");
@@ -2861,7 +2921,7 @@ mod tests {
         ] {
             let open = Open::file(name, bytes);
             let entity = open.entity();
-            let registry = entity.entity.as_ref().and_then(fields::fields_of);
+            let registry = entity.entity.as_deref().and_then(fields::fields_of);
             assert!(registry.is_none(), "{name} declares no field registry");
             assert_eq!(
                 faces(shape(entity))
@@ -3022,7 +3082,7 @@ mod tests {
             None,
             "the selection does not survive a switch"
         );
-        let snapshot = sample::snapshot(open.entity().entity.as_ref().unwrap())
+        let snapshot = sample::snapshot(open.entity().entity.as_deref().unwrap())
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.zones[0].top_note, 84, "the edit survives");
@@ -3078,7 +3138,7 @@ mod tests {
     fn a_piano_lays_its_plan_out_before_anything_carries_its_bytes() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         let named = |open: &Open| {
-            piano::snapshot(open.entity().entity.as_ref().unwrap())
+            piano::snapshot(open.entity().entity.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
                 .name

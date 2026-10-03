@@ -430,6 +430,19 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
+/// What the status line says while the library is being read, if it is: how many files
+/// its listing has found, then how many are still to be decoded.
+fn reading(place: Option<&crate::folders::Where>, unread: usize) -> Option<String> {
+    let said = match (place.and_then(|at| at.listing), unread) {
+        (Some(1), _) => "1 file".to_string(),
+        (Some(files), _) => format!("{files} files"),
+        (None, 0) => return None,
+        (None, 1) => "1 file to go".to_string(),
+        (None, unread) => format!("{unread} files to go"),
+    };
+    Some(format!("Reading the library… {said}"))
+}
+
 /// The title bar's MIDI input status: a short label, the lamp beside it, and the details
 /// on hover. `None` while MIDI is off.
 ///
@@ -733,6 +746,7 @@ impl DrawbarApp {
                 self.about = Some(crate::about::About::new(
                     &self.device.state,
                     &self.workspace,
+                    self.store.as_ref(),
                 ));
             }
         });
@@ -744,6 +758,11 @@ impl DrawbarApp {
         }
         ui.menu_button("New", |ui| new_menu(ui, acts));
         ui.separator();
+        let picking = crate::libraries::picking();
+        if crate::browser::offers_libraries(&self.browser.folders, picking) {
+            crate::browser::library_items(ui, &self.browser.folders, picking, acts);
+            ui.separator();
+        }
         if let Some(id) = self.tabs.active() {
             if item(ui, "Save", Some(key::SAVE)) {
                 acts.push(Act::SaveDoc(id));
@@ -802,6 +821,10 @@ impl DrawbarApp {
             if marked(ui, label, self.shell.open(dock), Some(shortcut)) {
                 acts.push(Act::ToggleDock(dock));
             }
+        }
+        let all = self.browser.folders.all_files;
+        if marked(ui, crate::folders::SHOW_ALL_FILES, all, None) {
+            self.browser.folders.all_files = !all;
         }
         ui.separator();
         ui.menu_button("Theme", |ui| {
@@ -1001,12 +1024,18 @@ impl DrawbarApp {
             .show(ctx, |ui| {
                 edge(ui, Side::Top);
                 along(ui, |ui| {
-                    let said = match &self.device.state.in_flight {
-                        Some(words) => {
+                    let place = self.browser.folders.place.as_ref();
+                    let reading = reading(place, self.workspace.reading());
+                    let said = match (&self.device.state.in_flight, reading) {
+                        (Some(words), _) => {
                             ui.spinner();
                             egui::RichText::new(&words.doing).size(11.0)
                         }
-                        None => {
+                        (None, Some(reading)) => {
+                            ui.spinner();
+                            egui::RichText::new(reading).size(11.0)
+                        }
+                        (None, None) => {
                             let (level, text) = self.log.status();
                             let tint = level.color(ui.visuals());
                             let glyph = match level {
@@ -1291,8 +1320,8 @@ pub fn too_small_notice(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Fake;
     use crate::testing;
+    use crate::testing::Fake;
     use eframe::{App, Storage};
 
     /// The window size the design is drawn for.
@@ -1311,7 +1340,7 @@ mod tests {
     fn app(ctx: &egui::Context, storage: Option<&dyn eframe::Storage>) -> DrawbarApp {
         let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
         cc.storage = storage;
-        DrawbarApp::new(&cc)
+        DrawbarApp::with_library(&cc, None)
     }
 
     /// Attach an instrument, which the full layout needs.
@@ -1545,7 +1574,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = app.workspace.get(fresh).unwrap().bytes.to_vec();
         app.workspace.remove(fresh, &mut app.log);
         let id = app.workspace.ingest(
             "Africa-Split.ne5p".into(),
@@ -1674,7 +1703,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let bytes = app.workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         app.workspace.replace_bytes(id, edited, &mut app.log);

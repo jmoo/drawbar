@@ -15,7 +15,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, families_present, qualifier, Act, Browser, Bulk, Item, Kind};
+use crate::browser::{cell_ink, qualifier, Act, Browser, Bulk, Item, Kind};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
@@ -208,7 +208,7 @@ pub fn rows(
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
-    let kept = families_present(workspace);
+    let kept = workspace.families_present();
     let instrument = device.product().and_then(Family::from_product);
     for entity in workspace.listed() {
         // Claim the row's slot so the instrument's list does not repeat it.
@@ -290,7 +290,7 @@ pub fn row_of(
                 device,
                 queue,
                 tags.worn(id).len(),
-                &families_present(workspace),
+                &workspace.families_present(),
                 instrument,
             ))
         }
@@ -318,7 +318,7 @@ fn local(
         unsaved: entity.is_unsaved(),
         where_: whereabouts(entity, device, queue),
         at: entity.spot(),
-        size: entity.bytes.len() as u64,
+        size: entity.size(),
         needs: wanted(entity, device),
     }
 }
@@ -450,7 +450,7 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
 
 /// The library a program names, and its name if the instrument has reported one.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let Some(fields) = entity.entity.as_ref().and_then(crate::fields::fields_of) else {
+    let Some(fields) = entity.entity.as_deref().and_then(crate::fields::fields_of) else {
         return Needs::Nothing;
     };
     // One cell, so it shows the first library the program names.
@@ -824,7 +824,9 @@ impl Library {
             .id_salt("library_table")
             .auto_shrink([false; 2])
             .show_rows(ui, ROW, rows.len(), |ui, shown| {
-                for row in shown.filter_map(|index| rows.get(index)) {
+                let shown = rows.get(shown).unwrap_or_default();
+                workspace.in_view(shown.iter().filter_map(|row| row.item.local()));
+                for row in shown {
                     paint(
                         ui, row, width, &tracks, browser, &list, workspace, device, queue, acts,
                     );
@@ -1709,7 +1711,7 @@ mod tests {
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Settings, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let held = workspace.get(id).unwrap();
         let crc = held.saved.crc32.expect("a container");
         let body_len = held.container.as_ref().expect("a container").body_len();
@@ -1868,7 +1870,7 @@ mod tests {
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let saved_as = workspace.get(id).unwrap().saved.crc32.unwrap();
 
         // Edited before anything is read, so there is no earlier link to fall back on.
@@ -1980,7 +1982,7 @@ mod tests {
         let (tags, mut queue) = (Tags::default(), Queue::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
@@ -2345,13 +2347,117 @@ mod tests {
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
 
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
 
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
+    }
+
+    /// The table asks for the files of the rows in view, and not of a row out of view.
+    #[test]
+    fn only_the_table_rows_in_view_are_asked_for() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let saved = (1..=500)
+            .map(|id| crate::workspace::Saved {
+                id,
+                name: format!("Sound {id:04}.ne5p"),
+                path: Some(crate::store::LibPath::root().join(&format!("Sound {id:04}.ne5p"))),
+                origin: Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(1),
+                unsaved: None,
+            })
+            .collect();
+        workspace.restore(saved, None, &mut log);
+        testing::run(&ctx, screen(), |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                });
+        });
+        assert!(workspace.wanted(1), "the first row is in view");
+        assert!(!workspace.wanted(500), "the last row is not");
+    }
+
+    /// Frames of the tree beside the table take the library's families once, and a file
+    /// read since is in them on the next frame.
+    #[test]
+    fn frames_take_the_families_once_per_change() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ns4p".into(),
+            path: Some(crate::store::LibPath::root().join("Grand.ns4p")),
+            origin: Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(1),
+            unsaved: None,
+        };
+        workspace.restore(vec![saved], None, &mut log);
+        let mut draw = |browser: &mut Browser, workspace: &Workspace| {
+            testing::run(
+                &ctx,
+                testing::screen(egui::vec2(1200.0, 600.0), Vec::new()),
+                |ctx| {
+                    egui::SidePanel::left("browser")
+                        .exact_width(crate::shell::BROWSER)
+                        .show(ctx, |ui| {
+                            browser.ui(ui, workspace, &device, &queue, &shell.filter);
+                        });
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new())
+                        .show(ctx, |ui| {
+                            library.ui(ui, browser, workspace, &device, &queue, &shell);
+                        });
+                },
+            );
+        };
+        for _ in 0..3 {
+            draw(&mut browser, &workspace);
+        }
+        assert_eq!(workspace.families_taken.get(), 1);
+        assert_eq!(
+            workspace.families_present(),
+            [Family::Stage4],
+            "what its name says"
+        );
+
+        workspace.take_wanted();
+        workspace.took(1, Some(Fresh::Program.bytes().unwrap()), None);
+        workspace.settle_files(&mut log);
+        draw(&mut browser, &workspace);
+        assert_eq!(workspace.families_taken.get(), 2);
+        assert_eq!(
+            workspace.families_present(),
+            [Family::Electro5],
+            "what it holds"
+        );
     }
 
     /// A frame of the table at the center's width with no dock open.

@@ -934,7 +934,6 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 name = "drawbar"
 version = "0.9.1"
 dependencies = [
- "base64",
  "eframe",
  "egui_extras",
  "js-sys",
@@ -943,6 +942,10 @@ dependencies = [
  "nord-usb",
  "rfd",
  "rodio",
+ "ron",
+ "rustix 1.1.4",
+ "serde",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

@@ -374,7 +374,7 @@ pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log
         }
         held.stamp = entity.stamp;
         held.diff = match &held.read {
-            Read::Answered(there) => compare(&entity.bytes, there),
+            Read::Answered(there) => compare_with(entity, there),
             Read::Unasked | Read::Asked => verdict(entity, &held.replaces),
         };
         moved.push(held.id);
@@ -502,7 +502,7 @@ impl Queue {
         };
         held.read = Read::Answered(there.to_vec());
         held.stamp = entity.stamp;
-        held.diff = compare(&entity.bytes, there);
+        held.diff = compare_with(entity, there);
     }
 
     /// Record that the compare read of a slot something is waiting for found it empty.
@@ -591,6 +591,15 @@ impl Queue {
 
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
+    }
+}
+
+/// [`compare`] against what an asset holds. One resting in its file is read whole, and
+/// one whose file does not read has no diff yet.
+fn compare_with(entity: &LocalEntity, there: &[u8]) -> Diff {
+    match entity.whole() {
+        Ok(here) => compare(&here, there),
+        Err(_) => Diff::Pending,
     }
 }
 
@@ -1264,7 +1273,7 @@ mod tests {
 
     /// Change a document's bytes the way an edit does.
     fn edit(workspace: &mut Workspace, id: u64, log: &mut Log) {
-        let bytes = workspace.get(id).expect("it is in memory").bytes.clone();
+        let bytes = workspace.get(id).expect("it is in memory").bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, log);
@@ -1839,7 +1848,7 @@ mod tests {
         assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
 
         for gain in ["96", "97", "98"] {
-            let held = workspace.get(id).unwrap().bytes.clone();
+            let held = workspace.get(id).unwrap().bytes.to_vec();
             let (_, edited) =
                 crate::fields::apply(&held, &[("center_panel.gain".into(), gain.into())]).unwrap();
             workspace.replace_bytes(id, edited, &mut log);

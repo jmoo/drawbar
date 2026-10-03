@@ -174,7 +174,7 @@ impl<F: Framing> std::fmt::Debug for Framed<F> {
 /// A chain whose first section is not its container: the leading sections are missing,
 /// or the bytes are not a chain. Raised before the first declared length is trusted,
 /// since a corrupt opener's length is arbitrary.
-fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
+pub(super) fn wrong_opener(expected: &[u8], found: &[u8]) -> ParseError {
     ParseError::AssertFail(format!(
         "the body does not open with the {} container section; found {}",
         expected.escape_ascii(),
@@ -193,7 +193,7 @@ fn unpadded_tag(tag: &[u8], at: u64, found: u8) -> ParseError {
     ))
 }
 
-fn missing_opener(expected: &[u8]) -> ParseError {
+pub(super) fn missing_opener(expected: &[u8]) -> ParseError {
     ParseError::AssertFail(format!(
         "the body does not open with the {} container section; found end of body",
         expected.escape_ascii(),
@@ -247,11 +247,7 @@ fn read_exact_or_end(
     while got < buf.len() {
         match r.read(&mut buf[got..]) {
             Ok(0) if got == 0 => return Ok(false),
-            Ok(0) => {
-                return Err(ParseError::AssertFail(format!(
-                    "truncated section header at {at}"
-                )))
-            }
+            Ok(0) => return Err(truncated_header(at)),
             Ok(n) => got += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(ParseError::AssertFail(format!("reading a section: {e}"))),
@@ -260,9 +256,14 @@ fn read_exact_or_end(
     Ok(true)
 }
 
+/// A section header the body ends inside.
+pub(super) fn truncated_header(at: u64) -> ParseError {
+    ParseError::AssertFail(format!("truncated section header at {at}"))
+}
+
 /// Where a section starting at `at` ends, refusing a declared length the body
 /// cannot hold before it is allocated.
-fn section_end(
+pub(super) fn section_end(
     at: u64,
     header: usize,
     len: usize,
