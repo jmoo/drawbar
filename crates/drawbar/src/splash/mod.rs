@@ -623,11 +623,9 @@ pub enum Change<'a> {
 }
 
 impl<'a> Change<'a> {
-    /// Read a heading with or without the emoji variation selector: [`plain`] strips it
-    /// from a fetched body, and a body from anywhere else still carries it.
     pub fn read(heading: &'a str) -> Change<'a> {
         match heading.trim() {
-            "\u{26a0} Breaking changes" | "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
+            "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
             "Features" => Change::New,
             "Bug fixes" => Change::Fixed,
             "Performance" => Change::Faster,
@@ -928,14 +926,6 @@ pub struct Commit<'a> {
     pub url: &'a str,
 }
 
-/// A release body with the emoji variation selector taken out.
-///
-/// ⚠️ No bundled font has a glyph for U+FE0F, and a missing glyph renders as an empty
-/// box, so `### ⚠️ Breaking changes` would show a blank tile beside the warning sign.
-pub fn plain(body: &str) -> String {
-    body.replace('\u{fe0f}', "")
-}
-
 /// Read one line of a release body.
 pub fn classify(line: &str) -> Line<'_> {
     let line = line.trim_end();
@@ -1073,22 +1063,9 @@ mod tests {
     }
 
     #[test]
-    fn a_breaking_heading_is_named_with_or_without_the_warning_sign() {
-        assert_eq!(
-            Change::read("\u{26a0} Breaking changes"),
-            Change::Breaking,
-            "the heading a fetched body carries once `plain` has run"
-        );
-        assert_eq!(
-            Change::read("\u{26a0}\u{fe0f} Breaking changes"),
-            Change::Breaking
-        );
-        assert_eq!(Change::Breaking.title(), "Breaking");
-    }
-
-    #[test]
     fn every_heading_the_release_script_writes_has_a_name_and_an_unknown_one_keeps_its_own() {
         for (heading, title) in [
+            ("\u{26a0}\u{fe0f} Breaking changes", "Breaking"),
             ("Features", "New"),
             ("Bug fixes", "Fixed"),
             ("Performance", "Faster"),
@@ -1119,8 +1096,7 @@ mod tests {
 
     #[test]
     fn the_notes_group_under_their_headings_and_the_compare_link_is_left_for_the_foot() {
-        let body = plain(RELEASED);
-        let read = sections(&body);
+        let read = sections(RELEASED);
         let named: Vec<&str> = read
             .iter()
             .map(|section| section.change.map_or("", Change::title))
@@ -1128,7 +1104,7 @@ mod tests {
         assert_eq!(named, vec!["Breaking", "New"]);
         assert!(read.iter().all(|section| section.lines.len() == 1));
         assert_eq!(
-            changelog(&body),
+            changelog(RELEASED),
             Some("https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0")
         );
     }
@@ -1179,7 +1155,7 @@ mod tests {
         let ctx = headless();
         let size = crate::shell::LEAST;
         let notes = Notes::Read {
-            body: plain(RELEASED),
+            body: RELEASED.to_owned(),
             page: "https://github.com/jmoo/drawbar/releases/tag/drawbar-v0.5.0".to_owned(),
         };
         let _ = drawn_at(&ctx, size, |ctx| {
@@ -1306,14 +1282,6 @@ mod tests {
             Line::Text("  Ordinary prose.")
         );
         assert_eq!(classify("   "), Line::Blank);
-    }
-
-    #[test]
-    fn a_heading_keeps_its_warning_sign_without_the_variation_selector() {
-        assert_eq!(
-            plain("### \u{26a0}\u{fe0f} Breaking changes"),
-            "### \u{26a0} Breaking changes"
-        );
     }
 
     #[test]
