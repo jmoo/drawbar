@@ -43,6 +43,7 @@ pub mod tags;
 mod testing;
 pub mod work;
 pub mod workspace;
+pub mod zoom;
 
 pub use app::DrawbarApp;
 

@@ -359,8 +359,8 @@ pub enum DeviceEvent {
         /// by now, since a write takes as long as the instrument takes.
         bytes: Vec<u8>,
     },
-    /// A slot's former contents, which a failed write and a failed restore left with
-    /// nowhere else to go.
+    /// A slot's former contents, left with nowhere else to go by a failed write and a
+    /// failed restore, or by a delete that may have landed.
     Rescued {
         at: Location,
         name: String,
@@ -806,8 +806,8 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
 /// The slot on the attached instrument this asset stands on.
 ///
 /// The slot it came off while the instrument still holds one there; otherwise a slot
-/// reporting the body it was saved as ([`among`]), the slot it was last written to
-/// ([`stands`]), or the slot carrying its name ([`named`]).
+/// reporting the body it was saved as (`among`), the slot it was last written to
+/// (`stands`), or the slot carrying its name (`named`).
 ///
 /// ⚠️ Reads the link the asset already carries, so running it again over an unchanged
 /// cache gives the same answer.
@@ -1108,7 +1108,7 @@ impl Device {
     ///
     /// The cached names stay until each bank's replacement arrives: a walk is dozens of
     /// reads long, and an empty folder for that long is worse than names about to be
-    /// confirmed. Banks a mutation touches are dropped at once (see [`Device::dispatch`]).
+    /// confirmed. Banks a mutation touches are dropped at once (see `Device::dispatch`).
     pub fn read_class(&mut self, class: ObjectClass) {
         self.state.scan.start(class);
     }
@@ -1520,11 +1520,12 @@ impl Device {
                 },
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
-                        "{} could not be restored; its bytes are in the local list as {name}",
+                        "what {} held is in the local list as {name}",
                         shown(at)
                     ));
                     log.trouble(format!(
-                        "{} is empty. What was in it is on this computer as “{name}”.",
+                        "{} may no longer hold its sound. What was in it is on this computer \
+                         as “{name}”.",
                         shown(at)
                     ));
                     workspace.ingest(name, Origin::Rescued { at }, bytes, log);

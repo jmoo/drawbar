@@ -92,9 +92,8 @@ impl Kind {
     /// ⚠️ Exhaustive over [`Entity`], so a family the library adds is a compile error
     /// here and never a nameless row.
     ///
-    /// Bytes that did not decode are a note when
-    /// [`is_text`](crate::document::text::is_text) said so on arrival, and
-    /// [`Kind::Other`] otherwise.
+    /// Bytes that did not decode are a note when `document::text::is_text` said so on
+    /// arrival, and [`Kind::Other`] otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         let Some(decoded) = entity.entity.as_ref() else {
             return match entity.is_text {

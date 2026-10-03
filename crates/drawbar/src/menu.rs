@@ -1,8 +1,8 @@
 //! The menus: every command the app offers from them, one table of shortcuts, and the
 //! in-window menus that draw them.
 //!
-//! The macOS menu bar ([`crate::menubar`]), the in-window menus, and the shortcuts all
-//! read [`menus`], [`DrawbarApp::offer`], and [`shortcut`], so a command is named, bound,
+//! The macOS menu bar (`crate::menubar`), the in-window menus, and the shortcuts all
+//! read [`menus`], `DrawbarApp::offer`, and [`shortcut`], so a command is named, bound,
 //! and gated in one place.
 
 use eframe::egui;
@@ -17,6 +17,7 @@ use crate::shell::Dock;
 use crate::strings::folder;
 use crate::tabs::Spot;
 use crate::workspace::Fresh;
+use crate::zoom::Step;
 
 /// Everything a menu item can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub enum Command {
     Browser,
     Inspector,
     Activity,
+    Zoom(Step),
     Theme(ThemeChoice),
     Connect,
     Disconnect,
@@ -104,6 +106,9 @@ pub fn label(command: Command) -> &'static str {
         Command::Browser => "Browser panel",
         Command::Inspector => "Inspector panel",
         Command::Activity => "Activity log",
+        Command::Zoom(Step::In) => "Zoom in",
+        Command::Zoom(Step::Out) => "Zoom out",
+        Command::Zoom(Step::Reset) => "Reset zoom",
         Command::Theme(choice) => choice.name(),
         Command::Connect => "Connect…",
         Command::Disconnect => "Disconnect",
@@ -153,12 +158,7 @@ fn new_lines(ui: &mut egui::Ui, entries: &[Entry], acts: &mut Vec<Act>) {
             Entry::Rule => {
                 ui.separator();
             }
-            Entry::Sub(title, inner) => {
-                ui.menu_button(*title, |ui| {
-                    drop_down_style(ui);
-                    new_lines(ui, inner, acts);
-                });
-            }
+            Entry::Sub(title, inner) => submenu(ui, title, |ui| new_lines(ui, inner, acts)),
             Entry::Do(command) => {
                 if item_button(ui, &Offer::of(*command), None) {
                     acts.extend(made(*command));
@@ -203,6 +203,10 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         Do(C::Inspector),
         Do(C::Activity),
         Rule,
+        Do(C::Zoom(Step::In)),
+        Do(C::Zoom(Step::Out)),
+        Do(C::Zoom(Step::Reset)),
+        Rule,
         Entry::Sub(
             "Theme",
             ThemeChoice::ALL
@@ -210,20 +214,6 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
                 .map(|choice| Do(C::Theme(*choice)))
                 .collect(),
         ),
-    ];
-    let instrument = vec![
-        Do(C::Connect),
-        Do(C::Disconnect),
-        Rule,
-        Do(C::ReadEverything),
-        Do(C::ReadAgain),
-        Rule,
-        Do(C::ReviewQueue),
-        Do(C::SendAll),
-        Do(C::ClearQueue),
-        Do(C::Unqueue),
-        Rule,
-        Do(C::Listen),
     ];
     let mut help = vec![
         Do(C::Guide),
@@ -247,12 +237,33 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         },
         Menu {
             title: "Instrument",
-            entries: instrument,
+            entries: instrument_entries(),
         },
         Menu {
             title: "Help",
             entries: help,
         },
+    ]
+}
+
+/// The Instrument menu's lines, which the attached instrument's pill also opens.
+fn instrument_entries() -> Vec<Entry> {
+    use Command as C;
+    use Entry::{Do, Rule};
+
+    vec![
+        Do(C::Connect),
+        Do(C::Disconnect),
+        Rule,
+        Do(C::ReadEverything),
+        Do(C::ReadAgain),
+        Rule,
+        Do(C::ReviewQueue),
+        Do(C::SendAll),
+        Do(C::ClearQueue),
+        Do(C::Unqueue),
+        Rule,
+        Do(C::Listen),
     ]
 }
 
@@ -318,8 +329,24 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
         Command::Activity => command_and(With::ALT, Key::L),
         Command::ReadEverything => Shortcut::new(With::COMMAND, Key::R),
         Command::ReviewQueue => command_and(With::SHIFT, Key::S),
+        // A browser zooms its page with these, so the web build leaves them to it.
+        Command::Zoom(step) if platform.windowed() => Shortcut::new(
+            With::COMMAND,
+            match step {
+                Step::In => Key::Plus,
+                Step::Out => Key::Minus,
+                Step::Reset => Key::Num0,
+            },
+        ),
         _ => return None,
     })
+}
+
+/// A second key a command takes, never written beside it: ⌘= is ⌘+ without the Shift a
+/// US layout needs for `+`.
+fn unwritten(command: Command, platform: Platform) -> Option<egui::KeyboardShortcut> {
+    (command == Command::Zoom(Step::In) && platform.windowed())
+        .then(|| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals))
 }
 
 /// The key that puts the cursor in the search box.
@@ -343,7 +370,7 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// document and lose its revert. A bound key is consumed whether or not its command is
 /// offered now, so it never falls through to a shorter one. In a browser, `index.html`
 /// also keeps each of these keys from the browser's own action.
-const KEYED: [Command; 12] = [
+const KEYED: [Command; 15] = [
     Command::ReviewQueue,
     Command::Export,
     Command::Browser,
@@ -356,6 +383,9 @@ const KEYED: [Command; 12] = [
     Command::Quit,
     Command::Keyboard,
     Command::Document,
+    Command::Zoom(Step::In),
+    Command::Zoom(Step::Out),
+    Command::Zoom(Step::Reset),
 ];
 
 /// The minimum width of a drop-down menu, so its width does not change with which items
@@ -384,10 +414,12 @@ pub(crate) fn covered(ctx: &egui::Context) -> bool {
 
 impl DrawbarApp {
     /// What a key or the Mac's menu bar may do with `command` now: its [`Self::offer`],
-    /// disabled behind a modal unless it quits.
+    /// disabled behind a modal unless it quits or zooms, which act on no part of the
+    /// window the modal covers.
     pub(crate) fn offer_now(&self, ctx: &egui::Context, command: Command) -> Option<Offer> {
         let mut offer = self.offer(command)?;
-        offer.enabled &= command == Command::Quit || !covered(ctx);
+        let over = matches!(command, Command::Quit | Command::Zoom(_));
+        offer.enabled &= over || !covered(ctx);
         Some(offer)
     }
 
@@ -437,6 +469,10 @@ impl DrawbarApp {
             Command::Browser => check(self.shell.open(Dock::Browser)),
             Command::Inspector => check(self.shell.open(Dock::Inspector)),
             Command::Activity => check(self.shell.log_open),
+            Command::Zoom(step) => Offer {
+                enabled: self.zoom.after(step, self.room).is_ok(),
+                ..plain
+            },
             Command::Theme(choice) => check(self.theme == choice),
             Command::Connect => (!attached).then_some(plain)?,
             Command::Disconnect | Command::ReadEverything | Command::ReviewQueue => {
@@ -493,6 +529,11 @@ impl DrawbarApp {
             Command::Browser => acts.push(Act::ToggleDock(Dock::Browser)),
             Command::Inspector => acts.push(Act::ToggleDock(Dock::Inspector)),
             Command::Activity => acts.push(Act::ToggleLog),
+            Command::Zoom(step) => {
+                if let Ok(zoom) = self.zoom.after(step, self.room) {
+                    self.pick_zoom(ctx, frame, zoom);
+                }
+            }
             Command::Theme(choice) => self.pick_theme(ctx, frame, choice),
             Command::Connect => acts.push(Act::Connect),
             Command::Disconnect => acts.push(Act::Disconnect),
@@ -519,24 +560,26 @@ impl DrawbarApp {
         }
     }
 
-    /// Run whatever command this frame's keys ask for.
+    /// Run whatever command this frame's keys ask for, of those `admit` lets through.
     pub(crate) fn shortcuts(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
+        admit: fn(Command) -> bool,
         acts: &mut Vec<Act>,
     ) {
         let (platform, mac) = (self.platform, crate::platform::mac_keyboard(ctx));
         for command in KEYED {
-            let Some(keys) = shortcut(command, platform, mac) else {
-                continue;
-            };
-            if !ctx.input_mut(|input| input.consume_shortcut(&keys)) {
+            let mut keys = shortcut(command, platform, mac)
+                .into_iter()
+                .chain(unwritten(command, platform));
+            if !keys.any(|keys| ctx.input_mut(|input| input.consume_shortcut(&keys))) {
                 continue;
             }
-            if self
-                .offer_now(ctx, command)
-                .is_some_and(|offer| offer.enabled)
+            if admit(command)
+                && self
+                    .offer_now(ctx, command)
+                    .is_some_and(|offer| offer.enabled)
             {
                 self.run(ctx, frame, command, acts);
             }
@@ -647,6 +690,19 @@ impl DrawbarApp {
         response.on_hover_text("Menu  F10");
     }
 
+    /// The Instrument menu, dropping down from `pill` when it is clicked.
+    pub(crate) fn instrument_menu(
+        &mut self,
+        pill: &egui::Response,
+        frame: &mut eframe::Frame,
+        acts: &mut Vec<Act>,
+    ) {
+        egui::Popup::menu(pill).show(|ui| {
+            drop_down_style(ui);
+            self.entries(ui, frame, &instrument_entries(), acts);
+        });
+    }
+
     /// A menu's lines, leaving out what is not offered now and any rule left with
     /// nothing between it and the last.
     fn entries(
@@ -663,10 +719,7 @@ impl DrawbarApp {
                 Entry::Rule => owed_rule = drawn,
                 Entry::Sub(title, inner) => {
                     rule_if(ui, &mut owed_rule);
-                    ui.menu_button(*title, |ui| {
-                        drop_down_style(ui);
-                        self.entries(ui, frame, inner, acts);
-                    });
+                    submenu(ui, title, |ui| self.entries(ui, frame, inner, acts));
                     drawn = true;
                 }
                 Entry::Do(command) => {
@@ -712,13 +765,24 @@ fn item_button(ui: &mut egui::Ui, offer: &Offer, keys: Option<String>) -> bool {
 ///
 /// ⚠️ A check at the left, not a selected button or a `selectable_label`: both fill the
 /// row with `selection.bg_fill`, the instrument's red, which reads as a warning in a menu
-/// of ordinary items. **Every** checkable menu item in the app uses this or [`check`].
+/// of ordinary items. **Every** checkable menu item in the app uses this or `check`.
 pub fn marked(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
     let clicked = ui.add(check(ui, label, on)).clicked();
     if clicked {
         ui.close();
     }
     clicked
+}
+
+/// A submenu's line in a drop-down: its label in the column the other items' labels
+/// start at, past the empty check column, and the arrow at the right.
+fn submenu(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
+    let button =
+        check(ui, title, false).right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW);
+    egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| {
+        drop_down_style(ui);
+        content(ui);
+    });
 }
 
 /// The button behind a checkable item: the check column, then the label.
@@ -935,6 +999,23 @@ mod tests {
         assert_eq!(
             key_text(Command::CloseTab, Platform::Mac, true).as_deref(),
             Some("⌘W")
+        );
+    }
+
+    #[test]
+    fn a_browser_keeps_its_zoom_keys_and_a_window_takes_them() {
+        for step in [Step::In, Step::Out, Step::Reset] {
+            let zoom = Command::Zoom(step);
+            assert_eq!(shortcut(zoom, Platform::Web, true), None, "{step:?}");
+            assert_eq!(unwritten(zoom, Platform::Web), None, "{step:?}");
+            assert!(
+                shortcut(zoom, Platform::Windows, false).is_some(),
+                "{step:?}"
+            );
+        }
+        assert_eq!(
+            key_text(Command::Zoom(Step::In), Platform::Windows, false).as_deref(),
+            Some("Ctrl+Plus")
         );
     }
 

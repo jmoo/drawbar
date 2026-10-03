@@ -607,6 +607,21 @@ in
         }
       );
 
+      # Every crate's public documentation. A warning, such as a link from a public
+      # item to a private one, fails it. `nix flake check` runs it.
+      rustdoc = crane.cargoDoc (
+        commonArgs
+        // audioArgs
+        // {
+          inherit cargoArtifacts;
+          RUSTDOCFLAGS = "--deny warnings";
+          cargoDocExtraArgs = "--no-deps";
+          cargoExtraArgs = "--locked --workspace";
+          pname = "workspace-rustdoc";
+          version = "0";
+        }
+      );
+
       # The corpus assemblies themselves.
       inherit corpus;
       corpus-full = corpusFull;

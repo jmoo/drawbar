@@ -246,7 +246,7 @@ impl Browser {
     /// A click on a row's checkbox, which toggles that row.
     ///
     /// ⚠️ A plain click on the checkbox acts as the ⌘ gesture. A click on the row itself
-    /// follows [`gesture`].
+    /// follows `gesture`.
     pub fn check(&mut self, item: Item) {
         self.rename = None;
         self.selection.toggle(item);

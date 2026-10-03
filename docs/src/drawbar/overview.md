@@ -6,13 +6,13 @@ desktop app.
 
 | Part | What it is for |
 |---|---|
-| **Top bar** | Open, New and Save, the search box, and the instrument: **Send**, the MIDI controllers, and **Connect instrument…** or the instrument's name. |
+| **Top bar** | Open, New and Save, the search box, and the instrument: **Send**, the MIDI controllers, and **Connect instrument…** or the instrument's name, which opens the **Instrument** menu. |
 | **Browser** (left) | **Places** lists this computer and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
 | **Library** (center) | One table over both places. Sort by any column. |
 | **Documents** (center) | Every sound you open gets a tab beside the Library. |
 | **Keyboard** (center) | The instrument's folders drawn as banks of slots, once connected. |
 | **Inspector** (right) | What is selected and the actions on it, and while connected, how full each folder is. |
-| **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. |
+| **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. The zoom is at the right. |
 
 The search box filters the Library by name; ⌘K (Ctrl+K) puts the cursor in it.
 The buttons at the two ends of the row of tabs show and hide the browser and the
@@ -56,6 +56,9 @@ the list holds more than one family or a sound is not for the connected
 instrument. It adds the generation, as in `v3 sample`, when the list holds sample
 instruments of more than one generation.
 
+Drag the edge between two column heads to resize the column on its left, and
+double-click the edge to give it its own width back. drawbar keeps the widths.
+
 The **Where** column says where a sound lives: on this computer, on the keyboard,
 or both, with `=` when the two copies match and `≠` when they differ. Its pill
 turns red when a send is waiting and yellow when the two copies differ. A name in
@@ -97,3 +100,16 @@ close that program and turn listening off and on again.
 
 The sun and moon button in the top bar cycles between following your system,
 light, and dark. Hover it to see which one is set.
+
+## Zoom
+
+The magnifier at the right end of the status line zooms the whole window, from
+50% to 200%. Away from 100% it shows the zoom beside it. Click it for **−** and
+**+**, and for **Reset to 100%**. **View** has the same three commands, and the
+desktop app also takes ⌘+ (or ⌘=), ⌘− and ⌘0. In a browser those keys zoom the
+page instead. drawbar keeps the zoom between sessions.
+
+drawbar does not zoom out so far that text and lines blur on your display, or
+in so far that the window can no longer hold it. On most displays without high
+pixel density that means no smaller than 100%. If the window later becomes too
+small for the zoom, drawbar offers to zoom out.

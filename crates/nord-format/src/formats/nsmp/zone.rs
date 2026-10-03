@@ -352,7 +352,7 @@ pub enum KeyMap {
     /// This layout carries no per-key table.
     Absent,
     /// Every record names its own key. The sample editor writes this whatever
-    /// the zone layout, and [`partners`] yields it for an instrument where no
+    /// the zone layout, and the partner rule yields it for an instrument where no
     /// zone has an eligible partner.
     Neutral,
     /// Partner roots, filled in from the zone layout by the vendor's builder.
@@ -463,7 +463,7 @@ impl Table {
     ///
     /// Where [`Wide::count_at`] fixes the count's offset, the table is read from
     /// there. Otherwise the table is found at the end of the payload, behind its
-    /// count byte, with an unmodeled suffix of up to [`MAX_TAIL`] bytes. A placement
+    /// count byte, with an unmodeled suffix of up to 8 bytes. A placement
     /// fits when the count matches and every record names a stroke holding its root
     /// key.
     pub fn locate(

@@ -69,7 +69,7 @@ const CHIP: f32 = 18.0;
 /// Which face of a document is showing.
 ///
 /// Basic is the sound. Advanced is what the file says about itself and the engineering
-/// under it. [`super::faces`] decides which faces a document has.
+/// under it. `faces` decides which faces a document has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Face {
     /// The panel, in the instrument's own words. Happy-path edits.

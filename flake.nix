@@ -64,6 +64,7 @@
                     touch "$out"
                   '';
               clippy = pkgs.nord.clippy;
+              rustdoc = pkgs.nord.rustdoc;
             };
 
             devShells.default = pkgs.lib.crane.devShell {
