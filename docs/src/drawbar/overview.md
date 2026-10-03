@@ -6,7 +6,7 @@ desktop app.
 
 | Part | What it is for |
 |---|---|
-| **Top bar** | Open, New and Save, the search box, and the instrument: **Send**, the MIDI controllers, and **Connect instrument…** or the instrument's name. |
+| **Top bar** | Open, New and Save, the search box, and the instrument: **Send**, the MIDI controllers, and **Connect instrument…** or the instrument's name, which opens the **Instrument** menu. |
 | **Browser** (left) | **Places** lists this computer and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
 | **Library** (center) | One table over both places. Sort by any column. |
 | **Documents** (center) | Every sound you open gets a tab beside the Library. |
@@ -55,6 +55,9 @@ The **Kind** column adds the instrument family, as in `Stage 4 program`, when
 the list holds more than one family or a sound is not for the connected
 instrument. It adds the generation, as in `v3 sample`, when the list holds sample
 instruments of more than one generation.
+
+Drag the edge between two column heads to resize the column on its left, and
+double-click the edge to give it its own width back. drawbar keeps the widths.
 
 The **Where** column says where a sound lives: on this computer, on the keyboard,
 or both, with `=` when the two copies match and `≠` when they differ. Its pill

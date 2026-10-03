@@ -559,11 +559,11 @@ impl Column {
     fn track(self) -> Track {
         match self {
             Column::Glyph => Track::Px(16.0),
-            // 96 px holds the longest kind word. It is a capped share so a narrow center
-            // gives the room to the name.
+            // 120 px holds a kind with its family, as in `Stage 4 program`. It is a capped
+            // share so a narrow center gives the room to the name.
             Column::Kind => Track::Capped {
-                share: 0.7,
-                max: 96.0,
+                share: 1.0,
+                max: 120.0,
             },
             Column::Name => Track::Share(1.9),
             Column::Tags => Track::Px(34.0),
@@ -574,14 +574,48 @@ impl Column {
             Column::Needs => Track::Share(1.3),
         }
     }
+
+    /// Whether the column's right edge can be dragged. Needs, the last, keeps its share so
+    /// the columns always fill the width.
+    fn resizable(self) -> bool {
+        !matches!(self, Column::Glyph | Column::Needs)
+    }
+
+    /// The column's name where its width is kept.
+    fn key(self) -> &'static str {
+        match self {
+            Column::Glyph => "glyph",
+            Column::Kind => "kind",
+            Column::Name => "name",
+            Column::Tags => "tags",
+            Column::Where => "where",
+            Column::At => "at",
+            Column::Size => "size",
+            Column::Needs => "needs",
+        }
+    }
 }
+
+/// The widths columns were dragged to, by column; `None` keeps the column's own track.
+pub type Widths = [Option<f32>; 8];
 
 /// The gap between two columns.
 const GAP: f32 = 10.0;
 
-/// Where each column sits across `width`, laid out by [`crate::panel::tracks`].
-pub fn tracks(width: f32) -> [Range<f32>; 8] {
-    let wanted = Column::ALL.map(Column::track);
+/// The narrowest and widest a column can be dragged to.
+const COLUMN_LEAST: f32 = 24.0;
+const COLUMN_MOST: f32 = 480.0;
+
+/// The width of the grip on a column's right edge in the head.
+const GRIP: f32 = 8.0;
+
+/// Where each column sits across `width`, laid out by [`crate::panel::tracks`], with any
+/// dragged `widths` in place of the columns' own tracks.
+pub fn tracks(width: f32, widths: &Widths) -> [Range<f32>; 8] {
+    let wanted = Column::ALL.map(|column| match widths[column as usize] {
+        Some(px) => Track::Px(px),
+        None => column.track(),
+    });
     let held = crate::panel::tracks(width, &wanted, GAP);
     std::array::from_fn(|index| held[index].clone())
 }
@@ -738,6 +772,7 @@ const MONO: f32 = 11.5;
 pub struct Library {
     by: Column,
     order: Order,
+    widths: Widths,
 }
 
 impl Default for Library {
@@ -745,11 +780,57 @@ impl Default for Library {
         Library {
             by: Column::Name,
             order: Order::Up,
+            widths: [None; 8],
         }
     }
 }
 
 impl Library {
+    /// Where the column widths are kept between sessions.
+    pub const KEY: &'static str = "drawbar.library";
+
+    const VERSION: &'static str = "drawbar library 1";
+
+    /// Restore the column widths the last session left. An unknown version, column, or a
+    /// width out of range is ignored, and that column keeps its own track.
+    pub fn restore(&mut self, storage: &dyn eframe::Storage) {
+        let Some(text) = storage.get_string(Library::KEY) else {
+            return;
+        };
+        let mut lines = text.lines();
+        if lines.next() != Some(Library::VERSION) {
+            return;
+        }
+        for line in lines {
+            let mut parts = line.split('\t');
+            let (Some("width"), Some(key), Some(px)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let Some(column) = Column::ALL
+                .into_iter()
+                .find(|column| column.resizable() && column.key() == key)
+            else {
+                continue;
+            };
+            if let Ok(px) = px.parse::<f32>() {
+                if (COLUMN_LEAST..=COLUMN_MOST).contains(&px) {
+                    self.widths[column as usize] = Some(px);
+                }
+            }
+        }
+    }
+
+    pub fn keep(&self, storage: &mut dyn eframe::Storage) {
+        let mut text = format!("{}\n", Library::VERSION);
+        for column in Column::ALL {
+            if let Some(px) = self.widths[column as usize] {
+                text.push_str(&format!("width\t{}\t{px}\n", column.key()));
+            }
+        }
+        storage.set_string(Library::KEY, text);
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -800,7 +881,7 @@ impl Library {
                 .layout(*ui.layout()),
         );
         let width = list_width(ui, rows.len(), ROW + ROW_GAP, HEAD + ABOVE);
-        let tracks = tracks((width - 2.0 * CELL_PAD).max(0.0));
+        let tracks = tracks((width - 2.0 * CELL_PAD).max(0.0), &self.widths);
         self.head(ui, width, &tracks);
         ui.add_space(ABOVE);
         if rows.is_empty() {
@@ -829,6 +910,41 @@ impl Library {
                 .clicked()
         {
             browser.unpick();
+        }
+    }
+
+    /// A grip on each resizable column's right edge in the head: dragging it sets the
+    /// column's width, and a double click gives the column back its own track.
+    ///
+    /// ⚠️ Added after the head, so a press on a grip drags it instead of sorting.
+    fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; 8]) {
+        for (column, track) in Column::ALL.iter().zip(tracks) {
+            if !column.resizable() {
+                continue;
+            }
+            let edge = content.left() + track.end + GAP / 2.0;
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(edge, content.center().y),
+                egui::vec2(GRIP, content.height()),
+            );
+            let id = ui.id().with(("column edge", *column as usize));
+            let grip = ui.interact(rect, id, egui::Sense::click_and_drag());
+            if grip.hovered() || grip.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                let ink = ui.visuals().widgets.hovered.bg_stroke.color;
+                ui.painter().vline(
+                    edge,
+                    rect.y_range().shrink(6.0),
+                    egui::Stroke::new(1.0_f32, ink),
+                );
+            }
+            let slot = &mut self.widths[*column as usize];
+            if grip.double_clicked() {
+                *slot = None;
+            } else if let Some(at) = grip.interact_pointer_pos().filter(|_| grip.dragged()) {
+                let start = content.left() + track.start;
+                *slot = Some((at.x - GAP / 2.0 - start).clamp(COLUMN_LEAST, COLUMN_MOST));
+            }
         }
     }
 
@@ -886,6 +1002,7 @@ impl Library {
             );
         }
 
+        self.grips(ui, content, tracks);
         let Some(column) = response
             .clicked()
             .then(|| under(&response, content, tracks))
@@ -1330,7 +1447,7 @@ mod tests {
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
-            let tracks = tracks(width);
+            let tracks = tracks(width, &[None; 8]);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(
                     track.start >= 0.0 && track.end >= track.start,
@@ -1357,23 +1474,23 @@ mod tests {
         }
     }
 
-    /// ⚠️ The kind column gets at most 96 px, and the name must stay readable when the
+    /// ⚠️ The kind column gets at most 120 px, and the name must stay readable when the
     /// center is narrow: programs are told apart by their names.
     #[test]
-    fn the_kind_reaches_96_px_when_wide_and_yields_to_the_name_when_narrow() {
+    fn the_kind_reaches_120_px_when_wide_and_yields_to_the_name_when_narrow() {
         let width_of = |tracks: &[Range<f32>; 8], column: Column| {
             let track = &tracks[column as usize];
             track.end - track.start
         };
 
-        let wide = tracks(900.0);
+        let wide = tracks(900.0, &[None; 8]);
         assert!(
-            (width_of(&wide, Column::Kind) - 96.0).abs() < 0.01,
+            (width_of(&wide, Column::Kind) - 120.0).abs() < 0.01,
             "at 900 the kind holds the longest word: {}",
             width_of(&wide, Column::Kind)
         );
 
-        let narrow = tracks(430.0);
+        let narrow = tracks(430.0, &[None; 8]);
         assert!(
             width_of(&narrow, Column::Name) >= 40.0,
             "at 430 the name is unreadable: {}",
@@ -1400,7 +1517,7 @@ mod tests {
     #[test]
     fn a_width_below_the_fixed_columns_shrinks_every_track_instead_of_going_negative() {
         for width in [0.0_f32, 40.0, 120.0] {
-            let tracks = tracks(width);
+            let tracks = tracks(width, &[None; 8]);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(track.start >= 0.0, "{column:?} at {width}: {track:?}");
                 assert!(track.end >= track.start, "{column:?} at {width}: {track:?}");
@@ -2484,6 +2601,112 @@ mod tests {
             matches!(filed.as_slice(), [(dragged, Some(_))] if *dragged == id),
             "the drag filed the row it started on: {filed:?}"
         );
+    }
+
+    /// One frame of the library alone across `screen`, and the words it painted.
+    fn library_frame(
+        library: &mut Library,
+        bench: &mut Bench,
+        screen: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Vec<testing::Word> {
+        let ctx = bench.ctx.clone();
+        let output = testing::run(&ctx, testing::screen(screen, events), |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    let acts = library.ui(
+                        ui,
+                        &mut bench.browser,
+                        &bench.workspace,
+                        &bench.device,
+                        &bench.queue,
+                        &bench.shell,
+                    );
+                    bench.act(acts);
+                });
+        });
+        testing::painted(&output)
+    }
+
+    /// Dragging a column's right edge in the head sets the column's width without sorting
+    /// by it, and a double click on the edge gives the column its own width back.
+    #[test]
+    fn a_column_edge_drags_to_a_width_and_a_double_click_resets_it() {
+        let mut bench = Bench::new();
+        bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let mut library = Library::default();
+        let screen = egui::vec2(900.0, 540.0);
+        let mut frame =
+            |library: &mut Library, events| library_frame(library, &mut bench, screen, events);
+        let said = frame(&mut library, Vec::new());
+        let name = testing::where_(&said, "Name");
+        let edge = egui::pos2(name.left() - GAP / 2.0, name.center().y);
+        let dragged = edge + egui::vec2(40.0, 0.0);
+
+        frame(&mut library, vec![egui::Event::PointerMoved(edge)]);
+        frame(&mut library, vec![testing::button(edge, true)]);
+        frame(&mut library, vec![egui::Event::PointerMoved(dragged)]);
+        frame(&mut library, vec![testing::button(dragged, false)]);
+        let said = frame(&mut library, Vec::new());
+        let moved = testing::where_(&said, "Name").left() - name.left();
+        assert!((moved - 40.0).abs() < 0.5, "the name moved {moved}");
+        assert_eq!(library.by, Column::Name, "and nothing was sorted");
+
+        let at = dragged;
+        frame(
+            &mut library,
+            vec![
+                testing::button(at, true),
+                testing::button(at, false),
+                testing::button(at, true),
+                testing::button(at, false),
+            ],
+        );
+        let said = frame(&mut library, Vec::new());
+        assert_eq!(library.widths, [None; 8]);
+        assert_eq!(testing::where_(&said, "Name").left(), name.left());
+    }
+
+    /// Dragged widths come back in the next session; a width this build would not lay
+    /// out, a column without an edge, or another version is left out.
+    #[test]
+    fn the_column_widths_come_back_and_nonsense_is_left_out() {
+        let mut store = crate::store::Fake::default();
+        let mut before = Library::default();
+        before.widths[Column::Kind as usize] = Some(150.0);
+        before.widths[Column::Size as usize] = Some(70.0);
+        before.keep(&mut store);
+        let mut after = Library::default();
+        after.restore(&store);
+        assert_eq!(after.widths, before.widths);
+
+        eframe::Storage::set_string(
+            &mut store,
+            Library::KEY,
+            format!(
+                "{}\nwidth\tkind\tabc\nwidth\tglyph\t50\nwidth\tname\t9000\n\
+                 width\tneeds\t80\nwidth\tat\t60\n",
+                Library::VERSION
+            ),
+        );
+        let mut after = Library::default();
+        after.restore(&store);
+        let mut only_at = [None; 8];
+        only_at[Column::At as usize] = Some(60.0);
+        assert_eq!(after.widths, only_at);
+
+        eframe::Storage::set_string(
+            &mut store,
+            Library::KEY,
+            "drawbar library 0\nwidth\tat\t60\n".into(),
+        );
+        let mut after = Library::default();
+        after.restore(&store);
+        assert_eq!(after.widths, [None; 8]);
     }
 
     /// Paints the table headlessly at the center's width with both docks open and with

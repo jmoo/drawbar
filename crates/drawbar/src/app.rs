@@ -228,6 +228,7 @@ impl DrawbarApp {
             crate::store::load(storage, &mut app.workspace, &mut app.log);
             app.browser.restore(storage);
             app.shell.restore(storage);
+            app.library.restore(storage);
             #[cfg(not(target_arch = "wasm32"))]
             app.midi.restore(storage, &cc.egui_ctx);
             // Only after both stores are read does the grouping know what survived.
@@ -399,6 +400,7 @@ impl eframe::App for DrawbarApp {
         // store.
         self.browser.keep(storage);
         self.shell.keep(storage);
+        self.library.keep(storage);
         #[cfg(not(target_arch = "wasm32"))]
         self.midi.keep(storage);
         self.saved = self.workspace.revision();
