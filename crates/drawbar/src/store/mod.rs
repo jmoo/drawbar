@@ -44,7 +44,7 @@ pub use web::{default_root, permission, Backend, Picked, Root};
 #[cfg(not(target_arch = "wasm32"))]
 pub type Root = std::path::PathBuf;
 
-pub use exec::{MOST_BYTES, MOST_ENTRIES};
+pub use exec::{opens, MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Row, Sidecar, Stored};
 

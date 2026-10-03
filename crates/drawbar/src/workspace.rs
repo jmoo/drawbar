@@ -938,10 +938,14 @@ enum Incoming {
 
 pub struct Workspace {
     entities: Vec<LocalEntity>,
+    /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
+    at: std::cell::RefCell<(u64, std::collections::HashMap<u64, usize>)>,
     next_id: u64,
     /// Bumped by every change to the list, so the shell can tell when the store is
     /// behind without comparing every asset's bytes.
     revision: u64,
+    /// Bumped by every change to which assets are listed, or to their names and paths.
+    layout: u64,
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
@@ -975,8 +979,10 @@ impl Workspace {
         let (tx, rx) = std::sync::mpsc::channel();
         Workspace {
             entities: Vec::new(),
+            at: Default::default(),
             next_id: 1,
             revision: 0,
+            layout: 1,
             ctx,
             tx,
             rx,
@@ -997,6 +1003,50 @@ impl Workspace {
         self.revision
     }
 
+    /// Counts changes to which assets are listed and to their names and paths, so a view
+    /// of where they are is taken again only when it would differ.
+    pub fn layout(&self) -> u64 {
+        self.layout
+    }
+
+    /// Record a change to which assets are held, or to their names or paths.
+    fn moved(&mut self) {
+        self.revision += 1;
+        self.layout += 1;
+    }
+
+    /// Where `id` sits in the list.
+    fn position(&self, id: u64) -> Option<usize> {
+        let mut at = self.at.borrow_mut();
+        if at.0 != self.layout {
+            let positions = self.entities.iter().enumerate();
+            *at = (
+                self.layout,
+                positions
+                    .map(|(position, entity)| (entity.id, position))
+                    .collect(),
+            );
+        }
+        // A change to the list that did not bump the layout is caught here: the list is
+        // searched rather than another asset handed back.
+        match at.1.get(&id) {
+            Some(&position)
+                if self
+                    .entities
+                    .get(position)
+                    .is_some_and(|held| held.id == id) =>
+            {
+                Some(position)
+            }
+            _ => self.entities.iter().position(|held| held.id == id),
+        }
+    }
+
+    fn get_mut(&mut self, id: u64) -> Option<&mut LocalEntity> {
+        let position = self.position(id)?;
+        self.entities.get_mut(position)
+    }
+
     /// Everything held in memory, views included. The local **list** is
     /// [`Workspace::listed`].
     pub fn entities(&self) -> &[LocalEntity] {
@@ -1009,7 +1059,7 @@ impl Workspace {
     }
 
     pub fn get(&self, id: u64) -> Option<&LocalEntity> {
-        self.entities.iter().find(|e| e.id == id)
+        self.entities.get(self.position(id)?)
     }
 
     /// Whether this is a view of a slot and not on this computer.
@@ -1023,7 +1073,7 @@ impl Workspace {
     /// which is edited and sent back like any other and goes when its tab closes.
     pub fn view(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
         let (id, _) = self.add(name, origin, bytes, log);
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return id;
         };
         entity.kept = false;
@@ -1049,14 +1099,14 @@ impl Workspace {
 
     /// Promote a view into the local list, with its edits and its place in the queue.
     pub fn keep(&mut self, id: u64, log: &mut Log) {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
         if std::mem::replace(&mut entity.kept, true) {
             return;
         }
         let name = entity.name.clone();
-        self.revision += 1;
+        self.moved();
         log.say(format!("“{name}” is on this computer."));
     }
 
@@ -1093,7 +1143,7 @@ impl Workspace {
         if self.entities.len() == before && rescued.is_empty() {
             return;
         }
-        self.revision += 1;
+        self.moved();
     }
 
     /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
@@ -1106,26 +1156,26 @@ impl Workspace {
 
     /// Rename an asset held here. Nothing leaves this computer.
     pub fn rename(&mut self, id: u64, name: String) {
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             entity.name = name;
-            self.revision += 1;
+            self.moved();
         }
     }
 
     /// Put an asset's file at `path`, which also names it.
     pub fn place(&mut self, id: u64, path: LibPath) {
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             entity.name = path.leaf().to_string();
             entity.path = Some(path);
-            self.revision += 1;
+            self.moved();
         }
     }
 
     /// Forget where an asset's file was to go, so it is placed again under a free name.
     pub fn unplace(&mut self, id: u64) {
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             entity.path = None;
-            self.revision += 1;
+            self.moved();
         }
     }
 
@@ -1137,7 +1187,7 @@ impl Workspace {
                 entity.path = Some(moved);
             }
         }
-        self.revision += 1;
+        self.moved();
     }
 
     /// Take bytes that were saved over this asset's file from outside the app. They are
@@ -1163,7 +1213,7 @@ impl Workspace {
             return self.adopt(id, theirs, log);
         }
         let stamp = self.stamp_for(id, &theirs);
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             entity.saved = Baseline::read(theirs, stamp);
         }
     }
@@ -1174,7 +1224,7 @@ impl Workspace {
             return self.adopt_file(id, theirs);
         }
         let stamp = self.stamp();
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             entity.saved = Baseline::on_disk(theirs.clone(), stamp);
         }
         self.check(id, theirs);
@@ -1187,7 +1237,7 @@ impl Workspace {
             return;
         }
         let stamp = self.stamp();
-        if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(entity) = self.get_mut(id) {
             if !entity.is_unsaved() {
                 entity.saved.stamp = stamp;
             }
@@ -1246,7 +1296,7 @@ impl Workspace {
     /// holds: where its file is, whether it is kept, its link, its last write and its
     /// pending edit, and its saved baseline where `keep_saved` says so.
     fn swap(&mut self, id: u64, keep_saved: bool, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
         let made = made(entity);
@@ -1296,7 +1346,7 @@ impl Workspace {
             return;
         };
         self.next_check();
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
         // An answer about a file the asset no longer stands on is dropped.
@@ -1414,7 +1464,7 @@ impl Workspace {
                 let name = entity.name.clone();
                 log.error(format!("{name}: {why}"));
                 log.trouble(format!("“{name}” could not be read."));
-                if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+                if let Some(entity) = self.get_mut(id) {
                     entity.parse_error = Some(why.clone());
                     entity.verify = VerifyState::Failed(why);
                 }
@@ -1474,6 +1524,7 @@ impl Workspace {
             }
         };
         self.entities.push(entity);
+        self.layout += 1;
         (id, arrival)
     }
 
@@ -1611,7 +1662,7 @@ impl Workspace {
     }
 
     pub fn export(&self, id: u64) {
-        let Some(entity) = self.entities.iter().find(|e| e.id == id) else {
+        let Some(entity) = self.get(id) else {
             return;
         };
         let name = match self.export_name(id) {
@@ -1679,7 +1730,7 @@ impl Workspace {
     /// ⚠️ Only the editor holding the edit can tell, so it must call this on every frame
     /// the answer might change. The bytes are the saved ones either way.
     pub fn mark_pending(&mut self, id: u64, pending: bool) -> bool {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return false;
         };
         if std::mem::replace(&mut entity.pending, pending) == pending {
@@ -1694,7 +1745,7 @@ impl Workspace {
     /// ⚠️ The bytes do not change, so the stamp stays and caches over them stay valid.
     /// The list revision moves, so the store is written again without the unsaved copy.
     pub fn mark_saved(&mut self, id: u64) {
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
         // Resting in its file, it holds what it was saved as, and only an editor's pending
@@ -1724,7 +1775,7 @@ impl Workspace {
             .map(|file| file.holds(&sent));
         match resting {
             Some(true) => {
-                if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+                if let Some(entity) = self.get_mut(id) {
                     entity.link = Some((class, at));
                     entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
                 }
@@ -1739,7 +1790,7 @@ impl Workspace {
             None => {}
         }
         let stamp = self.stamp_for(id, &sent);
-        let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) else {
+        let Some(entity) = self.get_mut(id) else {
             return;
         };
         entity.saved = Baseline::read(sent, stamp);
@@ -1794,7 +1845,7 @@ impl Workspace {
         let held = self
             .get(id)
             .is_some_and(|entity| entity.saved.holds(&bytes));
-        let entity = self.entities.iter_mut().find(|e| e.id == id)?;
+        let entity = self.get_mut(id)?;
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
         let path = entity.path.take();
         let saved = std::mem::take(&mut entity.saved);
@@ -1821,7 +1872,7 @@ impl Workspace {
     }
 
     pub fn duplicate(&mut self, id: u64, log: &mut Log) -> Option<u64> {
-        let source = self.entities.iter().find(|e| e.id == id)?;
+        let source = self.get(id)?;
         let name = crate::strings::tagged(
             &source.name,
             &format!("{} copy", crate::strings::display_name(&source.name)),
@@ -1842,11 +1893,11 @@ impl Workspace {
     }
 
     pub fn remove(&mut self, id: u64, log: &mut Log) {
-        let Some(at) = self.entities.iter().position(|e| e.id == id) else {
+        let Some(at) = self.position(id) else {
             return;
         };
         let gone = self.entities.remove(at);
-        self.revision += 1;
+        self.moved();
         log.say(format!("Removed “{}” from this computer.", gone.name));
     }
 
@@ -1856,7 +1907,7 @@ impl Workspace {
         let gone = self.listed().map(|entity| entity.id).collect();
         self.entities.retain(|entity| !entity.kept);
         self.let_go();
-        self.revision += 1;
+        self.moved();
         gone
     }
 
@@ -1891,6 +1942,8 @@ impl Workspace {
     /// ⚠️ Restore decodes and re-encodes every asset held whole before the next frame.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
         let mut refused = 0;
+        let mut held: std::collections::HashSet<u64> =
+            self.entities.iter().map(|entity| entity.id).collect();
         for Saved {
             id,
             name,
@@ -1905,7 +1958,7 @@ impl Workspace {
                 refused += 1;
                 continue;
             };
-            if self.entities.iter().any(|e| e.id == id) {
+            if !held.insert(id) {
                 refused += 1;
                 continue;
             }
@@ -1951,7 +2004,7 @@ impl Workspace {
         if let Some(next) = next_id {
             self.next_id = self.next_id.max(next);
         }
-        self.revision += 1;
+        self.moved();
         self.next_check();
         refused
     }

@@ -395,7 +395,7 @@ impl Browser {
                 glyph: Some(Glyph::LibraryBig),
                 name: place.name.as_deref().unwrap_or("This computer"),
                 whole: place.name.is_some(),
-                count: Some(workspace.listed().count().to_string()),
+                count: Some(self.folders.count(None, workspace).to_string()),
                 ..Cells::default()
             },
         );
@@ -574,8 +574,7 @@ impl Browser {
             .iter()
             .map(|entity| Item::Local(entity.id))
             .collect();
-        let count =
-            inside.len() + self.folders.children(Some(id)).len() + self.strangers_shown(Some(id));
+        let count = self.folders.count(Some(id), workspace);
         let mut open = self.open.contains(&Branch::Folder(id));
 
         if self.rename.as_ref().is_some_and(|r| r.what == item) {
@@ -644,7 +643,10 @@ impl Browser {
             .folders
             .path_of(id)
             .is_some_and(|path| self.folders.unwalked.contains(path));
-        if count == 0 && !unwalked {
+        let empty = inside.is_empty()
+            && self.folders.children(Some(id)).is_empty()
+            && self.strangers_shown(Some(id)) == 0;
+        if empty && !unwalked {
             nothing(ui, depth + 1, "empty; drag sounds here");
         }
         self.folder_body(ui, Some(id), depth, workspace, device, queue, naming, acts);
@@ -1622,6 +1624,39 @@ mod tests {
         browser.folders.all_files = true;
         let said = drawn(&mut browser);
         assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
+    }
+
+    /// Drawing the tree asks every folder row for its count and its contents, and none
+    /// of that is taken again until something moves.
+    #[test]
+    fn frames_of_the_tree_count_the_folders_once() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut parent = LibPath::root();
+        for _ in 0..3 {
+            let id = browser.folders.make(&parent, &workspace);
+            browser.open.insert(Branch::Folder(id));
+            parent = browser.folders.path_of(id).unwrap().clone();
+            let asset = workspace.create(Fresh::Program, &mut log).unwrap();
+            workspace.place(asset, parent.join("Grand.ne5p"));
+        }
+        for _ in 0..3 {
+            testing::run(&ctx, egui::RawInput::default(), |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                    });
+            });
+        }
+        assert_eq!(browser.folders.censuses.get(), 1);
     }
 
     /// ⚠️ A filter applied while a document is in front would narrow a table nobody is

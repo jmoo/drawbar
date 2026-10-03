@@ -5,7 +5,8 @@
 //! can name it while its path changes. Changes to folders queue [`Op`]s, which
 //! [`crate::store::Store`] sends to the disk in order.
 
-use std::collections::BTreeSet;
+use std::cell::{Ref, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::store::{names, LibPath, Row};
 use crate::workspace::{LocalEntity, Workspace};
@@ -94,10 +95,59 @@ pub enum Clash {
     Ambiguous(Vec<String>),
 }
 
+/// Where the listed assets are, taken once for each [`Workspace::layout`] and each change
+/// to the folders, and never per frame.
+#[derive(Default)]
+struct Census {
+    /// The workspace's layout and the folders' generation it was taken at.
+    taken: (u64, u64),
+    /// How many files drawbar opens each folder holds, everywhere below it. The root's
+    /// count, under `None`, is the whole library's.
+    counts: BTreeMap<Option<u64>, usize>,
+    /// The ids of the assets directly in each folder, in list order.
+    members: BTreeMap<Option<u64>, Vec<u64>>,
+}
+
+impl Census {
+    fn take(taken: (u64, u64), folders: &[Folder], workspace: &Workspace) -> Census {
+        let ids: BTreeMap<&LibPath, u64> = folders
+            .iter()
+            .map(|folder| (&folder.path, folder.id))
+            .collect();
+        let mut census = Census {
+            taken,
+            ..Census::default()
+        };
+        for entity in workspace.listed() {
+            let parent = entity.path.as_ref().map(LibPath::parent);
+            let holder = parent.as_ref().and_then(|dir| ids.get(dir).copied());
+            census.members.entry(holder).or_default().push(entity.id);
+            if !crate::store::opens(&entity.name) {
+                continue;
+            }
+            *census.counts.entry(None).or_default() += 1;
+            let mut dir = parent.filter(|_| holder.is_some());
+            while let Some(at) = dir.filter(|at| !at.is_root()) {
+                if let Some(id) = ids.get(&at) {
+                    *census.counts.entry(Some(*id)).or_default() += 1;
+                }
+                dir = Some(at.parent());
+            }
+        }
+        census
+    }
+}
+
 #[derive(Default)]
 pub struct Folders {
     /// In path order, so parents come before their children.
     list: Vec<Folder>,
+    /// Bumped by every change to `list`.
+    generation: u64,
+    census: RefCell<Census>,
+    /// How many times a census has been taken.
+    #[cfg(test)]
+    pub(crate) censuses: std::cell::Cell<usize>,
     ops: Vec<Op>,
     /// Assets whose file went missing outside drawbar while it held them.
     pub missing: BTreeSet<u64>,
@@ -181,10 +231,27 @@ impl Folders {
         folder: Option<u64>,
         workspace: &'a Workspace,
     ) -> Vec<&'a LocalEntity> {
-        workspace
-            .listed()
-            .filter(|entity| self.holding(entity) == folder)
-            .collect()
+        let census = self.census(workspace);
+        let ids = census.members.get(&folder).map_or(&[][..], Vec::as_slice);
+        ids.iter().filter_map(|id| workspace.get(*id)).collect()
+    }
+
+    /// How many files drawbar opens are in `folder`, or in the whole library for `None`,
+    /// however deep. Folders and files drawbar does not open are not counted; a file not
+    /// read yet is.
+    pub fn count(&self, folder: Option<u64>, workspace: &Workspace) -> usize {
+        let census = self.census(workspace);
+        census.counts.get(&folder).copied().unwrap_or(0)
+    }
+
+    fn census(&self, workspace: &Workspace) -> Ref<'_, Census> {
+        let now = (workspace.layout(), self.generation);
+        if self.census.borrow().taken != now {
+            *self.census.borrow_mut() = Census::take(now, &self.list, workspace);
+            #[cfg(test)]
+            self.censuses.set(self.censuses.get() + 1);
+        }
+        self.census.borrow()
     }
 
     /// Forget the library open until now, and keep what is the window's: whether all
@@ -193,6 +260,7 @@ impl Folders {
         *self = Folders {
             all_files: self.all_files,
             libraries: std::mem::take(&mut self.libraries),
+            generation: self.generation + 1,
             ..Folders::default()
         };
     }
@@ -236,6 +304,7 @@ impl Folders {
         let id = self.next_id();
         self.list.push(Folder { id, path });
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
+        self.generation += 1;
         id
     }
 
@@ -257,6 +326,7 @@ impl Folders {
             }
         }
         self.list.retain(|folder| dirs.contains(&folder.path));
+        self.generation += 1;
         for dir in dirs {
             self.insert(dir);
         }
@@ -344,6 +414,7 @@ impl Folders {
             }
         }
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
+        self.generation += 1;
         for lost in &mut self.lost {
             if let Some(moved) = lost.row.path.as_ref().and_then(|at| at.moved(&from, &to)) {
                 lost.row.path = Some(moved);
@@ -359,6 +430,7 @@ impl Folders {
             return;
         };
         self.list.retain(|folder| folder.id != id);
+        self.generation += 1;
         self.ops.push(Op::RemoveDir(path));
     }
 
@@ -493,6 +565,63 @@ mod tests {
             }],
             "one rename on disk, not one per file"
         );
+    }
+
+    /// Every file drawbar opens below a folder counts toward it, and nothing else does:
+    /// not its folders, and not a file it holds of a kind it does not open.
+    #[test]
+    fn a_folder_counts_the_files_drawbar_opens_everywhere_below_it() {
+        let (mut workspace, mut log) = workspace();
+        let mut folders = Folders::default();
+        folders.sync(
+            &["Pianos", "Pianos/Old", "Pianos/Empty"].map(|dir| LibPath::parse(dir).unwrap()),
+        );
+        for path in [
+            "top.ne5p",
+            "Pianos/Grand.ne5p",
+            "Pianos/Old/c3.ne5p",
+            "Pianos/scan.pdf",
+        ] {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            workspace.place(id, LibPath::parse(path).unwrap());
+        }
+        folders.others = vec![LibPath::parse("Pianos/cover.jpg").unwrap()];
+        let count = |path: &str| {
+            let id = folders.id_of(&LibPath::parse(path).unwrap()).unwrap();
+            folders.count(Some(id), &workspace)
+        };
+        assert_eq!(count("Pianos"), 2);
+        assert_eq!(count("Pianos/Old"), 1);
+        assert_eq!(count("Pianos/Empty"), 0);
+        assert_eq!(folders.count(None, &workspace), 3, "the whole library");
+    }
+
+    /// The counts and the members are taken once for each change to where the assets
+    /// are, however often they are asked for.
+    #[test]
+    fn the_counts_are_taken_again_only_when_an_asset_or_a_folder_moves() {
+        let (mut workspace, mut log) = workspace();
+        let mut folders = Folders::default();
+        let pianos = folders.make(&LibPath::root(), &workspace);
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let dir = folders.path_of(pianos).unwrap().clone();
+        workspace.place(id, dir.join("Grand.ne5p"));
+        for _ in 0..3 {
+            assert_eq!(folders.count(Some(pianos), &workspace), 1);
+            assert_eq!(folders.members(Some(pianos), &workspace).len(), 1);
+        }
+        assert_eq!(folders.censuses.get(), 1);
+
+        let log = &mut log;
+        workspace.replace_bytes(id, Fresh::Live.bytes().unwrap(), log);
+        folders.count(None, &workspace);
+        assert_eq!(folders.censuses.get(), 1, "an edit moves nothing");
+
+        workspace.place(id, LibPath::root().join("Grand.ne5p"));
+        assert_eq!(folders.count(Some(pianos), &workspace), 0);
+        folders.relocate(pianos, LibPath::root().join("Keys"), &mut workspace);
+        assert_eq!(folders.count(None, &workspace), 1);
+        assert_eq!(folders.censuses.get(), 3);
     }
 
     #[test]
