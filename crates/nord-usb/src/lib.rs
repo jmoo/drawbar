@@ -34,6 +34,7 @@ pub mod transport;
 pub mod wire;
 
 pub use device::{Device, Geometry};
+pub use envelope::FileSource;
 pub use error::{Error, Result};
 pub use session::{ReadOnly, ReadWrite, Session};
 pub use transport::Transport;

@@ -56,7 +56,8 @@ pub enum Error {
     Transport(String),
 
     /// The `CBIN` file around an entity body is wrong: bad magic, a checksum that does
-    /// not match the body, a malformed format tag, or no body.
+    /// not match the body, a malformed format tag, no body, or bytes that changed while
+    /// a write was sending them.
     #[error("envelope: {0}")]
     Envelope(String),
 

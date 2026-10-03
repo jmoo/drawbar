@@ -4,9 +4,7 @@
 //! session and applying primitives repeatedly. Operations send the progress labels the
 //! instrument displays but omit reads that only refresh a host UI.
 
-use nord_format::cbin::{Cbin, RawBody};
-
-use crate::envelope;
+use crate::envelope::{self, FileSource, Opened};
 use crate::error::{Error, Result};
 use crate::session::ReadWrite;
 use crate::session::{Session, WRITE_LIMIT};
@@ -325,7 +323,29 @@ pub async fn write<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
     at: Location,
-    file: &[u8],
+    mut file: &[u8],
+    name: &str,
+    timestamp: u32,
+) -> Result<()> {
+    write_from(session, unit, at, &mut file, name, timestamp).await
+}
+
+/// [`write()`], reading the file from `file` one transfer chunk at a time, so that memory
+/// stays bounded by the chunk whatever the file's size.
+///
+/// The body is read twice. The first pass checks it against the file's checksum before
+/// any frame is sent, so a damaged file is refused as [`write()`] refuses it. The second
+/// sends it, and withholds the final chunk with [`Error::Envelope`] if the bytes no
+/// longer match, which leaves the write unfinished rather than completed with a file
+/// that changed after it was checked.
+///
+/// A failed read from `file` returns its [`Error::Io`] the way a failed send returns
+/// its error: the session is still in step, and closing it is the caller's.
+pub async fn write_from<T: Transport>(
+    session: &mut Session<'_, T, ReadWrite>,
+    unit: AllocationUnit,
+    at: Location,
+    file: &mut impl FileSource,
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
@@ -335,11 +355,12 @@ pub async fn write<T: Transport>(
             session.class().label()
         )));
     }
-    let file = envelope::unwrap(file)?;
+    let chunk = write_chunk()?;
+    let opened = envelope::open(file, chunk).await?;
     if !unit.is_bytes() {
-        reserve(session, unit.blocks_for(file.body.0.len())?).await?;
+        reserve(session, unit.blocks_for(opened.body.len())?).await?;
     }
-    transfer_in(session, at, &file, name, timestamp).await
+    transfer_in(session, at, file, &opened, chunk, name, timestamp).await
 }
 
 /// A [`cmd::BEGIN_WRITE`] argument block: the address, the body's length, the format
@@ -393,37 +414,48 @@ pub fn write_data_args(at: Location, offset: usize, chunk: &[u8]) -> Result<Vec<
 async fn transfer_in<T: Transport>(
     session: &mut Session<'_, T, ReadWrite>,
     at: Location,
-    file: &Cbin<RawBody>,
+    file: &mut impl FileSource,
+    opened: &Opened,
+    chunk_size: usize,
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
-    let body = &file.body.0;
-    let chunk_size = write_chunk()?;
+    let body = opened.body.clone();
+    let len = body.len();
 
     session.notify(&ui::label("Downloading...")?).await?;
 
-    let begin = begin_write_args(at, body.len(), &file.header.tag, timestamp, name)?;
+    let begin = begin_write_args(at, len, &opened.header.tag, timestamp, name)?;
     session
         .request(&Message::program(cmd::BEGIN_WRITE, begin))
         .await?;
 
+    let mut buf = vec![0; chunk_size.min(len)];
+    let mut hash = opened.hash();
     let mut offset = 0usize;
     let mut painted = None;
-    while offset < body.len() {
-        let end = offset.saturating_add(chunk_size).min(body.len());
-        let data = Message::program(
-            cmd::WRITE_DATA,
-            write_data_args(at, offset, &body[offset..end])?,
-        );
+    while offset < len {
+        let end = offset.saturating_add(chunk_size).min(len);
+        let chunk = &mut buf[..end - offset];
+        file.read_at((body.start + offset) as u64, chunk).await?;
+        hash.update(chunk);
+        let data = Message::program(cmd::WRITE_DATA, write_data_args(at, offset, chunk)?);
         // Only the final chunk is acknowledged.
-        if end == body.len() {
+        if end == len {
+            if !opened.matches(&hash) {
+                return Err(Error::Envelope(
+                    "the file changed after its checksum was checked, so its last chunk \
+                     was not sent"
+                        .into(),
+                ));
+            }
             session.request(&data).await?;
         } else {
             session.notify(&data).await?;
         }
         offset = end;
 
-        let pct = (offset as u64 * 100 / (body.len().max(1)) as u64) as u16;
+        let pct = (offset as u64 * 100 / (len.max(1)) as u64) as u16;
         if painted != Some(pct) {
             session.notify(&ui::percent(pct)).await?;
             painted = Some(pct);

@@ -6,8 +6,10 @@
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
-use nord_format::cbin::{self, Cbin, Header, RawBody};
-use std::io::Cursor;
+use nord_format::cbin::{self, Cbin, Generation, Header, RawBody};
+use nord_format::crc::{Crc16Stream, Crc32Stream};
+use std::io::{self, Cursor};
+use std::ops::Range;
 
 /// CRC-32/ISO-HDLC over a wire body. The type-1 container carries the same checksum,
 /// and the device reports it in `0x1e` object info.
@@ -83,6 +85,8 @@ pub fn wrap(format: &str, at: Location, version: u32, body: &[u8]) -> Result<Vec
     Ok(out.into_inner())
 }
 
+const BARE_HEADER: &str = "the file is a bare CBIN header with no body to send";
+
 /// The inverse of [`wrap`]: split file bytes into the header and the body the wire
 /// carries. The checksum is verified.
 pub fn unwrap(file: &[u8]) -> Result<Cbin<RawBody>> {
@@ -90,11 +94,149 @@ pub fn unwrap(file: &[u8]) -> Result<Cbin<RawBody>> {
         cbin::read_raw(&mut Cursor::new(file)).map_err(|e| Error::Envelope(e.to_string()))?;
     // A container may hold an empty body, but the body is the whole payload of a write.
     if read.body.0.is_empty() {
-        return Err(Error::Envelope(
-            "the file is a bare CBIN header with no body to send".into(),
-        ));
+        return Err(Error::Envelope(BARE_HEADER.into()));
     }
     Ok(read)
+}
+
+/// Where the bytes of a file to send come from: a file on disk, a browser `File`, or
+/// memory. A write reads it in pieces no larger than one transfer chunk, so the whole
+/// file is never held at once.
+///
+/// No `Send` bound, for the reason [`Transport`](crate::transport::Transport) gives.
+#[allow(async_fn_in_trait, clippy::len_without_is_empty)]
+pub trait FileSource {
+    /// The file's length in bytes, taken once before the first read.
+    fn len(&self) -> u64;
+
+    /// Fill `buf` with the bytes starting at `offset`. Bytes past the end are an error,
+    /// such as [`io::ErrorKind::UnexpectedEof`], never a short read.
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+}
+
+impl FileSource for &[u8] {
+    fn len(&self) -> u64 {
+        <[u8]>::len(self) as u64
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let bytes = usize::try_from(offset)
+            .ok()
+            .and_then(|start| self.get(start..start.checked_add(buf.len())?))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        buf.copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// A file opened through a [`FileSource`] and verified as [`unwrap`] verifies one: its
+/// header, and where in the file the body the wire carries lies.
+pub(crate) struct Opened {
+    pub header: Header,
+    pub body: Range<usize>,
+    stored: u32,
+    /// The file's first bytes, which a type-0 checksum covers ahead of the body.
+    head: Vec<u8>,
+}
+
+/// The checksum a file's generation stores, accumulated over its body.
+pub(crate) enum Hash {
+    V0(Crc16Stream<'static>),
+    V1(Crc32Stream<'static>),
+}
+
+impl Hash {
+    pub fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Hash::V0(h) => h.update(bytes),
+            Hash::V1(h) => h.update(bytes),
+        }
+    }
+
+    fn value(&self) -> u32 {
+        match self {
+            Hash::V0(h) => h.value().into(),
+            Hash::V1(h) => h.value(),
+        }
+    }
+}
+
+impl Opened {
+    /// An accumulator that has seen what the checksum covers before the body.
+    pub fn hash(&self) -> Hash {
+        match self.header.generation {
+            Generation::V0 => {
+                let mut hash = Crc16Stream::new();
+                hash.update(&self.head[..Generation::V0.body_start() as usize]);
+                Hash::V0(hash)
+            }
+            Generation::V1 => Hash::V1(Crc32Stream::new()),
+        }
+    }
+
+    /// Whether `hash`, having seen the whole body, matches the checksum the file stores.
+    pub fn matches(&self, hash: &Hash) -> bool {
+        hash.value() == self.stored
+    }
+
+    /// One pass over the body in pieces of `chunk` bytes, checking it against the
+    /// stored checksum.
+    async fn verify(&self, file: &mut impl FileSource, chunk: usize) -> Result<()> {
+        let mut hash = self.hash();
+        let mut buf = vec![0; chunk.min(self.body.len())];
+        for at in self.body.clone().step_by(chunk) {
+            let piece = &mut buf[..chunk.min(self.body.end - at)];
+            file.read_at(at as u64, piece).await?;
+            hash.update(piece);
+        }
+        if self.matches(&hash) {
+            return Ok(());
+        }
+        Err(Error::Envelope(format!(
+            "{}: stored checksum {:#x} does not match the file's {:#x}",
+            tag(&self.header),
+            self.stored,
+            hash.value()
+        )))
+    }
+}
+
+/// [`unwrap`] through a [`FileSource`]: the header is read alone, and the body in
+/// pieces of `chunk` bytes, which are checked against the stored checksum and dropped.
+pub(crate) async fn open(file: &mut impl FileSource, chunk: usize) -> Result<Opened> {
+    let len = usize::try_from(file.len()).map_err(|_| {
+        Error::InvalidArgument("the file is larger than this platform can address".into())
+    })?;
+    let mut head = vec![0; len.min(Generation::V1.body_start() as usize)];
+    file.read_at(0, &mut head).await?;
+    // The header checks are nord-format's: the longer header's worth of bytes, or the
+    // whole of a shorter file, is a container it can inspect without the body.
+    let info =
+        cbin::inspect(&mut Cursor::new(&head)).map_err(|e| Error::Envelope(e.to_string()))?;
+
+    let start = info.header.generation.body_start() as usize;
+    let (body, stored) = match info.header.generation {
+        Generation::V1 => (start..len, info.stored_checksum),
+        // The crc16 trails the file, out of the header's reach. Inspecting has refused a
+        // file too short to hold it.
+        Generation::V0 => {
+            let mut trailer = [0u8; 2];
+            let end = len - trailer.len();
+            file.read_at(end as u64, &mut trailer).await?;
+            (start..end, u16::from_le_bytes(trailer).into())
+        }
+    };
+    let opened = Opened {
+        header: info.header,
+        body,
+        stored,
+        head,
+    };
+    opened.verify(file, chunk).await?;
+    if opened.body.is_empty() {
+        return Err(Error::Envelope(BARE_HEADER.into()));
+    }
+    Ok(opened)
 }
 
 #[cfg(test)]
@@ -160,6 +302,81 @@ mod tests {
         let bytes = bytes.into_inner();
         assert!(cbin::read_raw(&mut Cursor::new(&bytes)).is_ok());
         assert!(unwrap(&bytes).is_err(), "an empty body has nothing to send");
+    }
+
+    fn file(generation: Generation, tag: &str, body: &[u8]) -> Vec<u8> {
+        let file = Cbin {
+            header: Header {
+                generation,
+                ..Header::new(tag, (6, 9), 4)
+            },
+            body: RawBody(body.to_vec()),
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        file.write_to(&mut bytes).unwrap();
+        bytes.into_inner()
+    }
+
+    /// For every truncation and every flipped bit of type-1 and type-0 files, `open`
+    /// accepts exactly what `unwrap` accepts, and finds the same header and body.
+    #[test]
+    fn opening_through_a_source_accepts_exactly_what_unwrap_accepts() {
+        let body = hex(BODY);
+        let files = [
+            [hex(HEADER), body.clone()].concat(),
+            file(Generation::V0, "nspg", &body),
+            // Shorter than a type-1 header, so the header read is the whole file.
+            file(Generation::V0, "nspg", &body[..5]),
+            file(Generation::V1, "ne5p", &[]),
+        ];
+        let mut cases = Vec::new();
+        for file in &files {
+            cases.extend((0..=file.len()).map(|len| file[..len].to_vec()));
+            for at in 0..file.len() {
+                for bit in 0..8 {
+                    let mut flipped = file.clone();
+                    flipped[at] ^= 1 << bit;
+                    cases.push(flipped);
+                }
+            }
+        }
+
+        let (mut accepted, mut refused) = (0, 0);
+        for (i, case) in cases.iter().enumerate() {
+            let whole = unwrap(case);
+            for chunk in [1, 7, 4096] {
+                let opened = pollster::block_on(open(&mut case.as_slice(), chunk));
+                match (&whole, opened) {
+                    (Ok(whole), Ok(opened)) => {
+                        assert_eq!(opened.header, whole.header, "case {i}");
+                        assert_eq!(case[opened.body], whole.body.0[..], "case {i}");
+                        accepted += 1;
+                    }
+                    (Err(_), Err(_)) => refused += 1,
+                    (whole, opened) => panic!(
+                        "case {i}, chunk {chunk}: unwrap {:?} but open {:?}",
+                        whole.as_ref().map(|_| ()),
+                        opened.map(|_| ())
+                    ),
+                }
+            }
+        }
+        assert!(
+            accepted > 0 && refused > 0,
+            "{accepted} accepted, {refused} refused"
+        );
+    }
+
+    #[test]
+    fn a_slice_refuses_a_read_past_its_end() {
+        let mut file: &[u8] = &[1, 2, 3];
+        let mut buf = [0; 2];
+        pollster::block_on(file.read_at(1, &mut buf)).unwrap();
+        assert_eq!(buf, [2, 3]);
+        let err = pollster::block_on(file.read_at(2, &mut buf)).expect_err("one byte short");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        let err = pollster::block_on(file.read_at(u64::MAX, &mut buf)).expect_err("past usize");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
