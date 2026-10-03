@@ -18,7 +18,16 @@ whole read holds all of it in memory. `npno::Index` and `nsmp::Index` read only 
 file's headers and stroke directory, through `Read` and `Seek`, and give the byte
 range of each stroke's audio. A caller reads one stroke by its range and decodes
 it. The index does not verify the container checksum, which covers every byte;
-`cbin::inspect` checks it in one streaming pass.
+`cbin::inspect` checks it in one streaming pass, and `cbin::Verifier` does the
+same over chunks a caller supplies.
+
+An edit is saved without a whole read too. A sample instrument's
+`nsmp::Outline`, from its index, answers what a whole read answers outside the
+audio and takes the same edits; `Index::patch` turns it into a `cbin::Patch`, the
+few sections the edit changed and the restated checksum, which `Patch::copy`
+writes while copying the file through. An edited piano library is written by
+`Library::write_from`, which reads one stroke's audio at a time from the source
+file.
 
 ## The support map
 

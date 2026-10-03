@@ -16,7 +16,10 @@ dispatches. Each specimen is parsed, round-tripped byte for byte, checked for
 unnameable values, and has every registry field set and read back without moving
 another. A piano library or sample instrument, alone or in a bundle, must also
 index to the bytes a whole read gives each stroke or zone, reading none of the
-audio to find them.
+audio to find them. A sample's outline must answer as a whole read does, and an
+edit saved as a patch must write the bytes a whole edit writes. An edited piano
+library streamed from its file must write the bytes the whole library writes,
+reading one stroke at a time.
 
 With `--features corpus`, `NORD_CORPUS_ROOT` names a corpus: any tree of Nord
 files. The sweep runs over every file in it the reader recognizes, wherever it
