@@ -2314,7 +2314,10 @@ fn reads_waiting_for_room_look_for_it_once_a_frame() {
 
     session.store.looked_for_room = 0;
     session.read(&ids);
-    assert_eq!(session.store.looked_for_room, 1, "one pass, not one per read");
+    assert_eq!(
+        session.store.looked_for_room, 1,
+        "one pass, not one per read"
+    );
 }
 
 /// Once the library is listed, each file the index tracks, here by a tag, is read and
