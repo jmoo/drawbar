@@ -676,10 +676,13 @@ file already there. In a picked folder the page writes through
 Web Lock named for the folder, taken with `ifAvailable`, keeps a second tab to
 reading. Reads go through `File` snapshots in 4 MiB slices.
 
-Two things differ from the desktop. `create` checks the name and then moves,
-in two steps, so in a picked folder another program can write between them.
-Chrome cannot move a folder whole, so a folder moves file by file, and an
-interrupted move leaves its files split between the two names, none lost. The
+Two things differ from the desktop. A new file's write checks the name and then
+moves, in two steps, so in a picked folder another program can write between
+them. Chrome cannot move a folder whole, so a folder moves file by file, and an
+interrupted move leaves its files split between the two names, none lost. A
+rename that changes only case moves through a free name beside the folder,
+`<name>.<n>.drawbar-move`, since on a disk that ignores case the new name reaches
+the folder itself, and a folder is never removed where it is the one moved into. The
 first write to the private file system also asks the browser to keep it through
 a shortage of space. A tab opens a new library only once the one before it has
 run its last command and let go of its lock.

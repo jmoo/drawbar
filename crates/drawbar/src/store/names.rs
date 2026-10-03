@@ -76,6 +76,21 @@ pub fn inside(path: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// The renames that move the folder `from` to `to` one at a time, where a folder cannot
+/// move whole: `to` itself, or, where the two differ only in case, `aside` and then `to`,
+/// so no step moves a folder onto itself on a disk that ignores case. `aside` is a free
+/// name beside `from`.
+pub fn folder_steps(from: &str, to: &str, aside: &str) -> Vec<(String, String)> {
+    let parent = |path: &str| path.rsplit_once('/').map(|(dir, _)| dir.to_string());
+    match parent(from) == parent(to) && key(from) == key(to) {
+        true => vec![
+            (from.to_string(), aside.to_string()),
+            (aside.to_string(), to.to_string()),
+        ],
+        false => vec![(from.to_string(), to.to_string())],
+    }
+}
+
 /// `wanted`, or the first of `wanted 2`, `wanted 3`, … that `taken` refuses, with the
 /// number before the extension so `c3 2.wav` still reads as a WAV.
 pub fn free(wanted: &str, taken: impl Fn(&str) -> bool) -> String {
@@ -141,6 +156,23 @@ fn shortened(name: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder renamed in case alone moves through a name beside it, so no step's
+    /// destination is its own source on a disk that ignores case; any other move is one
+    /// step.
+    #[test]
+    fn a_case_only_folder_rename_never_moves_a_folder_onto_itself() {
+        let steps = folder_steps("Gigs/cello", "Gigs/Cello", "Gigs/cello.1.drawbar-move");
+        assert_eq!(steps.len(), 2);
+        for (from, to) in &steps {
+            assert_ne!(key(from), key(to), "{from} onto {to}");
+        }
+        assert_eq!(steps.last().map(|(_, to)| to.as_str()), Some("Gigs/Cello"));
+        assert_eq!(
+            folder_steps("Gigs/cello", "Old/Cello", "unused"),
+            [("Gigs/cello".to_string(), "Old/Cello".to_string())]
+        );
+    }
 
     #[test]
     fn a_name_every_system_holds_is_allowed() {

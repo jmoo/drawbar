@@ -875,7 +875,8 @@ impl Folder {
     /// [`Fs::rename`], leaving the folder handles as they are.
     ///
     /// ⚠️ Chrome cannot move a folder whole, so there a folder moves file by file, and
-    /// one interrupted leaves its files split between the two names, none lost.
+    /// one interrupted leaves its files split between the two names, none lost. A rename
+    /// that changes only case moves through a free name beside it.
     async fn relocate(&self, from: &str, to: &str) -> io::Result<()> {
         if to == from || names::inside(to, from) {
             return Err(io::Error::new(
@@ -894,7 +895,43 @@ impl Folder {
         if handle.kind() == FileSystemHandleKind::File || field(&handle, "move").is_some() {
             return move_to(&handle, &dir, &leaf).await;
         }
-        move_tree(handle.unchecked_ref(), &dir, &leaf).await?;
+        let aside = self.aside(from).await?;
+        for (from, to) in names::folder_steps(from, to, &aside) {
+            self.move_folder(&from, &to).await?;
+        }
+        Ok(())
+    }
+
+    /// A free name beside the folder `from`, to move it through.
+    async fn aside(&self, from: &str) -> io::Result<String> {
+        for n in 1..100 {
+            let aside = format!("{from}.{n}.drawbar-move");
+            if !self.taken(&aside).await? {
+                return Ok(aside);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no name beside the folder is free to move it through",
+        ))
+    }
+
+    /// Move the folder `from` to `to` file by file, then remove what is left of `from`.
+    ///
+    /// ⚠️ `from` is removed only where it is not the folder at `to`: on a disk that
+    /// ignores case two names can reach one folder, and removing it would delete what
+    /// was just moved.
+    async fn move_folder(&self, from: &str, to: &str) -> io::Result<()> {
+        let handle: FileSystemDirectoryHandle = self.handle(from).await?.unchecked_into();
+        let (dir, leaf) = self.spot(to).await?;
+        move_tree(&handle, &dir, &leaf).await?;
+        let moved: FileSystemHandle = settle(dir.get_directory_handle(&leaf)).await?;
+        let same = JsFuture::from(handle.is_same_entry(&moved))
+            .await
+            .map_err(failed)?;
+        if same.as_bool() == Some(true) {
+            return Err(io::Error::other("a folder cannot move onto itself"));
+        }
         let (parent, name) = self.spot(from).await?;
         JsFuture::from(parent.remove_entry(&name))
             .await
