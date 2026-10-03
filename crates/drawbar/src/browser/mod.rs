@@ -44,7 +44,7 @@ pub use tree::new_menu;
 use act::{will_write, write_warnings};
 use drag::ghost;
 use selection::{gesture, Gesture};
-use tree::{Branch, Sections};
+use tree::{Branch, Rows, Sections};
 
 /// An in-place rename, waiting on Enter or Esc.
 struct Rename {
@@ -135,8 +135,9 @@ pub struct Browser {
     /// The open branches of the tree. Both places start open, so a new panel shows what
     /// is in them.
     open: BTreeSet<Branch>,
-    /// A slot to scroll to and select, once the branches holding it have been drawn.
+    /// A slot to scroll to and select, once the branches holding it have been laid out.
     jump: Option<(ObjectClass, Location)>,
+    rows: Rows,
 }
 
 impl Default for Browser {
@@ -151,6 +152,7 @@ impl Default for Browser {
             sections: Sections::default(),
             open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
+            rows: Rows::default(),
         }
     }
 }
@@ -231,11 +233,6 @@ impl Browser {
     fn select(&mut self, item: Item) {
         self.rename = None;
         self.selection.only(item);
-    }
-
-    /// Whether this row is the only one selected, which is what F2 renames.
-    fn sole_is(&self, item: Item) -> bool {
-        self.selection.sole() == Some(item)
     }
 
     /// Cancel an open rename of `what` and drop it from the selection, because its row is
@@ -1016,16 +1013,37 @@ mod tests {
     /// would look like it applies to all of them, and only one would change.
     #[test]
     fn f2_renames_only_while_its_row_is_the_only_one_picked() {
-        let Bench { mut browser, .. } = Bench::new();
-        let row = Item::Local(1);
-        browser.selection.only(row);
-        assert!(browser.sole_is(row));
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let one = workspace.create(Fresh::Program, &mut log).unwrap();
+        let two = workspace.create(Fresh::Program, &mut log).unwrap();
+        let press_f2 = |browser: &mut Browser| {
+            let input = egui::RawInput {
+                events: vec![testing::key(egui::Key::F2)],
+                ..Default::default()
+            };
+            testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::left("places").show(ctx, |ui| {
+                    browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                });
+            });
+            browser.rename.as_ref().map(|rename| rename.what)
+        };
 
-        browser.selection.toggle(Item::Local(2));
-        assert!(!browser.sole_is(row), "two rows selected");
-        browser.selection.plain(Item::Local(2));
-        assert!(
-            browser.sole_is(row),
+        browser.selection.only(Item::Local(one));
+        browser.selection.toggle(Item::Local(two));
+        assert_eq!(press_f2(&mut browser), None, "two rows selected");
+        browser.selection.plain(Item::Local(two));
+        assert_eq!(
+            press_f2(&mut browser),
+            Some(Item::Local(one)),
             "a plain click on one of the two leaves the other sole"
         );
     }

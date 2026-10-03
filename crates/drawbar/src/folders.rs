@@ -140,6 +140,9 @@ impl Census {
     }
 }
 
+/// What [`Folders::shape`] returns.
+pub(crate) type Shape = (u64, [usize; 4], bool);
+
 #[derive(Default)]
 pub struct Folders {
     /// In path order, so parents come before their children.
@@ -254,6 +257,24 @@ impl Folders {
             self.censuses.set(self.censuses.get() + 1);
         }
         self.census.borrow()
+    }
+
+    /// A value that changes whenever the tree's lines for the library would: the
+    /// folders, and the lists of what is beside the assets in them.
+    ///
+    /// ⚠️ Those lists only grow, or are replaced whole by a listing that also syncs the
+    /// folders, so their lengths and the generation together catch every change.
+    pub(crate) fn shape(&self) -> Shape {
+        (
+            self.generation,
+            [
+                self.others.len(),
+                self.unread.len(),
+                self.unwalked.len(),
+                self.lost.len(),
+            ],
+            self.all_files,
+        )
     }
 
     /// Forget the library open until now, and keep what is the window's: whether all
