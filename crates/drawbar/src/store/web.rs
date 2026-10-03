@@ -583,7 +583,8 @@ struct Folder {
     /// up again from the root one name at a time.
     ///
     /// ⚠️ Safari and Firefox keep a handle on its folder wherever it moves, so the handles
-    /// are let go after each command and whenever this tab moves or removes a folder.
+    /// are let go after each command, and after every move, new folder or removal this
+    /// tab makes, whether it succeeded or not.
     dirs: RefCell<HashMap<String, FileSystemDirectoryHandle>>,
 }
 
@@ -767,6 +768,46 @@ impl Folder {
             }
         }
         placed
+    }
+
+    /// [`Fs::rename`], leaving the folder handles as they are.
+    ///
+    /// ⚠️ Chrome cannot move a folder whole, so there a folder moves file by file, and
+    /// one interrupted leaves its files split between the two names, none lost.
+    async fn relocate(&self, from: &str, to: &str) -> io::Result<()> {
+        if to == from || names::inside(to, from) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "it cannot move into itself",
+            ));
+        }
+        let same = from.rsplit_once('/').map(|(dir, _)| dir)
+            == to.rsplit_once('/').map(|(dir, _)| dir)
+            && names::key(from) == names::key(to);
+        if !same && self.taken(to).await? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let handle = self.handle(from).await?;
+        let (dir, leaf) = self.spot(to).await?;
+        if handle.kind() == FileSystemHandleKind::File || field(&handle, "move").is_some() {
+            return move_to(&handle, &dir, &leaf).await;
+        }
+        move_tree(handle.unchecked_ref(), &dir, &leaf).await?;
+        let (parent, name) = self.spot(from).await?;
+        JsFuture::from(parent.remove_entry(&name))
+            .await
+            .map_err(failed)?;
+        Ok(())
+    }
+
+    /// [`Fs::remove_dir`], leaving the folder handles as they are.
+    async fn unmake(&self, path: &str) -> io::Result<()> {
+        let (dir, leaf) = self.spot(path).await?;
+        settle::<FileSystemDirectoryHandle>(dir.get_directory_handle(&leaf)).await?;
+        JsFuture::from(dir.remove_entry(&leaf))
+            .await
+            .map_err(failed)?;
+        Ok(())
     }
 }
 
@@ -1065,39 +1106,16 @@ impl Fs for Folder {
         self.place(&temp, path).await
     }
 
-    /// ⚠️ Chrome cannot move a folder whole, so there a folder moves file by file, and
-    /// one interrupted leaves its files split between the two names, none lost.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
-        if to == from || names::inside(to, from) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "it cannot move into itself",
-            ));
-        }
-        let same = from.rsplit_once('/').map(|(dir, _)| dir)
-            == to.rsplit_once('/').map(|(dir, _)| dir)
-            && names::key(from) == names::key(to);
-        if !same && self.taken(to).await? {
-            return Err(io::ErrorKind::AlreadyExists.into());
-        }
-        let handle = self.handle(from).await?;
-        let (dir, leaf) = self.spot(to).await?;
-        if handle.kind() == FileSystemHandleKind::Directory {
-            self.dirs.borrow_mut().clear();
-        }
-        if handle.kind() == FileSystemHandleKind::File || field(&handle, "move").is_some() {
-            return move_to(&handle, &dir, &leaf).await;
-        }
-        move_tree(handle.unchecked_ref(), &dir, &leaf).await?;
-        let (parent, name) = self.spot(from).await?;
-        JsFuture::from(parent.remove_entry(&name))
-            .await
-            .map_err(failed)?;
-        Ok(())
+        let moved = self.relocate(from, to).await;
+        self.dirs.get_mut().clear();
+        moved
     }
 
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {
-        self.dir(path, true).await.map(|_| ())
+        let made = self.dir(path, true).await.map(|_| ());
+        self.dirs.get_mut().clear();
+        made
     }
 
     async fn remove_file(&mut self, path: &str) -> io::Result<()> {
@@ -1110,12 +1128,8 @@ impl Fs for Folder {
     }
 
     async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
-        self.dirs.borrow_mut().clear();
-        let (dir, leaf) = self.spot(path).await?;
-        settle::<FileSystemDirectoryHandle>(dir.get_directory_handle(&leaf)).await?;
-        JsFuture::from(dir.remove_entry(&leaf))
-            .await
-            .map_err(failed)?;
-        Ok(())
+        let removed = self.unmake(path).await;
+        self.dirs.get_mut().clear();
+        removed
     }
 }
