@@ -2200,8 +2200,6 @@ impl Workspace {
     /// id or is already in the list.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
         let mut refused = 0;
-        let mut held: std::collections::HashSet<u64> =
-            self.entities.iter().map(|entity| entity.id).collect();
         for Saved {
             id,
             name,
@@ -2216,7 +2214,8 @@ impl Workspace {
                 refused += 1;
                 continue;
             };
-            if !held.insert(id) {
+            // Every id held is below the next one, so only an id below it can be held.
+            if id < self.next_id && self.position(id).is_some() {
                 refused += 1;
                 continue;
             }
@@ -3186,6 +3185,33 @@ mod tests {
         // A new asset cannot land on an id something restored is already using.
         let fresh = workspace.create(Fresh::Live, &mut log).unwrap();
         assert!(fresh >= 10);
+    }
+
+    /// An id already held is refused, in the same restore or a later one; a free id
+    /// below the next one is not.
+    #[test]
+    fn a_restore_refuses_only_the_ids_already_held() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let saved = |id| Saved {
+            id,
+            name: format!("{id}.ne5p"),
+            path: None,
+            origin: Origin::Fresh,
+            saved: Fresh::Program.bytes().unwrap(),
+            file: None,
+            unsaved: None,
+        };
+        assert_eq!(
+            workspace.restore(vec![saved(5), saved(5)], None, &mut log),
+            1
+        );
+        assert_eq!(
+            workspace.restore(vec![saved(5), saved(3)], None, &mut log),
+            1
+        );
+        let ids: Vec<u64> = workspace.listed().map(|entity| entity.id).collect();
+        assert_eq!(ids, [5, 3]);
     }
 
     /// The assets asked for first are decoded first, whatever order the rest arrived in.
