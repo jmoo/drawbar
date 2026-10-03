@@ -44,7 +44,8 @@
 //!
 //! ⚠️ Real libraries are tens of megabytes, and reading one allocates the whole body.
 //! [`Index`] reads the prefix and the directory alone and says where each stroke's
-//! audio sits, so one stroke can be read by range. [`crate::cbin::inspect`] answers
+//! audio sits, so one stroke can be read by range, and [`Library::write_from`] writes an
+//! edited library holding one stroke at a time. [`crate::cbin::inspect`] answers
 //! container questions in O(1).
 //!
 //! ⚠️ The header's `location` and `aux` are not checked. In a library these words hold
@@ -62,7 +63,7 @@ pub mod synthetic;
 pub use index::Index;
 
 use crate::cbin::{self, Cbin, Header, RawBody};
-use crate::error::{try_vec, Error, ParseError};
+use crate::error::{Error, ParseError};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -576,6 +577,8 @@ pub struct Stroke<'a> {
     pub root: u8,
     record: [u8; RECORD],
     audio: Cow<'a, [u8]>,
+    /// Where the audio sits in the stream an [`Index`] was read from.
+    from: Option<Range<u64>>,
 }
 
 impl<'a> Stroke<'a> {
@@ -777,6 +780,7 @@ impl<'a> Library<'a> {
                     root: stroke.root,
                     record: stroke.record,
                     audio: Cow::Owned(Vec::new()),
+                    from: stroke.from.clone(),
                 })
                 .collect(),
         }
@@ -1094,25 +1098,38 @@ impl<'a> Library<'a> {
 
     /// Bytes the body would occupy.
     pub fn body_len(&self) -> Result<usize, Error> {
-        let (_, len) = self.extent()?;
+        let (_, len) = self.extent(|stroke| stroke.audio.len() as u64)?;
         Ok(len)
     }
 
-    /// The first audio offset and the body length the current stroke list implies.
+    /// The first audio offset and the body length the current stroke list implies,
+    /// once the list is one the directory can state.
     ///
-    /// A stroke whose audio is not the `blocks × block_bytes` its record states is
-    /// refused, because a read of the resulting body would reject it.
-    fn extent(&self) -> Result<(usize, usize), Error> {
+    /// A stroke whose audio, `audio_len` bytes, is not the `blocks × block_bytes` its
+    /// record states is refused, because a read of the resulting body would reject it.
+    fn extent(&self, audio_len: impl Fn(&Stroke<'a>) -> u64) -> Result<(usize, usize), Error> {
+        u16::try_from(self.strokes.len()).map_err(|_| ParseError::OutOfBounds {
+            value: format!("{} strokes", self.strokes.len()),
+            bound: "the u16 stroke count the directory holds".into(),
+        })?;
+        if self.strokes.windows(2).any(|w| w[0].root > w[1].root) {
+            return Err(ParseError::AssertFail(
+                "the strokes are not in ascending root order, which the per-root counts \
+                 require"
+                    .into(),
+            )
+            .into());
+        }
         let block = self.block_bytes();
         let first = first_audio_offset(directory_end(self.strokes.len())?, block)?;
         let mut len = first;
         for (index, stroke) in self.strokes.iter().enumerate() {
             let span = audio_span(stroke.blocks(), block)?;
-            if stroke.audio.len() != span {
+            let held = audio_len(stroke);
+            if u64::try_from(span) != Ok(held) {
                 return Err(ParseError::AssertFail(format!(
-                    "stroke {index} holds {} audio bytes where the {} block(s) its record \
-                     states span {span}",
-                    stroke.audio.len(),
+                    "stroke {index} holds {held} audio bytes where the {} block(s) its \
+                     record states span {span}",
                     stroke.blocks()
                 ))
                 .into());
@@ -1130,24 +1147,74 @@ impl<'a> Library<'a> {
     /// directory the transforms shortened and every span moved, and plays it at the
     /// source library's level.
     pub fn to_body(&self) -> Result<Vec<u8>, Error> {
-        let count = u16::try_from(self.strokes.len()).map_err(|_| ParseError::OutOfBounds {
-            value: format!("{} strokes", self.strokes.len()),
-            bound: "the u16 stroke count the directory holds".into(),
+        let (first, len) = self.extent(|stroke| stroke.audio.len() as u64)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(len)
+            .map_err(|_| overflow("the body"))?;
+        self.write_body(&mut out, first, |stroke, out| {
+            out.write_all(&stroke.audio)?;
+            Ok(())
         })?;
-        if self.strokes.windows(2).any(|w| w[0].root > w[1].root) {
-            return Err(ParseError::AssertFail(
-                "the strokes are not in ascending root order, which the per-root counts \
-                 require"
-                    .into(),
-            )
+        Ok(out)
+    }
+
+    /// Write the library as a file to `w`, reading each stroke's audio from `source`,
+    /// the stream the [`Index`] its strokes came from was read from. The bytes are
+    /// those [`Library::to_piano`] writes for the same library holding its audio.
+    ///
+    /// Memory is the prefix and the largest stroke: one stroke's audio is read and
+    /// written before the next is read. The type-1 checksum ahead of the body is a
+    /// placeholder until the body has streamed past, then one seek writes it.
+    ///
+    /// A stroke not read through an [`Index`] is refused before anything is written.
+    pub fn write_from(
+        &self,
+        w: &mut (impl Write + Seek),
+        source: &mut impl AudioSource,
+    ) -> Result<(), Error> {
+        if let Some(index) = self.strokes.iter().position(|stroke| stroke.from.is_none()) {
+            return Err(ParseError::AssertFail(format!(
+                "stroke {index} was not read through an index, so it has no range to read its \
+                 audio from"
+            ))
             .into());
         }
+        let range = |stroke: &Stroke<'a>| stroke.from.clone().unwrap_or_default();
+        let (first, _) = self.extent(|stroke| {
+            let range = range(stroke);
+            range.end.saturating_sub(range.start)
+        })?;
+        let mut audio = Vec::new();
+        cbin::write_with(&self.header, w, |body| {
+            self.write_body(body, first, |stroke, body| {
+                let range = range(stroke);
+                let len = usize::try_from(range.end - range.start)
+                    .map_err(|_| overflow("a stroke's audio"))?;
+                audio.clear();
+                audio
+                    .try_reserve_exact(len)
+                    .map_err(|_| overflow("a stroke's audio"))?;
+                audio.resize(len, 0);
+                source.read_audio(range.start, &mut audio)?;
+                body.write_all(&audio)?;
+                Ok(())
+            })
+        })?;
+        Ok(())
+    }
 
-        let (first, len) = self.extent()?;
-        let mut out = try_vec(len)?;
-        out[..DIRECTORY_AT].copy_from_slice(&self.prefix);
-        put16(&mut out, CHANNELS_AT, self.channels);
-        put16(&mut out, STROKE_COUNT_AT, count);
+    /// Write the body [`Library::to_body`] lays out to `w`, each stroke's audio by
+    /// `audio`, with the first span at body offset `first`.
+    fn write_body<W: Write>(
+        &self,
+        w: &mut W,
+        first: usize,
+        mut audio: impl FnMut(&Stroke<'a>, &mut W) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut prefix = self.prefix.clone();
+        put16(&mut prefix, CHANNELS_AT, self.channels);
+        let count = u16::try_from(self.strokes.len()).expect("extent checked the count");
+        put16(&mut prefix, STROKE_COUNT_AT, count);
         for note in 0..NOTES {
             let n = self
                 .strokes
@@ -1155,23 +1222,31 @@ impl<'a> Library<'a> {
                 .filter(|s| usize::from(s.root) == note)
                 .count();
             let n = u16::try_from(n).expect("a per-root count is at most the stroke count");
-            let at = ROOT_COUNTS_AT + note * 2;
-            put16(&mut out, at, n);
+            put16(&mut prefix, ROOT_COUNTS_AT + note * 2, n);
         }
+        w.write_all(&prefix)?;
 
         let mut at = first;
-        for (i, stroke) in self.strokes.iter().enumerate() {
+        for stroke in &self.strokes {
             let start = u32::try_from(at).map_err(|_| ParseError::OutOfBounds {
                 value: format!("audio offset {at:#x}"),
                 bound: "the u32 offset a stroke record holds".into(),
             })?;
-            let record = DIRECTORY_AT + i * RECORD;
-            out[record..record + RECORD].copy_from_slice(&stroke.record);
-            put32(&mut out, record + REC_START, start);
-            out[at..at + stroke.audio.len()].copy_from_slice(&stroke.audio);
-            at += stroke.audio.len();
+            let mut record = stroke.record;
+            put32(&mut record, REC_START, start);
+            w.write_all(&record)?;
+            at = at
+                .checked_add(audio_span(stroke.blocks(), self.block_bytes())?)
+                .ok_or_else(|| overflow("the audio"))?;
         }
-        Ok(out)
+        let gap = first
+            .checked_sub(directory_end(self.strokes.len())?)
+            .ok_or_else(|| overflow("the alignment gap"))?;
+        w.write_all(&vec![0; gap])?;
+        for stroke in &self.strokes {
+            audio(stroke, w)?;
+        }
+        Ok(())
     }
 
     /// The library as a file, ready to write. The container recomputes its own
@@ -1247,6 +1322,7 @@ impl Library<'static> {
                 root,
                 record,
                 audio: Cow::Owned(Vec::new()),
+                from: None,
             });
             spans.push(at..end);
             at = end;
@@ -1266,6 +1342,19 @@ impl Library<'static> {
         };
         library.check_key_map()?;
         Ok((library, spans))
+    }
+}
+
+/// Where [`Library::write_from`] reads each stroke's audio: the stream an [`Index`]
+/// was read from, one stroke's range at a time.
+pub trait AudioSource {
+    /// Fill `buf` with the bytes at stream position `at` onward.
+    fn read_audio(&mut self, at: u64, buf: &mut [u8]) -> std::io::Result<()>;
+}
+
+impl<R: Read + Seek> AudioSource for R {
+    fn read_audio(&mut self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        cbin::read_at(self, at, buf)
     }
 }
 

@@ -150,6 +150,121 @@ fn piano_index(bytes: &[u8], piano: &npno::Piano) -> Result<(), String> {
         );
         reads_within(&reader.reads, range, 0).map_err(|e| format!("stroke {i}: {e}"))?;
     }
+    for (name, plan) in PIANO_PLANS {
+        streams_as_written(bytes, &index, &whole, plan).map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// An edit a piano document's plan makes, by name.
+type PianoPlan = (&'static str, fn(&mut npno::Library<'_>) -> Answer<()>);
+
+const PIANO_PLANS: [PianoPlan; 7] = [
+    ("nothing", |_| Ok(())),
+    ("a trim", |library| library.set_trim(0, 6)),
+    ("a removed stroke", |library| {
+        let mut at = 0;
+        library.retain_strokes(|_| {
+            at += 1;
+            at != 2
+        });
+        Ok(())
+    }),
+    ("a dropped bank", |library| {
+        library.drop_bank(npno::Bank::Release);
+        Ok(())
+    }),
+    ("the loudest layer", |library| {
+        library.keep_layers(&npno::Layers::Loudest(1));
+        Ok(())
+    }),
+    ("a cut range", |library| {
+        library.cut_range(60..=72).map(|_| ())
+    }),
+    ("the playback fields", |library| {
+        library.set_gain(-12);
+        library.set_damper_top(80)?;
+        library.set_fine_tune(60, 5)?;
+        library.set_name("Streamed")
+    }),
+];
+
+/// A source that records each read, and refuses one longer than the longest stroke.
+struct Limited<'a> {
+    bytes: Cursor<&'a [u8]>,
+    longest: u64,
+    reads: Vec<Range<u64>>,
+}
+
+impl npno::AudioSource for Limited<'_> {
+    fn read_audio(&mut self, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        let range = at..at + buf.len() as u64;
+        if range.end - range.start > self.longest {
+            return Err(io::Error::other(format!(
+                "a read of {range:?} is longer than the {}-byte longest stroke",
+                self.longest
+            )));
+        }
+        self.reads.push(range);
+        self.bytes.read_audio(at, buf)
+    }
+}
+
+/// The plan streamed through the index writes the file the whole library writes, with
+/// one read per kept stroke and none longer than a stroke.
+fn streams_as_written(
+    bytes: &[u8],
+    index: &npno::Index,
+    whole: &npno::Library<'_>,
+    plan: fn(&mut npno::Library<'_>) -> Answer<()>,
+) -> Result<(), String> {
+    let mut planned = whole.clone();
+    let written = plan(&mut planned).and_then(|()| {
+        let mut out = Cursor::new(Vec::new());
+        planned.to_piano()?.write_to(&mut out)?;
+        Ok(out.into_inner())
+    });
+    let mut indexed = index.library().clone();
+    let longest = index
+        .audio_ranges()
+        .iter()
+        .map(|range| range.end - range.start)
+        .max()
+        .unwrap_or(0);
+    let mut source = Limited {
+        bytes: Cursor::new(bytes),
+        longest,
+        reads: Vec::new(),
+    };
+    let streamed = plan(&mut indexed).and_then(|()| {
+        let mut out = Cursor::new(Vec::new());
+        indexed.write_from(&mut out, &mut source)?;
+        Ok(out.into_inner())
+    });
+    let (written, streamed) = match (written, streamed) {
+        (Ok(written), Ok(streamed)) => (written, streamed),
+        (Err(_), Err(_)) => return Ok(()),
+        (written, streamed) => {
+            return Err(format!(
+                "the whole library gives {:?} and the stream {:?}",
+                written.map(|_| ()).map_err(|e| e.to_string()),
+                streamed.map(|_| ()).map_err(|e| e.to_string())
+            ))
+        }
+    };
+    let first = written.iter().zip(&streamed).position(|(a, b)| a != b);
+    ensure!(
+        written.len() == streamed.len() && first.is_none(),
+        "the stream writes {} bytes and the whole library {}, first apart at {first:?}",
+        streamed.len(),
+        written.len()
+    );
+    ensure!(
+        source.reads.len() == indexed.strokes().len(),
+        "{} reads for {} kept strokes",
+        source.reads.len(),
+        indexed.strokes().len()
+    );
     Ok(())
 }
 

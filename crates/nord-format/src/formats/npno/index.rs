@@ -45,11 +45,14 @@ impl Index {
         let directory_at = offset(&body, DIRECTORY_AT)?;
         cbin::read_at(r, directory_at, &mut head[DIRECTORY_AT..])?;
 
-        let (library, spans) = Library::skeleton(header, &head, body_len)?;
-        let audio = spans
+        let (mut library, spans) = Library::skeleton(header, &head, body_len)?;
+        let audio: Vec<Range<u64>> = spans
             .into_iter()
             .map(|span| Ok(offset(&body, span.start)?..offset(&body, span.end)?))
             .collect::<Result<_, Error>>()?;
+        for (stroke, range) in library.strokes.iter_mut().zip(&audio) {
+            stroke.from = Some(range.clone());
+        }
         Ok(Index { library, audio })
     }
 
@@ -57,7 +60,9 @@ impl Index {
     ///
     /// ⚠️ Its strokes carry no audio: [`Stroke::audio`] is empty, so
     /// [`codec::decode`](super::codec::decode) refuses them and [`Library::to_body`]
-    /// refuses the library. [`Index::stroke`] pairs a record with its audio.
+    /// refuses the library. [`Index::stroke`] pairs a record with its audio, and
+    /// [`Library::write_from`] writes the library, or one its transforms made, with each
+    /// stroke's audio read from this stream by its range.
     pub fn library(&self) -> &Library<'static> {
         &self.library
     }
@@ -94,6 +99,7 @@ impl Index {
             root: stroke.root,
             record: stroke.record,
             audio: Cow::Borrowed(audio),
+            from: stroke.from.clone(),
         })
     }
 }
@@ -109,7 +115,9 @@ fn offset(body: &Range<u64>, at: usize) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::super::synthetic::{take, Build};
-    use super::super::{codec, put16, put32, Bank, RECORD, REC_BLOCKS, REC_START, STROKE_COUNT_AT};
+    use super::super::{
+        codec, put16, put32, AudioSource, Bank, RECORD, REC_BLOCKS, REC_START, STROKE_COUNT_AT,
+    };
     use super::*;
     use crate::cbin::Generation;
     use std::io::Cursor;
@@ -333,5 +341,137 @@ mod tests {
         let mut build = Build::new();
         build.map.push((80, 80));
         refused_as_a_parse_refuses(&build.bytes().unwrap(), "key 80 plays root 80");
+    }
+
+    /// An edit a piano document's plan makes, by name.
+    type Plan = (&'static str, fn(&mut Library<'_>) -> Result<(), Error>);
+
+    const PLANS: [Plan; 8] = [
+        ("nothing", |_| Ok(())),
+        ("a trim", |library| library.set_trim(0, 6)),
+        ("a removed stroke", |library| {
+            let mut at = 0;
+            library.retain_strokes(|_| {
+                at += 1;
+                at != 2
+            });
+            Ok(())
+        }),
+        ("a dropped bank", |library| {
+            library.drop_bank(Bank::Release);
+            Ok(())
+        }),
+        ("the loudest layer", |library| {
+            library.keep_layers(&super::super::Layers::Loudest(1));
+            Ok(())
+        }),
+        ("a cut range", |library| {
+            library.cut_range(70..=127).map(|_| ())
+        }),
+        ("the playback fields", |library| {
+            library.set_gain(-12);
+            library.set_damper_top(80)?;
+            library.set_fine_tune(60, 5)?;
+            library.set_name("Streamed")
+        }),
+        ("every stroke removed", |library| {
+            library.retain_strokes(|_| false);
+            Ok(())
+        }),
+    ];
+
+    /// A source that records each read and refuses one longer than `longest`.
+    struct Limited<'a> {
+        bytes: Cursor<&'a [u8]>,
+        longest: usize,
+        reads: Vec<Range<u64>>,
+    }
+
+    impl AudioSource for Limited<'_> {
+        fn read_audio(&mut self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            assert!(
+                buf.len() <= self.longest,
+                "asked for {} bytes at once, more than the {}-byte longest stroke",
+                buf.len(),
+                self.longest
+            );
+            self.reads.push(at..at + buf.len() as u64);
+            self.bytes.read_audio(at, buf)
+        }
+    }
+
+    fn larger() -> Build {
+        let mut build = Build::new();
+        build.channels = 2;
+        build.takes = vec![
+            take(48, Bank::Attack, 0, 3),
+            take(48, Bank::Attack, 9, 1),
+            take(60, Bank::Attack, 0, 2),
+            take(60, Bank::Release, 3, 1),
+            take(72, Bank::Attack, 0, 4),
+        ];
+        build.map = vec![(48, 48), (60, 60), (61, 60), (72, 72), (73, 72)];
+        build
+    }
+
+    #[test]
+    fn a_plan_streamed_from_the_index_writes_what_the_whole_library_writes() {
+        for generation in [Generation::V1, Generation::V0] {
+            let mut piano = larger().piano();
+            piano.file.header.generation = generation;
+            let mut out = Cursor::new(Vec::new());
+            piano.write_to(&mut out).unwrap();
+            let bytes = out.into_inner();
+            let index = index(&bytes).unwrap();
+            let longest = index
+                .audio_ranges()
+                .iter()
+                .map(|range| (range.end - range.start) as usize)
+                .max()
+                .unwrap();
+            for (name, plan) in PLANS {
+                let mut whole = Library::borrow(&bytes).unwrap();
+                plan(&mut whole).unwrap();
+                let mut written = Cursor::new(Vec::new());
+                whole.to_piano().unwrap().write_to(&mut written).unwrap();
+
+                let mut indexed = index.library().clone();
+                plan(&mut indexed).unwrap();
+                let mut source = Limited {
+                    bytes: Cursor::new(&bytes),
+                    longest,
+                    reads: Vec::new(),
+                };
+                let mut streamed = Cursor::new(Vec::new());
+                indexed.write_from(&mut streamed, &mut source).unwrap();
+                assert!(
+                    streamed.into_inner() == written.into_inner(),
+                    "{generation:?}, {name}"
+                );
+
+                let kept: Vec<Range<u64>> = indexed
+                    .strokes()
+                    .iter()
+                    .map(|stroke| stroke.from.clone().unwrap())
+                    .collect();
+                assert_eq!(
+                    source.reads, kept,
+                    "{generation:?}, {name}: one read per kept stroke"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_library_not_read_through_an_index_is_refused_before_anything_is_written() {
+        let bytes = Build::new().bytes().unwrap();
+        let library = Library::borrow(&bytes).unwrap();
+        let mut out = Cursor::new(Vec::new());
+        let error = library
+            .write_from(&mut out, &mut Cursor::new(&bytes))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not read through an index"), "{error}");
+        assert!(out.into_inner().is_empty());
     }
 }
