@@ -69,6 +69,9 @@ const SIDES_GAP: f32 = 16.0;
 /// mid-word.
 const SEARCH: &str = "omnibox";
 
+/// What the empty search box says.
+const SEARCH_HINT: &str = "Search the library by name, or drop files here";
+
 /// The height of a chip or a button in the top bar, and the size of its glyph.
 const CHIP: f32 = 30.0;
 const BAR_GLYPH: f32 = 16.0;
@@ -862,10 +865,7 @@ impl DrawbarApp {
                 .frame(false)
                 .vertical_align(egui::Align::Center)
                 .font(ui_text())
-                .hint_text(
-                    egui::RichText::new("Search the library by name, or drop files here")
-                        .text_style(ui_text()),
-                ),
+                .hint_text(egui::RichText::new(SEARCH_HINT).text_style(ui_text())),
         );
         // The box filters only the library's table, so any change to the text, the first
         // keystroke included, brings the library forward.
@@ -1457,6 +1457,10 @@ mod tests {
             for title in ["File", "View", "Instrument", "Help"] {
                 assert_eq!(painted.wrote(title), titled, "{platform:?}: {title}");
             }
+            assert!(
+                painted.wrote(SEARCH_HINT),
+                "{platform:?}: the search has room"
+            );
             let word_mark = painted.wrote("drawbar");
             assert_eq!(
                 word_mark,

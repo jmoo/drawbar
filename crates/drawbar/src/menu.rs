@@ -281,6 +281,9 @@ const MENU: f32 = 260.0;
 const ITEM: f32 = 28.0;
 const SECTION: f32 = 24.0;
 
+/// The padding at each end of a title in Windows' menu bar.
+const TITLE_PAD: f32 = 9.0;
+
 /// The check column's glyph.
 const CHECK: f32 = 13.0;
 
@@ -465,14 +468,31 @@ impl DrawbarApp {
         acts: &mut Vec<Act>,
     ) {
         let menus = menus(self.platform);
-        egui::containers::menu::MenuBar::new().ui(ui, |ui| {
-            for menu in &menus {
-                title_style(ui);
-                ui.menu_button(menu.title, |ui| {
-                    drop_down_style(ui);
-                    self.entries(ui, frame, &menu.entries, acts);
-                });
-            }
+        // ⚠️ A menu bar takes all the width it is given, so it is given only what its
+        // titles need. Otherwise it would leave the search no room in the top bar.
+        let font = crate::app::ui().resolve(ui.style());
+        let gap = ui.spacing().item_spacing.x;
+        let titles: f32 = menus
+            .iter()
+            .map(|menu| {
+                let text = ui.painter().layout_no_wrap(
+                    menu.title.to_owned(),
+                    font.clone(),
+                    egui::Color32::PLACEHOLDER,
+                );
+                text.size().x + 2.0 * TITLE_PAD + gap
+            })
+            .sum();
+        ui.allocate_ui(egui::vec2(titles, ITEM), |ui| {
+            egui::containers::menu::MenuBar::new().ui(ui, |ui| {
+                for menu in &menus {
+                    title_style(ui);
+                    ui.menu_button(menu.title, |ui| {
+                        drop_down_style(ui);
+                        self.entries(ui, frame, &menu.entries, acts);
+                    });
+                }
+            });
         });
     }
 
@@ -603,7 +623,7 @@ fn rule_if(ui: &mut egui::Ui, owed: &mut bool) {
 fn title_style(ui: &mut egui::Ui) {
     let style = ui.style_mut();
     style.override_text_style = Some(crate::app::ui());
-    style.spacing.button_padding = egui::vec2(9.0, 5.0);
+    style.spacing.button_padding = egui::vec2(TITLE_PAD, 5.0);
     for state in [
         &mut style.visuals.widgets.inactive,
         &mut style.visuals.widgets.hovered,
