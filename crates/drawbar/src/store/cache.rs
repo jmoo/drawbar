@@ -15,13 +15,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Fingerprint, LibPath, Stat};
+use super::{LibPath, Stat};
 use crate::browser::Kind;
 use crate::log::Log;
 use crate::summary::{Plays, Summary, Verdict};
 
 /// The version of what this build writes. Anything else is discarded unread.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// What one file held when it was read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,8 +30,6 @@ pub struct Entry {
     pub len: u64,
     /// Nanoseconds since the Unix epoch. See [`Stat::modified`].
     pub modified: Option<u64>,
-    /// CRC-32 over the whole file, where one was taken.
-    pub crc: Option<u32>,
     pub summary: Summary,
 }
 
@@ -41,7 +39,6 @@ pub struct Entry {
 struct Packed(
     u64,
     Option<u64>,
-    Option<u32>,
     Kind,
     String,
     Option<u32>,
@@ -63,7 +60,6 @@ impl From<Entry> for Packed {
         Packed(
             entry.len,
             entry.modified,
-            entry.crc,
             kind,
             tag,
             crc32,
@@ -76,11 +72,10 @@ impl From<Entry> for Packed {
 
 impl From<Packed> for Entry {
     fn from(packed: Packed) -> Entry {
-        let Packed(len, modified, crc, kind, tag, crc32, plays, verdict, wavs) = packed;
+        let Packed(len, modified, kind, tag, crc32, plays, verdict, wavs) = packed;
         Entry {
             len,
             modified,
-            crc,
             summary: Summary {
                 kind,
                 tag,
@@ -99,12 +94,11 @@ fn ron() -> ron::Options {
 }
 
 impl Entry {
-    /// What a file with fingerprint `print` holds, as `summary` says.
-    pub fn of(print: Fingerprint, summary: Summary) -> Entry {
+    /// What a file with length and time `stat` holds, as `summary` says.
+    pub fn of(stat: Stat, summary: Summary) -> Entry {
         Entry {
-            len: print.len,
-            modified: print.modified,
-            crc: print.crc,
+            len: stat.len,
+            modified: stat.modified,
             summary,
         }
     }
@@ -800,7 +794,6 @@ mod tests {
         Entry {
             len,
             modified: Some(1_700_000_000_000_000_000),
-            crc: Some(0x1234_5678),
             summary: Summary {
                 kind: Kind::Program,
                 tag: "ne5p".into(),

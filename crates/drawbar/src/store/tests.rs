@@ -2883,6 +2883,62 @@ fn a_rename_outside_recognized_by_contents_keeps_what_was_read() {
     assert_eq!(second.reads(), 0);
 }
 
+/// A file rewritten under the same length and time is remembered as it was, but a
+/// read takes it as it is: the index then holds its true CRC, the cache its new summary,
+/// and a stranger holding its old contents is not taken for it moved.
+#[test]
+fn a_read_corrects_what_a_file_rewritten_under_its_old_stat_was_remembered_as() {
+    let (root, shelf) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    let (old, new) = (with_gain(&program, "12"), with_gain(&program, "96"));
+    assert_eq!(old.len(), new.len());
+    fs::write(root.at("Grand.ne5p"), &old).unwrap();
+    let mut first = Session::remembering(&root, &shelf);
+    let id = first.only();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(id, tag, true);
+    first.read_all();
+    let was = first.bench.workspace.get(id).unwrap().saved.crc32;
+    first.close();
+
+    let at = fs::metadata(root.at("Grand.ne5p"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::write(root.at("Grand.ne5p"), &new).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(root.at("Grand.ne5p"))
+        .and_then(|file| file.set_modified(at))
+        .unwrap();
+    let mut second = Session::remembering(&root, &shelf);
+    assert_eq!(second.bench.workspace.get(id).unwrap().saved.crc32, was);
+    second.read(&[id]);
+    let now = second.bench.workspace.get(id).unwrap().saved.crc32;
+    assert_ne!(now, was);
+    second.close();
+    let index = fs::read_to_string(root.at(".drawbar/library.ron")).unwrap();
+    let Read::Known(index) = sidecar::read(&index) else {
+        panic!("the index reads: {index}");
+    };
+    let print = index.assets[&id].fingerprint.expect("a fingerprint");
+    assert_eq!(
+        print.crc,
+        Some(nord_format::crc::crc32(&new)),
+        "the true CRC"
+    );
+
+    let third = Session::remembering(&root, &shelf);
+    assert_eq!(third.bench.workspace.get(id).unwrap().saved.crc32, now);
+    third.close();
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    fs::write(root.at("Copy.ne5p"), &old).unwrap();
+    let fourth = Session::remembering(&root, &shelf);
+    let copy = fourth.named("Copy.ne5p");
+    assert_ne!(copy, id, "the old contents are not this asset moved");
+    assert!(fourth.bench.browser.tags.worn(copy).is_empty());
+}
+
 /// Two libraries keep their entries apart in one cache file, even for files of one path,
 /// length and time.
 #[test]

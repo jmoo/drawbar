@@ -812,10 +812,9 @@ impl Store {
             let Some(record) = self.records.get_mut(&id) else {
                 continue;
             };
-            let moved = record
-                .fingerprint
-                .is_none_or(|print| print.stat() != found.stat);
-            if let (true, Some(bytes)) = (moved, &found.bytes) {
+            // ⚠️ Taken whether or not the stat moved: a file rewritten under the same
+            // length and time holds what it holds now, not what its CRC said before.
+            if let Some(bytes) = &found.bytes {
                 found.crc = Some(nord_format::crc::crc32(bytes));
             }
             record.fingerprint = Some(diff::kept(record.fingerprint, &found));
@@ -1980,21 +1979,19 @@ impl Store {
     }
 
     /// Give an unread asset what the cache holds for its file, where the file's length
-    /// and time are still the ones it was read at, and the whole file's CRC where none
-    /// is known.
+    /// and time are still the ones it was read at.
     fn recall(&mut self, id: u64, workspace: &mut Workspace) {
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
         let (Some(path), Some(print), Holds::Unread) =
-            (&record.path, &mut record.fingerprint, record.holds)
+            (&record.path, record.fingerprint, record.holds)
         else {
             return;
         };
         let Some(entry) = self.cache.fresh(path, print.stat()) else {
             return;
         };
-        print.crc = print.crc.or(entry.crc);
         workspace.remember(id, entry.summary.clone());
         record.summarized = workspace.get(id).map(|entity| entity.saved.stamp);
     }
@@ -2017,12 +2014,8 @@ impl Store {
             let Some(summary) = Summary::of(entity) else {
                 continue;
             };
-            let print = Fingerprint {
-                crc: print.crc.or(entity.saved.whole_crc()),
-                ..print
-            };
             self.cache
-                .put(path.clone(), cache::Entry::of(print, summary));
+                .put(path.clone(), cache::Entry::of(print.stat(), summary));
             record.summarized = Some(stamp);
         }
     }
