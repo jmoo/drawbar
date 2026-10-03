@@ -459,8 +459,9 @@ Nor is a slot's occupant held whole. Before a write replaces one, the worker
 reads it back so it can put it back if the write fails (`worker::put`). One of up
 to 1 MiB of body is read into memory. A larger one, a piano or most samples, is
 read through `op::read_into` into a file (`device::scratch`): in the library's
-`.drawbar/tmp/` on the desktop while the library may be written, or the
-system's temporary folder otherwise, and in `.drawbar/tmp/` of the private
+`.drawbar/tmp/` on the desktop while the library may be written, made where
+missing, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
+otherwise, never the system's temporary folder, and in `.drawbar/tmp/` of the private
 storage in the browser, through a `library-writer.js` of the device's own. The
 restore sends that file through `write_from`. The file is deleted once the slot
 holds what it should. Where the restore fails as well, it stays, and

@@ -1,6 +1,6 @@
 //! Where the occupant of a slot waits while a write replaces it, when it is too large to
-//! hold: a file under the library's `.drawbar/tmp/` on the desktop, or the system's
-//! temporary folder where the library cannot take one, and `.drawbar/tmp/` of the
+//! hold: a file under the library's `.drawbar/tmp/` on the desktop, or a `rescued` folder
+//! of drawbar's own data where the library cannot take one, and `.drawbar/tmp/` of the
 //! browser's private storage in the browser.
 //!
 //! A file is named as the rescue it becomes if the write and its restore both fail
