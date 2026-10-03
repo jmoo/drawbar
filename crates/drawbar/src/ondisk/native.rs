@@ -78,10 +78,24 @@ impl Source {
             .try_reserve_exact(want)
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         bytes.resize(want, 0);
-        let mut at = At::new(&self.file, self.len);
-        at.seek(SeekFrom::Start(range.start))?;
-        at.read_exact(&mut bytes)?;
+        self.fill(range.start, &mut bytes)?;
         Ok(bytes)
+    }
+
+    /// Fill `buf` with the bytes at `offset`, on the calling thread.
+    pub(super) async fn read_into(
+        &self,
+        _serial: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        self.fill(offset, buf)
+    }
+
+    fn fill(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let mut at = At::new(&self.file, self.len);
+        at.seek(SeekFrom::Start(offset))?;
+        at.read_exact(buf)
     }
 
     pub(super) fn whole(&self, len: u64) -> io::Result<Vec<u8>> {

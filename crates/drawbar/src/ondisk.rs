@@ -114,9 +114,12 @@ pub struct OnDisk {
     /// apart.
     pub serial: u64,
     pub index: Index,
-    /// Every range [`OnDisk::read`] was asked for.
+    /// Every range [`OnDisk::read`] or a send was asked for.
     #[cfg(test)]
     reads: std::sync::Mutex<Vec<Range<u64>>>,
+    /// How many reads a send makes before the file reads as gone.
+    #[cfg(test)]
+    vanishes: std::sync::Mutex<Option<usize>>,
 }
 
 impl OnDisk {
@@ -130,6 +133,8 @@ impl OnDisk {
             index,
             #[cfg(test)]
             reads: Default::default(),
+            #[cfg(test)]
+            vanishes: Default::default(),
         }
     }
 
@@ -239,6 +244,49 @@ impl OnDisk {
     #[cfg(test)]
     pub fn take_reads(&self) -> Vec<Range<u64>> {
         std::mem::take(&mut self.reads.lock().expect("unpoisoned"))
+    }
+
+    /// Fail every read a send asks for once `reads` more have answered, as a file gone
+    /// from the disk does.
+    #[cfg(test)]
+    pub fn vanish_after(&self, reads: usize) {
+        *self.vanishes.lock().expect("unpoisoned") = Some(reads);
+    }
+
+    #[cfg(test)]
+    fn sending(&self, range: Range<u64>) -> io::Result<()> {
+        self.reads.lock().expect("unpoisoned").push(range);
+        let mut vanishes = self.vanishes.lock().expect("unpoisoned");
+        match vanishes.as_mut() {
+            Some(0) => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "No such file or directory",
+            )),
+            Some(left) => {
+                *left -= 1;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// How a send reads the file: a transfer chunk at a time, by position through the handle
+/// on the desktop, and by slice through the snapshot in the browser.
+impl nord_usb::FileSource for &OnDisk {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let range = offset
+            ..offset
+                .checked_add(buf.len() as u64)
+                .filter(|end| *end <= self.len)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        #[cfg(test)]
+        self.sending(range.clone())?;
+        self.source.read_into(self.serial, range.start, buf).await
     }
 }
 

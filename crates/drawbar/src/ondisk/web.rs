@@ -121,6 +121,20 @@ impl Source {
         Err(Missing::error(range))
     }
 
+    /// Fill `buf` with the bytes at `offset`, through the snapshot held when this read
+    /// runs: a move may have taken another since the last read.
+    pub(super) async fn read_into(
+        &self,
+        serial: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
+        let snapshot = SNAPSHOTS
+            .with(|held| held.borrow().get(&serial).cloned())
+            .ok_or_else(gone)?;
+        slice_into(&snapshot, offset, buf).await
+    }
+
     pub(super) fn whole(&self, _len: u64) -> io::Result<Vec<u8>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -202,6 +216,20 @@ fn gone() -> io::Error {
 
 /// The bytes at `range` of `file`.
 pub(crate) async fn slice(file: &web_sys::File, range: Range<u64>) -> io::Result<Vec<u8>> {
+    let bytes = sliced(file, range).await?;
+    Ok(bytes.to_vec())
+}
+
+/// Fill `buf` with the bytes of `file` at `offset`.
+async fn slice_into(file: &web_sys::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    let end = offset
+        .checked_add(buf.len() as u64)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+    sliced(file, offset..end).await?.copy_to(buf);
+    Ok(())
+}
+
+async fn sliced(file: &web_sys::File, range: Range<u64>) -> io::Result<Uint8Array> {
     let failed = |e| io::Error::other(crate::js::describe(&e));
     let blob = file
         .slice_with_f64_and_f64(range.start as f64, range.end as f64)
@@ -211,5 +239,5 @@ pub(crate) async fn slice(file: &web_sys::File, range: Range<u64>) -> io::Result
     if u64::from(bytes.length()) != range.end - range.start {
         return Err(io::Error::other("the file changed while it was read"));
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
