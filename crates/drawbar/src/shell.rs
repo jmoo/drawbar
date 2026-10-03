@@ -19,6 +19,7 @@ use crate::menu::{key_text, new_menu, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
 use crate::platform::{Frame, Platform, CRAMPED};
 use crate::tabs::Spot;
+use crate::zoom::{Step, Zoom};
 
 /// The status line at the bottom of the window.
 pub const STATUS: f32 = 30.0;
@@ -37,8 +38,9 @@ const CENTER_TALL: f32 = 280.0;
 /// The smallest screen the shell lays out in: both side cards at their minimum widths,
 /// around a center that still keeps [`CENTER_WIDE`] by [`CENTER_TALL`] under its tabs.
 ///
-/// A native window's minimum size keeps it above this. A browser tab can be any size, so
-/// the web build shows [`too_small_notice`] instead of a shell that cannot fit.
+/// A browser tab can be any size, and a native window at its minimum size is too small at
+/// a large zoom, so either may show [`too_small_notice`] instead of a shell that cannot
+/// fit.
 pub const LEAST: egui::Vec2 = egui::vec2(
     SIDE_LEAST + CENTER_WIDE + SIDE_LEAST + 4.0 * GUTTER,
     Platform::Web.top_bar() + STATUS + crate::tabs::HEIGHT + CENTER_TALL + GUTTER,
@@ -71,7 +73,7 @@ const SEARCH_HINT: &str = "Search the library by name, or drop files here";
 const CHIP: f32 = 30.0;
 const BAR_GLYPH: f32 = 16.0;
 
-/// The room the Mac's traffic lights take at the left of the bar.
+/// The room the Mac's traffic lights take at the left of the bar, at 100%.
 const LIGHTS: f32 = 78.0;
 
 /// The bar's padding at each end, where nothing of the platform's sits.
@@ -79,6 +81,10 @@ const BAR_PAD: f32 = 10.0;
 
 /// The status line's padding at each end.
 const STATUS_PAD: f32 = 16.0;
+
+/// The side of a zoom button in the status line, and of its glyph.
+const ZOOM_BOX: f32 = 20.0;
+const ZOOM_GLYPH: f32 = 12.0;
 
 /// The height of the row of file tools at the top of the browser card on Windows.
 const TOOLS_ROW: f32 = 40.0;
@@ -478,6 +484,15 @@ impl DrawbarApp {
         }
     }
 
+    /// Draw the window at `zoom`, and store it for the next session.
+    pub(crate) fn pick_zoom(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, zoom: Zoom) {
+        self.zoom = zoom;
+        ctx.set_zoom_factor(zoom.factor());
+        if let Some(storage) = frame.storage_mut() {
+            storage.set_string(Zoom::KEY, zoom.percent().to_string());
+        }
+    }
+
     /// The canvas the cards sit on, under everything else.
     pub(crate) fn backdrop(&self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
@@ -500,7 +515,7 @@ impl DrawbarApp {
     ) {
         egui::TopBottomPanel::top("topbar")
             .resizable(false)
-            .exact_height(self.platform.top_bar())
+            .exact_height(bar_height(self.platform, ctx.zoom_factor()))
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
@@ -543,7 +558,7 @@ impl DrawbarApp {
     /// The bar's left end: what the platform puts there, then the file tools.
     fn left_edge(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
         match (&self.chrome, self.platform) {
-            (_, Platform::Mac) => ui.add_space(LIGHTS),
+            (_, Platform::Mac) => ui.add_space(LIGHTS / ui.ctx().zoom_factor()),
             (_, Platform::Windows) => {
                 ui.add_space(BAR_PAD);
                 logo(ui);
@@ -891,9 +906,14 @@ impl DrawbarApp {
         }
     }
 
-    /// The status line: what just happened and whether anything went wrong. Either opens
-    /// the activity popover.
-    pub(crate) fn status_line(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+    /// The status line: what just happened and whether anything went wrong, either of which
+    /// opens the activity popover, and the zoom at the right end.
+    pub(crate) fn status_line(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        acts: &mut Vec<Act>,
+    ) {
         egui::TopBottomPanel::bottom("status")
             .resizable(false)
             .exact_height(STATUS)
@@ -901,14 +921,50 @@ impl DrawbarApp {
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
                 self.shell.status_rect = ui.max_rect();
+                let line = ui.max_rect().shrink2(egui::vec2(STATUS_PAD - 6.0, 0.0));
+                let mut zoom = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(line)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                zoom.spacing_mut().item_spacing.x = 2.0;
+                self.zoom_chip(&mut zoom, frame);
                 let mut row = ui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(ui.max_rect().shrink2(egui::vec2(STATUS_PAD - 6.0, 0.0)))
+                        .max_rect(line.with_max_x(zoom.min_rect().left() - 6.0))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 row.spacing_mut().item_spacing.x = 6.0;
                 self.said(&mut row, acts);
             });
+    }
+
+    /// A step down, the zoom, and a step up, laid right to left. The zoom's label puts the
+    /// default back, and is as wide as its widest so the step down stays put.
+    fn zoom_chip(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let larger = zoom_step(ui, self.zoom.after(Step::In), Glyph::Plus, "zoom in");
+        let font = egui::FontId::proportional(11.5);
+        let ink = ui.visuals().weak_text_color();
+        let widest = ui
+            .painter()
+            .layout_no_wrap(Zoom::default().label(), font.clone(), ink)
+            .size()
+            .x;
+        let galley = ui.painter().layout_no_wrap(self.zoom.label(), font, ink);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(widest + 12.0, ZOOM_BOX), egui::Sense::click());
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, 5.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, ink);
+        let clicked = response.on_hover_text("back to the default size").clicked();
+        let reset = self.zoom.after(Step::Reset).filter(|_| clicked);
+        let smaller = zoom_step(ui, self.zoom.after(Step::Out), Glyph::Minus, "zoom out");
+        if let Some(zoom) = larger.or(reset).or(smaller) {
+            self.pick_zoom(ui.ctx(), frame, zoom);
+        }
     }
 
     /// The newest sentence, or what the instrument is doing, then the count of problems.
@@ -1140,6 +1196,29 @@ fn claim(ui: &mut egui::Ui) {
     ui.set_min_size(ui.max_rect().size());
 }
 
+/// A zoom button in the status line, disabled when there is nowhere `to` go, and where
+/// it goes once clicked.
+fn zoom_step(ui: &mut egui::Ui, to: Option<Zoom>, glyph: Glyph, hint: &str) -> Option<Zoom> {
+    let clicked = ui
+        .add_enabled_ui(to.is_some(), |ui| {
+            glyph_button(ui, glyph, ZOOM_GLYPH, ZOOM_BOX, hint)
+        })
+        .inner
+        .clicked();
+    to.filter(|_| clicked)
+}
+
+/// The top bar's height in points at `zoom`.
+///
+/// ⚠️ The Mac's bar shares the traffic lights' center line, and the system draws them the
+/// same size at every zoom. The bar keeps its height on screen while a chip still fits.
+fn bar_height(platform: Platform, zoom: f32) -> f32 {
+    match platform {
+        Platform::Mac => (platform.top_bar() / zoom).max(CHIP),
+        Platform::Windows | Platform::Linux | Platform::Web => platform.top_bar(),
+    }
+}
+
 /// Where a panel ended up this frame.
 fn laid_out(ctx: &egui::Context, id: &str) -> Option<egui::Rect> {
     egui::containers::panel::PanelState::load(ctx, egui::Id::new(id)).map(|state| state.rect)
@@ -1150,8 +1229,10 @@ pub fn too_small(screen: egui::Vec2) -> bool {
     screen.x < LEAST.x || screen.y < LEAST.y
 }
 
-/// What a screen too small for the shell shows instead of it.
-pub fn too_small_notice(ctx: &egui::Context) {
+/// What a screen too small for the shell shows instead of it, and the `smaller` zoom if
+/// it was asked for.
+pub fn too_small_notice(ctx: &egui::Context, smaller: Option<Zoom>) -> Option<Zoom> {
+    let mut picked = None;
     let fill = ctx.style().visuals.panel_fill;
     egui::CentralPanel::default()
         .frame(
@@ -1166,9 +1247,16 @@ pub fn too_small_notice(ctx: &egui::Context) {
                 ui.add_space(6.0);
                 ui.label(TOO_SMALL_WHY);
                 ui.add_space(12.0);
+                if let Some(zoom) = smaller {
+                    if ui.button("Zoom out").clicked() {
+                        picked = Some(zoom);
+                    }
+                    ui.add_space(6.0);
+                }
                 crate::sheet::link(ui, "User guide", GUIDE);
             });
         });
+    picked
 }
 
 #[cfg(test)]
@@ -1383,16 +1471,138 @@ mod tests {
         assert!(favicon.contains(&dark), "favicon.svg lacks `{dark}`");
     }
 
-    /// A gated frame draws only the notice: what is wrong, and a link to the guide.
+    /// A gated frame draws only the notice: what is wrong, a smaller zoom where there is
+    /// one, and a link to the guide.
     #[test]
-    fn the_notice_says_what_is_wrong_and_offers_the_guide() {
-        let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
-        let output = testing::run(&egui::Context::default(), input, too_small_notice);
-        let said = testing::words(&output);
+    fn the_notice_says_what_is_wrong_and_offers_a_smaller_zoom_and_the_guide() {
+        let said = |smaller: Option<Zoom>| {
+            let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
+            let output = testing::run(&egui::Context::default(), input, |ctx| {
+                too_small_notice(ctx, smaller);
+            });
+            testing::words(&output)
+        };
 
-        assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");
-        assert!(said.iter().any(|word| word == TOO_SMALL_WHY), "{said:?}");
-        assert!(said.iter().any(|word| word == "User guide"), "{said:?}");
+        let smallest = said(None);
+        for word in [TOO_SMALL, TOO_SMALL_WHY, "User guide"] {
+            assert!(
+                smallest.iter().any(|said| said == word),
+                "{word}: {smallest:?}"
+            );
+        }
+        assert!(
+            !smallest.iter().any(|word| word == "Zoom out"),
+            "nothing smaller to offer: {smallest:?}"
+        );
+        let zoomed = said(Zoom::default().after(Step::Out));
+        assert!(zoomed.iter().any(|word| word == "Zoom out"), "{zoomed:?}");
+    }
+
+    fn zoom_key(key: egui::Key) -> egui::Event {
+        pressed(key, egui::Modifiers::COMMAND)
+    }
+
+    /// In a window ⌘+ (or ⌘=) and ⌘− step through the zooms and stop at either end, and
+    /// ⌘0 puts back the zoom a fresh install starts at.
+    #[test]
+    fn the_zoom_keys_step_the_window_and_stop_at_the_ends() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let mut zoomed = |key: egui::Key| {
+            let _ = frame_of(&ctx, &mut app, SCREEN, vec![zoom_key(key)]);
+            let _ = drawn(&ctx, &mut app);
+            assert_eq!(ctx.zoom_factor(), app.zoom.factor(), "after {key:?}");
+            app.zoom.percent()
+        };
+
+        assert_eq!(zoomed(egui::Key::Equals), 110);
+        assert_eq!(zoomed(egui::Key::Plus), 125);
+        assert_eq!(zoomed(egui::Key::Num0), 100);
+        let out: Vec<u16> = (0..3).map(|_| zoomed(egui::Key::Minus)).collect();
+        assert_eq!(out, [90, 80, 80]);
+        let up: Vec<u16> = (0..8).map(|_| zoomed(egui::Key::Plus)).collect();
+        assert_eq!(up, [90, 100, 110, 125, 150, 175, 200, 200]);
+    }
+
+    /// ⚠️ A window too small at its zoom shows only the notice, and the way out of it is a
+    /// smaller zoom, so the zoom keys must still work there.
+    #[test]
+    fn the_zoom_keys_still_work_while_the_window_is_too_small() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.zoom = Zoom::read("150");
+        let small = LEAST - egui::vec2(1.0, 0.0);
+
+        let gated = frame_of(&ctx, &mut app, small, vec![zoom_key(egui::Key::Minus)]);
+        assert!(gated.wrote(TOO_SMALL));
+        assert_eq!(app.zoom.percent(), 125);
+    }
+
+    #[test]
+    fn a_zoom_item_is_disabled_where_it_would_change_nothing() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let enabled = |app: &DrawbarApp, step| {
+            app.offer(Command::Zoom(step))
+                .is_some_and(|offer| offer.enabled)
+        };
+
+        assert!(enabled(&app, Step::In) && enabled(&app, Step::Out));
+        assert!(!enabled(&app, Step::Reset), "already the default");
+        app.zoom = Zoom::read("200");
+        assert!(!enabled(&app, Step::In), "already the largest");
+        assert!(enabled(&app, Step::Out) && enabled(&app, Step::Reset));
+    }
+
+    /// A zoom acts on the whole window, the modal over it included, so its keys still work
+    /// behind one.
+    #[test]
+    fn the_zoom_keys_still_work_behind_a_modal() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        app.shell.review_open = true;
+        let _ = settled(&ctx, &mut app, SCREEN);
+        assert!(crate::menu::covered(&ctx), "the review is a modal");
+
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![zoom_key(egui::Key::Plus)]);
+        assert!(app.shell.review_open, "the review stays up");
+        assert_eq!(app.zoom.percent(), 110);
+    }
+
+    /// The zoom picked is the zoom the next session opens at, and the status line says
+    /// which it is.
+    #[test]
+    fn the_zoom_comes_back_as_it_was_left_and_the_status_line_shows_it() {
+        let mut store = Fake::default();
+        {
+            let ctx = egui::Context::default();
+            let mut before = app(&ctx, None);
+            assert!(drawn(&ctx, &mut before).wrote("Default"));
+            assert_eq!(ctx.zoom_factor(), 1.0, "a fresh install");
+            before.zoom = Zoom::read("125");
+            before.save(&mut store);
+        }
+        let ctx = egui::Context::default();
+        let mut after = app(&ctx, Some(&store));
+        assert!(drawn(&ctx, &mut after).wrote("+2"));
+        assert_eq!(after.zoom.percent(), 125);
+        assert_eq!(ctx.zoom_factor(), 1.25);
+    }
+
+    /// ⚠️ The Mac's traffic lights do not zoom, so its top bar keeps their height on screen
+    /// until a chip would no longer fit.
+    #[test]
+    fn the_macs_top_bar_keeps_its_height_on_screen_while_a_chip_fits() {
+        let mac = Platform::Mac.top_bar();
+        for zoom in [0.8, 1.0, 1.5] {
+            assert_eq!(bar_height(Platform::Mac, zoom) * zoom, mac, "at {zoom}");
+        }
+        assert_eq!(bar_height(Platform::Mac, 2.0), CHIP);
+        assert_eq!(
+            bar_height(Platform::Windows, 2.0),
+            Platform::Windows.top_bar()
+        );
     }
 
     /// Switching the theme changes only colors: the metrics live on the style both themes

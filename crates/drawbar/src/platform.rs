@@ -213,6 +213,11 @@ pub fn written(shortcut: egui::KeyboardShortcut, mac: bool) -> String {
             text
         }
         false => {
+            // "Ctrl++" reads as a typo, so these two are spelled out.
+            let key = match shortcut.logical_key {
+                egui::Key::Plus | egui::Key::Minus => shortcut.logical_key.name(),
+                _ => key,
+            };
             let words = [
                 (command || with.ctrl, "Ctrl"),
                 (with.alt, "Alt"),
@@ -522,6 +527,8 @@ mod tests {
             ),
             (Shortcut::new(With::ALT, Key::W), "⌥W", "Alt+W"),
             (Shortcut::new(With::CTRL, Key::Num2), "⌃2", "Ctrl+2"),
+            (Shortcut::new(With::COMMAND, Key::Plus), "⌘+", "Ctrl+Plus"),
+            (Shortcut::new(With::COMMAND, Key::Minus), "⌘−", "Ctrl+Minus"),
         ];
         for (shortcut, mac, other) in cases {
             assert_eq!(written(shortcut, true), mac);

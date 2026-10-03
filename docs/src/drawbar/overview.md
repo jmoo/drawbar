@@ -12,7 +12,7 @@ desktop app.
 | **Documents** (center) | Every sound you open gets a tab beside the Library. |
 | **Keyboard** (center) | The instrument's folders drawn as banks of slots, once connected. |
 | **Inspector** (right) | What is selected and the actions on it, and while connected, how full each folder is. |
-| **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. |
+| **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. The size is at the right. |
 
 The search box filters the Library by name; ⌘K (Ctrl+K) puts the cursor in it.
 The buttons at the two ends of the row of tabs show and hide the browser and the
@@ -97,3 +97,13 @@ close that program and turn listening off and on again.
 
 The sun and moon button in the top bar cycles between following your system,
 light, and dark. Hover it to see which one is set.
+
+## Size
+
+The **−** and **+** at the right end of the status line make the whole window
+smaller or larger. Between them is the size: **Default**, or how many steps from
+it, from −2 to +5. Click it to return to Default. **View** has the same three
+commands, and the desktop app also takes ⌘+ (or ⌘=), ⌘− and ⌘0. In a browser
+those keys zoom the page instead. drawbar keeps the size between sessions.
+
+If the window is too small for the size, drawbar offers to zoom out.
