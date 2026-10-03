@@ -96,7 +96,7 @@ pub trait Fs {
     /// The names in one folder.
     async fn names(&self, dir: &str) -> io::Result<Vec<String>>;
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
-    /// `None` when nothing is there.
+    /// The file at `path`, or `None` where no file is: nothing, a folder, or a link.
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
     /// Write a file where none is. It appears whole or not at all, and a file that
     /// appeared there first is left alone and reported as
@@ -229,7 +229,7 @@ async fn reads_between(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) {
 /// parts, then [`Event::Complete`]. An error is why nothing opened, and nothing was
 /// answered.
 async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), String> {
-    let indexed = matches!(fs.stat(DIR).await, Ok(Some(_)));
+    let indexed = fs.names(DIR).await.is_ok();
     // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
     // its `.drawbar/` as that drawbar left it.
     let (sidecar, mut writable) = index(fs).await;

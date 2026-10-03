@@ -1000,6 +1000,29 @@ fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
     assert!(again.bench.browser.tags.worn(tagged).contains(&tag));
 }
 
+/// A folder where the index says a file is, is not taken for that file: it is listed as
+/// a folder, and the row, which held a tag, is kept as lost.
+#[test]
+fn a_folder_at_the_path_of_an_indexed_file_is_not_that_file() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(id, tag, true);
+    first.close();
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    fs::create_dir(root.at("untitled.ne5p")).unwrap();
+
+    let session = Session::listed(&root);
+    assert_eq!(session.bench.workspace.listed().count(), 0, "no asset");
+    let folders = &session.bench.browser.folders;
+    assert!(folders
+        .id_of(&LibPath::parse("untitled.ne5p").unwrap())
+        .is_some());
+    let lost: Vec<u64> = folders.lost().iter().map(|lost| lost.id).collect();
+    assert_eq!(lost, [id]);
+}
+
 #[test]
 fn a_view_holding_an_edit_comes_back_as_a_file() {
     let root = Temp::new();

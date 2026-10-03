@@ -391,7 +391,8 @@ impl Fs for Disk {
 
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match fs::symlink_metadata(self.locate(path)?) {
-            Ok(meta) => Ok(Some(stat(&meta))),
+            Ok(meta) if meta.is_file() => Ok(Some(stat(&meta))),
+            Ok(_) => Ok(None),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }

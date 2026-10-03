@@ -652,6 +652,15 @@ impl Folder {
         }
     }
 
+    /// Whether anything, file or folder, is at `path`.
+    async fn taken(&self, path: &str) -> io::Result<bool> {
+        match self.handle(path).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Write `bytes` to a new file under `.drawbar/tmp/`, flushed, and return its path.
     ///
     /// The file takes `path`'s extension: Chrome reads a file moved to a new extension
@@ -952,10 +961,7 @@ impl Fs for Folder {
 
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match self.handle(path).await {
-            Ok(handle) if handle.kind() == FileSystemHandleKind::Directory => Ok(Some(Stat {
-                len: 0,
-                modified: None,
-            })),
+            Ok(handle) if handle.kind() == FileSystemHandleKind::Directory => Ok(None),
             Ok(handle) => Ok(Some(stat(&snapshot(handle.unchecked_ref()).await?))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -966,7 +972,7 @@ impl Fs for Folder {
     /// because this tab holds the library's lock, but in a picked folder another program
     /// may, and the move replaces what it wrote.
     async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        if self.stat(path).await?.is_some() {
+        if self.taken(path).await? {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         let temp = self.stage(path, bytes).await?;
@@ -990,7 +996,7 @@ impl Fs for Folder {
         let same = from.rsplit_once('/').map(|(dir, _)| dir)
             == to.rsplit_once('/').map(|(dir, _)| dir)
             && names::key(from) == names::key(to);
-        if !same && self.stat(to).await?.is_some() {
+        if !same && self.taken(to).await? {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         let handle = self.handle(from).await?;
