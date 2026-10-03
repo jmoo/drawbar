@@ -7,14 +7,16 @@ have been tested.
 ## Connecting
 
 Close Nord Sound Manager first, since it keeps the USB connection to itself. Then
-click **Connect an instrument…** under **PLACES**, or **Instrument ▸ Connect…**.
+click **Connect instrument…** in the top bar, **Connect an instrument…** under
+**Places**, or **Instrument ▸ Connect…**.
 A web browser asks you to pick the device. The desktop app takes the first Nord
 it finds.
 
 Once connected, drawbar reads every folder the instrument declares, a bank at a
-time, and the instrument's controls appear: **Read** and **Send** in the toolbar,
-the Keyboard tab, the send queue, and the inspector's room meters. **Read**
-rereads everything, and each folder has its own **Read again**.
+time, and the instrument's controls appear: its name and **Send** in the top bar,
+the Keyboard tab, the send queue, and the inspector's **Room** and **Info**.
+**Instrument ▸ Read everything** (⌘R) rereads everything, and each folder has its
+own **Read again**.
 
 Slots are labeled the way the panel shows them, `7:4 Africa Split`. Empty slots
 are listed too, as places to drop things.
@@ -39,16 +41,20 @@ the log says why.
 ## The send queue
 
 Nothing is written until you send. Drops, **Queue for sending**, and Save on a
-sound that belongs to a slot all add to the queue in the bottom dock. Each row
-shows its destination. Click the destination to change it, click × to remove the
-row, and select a row to see what would change on the keyboard.
+sound that belongs to a slot all add to the queue, and **Send** in the top bar
+counts what is waiting. A yellow dot on it means something waiting cannot go to
+the instrument attached now.
+
+Click **Send**, or press ⇧⌘S, to review the queue. Each row shows its
+destination. Click the destination to change it, click × to remove the row, and
+select a row to see what is in that slot now and what would change. Double-click
+a row to open the sound. Anything to know before sending is at the foot.
 
 When a sound on this computer no longer matches the slot it came from, a **Queue**
-button appears in the toolbar beside **Send**, with how many there are. Click it
+button appears in the top bar beside **Send**, with how many there are. Click it
 to queue each of them for the slot it came from.
 
-**Send all** asks once, listing every destination and what it replaces, then
-writes folder by folder. If the instrument refuses an item, that folder's batch
+**Send all** in the review writes folder by folder. If the instrument refuses an item, that folder's batch
 stops there. What was written stays, and the rest stays queued. The queue also
 survives a disconnection.
 

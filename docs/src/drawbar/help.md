@@ -15,9 +15,10 @@ drawbar there. [What is supported](../getting-started/support.md) covers the
 same claims in more detail.
 
 **Help ▸ Copy activity log** puts the whole log on the clipboard, for a bug
-report.
+report. The [activity log](overview.md#the-activity-log) has the same button.
 
-**Help ▸ About drawbar** opens the About box, which links to the source, this
+**Help ▸ About drawbar** (on macOS, **drawbar ▸ About drawbar**) opens the About
+box, which links to the source, this
 guide, the releases and the issue tracker.
 
 **This build** lists what you are running: the version and target, the browser
