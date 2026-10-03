@@ -66,9 +66,16 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
         // An explicit destination is the unambiguous case, whatever the source was.
         (_, Some(out)) => write_file(ui, &out, &edited),
         // The slot keeps whatever it is already called, so the write carries no name.
-        (Some(Target::Slot(at)), None) => {
-            crate::device::send(ui, &edited, at, class, args.common.yes, what, None, None)
-        }
+        (Some(Target::Slot(at)), None) => crate::device::send(
+            ui,
+            &mut edited.as_slice(),
+            at,
+            class,
+            args.common.yes,
+            what,
+            None,
+            None,
+        ),
         (None, None) => {
             Err("editing a fresh default needs -o: there is nothing to write back to".into())
         }
