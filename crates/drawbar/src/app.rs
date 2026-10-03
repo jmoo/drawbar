@@ -17,6 +17,7 @@ use crate::queue::Queue;
 use crate::shell::{Dock, Shell};
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
+use crate::zoom::Zoom;
 
 /// A theme-specific success color with enough contrast for small text.
 pub fn good(visuals: &egui::Visuals) -> egui::Color32 {
@@ -166,6 +167,7 @@ pub struct DrawbarApp {
     pub(crate) document: Document,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
+    pub(crate) zoom: Zoom,
     /// The MIDI controllers listened to, whichever tab is in front.
     pub(crate) midi: Midi,
     pub(crate) splash: crate::splash::Splash,
@@ -201,6 +203,14 @@ impl DrawbarApp {
             .and_then(|storage| storage.get_string(ThemeChoice::KEY))
             .map_or(ThemeChoice::default(), |text| ThemeChoice::read(&text));
         cc.egui_ctx.set_theme(theme.preference());
+        let zoom = cc
+            .storage
+            .and_then(|storage| storage.get_string(Zoom::KEY))
+            .map_or(Zoom::default(), |text| Zoom::read(&text));
+        cc.egui_ctx.set_zoom_factor(zoom.factor());
+        // egui's own keys step by a tenth and reset to 100%, off the steps drawbar offers.
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
         let mut app = DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
@@ -213,6 +223,7 @@ impl DrawbarApp {
             document: Document::default(),
             log: Log::default(),
             theme,
+            zoom,
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
@@ -254,12 +265,14 @@ impl DrawbarApp {
         self
     }
 
-    /// Run what was picked from the macOS menu bar, and bring its items up to date.
+    /// Run what was picked from the macOS menu bar, of what `admit` lets through, and bring
+    /// its items up to date.
     #[cfg(target_os = "macos")]
     fn menu_bar_events(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
+        admit: fn(crate::menu::Command) -> bool,
         acts: &mut Vec<browser::Act>,
     ) {
         let Some(mut bar) = self.menubar.take() else {
@@ -272,15 +285,34 @@ impl DrawbarApp {
             ctx.request_repaint();
         }
         for command in picked {
-            if self
-                .offer_now(ctx, command)
-                .is_some_and(|offer| offer.enabled)
+            if admit(command)
+                && self
+                    .offer_now(ctx, command)
+                    .is_some_and(|offer| offer.enabled)
             {
                 self.run(ctx, frame, command, acts);
             }
         }
         bar.refresh(|command| self.offer_now(ctx, command));
         self.menubar = Some(bar);
+    }
+
+    /// A screen too small for the shell: a browser tab of any size, or a window too small
+    /// at this zoom.
+    ///
+    /// Only the notice draws, so no input reaches a shell with no room to lay out, and its
+    /// state is untouched. The zoom alone still answers its keys and menu items.
+    fn gated(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let zooms =
+            |command: crate::menu::Command| matches!(command, crate::menu::Command::Zoom(_));
+        let mut acts = Vec::new();
+        #[cfg(target_os = "macos")]
+        self.menu_bar_events(ctx, frame, zooms, &mut acts);
+        self.shortcuts(ctx, frame, zooms, &mut acts);
+        let smaller = self.zoom.after(crate::zoom::Step::Out);
+        if let Some(zoom) = crate::shell::too_small_notice(ctx, smaller) {
+            self.pick_zoom(ctx, frame, zoom);
+        }
     }
 
     /// Ingest anything dropped on the window, or hand it to the New dialog while one is
@@ -394,6 +426,7 @@ impl eframe::App for DrawbarApp {
         let left = crate::store::save(storage, &self.workspace, &self.queue);
         self.report(left);
         storage.set_string(ThemeChoice::KEY, self.theme.stored().to_string());
+        storage.set_string(Zoom::KEY, self.zoom.percent().to_string());
         // Unlike the theme, these are not written from the frame that changed them: a
         // divider moves on every frame of a drag, and each write rewrites the whole
         // store.
@@ -411,12 +444,8 @@ impl eframe::App for DrawbarApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Browser build only: a native window cannot shrink below the minimum size
-        // `main` sets. Nothing below this draws, so no input reaches a shell with no room
-        // to lay out, and its state is untouched.
-        #[cfg(target_arch = "wasm32")]
         if crate::shell::too_small(ctx.screen_rect().size()) {
-            crate::shell::too_small_notice(ctx);
+            self.gated(ctx, frame);
             return;
         }
         self.log.tick(ctx);
@@ -467,12 +496,12 @@ impl eframe::App for DrawbarApp {
             .released(ctx, &mut self.workspace, &mut self.log);
         acts.extend(asked);
         #[cfg(target_os = "macos")]
-        self.menu_bar_events(ctx, frame, &mut acts);
-        self.shortcuts(ctx, frame, &mut acts);
+        self.menu_bar_events(ctx, frame, |_| true, &mut acts);
+        self.shortcuts(ctx, frame, |_| true, &mut acts);
         self.browser.dialog(ctx, &mut acts);
         self.backdrop(ctx);
         self.top_bar(ctx, frame, &mut acts);
-        self.status_line(ctx, &mut acts);
+        self.status_line(ctx, frame, &mut acts);
         self.browser_card(ctx, &mut acts);
         self.inspector_card(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);

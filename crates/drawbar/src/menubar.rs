@@ -220,6 +220,9 @@ fn accelerator(command: Command) -> Option<KeyAccelerator> {
         egui::Key::W => "w",
         egui::Key::Num2 => "2",
         egui::Key::Num3 => "3",
+        egui::Key::Num0 => "0",
+        egui::Key::Plus => "+",
+        egui::Key::Minus => "-",
         _ => return None,
     };
     let with = keys.modifiers;
