@@ -1544,6 +1544,55 @@ fn a_folder_renamed_while_the_library_is_listed_takes_everything_under_it() {
     assert!(entity.is_unsaved());
 }
 
+/// An asset made while the library is still being listed takes an id of its own, and
+/// every file the listing brings back still comes back, the files the index names and
+/// the ones it does not.
+#[test]
+fn an_asset_made_while_the_library_is_listed_shares_no_id_with_a_file() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let indexed = first.create();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(indexed, tag, true);
+    first.close();
+    fs::write(root.at("Other.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+
+    let bench = Bench::new();
+    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let mut second = Session { store, bench };
+    assert!(second.next(), "opening answered");
+    let before = second.create();
+    assert!(second.next(), "the rows of the index answered");
+    let after = second.create();
+    second.listed_whole();
+
+    let workspace = &second.bench.workspace;
+    let mut names: Vec<&str> = workspace.listed().map(|e| e.name.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Other.ne5p",
+            "untitled.ne5p",
+            "untitled.ne5p",
+            "untitled.ne5p"
+        ]
+    );
+    let file = workspace
+        .listed()
+        .find(|entity| {
+            entity
+                .path
+                .as_ref()
+                .is_some_and(|at| at.as_str() == "untitled.ne5p")
+        })
+        .expect("the file the index names");
+    assert!(second.bench.browser.tags.worn(file.id).contains(&tag));
+    for made in [before, after] {
+        assert_eq!(second.path(made), None, "not placed yet");
+    }
+}
+
 /// A folder removed while the library is still being listed waits until everything in
 /// it has been listed, and then the usual rules apply: it goes, and what was in it moves
 /// up, unless it holds a file drawbar does not.

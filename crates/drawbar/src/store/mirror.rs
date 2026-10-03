@@ -75,7 +75,8 @@ struct Loading {
     claimed: BTreeSet<u64>,
     /// The working copies not yet taken up, by id.
     working: BTreeMap<u64, Vec<u8>>,
-    /// The id the next file the index does not name takes.
+    /// The id the next file the index does not name takes, unless the workspace has
+    /// given it out since.
     next: u64,
     /// Every folder listed so far.
     dirs: Vec<LibPath>,
@@ -796,6 +797,7 @@ impl Store {
             }
             rows.insert(moved, row);
         }
+        workspace.reserve(next);
         browser.tags.restore(
             tags,
             rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
@@ -826,6 +828,7 @@ impl Store {
         let Some(mut loading) = self.loading.take() else {
             return;
         };
+        loading.next = loading.next.max(workspace.next_id());
         loading.caught_up(ran, &mut part);
         let Listing {
             dirs,
@@ -931,6 +934,7 @@ impl Store {
         let Some(mut loading) = self.loading.take() else {
             return;
         };
+        loading.next = loading.next.max(workspace.next_id());
         for found in &mut complete.strangers {
             loading.now(complete.ran, &mut found.path);
         }

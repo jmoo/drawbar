@@ -2380,6 +2380,11 @@ impl Workspace {
         self.next_id
     }
 
+    /// Give no new asset an id below `next`, which a library opening has handed out.
+    pub fn reserve(&mut self, next: u64) {
+        self.next_id = self.next_id.max(next);
+    }
+
     /// Restore what a previous session held, and return how many assets were refused.
     ///
     /// Every asset is verified on the way in: bytes from a store have been somewhere
