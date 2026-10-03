@@ -597,11 +597,14 @@ impl Browser {
                 let area = ui.max_rect();
                 ui.set_min_height(rows.height());
                 let shown = rows.within(viewport.min.y, viewport.max.y);
-                for line in &rows.lines[shown.clone()] {
-                    if let Line::Local { id, .. } = line {
-                        workspace.hurry(*id);
-                    }
-                }
+                workspace.in_view(
+                    rows.lines[shown.clone()]
+                        .iter()
+                        .filter_map(|line| match line {
+                            Line::Local { id, .. } => Some(*id),
+                            _ => None,
+                        }),
+                );
                 // ⚠️ The line being renamed is drawn wherever it is. An editor left undrawn
                 // for a frame loses its focus, and losing focus ends the rename.
                 let renaming = self
@@ -2287,6 +2290,40 @@ mod tests {
         frame(&mut bench, on_screen(Vec::new()), None);
         assert!(bench.workspace.wanted(1), "the first row is in view");
         assert!(!bench.workspace.wanted(500), "the last row is not");
+    }
+
+    /// A row whose file is read while it is drawn says what the file holds on the next
+    /// frame, from the lines it already had.
+    #[test]
+    fn a_row_read_while_drawn_says_what_it_holds() {
+        let mut bench = Bench::new();
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ne5p".into(),
+            path: Some(LibPath::root().join("Grand.ne5p")),
+            origin: crate::workspace::Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(1),
+            unsaved: None,
+        };
+        bench.workspace.restore(vec![saved], None, &mut bench.log);
+        let (output, _) = frame(&mut bench, on_screen(Vec::new()), None);
+        assert!(testing::words(&output).contains(&"reading…".to_string()));
+
+        assert_eq!(bench.workspace.take_wanted(), vec![1]);
+        let bytes = Fresh::Program.bytes().unwrap();
+        bench.workspace.took(1, Some(bytes), None);
+        bench.workspace.settle_files(&mut bench.log);
+        let takes = bench.browser.rows.takes;
+        let (output, _) = frame(&mut bench, on_screen(Vec::new()), None);
+        let said = testing::words(&output);
+        assert!(!said.contains(&"reading…".to_string()), "{said:?}");
+        assert!(said.contains(&"program".to_string()), "{said:?}");
+        assert_eq!(
+            bench.browser.rows.takes, takes,
+            "the lines stand for the same rows"
+        );
     }
 
     /// A rename of a row out of view keeps its editor: what is typed into it renames the

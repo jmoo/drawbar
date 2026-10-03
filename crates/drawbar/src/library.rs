@@ -824,10 +824,9 @@ impl Library {
             .id_salt("library_table")
             .auto_shrink([false; 2])
             .show_rows(ui, ROW, rows.len(), |ui, shown| {
-                for row in shown.filter_map(|index| rows.get(index)) {
-                    if let Some(id) = row.item.local() {
-                        workspace.hurry(id);
-                    }
+                let shown = rows.get(shown).unwrap_or_default();
+                workspace.in_view(shown.iter().filter_map(|row| row.item.local()));
+                for row in shown {
                     paint(
                         ui, row, width, &tracks, browser, &list, workspace, device, queue, acts,
                     );
@@ -2355,6 +2354,44 @@ mod tests {
 
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
+    }
+
+    /// The table asks for the files of the rows in view, and not of a row out of view.
+    #[test]
+    fn only_the_table_rows_in_view_are_asked_for() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let saved = (1..=500)
+            .map(|id| crate::workspace::Saved {
+                id,
+                name: format!("Sound {id:04}.ne5p"),
+                path: Some(crate::store::LibPath::root().join(&format!("Sound {id:04}.ne5p"))),
+                origin: Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(1),
+                unsaved: None,
+            })
+            .collect();
+        workspace.restore(saved, None, &mut log);
+        testing::run(&ctx, screen(), |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                });
+        });
+        assert!(workspace.wanted(1), "the first row is in view");
+        assert!(!workspace.wanted(500), "the last row is not");
     }
 
     /// A frame of the table at the center's width with no dock open.
