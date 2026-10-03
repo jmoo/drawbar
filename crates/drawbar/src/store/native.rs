@@ -15,49 +15,26 @@ use super::exec::{self, Children, Fs, Kind, TEMP, TMP, WORKING};
 use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
 
-/// The default library: `drawbar` in the user's Music folder, or in the home folder
-/// where the system names no Music folder.
+/// The folder the default library is, inside drawbar's own data.
+const LIBRARY: &str = "library";
+
+/// The default library: `library` in drawbar's own data, beside eframe's store.
+#[cfg(not(windows))]
 pub fn default_root() -> Option<PathBuf> {
-    let home = std::env::home_dir()?;
-    Some(music(&home).unwrap_or(home).join("drawbar"))
+    Some(eframe::storage_dir(crate::APP)?.join(LIBRARY))
 }
 
-/// The user's Music folder: always `~/Music` on macOS and Windows.
+/// The default library: `drawbar\library` in the local app data.
 ///
-/// ⚠️ A Windows Music folder the user moved elsewhere is not followed.
-#[cfg(any(target_os = "macos", windows))]
-fn music(home: &Path) -> Option<PathBuf> {
-    Some(home.join("Music"))
-}
-
-/// The user's Music folder as `xdg-user-dirs` names it, which a minimal system may not.
-#[cfg(not(any(target_os = "macos", windows)))]
-fn music(home: &Path) -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    let text = fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
-    xdg_music(&text, home)
-}
-
-/// `XDG_MUSIC_DIR` from a `user-dirs.dirs` file: `"$HOME/…"` or an absolute path, in
-/// quotes. A value naming the home folder itself means the user has no Music folder.
-#[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
-fn xdg_music(text: &str, home: &Path) -> Option<PathBuf> {
-    let value = text
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("XDG_MUSIC_DIR="))
-        .next_back()?
-        .trim()
-        .strip_prefix('"')?
-        .strip_suffix('"')?;
-    let dir = match value.strip_prefix("$HOME") {
-        Some(rest) => home.join(rest.trim_start_matches('/')),
-        None if value.starts_with('/') => PathBuf::from(value),
-        None => return None,
-    };
-    (dir != home).then_some(dir)
+/// ⚠️ Not beside eframe's store, which is in the roaming app data: a domain profile copies
+/// that to and from a server at every sign-in, and a piano library runs to hundreds of
+/// megabytes. The local app data stays on this machine.
+#[cfg(windows)]
+pub fn default_root() -> Option<PathBuf> {
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    local
+        .is_absolute()
+        .then(|| local.join(crate::APP).join(LIBRARY))
 }
 
 const LOCK: &str = ".drawbar/lock";
@@ -590,20 +567,68 @@ mod tests {
         assert!(!root.at("c3.ne5p").exists());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn the_music_folder_is_read_from_user_dirs_as_xdg_writes_it() {
-        let home = Path::new("/home/jo");
-        let music = |text| xdg_music(text, home);
+    fn the_default_library_on_macos_is_in_application_support() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
         assert_eq!(
-            music("# written by xdg-user-dirs-update\nXDG_MUSIC_DIR=\"$HOME/Musik\"\n"),
-            Some(PathBuf::from("/home/jo/Musik"))
+            default_root(),
+            Some(home.join("Library/Application Support/drawbar/library"))
         );
+    }
+
+    /// The one test that sets `XDG_DATA_HOME`, so no other reads it while it moves.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_default_library_elsewhere_on_unix_is_in_the_xdg_data_folder() {
+        let data = Temp::new();
+        let held = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("XDG_DATA_HOME", &data.0);
+        let named = default_root();
+        let storage = eframe::storage_dir(crate::APP);
+        std::env::set_var("XDG_DATA_HOME", "relative/data");
+        let relative = default_root();
+        match held {
+            Some(held) => std::env::set_var("XDG_DATA_HOME", held),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        assert_eq!(named, Some(data.at("drawbar/library")));
         assert_eq!(
-            music("XDG_MUSIC_DIR=\"/srv/audio\""),
-            Some(PathBuf::from("/srv/audio"))
+            named,
+            storage.map(|dir| dir.join(LIBRARY)),
+            "beside eframe's store"
         );
-        assert_eq!(music("XDG_MUSIC_DIR=\"$HOME/\""), None, "no Music folder");
-        assert_eq!(music("XDG_DOWNLOAD_DIR=\"$HOME/Downloads\""), None);
-        assert_eq!(music("XDG_MUSIC_DIR=Music"), None, "not a path it writes");
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+        assert_eq!(
+            relative,
+            Some(home.join(".local/share/drawbar/library")),
+            "a relative XDG_DATA_HOME is ignored"
+        );
+    }
+
+    /// The one test that sets `LOCALAPPDATA`, so no other reads it while it moves.
+    #[cfg(windows)]
+    #[test]
+    fn the_default_library_on_windows_is_in_the_local_app_data() {
+        let local = Temp::new();
+        let held = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local.0);
+        let named = default_root();
+        std::env::remove_var("LOCALAPPDATA");
+        let unset = default_root();
+        if let Some(held) = held {
+            std::env::set_var("LOCALAPPDATA", held);
+        }
+        assert_eq!(named, Some(local.at("drawbar").join("library")));
+        assert_eq!(unset, None);
+    }
+
+    /// The derived cache sits beside `app.ron`, one level above the default library, so
+    /// the library never holds it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_default_library_is_a_folder_of_the_storage_eframe_keeps() {
+        let storage = eframe::storage_dir(crate::APP).expect("the system names one");
+        assert_eq!(default_root(), Some(storage.join(LIBRARY)));
     }
 }

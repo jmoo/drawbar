@@ -3039,6 +3039,25 @@ fn the_cache_is_never_written_inside_the_library() {
     assert!(entity.reading(), "it was kept for that session only");
 }
 
+/// The default library is a folder of drawbar's own data, and the cache sits in that
+/// data beside it, not inside it, so the cache is kept between sessions.
+#[test]
+fn the_cache_beside_a_library_in_the_same_data_is_kept() {
+    let data = Temp::new();
+    fs::create_dir_all(data.at("library")).unwrap();
+    let root = Temp(data.at("library"));
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::kept_at(&root, data.at(CACHE));
+    first.read_all();
+    first.close();
+    assert!(data.at(CACHE).is_file());
+    assert_eq!(root.names(""), ["Grand.ne5p"]);
+
+    let second = Session::kept_at(&root, data.at(CACHE));
+    let entity = second.bench.workspace.get(second.only()).unwrap();
+    assert!(entity.unread() && !entity.reading(), "remembered");
+}
+
 /// A tracked file whose summary is remembered is not read in the background: what it is
 /// and the slot it matches are known without it.
 #[test]

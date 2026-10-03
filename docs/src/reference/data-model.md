@@ -15,9 +15,12 @@ the files left on disk and read by range, and `summary.rs` with
 A library is a folder tree. A folder in the browser is a directory, an asset is
 a file, and a move is a rename. Any folder can be opened as a library.
 
-- **Desktop:** the default library is `drawbar` in the user's Music folder:
-  `~/Music` on macOS and Windows, the folder `xdg-user-dirs` names on Linux, or
-  the home folder where there is none (`store::native::default_root`).
+- **Desktop:** the default library is `library` in the folder eframe keeps the
+  app's data in (`eframe::storage_dir`): `~/Library/Application Support/drawbar`
+  on macOS, `$XDG_DATA_HOME/drawbar` or `~/.local/share/drawbar` on Linux. On
+  Windows that folder is in the roaming app data, which a domain profile copies at
+  every sign-in, so the library is `%LOCALAPPDATA%\drawbar\library` instead
+  (`store::native::default_root`).
 - **Browser:** the default library is the root of the origin private file system
   (OPFS). In browsers with `showDirectoryPicker`, the user can also pick a folder
   on the computer (`store::web::Root`).
@@ -656,7 +659,7 @@ files refer to.
 | Theme, docks, Show all files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
 | Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent` |
-| The derived cache | `library-cache.ron` beside `app.ron` | IndexedDB: database `drawbar`, store `files` |
+| The derived cache | `library-cache.ron` beside `app.ron`, outside the default library | IndexedDB: database `drawbar`, store `files` |
 
 A preference is never kept in a library, and a library is never kept in
 preferences. A folder handle can be kept only in IndexedDB, and it comes back

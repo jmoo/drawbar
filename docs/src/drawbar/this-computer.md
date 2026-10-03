@@ -32,12 +32,12 @@ comes back unsaved the next time drawbar starts.
 
 ## Where it lives
 
-On the desktop, this computer is a folder of real files: `drawbar` in your Music
-folder. That is `~/Music/drawbar` on macOS and `Music\drawbar` in your user folder
-on Windows. On Linux it is in the music folder `xdg-user-dirs` names, or
-`~/drawbar` where there is none. drawbar makes the folder the first time it keeps
-something there. Hover **This computer** for its path, or right-click it and
-choose **Show the library folder**.
+On the desktop, this computer is a folder of real files in drawbar's own data:
+`~/Library/Application Support/drawbar/library` on macOS,
+`~/.local/share/drawbar/library` on Linux (under `$XDG_DATA_HOME` where that is
+set), and `%LOCALAPPDATA%\drawbar\library` on Windows. drawbar makes the folder
+the first time it keeps something there. Hover **This computer** for its path, or
+right-click it and choose **Show the library folder**.
 
 Every sound is a file there, named as the browser shows it plus its extension,
 and every folder in the browser is a folder there. Finder, your backups and Nord
@@ -68,7 +68,7 @@ plays, and the WAVs a Sample Editor project names. The summaries live in drawbar
 own data, never in the library: in `library-cache.ron`, in
 `~/Library/Application Support/drawbar` on macOS, `~/.local/share/drawbar` on
 Linux and `%APPDATA%\drawbar\data` on Windows, and in the site's IndexedDB in
-the browser. When you open the library again, a file whose size and date have not
+the browser. On macOS and Linux that is the folder the library is in. When you open the library again, a file whose size and date have not
 changed shows its kind and matches its slot without being read, and is read only
 when you select, open or act on it. Deleting the summaries loses nothing: drawbar
 reads the files again as it needs them.
