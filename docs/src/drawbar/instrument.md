@@ -62,9 +62,13 @@ this computer becomes `Africa-Split` on the panel.
   progress screen.
 - A move is a swap, never an overwrite.
 - Writing into an occupied slot deletes the old sound first, because the
-  instrument refuses to overwrite in place. drawbar reads the old sound into memory
-  before deleting it, writes it back if the new write fails, and if that fails too,
-  keeps its bytes on this computer as a rescued sound.
+  instrument refuses to overwrite in place. drawbar reads the old sound before
+  deleting it and writes it back if the new write fails. A piano or a sample over
+  1 MiB is read into a file rather than into memory: in the library's
+  `.drawbar/tmp/` folder, the system's temporary folder where the library cannot
+  be written, or the browser's own storage for drawbar. If writing it back fails too, a small sound's bytes are kept on this
+  computer as a rescued sound, and a large one stays in its file, which drawbar
+  names in the log.
 - Live slots and Settings are overwritten in place. Writing Settings reloads the
   selected program, so unsaved panel changes are lost. drawbar warns before it does
   this.

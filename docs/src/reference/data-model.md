@@ -131,7 +131,9 @@ read-only.
 - `tmp/` holds the temporary files of writes in flight. On the desktop that is
   only the index's own files; a library file is staged as a hidden sibling,
   `.<name>.drawbar-tmp`, so its rename never crosses a volume. In the browser
-  every write is staged in `tmp/`.
+  every write is staged in `tmp/`. It also holds a slot's occupant while a write
+  to the instrument replaces it, as `nord-rescued-…`, which the open's sweep
+  leaves.
 - `lock` is held by the one drawbar that may write the library, so a second
   drawbar opens it read-only.
 
@@ -445,10 +447,30 @@ without reading it into memory.
 A send never reads a resting file whole either. The command carries the file
 (`device::Payload::File`), and the worker reads it one transfer chunk at a time
 through `nord_usb::FileSource`: by position through the handle on the desktop,
-and by `File.slice` through the snapshot in the browser. The queue compares a
-resting file with a slot's occupant by the checksum its check took, so its diff
-says only whether the bodies differ. A file that fails to read partway through a
-send fails it as a refused write does, and the slot's occupant is put back.
+and by `File.slice` through the snapshot in the browser. A file that fails to read
+partway through a send fails it as a refused write does, and the slot's occupant
+is put back.
+
+Nor is a slot's occupant held whole. Before a write replaces one, the worker
+reads it back so it can put it back if the write fails (`worker::put`). One of up
+to 1 MiB of body is read into memory. A larger one, a piano or most samples, is
+read through `op::read_into` into a file (`device::scratch`): in the library's
+`.drawbar/tmp/` on the desktop while the library may be written, or the
+system's temporary folder otherwise, and in `.drawbar/tmp/` of the private
+storage in the browser, through a `library-writer.js` of the device's own. The
+restore sends that file through `write_from`. The file is deleted once the slot
+holds what it should. Where the restore fails as well, it stays, and
+`DeviceEvent::Kept` names it in the log; a small occupant becomes a rescued asset
+instead. The file is named as its rescue, `nord-rescued-<bank>-<slot>.<tag>`,
+numbered where that name is taken, and the open's sweep of `tmp/` leaves those
+names, since one left by an interrupted write is the slot's only copy.
+
+The queue compares a resting file with a slot's occupant by the checksum its
+check took, so its diff says only whether the bodies differ. The instrument
+reports no checksum for a piano or sample slot. One whose body length, which it
+does report, differs from the asset's is different without a read. One of the
+same length is read through `op::read_into` into `std::io::sink()`
+(`DeviceEvent::Summed`), and its CRC-32 decides.
 
 ## The store protocol
 

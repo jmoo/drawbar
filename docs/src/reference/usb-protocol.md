@@ -74,6 +74,20 @@ A write reads its file through the `FileSource` trait, one transfer chunk at a
 time, so memory does not grow with the file. The body is read twice: once to
 check its checksum before the first frame, and again to send it. If the bytes
 change in between, the last chunk is held back and the write fails unfinished.
+`envelope::verify` runs the first of those checks alone, for a caller that must
+know the file is whole before it touches the instrument.
+
+A read hands its file to the `FileSink` trait the same way: `op::read_into`
+writes each chunk of the body as it arrives, behind the room its `CBIN` header
+takes, and the header last, once the body's CRC-32 is known. It returns the
+slot's object info and that CRC-32. `op::read_program` is `read_into` into
+memory, so the two send the same frames. A sink that keeps nothing,
+`std::io::sink()`, takes a slot's checksum without holding its body.
+
+The device reports a body CRC-32 in object info for programs and set lists, and
+`0xffffffff` for pianos, samples and Settings, so the only way to learn what a
+piano or sample slot holds is to read it. Its object info does report the body's
+length, format tag, version and name.
 
 The API documentation is on [docs.rs](https://docs.rs/nord-usb), and
 [Testing](testing.md) covers the replay suite.

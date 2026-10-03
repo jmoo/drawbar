@@ -53,8 +53,13 @@ The instrument does not overwrite an occupied slot in place, so a `put` into one
 deletes the old sound first. `nord` reads the old sound before deleting it, and
 puts it back if the write fails. If that fails too, the old bytes are saved in the
 working directory as a file such as `nord-rescued-7-50.ne5p`, which `put` takes
-straight back. Live slots and settings are the exception: the instrument
-overwrites those in place.
+straight back. A sound over 1 MiB, such as a piano, is read straight into that
+file rather than into memory, and the file is deleted once the slot holds what it
+should. Live slots and settings are the exception: the instrument overwrites
+those in place.
+
+`put` checks the file's checksum before it touches the instrument, and `put` and
+`get -o` move a file through in pieces, so a piano is never held in memory.
 
 Every command closes its session even when it fails, so an error cannot leave the
 instrument stuck on its progress screen. If a run is interrupted, `nord device
