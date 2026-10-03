@@ -140,6 +140,9 @@ fn matches(expected: &Expectation, spellings: &[String]) -> bool {
         .any(|b| (a - b).abs() <= tolerance)
 }
 
+/// The trait naming a vendor per-key table the partner law does not describe.
+pub const KEY_MAP_OUTSIDE_PARTNER_LAW: &str = "key_map_outside_partner_law";
+
 /// The trait vocabulary, one checker per name. A trait this reader does not
 /// know is an error, so the vocabulary cannot drift.
 fn traits(s: &Specimen) -> Result<(), String> {
@@ -152,6 +155,7 @@ fn traits(s: &Specimen) -> Result<(), String> {
                 "b3_bass_manual" => b3_bass_manual,
                 "builds_from_source" => builds_from_source,
                 "editor_render" => editor_render,
+                KEY_MAP_OUTSIDE_PARTNER_LAW => key_map_outside_partner_law,
                 "left_channel_only" => |s| one_channel(s, Channel::Left),
                 "right_channel_only" => |s| one_channel(s, Channel::Right),
                 "sine_at_root_key" => sine_at_root_key,
@@ -165,6 +169,24 @@ fn traits(s: &Specimen) -> Result<(), String> {
         })
         .collect();
     ensure!(wrong.is_empty(), "{}", wrong.join("; "));
+    Ok(())
+}
+
+/// The planner does not reproduce the populated per-key table, and the zones refuse
+/// edits, so an edit cannot rewrite a table the planner cannot derive.
+fn key_map_outside_partner_law(s: &Specimen) -> Result<(), String> {
+    let wide = samples::wide(s.entity)?;
+    let plan = samples::planned_key_map(wide)?.ok_or("the map holds no per-key table")?;
+    ensure!(
+        plan.kind == nsmp::zone::KeyMap::Populated,
+        "the per-key table is {:?}",
+        plan.kind
+    );
+    ensure!(
+        plan.planned != plan.stored,
+        "the planner reproduces the table"
+    );
+    ensure!(!wide.zones_are_editable(), "the zones are editable");
     Ok(())
 }
 

@@ -10,7 +10,9 @@
 //! no value its components cannot name, and match its `<file>.oracle.json`
 //! sidecar if it has one. On a sample (every fixture, every specimen with a
 //! sidecar, and one of each container shape among the rest), every registry
-//! field must also take a new value without changing another. The fixtures must
+//! field must also take a new value without changing another. A sidecar needs
+//! its specimen beside it, unless the tree's `library.json` projects an R2 object
+//! to that path. The fixtures must
 //! hold a file of every type the reader dispatches. In the corpus, each claim
 //! about every specimen of a kind runs once per specimen of that kind, so a tree
 //! without that kind runs none. A file ending `.kernel.tsv` is an oracle for the
@@ -38,6 +40,7 @@ macro_rules! ensure {
 #[cfg(feature = "corpus")]
 mod invariants;
 mod kernel;
+mod library;
 mod lookup;
 mod oracle;
 mod samples;
@@ -196,13 +199,24 @@ fn trials_for(label: &str, root: &Path, mutate_all: bool, trials: &mut Vec<Trial
         );
     }
 
-    // A sidecar without its specimen is an error, and one stating a refusal is
-    // checked here, since the sweep does not read a file the reader refuses.
+    // A sidecar without its specimen is an error unless the tree's index projects an
+    // R2 object there, and one stating a refusal is checked here, since the sweep does
+    // not read a file the reader refuses.
+    let projected = library::projected(root).unwrap_or_else(|e| {
+        trials.push(Trial::test(format!("{label}/library.json"), move || {
+            Err(e.into())
+        }));
+        BTreeSet::new()
+    });
     for sidecar in sidecars {
         let name = format!("{label}/{}", rel(root, &sidecar));
+        let target = sidecar::specimen_of(&sidecar);
+        let indexed = projected.contains(&rel(root, &target));
         trials.push(Trial::test(name, move || {
-            let target = sidecar::specimen_of(&sidecar);
             if !target.exists() {
+                if indexed {
+                    return sidecar::load(&sidecar).map(|_| ()).map_err(Failed::from);
+                }
                 return Err(format!(
                     "sidecar for {}, which does not exist",
                     target.file_name().unwrap().to_string_lossy()
@@ -234,7 +248,7 @@ fn invariant_trials(label: &str, root: &Path, trials: &mut Vec<Trial>) {
         let Ok(entity) = nord_format::from_stream(&mut Cursor::new(&bytes)) else {
             continue;
         };
-        let kinds = invariants::kinds(&bytes, &entity);
+        let kinds = invariants::kinds(&path, &bytes, &entity);
         let name = rel(root, &path);
         for invariant in invariants::INVARIANTS
             .iter()
@@ -283,6 +297,36 @@ fn lookup_trial(fixtures: &Path) -> Trial {
     )
 }
 
+/// The projection rule the corpus assembly applies to its index, as a trial: this
+/// target has its own harness, so `#[test]` does not run here.
+fn library_trial() -> Trial {
+    Trial::test(
+        "library: paths that differ only in case take their sha256 prefix",
+        || {
+            let sha = |digit: char| digit.to_string().repeat(64);
+            let index = serde_json::json!({ "files": [
+                { "ext": "nsmp3", "filename": "Choir Oh.nsmp3", "sha256": sha('a') },
+                { "ext": "nsmp3", "filename": "Choir oh.nsmp3", "sha256": sha('b') },
+                { "ext": "nsmp4", "filename": "Kept.nsmp4", "sha256": sha('c'), "in_git": true },
+                { "path": "nc2/pipes/Organ.npip", "sha256": sha('d') },
+            ]});
+            let got = library::projections(&index)?;
+            let want: BTreeSet<String> = [
+                "nsmp3/Choir Oh-aaaaaaaa.nsmp3",
+                "nsmp3/Choir oh-bbbbbbbb.nsmp3",
+                "nc2/pipes/Organ.npip",
+            ]
+            .map(String::from)
+            .into();
+            if got == want {
+                Ok(())
+            } else {
+                Err(format!("projected {got:?}, want {want:?}").into())
+            }
+        },
+    )
+}
+
 /// The fixtures hold a file of every class `from_stream` reads and of every CBIN tag
 /// it dispatches.
 fn coverage_trial(fixtures: &Path) -> Trial {
@@ -326,6 +370,7 @@ fn main() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     trials.push(lookup_trial(&fixtures));
     trials.push(coverage_trial(&fixtures));
+    trials.push(library_trial());
     trials_for("fixtures", &fixtures, true, &mut trials);
 
     #[cfg(feature = "corpus")]

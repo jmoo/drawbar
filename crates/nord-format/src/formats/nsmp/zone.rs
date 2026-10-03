@@ -352,8 +352,7 @@ pub enum KeyMap {
     /// This layout carries no per-key table.
     Absent,
     /// Every record names its own key. The sample editor writes this whatever
-    /// the zone layout, and the partner rule yields it for an instrument where no
-    /// zone has an eligible partner.
+    /// the zone layout.
     Neutral,
     /// Partner roots, filled in from the zone layout by the vendor's builder.
     Populated,
@@ -383,14 +382,15 @@ fn span(ladder: &[(u8, u8, u8)]) -> Option<(u8, u8)> {
     Some((ladder.first()?.1.max(KEY_FLOOR), ladder.last()?.2))
 }
 
-/// The partner roots one key names, or the identity where none is eligible.
+/// The partner roots one key names.
 ///
 /// Take the zone that claims the key and let `R` be its root. Eligible are the
 /// roots below `R` within [`PARTNER_UP`] semitones and every root above it.
 /// `a` is the nearest of those to `R`, ties going to the lower root. `b` is the
 /// nearest of the rest when `a` is below `R`; when `a` is above, `b` reaches
 /// back across `R` for the highest eligible root below it, and only when
-/// nothing is below does it take the next root above `a`.
+/// nothing is below does it take the next root above `a`. Where nothing is
+/// eligible, the zone names its own root, `a = b = R`.
 ///
 /// Outside the span the record is the identity, `a = b = key`. Inferred from
 /// specimens; not confirmed on hardware.
@@ -425,7 +425,7 @@ fn partners(ladder: &[(u8, u8, u8)], key: u8) -> (u8, u8) {
     let nearest = |set: &[u8]| set.iter().copied().min_by_key(|&r| (r.abs_diff(root), r));
     let eligible: Vec<u8> = below.iter().chain(&above).copied().collect();
     let Some(a) = nearest(&eligible) else {
-        return identity;
+        return (root, root);
     };
     let b = if a < root {
         let rest: Vec<u8> = eligible.iter().copied().filter(|&r| r != a).collect();
@@ -1032,11 +1032,17 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_zone_names_nobody() {
-        let zs = vec![(60, 17, 84)];
-        for key in [17, 60, 84] {
-            assert_eq!(partners(&zs, key), (key, key), "key {key}");
+    fn a_zone_with_no_eligible_partner_names_its_own_root() {
+        let lone = vec![(60, 17, 84)];
+        for key in [17, 59, 60, 84] {
+            assert_eq!(partners(&lone, key), (60, 60), "lone zone, key {key}");
         }
+        // Nothing above the top zone, and the root below is past a minor third.
+        let top = vec![(96, 17, 97), (102, 98, 103), (108, 104, 108)];
+        for key in [104, 107, 108] {
+            assert_eq!(partners(&top, key), (108, 108), "top zone, key {key}");
+        }
+        assert_eq!(partners(&top, 109), (109, 109), "past the span");
     }
 
     #[test]

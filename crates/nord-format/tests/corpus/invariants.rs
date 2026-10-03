@@ -4,11 +4,14 @@
 //! wrote, not for the fixtures' zero bodies, so they run on the corpus only.
 
 use crate::format_table;
-use crate::samples::{self, audio, edited, moved};
+use crate::oracle::KEY_MAP_OUTSIDE_PARTNER_LAW;
+use crate::samples::{self, audio, edited, moved, planned_key_map};
+use crate::sidecar;
 use crate::Context;
 use nord_format::formats::{npno, nsmp, nsmpproj};
 use nord_format::{Entity, Live, OrganPreset, PianoPreset, Program, Sample, Synth};
 use std::io::Cursor;
+use std::path::Path;
 
 /// What a specimen is, for choosing its claims. One specimen has several kinds.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,20 +33,21 @@ pub enum Kind {
     EditableWide,
     /// A wide instrument with a v4 preset.
     WideV4Preset,
-    /// A wide instrument with a `map` section.
+    /// A wide instrument with a `map` section, unless its sidecar marks the per-key
+    /// table as one the partner law does not describe.
     WideMap,
     Project,
     Piano,
 }
 
-pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
+pub fn kinds(path: &Path, bytes: &[u8], entity: &Entity) -> Vec<Kind> {
     let mut kinds = Vec::new();
     if bytes.starts_with(b"CBIN") {
         kinds.push(Kind::Cbin);
         let tag = &bytes[8..12];
         if format_table::formats()
             .iter()
-            .any(|(format, _, _)| format.as_bytes() == tag)
+            .any(|(format, body_len, _)| format.as_bytes() == tag && body_len.is_some())
         {
             kinds.push(Kind::Tabled);
         }
@@ -79,7 +83,9 @@ pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
                     if matches!(wide.sty(), Ok(nsmp::Sty::V4(_))) {
                         kinds.push(Kind::WideV4Preset);
                     }
-                    if nsmp::section::find(&wide.body.sections, nsmp::section::MAP4).is_some() {
+                    if nsmp::section::find(&wide.body.sections, nsmp::section::MAP4).is_some()
+                        && !outside_partner_law(path)
+                    {
                         kinds.push(Kind::WideMap);
                     }
                 }
@@ -90,6 +96,14 @@ pub fn kinds(bytes: &[u8], entity: &Entity) -> Vec<Kind> {
         _ => {}
     }
     kinds
+}
+
+/// Whether the specimen's sidecar states [`KEY_MAP_OUTSIDE_PARTNER_LAW`], which its
+/// own checker verifies. An unreadable sidecar fails the specimen's sweep trial.
+fn outside_partner_law(path: &Path) -> bool {
+    sidecar::of(path).is_ok_and(|sidecar| {
+        sidecar.is_some_and(|s| s.traits.iter().any(|t| t == KEY_MAP_OUTSIDE_PARTNER_LAW))
+    })
 }
 
 pub struct Invariant {
@@ -264,10 +278,10 @@ fn aux_word(bytes: &[u8], _: &Entity) -> Result<(), String> {
 fn body_length(bytes: &[u8], _: &Entity) -> Result<(), String> {
     let info = nord_format::cbin::inspect(&mut Cursor::new(bytes)).context("inspect")?;
     let tag = String::from_utf8_lossy(&info.header.tag).into_owned();
-    let (_, want, _) = format_table::formats()
+    let want = format_table::formats()
         .into_iter()
-        .find(|(format, _, _)| *format == tag)
-        .ok_or_else(|| format!("{tag:?} is not in the format table"))?;
+        .find_map(|(format, body_len, _)| body_len.filter(|_| format == tag))
+        .ok_or_else(|| format!("{tag:?} has no fixed body length in the format table"))?;
     ensure!(
         info.body_len == want as u64,
         "{tag:?} body is {} bytes, its format's {want}",
@@ -851,42 +865,6 @@ fn dynamics(_: &[u8], entity: &Entity) -> Result<(), String> {
         sty.dynamics_response()
     );
     Ok(())
-}
-
-/// A v4 `map`'s per-key table, stored and as the planner would write it from the
-/// zones.
-struct KeyMapPlan {
-    kind: nsmp::zone::KeyMap,
-    stored: Vec<u8>,
-    planned: Vec<u8>,
-    writes: bool,
-}
-
-/// The per-key table's plan, or `None` where the `map` holds no table.
-fn planned_key_map(
-    sample: &nord_format::cbin::Cbin<nsmp::SampleV3>,
-) -> Result<Option<KeyMapPlan>, String> {
-    let map =
-        nsmp::section::find(&sample.body.sections, nsmp::section::MAP4).ok_or("no map section")?;
-    let table = sample.zone_table().context("zone table")?;
-    let kind = table.key_map(&map.payload).context("per-key table")?;
-    if kind == nsmp::zone::KeyMap::Absent {
-        return Ok(None);
-    }
-    let zones = sample.zones().context("zones")?;
-    let plan = table
-        .plan_key_map(&map.payload, &zones)
-        .context("the key-map planner")?;
-    let mut planned = map.payload.clone();
-    for (at, quad) in &plan {
-        planned[*at..*at + quad.len()].copy_from_slice(quad);
-    }
-    Ok(Some(KeyMapPlan {
-        kind,
-        stored: map.payload.clone(),
-        planned,
-        writes: !plan.is_empty(),
-    }))
 }
 
 /// The Sample Editor writes the neutral table for any zone layout, so the planner
