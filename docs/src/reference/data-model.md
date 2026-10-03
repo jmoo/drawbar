@@ -6,8 +6,9 @@ consistent with changes made outside drawbar. What a user sees of it is on
 [Your files](../drawbar/this-computer.md).
 
 The code is in `crates/drawbar/src`: `store/` holds the library on disk,
-`workspace.rs` the assets in memory, `folders.rs` the folder tree, and
-`ondisk.rs` the files left on disk and read by range.
+`workspace.rs` the assets in memory, `folders.rs` the folder tree, `ondisk.rs`
+the files left on disk and read by range, and `summary.rs` with
+`store/cache.rs` what drawbar remembers of a read between sessions.
 
 ## The library on disk
 
@@ -129,6 +130,7 @@ every asset as a `LocalEntity`. The fields that matter here:
 | `kept` | Whether it is on this computer, as opposed to a view of a slot. |
 | `pending` | Whether an editor holds an edit not yet applied to `bytes`. |
 | `stamp` | Distinct for every set of bytes this id has held. |
+| `remembered` | While it is unread, the `Summary` a read of its file found before. See [The derived cache](#the-derived-cache). |
 
 `Bytes` wraps an `Arc<[u8]>`. The baseline shares the allocation while the bytes
 are the same, so a clean asset is held once; an edit puts new bytes in place and
@@ -177,7 +179,10 @@ so their working copies leave the library being closed (`Store::hand_over`).
 stateDiagram-v2
     state "Not read" as NotRead
     [*] --> Listed: listed
+    Listed --> Remembered: a fresh cache entry
     Listed --> Reading: needed
+    Remembered --> Reading: picked, opened or acted on
+    Remembered --> Listed: file changed
     Reading --> Whole: read whole
     Reading --> Resting: piano or sample, desktop
     Reading --> NotRead: gone, error or no room
@@ -185,7 +190,7 @@ stateDiagram-v2
     Resting --> Whole: woken
     Resting --> Unsaved: edited
     Whole --> Unsaved: edited
-    Whole --> Listed: evicted
+    Whole --> Remembered: evicted
     Unsaved --> Whole: reverted
     Unsaved --> Saving: saved
     Saving --> Whole: written
@@ -199,6 +204,10 @@ stateDiagram-v2
 - **Listed.** The asset holds its file's name, length and time, and nothing
   else. Its baseline's `unread` is set, its verify state is `Reading`, and its
   kind comes from its extension.
+- **Remembered.** Still unread, but the cache holds a summary of an earlier read
+  of the file, taken at the length and time it has now. It draws its kind, tag,
+  slot checksum, the library it plays and its verdict from that summary, and its
+  verify state is `Remembered`. A row in view does not read it.
 - **Reading.** Something needs it, or the index tracks it and it is read in the
   background. A `Cmd::Read` for its file is in flight.
 - **Whole.** Its bytes are in memory. They are decoded off the frame, up to eight
@@ -225,9 +234,11 @@ stateDiagram-v2
   for again, except for a read refused for room, which is retried once room can
   be made.
 
-A clean asset that is evicted goes back to Listed under a new stamp, and keeps
-its baseline's `crc32`, so it still matches its slot. A change on disk to an
-unread file drops that checksum, since it no longer stands for the file.
+A clean asset that is evicted goes back to unread under a new stamp, and keeps
+its baseline's `crc32` and a summary of what it held, so it is Remembered: it
+still draws as it did and matches its slot. A change on disk to an unread file
+drops that checksum and the summary, since they no longer stand for the file,
+and it is Listed again.
 
 ## Listing and reading
 
@@ -257,11 +268,12 @@ folder's `others`, and shown with **Show all files**.
 ### Lazy reads
 
 A listed asset is read once something needs it. `Workspace::hurry` marks it
-wanted, and the store's next `poll` sends one `Cmd::Read` for all of them. Four
-things call it:
+wanted, and the store's next `poll` sends one `Cmd::Read` for all of them.
+Nothing is asked until the cache has said what it remembers. Four things ask:
 
 - `Workspace::in_view`, for the rows the tree and the library table draw this
-  frame;
+  frame. A row draws what is remembered of it, so only a row with nothing
+  remembered is read;
 - the app, every frame, for what is open in a tab or selected
   (`DrawbarApp::update`);
 - the inspector, for the selection;
@@ -272,15 +284,16 @@ An asset needed this frame or the last is not evicted.
 
 ### Background reads
 
-Once the listing is complete, and again at each full pass, the store reads the
-unread files the index tracks, whole: those with tags, a working copy or a slot
-they came off (`Store::fetch_tracked`). Reading them decodes them and takes
-their slot checksum, so they match their slots on the instrument before
-anything shows them. They go 32 files or 16 MiB at a time, and a read the user
-waits on runs after the batch in flight. A tracked file whose CRC is still
-unknown, and that no background read will cover, has its CRC taken alone,
-64 files or 64 MiB at a time (`Cmd::Fingerprint`), so that an outside rename
-keeps its row.
+Once the listing is complete and the cache has answered, and again at each full
+pass, the store reads the unread files the index tracks, whole: those with tags,
+a working copy or a slot they came off (`Store::fetch_tracked`). Reading them
+decodes them and takes their slot checksum, so they match their slots on the
+instrument before anything shows them. A remembered file is skipped, since its
+summary already carries that checksum. They go 32 files or 16 MiB at a time,
+and a read the user waits on runs after the batch in flight. A tracked file
+whose CRC neither the index nor the cache knows, and that no background read
+will cover, has its CRC taken alone, 64 files or 64 MiB at a time
+(`Cmd::Fingerprint`), so that an outside rename keeps its row.
 
 ### The memory budget
 
@@ -541,6 +554,9 @@ The CRC is taken only where the contents decide something:
 - the resting check of a piano or sample instrument, and any whole read;
 - in the background, for tracked rows that lack one.
 
+A file listed with the length and time its cache entry was taken at also gets
+the entry's CRC.
+
 ### When drawbar looks again
 
 The store rescans when the window comes back into focus, and before a send to
@@ -639,6 +655,7 @@ files refer to.
 | Theme, docks, Show all files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
 | Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent` |
+| The derived cache | `library-cache.ron` beside `app.ron` | IndexedDB: database `drawbar`, store `files` |
 
 A preference is never kept in a library, and a library is never kept in
 preferences. A folder handle can be kept only in IndexedDB, and it comes back
@@ -654,5 +671,120 @@ clear one.
 
 ## The derived cache
 
-> Placeholder: this section will describe the per-file summary cache, kept
-> beside `app.ron` on the desktop and in IndexedDB in the browser.
+drawbar remembers what a read of each file found, so a file it does not read
+this session still draws as it did once read (`summary.rs`, `store/cache.rs`).
+Everything in the cache can be read again from the library, so losing it costs
+only reads. It is never kept in the library. Where it lives on each system is on
+[Your files](../drawbar/this-computer.md).
+
+### What an entry holds
+
+An entry is a file's length, modification time and whole-file CRC-32 when it was
+read, and a `Summary` of what the read found:
+
+| Field | Meaning |
+|---|---|
+| `kind` | The kind the browser shows and filters by. |
+| `tag` | The format tag, which names the family and model: `ne5p`. |
+| `crc32` | The slot checksum, as `Baseline::crc32`. |
+| `plays` | The piano or sample library a program plays, by class and id, as the Needs column shows it. |
+| `verdict` | How its check went: ok, checked, differs at an offset, failed, or not applicable. |
+| `wavs` | For a Sample Editor project, the WAVs it names, with `/` between folders. |
+
+There is no name: a row shows its filename.
+
+At each full pass and at exit, `Store::summarize` puts an entry for every asset
+that holds what its file does, read and decoded or checked, once per set of
+bytes. An asset that is unsaved, saving, missing, or still being read or checked
+has none taken.
+
+### Remembered rows
+
+```mermaid
+flowchart TD
+    listed["a listed file"] --> fresh{"a cache entry<br/>with its length<br/>and time?"}
+    fresh -- yes --> remembered["remembered:<br/>drawn from the summary"]
+    fresh -- no --> plain["listed:<br/>kind from the extension"]
+    remembered -- "picked, opened<br/>or acted on" --> read["read and decoded"]
+    plain -- "in view, picked,<br/>opened or acted on" --> read
+    read -- "next full pass" --> entry["its entry, put<br/>in the cache"]
+```
+
+As each part of a listing is folded in, and again once the cache's entries
+arrive, every unread asset whose file has the length and time of its entry is
+given the entry's summary (`Store::recall`, `Workspace::remember`). Its verify
+state becomes `VerifyState::Remembered(verdict)`, `LocalEntity::remembered`
+holds the summary, `saved.crc32` takes the slot checksum, and the entry's CRC
+fills in the file's fingerprint where none is known.
+
+A remembered asset is still `unread()`: it holds no bytes, and an act reads it
+first. It is not `reading()`, so a row in view does not read it, while `hurry`
+(a pick, an open tab, an act) does. `Kind::of`, `LocalEntity::tag` and the
+Needs column take what the summary says, and with the slot checksum in the
+baseline, `device::link`, `library::agrees` and Differs work as for a file read.
+An evicted asset keeps its summary, and with it all of this.
+
+An entry whose length or time no longer match the file is ignored, and the file
+is read when something needs it, which puts a new entry over it. A rescan that
+finds an unread file changed takes its summary away (`Workspace::stale`).
+
+No read is asked, in the foreground or behind, until the cache has answered, so
+a file it remembers is not read meanwhile. A tracked file it remembers is not
+read in the background, and where its entry has a CRC, it is not read for one
+either.
+
+### Following the library
+
+Entries follow the paths of their files: a rename drawbar makes, of a file or a
+folder, moves them, and so does an outside rename matched by its CRC, at open or
+on a rescan. A rename that failed moves them back, and a file deleted, inside or
+outside drawbar, takes its entry with it. Changes made while the entries are
+still loading are made again over them as they arrive, and an entry put
+meanwhile stands over the one kept.
+
+Once per open, after a listing that reached every folder and once the cache has
+answered, the entries of every file the listing did not find are dropped
+(`Cache::keep_only`). A listing with unwalked folders drops nothing.
+
+### On the desktop
+
+The cache is `library-cache.ron` in `eframe::storage_dir("drawbar")`, beside
+`app.ron`. It holds one section per library, under the library folder's path,
+each with a counter of when it was written; the 8 libraries written most lately
+are kept. Each entry is a RON tuple of unnamed fields, since a library has tens
+of thousands of them. The file is read on a thread when the library opens.
+
+At a full pass where something changed and no write is in flight, the file is
+written off the frame: read again, this library's section replaced, the others
+kept, then written to `library-cache.ron.tmp` and renamed over. One write runs
+at a time in the process. Closing a library waits for its last write.
+
+Where that folder lies inside the library, or the system names none, the cache
+is kept in memory only. A file that does not read, or holds another version,
+gives an empty cache and one line in the log, and the next write replaces it,
+other libraries' sections with it.
+
+### In the browser
+
+The cache is the `files` store of the `drawbar` IndexedDB database, version 2,
+beside `libraries`. Each file is one record, keyed `<library id>/<path>`, where
+the browser's own library is id 0 and a picked folder has its id from the
+recent list. A record's value is the RON text of `(version, entry)`. Everything
+is asynchronous; nothing goes through local storage.
+
+A library's records are read by a key range over its prefix when it opens. A
+record that does not read, or holds another version, is deleted. If IndexedDB
+has not answered within 2 seconds, the cache is empty for this open, with one
+line in the log, and reads go ahead. A write puts each changed entry and deletes
+each dropped one in one transaction, one write at a time. The page cannot wait,
+so a library's last write lands after it is let go. Whenever the recent list is
+written, the records of picked folders no longer on it are deleted
+(`store::keep_libraries`).
+
+### Projects naming a WAV
+
+`Workspace::projects_naming(&LibPath)` answers with `Naming { by, unknown }`:
+the projects whose WAV list, from their decode or their summary, names that
+file, and the projects with neither, which may. A project names a WAV relative
+to its own folder, and a path that is absolute or leaves the library names
+nothing (`summary::resolve`).
