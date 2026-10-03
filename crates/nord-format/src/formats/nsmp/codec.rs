@@ -582,11 +582,12 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
             || count == 0
             || (stereo && !count.is_multiple_of(2))
             || (!one_to_one && !count.is_multiple_of(cell))
+            || (wide_openings && !one_to_one && !count.is_multiple_of(2 * cell))
         {
             return Err(Unsupported::Malformed { word: i });
         }
 
-        let span = layout.record_span(count, width, wide_openings && one_to_one);
+        let span = layout.record_span(count, width, wide_openings);
         if i + span > last.unwrap_or(words) {
             return Err(Unsupported::Desync { word: i });
         }
@@ -1175,6 +1176,16 @@ mod tests {
         let raw = (1u32 << 23) | (u32::from(width - 1) << 19) | count as u32;
         s[head..head + layout.word()].copy_from_slice(&raw.to_be_bytes());
         s
+    }
+
+    #[test]
+    fn a_v4_stereo_content_record_needs_whole_cells_per_channel() {
+        let half_cell: Vec<i32> = (0..16).map(|k| k - 8).collect();
+        let s = stereo_stroke(Layout::V4, 5, &half_cell, &half_cell);
+        assert_eq!(
+            walk(&s, 0, Layout::V4),
+            Err(Unsupported::Malformed { word: 0 })
+        );
     }
 
     #[test]

@@ -443,7 +443,7 @@ pub fn mark_words(mark: Mark) -> &'static str {
 /// this asset stands for.
 ///
 /// ⚠️ The only rule for a local row's dot. An asset with no link gets no mark. The link
-/// is the slot [`whereabouts`] reads, and no other slot counts.
+/// is the slot `whereabouts` reads, and no other slot counts.
 pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) -> Option<Mark> {
     whereabouts(entity, device, queue).mark(queue.holds(entity.id))
 }

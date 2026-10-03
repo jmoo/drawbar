@@ -30,7 +30,7 @@
 //!
 //! All three generations are written from one plan. [`Options::layout`] picks the
 //! generation, which decides the container (the narrow `NWS` chain or the wide `NSMP`
-//! one, and the section schemas inside) and the stream's units, held in [`Units`].
+//! one, and the section schemas inside) and the stream's units.
 //! The lattice, the kernel, the quantizer, the count laws and the record grammar's bit
 //! layout are shared by all three.
 //!
@@ -450,8 +450,8 @@ pub struct Looped {
     /// Field the marked record opens at.
     pub at: usize,
     /// Fields repeated past the loop end, which is also how far `at` sits past the
-    /// loop start: [`LOOP_LEAD`] per channel, or more when the mark is pushed off the
-    /// resync point by [`min_resync_gap`].
+    /// loop start: a fixed lead per channel, or more when the mark is pushed off the
+    /// resync point as [`Plan::looped`] describes.
     pub lead: usize,
     /// Fields of the loop's tail the crossfade rewrites.
     pub crossfade: usize,
@@ -553,9 +553,9 @@ impl Plan {
     /// [`Loop::end`], with the loop's own opening repeated past it, resynchronizing at
     /// `secondary_start` as [`new`](Plan::new) does.
     ///
-    /// The marked record sits [`LOOP_LEAD`] fields per channel past the loop start, or
-    /// [`min_resync_gap`] past the resync point when that is later: a loop starting
-    /// near the resync is pushed back, and the stream grows by the same amount.
+    /// The marked record sits a fixed lead per channel past the loop start, or a
+    /// generation's minimum gap past the resync point when that is later: a loop
+    /// starting near the resync is pushed back, and the stream grows by the same amount.
     ///
     /// Refuses a loop the format cannot state (one outside the audio, one shorter than
     /// the run it must open with, or a crossfade with no material in front of the loop
@@ -1901,8 +1901,9 @@ pub struct NewZone<'a> {
     /// Highest note this zone answers to. Stored as given; the file keeps top notes and
     /// does not derive them from the root keys.
     pub top_note: u8,
-    /// The stroke's global id, 1 through [`MAX_STROKE_ID`]. Zones name their strokes
-    /// by it, not by position, so it need not follow section order.
+    /// The stroke's global id, 1 through 255: one byte, and the editor never issues
+    /// zero. Zones name their strokes by it, not by position, so it need not follow
+    /// section order.
     pub global_id: u32,
     /// The zone's sustain loop, which truncates its audio at [`Loop::end`].
     pub loops: Option<Loop>,

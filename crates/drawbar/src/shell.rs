@@ -4,7 +4,7 @@
 //! their own, and the browser, the document, and the inspector are rounded cards on it,
 //! [`GUTTER`] apart and [`GUTTER`] in from the window's edges. A hidden side panel takes
 //! no room at all. Each side card resizes by dragging its edge facing the center, between
-//! its minimum width and whatever leaves the center [`CENTER_WIDE`] wide.
+//! its minimum width and whatever leaves the center `CENTER_WIDE` wide.
 //!
 //! The top bar is the one place the platforms differ; see [`crate::platform`].
 
@@ -36,7 +36,7 @@ const CENTER_WIDE: f32 = 300.0;
 const CENTER_TALL: f32 = 280.0;
 
 /// The smallest screen the shell lays out in: both side cards at their minimum widths,
-/// around a center that still keeps [`CENTER_WIDE`] by [`CENTER_TALL`] under its tabs.
+/// around a center that still keeps `CENTER_WIDE` by `CENTER_TALL` under its tabs.
 ///
 /// A browser tab can be any size, and a native window at its minimum size is too small at
 /// a large zoom, so either may show [`too_small_notice`] instead of a shell that cannot

@@ -1,8 +1,8 @@
 //! The menus: every command the app offers from them, one table of shortcuts, and the
 //! in-window menus that draw them.
 //!
-//! The macOS menu bar ([`crate::menubar`]), the in-window menus, and the shortcuts all
-//! read [`menus`], [`DrawbarApp::offer`], and [`shortcut`], so a command is named, bound,
+//! The macOS menu bar (`crate::menubar`), the in-window menus, and the shortcuts all
+//! read [`menus`], `DrawbarApp::offer`, and [`shortcut`], so a command is named, bound,
 //! and gated in one place.
 
 use eframe::egui;
@@ -753,7 +753,7 @@ fn item_button(ui: &mut egui::Ui, offer: &Offer, keys: Option<String>) -> bool {
 ///
 /// ⚠️ A check at the left, not a selected button or a `selectable_label`: both fill the
 /// row with `selection.bg_fill`, the instrument's red, which reads as a warning in a menu
-/// of ordinary items. **Every** checkable menu item in the app uses this or [`check`].
+/// of ordinary items. **Every** checkable menu item in the app uses this or `check`.
 pub fn marked(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
     let clicked = ui.add(check(ui, label, on)).clicked();
     if clicked {

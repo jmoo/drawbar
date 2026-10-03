@@ -218,7 +218,7 @@ pub struct LocalEntity {
     pub entity: Option<Entity>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
-    /// Whether the bytes are a note, from [`crate::document::text::is_text`].
+    /// Whether the bytes are a note, from `document::text::is_text`.
     ///
     /// ⚠️ Computed when the bytes land and never per frame: deciding it walks every
     /// byte, and every listed row asks for its kind on every frame.
@@ -318,7 +318,7 @@ impl LocalEntity {
     /// The format tag, from the decode if there is one and from the container otherwise.
     ///
     /// A note has neither, so its tag comes from its bytes being text. See
-    /// [`crate::document::text::is_text`].
+    /// `document::text::is_text`.
     pub fn tag(&self) -> String {
         match (&self.entity, &self.container) {
             (Some(entity), _) => entity.identity().format.to_string(),
