@@ -15,7 +15,7 @@
 //! next library opens only then.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -245,7 +245,10 @@ async fn drive(
             ctx.request_repaint();
         };
         match &mut fs {
-            Ok(fs) => exec::run(fs, cmd, &mut answer).await,
+            Ok(fs) => {
+                exec::run(fs, cmd, &mut answer).await;
+                fs.dirs.borrow_mut().clear();
+            }
             Err(why) => answer(refused(cmd, why)),
         }
         if private && inbox.borrow().cmds.is_empty() {
@@ -576,6 +579,12 @@ struct Folder {
     asked: bool,
     /// The commands for this library, closed once it is let go.
     inbox: Rc<RefCell<Inbox>>,
+    /// The folders found so far by the command running, by path, so a path is not looked
+    /// up again from the root one name at a time.
+    ///
+    /// ⚠️ Safari and Firefox keep a handle on its folder wherever it moves, so the handles
+    /// are let go after each command and whenever this tab moves or removes a folder.
+    dirs: RefCell<HashMap<String, FileSystemDirectoryHandle>>,
 }
 
 /// A folder of the library and the name of one entry in it.
@@ -607,6 +616,7 @@ impl Folder {
             room,
             asked: false,
             inbox,
+            dirs: RefCell::default(),
         })
     }
 
@@ -625,8 +635,19 @@ impl Folder {
         let options = FileSystemGetDirectoryOptions::new();
         options.set_create(create);
         let mut dir = self.root.clone();
+        let mut at = String::new();
         for name in path.split('/').filter(|name| !name.is_empty()) {
-            dir = settle(dir.get_directory_handle_with_options(name, &options)).await?;
+            at = joined(&at, name);
+            let known = self.dirs.borrow().get(&at).cloned();
+            dir = match known {
+                Some(known) => known,
+                None => {
+                    let found: FileSystemDirectoryHandle =
+                        settle(dir.get_directory_handle_with_options(name, &options)).await?;
+                    self.dirs.borrow_mut().insert(at.clone(), found.clone());
+                    found
+                }
+            };
         }
         Ok(dir)
     }
@@ -761,6 +782,14 @@ async fn move_to(handle: &JsValue, dir: &FileSystemDirectoryHandle, name: &str) 
         .map_err(|_| io::Error::other("this browser cannot move a file"))?;
     JsFuture::from(moving).await.map_err(failed)?;
     Ok(())
+}
+
+/// `name` in the folder at `dir`, both joined by `/`.
+fn joined(dir: &str, name: &str) -> String {
+    match dir.is_empty() {
+        true => name.to_string(),
+        false => format!("{dir}/{name}"),
+    }
 }
 
 /// The entries of a folder, sorted by name.
@@ -901,15 +930,31 @@ impl Fs for Folder {
         }
     }
 
+    /// Every file's snapshot is asked for before any is waited on, so the browser looks
+    /// them up together.
     async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
         let found = entries(&self.dir(dir, false).await?).await?;
         let more = found.len() > room;
+        let found: Vec<(String, FileSystemHandle)> = found.into_iter().take(room).collect();
+        let snapshots: Vec<Option<JsFuture>> = found
+            .iter()
+            .map(|(name, handle)| {
+                let file = handle.kind() == FileSystemHandleKind::File && exec::opens(name);
+                file.then(|| {
+                    JsFuture::from(handle.unchecked_ref::<FileSystemFileHandle>().get_file())
+                })
+            })
+            .collect();
         let mut children = Vec::new();
-        for (name, handle) in found.into_iter().take(room) {
-            let kind = match handle.kind() {
-                FileSystemHandleKind::Directory => Some(Kind::Dir),
-                _ if exec::opens(&name) => match snapshot(handle.unchecked_ref()).await {
-                    Ok(file) => Some(Kind::File(stat(&file))),
+        for ((name, handle), snapshot) in found.into_iter().zip(snapshots) {
+            let kind = match (handle.kind(), snapshot) {
+                (FileSystemHandleKind::Directory, _) => {
+                    let path = joined(dir, &name);
+                    self.dirs.borrow_mut().insert(path, handle.unchecked_into());
+                    Some(Kind::Dir)
+                }
+                (_, Some(snapshot)) => match snapshot.await.map_err(failed) {
+                    Ok(file) => Some(Kind::File(stat(file.unchecked_ref()))),
                     Err(e) if e.kind() == io::ErrorKind::NotFound => None,
                     Err(e) => Some(Kind::Unread(e.to_string())),
                 },
@@ -1002,6 +1047,9 @@ impl Fs for Folder {
         }
         let handle = self.handle(from).await?;
         let (dir, leaf) = self.spot(to).await?;
+        if handle.kind() == FileSystemHandleKind::Directory {
+            self.dirs.borrow_mut().clear();
+        }
         if handle.kind() == FileSystemHandleKind::File || field(&handle, "move").is_some() {
             return move_to(&handle, &dir, &leaf).await;
         }
@@ -1027,6 +1075,7 @@ impl Fs for Folder {
     }
 
     async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
+        self.dirs.borrow_mut().clear();
         let (dir, leaf) = self.spot(path).await?;
         settle::<FileSystemDirectoryHandle>(dir.get_directory_handle(&leaf)).await?;
         JsFuture::from(dir.remove_entry(&leaf))
