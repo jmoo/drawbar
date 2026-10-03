@@ -173,7 +173,7 @@ pub fn cell(rect: egui::Rect, track: &Range<f32>) -> egui::Rect {
     )
 }
 
-/// A child `Ui` for a table, inset from the left by [`PAD`] so its heads and rows start
+/// A child `Ui` for a table, inset from the left by `PAD` so its heads and rows start
 /// where a tree row starts and the scroll bar stays at the panel's edge.
 ///
 /// ⚠️ Without it the first track starts at the panel's edge, and a mark's left stroke is

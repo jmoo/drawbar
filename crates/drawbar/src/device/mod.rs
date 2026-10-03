@@ -806,8 +806,8 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
 /// The slot on the attached instrument this asset stands on.
 ///
 /// The slot it came off while the instrument still holds one there; otherwise a slot
-/// reporting the body it was saved as ([`among`]), the slot it was last written to
-/// ([`stands`]), or the slot carrying its name ([`named`]).
+/// reporting the body it was saved as (`among`), the slot it was last written to
+/// (`stands`), or the slot carrying its name (`named`).
 ///
 /// ⚠️ Reads the link the asset already carries, so running it again over an unchanged
 /// cache gives the same answer.
@@ -1108,7 +1108,7 @@ impl Device {
     ///
     /// The cached names stay until each bank's replacement arrives: a walk is dozens of
     /// reads long, and an empty folder for that long is worse than names about to be
-    /// confirmed. Banks a mutation touches are dropped at once (see [`Device::dispatch`]).
+    /// confirmed. Banks a mutation touches are dropped at once (see `Device::dispatch`).
     pub fn read_class(&mut self, class: ObjectClass) {
         self.state.scan.start(class);
     }
