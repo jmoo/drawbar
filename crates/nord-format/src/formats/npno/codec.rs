@@ -376,6 +376,7 @@ mod tests {
             root: 0,
             record,
             audio: std::borrow::Cow::Borrowed(audio),
+            from: None,
         }
     }
 

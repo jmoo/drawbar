@@ -8,14 +8,15 @@
 //! Every file the reader recognizes, wherever it sits, is a specimen. Each one
 //! must pass its container checksum, parse, re-encode to the same bytes, decode
 //! no value its components cannot name, and match its `<file>.oracle.json`
-//! sidecar if it has one. On a sample (every fixture, every specimen with a
-//! sidecar, and one of each container shape among the rest), every registry
-//! field must also take a new value without changing another. The fixtures must
-//! hold a file of every type the reader dispatches. In the corpus, each claim
-//! about every specimen of a kind runs once per specimen of that kind, so a tree
-//! without that kind runs none. A file ending `.kernel.tsv` is an oracle for the
-//! sample codec's interpolation kernel. Nothing here names a model, a directory,
-//! or a file in the corpus.
+//! sidecar if it has one. A piano library or sample instrument must also index to
+//! the bytes a whole read gives each stroke or zone, without reading the audio. On
+//! a sample (every fixture, every specimen with a sidecar, and one of each
+//! container shape among the rest), every registry field must also take a new
+//! value without changing another. The fixtures must hold a file of every type the
+//! reader dispatches. In the corpus, each claim about every specimen of a kind runs
+//! once per specimen of that kind, so a tree without that kind runs none. A file
+//! ending `.kernel.tsv` is an oracle for the sample codec's interpolation kernel.
+//! Nothing here names a model, a directory, or a file in the corpus.
 //!
 //! ```sh
 //! cargo test -p nord-format --test corpus                        # the fixtures
@@ -35,6 +36,7 @@ macro_rules! ensure {
     };
 }
 
+mod index;
 #[cfg(feature = "corpus")]
 mod invariants;
 mod kernel;
@@ -97,6 +99,28 @@ fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
 /// One specimen: checksum, parse, byte-exact round trip, no unnamed decoded
 /// values, the oracle sidecar if there is one, and, if `mutate`, the per-field
 /// mutation check.
+/// A [`cbin::Verifier`] fed the file in uneven chunks reports what `inspect` reported.
+fn streamed_check_agrees(bytes: &[u8], info: &cbin::Info) -> Result<(), String> {
+    let mut verifier = cbin::Verifier::new();
+    for chunk in bytes.chunks(4093) {
+        verifier.update(chunk).context("a streamed check")?;
+    }
+    let streamed = verifier.finish().context("a streamed check")?;
+    let facts = |i: &cbin::Info| {
+        (
+            i.header.clone(),
+            i.body_len,
+            i.checksum_ok,
+            i.stored_checksum,
+        )
+    };
+    ensure!(
+        facts(&streamed) == facts(info),
+        "a streamed check reports {streamed:?} and inspect {info:?}"
+    );
+    Ok(())
+}
+
 fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
@@ -106,6 +130,7 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         if !info.checksum_ok {
             return Err(format!("container checksum mismatch ({:?})", info.header).into());
         }
+        streamed_check_agrees(&bytes, &info).map_err(Failed::from)?;
         Some(info)
     } else {
         None
@@ -127,6 +152,8 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
             return Err("re-encode changed the bytes".into());
         }
     }
+
+    index::check(&bytes, &entity).map_err(Failed::from)?;
 
     let unwritten = info
         .as_ref()
