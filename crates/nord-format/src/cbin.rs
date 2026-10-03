@@ -745,6 +745,167 @@ pub fn inspect(r: &mut (impl Read + Seek)) -> Result<Info, Error> {
     })
 }
 
+impl Header {
+    /// The header at the start of `prefix`, validated as a read validates it. A type-0
+    /// header takes 0x18 bytes and a type-1 header 0x2c; a shorter prefix is refused.
+    pub fn from_prefix(prefix: &[u8]) -> Result<Header, Error> {
+        let mut prefix = prefix;
+        Ok(read_header(&mut prefix)?.0)
+    }
+}
+
+/// [`inspect`] over bytes the caller supplies: a whole file, in order, in chunks of any
+/// size. Nothing is read from anywhere, so the source may be asynchronous.
+///
+/// Memory is the header and the trailer.
+pub struct Verifier {
+    state: Verifying,
+}
+
+enum Verifying {
+    /// The bytes seen so far, before the header is whole.
+    Prefix(Vec<u8>),
+    Body {
+        header: Header,
+        stored_crc32: u32,
+        hash: Hash,
+        body_len: u64,
+        /// The last bytes seen, not yet hashed: they may be the type-0 trailer.
+        held: Vec<u8>,
+    },
+}
+
+impl Default for Verifier {
+    fn default() -> Verifier {
+        Verifier::new()
+    }
+}
+
+impl Verifier {
+    pub fn new() -> Verifier {
+        Verifier {
+            state: Verifying::Prefix(Vec::new()),
+        }
+    }
+
+    /// The next bytes of the file. A header that does not validate is refused as soon
+    /// as it is whole.
+    pub fn update(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let Verifying::Prefix(prefix) = &mut self.state else {
+            self.body(bytes);
+            return Ok(());
+        };
+        let taken = bytes.len().min(HEADER_MAX - prefix.len());
+        prefix.extend_from_slice(&bytes[..taken]);
+        let Some((header, stored_crc32, used)) = whole_header(prefix)? else {
+            return Ok(());
+        };
+        let prefix = std::mem::take(prefix);
+        self.state = Verifying::Body {
+            hash: Hash::primed(&header),
+            header,
+            stored_crc32,
+            body_len: 0,
+            held: Vec::new(),
+        };
+        self.body(&prefix[used..]);
+        self.body(&bytes[taken..]);
+        Ok(())
+    }
+
+    /// Hash every byte of `bytes` but the last ones that could be a trailer, holding
+    /// those back until more arrive.
+    fn body(&mut self, bytes: &[u8]) {
+        let Verifying::Body {
+            header,
+            hash,
+            body_len,
+            held,
+            ..
+        } = &mut self.state
+        else {
+            unreachable!("called once the header is whole")
+        };
+        let trailer = header.generation.trailer_len() as usize;
+        let (hashed, kept) = match bytes.len().checked_sub(trailer) {
+            Some(past) => {
+                hash.update(held);
+                *body_len += held.len() as u64;
+                held.clear();
+                bytes.split_at(past)
+            }
+            None => {
+                let past = (held.len() + bytes.len()).saturating_sub(trailer);
+                hash.update(&held[..past]);
+                *body_len += past as u64;
+                held.drain(..past);
+                (&[][..], bytes)
+            }
+        };
+        hash.update(hashed);
+        *body_len += hashed.len() as u64;
+        held.extend_from_slice(kept);
+    }
+
+    /// The verdict, once the last byte has been supplied: what [`inspect`] reports for
+    /// the same file, refusing what it refuses.
+    pub fn finish(self) -> Result<Info, Error> {
+        let Verifying::Body {
+            header,
+            stored_crc32,
+            hash,
+            body_len,
+            held,
+        } = self.state
+        else {
+            return Err(
+                ParseError::AssertFail("the file ends inside its container header".into()).into(),
+            );
+        };
+        let stored = match header.generation {
+            Generation::V1 => stored_crc32,
+            Generation::V0 => match *held.as_slice() {
+                [a, b] => u16::from_le_bytes([a, b]).into(),
+                _ => {
+                    return Err(ParseError::AssertFail(format!(
+                        "{}: the file ends before its 2-byte checksum trailer",
+                        tag_str(&header.tag)
+                    ))
+                    .into())
+                }
+            },
+        };
+        Ok(Info {
+            checksum_ok: hash.value() == stored,
+            header,
+            body_len,
+            stored_checksum: stored,
+        })
+    }
+}
+
+/// The longest header: a type-1 header with its checksum and pad.
+const HEADER_MAX: usize = 0x2c;
+
+/// The header, its stored crc32 and its length, once `prefix` holds all of it.
+fn whole_header(prefix: &[u8]) -> Result<Option<(Header, u32, usize)>, Error> {
+    if prefix.len() < HEAD_LEN {
+        return Ok(None);
+    }
+    // `read_header` refuses a type word that names neither generation.
+    let generation = match le_u32(prefix, 4) {
+        1 => Generation::V1,
+        _ => Generation::V0,
+    };
+    let used = generation.body_start() as usize;
+    if prefix.len() < used {
+        return Ok(None);
+    }
+    let mut head = &prefix[..used];
+    let (header, stored_crc32) = read_header(&mut head)?;
+    Ok(Some((header, stored_crc32, used)))
+}
+
 /// A read view scoped to the body: position 0 is the first body byte, [`len`] is
 /// the body length (the type-0 trailer already excluded), and every byte is
 /// checksummed on its way past.
@@ -1324,5 +1485,81 @@ mod tests {
         file[0x18] ^= 0xff;
         let patch = patch(&file, 0, &[(0, b"x")]).unwrap();
         assert!(copied(&patch, &file).is_err());
+    }
+
+    /// What a check concluded: the facts it reports, or that it refused.
+    fn verdict(info: Result<Info, Error>) -> Option<(Header, u64, bool, u32)> {
+        info.ok().map(|info| {
+            (
+                info.header,
+                info.body_len,
+                info.checksum_ok,
+                info.stored_checksum,
+            )
+        })
+    }
+
+    fn verified(bytes: &[u8], chunk: usize) -> Result<Info, Error> {
+        let mut verifier = Verifier::new();
+        for piece in bytes.chunks(chunk) {
+            verifier.update(piece)?;
+        }
+        verifier.finish()
+    }
+
+    /// Every cut and every single-bit flip of each file, against `inspect`.
+    #[test]
+    fn a_streamed_check_agrees_with_inspect_however_the_file_is_cut() {
+        let mut files = Vec::new();
+        for len in [0, 1, 2, 5, 300] {
+            let body: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            files.push(v1_file(&body));
+            files.push(v0_file(&body));
+        }
+        let mut variants = Vec::new();
+        for file in &files {
+            variants.extend((0..=file.len()).map(|len| file[..len].to_vec()));
+            for at in 0..file.len() {
+                let mut flipped = file.clone();
+                flipped[at] ^= 1 << (at % 8);
+                variants.push(flipped);
+            }
+        }
+        let (mut accepted, mut refused, mut failed) = (0, 0, 0);
+        for bytes in &variants {
+            let whole = verdict(inspect(&mut Cursor::new(bytes)));
+            match &whole {
+                None => refused += 1,
+                Some((.., true, _)) => accepted += 1,
+                Some(_) => failed += 1,
+            }
+            for chunk in [1, 2, 3, 7, 0x2c, 64, bytes.len().max(1)] {
+                assert_eq!(
+                    verdict(verified(bytes, chunk)),
+                    whole,
+                    "{} bytes in chunks of {chunk}",
+                    bytes.len()
+                );
+            }
+        }
+        assert!(accepted > 0 && refused > 0 && failed > 0);
+    }
+
+    #[test]
+    fn a_header_reads_from_a_prefix_as_a_read_does() {
+        let v1 = v1_file(&[1, 2, 3]);
+        let v0 = v0_file(&[1, 2, 3]);
+        assert_eq!(
+            Header::from_prefix(&v1[..0x2c]).unwrap().generation,
+            Generation::V1
+        );
+        assert_eq!(
+            Header::from_prefix(&v0[..0x18]).unwrap().generation,
+            Generation::V0
+        );
+        assert!(Header::from_prefix(&v1[..0x2b]).is_err());
+        let mut padded = v1.clone();
+        padded[0x20] = 1;
+        assert!(Header::from_prefix(&padded).is_err());
     }
 }

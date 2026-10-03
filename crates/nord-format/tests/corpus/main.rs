@@ -99,6 +99,28 @@ fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
 /// One specimen: checksum, parse, byte-exact round trip, no unnamed decoded
 /// values, the oracle sidecar if there is one, and, if `mutate`, the per-field
 /// mutation check.
+/// A [`cbin::Verifier`] fed the file in uneven chunks reports what `inspect` reported.
+fn streamed_check_agrees(bytes: &[u8], info: &cbin::Info) -> Result<(), String> {
+    let mut verifier = cbin::Verifier::new();
+    for chunk in bytes.chunks(4093) {
+        verifier.update(chunk).context("a streamed check")?;
+    }
+    let streamed = verifier.finish().context("a streamed check")?;
+    let facts = |i: &cbin::Info| {
+        (
+            i.header.clone(),
+            i.body_len,
+            i.checksum_ok,
+            i.stored_checksum,
+        )
+    };
+    ensure!(
+        facts(&streamed) == facts(info),
+        "a streamed check reports {streamed:?} and inspect {info:?}"
+    );
+    Ok(())
+}
+
 fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
@@ -108,6 +130,7 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         if !info.checksum_ok {
             return Err(format!("container checksum mismatch ({:?})", info.header).into());
         }
+        streamed_check_agrees(&bytes, &info).map_err(Failed::from)?;
         Some(info)
     } else {
         None
