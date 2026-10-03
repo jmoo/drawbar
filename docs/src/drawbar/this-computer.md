@@ -81,8 +81,8 @@ no storage, as some private windows do, drawbar says so, and what you make lasts
 until the tab closes.
 
 This version of drawbar starts with an empty list. What an earlier version kept
-is not carried over, and drawbar says so once. Long-term storage is not
-guaranteed while drawbar is in alpha. Keep your own copies.
+is not carried over. Long-term storage is not guaranteed while drawbar is in
+alpha. Keep your own copies.
 
 ## Opening another folder
 

@@ -183,8 +183,6 @@ pub struct DrawbarApp {
     /// user agreed to lose what the open one cannot keep.
     #[cfg(target_arch = "wasm32")]
     waiting: Option<(crate::store::Root, bool)>,
-    /// Said once, over everything, until it is dismissed.
-    notice: Option<String>,
     /// eframe's store still holds a library kept the old way, to empty at the first
     /// frame that can write it.
     leaving: bool,
@@ -244,14 +242,6 @@ impl DrawbarApp {
             .map_or(ThemeChoice::default(), |text| ThemeChoice::read(&text));
         cc.egui_ctx.set_theme(theme.preference());
         let leaving = cc.storage.is_some_and(crate::store::left_behind);
-        let notice = leaving.then(|| match &store {
-            Some(store) => format!(
-                "{} Its library is kept in {}.",
-                crate::store::STARTS_EMPTY,
-                store.label()
-            ),
-            None => crate::store::STARTS_EMPTY.to_string(),
-        });
         let mut app = DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
@@ -279,7 +269,6 @@ impl DrawbarApp {
             libraries: crate::libraries::Libraries::default(),
             #[cfg(target_arch = "wasm32")]
             waiting: None,
-            notice,
             leaving,
             synced: 0,
             synced_at: 0.0,
@@ -357,23 +346,6 @@ impl DrawbarApp {
         acts.into_iter()
             .filter(|act| !matches!(act, browser::Act::SendAll))
             .collect()
-    }
-
-    /// The notice, until it is dismissed.
-    fn notice(&mut self, ctx: &egui::Context) {
-        let Some(text) = &self.notice else {
-            return;
-        };
-        let mut seen = false;
-        egui::Modal::new(egui::Id::new("notice")).show(ctx, |ui| {
-            ui.set_width(400.0);
-            ui.label(text);
-            ui.add_space(8.0);
-            seen = ui.button("OK").clicked();
-        });
-        if seen {
-            self.notice = None;
-        }
     }
 
     /// What changed in the running version. The web build shows the change list in the
@@ -713,7 +685,6 @@ impl eframe::App for DrawbarApp {
             arrived.push(browser::Act::SendAll);
         }
         drop_hint(ctx);
-        self.notice(ctx);
         // Opened by choosing WAVs under New. It is drawn before anything else this frame
         // because it is a modal over the whole window.
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
@@ -983,9 +954,9 @@ mod tests {
     use crate::workspace::Origin;
 
     /// A library kept the old way is not read. Its keys are emptied at the first frame,
-    /// and the notice is shown to the run that finds them full, not to the next one.
+    /// and preferences beside them stay.
     #[test]
-    fn a_library_left_behind_is_emptied_and_said_once() {
+    fn a_library_left_behind_is_emptied_quietly() {
         let mut storage = crate::testing::Fake::default();
         eframe::Storage::set_string(
             &mut storage,
@@ -996,7 +967,7 @@ mod tests {
         eframe::Storage::set_string(&mut storage, ThemeChoice::KEY, "dark".into());
 
         let first = open(&storage);
-        assert_eq!(first.notice.as_deref(), Some(crate::store::STARTS_EMPTY));
+        assert!(first.leaving);
         crate::store::leave_behind(&mut storage);
         for key in ["drawbar.this_computer", "drawbar.tags"] {
             let held = eframe::Storage::get_string(&storage, key);
@@ -1009,7 +980,7 @@ mod tests {
         );
 
         let second = open(&storage);
-        assert!(second.notice.is_none(), "{:?}", second.notice);
+        assert!(!second.leaving, "emptied keys are not left behind again");
     }
 
     /// The app over a library in `root`, once it has opened.

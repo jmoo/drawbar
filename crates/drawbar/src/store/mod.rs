@@ -364,10 +364,6 @@ pub enum Event {
 /// reads them.
 const LEFT_BEHIND: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.tags"];
 
-/// What the user is told, once, when a library kept the old way is left behind.
-pub const STARTS_EMPTY: &str = "This computer starts empty in this version of drawbar. \
-     What the previous version kept is not carried over.";
-
 /// Whether eframe's store still holds a library kept the old way.
 pub fn left_behind(storage: &dyn eframe::Storage) -> bool {
     LEFT_BEHIND
