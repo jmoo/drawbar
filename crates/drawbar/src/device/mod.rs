@@ -27,6 +27,7 @@ use crate::tabs::Tabs;
 use crate::workspace::{LocalEntity, Origin, Workspace};
 
 mod scan;
+mod scratch;
 mod worker;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +41,7 @@ mod web;
 use web::Link;
 
 pub use scan::{Progress, Scan};
+use scratch::Scratch;
 pub use worker::{Emit, Flow};
 
 /// The number the panel labels a zero-indexed bank with.
@@ -400,6 +402,13 @@ pub enum DeviceEvent {
         at: Location,
         name: String,
         bytes: Vec<u8>,
+    },
+    /// A slot's former contents, too large to hold, which a failed write and a failed
+    /// restore left in the file they were read into.
+    Kept {
+        at: Location,
+        /// Where the file is, in words a person can follow to it.
+        place: String,
     },
     Note(String),
     OpOk(String),
@@ -1062,7 +1071,7 @@ impl Device {
             events,
             #[cfg(test)]
             from_worker: sender.clone(),
-            link: Link::new(ctx, sender),
+            link: Link::new(ctx, sender, Scratch::default()),
             pending: VecDeque::new(),
             running: None,
             asked_deps: None,
@@ -1101,6 +1110,14 @@ impl Device {
     pub fn release(&mut self) {
         self.link.disconnect();
         self.link.join(std::time::Duration::from_secs(2));
+    }
+
+    /// Keep the occupant of a slot a write replaces, when it is too large to hold, in
+    /// `dir`: the open library's `.drawbar/tmp/`, or `None` where the library cannot be
+    /// written, for the system's temporary folder.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn keep_occupants_in(&self, dir: Option<std::path::PathBuf>) {
+        self.link.scratch().keep_in(dir);
     }
 
     /// Queue one command the user asked for. It runs ahead of the background read, and
@@ -1553,6 +1570,16 @@ impl Device {
                         log.trouble(format!("{} is empty.", place(class, at)));
                     }
                 },
+                DeviceEvent::Kept { at, place } => {
+                    log.error(format!(
+                        "{} could not be restored; its bytes are kept at {place}",
+                        shown(at)
+                    ));
+                    log.trouble(format!(
+                        "{} is empty. What was in it is kept at {place}.",
+                        shown(at)
+                    ));
+                }
                 DeviceEvent::Rescued { at, name, bytes } => {
                     log.error(format!(
                         "{} could not be restored; its bytes are in the local list as {name}",

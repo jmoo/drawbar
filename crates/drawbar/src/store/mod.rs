@@ -39,6 +39,8 @@ pub use native::{default_root, Backend};
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
+pub(crate) use web::{buffer, private_root, settle, Writer};
+#[cfg(target_arch = "wasm32")]
 pub use web::{default_root, permission, Backend, Picked, Root};
 
 /// Where a library is: a folder on the desktop.
@@ -83,6 +85,7 @@ pub fn outside_len(from: &Outside) -> Option<u64> {
 #[cfg(target_arch = "wasm32")]
 pub use cache::keep_libraries;
 pub use cache::Cache;
+pub(crate) use exec::TMP;
 pub use exec::{opens, MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Keeps, Row, Sidecar, Stored, Working};

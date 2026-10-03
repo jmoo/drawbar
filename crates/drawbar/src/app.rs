@@ -815,6 +815,9 @@ impl eframe::App for DrawbarApp {
             &mut self.queue,
             &mut self.log,
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device
+            .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
         // ahead of the background tree read.
         self.device.pump();

@@ -356,7 +356,11 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     let sweeps = indexed && writable.is_ok();
     let mut swept = 0;
     if sweeps {
-        swept += sweep(fs, TMP, |_| true).await;
+        // ⚠️ A rescue is a slot's only copy, left by a write that did not finish.
+        swept += sweep(fs, TMP, |name| {
+            !name.starts_with(nord_usb::envelope::RESCUED)
+        })
+        .await;
         swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
     }
     let rows: Vec<Row> = sidecar

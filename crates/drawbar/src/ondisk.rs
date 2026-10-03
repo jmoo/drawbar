@@ -31,9 +31,9 @@ use native::Source;
 #[cfg(target_arch = "wasm32")]
 pub use web::repaint_with;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::slice;
-#[cfg(target_arch = "wasm32")]
 use web::Source;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::{slice, slice_into};
 
 /// Where each stroke or zone's audio sits in the file.
 #[derive(Debug)]

@@ -12,6 +12,7 @@ use eframe::egui;
 use nord_usb::device::Device;
 use nord_usb::transport::{usb, UsbTransport};
 
+use super::scratch::Scratch;
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
 
@@ -25,22 +26,30 @@ pub struct Link {
     commands: Option<Sender<DeviceCmd>>,
     /// The running worker, kept so quitting can wait for its session to close.
     worker: Option<JoinHandle<()>>,
+    /// Shared with every worker, so where it keeps files can change while one runs.
+    scratch: Scratch,
 }
 
 impl Link {
-    pub fn new(ctx: egui::Context, events: Sender<DeviceEvent>) -> Link {
+    pub fn new(ctx: egui::Context, events: Sender<DeviceEvent>, scratch: Scratch) -> Link {
         Link {
             ctx,
             events,
             commands: None,
             worker: None,
+            scratch,
         }
+    }
+
+    pub fn scratch(&self) -> &Scratch {
+        &self.scratch
     }
 
     pub fn connect(&mut self) {
         let (tx, rx) = mpsc::channel::<DeviceCmd>();
         self.commands = Some(tx);
         let emit = Emit::new(self.events.clone(), self.ctx.clone());
+        let scratch = self.scratch.clone();
 
         self.worker = Some(std::thread::spawn(move || {
             let mut device = match open() {
@@ -59,7 +68,7 @@ impl Link {
             if flow == Flow::Continue {
                 flow = Flow::Released;
                 while let Ok(cmd) = rx.recv() {
-                    flow = nord_usb::block_on(worker::run(&mut device, cmd, &emit));
+                    flow = nord_usb::block_on(worker::run(&mut device, cmd, &scratch, &emit));
                     if flow != Flow::Continue {
                         break;
                     }
@@ -145,7 +154,11 @@ mod tests {
 
     #[test]
     fn waiting_for_the_worker_is_bounded() {
-        let mut link = Link::new(egui::Context::default(), mpsc::channel().0);
+        let mut link = Link::new(
+            egui::Context::default(),
+            mpsc::channel().0,
+            Scratch::default(),
+        );
         let (stop, held) = mpsc::channel::<()>();
         link.worker = Some(std::thread::spawn(move || {
             let _ = held.recv();

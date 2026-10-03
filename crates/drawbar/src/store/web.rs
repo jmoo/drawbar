@@ -93,6 +93,11 @@ impl Root {
     }
 }
 
+/// The root of the browser's private storage for the page, or why there is none.
+pub(crate) async fn private_root() -> io::Result<FileSystemDirectoryHandle> {
+    Folder::private().await.map_err(io::Error::other)
+}
+
 /// The library in the browser's own storage, which needs no one to find it.
 pub fn default_root() -> Option<Root> {
     Some(Root::Private)
@@ -384,7 +389,7 @@ fn failed(err: JsValue) -> io::Error {
     }
 }
 
-async fn settle<T: wasm_bindgen::JsCast>(promise: Promise) -> io::Result<T> {
+pub(crate) async fn settle<T: wasm_bindgen::JsCast>(promise: Promise) -> io::Result<T> {
     let value = JsFuture::from(promise).await.map_err(failed)?;
     value
         .dyn_into()
@@ -392,7 +397,7 @@ async fn settle<T: wasm_bindgen::JsCast>(promise: Promise) -> io::Result<T> {
 }
 
 /// The dedicated worker that writes files, and the requests waiting on its answers.
-struct Writer {
+pub(crate) struct Writer {
     worker: Worker,
     waiting: Rc<RefCell<BTreeMap<u32, Function>>>,
     next: Cell<u32>,
@@ -403,7 +408,7 @@ struct Writer {
 }
 
 impl Writer {
-    fn start() -> io::Result<Writer> {
+    pub(crate) fn start() -> io::Result<Writer> {
         let worker = Worker::new(&writer_url()).map_err(failed)?;
         let waiting: Rc<RefCell<BTreeMap<u32, Function>>> = Rc::default();
         let stopped: Rc<RefCell<Option<String>>> = Rc::default();
@@ -448,7 +453,12 @@ impl Writer {
 
     /// Send one request, with `data` handed over rather than copied, and wait for its
     /// answer.
-    async fn ask(&self, op: &str, path: &str, extra: &[(&str, JsValue)]) -> io::Result<JsValue> {
+    pub(crate) async fn ask(
+        &self,
+        op: &str,
+        path: &str,
+        extra: &[(&str, JsValue)],
+    ) -> io::Result<JsValue> {
         if let Some(why) = self.stopped.borrow().clone() {
             return Err(io::Error::other(why));
         }
@@ -570,7 +580,7 @@ async fn chunked(
 }
 
 /// `bytes`, copied into a buffer of their own that can be handed to the writer.
-fn buffer(bytes: &[u8]) -> js_sys::ArrayBuffer {
+pub(crate) fn buffer(bytes: &[u8]) -> js_sys::ArrayBuffer {
     let data = Uint8Array::new_with_length(bytes.len() as u32);
     data.copy_from(bytes);
     data.buffer()

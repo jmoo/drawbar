@@ -221,7 +221,11 @@ pub(crate) async fn slice(file: &web_sys::File, range: Range<u64>) -> io::Result
 }
 
 /// Fill `buf` with the bytes of `file` at `offset`.
-async fn slice_into(file: &web_sys::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+pub(crate) async fn slice_into(
+    file: &web_sys::File,
+    offset: u64,
+    buf: &mut [u8],
+) -> io::Result<()> {
     let end = offset
         .checked_add(buf.len() as u64)
         .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;

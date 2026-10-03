@@ -18,6 +18,7 @@ use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
+use super::scratch::{Kept, Scratch};
 use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload};
 use crate::strings::shown;
 use crate::workspace::Origin;
@@ -104,7 +105,12 @@ fn spoil(gone: &mut bool, at: Option<Location>) -> impl FnOnce(Error) -> String 
 /// most one [`DeviceEvent::OpOk`] or [`DeviceEvent::OpFailed`]: each is the outcome of one
 /// command, and a second would be recorded against another entry of the send queue.
 /// Steps within a command report through [`DeviceEvent::Note`].
-pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Emit) -> Flow {
+pub async fn run<T: Transport>(
+    device: &mut Device<T>,
+    cmd: DeviceCmd,
+    scratch: &Scratch,
+    emit: &Emit,
+) -> Flow {
     if matches!(cmd, DeviceCmd::Disconnect) {
         return Flow::Released;
     }
@@ -112,7 +118,7 @@ pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Em
     emit.send(DeviceEvent::Started(what.clone()));
 
     let mut gone = false;
-    let result = execute(device, cmd, emit, &mut gone).await;
+    let result = execute(device, cmd, scratch, emit, &mut gone).await;
 
     // State read during this command may already be stale, even when it failed.
     if device.take_changed() {
@@ -135,6 +141,7 @@ pub async fn run<T: Transport>(device: &mut Device<T>, cmd: DeviceCmd, emit: &Em
 async fn execute<T: Transport>(
     device: &mut Device<T>,
     cmd: DeviceCmd,
+    scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Option<String>, String> {
@@ -221,7 +228,7 @@ async fn execute<T: Transport>(
             name,
             payload,
         } => {
-            let note = put_one(device, class, at, &name, &payload, emit, gone)
+            let note = put_one(device, class, at, &name, &payload, scratch, emit, gone)
                 .await
                 .map_err(spoil(gone, Some(at)))??;
             // Reported as sent only once its session has closed.
@@ -234,7 +241,9 @@ async fn execute<T: Transport>(
             Ok(Some(note))
         }
 
-        DeviceCmd::SendAll { class, items } => send_all(device, class, items, emit, gone).await,
+        DeviceCmd::SendAll { class, items } => {
+            send_all(device, class, items, scratch, emit, gone).await
+        }
 
         DeviceCmd::Select { class, at } => {
             device
@@ -294,16 +303,116 @@ async fn execute<T: Transport>(
     }
 }
 
+/// Occupants whose body is at most this many bytes, such as programs, set lists and the
+/// smaller samples, are held in memory while a write replaces them. A larger one, a piano
+/// or most samples, waits in a file ([`Scratch`]).
+const HELD_OCCUPANT: u32 = 1 << 20;
+
+/// What a replace keeps of a slot's occupant until the new object has landed.
+enum Backup {
+    Held(Vec<u8>),
+    Kept(Kept),
+}
+
+/// Read the occupant `info` describes so it can be put back: into memory when it is small,
+/// and otherwise into a new file from `scratch`, a transfer chunk at a time. A read that
+/// fails leaves no file behind.
+async fn back_up<T: Transport>(
+    s: &mut Session<'_, T, ReadWrite>,
+    scratch: &Scratch,
+    info: &ProgramInfo,
+    gone: &mut bool,
+) -> Result<Backup, String> {
+    let at = info.location;
+    if info.body_len <= HELD_OCCUPANT {
+        return op::read_program(s, at)
+            .await
+            .map(Backup::Held)
+            .map_err(spoil(gone, Some(at)));
+    }
+    let mut kept = scratch
+        .create(&envelope::rescue_name_for(at, &info.format))
+        .await
+        .map_err(|e| format!("there was nowhere on this computer to keep it: {e}"))?;
+    let read = match op::read_into(s, at, &mut kept).await {
+        Ok(_) => kept.close().await.map_err(Error::Io),
+        Err(e) => Err(e),
+    };
+    match read {
+        Ok(()) => Ok(Backup::Kept(kept)),
+        Err(e) => {
+            let _ = kept.remove().await;
+            Err(spoil(gone, Some(at))(e))
+        }
+    }
+}
+
+/// Put a backup back into its slot.
+async fn restore<T: Transport>(
+    s: &mut Session<'_, T, ReadWrite>,
+    unit: AllocationUnit,
+    at: Location,
+    backup: &Backup,
+    name: &str,
+    timestamp: u32,
+) -> Result<(), Error> {
+    match backup {
+        Backup::Held(bytes) => op::write(s, unit, at, bytes, name, timestamp).await,
+        Backup::Kept(kept) => {
+            let mut file = kept.source().await?;
+            op::write_from(s, unit, at, &mut file, name, timestamp).await
+        }
+    }
+}
+
+/// Let a backup go once the slot holds what it should. A file that cannot be deleted is
+/// said, and left.
+async fn discard(backup: Option<Backup>, emit: &Emit) {
+    if let Some(Backup::Kept(kept)) = backup {
+        let place = kept.place();
+        if let Err(e) = kept.remove().await {
+            emit.send(DeviceEvent::Note(format!(
+                "{place} is no longer needed, and could not be deleted: {e}"
+            )));
+        }
+    }
+}
+
+/// Hand a backup on when the slot may have lost what it held: bytes to the local list, a
+/// file left where it is. Returns where it went, in words for the failure.
+fn rescue(at: Location, backup: Backup, emit: &Emit) -> String {
+    match backup {
+        Backup::Held(bytes) => {
+            let name = envelope::rescue_name(at, &bytes);
+            emit.send(DeviceEvent::Rescued { at, name, bytes });
+            "its former contents are in the local list as a rescued entity. Put it back".into()
+        }
+        Backup::Kept(kept) => {
+            let place = kept.place();
+            emit.send(DeviceEvent::Kept {
+                at,
+                place: place.clone(),
+            });
+            format!("its former contents are kept at {place}. Put them back")
+        }
+    }
+}
+
 /// Replace a slot inside the caller's session. The caller checks the address against
 /// the geometry first; this sends frames.
 ///
-/// ⚠️ An occupant is held in memory and restored or emitted as [`DeviceEvent::Rescued`].
+/// ⚠️ The occupant is read back first, into memory or into a file from `scratch`
+/// ([`HELD_OCCUPANT`]), and restored from there if the write fails. Where the slot may
+/// have lost it, it is rescued: emitted as [`DeviceEvent::Rescued`] or, from a file, left
+/// there and named in [`DeviceEvent::Kept`].
+#[allow(clippy::too_many_arguments)]
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
     at: Location,
     what: &str,
     payload: &Payload,
+    scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
@@ -323,30 +432,36 @@ async fn put<T: Transport>(
 
     // Nothing is deleted until the backup is in hand.
     let backup = match &existing {
-        Some(_) => match op::read_program(s, at).await {
-            Ok(file) => Some(file),
-            Err(e) => {
+        Some(info) => match back_up(s, scratch, info, gone).await {
+            Ok(backup) => Some(backup),
+            Err(why) => {
                 return Ok(Err(format!(
-                    "could not read {} back before replacing it, so it was left alone: {}",
+                    "could not read {} back before replacing it, so it was left alone: {why}",
                     shown(at),
-                    spoil(gone, Some(at))(e)
                 )))
             }
         },
         None => None,
     };
 
-    if backup.is_some() && !class.overwrites_in_place() {
+    if let (Some(_), false) = (&backup, class.overwrites_in_place()) {
         emit.send(DeviceEvent::Note(format!(
             "deleting {} to make room",
             shown(at)
         )));
         if let Err(e) = op::delete(s, at).await {
-            return Ok(Err(format!(
-                "deleting {}: {}",
-                shown(at),
-                spoil(gone, Some(at))(e)
-            )));
+            let refused = matches!(e, Error::DeviceStatus(_));
+            let why = format!("deleting {}: {}", shown(at), spoil(gone, Some(at))(e));
+            // ⚠️ A status is the instrument declining before the delete landed, so the
+            // occupant is still there. Any other failure may have come after it.
+            return Ok(Err(match (refused, backup) {
+                (true, backup) => {
+                    discard(backup, emit).await;
+                    why
+                }
+                (false, Some(backup)) => format!("{why}; {}", rescue(at, backup, emit)),
+                (false, None) => why,
+            }));
         }
     }
 
@@ -358,7 +473,10 @@ async fn put<T: Transport>(
     };
 
     Ok(match (written, backup) {
-        (Ok(()), _) => Ok(wrote(class, at, what, &write_name)),
+        (Ok(()), backup) => {
+            discard(backup, emit).await;
+            Ok(wrote(class, at, what, &write_name))
+        }
         (Err(Error::Io(e)), None) => Err(unreadable(what, &e)),
         (Err(e), None) => Err(spoil(gone, Some(at))(e)),
         // Restore the occupant before reporting the original error.
@@ -375,24 +493,20 @@ async fn put<T: Transport>(
                 .as_ref()
                 .map(|info| info.name.as_str())
                 .unwrap_or_default();
-            match op::write(s, unit, at, &backup, restore_name, timestamp).await {
-                Ok(()) => Err(format!(
-                    "{e} ({} was restored, and is unchanged)",
-                    shown(at)
-                )),
+            match restore(s, unit, at, &backup, restore_name, timestamp).await {
+                Ok(()) => {
+                    discard(Some(backup), emit).await;
+                    Err(format!(
+                        "{e} ({} was restored, and is unchanged)",
+                        shown(at)
+                    ))
+                }
                 Err(restore) => {
                     *gone |= hung_up(&restore);
-                    let name = envelope::rescue_name(at, &backup);
-                    emit.send(DeviceEvent::Rescued {
-                        at,
-                        name,
-                        bytes: backup,
-                    });
                     Err(format!(
-                        "{e} (restoring failed as well: {restore}); {}, and its former \
-                         contents are in the local list as a rescued entity. Put it \
-                         back.",
-                        aftermath(class, at)
+                        "{e} (restoring failed as well: {restore}); {}, and {}.",
+                        aftermath(class, at),
+                        rescue(at, backup, emit)
                     ))
                 }
             }
@@ -451,12 +565,14 @@ fn slot_label(name: &str) -> Option<String> {
     Some(label[..end].trim_end().to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn put_one<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     at: Location,
     what: &str,
     payload: &Payload,
+    scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Result<String, String>, Error> {
@@ -467,7 +583,7 @@ async fn put_one<T: Transport>(
     let unit = geometry.allocation_unit(class)?;
     device
         .destructive(class, async |s| {
-            put(s, unit, at, what, payload, emit, gone).await
+            put(s, unit, at, what, payload, scratch, emit, gone).await
         })
         .await
 }
@@ -477,12 +593,13 @@ async fn send_all<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     items: Vec<Outgoing>,
+    scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Option<String>, String> {
     let total = items.len();
     let mut done = 0;
-    let outcome = batch(device, class, &items, total, &mut done, emit, gone).await;
+    let outcome = batch(device, class, &items, total, &mut done, scratch, emit, gone).await;
     let refusal = outcome.map_err(spoil(gone, None))?;
     match refusal {
         None => Ok(Some(format!(
@@ -502,6 +619,7 @@ async fn batch<T: Transport>(
     items: &[Outgoing],
     total: usize,
     done: &mut usize,
+    scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
 ) -> Result<Option<String>, Error> {
@@ -523,7 +641,17 @@ async fn batch<T: Transport>(
                 if let Some(why) = refused {
                     return Ok(Some(format!("{}: {why}", shown(item.at))));
                 }
-                match put(s, unit, item.at, &item.name, &item.payload, emit, gone).await? {
+                let put = put(
+                    s,
+                    unit,
+                    item.at,
+                    &item.name,
+                    &item.payload,
+                    scratch,
+                    emit,
+                    gone,
+                );
+                match put.await? {
                     Ok(note) => {
                         *done += 1;
                         emit.send(DeviceEvent::Note(note));
@@ -1034,6 +1162,9 @@ mod wire_tests {
         keeps_data: bool,
         data: nord_format::crc::Crc32Stream<'static>,
         data_len: u64,
+        /// What every occupied slot reports holding: its body's length and format tag.
+        /// A read of it answers [`occupant_byte`]s.
+        occupant: (u32, &'static str),
     }
 
     /// The Electro 5's bank division, which a default Puppet uses.
@@ -1066,7 +1197,14 @@ mod wire_tests {
                 keeps_data: true,
                 data: nord_format::crc::Crc32Stream::new(),
                 data_len: 0,
+                occupant: (121, "ne5p"),
             }
+        }
+
+        /// Every occupied slot holds a body of `len` bytes, as a file tagged `format`.
+        fn holding(mut self, len: u32, format: &'static str) -> Puppet {
+            self.occupant = (len, format);
+            self
         }
 
         /// Whether `msg` is a chunk of a write the instrument does not answer: every chunk
@@ -1235,7 +1373,7 @@ mod wire_tests {
                     );
                     let at = at();
                     let mut p = words(&[at.bank, at.slot, offset, want]);
-                    p.resize(p.len() + want as usize, 0);
+                    p.extend((offset..offset + want).map(occupant_byte));
                     Some((0, p))
                 }
                 cmd::INFO => {
@@ -1248,11 +1386,11 @@ mod wire_tests {
                     }
                     match &self.filled {
                         Some(_) => match self.holds(at) {
-                            Some(name) => Some((0, info_payload(at, name))),
+                            Some(name) => Some((0, info_payload(at, name, self.occupant))),
                             None => Some((1, Vec::new())),
                         },
                         None => match self.info {
-                            0 => Some((0, info_payload(at, "something"))),
+                            0 => Some((0, info_payload(at, "something", self.occupant))),
                             status => Some((status, Vec::new())),
                         },
                     }
@@ -1299,10 +1437,36 @@ mod wire_tests {
         p
     }
 
-    fn info_payload(at: Location, name: &str) -> Vec<u8> {
-        let mut p = words(&[at.bank, at.slot, 121]);
-        p.extend_from_slice(b"ne5p");
-        p.extend_from_slice(&words(&[4, u32::MAX, u32::MAX, name.len() as u32]));
+    /// The byte at `offset` of every occupant's body: every chunk differs, so a chunk put
+    /// back at the wrong offset is caught.
+    fn occupant_byte(offset: u32) -> u8 {
+        (offset.wrapping_mul(2_654_435_761) >> 24) as u8
+    }
+
+    /// An occupant's body of `len` bytes, a chunk at a time, as its CRC-32.
+    fn occupant_crc(len: u32) -> u32 {
+        let mut crc = nord_format::crc::Crc32Stream::new();
+        let mut chunk = Vec::with_capacity(1 << 16);
+        for start in (0..len).step_by(1 << 16) {
+            chunk.clear();
+            chunk.extend((start..len.min(start + (1 << 16))).map(occupant_byte));
+            crc.update(&chunk);
+        }
+        crc.value()
+    }
+
+    /// The schema version every occupant reports.
+    const OCCUPANT_VERSION: u32 = 4;
+
+    fn info_payload(at: Location, name: &str, (len, format): (u32, &str)) -> Vec<u8> {
+        let mut p = words(&[at.bank, at.slot, len]);
+        p.extend_from_slice(format.as_bytes());
+        p.extend_from_slice(&words(&[
+            OCCUPANT_VERSION,
+            u32::MAX,
+            u32::MAX,
+            name.len() as u32,
+        ]));
         p.extend_from_slice(name.as_bytes());
         p.extend_from_slice(&u32::MAX.to_be_bytes());
         p
@@ -1360,11 +1524,20 @@ mod wire_tests {
     }
 
     fn drive(puppet: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {
+        drive_keeping(puppet, cmd, &Scratch::default())
+    }
+
+    /// [`drive`], keeping an occupant too large to hold in `scratch`.
+    fn drive_keeping(
+        puppet: &mut Puppet,
+        cmd: DeviceCmd,
+        scratch: &Scratch,
+    ) -> (Flow, Receiver<DeviceEvent>) {
         let (tx, events) = std::sync::mpsc::channel();
         let emit = Emit::new(tx, egui::Context::default());
         let lent = std::mem::replace(puppet, Puppet::new(1));
         let mut device = Device::new(lent);
-        let flow = nord_usb::block_on(run(&mut device, cmd, &emit));
+        let flow = nord_usb::block_on(run(&mut device, cmd, scratch, &emit));
         *puppet = device.into_transport();
         (flow, events)
     }
@@ -1856,7 +2029,12 @@ mod wire_tests {
             events,
             first_bank_arrived: false,
         });
-        let flow = nord_usb::block_on(run(&mut device, scan(ObjectClass::Program), &emit));
+        let flow = nord_usb::block_on(run(
+            &mut device,
+            scan(ObjectClass::Program),
+            &Scratch::default(),
+            &emit,
+        ));
         assert!(flow == Flow::Continue);
         assert!(
             device.transport().first_bank_arrived,
@@ -2333,6 +2511,153 @@ mod wire_tests {
         assert!(
             failed[0].contains("“Upright.npno” could not be read from its file")
                 && failed[0].contains("1:1 was restored"),
+            "{}",
+            failed[0]
+        );
+    }
+
+    /// An occupant's body of `len` bytes, held whole, for a test that compares against it.
+    fn occupant_body(len: u32) -> Vec<u8> {
+        (0..len).map(occupant_byte).collect()
+    }
+
+    /// The file an occupant of `len` bytes at `at` is kept as: the one its read rebuilds.
+    fn occupant_file(at: Location, len: u32) -> Vec<u8> {
+        envelope::wrap("npno", at, OCCUPANT_VERSION, &occupant_body(len)).unwrap()
+    }
+
+    /// Where a test keeps occupants: a folder of its own.
+    fn scratch_in(dir: &crate::testing::Temp) -> Scratch {
+        let scratch = Scratch::default();
+        scratch.keep_in(Some(dir.0.clone()));
+        scratch
+    }
+
+    /// A piano slot holding an occupant of a vendor's size is read into a file, not into
+    /// memory, and a refused write puts it back from that file, after which the file is
+    /// gone. No allocation comes near the occupant's size.
+    #[test]
+    fn a_large_occupant_waits_in_a_file_and_is_put_back_from_it_in_bounded_memory() {
+        let len: u32 = 48 << 20;
+        let crc = occupant_crc(len);
+        let at = Location { bank: 0, slot: 0 };
+        let dir = crate::testing::Temp::new();
+        let scratch = scratch_in(&dir);
+        let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")])
+            .holding(len, "npno")
+            .refusing_the_first_write()
+            .forgetful();
+        let payload = Payload::Bytes(crate::testing::piano(2));
+
+        let ((flow, events), largest) = crate::testing::largest_allocation(|| {
+            drive_keeping(&mut device, put_piano(payload), &scratch)
+        });
+
+        assert!(flow == Flow::Continue);
+        assert!(
+            largest < len as usize / 100,
+            "the largest allocation was {largest} bytes, of a {len}-byte occupant"
+        );
+        assert_eq!(
+            written_names(&device),
+            ["Upright", "Grand"],
+            "refused, then restored"
+        );
+        assert_eq!(
+            device.data_len,
+            u64::from(len),
+            "the restore carried a body"
+        );
+        assert_eq!(device.data.value(), crc, "and the body is the occupant's");
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let failed = failures(&said);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("1:1 was restored"), "{}", failed[0]);
+        assert_eq!(dir.names(""), Vec::<String>::new(), "the file is let go");
+    }
+
+    /// Put back from its file, an occupant makes the exchange its bytes make when they are
+    /// written from memory, frame for frame.
+    #[test]
+    fn a_large_occupant_put_back_from_its_file_makes_the_exchange_its_bytes_make() {
+        let len: u32 = 3 << 20;
+        let at = Location { bank: 0, slot: 0 };
+        let dir = crate::testing::Temp::new();
+        let mut restored = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")])
+            .holding(len, "npno")
+            .refusing_the_first_write();
+        drive_keeping(
+            &mut restored,
+            put_piano(Payload::Bytes(crate::testing::piano(2))),
+            &scratch_in(&dir),
+        );
+        let mut written = Puppet::stocked(&[("Bank 1", 400)], &[]);
+        drive(
+            &mut written,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Piano,
+                at,
+                name: "Grand.npno".into(),
+                payload: Payload::Bytes(occupant_file(at, len)),
+            },
+        );
+
+        // From the reservation the write makes, through the session's close.
+        let from_status = |device: &Puppet| {
+            let frames = frames(device);
+            let status = device
+                .heard
+                .iter()
+                .rposition(|msg| {
+                    msg.command == cmd::STATUS && matches!(msg.service, Service::Program)
+                })
+                .expect("a library write reserves space");
+            frames[status..].to_vec()
+        };
+        let (from_file, from_memory) = (from_status(&restored), from_status(&written));
+        assert!(from_file.len() > 100, "a body of many chunks");
+        assert_eq!(from_file.len(), from_memory.len(), "frames sent");
+        let differs = from_file.iter().zip(&from_memory).position(|(a, b)| a != b);
+        assert_eq!(differs, None, "the first frame that differs");
+    }
+
+    /// A large occupant that cannot be put back stays in the file it was read into, which
+    /// is whole, and the failure says where it is.
+    #[test]
+    fn a_large_occupant_that_cannot_be_put_back_stays_in_its_file() {
+        let len: u32 = 2 << 20;
+        let at = Location { bank: 0, slot: 0 };
+        let dir = crate::testing::Temp::new();
+        let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")])
+            .holding(len, "npno")
+            .refusing_every_write();
+        let (flow, events) = drive_keeping(
+            &mut device,
+            put_piano(Payload::Bytes(crate::testing::piano(2))),
+            &scratch_in(&dir),
+        );
+        assert!(flow == Flow::Continue, "a refusal is not a disconnection");
+
+        let kept = dir.at("nord-rescued-1-1.npno");
+        assert_eq!(dir.names(""), ["nord-rescued-1-1.npno"]);
+        assert!(
+            dir.read("nord-rescued-1-1.npno") == occupant_file(at, len),
+            "the kept file is the occupant's"
+        );
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        let places: Vec<&str> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Kept { place, .. } => Some(place.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(places, [kept.display().to_string()]);
+        let failed = failures(&said);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].contains(&format!("kept at {}", kept.display())),
             "{}",
             failed[0]
         );

@@ -776,6 +776,22 @@ fn leftovers_of_interrupted_writes_are_swept_and_the_last_index_reads() {
     );
 }
 
+/// A slot's occupant kept for a write that never finished is the slot's only copy, so
+/// the sweep of `tmp/` leaves it.
+#[test]
+fn a_kept_occupant_is_not_swept() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-1.npno"), b"a piano").unwrap();
+    fs::write(root.at(".drawbar/tmp/library.ron"), b"half an index").unwrap();
+
+    let second = Session::open(&root);
+    assert_eq!(root.names(exec::TMP), ["nord-rescued-1-1.npno"]);
+    assert_eq!(second.said("removed 1 leftovers"), 1);
+}
+
 #[test]
 fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
     let root = Temp::new();

@@ -396,6 +396,13 @@ impl Store {
         self.backend.root()
     }
 
+    /// The library's folder for temporary files, while it may be written. drawbar makes
+    /// it at the library's first write, so it may not be there yet.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tmp(&self) -> Option<std::path::PathBuf> {
+        self.open().then(|| self.root().join(super::TMP))
+    }
+
     /// Send the saves the files need, then say whether no save or rescan waits for its
     /// answer. A library whose answers cannot be waited for is let go only once settled,
     /// so its last pass sends no save and the index it writes holds every save's answer.
