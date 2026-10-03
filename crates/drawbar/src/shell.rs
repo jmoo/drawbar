@@ -816,9 +816,11 @@ impl DrawbarApp {
         }
     }
 
-    /// Put the cursor in the search box when its key is pressed.
+    /// Put the cursor in the search box when its key is pressed, unless a modal covers it.
     fn focus_search(&self, ctx: &egui::Context) {
-        if ctx.input_mut(|input| input.consume_shortcut(&search_key())) {
+        if !crate::menu::covered(ctx)
+            && ctx.input_mut(|input| input.consume_shortcut(&search_key()))
+        {
             ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH)));
         }
     }
@@ -1697,6 +1699,42 @@ mod tests {
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
             "reviewing the queue is not saving"
+        );
+    }
+
+    /// A key acts on nothing a modal covers: ⌘S behind the send queue's review leaves the
+    /// open document's revert point where it was, and saves again once the review closes.
+    #[test]
+    fn a_shortcut_behind_a_modal_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.tabs.open(id);
+        let save = || pressed(egui::Key::S, egui::Modifiers::COMMAND);
+
+        app.shell.review_open = true;
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![save()]);
+        assert!(app.shell.review_open, "the review stays up");
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "and the document behind it is not saved"
+        );
+
+        app.shell.review_open = false;
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![save()]);
+        assert!(
+            !app.workspace.get(id).unwrap().is_unsaved(),
+            "with nothing over it, ⌘S saves"
         );
     }
 

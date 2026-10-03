@@ -272,11 +272,14 @@ impl DrawbarApp {
             ctx.request_repaint();
         }
         for command in picked {
-            if self.offer(command).is_some_and(|offer| offer.enabled) {
+            if self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+            {
                 self.run(ctx, frame, command, acts);
             }
         }
-        bar.refresh(|command| self.offer(command));
+        bar.refresh(|command| self.offer_now(ctx, command));
         self.menubar = Some(bar);
     }
 
@@ -454,8 +457,7 @@ impl eframe::App for DrawbarApp {
         // Before the panels, so an editor open this frame still has focus when Escape is
         // handled. An overlay takes Escape for itself: the activity log, or any modal up
         // last frame, which an Escape this frame has already closed.
-        let modal = ctx.memory(|memory| memory.top_modal_layer()).is_some();
-        if !modal && !self.shell.log_open {
+        if !crate::menu::covered(ctx) && !self.shell.log_open {
             self.browser.let_go(ctx);
         }
 

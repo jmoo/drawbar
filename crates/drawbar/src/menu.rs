@@ -376,7 +376,21 @@ const TITLE_PAD: f32 = 9.0;
 /// The check column's glyph.
 const CHECK: f32 = 13.0;
 
+/// Whether a modal was up last frame, so a key or a native menu pick this frame would act
+/// on what it covers.
+pub(crate) fn covered(ctx: &egui::Context) -> bool {
+    ctx.memory(|memory| memory.top_modal_layer()).is_some()
+}
+
 impl DrawbarApp {
+    /// What a key or the Mac's menu bar may do with `command` now: its [`Self::offer`],
+    /// disabled behind a modal unless it quits.
+    pub(crate) fn offer_now(&self, ctx: &egui::Context, command: Command) -> Option<Offer> {
+        let mut offer = self.offer(command)?;
+        offer.enabled &= command == Command::Quit || !covered(ctx);
+        Some(offer)
+    }
+
     /// What `command` looks like in a menu now, or `None` when it is not offered: an
     /// in-window menu leaves the line out, and the Mac's menu bar disables it.
     pub(crate) fn offer(&self, command: Command) -> Option<Offer> {
@@ -520,7 +534,10 @@ impl DrawbarApp {
             if !ctx.input_mut(|input| input.consume_shortcut(&keys)) {
                 continue;
             }
-            if self.offer(command).is_some_and(|offer| offer.enabled) {
+            if self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+            {
                 self.run(ctx, frame, command, acts);
             }
         }
