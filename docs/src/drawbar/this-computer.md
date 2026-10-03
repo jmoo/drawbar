@@ -47,21 +47,28 @@ drawbar makes it the first time it changes something in the folder.
 
 The browser shows the files drawbar opens: Nord files, Sample Editor projects,
 notes, MIDI files and SysEx dumps. **Show all files**, in the View menu or on
-This computer's menu, lists the rest by name as well. drawbar lists at most
-10,000 files and folders in a library, and reads at most 1 GiB of files from it.
-Past either limit it says so: a folder it did not list in full, or could not
-read, shows **not all listed**, and a file it did not read is marked **not
-read**.
+This computer's menu, lists the rest by name as well. The number beside a folder
+counts the files drawbar opens in it and in every folder inside it. Beside This
+computer it counts the whole library.
+
+A large library comes in a part at a time, the top of the tree first, and the
+status bar counts the files as they arrive. Each file shows by its name at once,
+marked **reading…**, and is decoded and checked in the background. Opening,
+sending or exporting one still being read reads it straight away. Until the
+whole library is listed, its folders cannot be renamed or removed.
+
+drawbar lists at most a million files and folders in a library, and reads at
+most 1 GiB of files from it. Past either limit it says so: a folder it did not
+list in full, or could not read, shows **not all listed**, and a file it did not
+read is marked **not read**.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so on the
 desktop they stay in their files: drawbar holds in memory only the part it shows
 or plays, and reads a sample whole when you open it. Each time the library
 opens, each one's checksum is checked in the background. Its row says
 **checking…** until that is done, and **failed verification** if the file does
-not match its checksum. Such a file is not sent. One drawbar has not seen
-before, or one changed since it last looked, is also read through once as the
-library opens, so that drawbar knows it again if it is moved. What stays in its
-file does not count toward the 1 GiB.
+not match its checksum. Such a file is not sent. What stays in its file does
+not count toward the 1 GiB.
 
 **Delete…** on a sound deletes its file. **Remove folder** moves what was in the
 folder up a level and deletes nothing.
@@ -124,7 +131,8 @@ moment can also both open it to write.
 ## Changes made outside drawbar
 
 drawbar looks at the folder again whenever its window comes back to the front,
-and before it sends anything to the instrument.
+and before it sends anything to the instrument. A file whose size and
+modification time are what drawbar last saw is taken to be unchanged.
 
 - A sound renamed or moved outside drawbar keeps its tags.
 - A file changed outside drawbar is shown as it is now. If you had unsaved edits
