@@ -347,14 +347,11 @@ pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
 /// The union of both places, because a kind narrows what the library shows, and the
 /// library shows both.
 pub fn kinds_present(workspace: &Workspace, device: &DeviceState) -> Vec<Kind> {
-    let here: Vec<Kind> = workspace
-        .listed()
-        .map(Kind::of)
-        .chain(device.classes().into_iter().map(Kind::from_class))
-        .collect();
+    let here = workspace.kinds();
+    let there: Vec<Kind> = device.classes().into_iter().map(Kind::from_class).collect();
     Kind::ALL
         .into_iter()
-        .filter(|kind| here.contains(kind))
+        .filter(|kind| here.contains(kind) || there.contains(kind))
         .collect()
 }
 

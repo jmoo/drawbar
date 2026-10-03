@@ -1080,12 +1080,11 @@ enum Incoming {
     Failed(String),
 }
 
-/// The families of the listed assets, as [`Workspace::families_present`] last took them.
+/// Something taken from the listed assets, and the revision and layout it was taken at.
 #[derive(Default)]
-struct Families {
-    /// The revision and layout they were taken at.
-    taken: Option<(u64, u64)>,
-    families: Vec<accept::Family>,
+struct Taken<T> {
+    at: Option<(u64, u64)>,
+    value: T,
 }
 
 pub struct Workspace {
@@ -1098,10 +1097,14 @@ pub struct Workspace {
     revision: u64,
     /// Bumped by every change to which assets are listed, or to their names and paths.
     layout: u64,
-    families: std::cell::RefCell<Families>,
+    families: std::cell::RefCell<Taken<Vec<accept::Family>>>,
+    kinds: std::cell::RefCell<Taken<Vec<crate::browser::Kind>>>,
     /// How many times [`Workspace::families_present`] has been taken.
     #[cfg(test)]
     pub(crate) families_taken: std::cell::Cell<usize>,
+    /// How many times [`Workspace::kinds`] has been taken.
+    #[cfg(test)]
+    pub(crate) kinds_taken: std::cell::Cell<usize>,
     /// How many times the list has been searched end to end for an id.
     #[cfg(test)]
     pub(crate) searched: std::cell::Cell<usize>,
@@ -1168,8 +1171,11 @@ impl Workspace {
             entities: Vec::new(),
             at: Default::default(),
             families: Default::default(),
+            kinds: Default::default(),
             #[cfg(test)]
             families_taken: Default::default(),
+            #[cfg(test)]
+            kinds_taken: Default::default(),
             #[cfg(test)]
             searched: Default::default(),
             next_id: 1,
@@ -1214,26 +1220,51 @@ impl Workspace {
     /// when the list or one of its assets changes, so a frame that draws a family word
     /// per row does not take it per row.
     pub fn families_present(&self) -> Vec<accept::Family> {
+        self.taken(&self.families, || {
+            #[cfg(test)]
+            self.families_taken.set(self.families_taken.get() + 1);
+            let here: std::collections::HashSet<accept::Family> = self
+                .listed()
+                .filter_map(|entity| accept::Family::of_tag(&entity.tag()))
+                .collect();
+            accept::Family::ALL
+                .into_iter()
+                .filter(|family| here.contains(family))
+                .collect()
+        })
+    }
+
+    /// The kinds of the listed assets, in [`crate::browser::Kind::ALL`] order. Taken again
+    /// only when the list or one of its assets changes, as the families are.
+    pub fn kinds(&self) -> Vec<crate::browser::Kind> {
+        use crate::browser::Kind;
+        self.taken(&self.kinds, || {
+            #[cfg(test)]
+            self.kinds_taken.set(self.kinds_taken.get() + 1);
+            let mut here = Vec::new();
+            for kind in self.listed().map(Kind::of) {
+                if !here.contains(&kind) {
+                    here.push(kind);
+                }
+            }
+            Kind::ALL
+                .into_iter()
+                .filter(|kind| here.contains(kind))
+                .collect()
+        })
+    }
+
+    /// What `held` last took, or `take` again where the list has changed since.
+    fn taken<T: Clone>(&self, held: &std::cell::RefCell<Taken<T>>, take: impl FnOnce() -> T) -> T {
         let now = Some((self.revision, self.layout));
-        let mut held = self.families.borrow_mut();
-        if held.taken == now {
-            return held.families.clone();
+        let mut held = held.borrow_mut();
+        if held.at != now {
+            *held = Taken {
+                at: now,
+                value: take(),
+            };
         }
-        let here: std::collections::HashSet<accept::Family> = self
-            .listed()
-            .filter_map(|entity| accept::Family::of_tag(&entity.tag()))
-            .collect();
-        let families: Vec<accept::Family> = accept::Family::ALL
-            .into_iter()
-            .filter(|family| here.contains(family))
-            .collect();
-        *held = Families {
-            taken: now,
-            families: families.clone(),
-        };
-        #[cfg(test)]
-        self.families_taken.set(self.families_taken.get() + 1);
-        families
+        held.value.clone()
     }
 
     /// Record a change to which assets are held, or to their names or paths.

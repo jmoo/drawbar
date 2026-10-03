@@ -2646,6 +2646,63 @@ mod tests {
         assert!(worth_choosing(&kinds_present(&workspace, &device.state)));
     }
 
+    /// Frames of the tree take the library's kinds once, a file read since is in them on
+    /// the next frame, and an instrument attached adds its folders without taking them
+    /// again.
+    #[test]
+    fn frames_take_the_kinds_once_per_change() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            mut device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ns4p".into(),
+            path: Some(crate::store::LibPath::root().join("Grand.ns4p")),
+            origin: crate::workspace::Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(1),
+            unsaved: None,
+        };
+        workspace.restore(vec![saved], None, &mut log);
+        let draw = |browser: &mut Browser, workspace: &Workspace, device: &Device| {
+            testing::run(&ctx, egui::RawInput::default(), |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, workspace, device, &queue, &Filter::default());
+                    });
+            });
+        };
+        for _ in 0..3 {
+            draw(&mut browser, &workspace, &device);
+        }
+        assert_eq!(workspace.kinds_taken.get(), 1);
+        assert_eq!(workspace.kinds(), [Kind::Program], "what its name says");
+
+        workspace.take_wanted();
+        workspace.took(1, Some(Fresh::Stage4Synth.bytes().unwrap()), None);
+        workspace.settle_files(&mut log);
+        draw(&mut browser, &workspace, &device);
+        assert_eq!(workspace.kinds_taken.get(), 2);
+        assert_eq!(workspace.kinds(), [Kind::Synth], "what it holds");
+
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        draw(&mut browser, &workspace, &device);
+        assert_eq!(
+            workspace.kinds_taken.get(),
+            2,
+            "the instrument is not the list"
+        );
+        assert!(kinds_present(&workspace, &device.state).contains(&Kind::Live));
+    }
+
     /// ⚠️ The row that turns a filter off goes away with its kind. A filter left on a
     /// kind that is nowhere would show an empty table with nothing to click to clear it.
     #[test]
