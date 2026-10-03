@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::cache::{self, Cache};
 use super::diff::{self, match_files, Known};
 use super::exec::{too_much, working_name};
 use super::sidecar::{Row, Sidecar, VERSION};
@@ -20,6 +21,7 @@ use crate::browser::Browser;
 use crate::folders::{Folders, Op, Where};
 use crate::log::Log;
 use crate::queue::Queue;
+use crate::summary::Summary;
 use crate::workspace::{precious, LocalEntity, Origin, Saved, Workspace};
 
 /// How far opening has got.
@@ -62,6 +64,9 @@ struct Record {
     missing: bool,
     /// How drawbar holds what the file holds, while nothing has been saved over it.
     holds: Holds,
+    /// The [`crate::workspace::Baseline::stamp`] of the bytes whose summary the cache
+    /// holds for the file, so a summary is taken once per set of bytes.
+    summarized: Option<u64>,
 }
 
 /// An open whose listing is still arriving: the index's rows, as the files listed so far
@@ -303,6 +308,13 @@ pub struct Store {
     moving: Vec<(LibPath, LibPath)>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
+    /// What was read of the library's files, this session and before.
+    cache: Cache,
+    /// The cache has forgotten the files the open's listing did not find.
+    pruned: bool,
+    /// How many files have been asked of the backend to read.
+    #[cfg(test)]
+    pub(crate) asked_files: usize,
     /// The assets whose read was refused for want of room, each with its file's length,
     /// to ask for again once room can be made for it. One that could never fit is not.
     roomless: BTreeMap<u64, u64>,
@@ -344,6 +356,10 @@ impl Store {
             fetching: BTreeSet::new(),
             moving: Vec::new(),
             budget: MOST_BYTES,
+            cache: Cache::memory(),
+            pruned: false,
+            #[cfg(test)]
+            asked_files: 0,
             roomless: BTreeMap::new(),
             #[cfg(test)]
             looked_for_room: 0,
@@ -358,6 +374,12 @@ impl Store {
             name: Some(name),
             ..self
         }
+    }
+
+    /// The same store, remembering what was read of the library's files in `cache`, which
+    /// outlives the session. Otherwise it remembers them only for the session.
+    pub fn remembering(self, cache: Cache) -> Store {
+        Store { cache, ..self }
     }
 
     /// The folder the library is.
@@ -464,6 +486,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        self.recalled(workspace, browser, log);
         self.ask(workspace, browser, queue, log);
         self.walk(browser);
         let mut released = false;
@@ -525,7 +548,8 @@ impl Store {
 
     /// Ask the backend for the files of the unread assets something needs, reading at
     /// most what keeps the assets' whole bytes within [`MOST_BYTES`]. An asset refused
-    /// for want of room is asked for again once room can be made for it.
+    /// for want of room is asked for again once room can be made for it. Nothing is asked
+    /// until the cache has said what it remembers, so a row it remembers is not read.
     pub(crate) fn ask(
         &mut self,
         workspace: &mut Workspace,
@@ -533,7 +557,8 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) {
-        if !self.opened() || (!workspace.wants() && self.roomless.is_empty()) {
+        let waits = !workspace.wants() && self.roomless.is_empty();
+        if !self.opened() || waits || !self.cache.loaded() {
             return;
         }
         // Smallest first: where room cannot be made for one, it cannot for any larger,
@@ -661,6 +686,10 @@ impl Store {
     /// Send a command, counting it.
     fn send(&mut self, cmd: Cmd) {
         self.issued += 1;
+        #[cfg(test)]
+        if let Cmd::Read { files, .. } = &cmd {
+            self.asked_files += files.len();
+        }
         self.backend.send(cmd);
     }
 
@@ -701,6 +730,7 @@ impl Store {
                 record.path = Some(back);
             }
         }
+        self.cache.moved(to, from);
         if let Some(loading) = &mut self.loading {
             if let Some(rename) = loading.answered(from, to, false) {
                 loading.unmoved(rename);
@@ -790,11 +820,27 @@ impl Store {
             }
             record.fingerprint = Some(diff::kept(record.fingerprint, &found));
             record.holds = found.holds();
+            record.summarized = None;
             workspace.took(id, found.bytes, found.file);
         }
         if background {
             self.next_fetches(workspace);
         }
+    }
+
+    /// Wait for what the cache kept of earlier sessions, and take it in as
+    /// [`Store::poll`] would.
+    #[cfg(test)]
+    pub fn recall_kept(&mut self, workspace: &mut Workspace, browser: &Browser, log: &mut Log) {
+        if self.cache.arrive(log) {
+            self.took_in(workspace, browser);
+        }
+    }
+
+    /// What the cache holds now.
+    #[cfg(test)]
+    pub fn cache(&self) -> &Cache {
+        &self.cache
     }
 
     /// Whether a rescan is waiting for its answer.
@@ -1059,6 +1105,8 @@ impl Store {
                 break;
             }
         }
+        self.summarize(workspace);
+        self.cache.finish(log);
         self.backend.finish();
     }
 
@@ -1318,6 +1366,7 @@ impl Store {
         for id in ids {
             self.settle(id, workspace, &loading.rows);
             self.place_ahead(id, workspace, folders);
+            self.recall(id, workspace);
         }
     }
 
@@ -1391,6 +1440,9 @@ impl Store {
             let Some(stranger) = listed.get(&found.path).copied() else {
                 continue;
             };
+            if let Some(from) = loading.rows.get(&id).and_then(|row| row.path.as_ref()) {
+                self.cache.moved(from, &found.path);
+            }
             self.records.remove(&stranger);
             workspace.forget(stranger);
             for tag in browser.tags.worn(stranger).clone() {
@@ -1458,6 +1510,7 @@ impl Store {
                 n => format!("{n} files on this computer."),
             });
         }
+        self.prune(browser);
         self.fetch_tracked(workspace, browser);
     }
 
@@ -1571,7 +1624,9 @@ impl Store {
             let before = workspace.get(id).map(|entity| entity.name.clone());
             workspace.place(id, browser.folders.ahead(&found.path));
             if let Some(record) = self.records.get_mut(&id) {
-                record.path = Some(found.path.clone());
+                if let Some(from) = record.path.replace(found.path.clone()) {
+                    self.cache.moved(&from, &found.path);
+                }
                 if let Some(print) = &mut record.fingerprint {
                     *print = diff::kept(Some(*print), &found);
                 }
@@ -1604,6 +1659,7 @@ impl Store {
             for id in ids {
                 self.settle(id, workspace, &BTreeMap::new());
                 self.place_ahead(id, workspace, &browser.folders);
+                self.recall(id, workspace);
             }
         }
         touched
@@ -1622,6 +1678,7 @@ impl Store {
         if !found.read() {
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(found.fingerprint());
+                record.summarized = None;
             }
             workspace.stale(id);
             return;
@@ -1690,7 +1747,9 @@ impl Store {
             ));
             return;
         }
-        self.records.remove(&id);
+        if let Some(path) = self.records.remove(&id).and_then(|record| record.path) {
+            self.cache.forget(&path);
+        }
         browser.tags.forget(id);
         workspace.remove(id, log);
         log.say(format!("“{name}” was deleted outside drawbar."));
@@ -1758,6 +1817,10 @@ impl Store {
         queue: &Queue,
         pass: Pass,
     ) -> bool {
+        if pass != Pass::Files {
+            self.summarize(workspace);
+            self.cache.write();
+        }
         if !self.open() {
             return true;
         }
@@ -1837,7 +1900,7 @@ impl Store {
     /// at a time. A file waiting for [`Store::fetch_tracked`] to read it whole is left to
     /// that read.
     fn fingerprint_precious(&mut self, workspace: &Workspace, browser: &Browser) {
-        if self.loading.is_some() || self.fingerprinting {
+        if self.loading.is_some() || self.fingerprinting || !self.cache.loaded() {
             return;
         }
         if self.unprinted.is_empty() {
@@ -1867,7 +1930,8 @@ impl Store {
     /// the next full pass. Files the index does not track are read once something needs
     /// them.
     fn fetch_tracked(&mut self, workspace: &mut Workspace, browser: &Browser) {
-        if self.loading.is_some() || !self.opened() || !self.fetching.is_empty() {
+        let waits = self.loading.is_some() || !self.cache.loaded();
+        if waits || !self.opened() || !self.fetching.is_empty() {
             return;
         }
         if self.unfetched.is_empty() {
@@ -1889,6 +1953,94 @@ impl Store {
             self.unfetched.extend(wanted);
         }
         self.next_fetches(workspace);
+    }
+
+    /// Take in what the cache kept of earlier sessions, once it arrives: each unread file
+    /// it knows draws as it says, and the background reads wait for it.
+    fn recalled(&mut self, workspace: &mut Workspace, browser: &Browser, log: &mut Log) {
+        if self.cache.poll(log) {
+            self.took_in(workspace, browser);
+        }
+    }
+
+    /// Recall every unread file now that the cache's entries have arrived, and start what
+    /// waited for them.
+    fn took_in(&mut self, workspace: &mut Workspace, browser: &Browser) {
+        let unread: Vec<u64> = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.holds == Holds::Unread)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in unread {
+            self.recall(id, workspace);
+        }
+        self.prune(browser);
+        self.fetch_tracked(workspace, browser);
+    }
+
+    /// Give an unread asset what the cache holds for its file, where the file's length
+    /// and time are still the ones it was read at, and the whole file's CRC where none
+    /// is known.
+    fn recall(&mut self, id: u64, workspace: &mut Workspace) {
+        let Some(record) = self.records.get_mut(&id) else {
+            return;
+        };
+        let (Some(path), Some(print), Holds::Unread) =
+            (&record.path, &mut record.fingerprint, record.holds)
+        else {
+            return;
+        };
+        let Some(entry) = self.cache.fresh(path, print.stat()) else {
+            return;
+        };
+        print.crc = print.crc.or(entry.crc);
+        workspace.remember(id, entry.summary.clone());
+        record.summarized = workspace.get(id).map(|entity| entity.saved.stamp);
+    }
+
+    /// Keep in the cache a summary of each file whose asset holds what the file does and
+    /// has been read and decoded, once per set of bytes.
+    fn summarize(&mut self, workspace: &Workspace) {
+        for (id, record) in &mut self.records {
+            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
+                continue;
+            };
+            let Some(entity) = workspace.get(*id) else {
+                continue;
+            };
+            let stamp = entity.saved.stamp;
+            let clean = record.saved == stamp && !entity.is_unsaved();
+            if record.summarized == Some(stamp) || !clean || record.saving || record.missing {
+                continue;
+            }
+            let Some(summary) = Summary::of(entity) else {
+                continue;
+            };
+            let print = Fingerprint {
+                crc: print.crc.or(entity.saved.whole_crc()),
+                ..print
+            };
+            self.cache
+                .put(path.clone(), cache::Entry::of(print, summary));
+            record.summarized = Some(stamp);
+        }
+    }
+
+    /// Forget in the cache every file the open's listing did not find, once both are
+    /// here and the listing reached every folder.
+    fn prune(&mut self, browser: &Browser) {
+        let listed = self.opened() && self.loading.is_none();
+        let whole = browser.folders.unwalked.is_empty();
+        if self.pruned || !listed || !self.cache.loaded() || !whole {
+            return;
+        }
+        self.pruned = true;
+        let listed = self
+            .records
+            .values()
+            .filter_map(|record| record.path.clone());
+        self.cache.keep_only(listed.collect());
     }
 
     /// Ask for the next few tracked files waiting to be read in the background.
@@ -2008,6 +2160,7 @@ impl Store {
                 self.write(Cmd::RemoveDir(path))
             }
             Op::MoveDir { from, to } => {
+                self.cache.moved(&from, &to);
                 for record in self.records.values_mut() {
                     if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(&from, &to)) {
                         record.path = Some(moved);
@@ -2103,6 +2256,7 @@ impl Store {
             record.fingerprint.filter(|_| !missing)
         });
         if let Some(from) = from {
+            self.cache.moved(&from, path);
             self.rename(from, path.clone(), Vec::new());
         }
         if let Some(expect) = save {
@@ -2190,6 +2344,9 @@ impl Store {
             }
             let file = (record.path.clone(), record.fingerprint, record.missing);
             self.records.remove(&id);
+            if let Some(path) = &file.0 {
+                self.cache.forget(path);
+            }
             if let (Some(path), Some(expect), false) = file {
                 self.write(Cmd::RemoveFile { path, expect });
             }
@@ -2255,6 +2412,7 @@ impl Record {
             saving: false,
             missing: false,
             holds: Holds::Whole,
+            summarized: None,
         }
     }
 

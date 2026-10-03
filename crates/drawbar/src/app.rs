@@ -398,7 +398,8 @@ fn library(ctx: &egui::Context, root: crate::store::Root) -> Store {
     let name = crate::libraries::name(&root, crate::store::default_root().as_deref());
     #[cfg(target_arch = "wasm32")]
     let name = root.name();
-    let store = Store::start(crate::store::Backend::start(ctx, root));
+    let cache = crate::store::Cache::open(ctx, &root);
+    let store = Store::start(crate::store::Backend::start(ctx, root)).remembering(cache);
     match name {
         Some(name) => store.named(name),
         None => store,

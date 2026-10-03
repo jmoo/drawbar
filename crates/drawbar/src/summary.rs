@@ -2,7 +2,7 @@
 //!
 //! An asset whose file is not read this session still draws as it did once read: its
 //! kind, its family, the slot it matches and the library it plays come from its
-//! [`Summary`].
+//! [`Summary`]. [`crate::store`] keeps summaries between sessions; see its cache.
 
 use nord_format::Entity;
 use nord_usb::ObjectClass;

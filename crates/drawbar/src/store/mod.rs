@@ -24,6 +24,7 @@
 //! mirrors the [`crate::workspace::Workspace`] onto the files and folds what it hears back
 //! into it.
 
+mod cache;
 mod diff;
 mod exec;
 mod mirror;
@@ -44,6 +45,9 @@ pub use web::{default_root, permission, Backend, Picked, Root};
 #[cfg(not(target_arch = "wasm32"))]
 pub type Root = std::path::PathBuf;
 
+#[cfg(target_arch = "wasm32")]
+pub use cache::keep_libraries;
+pub use cache::Cache;
 pub use exec::{opens, MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Row, Sidecar, Stored};

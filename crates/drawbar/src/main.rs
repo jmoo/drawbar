@@ -13,7 +13,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "drawbar",
+        drawbar::APP,
         options,
         Box::new(|cc| Ok(Box::new(drawbar::DrawbarApp::new(cc)))),
     )

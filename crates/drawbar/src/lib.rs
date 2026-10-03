@@ -14,6 +14,8 @@ pub mod fields;
 pub mod filter;
 pub mod folders;
 pub mod icon;
+#[cfg(target_arch = "wasm32")]
+mod idb;
 pub mod inspector;
 #[cfg(target_arch = "wasm32")]
 mod js;
@@ -44,6 +46,9 @@ pub mod work;
 pub mod workspace;
 
 pub use app::DrawbarApp;
+
+/// The name eframe keeps this app's state under, which names its storage directory.
+pub const APP: &str = "drawbar";
 
 /// Start the app on `canvas`. Called from `index.html` after the wasm module loads.
 #[cfg(target_arch = "wasm32")]

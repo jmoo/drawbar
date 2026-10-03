@@ -9,21 +9,19 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
 use js_sys::{Array, Object, Promise, Reflect};
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     DirectoryPickerOptions, FileSystemDirectoryHandle, FileSystemHandle, FileSystemPermissionMode,
-    IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransaction, IdbTransactionMode,
+    IdbTransactionMode,
 };
 
 use super::{Picking, THIS_COMPUTER};
 use crate::folders::Library;
+use crate::idb::{committed, database, done, LIBRARIES as STORE};
 use crate::js::{describe, field};
 use crate::store::{permission, Picked, Root};
 
-const DATABASE: &str = "drawbar";
-const STORE: &str = "libraries";
 const KEY: &str = "recent";
 
 /// Whether this browser lets a page open a folder on this computer. Brave has
@@ -180,6 +178,12 @@ impl Libraries {
                     "The list of recent libraries was not kept: {e}."
                 )));
             }
+            let kept = recent.iter().filter_map(|root| match root {
+                Root::Picked(picked) => Some(picked.id),
+                Root::Private => None,
+            });
+            // What is left of a library forgotten here is only read again if it opens.
+            let _ = crate::store::keep_libraries(kept.collect()).await;
         });
     }
 
@@ -319,64 +323,4 @@ async fn write(entries: Array) -> Result<(), String> {
     .await;
     db.close();
     written
-}
-
-/// drawbar's database, made at its first use.
-async fn database() -> Result<IdbDatabase, String> {
-    let factory = web_sys::window()
-        .and_then(|window| window.indexed_db().ok().flatten())
-        .ok_or("this browser has no IndexedDB")?;
-    let request: IdbOpenDbRequest = factory
-        .open_with_u32(DATABASE, 1)
-        .map_err(|e| describe(&e))?;
-    let upgrading = request.clone();
-    let upgrade = Closure::once(move |_: JsValue| {
-        if let Ok(db) = upgrading.result() {
-            let _ = db
-                .unchecked_into::<IdbDatabase>()
-                .create_object_store(STORE);
-        }
-    });
-    request.set_onupgradeneeded(Some(upgrade.as_ref().unchecked_ref()));
-    let opened = done(&request).await;
-    request.set_onupgradeneeded(None);
-    Ok(opened?.unchecked_into())
-}
-
-/// Once `transaction` has committed, or why it did not.
-///
-/// ⚠️ Its requests succeed before it commits, and the commit can still fail, as when the
-/// origin is out of room.
-async fn committed(transaction: &IdbTransaction) -> Result<(), String> {
-    let answered = Promise::new(&mut |resolve, reject| {
-        transaction.set_oncomplete(Some(&resolve));
-        transaction.set_onabort(Some(&reject));
-        transaction.set_onerror(Some(&reject));
-    });
-    let answer = JsFuture::from(answered).await;
-    transaction.set_oncomplete(None);
-    transaction.set_onabort(None);
-    transaction.set_onerror(None);
-    answer.map(|_| ()).map_err(|_| match transaction.error() {
-        Some(error) => describe(&error),
-        None => "IndexedDB did not commit the change".to_string(),
-    })
-}
-
-/// The result of an IndexedDB request, once it has one.
-async fn done(request: &IdbRequest) -> Result<JsValue, String> {
-    let answered = Promise::new(&mut |resolve, reject| {
-        request.set_onsuccess(Some(&resolve));
-        request.set_onerror(Some(&reject));
-    });
-    let answer = JsFuture::from(answered).await;
-    request.set_onsuccess(None);
-    request.set_onerror(None);
-    if answer.is_err() {
-        return Err(match request.error() {
-            Ok(Some(error)) => describe(&error),
-            _ => "IndexedDB refused the request".to_string(),
-        });
-    }
-    request.result().map_err(|e| describe(&e))
 }
