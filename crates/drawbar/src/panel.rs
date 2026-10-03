@@ -1,15 +1,15 @@
-//! Shared chrome: section and dock headers, table column widths, chips, dashed borders,
-//! and flat buttons for bars.
+//! Shared chrome: section and dock headers, table column widths, chips and pills, dashed
+//! borders, and flat buttons for bars.
 
 use std::ops::Range;
 
 use eframe::egui;
 
 use crate::browser::cell_ink;
-use crate::icon::{icon, Glyph};
+use crate::icon::{icon, painted, Glyph};
 
 /// How tall a section header is, wherever it is drawn.
-pub const HEADER: f32 = 24.0;
+pub const HEADER: f32 = 26.0;
 
 /// How tall a dock's own header is: the tab strip's height, so the strip and every dock
 /// header beside it form one line across the window.
@@ -46,6 +46,12 @@ pub const PILL: f32 = 18.0;
 /// The size of the collapse triangle, and of the grip before a dock header's title.
 const CHEVRON: f32 = 12.0;
 const GRIP: f32 = 12.0;
+
+/// The triangle's opacity after a section label, relative to the label's ink.
+const CHEVRON_ALPHA: f32 = 0.7;
+
+/// The size of the count at a section header's right end.
+const COUNT: f32 = 10.5;
 
 /// The grip's opacity relative to the caption color. It is decoration, not a control.
 const GRIP_ALPHA: f32 = 0.6;
@@ -240,7 +246,7 @@ pub fn chip(
     egui::Frame::new()
         .fill(fill.unwrap_or(egui::Color32::TRANSPARENT))
         .stroke(egui::Stroke::new(1.0_f32, border))
-        .corner_radius(2.0)
+        .corner_radius(u8::MAX)
         .inner_margin(egui::Margin::symmetric(5, 1))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -385,17 +391,71 @@ pub fn caps(text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase()).text_style(crate::app::micro())
 }
 
-/// A section header: a collapse triangle and a [`caps`] title.
+/// A section header: a [`section_label`] title with the triangle after it, and `count` at
+/// the right end. A click anywhere on it opens or shuts the section.
 ///
-/// It takes the color of the panel it is on, changing to `faint_bg_color` only under the
-/// pointer. A dock's own header is [`dock_header`], which is not a control.
-pub fn panel_header(ui: &mut egui::Ui, title: &str, open: &mut bool) -> egui::Response {
-    bar(ui, HEADER, egui::Color32::TRANSPARENT, |ui| {
-        if chevron(ui, *open).clicked() {
-            *open = !*open;
-        }
-        ui.label(caps(title).color(crate::app::caption(ui.visuals())));
-    })
+/// It stands in [`ROW_INSET`] from the card's edges, like the rows under it, and has no
+/// fill: under the pointer only its ink brightens.
+pub fn panel_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    count: Option<&str>,
+    open: &mut bool,
+) -> egui::Response {
+    let (id, room) = ui.allocate_space(egui::vec2(ui.available_width(), HEADER));
+    let rect = room.shrink2(egui::vec2(ROW_INSET, 0.0));
+    let response = ui.interact(rect, id, egui::Sense::click());
+    if response.clicked() {
+        *open = !*open;
+    }
+    let visuals = ui.visuals();
+    let ink = match response.hovered() {
+        true => visuals.widgets.hovered.fg_stroke.color,
+        false => crate::app::caption(visuals),
+    };
+    let painter = ui.painter();
+    let middle = rect.center().y;
+    let label = painter.layout_no_wrap(
+        title.to_owned(),
+        crate::app::section().resolve(ui.style()),
+        ink,
+    );
+    let mut x = rect.left() + PAD;
+    let width = label.size().x;
+    painter.galley(
+        egui::pos2(x, middle - label.size().y / 2.0),
+        label,
+        egui::Color32::PLACEHOLDER,
+    );
+    x += width + GAP;
+    let glyph = match *open {
+        true => Glyph::ChevronDown,
+        false => Glyph::ChevronRight,
+    };
+    painted(
+        ui,
+        glyph,
+        egui::Rect::from_min_size(
+            egui::pos2(x, middle - CHEVRON / 2.0),
+            egui::Vec2::splat(CHEVRON),
+        ),
+        ink.gamma_multiply(CHEVRON_ALPHA),
+    );
+    if let Some(count) = count {
+        let count = painter.layout_no_wrap(count.to_owned(), egui::FontId::monospace(COUNT), ink);
+        painter.galley(
+            egui::pos2(
+                rect.right() - PAD - count.size().x,
+                middle - count.size().y / 2.0,
+            ),
+            count,
+            egui::Color32::PLACEHOLDER,
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, *open, title)
+    });
+    response
 }
 
 /// A dock's own header: a grip and a [`caps`] title, with nothing to click.
@@ -552,35 +612,37 @@ mod tests {
         }
     }
 
-    /// A header spans the full width at its kind's height, so a dock's body always starts
-    /// at the same place and a header's fill reaches both edges.
+    /// A section header stands in from the card's edges like the rows under it, and a
+    /// dock header spans the full width; each takes its kind's height, so a dock's body
+    /// always starts at the same place.
     #[test]
-    fn a_header_claims_its_own_height_and_the_whole_width() {
+    fn a_header_claims_its_own_height_and_its_own_width() {
         let mut section = egui::Rect::ZERO;
         let mut dock = egui::Rect::ZERO;
-        let mut width = 0.0;
+        let mut card = egui::Rect::ZERO;
         testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                width = ui.available_width();
-                section = panel_header(ui, "places", &mut true).rect;
+                card = ui.available_rect_before_wrap();
+                section = panel_header(ui, "Places", None, &mut true).rect;
                 dock = dock_header(ui, "browser").rect;
             });
         });
         assert_eq!(section.height(), HEADER);
         assert_eq!(dock.height(), crate::tabs::HEIGHT);
-        assert_eq!(section.width(), width);
-        assert_eq!(dock.width(), width);
+        assert_eq!(section.left(), card.left() + ROW_INSET);
+        assert_eq!(section.right(), card.right() - ROW_INSET);
+        assert_eq!(dock.width(), card.width());
     }
 
-    /// Run frames with the pointer over the header or away from it, and return what the
-    /// header painted behind itself.
-    fn header_fill(
+    /// Run frames with the pointer over the header or away from it, and return the
+    /// output of the last, with the header's rect.
+    fn pointed(
         ctx: &egui::Context,
         under_pointer: bool,
         header: impl Fn(&mut egui::Ui) -> egui::Response,
-    ) -> Vec<egui::Color32> {
+    ) -> (egui::FullOutput, egui::Rect) {
         let at = std::cell::Cell::new(egui::Pos2::ZERO);
-        let mut fill = Vec::new();
+        let mut last = None;
         // The first frame only learns where the header is; the second points at it.
         for _ in 0..2 {
             let input = egui::RawInput {
@@ -595,24 +657,48 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| rect = header(ui).rect);
             });
             at.set(rect.center());
-            fill = fills(&output, rect);
+            last = Some((output, rect));
         }
-        fill
+        last.expect("two frames ran")
     }
 
-    /// Three permanently gray bars down a dock would read as three separate panels, not
-    /// as the headings of one.
+    /// Three gray bars down a card would read as three separate panels, not as the
+    /// headings of one, so a section header shows the pointer with its ink alone.
     #[test]
-    fn a_section_header_wears_the_panel_until_the_pointer_is_on_it() {
+    fn a_section_header_has_no_fill_and_brightens_under_the_pointer() {
         let ctx = context();
-        let section = |ui: &mut egui::Ui| panel_header(ui, "places", &mut true);
-        assert_eq!(
-            header_fill(&ctx, false, section),
-            vec![egui::Color32::TRANSPARENT],
-        );
-        assert_eq!(
-            header_fill(&ctx, true, section),
-            vec![ctx.style().visuals.faint_bg_color],
+        let visuals = ctx.style().visuals.clone();
+        let section = |ui: &mut egui::Ui| panel_header(ui, "Places", Some("9"), &mut true);
+        for (under_pointer, ink) in [
+            (false, crate::app::caption(&visuals)),
+            (true, visuals.widgets.hovered.fg_stroke.color),
+        ] {
+            let (output, rect) = pointed(&ctx, under_pointer, section);
+            assert!(
+                fills(&output, rect).is_empty(),
+                "pointed at: {under_pointer}"
+            );
+            let said = testing::painted(&output);
+            for word in ["Places", "9"] {
+                let drawn = said.iter().find(|held| held.text == word).unwrap();
+                assert_eq!(drawn.ink, ink, "{word}, pointed at: {under_pointer}");
+            }
+        }
+    }
+
+    /// The label comes first, then the triangle, and the count sits at the right end.
+    #[test]
+    fn a_section_header_puts_its_count_at_the_right_end() {
+        let (output, rect) = pointed(&context(), false, |ui| {
+            panel_header(ui, "Tags", Some("12"), &mut true)
+        });
+        let said = testing::painted(&output);
+        let title = testing::where_(&said, "Tags");
+        let count = testing::where_(&said, "12");
+        assert_eq!(title.left(), rect.left() + PAD);
+        assert!(
+            (count.right() - (rect.right() - PAD)).abs() < 0.5,
+            "{count:?} in {rect:?}"
         );
     }
 
@@ -621,17 +707,18 @@ mod tests {
     fn a_dock_header_keeps_its_own_color_whether_or_not_it_is_pointed_at() {
         let ctx = context();
         let faint = ctx.style().visuals.faint_bg_color;
-        for pointed in [false, true] {
+        for pointed_at in [false, true] {
+            let (output, rect) = pointed(&ctx, pointed_at, |ui| dock_header(ui, "browser"));
             assert_eq!(
-                header_fill(&ctx, pointed, |ui| dock_header(ui, "browser")),
+                fills(&output, rect),
                 vec![faint],
-                "pointed at: {pointed}",
+                "pointed at: {pointed_at}"
             );
         }
     }
 
     #[test]
-    fn the_triangle_toggles_the_bool_it_was_handed() {
+    fn a_click_anywhere_on_a_section_header_toggles_the_bool_it_was_handed() {
         let ctx = context();
         let mut open = true;
         let at = std::cell::Cell::new(egui::Pos2::ZERO);
@@ -645,18 +732,16 @@ mod tests {
             };
             testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let rect = panel_header(ui, "browser", open).rect;
-                    at.set(egui::pos2(
-                        rect.left() + PAD + CHEVRON / 2.0,
-                        rect.center().y,
-                    ));
+                    let rect = panel_header(ui, "Places", None, open).rect;
+                    // Past the label and its triangle, where only the header is.
+                    at.set(egui::pos2(rect.right() - PAD, rect.center().y));
                 });
             });
         };
-        // The first frame only learns where the triangle is; the second presses it.
+        // The first frame only learns where the header is; the second presses it.
         frame(false, &mut open);
         frame(true, &mut open);
-        assert!(!open, "a click on the triangle shuts the dock");
+        assert!(!open, "a click on the header shuts the section");
         frame(true, &mut open);
         assert!(open, "the next click opens it again");
     }

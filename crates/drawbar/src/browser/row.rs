@@ -31,7 +31,7 @@ pub struct Cells<'a> {
     pub unsaved: bool,
     /// The instrument's panel has this slot loaded.
     pub loaded: bool,
-    /// A row inside a branch: a pixel shorter, in a smaller font.
+    /// A row inside a branch: shorter, with a smaller glyph and font.
     pub child: bool,
 }
 
@@ -44,17 +44,23 @@ pub struct Drawn {
 }
 
 /// The height of a row, and of a child row.
-pub const ROW: f32 = 22.0;
-pub const CHILD: f32 = 21.0;
+pub const ROW: f32 = 28.0;
+pub const CHILD: f32 = 26.0;
 
 /// The triangle's box, and the box plus the gap after it: what a leaf skips so its glyph
 /// lines up under the glyph of a branch beside it.
 pub const CHEVRON: f32 = 12.0;
 pub const STEP: f32 = CHEVRON + GAP;
 
-/// The kind glyph's box, and the gap between a row's parts.
-const GLYPH: f32 = 12.0;
-const GAP: f32 = 6.0;
+/// The gap between a row's parts, and the room left after the last one at the right end.
+const GAP: f32 = 8.0;
+const END: f32 = 8.0;
+
+/// The kind glyph's box, in a row and in a child row, and its opacity relative to the
+/// name's ink.
+const GLYPH: f32 = 14.0;
+const CHILD_GLYPH: f32 = 13.0;
+const GLYPH_ALPHA: f32 = 0.85;
 
 /// The diameter of the status dot.
 const DOT: f32 = 6.0;
@@ -65,11 +71,11 @@ const SMALL: f32 = 11.0;
 /// The width the location column takes, so names line up under each other.
 const AT_W: f32 = 34.0;
 
-/// The text sizes a row paints in. The row is painted directly, so the sizes live here
-/// and not in the named styles in [`crate::app`].
-const NAME: f32 = 12.0;
-const CHILD_NAME: f32 = 11.5;
-const MONO: f32 = 10.0;
+/// The text sizes a child row paints in, and the monospace size of a row's readouts. A
+/// top-level row's name is [`crate::app::ui`].
+const CHILD_NAME: f32 = 12.0;
+const MONO: f32 = 10.5;
+const CHILD_MONO: f32 = 10.0;
 
 /// The text color for a cell with a color of its own: a state word, a dependency, a
 /// count, an address.
@@ -117,20 +123,30 @@ pub fn starred(name: &str, unsaved: bool) -> String {
     }
 }
 
-/// One row of the tree: a full-width click target with its parts painted into it.
+/// One row of the tree: a click target standing in [`crate::panel::ROW_INSET`] from the
+/// card's edges, with its parts painted into it.
 ///
 /// ⚠️ Nothing inside is a widget. A label allocates its own hover rect, which wins the
 /// hit test over the row: the highlight drops out as the pointer crosses the text, and
 /// clicks land on whichever word is under them. Only the row senses input.
 pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
-    let height = match cells.child {
-        true => CHILD,
-        false => ROW,
+    let (height, glyph, font, mono) = match cells.child {
+        true => (
+            CHILD,
+            CHILD_GLYPH,
+            egui::FontId::proportional(CHILD_NAME),
+            egui::FontId::monospace(CHILD_MONO),
+        ),
+        false => (
+            ROW,
+            GLYPH,
+            crate::app::ui().resolve(ui.style()),
+            egui::FontId::monospace(MONO),
+        ),
     };
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::click_and_drag(),
-    );
+    let (id, room) = ui.allocate_space(egui::vec2(ui.available_width(), height));
+    let rect = room.shrink2(egui::vec2(crate::panel::ROW_INSET, 0.0));
+    let response = ui.interact(rect, id, egui::Sense::click_and_drag());
 
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
@@ -155,11 +171,11 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         box_
     });
 
-    if let Some(glyph) = cells.glyph {
+    if let Some(kind) = cells.glyph {
         let box_ =
-            egui::Rect::from_min_size(egui::pos2(x, middle(GLYPH)), egui::Vec2::splat(GLYPH));
-        painted(ui, glyph, box_, strong);
-        x += GLYPH + GAP;
+            egui::Rect::from_min_size(egui::pos2(x, middle(glyph)), egui::Vec2::splat(glyph));
+        painted(ui, kind, box_, strong.gamma_multiply(GLYPH_ALPHA));
+        x += glyph + GAP;
     }
 
     if cells.loaded {
@@ -173,7 +189,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     }
 
     if let Some(at) = &cells.at {
-        let galley = painter.layout_no_wrap(at.clone(), egui::FontId::monospace(MONO), quiet);
+        let galley = painter.layout_no_wrap(at.clone(), mono.clone(), quiet);
         painter.galley(
             egui::pos2(x, middle(galley.size().y)),
             galley,
@@ -183,10 +199,9 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     }
 
     // The right end is laid out first; the name gets the remaining width, truncated.
-    let mut right = rect.right() - GAP;
+    let mut right = rect.right() - END;
     if cells.tags > 0 {
-        let galley =
-            painter.layout_no_wrap(cells.tags.to_string(), egui::FontId::monospace(MONO), quiet);
+        let galley = painter.layout_no_wrap(cells.tags.to_string(), mono.clone(), quiet);
         right -= galley.size().x;
         painter.galley(
             egui::pos2(right, middle(galley.size().y)),
@@ -203,7 +218,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         right -= GAP;
     }
     if let Some(count) = &cells.count {
-        let galley = painter.layout_no_wrap(count.clone(), egui::FontId::monospace(MONO), quiet);
+        let galley = painter.layout_no_wrap(count.clone(), mono.clone(), quiet);
         right -= galley.size().x;
         painter.galley(
             egui::pos2(right, middle(galley.size().y)),
@@ -223,11 +238,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         (box_.expand(GAP / 2.0), said)
     });
 
-    let size = match cells.child {
-        true => CHILD_NAME,
-        false => NAME,
-    };
-    let mut job = name_job(cells, egui::FontId::proportional(size), strong);
+    let mut job = name_job(cells, font, strong);
     job.wrap = egui::text::TextWrapping::truncate_at_width((right - x).max(0.0));
     let galley = painter.layout_job(job);
     let elided = galley.elided;
@@ -242,7 +253,7 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
             rect.center().y,
             right - x,
             note,
-            egui::TextFormat::simple(egui::FontId::proportional(MONO), quiet),
+            egui::TextFormat::simple(egui::FontId::proportional(mono.size), quiet),
         );
     }
 
@@ -296,10 +307,12 @@ mod tests {
     #[test]
     fn a_name_too_long_for_its_row_is_cut_to_the_room_left() {
         let long = "Africa Split, the one with the long tail and the second manual";
+        let mut card = egui::Rect::NOTHING;
         let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::SidePanel::left("places")
                 .exact_width(232.0)
                 .show(ctx, |ui| {
+                    card = ui.available_rect_before_wrap();
                     row(
                         ui,
                         false,
@@ -326,10 +339,15 @@ mod tests {
             .find(|word| word.text == long)
             .expect("the long name was painted");
         assert!(cut.galley.elided, "a name without room is truncated");
+        let count = testing::where_(&painted, "128/400");
         assert!(
-            cut.rect.width() <= 232.0,
-            "and stays inside the panel: {}",
-            cut.rect.width()
+            cut.rect.right() <= count.left(),
+            "and stops before the count: {:?} against {count:?}",
+            cut.rect
+        );
+        assert!(
+            count.right() <= card.right() - crate::panel::ROW_INSET,
+            "which stays inside the row: {count:?} in {card:?}"
         );
         assert!(
             painted
@@ -337,5 +355,48 @@ mod tests {
                 .any(|word| word.text == "Africa Split" && !word.galley.elided),
             "a short name is painted whole"
         );
+    }
+
+    /// A row's highlight stands in from both edges of the card and is rounded, and a row
+    /// inside a branch is shorter than one at the top.
+    #[test]
+    fn a_row_stands_in_from_the_card_at_its_own_height() {
+        let ctx = context();
+        let mut card = egui::Rect::NOTHING;
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            egui::SidePanel::left("places")
+                .exact_width(232.0)
+                .show(ctx, |ui| {
+                    card = ui.available_rect_before_wrap();
+                    for child in [false, true] {
+                        row(
+                            ui,
+                            true,
+                            &Cells {
+                                name: "Africa Split",
+                                child,
+                                ..Cells::default()
+                            },
+                        );
+                    }
+                });
+        });
+
+        let lit = ctx.style().visuals.selection.bg_fill;
+        let highlights: Vec<egui::epaint::RectShape> = testing::rects(&output)
+            .into_iter()
+            .filter(|drawn| drawn.fill == lit)
+            .collect();
+        let heights: Vec<f32> = highlights.iter().map(|drawn| drawn.rect.height()).collect();
+        assert_eq!(heights, [ROW, CHILD]);
+        let inset = crate::panel::ROW_INSET;
+        for drawn in &highlights {
+            assert_eq!(drawn.rect.left(), card.left() + inset, "{:?}", drawn.rect);
+            assert_eq!(drawn.rect.right(), card.right() - inset, "{:?}", drawn.rect);
+            assert_eq!(
+                drawn.corner_radius,
+                egui::CornerRadius::same(crate::panel::ROW_RADIUS)
+            );
+        }
     }
 }

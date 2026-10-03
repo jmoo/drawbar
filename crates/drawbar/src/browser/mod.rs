@@ -352,9 +352,10 @@ impl Browser {
         let rename = self.rename.as_mut()?;
         let output = ui
             .horizontal(|ui| {
-                ui.add_space(indent);
+                ui.set_min_height(row::CHILD);
+                ui.add_space(crate::panel::ROW_INSET + indent);
                 egui::TextEdit::singleline(&mut rename.text)
-                    .desired_width(ui.available_width())
+                    .desired_width(ui.available_width() - crate::panel::ROW_INSET)
                     .show(ui)
             })
             .inner;
@@ -399,7 +400,7 @@ impl Browser {
             if landing(&carried.head, onto).is_ok() {
                 ui.painter().rect_stroke(
                     response.rect,
-                    3.0,
+                    crate::panel::ROW_RADIUS,
                     egui::Stroke::new(1.0_f32, ui.visuals().selection.stroke.color),
                     egui::StrokeKind::Inside,
                 );

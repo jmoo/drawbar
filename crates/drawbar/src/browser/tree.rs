@@ -112,14 +112,14 @@ impl Default for Sections {
     }
 }
 
-/// Where a row's contents start.
+/// Where a row's contents start, from the row's own left edge.
 ///
-/// A top-level branch starts 8 px in, a leaf beside it at 26, and a leaf one level down
-/// at 40. A leaf skips the triangle's box, which lines its glyph up under the glyph of a
+/// A top-level branch starts 6 px in, a leaf beside it at 26, and a leaf one level down
+/// at 36. A leaf skips the triangle's box, which lines its glyph up under the glyph of a
 /// branch at the same depth.
 fn indent(depth: usize, branch: bool) -> f32 {
-    const FIRST: f32 = 8.0;
-    const DOWN: f32 = 14.0;
+    const FIRST: f32 = 6.0;
+    const DOWN: f32 = 10.0;
     let past_the_triangle = match branch {
         true => 0.0,
         false => STEP,
@@ -127,10 +127,21 @@ fn indent(depth: usize, branch: bool) -> f32 {
     FIRST + DOWN * depth as f32 + past_the_triangle
 }
 
+/// The space above the first section, the gap between rows, and the space after each
+/// section.
+const TOP: f32 = 8.0;
+const ROW_GAP: f32 = 1.0;
+const AFTER_SECTION: f32 = 8.0;
+
 /// A section's header, and whether its body should be drawn.
-fn section(ui: &mut egui::Ui, title: &str, open: &mut bool) -> bool {
-    panel_header(ui, title, open);
+fn section(ui: &mut egui::Ui, title: &str, count: Option<&str>, open: &mut bool) -> bool {
+    panel_header(ui, title, count, open);
     *open
+}
+
+/// The space after a section, open or shut, before the next header.
+fn end_section(ui: &mut egui::Ui) {
+    ui.add_space(AFTER_SECTION - ROW_GAP);
 }
 
 /// Whether a click landed on the triangle, which opens the branch instead of selecting
@@ -219,17 +230,25 @@ impl Browser {
             .id_salt("browser_tree")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = ROW_GAP;
+                ui.add_space(TOP);
                 let mut sections = self.sections;
-                if section(ui, "places", &mut sections.places) {
+                if section(ui, "Places", None, &mut sections.places) {
                     self.places(ui, workspace, device, queue, filter, acts);
                 }
+                end_section(ui);
                 let kinds = kinds_present(workspace, &device.state);
-                if worth_choosing(&kinds) && section(ui, "kinds", &mut sections.kinds) {
-                    self.kinds(ui, &kinds, workspace, device, filter, acts);
+                if worth_choosing(&kinds) {
+                    if section(ui, "Kinds", None, &mut sections.kinds) {
+                        self.kinds(ui, &kinds, workspace, device, filter, acts);
+                    }
+                    end_section(ui);
                 }
-                if section(ui, "tags", &mut sections.tags) {
+                let tags = self.tags.all().len().to_string();
+                if section(ui, "Tags", Some(&tags), &mut sections.tags) {
                     self.tag_rows(ui, workspace, device, filter, acts);
                 }
+                end_section(ui);
                 self.sections = sections;
                 self.empty_below(ui);
             });
@@ -1262,7 +1281,7 @@ impl Browser {
             &Cells {
                 indent: indent(0, false),
                 glyph: Some(Glyph::Plus),
-                name: "new tag",
+                name: "New tag",
                 faint: true,
                 ..Cells::default()
             },
