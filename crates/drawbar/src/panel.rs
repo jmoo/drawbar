@@ -349,6 +349,25 @@ pub fn tonal_button(ui: &mut egui::Ui, glyph: Option<Glyph>, label: &str) -> egu
     response
 }
 
+/// Style the egui buttons in a `Ui` like [`tonal_button`]s, for buttons another module
+/// builds, such as menu buttons.
+///
+/// Scope this to a child `Ui`: it changes the visuals every later widget reads.
+pub fn tonal(ui: &mut egui::Ui) {
+    ui.spacing_mut().interact_size.y = 28.0;
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 0.0);
+    let widgets = &mut ui.visuals_mut().widgets;
+    for state in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.bg_stroke = egui::Stroke::NONE;
+        state.corner_radius = egui::CornerRadius::same(ROW_RADIUS);
+    }
+}
+
 /// A button that carries the accent: the one action a sheet exists for. A faint wash
 /// and border of the accent, its glyph in the accent, and its label in the active ink.
 pub fn accent_button(

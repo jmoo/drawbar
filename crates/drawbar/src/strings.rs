@@ -559,7 +559,7 @@ pub fn place(class: ObjectClass, at: Location) -> String {
 
 /// How much of a set the attached instrument takes: `6 of 9 fit the Nord Electro 5D 73`.
 ///
-/// A clause, because the library footer joins it with others. `None` when everything
+/// A clause, because the selection's consequence joins it with others. `None` when everything
 /// fits.
 pub fn fitting(fits: usize, of: usize, product: &str) -> Option<String> {
     (fits < of).then(|| format!("{fits} of {of} fit the {product}"))

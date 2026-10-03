@@ -31,7 +31,7 @@ pub const STATUS: f32 = 30.0;
 /// The side cards' default widths, and the minimum width of either.
 pub const BROWSER: f32 = 244.0;
 pub const INSPECTOR: f32 = 268.0;
-const SIDE_LEAST: f32 = 180.0;
+pub(crate) const SIDE_LEAST: f32 = 180.0;
 
 /// The room the center keeps however far a side card is dragged. A card's maximum width
 /// is whatever leaves this much, so it is computed from the room left each frame and not

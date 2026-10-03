@@ -15,13 +15,11 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, tint, ui as ui_text, warn};
-use crate::browser::{qualifier, Act, Browser, Bulk, Item, Kept, Kind, Qualifier};
+use crate::browser::{qualifier, Act, Browser, Item, Kept, Kind, Qualifier};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{painted, Glyph};
-use crate::panel::{
-    cut, list_width, pill_at, row_ink, view_header, Track, INNER_RADIUS, ROW_INSET, ROW_RADIUS,
-};
+use crate::panel::{cut, list_width, pill_at, row_ink, view_header, Track, ROW_INSET};
 use crate::queue::{Diff, Queue};
 use crate::shell::Shell;
 use crate::strings::{counted, folder, place, shown};
@@ -779,33 +777,6 @@ impl Library {
             crate::queue::changed(workspace, &device.state, queue).len(),
         ];
         header(ui, counts, browser.tags(), &shell.filter, &mut acts);
-        let picked: Vec<&Row> = held
-            .iter()
-            .filter(|row| browser.picked().holds(row.item))
-            .collect();
-        if !picked.is_empty() {
-            let checked: Vec<Item> = picked.iter().map(|row| row.item).collect();
-            let shape = Foot::of(ui, ui.available_width(), &checked, workspace, &device.state);
-            // Laid out before the table, so the strip keeps its height and the table takes
-            // what is left. ⚠️ Exact, because a panel otherwise takes its height from the
-            // last frame, and a footer that grows is cut off for a frame.
-            egui::TopBottomPanel::bottom("library_footer")
-                .resizable(false)
-                .exact_height(shape.height)
-                .frame(egui::Frame::new())
-                .show_inside(ui, |ui| {
-                    footer(
-                        ui,
-                        shape,
-                        &picked,
-                        browser,
-                        workspace,
-                        &device.state,
-                        queue,
-                        &mut acts,
-                    )
-                });
-        }
         self.table(ui, &held, browser, workspace, device, queue, &mut acts);
         acts
     }
@@ -1313,203 +1284,6 @@ fn worn(row: &Row, tags: &Tags) -> Vec<String> {
         .filter_map(|tag| tags.name_of(*tag))
         .map(str::to_string)
         .collect()
-}
-
-/// The strip under the table: what is selected, what sending it would do, and everything
-/// that can be asked of the whole set.
-#[allow(clippy::too_many_arguments)]
-fn footer(
-    ui: &mut egui::Ui,
-    shape: Foot,
-    picked: &[&Row],
-    browser: &mut Browser,
-    workspace: &Workspace,
-    device: &DeviceState,
-    queue: &Queue,
-    acts: &mut Vec<Act>,
-) {
-    let checked: Vec<Item> = picked.iter().map(|row| row.item).collect();
-    egui::Frame::new()
-        .fill(ui.visuals().window_fill)
-        .corner_radius(INNER_RADIUS)
-        .inner_margin(egui::Margin::symmetric(FOOT_X as i8, FOOT_Y as i8))
-        .outer_margin(egui::Margin {
-            left: ROW_INSET as i8,
-            right: ROW_INSET as i8,
-            top: 0,
-            bottom: ROW_INSET as i8,
-        })
-        .show(ui, |ui| {
-            if shape.one_row {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.scope(|ui| {
-                        tonal(ui);
-                        // Reversed: the strip runs right to left, so [`Bulk::ALL`]'s first
-                        // action has to be drawn last to sit farthest left.
-                        for action in Bulk::ALL.iter().rev() {
-                            browser.bulk_item(ui, *action, &checked, workspace, device, acts);
-                        }
-                    });
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        words(ui, picked, browser, device, queue);
-                    });
-                });
-            } else {
-                ui.horizontal(|ui| words(ui, picked, browser, device, queue));
-                ui.add_space(ROWS_GAP);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(ACTIONS_GAP, ACTIONS_GAP);
-                    tonal(ui);
-                    for action in Bulk::ALL {
-                        browser.bulk_item(ui, action, &checked, workspace, device, acts);
-                    }
-                });
-            }
-        });
-}
-
-/// How the footer lays out its words and actions in a given width.
-#[derive(Clone, Copy)]
-struct Foot {
-    /// The actions share the words' row; otherwise they wrap onto rows below.
-    one_row: bool,
-    height: f32,
-}
-
-impl Foot {
-    /// The footer's shape in `width`, from the words on its buttons, so it is right in the
-    /// frame it is drawn.
-    fn of(
-        ui: &egui::Ui,
-        width: f32,
-        checked: &[Item],
-        workspace: &Workspace,
-        device: &DeviceState,
-    ) -> Foot {
-        let font = egui::TextStyle::Button.resolve(ui.style());
-        let buttons: Vec<f32> = Bulk::ALL
-            .iter()
-            .map(|action| {
-                let label = crate::browser::bulk_label(*action, checked, workspace, device);
-                let text =
-                    ui.painter()
-                        .layout_no_wrap(label, font.clone(), egui::Color32::PLACEHOLDER);
-                text.size().x + 2.0 * TONAL_PAD
-            })
-            .collect();
-        let inner = width - 2.0 * ROW_INSET - 2.0 * FOOT_X;
-        let framing = 2.0 * FOOT_Y + ROW_INSET;
-        let one_row = buttons.iter().sum::<f32>() + ACTIONS_GAP * (buttons.len() - 1) as f32;
-        if inner >= one_row + WORDS {
-            return Foot {
-                one_row: true,
-                height: TONAL_TALL + framing,
-            };
-        }
-        let rows = wrapped_rows(&buttons, inner, ACTIONS_GAP) as f32;
-        let words = ui.spacing().interact_size.y;
-        Foot {
-            one_row: false,
-            height: words + ROWS_GAP + rows * TONAL_TALL + (rows - 1.0) * ACTIONS_GAP + framing,
-        }
-    }
-}
-
-/// How many rows `widths` take, laid left to right `gap` apart and wrapped at `width`.
-fn wrapped_rows(widths: &[f32], width: f32, gap: f32) -> usize {
-    let mut rows = 1;
-    let mut x = 0.0;
-    for item in widths {
-        if x > 0.0 && x + gap + item > width {
-            rows += 1;
-            x = 0.0;
-        }
-        x += match x > 0.0 {
-            true => gap + item,
-            false => *item,
-        };
-    }
-    rows
-}
-
-/// The footer's words: how many are selected, the button that clears them while there is
-/// room for it, and what sending them would do, shortened to fit.
-fn words(
-    ui: &mut egui::Ui,
-    picked: &[&Row],
-    browser: &mut Browser,
-    device: &DeviceState,
-    queue: &Queue,
-) {
-    ui.spacing_mut().item_spacing.x = 6.0;
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(format!("{} selected", picked.len()))
-                .text_style(ui_text())
-                .strong(),
-        )
-        .truncate(),
-    );
-    // Escape clears the selection too, so the button is the one to go.
-    if ui.available_width() >= CLEAR {
-        ui.scope(|ui| {
-            crate::panel::flat(ui);
-            let clear = egui::Button::new(egui::RichText::new("clear").text_style(ui_text()));
-            if ui
-                .add(clear)
-                .on_hover_text("clear the selection, or press Escape")
-                .clicked()
-            {
-                browser.unpick();
-            }
-        });
-    }
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(consequence(picked, device, queue))
-                .text_style(ui_text())
-                .weak(),
-        )
-        .truncate(),
-    );
-}
-
-/// The padding at each end of a footer button, and its height.
-const TONAL_PAD: f32 = 11.0;
-const TONAL_TALL: f32 = 28.0;
-
-/// The footer's padding inside its box, the gap between its actions, and the gap between
-/// its words and the actions wrapped below them.
-const FOOT_X: f32 = 10.0;
-const FOOT_Y: f32 = 6.0;
-const ACTIONS_GAP: f32 = 6.0;
-const ROWS_GAP: f32 = 4.0;
-
-/// The room the footer's clear button needs beside the actions.
-const CLEAR: f32 = 48.0;
-
-/// The least room the footer's words get beside its actions before the actions move to a
-/// row of their own.
-const WORDS: f32 = 160.0;
-
-/// Style the buttons in a `Ui` as [`crate::panel::tonal_button`]s: a quiet fill with no
-/// border, which darkens under the pointer.
-///
-/// Scope this to a child `Ui`: it changes the visuals every later widget reads.
-fn tonal(ui: &mut egui::Ui) {
-    ui.spacing_mut().interact_size.y = TONAL_TALL;
-    ui.spacing_mut().button_padding = egui::vec2(TONAL_PAD, 0.0);
-    let widgets = &mut ui.visuals_mut().widgets;
-    for state in [
-        &mut widgets.inactive,
-        &mut widgets.hovered,
-        &mut widgets.active,
-        &mut widgets.open,
-    ] {
-        state.bg_stroke = egui::Stroke::NONE;
-        state.corner_radius = egui::CornerRadius::same(ROW_RADIUS);
-    }
 }
 
 /// The line the table shows when no row passes the filters.
@@ -2295,10 +2069,10 @@ mod tests {
         assert!(marked.ends_with(mark_words(Mark::Differs)), "{marked}");
     }
 
-    /// The sentence the footer says: where the picked rows go, how many of those slots
+    /// The sentence about a selection: where the picked rows go, how many of those slots
     /// are taken, what is already waiting, and what nothing has named.
     #[test]
-    fn the_footer_says_where_a_selection_goes_and_what_it_would_replace() {
+    fn the_selection_says_where_it_goes_and_what_it_would_replace() {
         let Bench {
             mut workspace,
             mut device,
@@ -2434,95 +2208,6 @@ mod tests {
             1,
             "a plain click selected its row alone"
         );
-    }
-
-    /// However wide the library, the footer shows every action and its words whole, and
-    /// never one on another: a narrow footer moves the actions to rows of their own.
-    #[test]
-    fn wrapped_buttons_take_as_many_rows_as_their_widths_need() {
-        assert_eq!(wrapped_rows(&[50.0, 50.0, 50.0], 200.0, 6.0), 1);
-        assert_eq!(
-            wrapped_rows(&[50.0, 50.0, 50.0], 150.0, 6.0),
-            2,
-            "the gaps count"
-        );
-        assert_eq!(
-            wrapped_rows(&[300.0, 50.0], 100.0, 6.0),
-            2,
-            "a wide one gets its own row"
-        );
-    }
-
-    #[test]
-    fn the_footer_fits_its_words_and_actions_at_any_width() {
-        let Bench {
-            ctx,
-            mut browser,
-            mut workspace,
-            mut device,
-            queue,
-            shell,
-            mut log,
-            ..
-        } = Bench::new();
-        device.pretend_attached_as("Nord Electro 5");
-        let mut library = Library::default();
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        browser.check(Item::Local(id));
-
-        for width in [320.0_f32, 560.0, 1100.0] {
-            let mut said = Vec::new();
-            for _ in 0..2 {
-                let input = testing::screen(egui::vec2(width, 540.0), Vec::new());
-                let output = testing::run(&ctx, input, |ctx| {
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::new())
-                        .show(ctx, |ui| {
-                            library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
-                        });
-                });
-                said = testing::painted(&output);
-            }
-            let actions: Vec<egui::Rect> = Bulk::ALL
-                .iter()
-                .filter_map(|action| said.iter().find(|word| word.text == action.label()))
-                .map(|word| word.rect)
-                .collect();
-            assert_eq!(
-                actions.len(),
-                Bulk::ALL.len(),
-                "{width}: every action is shown"
-            );
-            let inside = |rect: egui::Rect| rect.left() >= 0.0 && rect.right() <= width;
-            // Prefixes, because a word short of room is cut to an ellipsis.
-            let words = said.iter().filter(|word| {
-                ["1 s", "cl", "No"]
-                    .iter()
-                    .any(|start| word.text.starts_with(start))
-            });
-            for action in &actions {
-                assert!(
-                    inside(*action),
-                    "{width}: an action at {action:?} is cut off"
-                );
-            }
-            for word in words {
-                assert!(
-                    inside(word.rect),
-                    "{width}: {:?} at {:?} is cut off",
-                    word.text,
-                    word.rect
-                );
-                for action in &actions {
-                    assert!(
-                        !word.rect.intersects(*action),
-                        "{width}: {:?} at {:?} sits on an action at {action:?}",
-                        word.text,
-                        word.rect
-                    );
-                }
-            }
-        }
     }
 
     /// A tag narrowing the library shows as a chip in the header, and a click on the chip
@@ -2807,7 +2492,7 @@ mod tests {
     }
 
     /// Paints the table headlessly at the center's width with both docks open and with
-    /// none, and picks a row at each so the footer is drawn too. Nothing checks pixels:
+    /// none, and picks a row at each. Nothing checks pixels:
     /// this catches a layout that panics or an id that collides.
     #[test]
     fn the_table_paints_at_every_width_the_center_has() {
@@ -2826,8 +2511,7 @@ mod tests {
         let on_a_row = on_row(0);
         let ctx = bench.ctx.clone();
         for width in [430.0_f32, 900.0] {
-            // The pointer moves, then presses, then the next frame has a row picked and
-            // draws the footer under the table.
+            // The pointer moves, then presses, then the next frame has a row picked.
             let frames: [Vec<egui::Event>; 4] = [
                 Vec::new(),
                 vec![egui::Event::PointerMoved(on_a_row)],

@@ -15,7 +15,7 @@ use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
-use crate::browser::{Act, Browser, Item, Kind};
+use crate::browser::{Act, Browser, Bulk, Item, Kind};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
@@ -208,26 +208,28 @@ fn header(ui: &mut egui::Ui, head: Head) -> bool {
     open.unwrap_or(true)
 }
 
-/// The selection: what it is, how it is tagged, and what it plays, each in its own card.
+/// The selection: what it is and what can be asked of it, how it is tagged, and what it
+/// plays, each in its own card.
 fn selection(
     ui: &mut egui::Ui,
-    browser: &Browser,
+    browser: &mut Browser,
     workspace: &Workspace,
     device: &Device,
     queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
-    let picked = browser.picked().items().count();
+    let checked: Vec<Item> = browser.picked().items().collect();
+    let picked = checked.len();
+    let rows: Vec<Row> = checked
+        .iter()
+        .filter_map(|item| row_of(*item, workspace, &device.state, queue, browser.tags()))
+        .collect();
     card(ui, Head::fixed(Glyph::ScanEye, "Selection"), |ui| {
         if picked == 0 {
             return faint(ui, "Nothing is selected.");
         }
-        let rows: Vec<Row> = browser
-            .picked()
-            .items()
-            .filter_map(|item| row_of(item, workspace, &device.state, queue, browser.tags()))
-            .collect();
         about_selection(ui, picked, &rows, workspace, device);
+        bulk_actions(ui, browser, &checked, &rows, workspace, device, queue, acts);
     });
     if picked == 0 {
         return;
@@ -320,6 +322,35 @@ fn about_selection(
     for fact in facts(row, &held) {
         fact_line(ui, fact);
     }
+}
+
+/// What sending the selection would do, then every action on the whole of it, wrapped
+/// to the card's width.
+#[allow(clippy::too_many_arguments)]
+fn bulk_actions(
+    ui: &mut egui::Ui,
+    browser: &mut Browser,
+    checked: &[Item],
+    rows: &[Row],
+    workspace: &Workspace,
+    device: &Device,
+    queue: &Queue,
+    acts: &mut Vec<Act>,
+) {
+    let rows: Vec<&Row> = rows.iter().collect();
+    let going = crate::library::consequence(&rows, &device.state, queue);
+    ui.add_space(4.0);
+    if !going.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(going).text_style(ui_text()).weak()).wrap());
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+        crate::panel::tonal(ui);
+        for action in Bulk::ALL {
+            browser.bulk_item(ui, action, checked, workspace, &device.state, acts);
+        }
+    });
 }
 
 /// One fact: its label in a fixed column and its full value beside it.
@@ -976,6 +1007,67 @@ mod tests {
         assert!(untagged.contains(&"New tag".to_string()), "{untagged:?}");
         assert!(!untagged.contains(&"Sunday".to_string()), "{untagged:?}");
         assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
+    }
+
+    /// The Selection card offers every action on the selection, whole and inside the card
+    /// at the narrowest the inspector gets, and Queue for sending queues what is selected.
+    #[test]
+    fn the_selection_card_offers_every_action_on_the_selection() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            mut device,
+            queue,
+            mut shell,
+            mut log,
+            ..
+        } = Bench::new();
+        device.pretend_attached_as("Nord Electro 5");
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.check(Item::Local(id));
+        let screen = egui::vec2(800.0, 900.0);
+
+        for width in [crate::shell::SIDE_LEAST, crate::shell::INSPECTOR] {
+            let mut acts = Vec::new();
+            let mut frame = |events: Vec<egui::Event>| {
+                let input = testing::screen(screen, events);
+                let output = testing::run(&ctx, input, |ctx| {
+                    egui::SidePanel::right("inspector")
+                        .exact_width(width)
+                        .show(ctx, |panel| {
+                            acts.extend(super::ui(
+                                panel,
+                                &mut shell,
+                                &mut browser,
+                                &workspace,
+                                &device,
+                                &queue,
+                            ));
+                        });
+                });
+                testing::painted(&output)
+            };
+            frame(Vec::new());
+            let said = frame(Vec::new());
+            for action in Bulk::ALL {
+                let word = testing::where_(&said, action.label());
+                assert!(
+                    word.left() >= screen.x - width && word.right() <= screen.x,
+                    "{width}: {} at {word:?} is cut off",
+                    action.label()
+                );
+            }
+            frame(testing::click(
+                testing::where_(&said, Bulk::Queue.label()).center(),
+            ));
+            assert!(
+                acts.iter()
+                    .any(|act| matches!(act, Act::SendChecked(ids) if ids == &[id])),
+                "{width}: Queue for sending queues the selection; got {} acts",
+                acts.len()
+            );
+        }
     }
 
     /// New tag in the Tags card puts a new tag on everything selected, and nothing else.

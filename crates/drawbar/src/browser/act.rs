@@ -161,7 +161,7 @@ pub enum Act {
     Refused(String),
 }
 
-/// The bulk actions on the checked set, in the order the library's footer and a checked
+/// The bulk actions on the checked set, in the order the Selection card and a checked
 /// row's menu offer them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bulk {

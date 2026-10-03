@@ -11,7 +11,7 @@ desktop app.
 | **Library** (center) | One table over both places. Sort by any column. |
 | **Documents** (center) | Every sound you open gets a tab beside the Library. |
 | **Keyboard** (center) | The instrument's folders drawn as banks of slots, once connected. |
-| **Inspector** (right) | What is selected, and while connected, how full each folder is. |
+| **Inspector** (right) | What is selected and the actions on it, and while connected, how full each folder is. |
 | **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. |
 
 The search box filters the Library by name; ⌘K (Ctrl+K) puts the cursor in it.
@@ -45,7 +45,8 @@ for a bug report, and **Clear** empties it. Escape or a click elsewhere closes i
 
 Click a row to select it, ⌘-click to add more, ⇧-click to select a run, and
 double-click to open. Right-click for a menu that acts on everything selected.
-In the Library, the footer acts on every selected row at once. F2 renames.
+The inspector's **Selection** card says where the selection would be sent and
+offers the same actions as buttons. F2 renames.
 
 ## Reading the Library
 

@@ -600,7 +600,7 @@ impl Browser {
 
     /// The menu a row offers, in the tree or in the library table.
     ///
-    /// A row inside a checked set of several offers what the library's footer offers,
+    /// A row inside a checked set of several offers what the Selection card offers,
     /// because the menu acts on the whole set.
     ///
     /// Folders and tags appear only in the tree, so the rows that draw them build their
@@ -683,8 +683,8 @@ impl Browser {
 
     /// Every tag, checked where it is on everything selected, then New tag.
     ///
-    /// Only the items, so the row's menu and the library's footer can each give them
-    /// their own label.
+    /// Only the items, so the row's menu and the Selection card can each give them their
+    /// own label.
     pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         for tag in self.tags.all() {
             let on = self.tags.on_all(picked, tag.id);

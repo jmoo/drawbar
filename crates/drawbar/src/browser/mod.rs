@@ -115,7 +115,7 @@ const ASK_FEWEST: f32 = 80.0;
 
 /// The words on a bulk action's button for the checked set: Queue counts what the
 /// attached instrument would take.
-pub(crate) fn bulk_label(
+fn bulk_label(
     action: Bulk,
     checked: &[Item],
     workspace: &Workspace,
@@ -535,8 +535,8 @@ impl Browser {
         });
     }
 
-    /// One bulk action on the checked set, drawn the same in the library's footer and in
-    /// a checked row's menu.
+    /// One bulk action on the checked set, drawn the same in the inspector's Selection card
+    /// and in a checked row's menu.
     ///
     /// The control is disabled when it has nothing to act on, and its hover says why:
     /// nothing of the right kind is checked, or the attached instrument refuses all of
