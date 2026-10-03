@@ -2163,7 +2163,8 @@ impl Workspace {
             return;
         }
         entity.decoded(decoded);
-        if let Some(e) = &entity.parse_error {
+        // A note has no format to decode, so a parse error on text is not a failure.
+        if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text) {
             log.warn(format!("{}: {e}", entity.name));
         }
         self.revision += 1;
@@ -3180,7 +3181,7 @@ impl Workspace {
                     }
                 }
             };
-            if let Some(e) = &entity.parse_error {
+            if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text) {
                 log.warn(format!("{}: {e}", entity.name));
             }
             self.next_id = self.next_id.max(next);
@@ -4338,6 +4339,44 @@ mod tests {
         );
         workspace.settle_files(&mut log);
         assert_eq!(workspace.reading(), 0);
+    }
+
+    /// A note read from the library, or restored with an unsaved edit, is words and not
+    /// a file that failed to decode, so it logs no problem.
+    #[test]
+    fn a_note_read_from_the_library_logs_no_problem() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let words = b"Smoke note 1\n".to_vec();
+        let note = |id: u64, unread: Option<u64>, unsaved: Option<Vec<u8>>| Saved {
+            id,
+            name: format!("Note {id}.txt"),
+            path: Some(LibPath::root().join(&format!("Note {id}.txt"))),
+            origin: Origin::Fresh,
+            saved: match unread {
+                Some(_) => Vec::new(),
+                None => words.clone(),
+            },
+            file: None,
+            unread,
+            unsaved,
+        };
+        let edited = b"Smoke note 1, edited\n".to_vec();
+        let saved = vec![
+            note(1, Some(words.len() as u64), None),
+            note(2, None, Some(edited)),
+        ];
+        workspace.restore(saved, None, &mut log);
+        workspace.hurry(1);
+        assert_eq!(workspace.take_wanted(), vec![1]);
+        workspace.took(1, Some(words), None);
+        workspace.settle_files(&mut log);
+
+        for id in [1, 2] {
+            let entity = workspace.get(id).expect("listed");
+            assert!(entity.is_text, "Note {id} is a note");
+        }
+        assert_eq!(log.problems(), 0, "{:?}", log.status());
     }
 
     /// A flipped body byte is reported: the container's checksum no longer matches, and
