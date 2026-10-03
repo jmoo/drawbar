@@ -2367,6 +2367,12 @@ mod tests {
         assert!(app.about.is_none(), "Escape closes About");
         assert_eq!(picked(&app), 1, "and keeps the selection");
 
+        app.shell.zoom_open = true;
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
+        assert!(!app.shell.zoom_open, "Escape closes the zoom popover");
+        assert_eq!(picked(&app), 1, "and keeps the selection");
+
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
         assert_eq!(picked(&app), 0, "with nothing open, Escape lets go");

@@ -488,9 +488,9 @@ impl eframe::App for DrawbarApp {
         crate::about::dialog(ctx, &mut self.about, &self.log);
 
         // Before the panels, so an editor open this frame still has focus when Escape is
-        // handled. An overlay takes Escape for itself: the activity log, or any modal up
-        // last frame, which an Escape this frame has already closed.
-        if !crate::menu::covered(ctx) && !self.shell.log_open {
+        // handled. An overlay takes Escape for itself: the activity log, the zoom popover,
+        // or any modal up last frame, which an Escape this frame has already closed.
+        if !crate::menu::covered(ctx) && !self.shell.log_open && !self.shell.zoom_open {
             self.browser.let_go(ctx);
         }
 
