@@ -12,7 +12,7 @@ desktop app.
 | **Documents** (center) | Every sound you open gets a tab beside the Library. |
 | **Keyboard** (center) | The instrument's folders drawn as banks of slots, once connected. |
 | **Inspector** (right) | What is selected and the actions on it, and while connected, how full each folder is. |
-| **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. |
+| **Status line** | The last thing that happened, and how many problems the log holds. Click either to open the activity log. The zoom is at the right. |
 
 The search box filters the Library by name; ⌘K (Ctrl+K) puts the cursor in it.
 The buttons at the two ends of the row of tabs show and hide the browser and the
@@ -100,3 +100,16 @@ close that program and turn listening off and on again.
 
 The sun and moon button in the top bar cycles between following your system,
 light, and dark. Hover it to see which one is set.
+
+## Zoom
+
+The magnifier at the right end of the status line zooms the whole window, from
+50% to 200%. Away from 100% it shows the zoom beside it. Click it for **−** and
+**+**, and for **Reset to 100%**. **View** has the same three commands, and the
+desktop app also takes ⌘+ (or ⌘=), ⌘− and ⌘0. In a browser those keys zoom the
+page instead. drawbar keeps the zoom between sessions.
+
+drawbar does not zoom out so far that text and lines blur on your display, or
+in so far that the window can no longer hold it. On most displays without high
+pixel density that means no smaller than 100%. If the window later becomes too
+small for the zoom, drawbar offers to zoom out.

@@ -113,6 +113,7 @@ glyphs! {
     Waves => "waves.svg",
     Wrench => "wrench.svg",
     X => "x.svg",
+    ZoomIn => "zoom-in.svg",
 }
 
 impl Glyph {
