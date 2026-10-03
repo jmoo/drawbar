@@ -2355,12 +2355,18 @@ impl Workspace {
     }
 
     pub fn remove(&mut self, id: u64, log: &mut Log) {
-        let Some(at) = self.position(id) else {
-            return;
-        };
+        if let Some(gone) = self.forget(id) {
+            log.say(format!("Removed “{}” from this computer.", gone.name));
+        }
+    }
+
+    /// Let go of an asset without a word, as when it turns out to be another asset's
+    /// file.
+    pub fn forget(&mut self, id: u64) -> Option<LocalEntity> {
+        let at = self.position(id)?;
         let gone = self.entities.remove(at);
         self.moved();
-        log.say(format!("Removed “{}” from this computer.", gone.name));
+        Some(gone)
     }
 
     /// Let go of every asset on this computer, as another library takes its place, and

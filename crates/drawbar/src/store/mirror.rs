@@ -668,7 +668,7 @@ impl Store {
             Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, log),
             Event::Listed { part, ran } => self.listed(part, ran, workspace, browser, log),
             Event::Complete(complete) => {
-                self.complete(complete, workspace, browser, log);
+                self.complete(complete, workspace, browser, queue, log);
                 self.pay();
             }
             Event::Walked { mut dir, ran } => {
@@ -1090,7 +1090,7 @@ impl Store {
             .filter(|mine| match (&found.bytes, &found.file) {
                 (Some(bytes), _) => mine != bytes,
                 (None, Some(file)) => !file.holds(mine),
-                (None, None) => true,
+                (None, None) => found.crc != Some(nord_format::crc::crc32(mine)),
             });
         let conflicted = changed && mine.is_some();
         self.records.insert(id, Record::of_found(&found, print));
@@ -1129,14 +1129,16 @@ impl Store {
         mut complete: Complete,
         workspace: &mut Workspace,
         browser: &mut Browser,
+        queue: &Queue,
         log: &mut Log,
     ) {
         let Some(mut loading) = self.loading.take() else {
             return;
         };
         loading.next = loading.next.max(workspace.next_id());
-        for found in &mut complete.strangers {
-            loading.now(complete.ran, &mut found.path);
+        let strangers = complete.strangers.iter_mut().map(|found| &mut found.path);
+        for path in strangers.chain(&mut complete.gone) {
+            loading.now(complete.ran, path);
         }
         let swept = loading.swept + complete.swept;
         if swept > 0 {
@@ -1156,9 +1158,30 @@ impl Store {
                 ))
             })
             .collect();
-        let matched = match_files(&known, complete.strangers);
+        // Each file that may be a row moved was listed as an asset of its own, which it
+        // gives up to the row it turns out to be, unless something has changed it since.
+        let listed: BTreeMap<LibPath, u64> = self
+            .records
+            .iter()
+            .filter(|(id, _)| !loading.rows.contains_key(*id))
+            .filter_map(|(id, record)| Some((record.path.clone()?, *id)))
+            .collect();
+        let strangers = complete.strangers.into_iter().filter(|found| {
+            let entity = listed.get(&found.path).and_then(|id| workspace.get(*id));
+            entity.is_some_and(|entity| !precious(entity, queue))
+        });
+        let matched = match_files(&known, strangers.collect());
         let mut back = Vec::new();
         for (id, found) in matched.renamed {
+            let Some(stranger) = listed.get(&found.path).copied() else {
+                continue;
+            };
+            self.records.remove(&stranger);
+            workspace.forget(stranger);
+            for tag in browser.tags.worn(stranger).clone() {
+                browser.tags.set(id, tag, true);
+            }
+            browser.tags.forget(stranger);
             if let Some((saved, _)) = self.claim(&mut loading, id, found, false) {
                 back.push(saved);
             }
@@ -1190,12 +1213,15 @@ impl Store {
                 back.push(saved_from(*id, row, bytes));
             }
         }
-        for found in matched.arrived {
-            let id = loading.next;
-            loading.next = id.saturating_add(1);
-            back.push(newcomer(id, found, &mut self.records));
-        }
         self.restored(back, &loading, workspace, log);
+        for path in &complete.gone {
+            if let Some(id) = listed.get(path) {
+                self.vanished(*id, workspace, browser, queue, log);
+            }
+        }
+        // A file gone since the walk listed it went somewhere the walk may not have
+        // looked, so the tree is listed again.
+        self.owes |= !complete.gone.is_empty();
         for id in &missing {
             workspace.unsave(*id, log);
             browser.folders.missing.insert(*id);

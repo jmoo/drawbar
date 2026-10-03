@@ -306,11 +306,8 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         swept,
     })));
     let mut lister = Lister::default();
-    lister.rows(fs, rows, answer).await;
-    lister.walk(fs, walk, answer).await;
-    let (last, strangers) = lister.finish(fs).await;
+    lister.list(fs, rows, walk, answer).await;
     let ran = lister.ran;
-    answer(Event::Listed { part: last, ran });
     let mut swept = 0;
     if sweeps {
         for temp in std::mem::take(&mut lister.temps) {
@@ -320,7 +317,8 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         }
     }
     answer(Event::Complete(Complete {
-        strangers,
+        strangers: lister.recognized,
+        gone: lister.gone,
         swept,
         ran,
     }));
@@ -531,6 +529,10 @@ fn nested(a: &str, b: &str) -> bool {
 /// How many entries one part of a listing covers before it is sent.
 const PART: usize = 256;
 
+/// How many files the CRCs taken after the walk read at most between two runs of the
+/// commands waiting, and how many of their bytes.
+const RECOGNIZE: (usize, u64) = (64, 16 << 20);
+
 /// One row of the index, as an open looks for it.
 struct Row {
     path: LibPath,
@@ -545,7 +547,8 @@ struct Row {
 /// Every row of the index is looked at first, where the index says it is, and sent
 /// before the walk begins; the walk leaves those files out. A file the walk finds whose
 /// length is that of a row not found, where that row's CRC is known, may be that row's
-/// file moved, so it is held back until the walk ends and its CRC taken.
+/// file moved: it is sent like any other, and once the walk ends its CRC is taken, a few
+/// files at a time.
 ///
 /// The commands sent meanwhile run between folders, each after the part gathered before
 /// it is sent, and the listing follows what each did to the tree.
@@ -561,8 +564,11 @@ struct Lister {
     part: Listing,
     /// Entries looked at for the part being gathered.
     taken: usize,
-    /// Files at new paths that may be rows moved.
-    strangers: Vec<Found>,
+    /// Files at new paths that may be rows moved, whose CRC is still to be taken, those
+    /// whose CRC has been, and those gone by then.
+    strangers: VecDeque<Found>,
+    recognized: Vec<Found>,
+    gone: Vec<LibPath>,
     /// The temporary siblings interrupted saves left.
     temps: Vec<String>,
     /// How many commands sent since the open have run.
@@ -671,7 +677,7 @@ impl Lister {
     /// ⚠️ A folder's entries are taken before any command runs after they were listed, the
     /// root's among them, which are listed before the open answers: a command may rename
     /// what they name.
-    async fn walk(&mut self, fs: &mut impl Fs, mut walk: Walk, answer: &mut impl FnMut(Event)) {
+    async fn walk(&mut self, fs: &mut impl Fs, walk: &mut Walk, answer: &mut impl FnMut(Event)) {
         loop {
             let next = walk.next_of(fs, &self.urgent).await;
             let Some(entries) = next.filter(|_| !fs.stopped()) else {
@@ -683,8 +689,8 @@ impl Lister {
                     self.send(answer);
                 }
             }
-            self.walked(&walk, answer);
-            self.between(fs, &mut walk, answer).await;
+            self.walked(walk, answer);
+            self.between(fs, walk, answer).await;
         }
     }
 
@@ -738,9 +744,11 @@ impl Lister {
                         .map(|path| path.moved(&from, &to).unwrap_or(path))
                         .collect();
                 }
-                for found in &mut self.strangers {
-                    if let Some(moved) = found.path.moved(&from, &to) {
-                        found.path = moved;
+                let found = self.strangers.iter_mut().chain(&mut self.recognized);
+                let paths = found.map(|found| &mut found.path).chain(&mut self.gone);
+                for path in paths {
+                    if let Some(moved) = path.moved(&from, &to) {
+                        *path = moved;
                     }
                 }
                 for dir in &mut self.urgent {
@@ -756,6 +764,8 @@ impl Lister {
                 }
             }
             Follow::Wrote(path) => {
+                self.strangers.retain(|found| found.path != path);
+                self.recognized.retain(|found| found.path != path);
                 self.told.insert(path);
             }
             Follow::Made(dir) => {
@@ -794,24 +804,68 @@ impl Lister {
             Kind::File(_) if !opens(path.leaf()) => self.part.others.push(path),
             Kind::File(stat) => {
                 let found = Found::unread(path, stat);
-                match self.lens.contains(&stat.len) {
-                    true => self.strangers.push(found),
-                    false => self.part.files.push(found),
+                if self.lens.contains(&stat.len) {
+                    self.strangers.push_back(found.clone());
                 }
+                self.part.files.push(found);
             }
             Kind::Unread(why) => self.part.unread.push((path, why)),
             Kind::Other => self.part.others.push(path),
         }
     }
 
-    /// Read each file held back and take its CRC. Returns the last part, and the files
-    /// held back.
-    async fn finish(&mut self, fs: &impl Fs) -> (Listing, Vec<Found>) {
-        let mut strangers = std::mem::take(&mut self.strangers);
-        for found in strangers.iter_mut().filter(|_| !fs.stopped()) {
-            fingerprint(fs, found).await;
+    /// Send the rows of the index, then the walk, then take the CRC of each file that
+    /// may be a row moved, and send the last part.
+    async fn list(
+        &mut self,
+        fs: &mut impl Fs,
+        rows: Vec<Row>,
+        mut walk: Walk,
+        answer: &mut impl FnMut(Event),
+    ) {
+        self.rows(fs, rows, answer).await;
+        self.walk(fs, &mut walk, answer).await;
+        self.recognize(fs, &mut walk, answer).await;
+        let part = self.cut();
+        answer(Event::Listed {
+            part,
+            ran: self.ran,
+        });
+    }
+
+    /// Take the CRC of each file that may be a row moved, as it is now, and run the
+    /// commands waiting after every few. One gone by then is noted as gone.
+    async fn recognize(
+        &mut self,
+        fs: &mut impl Fs,
+        walk: &mut Walk,
+        answer: &mut impl FnMut(Event),
+    ) {
+        let (most, most_bytes) = RECOGNIZE;
+        while !self.strangers.is_empty() && !fs.stopped() {
+            let (mut files, mut bytes) = (0, 0);
+            while files < most && bytes < most_bytes {
+                let Some(mut found) = self.strangers.pop_front() else {
+                    break;
+                };
+                files += 1;
+                bytes += found.stat.len;
+                match fs.stat(found.path.as_str()).await {
+                    Ok(Some(stat)) => found.stat = stat,
+                    Ok(None) => {
+                        self.gone.push(found.path);
+                        continue;
+                    }
+                    Err(_) => continue,
+                }
+                fingerprint(fs, &mut found).await;
+                (found.bytes, found.file) = (None, None);
+                if found.crc.is_some() {
+                    self.recognized.push(found);
+                }
+            }
+            self.between(fs, walk, answer).await;
         }
-        (self.cut(), strangers)
     }
 }
 
@@ -1197,20 +1251,25 @@ async fn remove(fs: &mut impl Fs, path: &LibPath, expect: Fingerprint) -> Result
 mod tests {
     use std::cell::Cell;
     use std::future::Future;
+    use std::rc::Rc;
 
     use super::*;
     use crate::testing::{on_disk, sample_bytes, Temp};
 
     /// A library whose files claim whatever size they are given, without taking it. The
-    /// ones in `rests` are left in place, as the desktop leaves a sample instrument, and
-    /// the folders in `unreadable` cannot be read. It counts the files it reads whole. The
-    /// commands in `waiting` were sent while a listing is in flight.
+    /// ones in `rests` are left in place, as the desktop leaves a sample instrument, the
+    /// folders in `unreadable` cannot be read, and the files in `vanished` are listed but
+    /// gone when looked at. It counts the files it reads whole. The commands in `waiting`
+    /// were sent while a listing is in flight, and `later` is sent once that many files
+    /// have been read.
     struct Claimed {
         files: BTreeMap<String, u64>,
         rests: BTreeMap<String, Arc<OnDisk>>,
         unreadable: BTreeSet<String>,
-        reads: Cell<usize>,
+        vanished: BTreeSet<String>,
+        reads: Rc<Cell<usize>>,
         waiting: VecDeque<Cmd>,
+        later: Option<(usize, Cmd)>,
     }
 
     impl Claimed {
@@ -1219,8 +1278,10 @@ mod tests {
                 files: files.into_iter().collect(),
                 rests: BTreeMap::new(),
                 unreadable: BTreeSet::new(),
-                reads: Cell::new(0),
+                vanished: BTreeSet::new(),
+                reads: Rc::default(),
                 waiting: VecDeque::new(),
+                later: None,
             }
         }
     }
@@ -1238,6 +1299,13 @@ mod tests {
 
     impl Fs for Claimed {
         fn waiting(&mut self) -> Option<Cmd> {
+            if self
+                .later
+                .as_ref()
+                .is_some_and(|(after, _)| self.reads.get() >= *after)
+            {
+                return self.later.take().map(|(_, cmd)| cmd);
+            }
             self.waiting.pop_front()
         }
         fn hold(&mut self, cmd: Cmd) {
@@ -1279,7 +1347,11 @@ mod tests {
             Ok(path.as_bytes().to_vec())
         }
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
-            Ok(self.files.get(path).map(|len| stat(*len)))
+            let here = self
+                .files
+                .get(path)
+                .filter(|_| !self.vanished.contains(path));
+            Ok(here.map(|len| stat(*len)))
         }
         async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
             self.files.insert(path.to_string(), bytes.len() as u64);
@@ -1334,37 +1406,32 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
-    /// Every answer of an open's listing over these rows of the index, with the files
-    /// held back last, as a part of their own.
+    /// Every answer of an open's listing over these rows of the index, its end among
+    /// them.
     fn listing(fs: &mut Claimed, rows: Vec<Row>) -> Vec<Event> {
         now(async {
             let walk = Walk::start(fs).await.unwrap();
             let mut lister = Lister::default();
             let mut events = Vec::new();
             let mut answer = |event| events.push(event);
-            lister.rows(fs, rows, &mut answer).await;
-            lister.walk(fs, walk, &mut answer).await;
-            let (last, strangers) = lister.finish(fs).await;
-            let ran = lister.ran;
-            answer(Event::Listed { part: last, ran });
-            let strangers = Listing {
-                files: strangers,
-                ..Listing::default()
-            };
-            answer(Event::Listed {
-                part: strangers,
-                ran,
-            });
+            lister.list(fs, rows, walk, &mut answer).await;
+            answer(Event::Complete(Complete {
+                strangers: lister.recognized,
+                gone: lister.gone,
+                swept: 0,
+                ran: lister.ran,
+            }));
             events
         })
     }
 
-    /// Every part of an open's listing, where nothing else is answered.
+    /// Every part of an open's listing, where nothing else is answered but its end.
     fn parts(fs: &mut Claimed, rows: Vec<Row>) -> Vec<Listing> {
         listing(fs, rows)
             .into_iter()
-            .map(|event| match event {
-                Event::Listed { part, .. } => part,
+            .filter_map(|event| match event {
+                Event::Listed { part, .. } => Some(part),
+                Event::Complete(_) => None,
                 other => panic!("{other:?}"),
             })
             .collect()
@@ -1630,11 +1697,12 @@ mod tests {
         assert_eq!(listed, levels.len() * PART, "every file");
     }
 
-    /// A file at a new path waits for the end of the listing only where its length is that
-    /// of a file the index names that is not where the index says, and is read there, its
-    /// CRC taken.
+    /// A file at a new path is listed at once, unread, whatever its length. Where its
+    /// length is that of a file the index names that is not where the index says, its
+    /// CRC is taken once the walk is done, and the end of the listing names it with that
+    /// CRC.
     #[test]
-    fn a_file_that_may_be_one_moved_waits_for_the_end_and_is_fingerprinted() {
+    fn a_file_that_may_be_one_moved_is_listed_at_once_and_fingerprinted_at_the_end() {
         let mut fs = Claimed::of(["Grand.ne5p", "Moved.ne5p", "Other.ne5p"].map(|path| {
             let len = match path {
                 "Other.ne5p" => 3,
@@ -1650,20 +1718,68 @@ mod tests {
             }),
             working: false,
         };
-        let parts = parts(&mut fs, vec![row("Gone.ne5p"), row("Grand.ne5p")]);
-        let strangers = &parts[parts.len() - 1].files;
-        let held: Vec<(&str, bool)> = strangers
+        let events = listing(&mut fs, vec![row("Gone.ne5p"), row("Grand.ne5p")]);
+        let Some(Event::Complete(complete)) = events.last() else {
+            panic!("{events:?}");
+        };
+        let recognized: Vec<(&str, Option<u32>, bool)> = complete
+            .strangers
             .iter()
-            .map(|found| (found.path.as_str(), found.crc.is_some()))
+            .map(|found| (found.path.as_str(), found.crc, found.read()))
             .collect();
-        assert_eq!(held, [("Moved.ne5p", true)], "(path, fingerprinted)");
+        let crc = nord_format::crc::crc32(b"Moved.ne5p");
+        assert_eq!(
+            recognized,
+            [("Moved.ne5p", Some(crc), false)],
+            "(path, CRC, read)"
+        );
+        let parts = parts(&mut fs, vec![row("Gone.ne5p"), row("Grand.ne5p")]);
         assert_eq!(files(&parts[0]), ["Grand.ne5p"]);
-        let walked: Vec<&str> = parts[1..parts.len() - 1].iter().flat_map(files).collect();
-        assert_eq!(walked, ["Other.ne5p"]);
-        assert!(parts[..parts.len() - 1]
+        let walked: Vec<&str> = parts[1..].iter().flat_map(files).collect();
+        assert_eq!(walked, ["Moved.ne5p", "Other.ne5p"]);
+        assert!(parts
             .iter()
             .flat_map(|part| &part.files)
             .all(|found| found.crc.is_none() && !found.read()));
+    }
+
+    /// The CRCs taken after the walk are taken a few at a time, and a command sent
+    /// meanwhile runs between them. A file gone by the time its CRC is to be taken is
+    /// named as gone.
+    #[test]
+    fn the_crcs_after_the_walk_let_commands_run_between_them() {
+        const MANY: usize = 3 * RECOGNIZE.0;
+        let files = (0..MANY).map(|n| (format!("{n:03}.ne5p"), 10));
+        let mut fs = Claimed::of(files);
+        fs.later = Some((1, Cmd::Walk(path("anywhere"))));
+        fs.vanished.insert("001.ne5p".to_string());
+        let rows = vec![Row {
+            path: path("Gone.ne5p"),
+            print: Some(Fingerprint {
+                crc: Some(7),
+                ..Fingerprint::unread(stat(10))
+            }),
+            working: false,
+        }];
+        let reads = fs.reads.clone();
+        let events = now(async {
+            let walk = Walk::start(&fs).await.unwrap();
+            let mut lister = Lister::default();
+            let mut answered = Vec::new();
+            let mut answer = |event| answered.push((event, reads.get()));
+            lister.list(&mut fs, rows, walk, &mut answer).await;
+            assert_eq!(lister.recognized.len(), MANY - 1);
+            assert_eq!(lister.gone, [path("001.ne5p")]);
+            answered
+        });
+        let walked = events
+            .iter()
+            .find(|(event, _)| matches!(event, Event::Walked { .. }))
+            .map(|(_, reads)| *reads);
+        assert!(
+            walked.is_some_and(|reads| reads < MANY - 1),
+            "{walked:?} files read first"
+        );
     }
 
     /// A folder renamed while the walk is in flight is listed under its new name. What
@@ -1681,7 +1797,7 @@ mod tests {
         for event in listing(&mut fs, Vec::new()) {
             let (part, ran) = match event {
                 Event::Listed { part, ran } => (part, ran),
-                Event::Moved { result: Ok(()), .. } => continue,
+                Event::Moved { result: Ok(()), .. } | Event::Complete(_) => continue,
                 other => panic!("{other:?}"),
             };
             match ran {
@@ -1711,7 +1827,7 @@ mod tests {
                 Event::Listed { part, ran } => {
                     listed.extend(named(&part).into_iter().map(|name| (name, ran)))
                 }
-                Event::Moved { result: Ok(()), .. } => {}
+                Event::Moved { result: Ok(()), .. } | Event::Complete(_) => {}
                 other => panic!("{other:?}"),
             }
         }
@@ -1740,6 +1856,7 @@ mod tests {
             match event {
                 Event::Listed { part, .. } => listed.extend(named(&part)),
                 Event::Saved { result, .. } => saved = result.is_ok(),
+                Event::Complete(_) => {}
                 other => panic!("{other:?}"),
             }
         }
@@ -1808,10 +1925,10 @@ mod tests {
             .iter()
             .any(|event| matches!(event, Event::Scanned(Ok(_)))));
         assert!(events.iter().any(|event| matches!(event, Event::Read(_))));
-        let Some(Event::Listed { ran, .. }) = events.last() else {
+        let Some(Event::Complete(complete)) = events.last() else {
             panic!("{events:?}");
         };
-        assert_eq!(*ran, 2, "commands run");
+        assert_eq!(complete.ran, 2, "commands run");
     }
 
     /// A check sent while the walk is in flight is answered between two folders, and a

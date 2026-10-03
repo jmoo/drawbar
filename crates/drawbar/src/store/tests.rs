@@ -515,6 +515,39 @@ fn a_tagged_file_never_read_keeps_its_tag_through_a_rename_outside() {
     assert_eq!(third.bench.workspace.listed().count(), 1, "not a new asset");
 }
 
+/// A file at a new path shows as soon as the listing finds it, though it may be a file
+/// the index names, moved. Once the listing is done and its contents match, it is that
+/// file: one asset, under the index's id, with its tags.
+#[test]
+fn a_file_renamed_while_drawbar_was_away_shows_at_once_and_becomes_its_asset() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(id, tag, true);
+    first.sync();
+    first.close();
+    fs::rename(root.at("untitled.ne5p"), root.at("Grand.ne5p")).unwrap();
+
+    let mut second = Session::opening(&root);
+    let shown = loop {
+        let mut listed = second.bench.workspace.listed();
+        if let Some(found) = listed.find(|entity| entity.name == "Grand.ne5p") {
+            break found.id;
+        }
+        drop(listed);
+        assert!(second.next(), "the listing answered");
+    };
+    assert!(second.store.listing(), "shown before the listing is done");
+    assert_ne!(shown, id, "as a file of its own, until then");
+    second.listed_whole();
+    assert_eq!(second.only(), id);
+    assert_eq!(second.path(id).as_deref(), Some("Grand.ne5p"));
+    assert!(second.bench.browser.tags.worn(id).contains(&tag));
+    assert!(second.bench.browser.tags.worn(shown).is_empty());
+    assert_eq!(second.said("deleted outside drawbar"), 0);
+}
+
 /// A file written again elsewhere, its time new and its length the same, is the asset
 /// moved when its contents are what the asset's file held.
 #[test]

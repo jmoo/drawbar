@@ -351,10 +351,12 @@ pub struct Opened {
 /// The end of an open's listing.
 #[derive(Debug)]
 pub struct Complete {
-    /// Files at paths the index does not name, each the length of a file it names that is
-    /// not where it says, which may be that file moved and so wait for the whole tree.
-    /// Each comes read, with its CRC.
+    /// Files listed at paths the index does not name, each the length of a file it
+    /// names that is not where it says, and so maybe that file moved. Each comes with its
+    /// CRC, unread.
     pub strangers: Vec<Found>,
+    /// Files of that kind that were gone by the time their CRC was to be taken.
+    pub gone: Vec<LibPath>,
     /// How many temporary siblings of interrupted saves were removed.
     pub swept: usize,
     /// How many commands sent since the open had run when the listing ended.
