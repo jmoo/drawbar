@@ -42,8 +42,9 @@ lost. Store them first.
 ## Set lists and samples
 
 A set list's fields are the slots it plays, `slot1` to `slot4`. A sample
-instrument's are its name and each zone's root key and top note, plus its low
-note in the layouts that store one. Notes are written as names (`C4` is middle
+instrument's are its name, where it stores one, and each zone's root key and
+top note, plus its low note in the layouts that store one. Instruments from the
+original Sample Library store no name. Notes are written as names (`C4` is middle
 C) or as numbers, and `--fields` lists what a given file offers.
 
 ```sh

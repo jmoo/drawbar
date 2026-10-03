@@ -687,6 +687,10 @@ fn early_chain(bytes: &[u8], entity: &Entity) -> Result<(), String> {
         !chain.names_instrument() && sample.name().context("name")?.is_empty(),
         "this chain has no name field"
     );
+    ensure!(
+        !sample.name_is_editable(),
+        "an instrument with no name field reports its name editable"
+    );
     let mut copy = nsmp::from_bytes(bytes).context("read")?;
     ensure!(
         copy.set_name("Renamed").is_err(),

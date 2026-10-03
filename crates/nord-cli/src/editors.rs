@@ -118,20 +118,24 @@ fn switch(v: bool) -> String {
     v.to_string()
 }
 
-/// The sample instrument: its name, plus each zone's root key and boundaries
-/// where the keyboard layout can be edited without leaving another map stale.
-/// `low_note` is listed only where the generation stores one; elsewhere zones
-/// tile and a zone's bottom follows from the one below it.
+/// The sample instrument: its name where the instrument stores one, plus each
+/// zone's root key and boundaries where the keyboard layout can be edited without
+/// leaving another map stale. `low_note` is listed only where the generation
+/// stores one; elsewhere zones tile and a zone's bottom follows from the one below
+/// it.
 pub struct SampleEditor<'a>(pub &'a mut Sample);
 
 impl Fields for SampleEditor<'_> {
     fn rows(&self) -> Result<Vec<Row>, String> {
         let sample = &self.0;
-        let mut out = vec![Row {
-            path: "name".into(),
-            value: sample.name().map_err(|e| e.to_string())?,
-            accepts: format!("up to {} bytes", sample.max_name_len()),
-        }];
+        let mut out = Vec::new();
+        if sample.name_is_editable() {
+            out.push(Row {
+                path: "name".into(),
+                value: sample.name().map_err(|e| e.to_string())?,
+                accepts: format!("up to {} bytes", sample.max_name_len()),
+            });
+        }
         if !sample.zones_are_editable() {
             return Ok(out);
         }
@@ -166,6 +170,12 @@ impl Fields for SampleEditor<'_> {
     fn set(&mut self, path: &str, value: &str) -> Result<(), String> {
         let sample = &mut self.0;
         if path == "name" {
+            if !sample.name_is_editable() {
+                return Err(
+                    "name: this instrument stores no name; --fields lists what can be edited"
+                        .into(),
+                );
+            }
             return sample.set_name(value).map_err(|e| e.to_string());
         }
         if !sample.zones_are_editable() {
@@ -377,7 +387,8 @@ mod tests {
     use super::*;
     use nord_format::cbin::Header;
     use nord_format::formats::ne5;
-    use nord_format::formats::nsmp::{self, section, SampleV3};
+    use nord_format::formats::nsmp::codec::Layout;
+    use nord_format::formats::nsmp::{self, encode, section, SampleV3};
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project() -> Project {
@@ -487,6 +498,78 @@ mod tests {
         assert!(err.contains("cannot be edited"), "{err}");
         SampleEditor(&mut sample).set("name", "Marimba").unwrap();
         assert_eq!(sample.name().unwrap(), "Marimba");
+    }
+
+    /// An instrument of `layout`, with its `hdr` cut to `hdr_len` bytes when given.
+    fn encoded(layout: Layout, hdr_len: Option<usize>) -> Sample {
+        let mut sample = encode::instrument(
+            &[0i16; encode::MIN_FRAMES],
+            &encode::Options::new("Tone").layout(layout),
+        )
+        .unwrap();
+        if let Some(len) = hdr_len {
+            match &mut sample {
+                Sample::V2(s) => section::find_mut(&mut s.body.sections, section::HDR)
+                    .expect("the encoder writes a hdr")
+                    .payload
+                    .truncate(len),
+                Sample::V3(s) => section::find_mut(&mut s.body.sections, section::HDR4)
+                    .expect("the encoder writes a hdr4")
+                    .payload
+                    .truncate(len),
+            }
+        }
+        sample
+    }
+
+    /// Every path `--fields` lists takes the value it lists, so the listing and
+    /// `--set` agree on what exists.
+    fn assert_every_listed_path_is_settable(sample: &mut Sample) {
+        let rows = SampleEditor(sample).rows().unwrap();
+        for row in rows {
+            SampleEditor(sample)
+                .set(&row.path, &row.value)
+                .unwrap_or_else(|e| {
+                    panic!("--fields lists {}, and --set refuses it: {e}", row.path)
+                });
+        }
+    }
+
+    /// A `hdr` that stops short of the name field lists no name and refuses one,
+    /// where a whole `hdr` lists and takes it.
+    fn assert_name_listed_only_where_stored(layout: Layout, short_hdr: usize) {
+        let mut named = encoded(layout, None);
+        assert_every_listed_path_is_settable(&mut named);
+        SampleEditor(&mut named).set("name", "Marimba").unwrap();
+        assert_eq!(named.name().unwrap(), "Marimba");
+
+        let mut nameless = encoded(layout, Some(short_hdr));
+        assert_every_listed_path_is_settable(&mut nameless);
+        let rows = SampleEditor(&mut nameless).rows().unwrap();
+        assert!(
+            rows.iter().all(|r| r.path != "name"),
+            "{layout:?}: a hdr of {short_hdr} bytes lists a name"
+        );
+        let err = SampleEditor(&mut nameless)
+            .set("name", "Marimba")
+            .expect_err("a hdr without a name field refuses a name");
+        assert!(err.contains("no name"), "{err}");
+    }
+
+    /// Sample Library 1 instruments store an 18-byte `hdr` with no name field.
+    #[test]
+    fn v2_lists_a_name_only_where_its_hdr_stores_one() {
+        assert_name_listed_only_where_stored(Layout::V2, 18);
+    }
+
+    #[test]
+    fn v3_lists_a_name_only_where_its_hdr_stores_one() {
+        assert_name_listed_only_where_stored(Layout::V3, 10);
+    }
+
+    #[test]
+    fn v4_lists_a_name_only_where_its_hdr_stores_one() {
+        assert_name_listed_only_where_stored(Layout::V4, 10);
     }
 
     /// The zone paths the listing prints come back out of it holding what was

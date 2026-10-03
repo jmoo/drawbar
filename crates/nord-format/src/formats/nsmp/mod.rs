@@ -175,6 +175,11 @@ impl StringField {
     /// The wide chain's main name, in both wide generations.
     pub(super) const NAME_V3: StringField = StringField { at: 10, next: 76 };
 
+    /// Whether a payload reaches the end of this field, so a write lands.
+    const fn fits(self, payload: &[u8]) -> bool {
+        payload.len() >= self.next
+    }
+
     /// Longest string this field holds, the terminator excluded.
     pub(super) const fn capacity(self) -> usize {
         self.next - self.at - 1
@@ -383,6 +388,13 @@ impl Cbin<SampleV3> {
         StringField::NAME_V3.write(&mut self.required_mut(section::HDR4)?.payload, name)
     }
 
+    /// Whether the `hdr` reaches the end of the main-name field, so
+    /// [`Self::set_name`] can rename.
+    pub fn name_is_editable(&self) -> bool {
+        self.required(section::HDR4)
+            .is_ok_and(|hdr| StringField::NAME_V3.fits(&hdr.payload))
+    }
+
     /// Whether this body's zones can be retuned and remapped.
     ///
     /// True wherever the zone table reads and, if the `map` also describes the
@@ -530,7 +542,7 @@ impl Cbin<Sample> {
     ///
     /// ⚠️ Empty on [`Chain::Early`], whose 18-byte `hdr` has no name field. Those
     /// instruments carry no name, and [`Self::set_name`] refuses them. Check
-    /// [`Self::chain`] before reporting the empty string as the name.
+    /// [`Self::name_is_editable`] before reporting the empty string as the name.
     pub fn name(&self) -> Result<String, Error> {
         Ok(StringField::NAME.read(&self.required(section::HDR)?.payload))
     }
@@ -538,6 +550,13 @@ impl Cbin<Sample> {
     /// Renames in place, NUL-padding the rest of the field.
     pub fn set_name(&mut self, name: &str) -> Result<(), Error> {
         StringField::NAME.write(&mut self.required_mut(section::HDR)?.payload, name)
+    }
+
+    /// Whether the `hdr` reaches the end of the name field, so [`Self::set_name`] can
+    /// rename. False on [`Chain::Early`].
+    pub fn name_is_editable(&self) -> bool {
+        self.required(section::HDR)
+            .is_ok_and(|hdr| StringField::NAME.fits(&hdr.payload))
     }
 
     /// Which narrow chain this body's sections form, from the `map` section's own
@@ -815,5 +834,7 @@ mod tests {
         assert_eq!(StringField::NAME.read(&[0u8; 18]), "");
         assert_eq!(StringField::NAME.read(&[]), "");
         assert!(StringField::NAME.write(&mut [0u8; 18], "Name").is_err());
+        assert!(!StringField::NAME.fits(&[0u8; 18]));
+        assert!(StringField::NAME.fits(&[0u8; 44]));
     }
 }
