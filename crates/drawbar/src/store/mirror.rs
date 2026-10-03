@@ -306,6 +306,9 @@ pub struct Store {
     /// The assets whose read was refused for want of room, each with its file's length,
     /// to ask for again once room can be made for it. One that could never fit is not.
     roomless: BTreeMap<u64, u64>,
+    /// How many times room has been looked for by going through every asset.
+    #[cfg(test)]
+    pub(crate) looked_for_room: usize,
     /// How many writing commands have been sent.
     sent: u64,
     /// How many commands have been sent since the open.
@@ -342,6 +345,8 @@ impl Store {
             moving: Vec::new(),
             budget: MOST_BYTES,
             roomless: BTreeMap::new(),
+            #[cfg(test)]
+            looked_for_room: 0,
             sent: 0,
             issued: 0,
         }
@@ -531,17 +536,26 @@ impl Store {
         if !self.opened() || (!workspace.wants() && self.roomless.is_empty()) {
             return;
         }
-        for (id, len) in std::mem::take(&mut self.roomless) {
+        // Smallest first: where room cannot be made for one, it cannot for any larger,
+        // so the rest wait without another pass over every asset.
+        let mut waiting: Vec<(u64, u64)> = std::mem::take(&mut self.roomless)
+            .into_iter()
+            .map(|(id, len)| (len, id))
+            .collect();
+        waiting.sort_unstable();
+        let mut rest = waiting.into_iter();
+        for (len, id) in rest.by_ref() {
             if workspace.get(id).is_none() {
                 continue;
             }
-            match self.make_room(len, Evict::Any, workspace, browser, queue) {
-                true => workspace.retry(id),
-                false => {
-                    self.roomless.insert(id, len);
-                }
+            if self.make_room(len, Evict::Any, workspace, browser, queue) {
+                workspace.retry(id);
+            } else {
+                self.roomless.insert(id, len);
+                break;
             }
         }
+        self.roomless.extend(rest.map(|(len, id)| (id, len)));
         let room = self.room(workspace);
         let mut files = Vec::new();
         for id in workspace.take_wanted() {
@@ -589,6 +603,10 @@ impl Store {
         }
         if need > self.budget {
             return false;
+        }
+        #[cfg(test)]
+        {
+            self.looked_for_room += 1;
         }
         let mut clean: Vec<(bool, u64, u64, u64)> = self
             .records

@@ -2290,6 +2290,33 @@ fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
     }
 }
 
+/// Reads refused for want of room are asked for again smallest first, and once room
+/// cannot be made for one, the larger ones wait without another pass over every asset.
+#[test]
+fn reads_waiting_for_room_look_for_it_once_a_frame() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let len = program.len() as u64;
+    let names: Vec<String> = (0..12).map(|n| format!("P{n:02}.ne5p")).collect();
+    for (n, name) in names.iter().enumerate() {
+        fs::write(root.at(name), with_gain(&program, &(n * 3).to_string())).unwrap();
+    }
+    let mut session = Session::listed(&root);
+    session.store.budget(2 * len + 1);
+    let ids: Vec<u64> = names.iter().map(|name| session.named(name)).collect();
+    session.read(&ids[..2]);
+    session.read(&ids);
+    let refused = ids.iter().filter(|id| {
+        let entity = session.bench.workspace.get(**id).unwrap();
+        entity.unread()
+    });
+    assert_eq!(refused.count(), 10, "only two fit, and both are needed now");
+
+    session.store.looked_for_room = 0;
+    session.read(&ids);
+    assert_eq!(session.store.looked_for_room, 1, "one pass, not one per read");
+}
+
 /// Once the library is listed, each file the index tracks, here by a tag, is read and
 /// decoded in the background, so it can match its slot before anything shows it. A file
 /// the index does not track waits until something needs it.
