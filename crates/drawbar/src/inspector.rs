@@ -1,12 +1,12 @@
 //! The right dock: the selection, and the instrument while one is attached.
 //!
-//! The dock has two headers. SELECTION describes the rows selected in the browser,
-//! whether or not an instrument is connected. It is flat, because a fact, a tag, and a
-//! dependency are lines about one selection, not separate panels. INSTRUMENT holds what
-//! an attached instrument reports, so it is absent without one. ROOM and INFO under it
-//! collapse independently, and their state is kept between sessions with the docks.
+//! Each part is a card. The selection's facts, its tags, and what a picked slot needs
+//! describe the rows selected in the browser, whether or not an instrument is connected.
+//! Room and Info hold what an attached instrument reports, so they are absent without
+//! one. Those two collapse independently, and their state is kept between sessions with
+//! the docks.
 //!
-//! Nothing here asks for data the rest of the app does not already have; a panel with no
+//! Nothing here asks for data the rest of the app does not already have; a card with no
 //! data says so.
 
 use eframe::egui;
@@ -14,12 +14,12 @@ use eframe::egui;
 use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
-use crate::app::{good, ui as ui_text};
-use crate::browser::{Act, Browser, Item, Kind};
+use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
+use crate::browser::{Act, Browser, Bulk, Item, Kind};
 use crate::device::{fit, occupancy, Device, Fit};
-use crate::icon::{icon, Glyph};
+use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
-use crate::panel::{chip, dock_header, panel_header, GAP, PAD};
+use crate::panel::{cut, signal_pill, tonal_button, GAP, GUTTER, INNER_RADIUS};
 use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
@@ -28,16 +28,42 @@ use crate::tags::Tags;
 use crate::workspace::Workspace;
 
 /// The size of a glyph in a line, and of the smaller one on a tag chip.
-const GLYPH: f32 = 12.0;
+const GLYPH: f32 = 13.0;
 const TAG: f32 = 11.0;
 
-/// The size of monospace readouts: a meter's figures, a slot label, an id.
+/// The size of monospace readouts: a meter's figures, an id.
 const MONO: f32 = 10.5;
 
 /// The width of a fact's label column, so the values line up.
 const FACT: f32 = 52.0;
 
-/// The dock's two headers, top to bottom.
+/// The height of a line that holds a pill: a library a slot needs.
+const LINE: f32 = 28.0;
+
+/// The space under a meter, before the next folder's name.
+const AFTER_METER: f32 = 7.0;
+
+/// A card's header: its height, the room at each end, the gap between its parts, and the
+/// sizes of its glyph, title, and badge.
+const HEAD: f32 = 34.0;
+const HEAD_SIDE: f32 = 10.0;
+const HEAD_GAP: f32 = 7.0;
+const HEAD_GLYPH: f32 = 14.0;
+const TITLE: f32 = 12.5;
+const BADGE: f32 = 11.5;
+
+/// The size of the triangle at the right end of a card that collapses.
+const CHEVRON: f32 = 12.0;
+
+/// The space around a card's body, inside the card.
+const BODY: egui::Margin = egui::Margin {
+    left: 12,
+    right: 12,
+    top: 2,
+    bottom: 12,
+};
+
+/// The selection's cards, then the instrument's while one is attached.
 pub fn ui(
     ui: &mut egui::Ui,
     shell: &mut Shell,
@@ -46,54 +72,173 @@ pub fn ui(
     device: &Device,
     queue: &Queue,
 ) -> Vec<Act> {
-    dock_header(ui, "selection");
-    let acts = selection(ui, browser, workspace, device, queue);
-    if !device.state.connected() {
-        return acts;
-    }
-    dock_header(ui, "instrument");
-    panel_header(ui, "room", &mut shell.room_open);
-    if shell.room_open {
-        room_panel(ui, workspace, device, queue);
-    }
-    panel_header(ui, "info", &mut shell.info_open);
-    if shell.info_open {
-        body(ui, |ui| crate::browser::about(ui, device));
-    }
+    let mut acts = Vec::new();
+    egui::ScrollArea::vertical()
+        .id_salt("inspector")
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            egui::Frame::new().inner_margin(GUTTER).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = GUTTER;
+                selection(ui, browser, workspace, device, queue, &mut acts);
+                if !device.state.connected() {
+                    return;
+                }
+                room_card(ui, &mut shell.room_open, workspace, device, queue);
+                let info = Head {
+                    glyph: Glyph::Info,
+                    title: "Info",
+                    badge: None,
+                    open: Some(&mut shell.info_open),
+                };
+                card(ui, info, |ui| crate::browser::about(ui, device));
+            });
+        });
     acts
 }
 
-/// The selection: what it is, how it is tagged, and what it plays, as lines under one
-/// header.
+/// What a card's header shows.
+struct Head<'a> {
+    glyph: Glyph,
+    title: &'a str,
+    /// A short word at the right end, in its own color.
+    badge: Option<(String, egui::Color32)>,
+    /// Whether the card is open, for a card that collapses; `None` for one that does not.
+    open: Option<&'a mut bool>,
+}
+
+impl<'a> Head<'a> {
+    /// The header of a card that is always open and has no badge.
+    fn fixed(glyph: Glyph, title: &'a str) -> Head<'a> {
+        Head {
+            glyph,
+            title,
+            badge: None,
+            open: None,
+        }
+    }
+}
+
+/// A card inside the dock: a header, and under it the body while the card is open.
+fn card(ui: &mut egui::Ui, head: Head, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(ui.visuals().window_fill)
+        .corner_radius(INNER_RADIUS)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if !header(ui, head) {
+                return;
+            }
+            egui::Frame::new().inner_margin(BODY).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
+                body(ui);
+            });
+        });
+}
+
+/// A card's header: its glyph and title, then the badge and the triangle at the right
+/// end. A click anywhere on a collapsing card's header opens or shuts it.
+///
+/// Returns whether the body should be drawn.
+fn header(ui: &mut egui::Ui, head: Head) -> bool {
+    let sense = match head.open {
+        Some(_) => egui::Sense::click(),
+        None => egui::Sense::hover(),
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEAD), sense);
+    let open = head.open.map(|open| {
+        if response.clicked() {
+            *open = !*open;
+        }
+        *open
+    });
+    let visuals = ui.visuals();
+    let quiet = match open.is_some() && response.hovered() {
+        true => visuals.widgets.hovered.fg_stroke.color,
+        false => caption(visuals),
+    };
+    let painter = ui.painter();
+    let middle = rect.center().y;
+    let square = |left: f32, size: f32| {
+        egui::Rect::from_min_size(
+            egui::pos2(left, middle - size / 2.0),
+            egui::Vec2::splat(size),
+        )
+    };
+
+    let left = rect.left() + HEAD_SIDE;
+    painted(ui, head.glyph, square(left, HEAD_GLYPH), quiet);
+    let left = left + HEAD_GLYPH + HEAD_GAP;
+
+    let mut right = rect.right() - HEAD_SIDE;
+    if let Some(open) = open {
+        let glyph = match open {
+            true => Glyph::ChevronDown,
+            false => Glyph::ChevronRight,
+        };
+        right -= CHEVRON;
+        painted(ui, glyph, square(right, CHEVRON), quiet);
+        right -= HEAD_GAP;
+    }
+    if let Some((said, ink)) = head.badge {
+        let badge = painter.layout_no_wrap(said, egui::FontId::proportional(BADGE), ink);
+        right -= badge.size().x;
+        let top = middle - badge.size().y / 2.0;
+        painter.galley(egui::pos2(right, top), badge, egui::Color32::PLACEHOLDER);
+        right -= HEAD_GAP;
+    }
+    cut(
+        painter,
+        left,
+        middle,
+        right - left,
+        head.title,
+        egui::TextFormat::simple(
+            egui::FontId::new(TITLE, bold()),
+            visuals.widgets.inactive.fg_stroke.color,
+        ),
+    );
+
+    if let Some(open) = open {
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open, head.title)
+        });
+    }
+    open.unwrap_or(true)
+}
+
+/// The selection: what it is and what can be asked of it, how it is tagged, and what it
+/// plays, each in its own card.
 fn selection(
     ui: &mut egui::Ui,
-    browser: &Browser,
+    browser: &mut Browser,
     workspace: &Workspace,
     device: &Device,
     queue: &Queue,
-) -> Vec<Act> {
-    let mut acts = Vec::new();
-    let picked = browser.picked().items().count();
-    if picked == 0 {
-        body(ui, |ui| faint(ui, "Nothing is selected."));
-        return acts;
-    }
-    let rows: Vec<Row> = browser
-        .picked()
-        .items()
-        .filter_map(|item| row_of(item, workspace, &device.state, queue, browser.tags()))
+    acts: &mut Vec<Act>,
+) {
+    let checked: Vec<Item> = browser.picked().items().collect();
+    let picked = checked.len();
+    let rows: Vec<Row> = checked
+        .iter()
+        .filter_map(|item| row_of(*item, workspace, &device.state, queue, browser.tags()))
         .collect();
-
-    body(ui, |ui| {
-        about_selection(ui, picked, &rows, workspace, device)
+    card(ui, Head::fixed(Glyph::ScanEye, "Selection"), |ui| {
+        if picked == 0 {
+            return faint(ui, "Nothing is selected.");
+        }
+        about_selection(ui, picked, &rows, workspace, device);
+        bulk_actions(ui, browser, &checked, &rows, workspace, device, queue, acts);
     });
-    tags(ui, &browser.picked().locals(), browser.tags(), &mut acts);
+    if picked == 0 {
+        return;
+    }
+    tags(ui, &browser.picked().locals(), browser.tags(), acts);
     if let Some((slot, deps)) = answered(browser, device) {
         dependencies(ui, slot, deps);
     }
-    acts
 }
-
 /// One line about a single picked asset: its label, its value, and the full text when
 /// the value is shortened.
 pub struct Fact {
@@ -179,6 +324,37 @@ fn about_selection(
     }
 }
 
+/// What sending the selection would do, when there is something to say, then every
+/// action on the whole of it, wrapped to the card's width.
+#[allow(clippy::too_many_arguments)]
+fn bulk_actions(
+    ui: &mut egui::Ui,
+    browser: &mut Browser,
+    checked: &[Item],
+    rows: &[Row],
+    workspace: &Workspace,
+    device: &Device,
+    queue: &Queue,
+    acts: &mut Vec<Act>,
+) {
+    let rows: Vec<&Row> = rows.iter().collect();
+    ui.add_space(4.0);
+    if let Some(going) = crate::library::consequence(&rows, &device.state, queue) {
+        ui.add(egui::Label::new(egui::RichText::new(going).text_style(ui_text()).weak()).wrap());
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+        // ⚠️ Unwrapped, so a button short of room moves to the next row instead of
+        // folding its label into the room left.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        crate::panel::tonal(ui);
+        for action in Bulk::ALL {
+            browser.bulk_item(ui, action, checked, workspace, &device.state, acts);
+        }
+    });
+}
+
 /// One fact: its label in a fixed column and its full value beside it.
 ///
 /// ⚠️ The value wraps instead of truncating. A refusal, a location sentence, or a name
@@ -204,15 +380,32 @@ fn void(ui: &mut egui::Ui, said: String) {
 }
 
 /// One meter per folder the instrument has counted, and a sentence on the limit the
-/// queue runs into.
-fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: &Queue) {
-    body(ui, |ui| {
-        let mut drawn = 0;
-        for class in device.state.classes() {
-            let Some(held) = room::meter(class, &device.state, queue, workspace) else {
-                continue;
-            };
-            drawn += 1;
+/// queue runs into. The badge counts the folders past the warning point.
+fn room_card(
+    ui: &mut egui::Ui,
+    open: &mut bool,
+    workspace: &Workspace,
+    device: &Device,
+    queue: &Queue,
+) {
+    let meters: Vec<(ObjectClass, room::Meter)> = device
+        .state
+        .classes()
+        .into_iter()
+        .filter_map(|class| Some((class, room::meter(class, &device.state, queue, workspace)?)))
+        .collect();
+    let crowded = meters.iter().filter(|(_, held)| held.crowded()).count();
+    let head = Head {
+        glyph: Glyph::Gauge,
+        title: "Room",
+        badge: (crowded > 0).then(|| (format!("{crowded} nearly full"), warn(ui.visuals()))),
+        open: Some(open),
+    };
+    card(ui, head, |ui| {
+        if meters.is_empty() {
+            return faint(ui, "The instrument's contents have not been counted.");
+        }
+        for (class, held) in meters {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(device.state.folder_name(class)).text_style(ui_text()),
@@ -227,10 +420,7 @@ fn room_panel(ui: &mut egui::Ui, workspace: &Workspace, device: &Device, queue: 
                 });
             });
             room::bar(ui, held);
-            ui.add_space(GAP);
-        }
-        if drawn == 0 {
-            return faint(ui, "The instrument's contents have not been counted.");
+            ui.add_space(AFTER_METER);
         }
         if let Some(said) = room::constraint(queue, workspace, &device.state) {
             ui.label(egui::RichText::new(said).text_style(ui_text()).weak());
@@ -256,19 +446,20 @@ fn answered<'a>(
     (!deps.is_empty()).then_some(((class, at), deps))
 }
 
-/// What the instrument said a picked slot needs.
+/// What the instrument said a picked slot needs, with the slot it answered for as the
+/// badge.
 fn dependencies(ui: &mut egui::Ui, (class, at): (ObjectClass, Location), deps: &[Dependency]) {
-    body(ui, |ui| {
+    let head = Head {
+        glyph: Glyph::Link,
+        title: "Dependencies",
+        badge: Some((place(class, at), caption(ui.visuals()))),
+        open: None,
+    };
+    card(ui, head, |ui| {
         for dep in deps {
             let named = Some(dep.name.trim()).filter(|name| !name.is_empty());
             needed(ui, dep.class, named, dep.id);
         }
-        ui.label(
-            egui::RichText::new(place(class, at))
-                .monospace()
-                .size(MONO)
-                .weak(),
-        );
     });
 }
 
@@ -276,18 +467,15 @@ fn dependencies(ui: &mut egui::Ui, (class, at): (ObjectClass, Location), deps: &
 /// is all there is.
 fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     ui.horizontal(|ui| {
+        ui.set_min_height(LINE);
         let quiet = ui.visuals().weak_text_color();
-        let lit = good(ui.visuals());
         icon(ui, Kind::from_class(class).glyph(), GLYPH, quiet);
         match named {
             Some(name) => {
+                let lit = good(ui.visuals());
                 ui.label(egui::RichText::new(name).text_style(ui_text()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("installed")
-                            .text_style(ui_text())
-                            .color(lit),
-                    );
+                    signal_pill(ui, "installed", lit);
                 });
             }
             None => {
@@ -313,24 +501,27 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
 /// ⚠️ Only a kept asset can have a tag: a tag attaches to a workspace id, and a slot has
 /// none. So this covers only the part of the selection on this computer.
 ///
-/// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's TAGS
+/// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's Tags
 /// section, and added to something new from the row's Tag menu.
 fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
-    let wearing = wearing(picked, worn);
-    if wearing.is_empty() {
+    if picked.is_empty() {
         return;
     }
-    body(ui, |ui| {
+    let wearing = wearing(picked, worn);
+    card(ui, Head::fixed(Glyph::Tags, "Tags"), |ui| {
+        let made = tonal_button(ui, Some(Glyph::Plus), "New tag")
+            .on_hover_text("a new tag on everything selected, named as you type");
+        if made.clicked() {
+            acts.push(Act::NewTag(picked.to_vec()));
+        }
+        if wearing.is_empty() {
+            return;
+        }
+        ui.add_space(GAP);
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::splat(5.0);
             for (id, name, on_all) in wearing {
-                let visuals = ui.visuals().clone();
-                let (tint, fill) = match on_all {
-                    true => (visuals.text_color(), Some(visuals.faint_bg_color)),
-                    false => (crate::app::caption(&visuals), None),
-                };
-                let drawn = chip(ui, Glyph::Tag, TAG, name, tint, fill);
-                let clicked = ui
-                    .interact(drawn.rect, drawn.id.with(id), egui::Sense::click())
+                let clicked = tag_chip(ui, id, name, on_all)
                     .on_hover_text(match on_all {
                         true => "on everything selected; click to remove it from all",
                         false => "on some of what is selected; click to add it to all",
@@ -348,6 +539,66 @@ fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
     });
 }
 
+/// One tag on the selection, as a pill: solid in the accent when it is on everything
+/// picked, hollow when it is on only some.
+fn tag_chip(ui: &mut egui::Ui, id: u64, name: &str, on_all: bool) -> egui::Response {
+    const HEIGHT: f32 = 26.0;
+    const SIDE: f32 = 10.0;
+    const SPACE: f32 = 5.0;
+    const TEXT: f32 = 12.0;
+
+    let visuals = ui.visuals();
+    let lit = accent(visuals);
+    let (ink, fill, border) = match on_all {
+        true => (
+            visuals.widgets.active.fg_stroke.color,
+            tint(lit, 0.16),
+            tint(lit, 0.6),
+        ),
+        false => (
+            caption(visuals),
+            egui::Color32::TRANSPARENT,
+            visuals.widgets.noninteractive.bg_stroke.color,
+        ),
+    };
+    let hovered_border = visuals.widgets.hovered.bg_stroke.color;
+    let galley =
+        ui.painter()
+            .layout_no_wrap(name.to_owned(), egui::FontId::proportional(TEXT), ink);
+    let size = egui::vec2(SIDE + TAG + SPACE + galley.size().x + SIDE, HEIGHT);
+    let (_, rect) = ui.allocate_space(size);
+    let response = ui.interact(rect, ui.id().with(("tag", id)), egui::Sense::click());
+    let border = match response.hovered() {
+        true => hovered_border,
+        false => border,
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        u8::MAX,
+        fill,
+        egui::Stroke::new(1.0_f32, border),
+        egui::StrokeKind::Inside,
+    );
+    let middle = rect.center().y;
+    let left = rect.left() + SIDE;
+    painted(
+        ui,
+        Glyph::Tag,
+        egui::Rect::from_min_size(egui::pos2(left, middle - TAG / 2.0), egui::Vec2::splat(TAG)),
+        ink,
+    );
+    let top = middle - galley.size().y / 2.0;
+    painter.galley(
+        egui::pos2(left + TAG + SPACE, top),
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on_all, name));
+    response
+}
+
 /// The tags any picked asset has, and whether each is on all of them.
 ///
 /// ⚠️ Only tags in use, in list order. A tag nothing picked has is not part of this
@@ -361,18 +612,7 @@ fn wearing<'a>(picked: &[u64], worn: &'a Tags) -> Vec<(u64, &'a str, bool)> {
         .collect()
 }
 
-/// A panel's body: padded at each end, with its lines under each other.
-fn body<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(PAD as i8, 6))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
-            contents(ui)
-        })
-        .inner
-}
-
-/// The line a panel shows when it has nothing to say.
+/// The line a card shows when it has nothing to say.
 fn faint(ui: &mut egui::Ui, said: &str) {
     ui.label(
         egui::RichText::new(said)
@@ -467,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn instrument_is_headed_only_while_one_is_attached() {
+    fn the_instruments_cards_show_only_while_one_is_attached() {
         let ctx = context();
         let mut shell = Shell {
             info_open: true,
@@ -475,31 +715,120 @@ mod tests {
         };
         let detached = paint(&mut shell, &Device::new(ctx.clone()), &[]);
         assert!(
-            detached.iter().any(|word| word == "SELECTION"),
+            detached.iter().any(|word| word == "Selection"),
             "{detached:?}"
         );
-        assert!(
-            !detached.iter().any(|word| word == "INSTRUMENT"),
-            "{detached:?}"
-        );
+        for title in ["Room", "Info"] {
+            assert!(!detached.iter().any(|word| word == title), "{detached:?}");
+        }
 
         let (device, at) = attached(&ctx);
         let held = paint(&mut shell, &device, &[(ObjectClass::Program, at)]);
-        for header in ["SELECTION", "INSTRUMENT", "ROOM", "INFO"] {
-            assert!(held.iter().any(|word| word == header), "{header}: {held:?}");
+        for title in ["Selection", "Dependencies", "Room", "Info"] {
+            assert!(held.iter().any(|word| word == title), "{title}: {held:?}");
         }
 
-        // Collapsed panels under INSTRUMENT draw only their headers.
+        // Collapsed cards draw only their headers.
         let mut shut = Shell {
             room_open: false,
             info_open: false,
             ..Shell::default()
         };
         let shut = paint(&mut shut, &device, &[(ObjectClass::Program, at)]);
-        for header in ["ROOM", "INFO"] {
-            assert!(shut.iter().any(|word| word == header), "{header}: {shut:?}");
+        for title in ["Room", "Info"] {
+            assert!(shut.iter().any(|word| word == title), "{title}: {shut:?}");
         }
         assert!(shut.len() < held.len(), "{shut:?}");
+    }
+
+    /// One frame of a collapsing card, clicking `at` when `press` is set, and leaving in
+    /// `at` the right end of the card's header.
+    fn headed(
+        ctx: &egui::Context,
+        open: &mut bool,
+        press: bool,
+        at: &std::cell::Cell<egui::Pos2>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            events: match press {
+                true => testing::click(at.get()),
+                false => Vec::new(),
+            },
+            ..Default::default()
+        };
+        testing::run(ctx, input, |ctx| {
+            egui::SidePanel::right("inspector")
+                .exact_width(crate::shell::INSPECTOR)
+                .show(ctx, |ui| {
+                    let top = ui.cursor().top();
+                    let head = Head {
+                        glyph: Glyph::Gauge,
+                        title: "Room",
+                        badge: Some(("1 nearly full".into(), egui::Color32::RED)),
+                        open: Some(&mut *open),
+                    };
+                    card(ui, head, |ui| {
+                        ui.label("Programs");
+                    });
+                    // The right end, past the title, where only the header is.
+                    let right = ui.min_rect().right() - HEAD_SIDE - CHEVRON / 2.0;
+                    at.set(egui::pos2(right, top + HEAD / 2.0));
+                });
+        })
+    }
+
+    /// A collapsing card opens and shuts from anywhere on its header, its triangle is at
+    /// the right end, and it keeps its header while shut.
+    #[test]
+    fn a_collapsing_card_toggles_from_its_header_and_keeps_it_while_shut() {
+        let ctx = context();
+        let at = std::cell::Cell::new(egui::Pos2::ZERO);
+        let mut open = true;
+        // The first frame only learns where the header is; the second presses it.
+        let first = testing::words(&headed(&ctx, &mut open, false, &at));
+        assert!(first.contains(&"Programs".to_string()), "{first:?}");
+        let shut = testing::words(&headed(&ctx, &mut open, true, &at));
+        assert!(!open, "a click on the header shuts the card");
+        assert!(!shut.contains(&"Programs".to_string()), "{shut:?}");
+        for word in ["Room", "1 nearly full"] {
+            assert!(shut.contains(&word.to_string()), "{word}: {shut:?}");
+        }
+        headed(&ctx, &mut open, true, &at);
+        assert!(open, "the next click opens it again");
+    }
+
+    /// The dependency answer is a list of pills in the tone of each line's state.
+    #[test]
+    fn an_installed_dependency_says_so_on_a_good_pill() {
+        let ctx = context();
+        let (device, at) = attached(&ctx);
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            egui::SidePanel::right("inspector")
+                .exact_width(crate::shell::INSPECTOR)
+                .show(ctx, |ui| {
+                    let deps = device.state.detail.deps.as_deref().unwrap();
+                    dependencies(ui, (ObjectClass::Program, at), deps);
+                });
+        });
+        let said = testing::painted(&output);
+        let installed = testing::where_(&said, "installed");
+        let lit = good(&ctx.style().visuals);
+        let pill = testing::rects(&output)
+            .into_iter()
+            .filter(|drawn| drawn.rect.contains_rect(installed))
+            .min_by(|one, other| one.rect.area().total_cmp(&other.rect.area()))
+            .expect("the word sits on a pill");
+        assert_eq!(pill.fill, tint(lit, 0.15));
+        assert!(said.iter().any(|word| word.text == "Royal Grand 3D"));
+        assert!(
+            said.iter().any(|word| word.text == "0x09990999"),
+            "a library listed without a name shows its id: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|word| word.text == place(ObjectClass::Program, at)),
+            "the badge names the slot that was asked about: {said:?}"
+        );
     }
 
     #[test]
@@ -648,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn the_selections_tags_are_chips_and_nothing_at_all_where_there_are_none() {
+    fn the_selections_tags_are_chips_beside_new_tag_and_nothing_without_a_selection() {
         let ctx = context();
         let mut labels = Tags::default();
         let (both, some) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
@@ -673,10 +1002,110 @@ mod tests {
             testing::words(&output)
         };
         let said = painted(&[7, 8]);
-        for name in ["Sunday", "Loud"] {
+        for name in ["Sunday", "Loud", "New tag"] {
             assert!(said.contains(&name.to_string()), "{name}: {said:?}");
         }
-        assert!(painted(&[9]).is_empty(), "{:?}", painted(&[9]));
+        let untagged = painted(&[9]);
+        assert!(untagged.contains(&"New tag".to_string()), "{untagged:?}");
+        assert!(!untagged.contains(&"Sunday".to_string()), "{untagged:?}");
+        assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
+    }
+
+    /// The Selection card offers every action on the selection, whole, on one line, and
+    /// inside the card at any width the inspector takes, and Queue for sending queues what
+    /// is selected.
+    #[test]
+    fn the_selection_card_offers_every_action_on_the_selection() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            mut device,
+            queue,
+            mut shell,
+            mut log,
+            ..
+        } = Bench::new();
+        device.pretend_attached_as("Nord Electro 5");
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        browser.check(Item::Local(id));
+        let screen = egui::vec2(800.0, 900.0);
+
+        let least = crate::shell::SIDE_LEAST as usize;
+        for width in (least..=400).step_by(4).map(|width| width as f32) {
+            let mut acts = Vec::new();
+            let mut frame = |events: Vec<egui::Event>| {
+                let input = testing::screen(screen, events);
+                let output = testing::run(&ctx, input, |ctx| {
+                    egui::SidePanel::right("inspector")
+                        .exact_width(width)
+                        .show(ctx, |panel| {
+                            acts.extend(super::ui(
+                                panel,
+                                &mut shell,
+                                &mut browser,
+                                &workspace,
+                                &device,
+                                &queue,
+                            ));
+                        });
+                });
+                testing::painted(&output)
+            };
+            frame(Vec::new());
+            let said = frame(Vec::new());
+            let line = testing::where_(&said, "Selection").height();
+            for action in Bulk::ALL {
+                let word = testing::where_(&said, action.label());
+                assert!(
+                    word.left() >= screen.x - width && word.right() <= screen.x - GUTTER,
+                    "{width}: {} at {word:?} runs past the card",
+                    action.label()
+                );
+                assert!(
+                    word.height() < 1.5 * line,
+                    "{width}: {} at {word:?} folds onto more than one line",
+                    action.label()
+                );
+            }
+            frame(testing::click(
+                testing::where_(&said, Bulk::Queue.label()).center(),
+            ));
+            assert!(
+                acts.iter()
+                    .any(|act| matches!(act, Act::SendChecked(ids) if ids == &[id])),
+                "{width}: Queue for sending queues the selection; got {} acts",
+                acts.len()
+            );
+        }
+    }
+
+    /// New tag in the Tags card puts a new tag on everything selected, and nothing else.
+    #[test]
+    fn new_tag_in_the_card_tags_the_selection() {
+        let ctx = context();
+        egui_extras::install_image_loaders(&ctx);
+        let labels = Tags::default();
+        let mut acts = Vec::new();
+        let frame = |events: Vec<egui::Event>, acts: &mut Vec<Act>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(crate::shell::INSPECTOR)
+                    .show(ctx, |panel| tags(panel, &[7, 8], &labels, acts));
+            });
+            testing::where_(&testing::painted(&output), "New tag").center()
+        };
+        let button = frame(Vec::new(), &mut acts);
+        frame(testing::click(button), &mut acts);
+        assert!(
+            matches!(acts.as_slice(), [Act::NewTag(ids)] if ids == &[7, 8]),
+            "one new tag on the selection; got {} acts",
+            acts.len()
+        );
     }
 
     #[test]

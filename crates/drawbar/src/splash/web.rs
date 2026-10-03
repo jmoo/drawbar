@@ -7,7 +7,7 @@ use eframe::egui;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use super::{https, news, opening, plain, welcome, Notes, Opening, Wanted, VERSION};
+use super::{https, news, opening, welcome, Notes, Opening, Wanted, VERSION};
 use crate::about::RELEASES;
 use crate::browser::Act;
 use crate::js::field;
@@ -138,7 +138,6 @@ async fn read(url: &str) -> Option<Notes> {
     if body.len() > MOST {
         return None;
     }
-    let body = plain(&body);
     let page = field(&json, "html_url").and_then(|url| url.as_string());
     let page = page
         .as_deref()

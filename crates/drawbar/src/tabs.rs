@@ -10,7 +10,6 @@ use nord_usb::ObjectClass;
 
 use crate::browser::{Act, Kind};
 use crate::icon::{painted, Glyph};
-use crate::panel::{GAP, GLYPH, PAD};
 use crate::shell::new_button;
 use crate::workspace::Workspace;
 
@@ -19,8 +18,19 @@ use crate::workspace::Workspace;
 /// there would share one state and a wheel over the body would scroll the strip.
 pub const SCROLL: &str = "tab_strip";
 
-/// How tall the strip is.
-pub const HEIGHT: f32 = 26.0;
+/// How tall the row of tabs is, on the canvas above the document card.
+pub const HEIGHT: f32 = 36.0;
+
+/// A tab: its height, its narrowest and widest, and the padding at each end.
+const TAB: f32 = 30.0;
+const TAB_LEAST: f32 = 104.0;
+const TAB_MOST: f32 = 184.0;
+const TAB_PAD: f32 = 10.0;
+
+/// A tab's glyph, the gap after it, and the close button at its end.
+const GLYPH: f32 = 13.0;
+const GAP: f32 = 7.0;
+const CLOSE: f32 = 18.0;
 
 /// Which of the center's views a tab shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,6 +48,8 @@ pub struct Tabs {
     /// The class the keyboard tab shows, as the tree last set it. There is one keyboard
     /// tab, so the class is its state, not a separate tab.
     keyboard: Option<ObjectClass>,
+    /// The tab last scrolled into view, so a tab that comes forward is scrolled to once.
+    seen: Option<Spot>,
 }
 
 impl Default for Tabs {
@@ -46,6 +58,7 @@ impl Default for Tabs {
             open: vec![Spot::Library],
             active: Spot::Library,
             keyboard: None,
+            seen: None,
         }
     }
 }
@@ -155,39 +168,35 @@ impl Tabs {
         }
     }
 
-    /// The strip. The open view draws itself below it.
+    /// The row of tabs, in the `Ui` the shell gives it between the two panel toggles.
     ///
-    /// ⚠️ The scroll area is a direct child of the caller's `Ui`, and its salt is
-    /// [`SCROLL`]: the document body below has its own salt, and two unsalted areas in
-    /// one `Ui` would share a state.
+    /// ⚠️ The scroll area's salt is [`SCROLL`]: the document body below has its own salt,
+    /// and two unsalted areas in one `Ui` would share a state.
     pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, acts: &mut Vec<Act>) {
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(ui.max_rect().left(), ui.cursor().top()),
-            egui::vec2(ui.available_width(), HEIGHT),
-        );
-        ui.painter()
-            .rect_filled(rect, 0.0, ui.visuals().window_fill);
-
         let mut close = None;
         let mut activate = None;
         let mut dropped = None;
         let mut painted: Vec<(usize, egui::Rect)> = Vec::new();
+        let came_forward = self.seen != Some(self.active);
         egui::ScrollArea::horizontal()
             .id_salt(SCROLL)
             .max_height(HEIGHT)
-            // A scroll bar would take a third of the 26 px strip.
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+                ui.horizontal_centered(|ui| {
                     for (index, spot) in self.open.iter().copied().enumerate() {
                         let Some(face) = face(spot, workspace) else {
                             continue;
                         };
-                        let drawn = paint(ui, &face, self.active == spot);
+                        let active = self.active == spot;
+                        let drawn = paint(ui, &face, active);
                         painted.push((index, drawn.tab.rect));
                         let mut label = drawn.tab;
+                        if active && came_forward {
+                            label.scroll_to_me(None);
+                        }
                         if label.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                         }
@@ -208,10 +217,10 @@ impl Tabs {
                             close = Some(spot);
                         }
                     }
-                    let ink = crate::app::caption(ui.visuals());
-                    new_button(ui, Glyph::Plus, ink, acts);
+                    new_button(ui, Glyph::Plus, 14.0, 28.0, acts);
                 });
             });
+        self.seen = Some(self.active);
         if let Some(spot) = activate {
             self.active = spot;
         }
@@ -295,71 +304,95 @@ struct Drawn {
     close: Option<egui::Response>,
 }
 
-/// The size of the × at the end of a tab.
-const SHUT: f32 = 11.0;
-
+/// A tab: a rounded pill on the canvas, filled with the card's color while it is in
+/// front, so the tab and the document under it read as one piece.
 fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
     let visuals = ui.visuals().clone();
-    let ink = match active {
-        true => visuals.widgets.active.fg_stroke.color,
-        false => crate::app::caption(&visuals),
-    };
-    let mut text = egui::RichText::new(crate::browser::starred(&face.name, face.unsaved))
-        .text_style(crate::app::ui());
-    if face.unsaved {
-        text = text.italics();
-    }
-    let galley = egui::WidgetText::from(text.color(ink)).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        crate::app::ui(),
+    let (rect, tab) = ui.allocate_exact_size(
+        egui::vec2(width(ui, face), TAB),
+        egui::Sense::click_and_drag(),
     );
-
-    let closes = match face.shut {
-        true => GAP + SHUT,
-        false => 0.0,
+    let ink = match (active, tab.hovered()) {
+        (true, _) => visuals.widgets.active.fg_stroke.color,
+        (false, true) => visuals.widgets.hovered.fg_stroke.color,
+        (false, false) => crate::app::caption(&visuals),
     };
-    let width = PAD + GLYPH + GAP + galley.size().x + closes + PAD;
-    let (rect, tab) =
-        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let painter = ui.painter().clone();
-
     if active {
-        painter.rect_filled(rect, 0.0, visuals.panel_fill);
-        painter.hline(
-            rect.x_range(),
-            rect.bottom() - 1.0,
-            egui::Stroke::new(2.0_f32, crate::app::accent(&visuals)),
-        );
+        let shadow = egui::Shadow {
+            offset: [0, 1],
+            blur: 2,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(46),
+        };
+        painter.add(shadow.as_shape(rect, 8));
+        painter.rect_filled(rect, 8.0, visuals.panel_fill);
     }
-    painter.vline(
-        rect.right() - 0.5,
-        rect.y_range(),
-        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
-    );
-
-    let mut x = rect.left() + PAD;
-    let box_ = |x: f32, size: f32| {
-        egui::Rect::from_min_size(
-            egui::pos2(x, rect.center().y - size / 2.0),
-            egui::vec2(size, size),
-        )
+    let mark = match active {
+        true => crate::app::accent(&visuals),
+        false => ink,
     };
-    painted(ui, face.glyph, box_(x, GLYPH), ink);
-    x += GLYPH + GAP;
-    painter.galley(
-        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-        galley.clone(),
-        egui::Color32::PLACEHOLDER,
+    let left = rect.left() + TAB_PAD;
+    painted(
+        ui,
+        face.glyph,
+        egui::Rect::from_min_size(
+            egui::pos2(left, rect.center().y - GLYPH / 2.0),
+            egui::Vec2::splat(GLYPH),
+        ),
+        mark,
     );
-    x += galley.size().x;
+    let name_at = left + GLYPH + GAP;
+    let name_end = match face.shut {
+        true => rect.right() - 5.0 - CLOSE - 4.0,
+        false => rect.right() - TAB_PAD,
+    };
+    let mut format = egui::TextFormat::simple(egui::FontId::proportional(12.5), ink);
+    format.italics = face.unsaved;
+    crate::panel::cut(
+        &painter,
+        name_at,
+        rect.center().y,
+        name_end - name_at,
+        &crate::browser::starred(&face.name, face.unsaved),
+        format,
+    );
     let close = face.shut.then(|| {
-        let shut = box_(x + GAP, SHUT);
-        painted(ui, Glyph::X, shut, ink.gamma_multiply(0.5));
-        ui.interact(shut, tab.id.with("close"), egui::Sense::click())
+        let shut = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 5.0 - CLOSE, rect.center().y - CLOSE / 2.0),
+            egui::Vec2::splat(CLOSE),
+        );
+        let response = ui.interact(shut, tab.id.with("close"), egui::Sense::click());
+        let alpha = match response.hovered() {
+            true => {
+                painter.rect_filled(shut, 5.0, visuals.widgets.hovered.weak_bg_fill);
+                1.0
+            }
+            false => 0.6,
+        };
+        painted(ui, Glyph::X, shut.shrink(3.5), ink.gamma_multiply(alpha));
+        response
     });
     Drawn { tab, close }
+}
+
+/// How wide a tab is: room for its glyph, its whole name, and its close button, between
+/// [`TAB_LEAST`] and [`TAB_MOST`].
+fn width(ui: &egui::Ui, face: &Face) -> f32 {
+    let name = ui
+        .painter()
+        .layout_no_wrap(
+            crate::browser::starred(&face.name, face.unsaved),
+            egui::FontId::proportional(12.5),
+            egui::Color32::PLACEHOLDER,
+        )
+        .size()
+        .x;
+    let close = match face.shut {
+        true => 4.0 + CLOSE + 5.0,
+        false => TAB_PAD,
+    };
+    (TAB_PAD + GLYPH + GAP + name + close).clamp(TAB_LEAST, TAB_MOST)
 }
 
 #[cfg(test)]

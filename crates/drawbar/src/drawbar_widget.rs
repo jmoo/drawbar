@@ -69,6 +69,11 @@ const STOP_H: f32 = 15.0;
 const BAR_W: f32 = 21.0;
 const TRACK_H: f32 = 104.0;
 
+/// The slot a stop slides in. It is the instrument's own, so both themes share it.
+const TRACK: egui::Color32 = egui::Color32::from_rgb(0x14, 0x15, 0x18);
+const TRACK_RADIUS: f32 = 6.0;
+const STOP_RADIUS: f32 = 4.0;
+
 /// The positions in the panel's grouping, `88 8000 000`: the two sub-octave bars, the
 /// four foundation ranks, then the three upper mutations.
 ///
@@ -136,7 +141,11 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8) -> bool {
     }
 
     let painter = ui.painter();
-    painter.rect_filled(track, 3.0, egui::Color32::from_rgb(0x11, 0x11, 0x13));
+    // The slot is sunk into the panel, so its top two rows are in shadow.
+    for (row, shade) in [(0.0, 0.45), (1.0, 0.2), (2.0, 0.0)] {
+        let fill = TRACK.lerp_to_gamma(egui::Color32::BLACK, shade);
+        painter.rect_filled(track.with_min_y(track.top() + row), TRACK_RADIUS, fill);
+    }
 
     // A stored position above MAX is painted at the bottom: the readout shows that it
     // is out of range, and a stop drawn off the end of its track would not.
@@ -146,7 +155,7 @@ fn bar(ui: &mut egui::Ui, rank: Option<usize>, value: &mut u8) -> bool {
         egui::vec2(BAR_W - 2.0, STOP_H),
     );
     let color = rank.map_or(NO_RANK, stop_color);
-    painter.rect_filled(stop, 2.0, color);
+    painter.rect_filled(stop, STOP_RADIUS, color);
     painter.text(
         stop.center(),
         egui::Align2::CENTER_CENTER,

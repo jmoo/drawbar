@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
-version = "0.9.1"
+version = "0.10.0"
 
 [lib]
 # `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
@@ -28,7 +28,7 @@ eframe = { version = "0.32", default-features = false, features = [
   "x11",
 ] }
 egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
-nord-format = { path = "../nord-format", version = "0.7.1", features = [
+nord-format = { path = "../nord-format", version = "0.8.0", features = [
   "bundle",
 ] }
 rfd = "0.15"
@@ -36,19 +36,36 @@ rfd = "0.15"
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests
 # need a `.npno` and nothing else in the workspace builds one without a template.
-nord-format = { path = "../nord-format", version = "0.7.1", features = [
+nord-format = { path = "../nord-format", version = "0.8.0", features = [
   "synthetic",
 ] }
+# Read drawbar's own source, to find every character its text needs a glyph for.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # MIDI input only. drawbar opens no output port.
 midir = "0.11"
-nord-usb = { path = "../nord-usb", version = "0.7.1", features = [
+nord-usb = { path = "../nord-usb", version = "0.8.0", features = [
   "blocking",
   "nusb",
 ] }
 # `playback` alone: the decoders are for files, and drawbar feeds it raw samples.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+
+# The native menu bar, and the title bar the traffic lights sit in. macOS only:
+# elsewhere the menus and window buttons are drawn in the window.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "NSResponder",
+  "NSToolbar",
+  "NSView",
+  "NSWindow",
+  "std",
+] }
+raw-window-handle = "0.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -91,6 +108,6 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceRequestOptions",
   "Window",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.7.1", default-features = false, features = [
+nord-usb = { path = "../nord-usb", version = "0.8.0", default-features = false, features = [
   "web",
 ] }

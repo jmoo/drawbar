@@ -70,13 +70,14 @@
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/*.bash (see their `nix-deps` lines), plus `mdbook serve docs`.
+              # scripts/* (see their `nix-deps` lines), plus `mdbook serve docs`.
               packages = with pkgs; [
                 cargo-about
                 curl
                 gh
                 jq
                 mdbook
+                (python3.withPackages (python: [ python.fonttools ]))
                 rust-analyzer
               ];
             };

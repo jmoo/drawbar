@@ -247,9 +247,14 @@ pub fn welcome(ctx: &egui::Context) -> Option<Wanted> {
 fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
     ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
     let mut wanted = None;
+    // The start cards stay under the scrolling middle, so a short window scrolls the
+    // support table and never hides the choices. Their height is last frame's; when it
+    // changes, the frame is discarded and redrawn.
+    let pinned = ui.id().with("start block");
+    let below: f32 = ui.data(|data| data.get_temp(pinned)).unwrap_or(0.0);
     egui::ScrollArea::vertical()
         .id_salt("welcome")
-        .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+        .max_height(sheet::middle(ui.ctx(), AROUND + below, FEWEST))
         .show(ui, |ui| {
             ui.add_space(GAP * 4.5);
             sheet::section(ui, |ui| {
@@ -260,10 +265,18 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
                 support(ui);
                 ui.add_space(GAP * 2.0);
                 legend(ui);
-                sheet::heading(ui, "Start here", None);
-                wanted = starts(ui);
             });
         });
+    let top = ui.cursor().top();
+    sheet::section(ui, |ui| {
+        sheet::heading(ui, "Start here", None);
+        wanted = starts(ui);
+    });
+    let height = ui.cursor().top() - top;
+    if height != below {
+        ui.data_mut(|data| data.insert_temp(pinned, height));
+        ui.ctx().request_discard("start block");
+    }
     sheet::foot(
         ui,
         |ui| sheet::disclaimer(ui, DISMISS),
@@ -623,11 +636,9 @@ pub enum Change<'a> {
 }
 
 impl<'a> Change<'a> {
-    /// Read a heading with or without the emoji variation selector: [`plain`] strips it
-    /// from a fetched body, and a body from anywhere else still carries it.
     pub fn read(heading: &'a str) -> Change<'a> {
         match heading.trim() {
-            "\u{26a0} Breaking changes" | "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
+            "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
             "Features" => Change::New,
             "Bug fixes" => Change::Fixed,
             "Performance" => Change::Faster,
@@ -928,14 +939,6 @@ pub struct Commit<'a> {
     pub url: &'a str,
 }
 
-/// A release body with the emoji variation selector taken out.
-///
-/// ⚠️ No bundled font has a glyph for U+FE0F, and a missing glyph renders as an empty
-/// box, so `### ⚠️ Breaking changes` would show a blank tile beside the warning sign.
-pub fn plain(body: &str) -> String {
-    body.replace('\u{fe0f}', "")
-}
-
 /// Read one line of a release body.
 pub fn classify(line: &str) -> Line<'_> {
     let line = line.trim_end();
@@ -1073,22 +1076,9 @@ mod tests {
     }
 
     #[test]
-    fn a_breaking_heading_is_named_with_or_without_the_warning_sign() {
-        assert_eq!(
-            Change::read("\u{26a0} Breaking changes"),
-            Change::Breaking,
-            "the heading a fetched body carries once `plain` has run"
-        );
-        assert_eq!(
-            Change::read("\u{26a0}\u{fe0f} Breaking changes"),
-            Change::Breaking
-        );
-        assert_eq!(Change::Breaking.title(), "Breaking");
-    }
-
-    #[test]
     fn every_heading_the_release_script_writes_has_a_name_and_an_unknown_one_keeps_its_own() {
         for (heading, title) in [
+            ("\u{26a0}\u{fe0f} Breaking changes", "Breaking"),
             ("Features", "New"),
             ("Bug fixes", "Fixed"),
             ("Performance", "Faster"),
@@ -1119,8 +1109,7 @@ mod tests {
 
     #[test]
     fn the_notes_group_under_their_headings_and_the_compare_link_is_left_for_the_foot() {
-        let body = plain(RELEASED);
-        let read = sections(&body);
+        let read = sections(RELEASED);
         let named: Vec<&str> = read
             .iter()
             .map(|section| section.change.map_or("", Change::title))
@@ -1128,7 +1117,7 @@ mod tests {
         assert_eq!(named, vec!["Breaking", "New"]);
         assert!(read.iter().all(|section| section.lines.len() == 1));
         assert_eq!(
-            changelog(&body),
+            changelog(RELEASED),
             Some("https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0")
         );
     }
@@ -1151,27 +1140,36 @@ mod tests {
     }
 
     /// The shell refuses a smaller screen than this, so both sheets must fit in it with
-    /// their dismiss button on screen.
+    /// their dismiss button on screen, and the welcome with its warning and every start
+    /// card too: the support table scrolls instead.
     #[test]
-    fn the_welcome_sheet_keeps_its_button_on_the_smallest_screen_the_shell_allows() {
+    fn the_welcome_sheet_keeps_its_button_and_its_choices_on_the_smallest_screen() {
         let ctx = headless();
         let size = crate::shell::LEAST;
-        // Twice, because the second frame lays out against the first.
-        let _ = drawn_at(&ctx, size, |ctx| {
-            welcome(ctx);
-        });
-        let said = drawn_at(&ctx, size, |ctx| {
-            welcome(ctx);
-        });
+        // Three times: each frame lays out against the one before, and the cards settle
+        // their own height first.
+        let mut said = Vec::new();
+        for _ in 0..3 {
+            said = drawn_at(&ctx, size, |ctx| {
+                welcome(ctx);
+            });
+        }
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let button = box_of(&said, "I understand")
-            .unwrap_or_else(|| panic!("the button was never painted: {said:?}"));
-        assert!(
-            screen.contains_rect(button.expand(6.0)),
-            "the button is off a {size:?} screen: {button:?}"
-        );
-        assert!(box_of(&said, "Nord Electro 5").is_some(), "{said:?}");
+        for label in [
+            "I understand",
+            "Connect an instrument…",
+            "Open files…",
+            "Read the guide",
+            &format!("{RISK_LEAD}{RISK_REST}"),
+        ] {
+            let drawn = box_of(&said, label)
+                .unwrap_or_else(|| panic!("{label} was never painted: {said:?}"));
+            assert!(
+                screen.contains_rect(drawn.expand(6.0)),
+                "{label} is off a {size:?} screen: {drawn:?}"
+            );
+        }
     }
 
     #[test]
@@ -1179,7 +1177,7 @@ mod tests {
         let ctx = headless();
         let size = crate::shell::LEAST;
         let notes = Notes::Read {
-            body: plain(RELEASED),
+            body: RELEASED.to_owned(),
             page: "https://github.com/jmoo/drawbar/releases/tag/drawbar-v0.5.0".to_owned(),
         };
         let _ = drawn_at(&ctx, size, |ctx| {
@@ -1306,14 +1304,6 @@ mod tests {
             Line::Text("  Ordinary prose.")
         );
         assert_eq!(classify("   "), Line::Blank);
-    }
-
-    #[test]
-    fn a_heading_keeps_its_warning_sign_without_the_variation_selector() {
-        assert_eq!(
-            plain("### \u{26a0}\u{fe0f} Breaking changes"),
-            "### \u{26a0} Breaking changes"
-        );
     }
 
     #[test]

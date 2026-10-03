@@ -33,7 +33,7 @@ const GAP: f32 = 10.0;
 
 /// The height of every control on the strip, and its corner radius.
 const CONTROL: f32 = 20.0;
-const RADIUS: f32 = 2.0;
+const RADIUS: f32 = crate::app::CONTROL_RADIUS as f32;
 
 /// The glyph sizes: the kind, a face or a quiet action, the loud action, a tag chip.
 const KIND: f32 = 15.0;

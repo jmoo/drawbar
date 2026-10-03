@@ -13,51 +13,15 @@ use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
 use super::drag::{kinds_present, qualifier, Item, Kept, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click, Verb};
-use crate::device::{occupancy, read_only, Connection, Device, DeviceState};
+use crate::device::{occupancy, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
-use crate::newproject::Making;
+use crate::menu::{marked, new_menu};
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
-use crate::shell::marked;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
-use crate::workspace::{Fresh, LocalEntity, Workspace};
-
-/// The New menu. Above the separator are files an instrument holds: each family's
-/// defaults, and the two instrument files built from audio. Below it are files only this
-/// computer keeps: a note, a Sample Editor project, and a folder.
-///
-/// ⚠️ One menu, used everywhere. The tree's context menu, the File menu, the toolbar and
-/// the tab strip all offer "New", and four different menus of one name would be four
-/// things to learn. Connecting an instrument makes nothing on this computer, so it is on
-/// the tree's instrument row instead.
-pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-    for family in &Fresh::FAMILIES {
-        ui.menu_button(family.label, |ui| {
-            for kind in family.kinds {
-                entry(ui, *kind, acts);
-            }
-        });
-    }
-    for making in Making::FROM_WAVS.iter().filter(|it| it.instrument_file()) {
-        from_wavs(ui, *making, acts);
-    }
-    ui.separator();
-    for kind in Fresh::LOOSE {
-        entry(ui, kind, acts);
-    }
-    for making in Making::FROM_WAVS.iter().filter(|it| !it.instrument_file()) {
-        from_wavs(ui, *making, acts);
-    }
-    offer(
-        ui,
-        "New folder",
-        Some("groups the list on this computer; the instrument never sees it"),
-        Act::NewFolder,
-        acts,
-    );
-}
+use crate::workspace::{LocalEntity, Workspace};
 
 /// A menu item that runs `act` and closes the menu.
 fn offer(ui: &mut egui::Ui, label: &str, hint: Option<&str>, act: Act, acts: &mut Vec<Act>) {
@@ -69,17 +33,6 @@ fn offer(ui: &mut egui::Ui, label: &str, hint: Option<&str>, act: Act, acts: &mu
         acts.push(act);
         ui.close();
     }
-}
-
-/// One kind this app creates from a default.
-fn entry(ui: &mut egui::Ui, kind: Fresh, acts: &mut Vec<Act>) {
-    offer(ui, kind.label(), kind.note(), Act::New(kind), acts);
-}
-
-/// One kind built from audio files, which asks for the files before it exists.
-fn from_wavs(ui: &mut egui::Ui, making: Making, acts: &mut Vec<Act>) {
-    let (item, hint) = making.item();
-    offer(ui, item, Some(hint), Act::NewFromWavs(making), acts);
 }
 
 /// A row of the tree with something under it.
@@ -112,14 +65,14 @@ impl Default for Sections {
     }
 }
 
-/// Where a row's contents start.
+/// Where a row's contents start, from the row's own left edge.
 ///
-/// A top-level branch starts 8 px in, a leaf beside it at 26, and a leaf one level down
-/// at 40. A leaf skips the triangle's box, which lines its glyph up under the glyph of a
+/// A top-level branch starts 6 px in, a leaf beside it at 26, and a leaf one level down
+/// at 36. A leaf skips the triangle's box, which lines its glyph up under the glyph of a
 /// branch at the same depth.
 fn indent(depth: usize, branch: bool) -> f32 {
-    const FIRST: f32 = 8.0;
-    const DOWN: f32 = 14.0;
+    const FIRST: f32 = 6.0;
+    const DOWN: f32 = 10.0;
     let past_the_triangle = match branch {
         true => 0.0,
         false => STEP,
@@ -127,10 +80,21 @@ fn indent(depth: usize, branch: bool) -> f32 {
     FIRST + DOWN * depth as f32 + past_the_triangle
 }
 
+/// The space above the first section, the gap between rows, and the space after each
+/// section.
+const TOP: f32 = 8.0;
+const ROW_GAP: f32 = 1.0;
+const AFTER_SECTION: f32 = 8.0;
+
 /// A section's header, and whether its body should be drawn.
-fn section(ui: &mut egui::Ui, title: &str, open: &mut bool) -> bool {
-    panel_header(ui, title, open);
+fn section(ui: &mut egui::Ui, title: &str, count: Option<&str>, open: &mut bool) -> bool {
+    panel_header(ui, title, count, open);
     *open
+}
+
+/// The space after a section, open or shut, before the next header.
+fn end_section(ui: &mut egui::Ui) {
+    ui.add_space(AFTER_SECTION - ROW_GAP);
 }
 
 /// Whether a click landed on the triangle, which opens the branch instead of selecting
@@ -219,17 +183,25 @@ impl Browser {
             .id_salt("browser_tree")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = ROW_GAP;
+                ui.add_space(TOP);
                 let mut sections = self.sections;
-                if section(ui, "places", &mut sections.places) {
+                if section(ui, "Places", None, &mut sections.places) {
                     self.places(ui, workspace, device, queue, filter, acts);
                 }
+                end_section(ui);
                 let kinds = kinds_present(workspace, &device.state);
-                if worth_choosing(&kinds) && section(ui, "kinds", &mut sections.kinds) {
-                    self.kinds(ui, &kinds, workspace, device, filter, acts);
+                if worth_choosing(&kinds) {
+                    if section(ui, "Kinds", None, &mut sections.kinds) {
+                        self.kinds(ui, &kinds, workspace, device, filter, acts);
+                    }
+                    end_section(ui);
                 }
-                if section(ui, "tags", &mut sections.tags) {
+                let tags = self.tags.all().len().to_string();
+                if section(ui, "Tags", Some(&tags), &mut sections.tags) {
                     self.tag_rows(ui, workspace, device, filter, acts);
                 }
+                end_section(ui);
                 self.sections = sections;
                 self.empty_below(ui);
             });
@@ -299,9 +271,8 @@ impl Browser {
             }
         }
 
-        match device.state.connected() {
-            true => self.instrument_rows(ui, workspace, device, queue, filter, acts),
-            false => self.connect_row(ui, device, acts),
+        if device.state.connected() {
+            self.instrument_rows(ui, workspace, device, queue, filter, acts);
         }
 
         let counts = [
@@ -382,38 +353,6 @@ impl Browser {
                 ui.menu_button("New", |ui| new_menu(ui, acts));
             });
         });
-    }
-
-    /// The row shown in place of an instrument until one is connected.
-    ///
-    /// ⚠️ The click reaches `requestDevice()` in the frame it landed in, which keeps the
-    /// browser's transient user activation alive.
-    fn connect_row(&mut self, ui: &mut egui::Ui, device: &Device, acts: &mut Vec<Act>) {
-        if matches!(device.state.connection, Connection::Connecting) {
-            nothing(ui, 0, "Looking for an instrument…");
-            return;
-        }
-        let drawn = row(
-            ui,
-            false,
-            &Cells {
-                indent: indent(0, false),
-                glyph: Some(Glyph::Keyboard),
-                name: "Connect an instrument…",
-                faint: true,
-                ..Cells::default()
-            },
-        );
-        if drawn
-            .response
-            .on_hover_text(
-                "Close Nord Sound Manager first. It keeps the USB connection to itself while \
-                 it is open.\n\nIn a browser: Chrome or Edge only.",
-            )
-            .clicked()
-        {
-            acts.push(Act::Connect);
-        }
     }
 
     /// The folder ids in creation order, copied out so a row can change the list it is
@@ -628,7 +567,7 @@ impl Browser {
 
     /// The menu a row offers, in the tree or in the library table.
     ///
-    /// A row inside a checked set of several offers what the library's footer offers,
+    /// A row inside a checked set of several offers what the Selection card offers,
     /// because the menu acts on the whole set.
     ///
     /// Folders and tags appear only in the tree, so the rows that draw them build their
@@ -691,7 +630,7 @@ impl Browser {
         }
         ui.menu_button("Move to folder", |ui| {
             for folder in self.folders.all() {
-                if marked(ui, &folder.name, filed == Some(folder.id), None) {
+                if marked(ui, &folder.name, filed == Some(folder.id)) {
                     acts.push(Act::File {
                         id,
                         folder: Some(folder.id),
@@ -711,12 +650,12 @@ impl Browser {
 
     /// Every tag, checked where it is on everything selected, then New tag.
     ///
-    /// Only the items, so the row's menu and the library's footer can each give them
-    /// their own label.
+    /// Only the items, so the row's menu and the Selection card can each give them their
+    /// own label.
     pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         for tag in self.tags.all() {
             let on = self.tags.on_all(picked, tag.id);
-            if marked(ui, &tag.name, on, None) {
+            if marked(ui, &tag.name, on) {
                 let ids = picked.to_vec();
                 acts.push(match on {
                     true => Act::Untag { ids, tag: tag.id },
@@ -1262,7 +1201,7 @@ impl Browser {
             &Cells {
                 indent: indent(0, false),
                 glyph: Some(Glyph::Plus),
-                name: "new tag",
+                name: "New tag",
                 faint: true,
                 ..Cells::default()
             },
@@ -1300,61 +1239,7 @@ fn destination(held: &Queued) -> String {
 mod tests {
     use super::*;
     use crate::testing::{self, context, words, Bench};
-
-    /// ⚠️ Everything built from audio is on the New menu. One pick of WAVs can make any
-    /// of them, and a menu offering only some would hide what the dialog does.
-    #[test]
-    fn the_new_menu_offers_everything_a_pick_of_wavs_makes() {
-        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
-        });
-        let said = words(&output);
-        for making in Making::FROM_WAVS {
-            let item = making.item().0;
-            assert!(said.iter().any(|word| word == item), "{item} is missing");
-        }
-        assert!(said.iter().any(|word| word == "New folder"));
-    }
-
-    /// ⚠️ The New menu's separator splits files an instrument holds from files only this
-    /// computer keeps. A kind on the wrong side would misstate where the new file can go.
-    #[test]
-    fn the_new_menu_parts_instrument_files_from_the_rest() {
-        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
-        });
-        let said = words(&output);
-        let at = |word: &str| {
-            said.iter()
-                .position(|held| held == word)
-                .unwrap_or_else(|| panic!("{word} is missing: {said:?}"))
-        };
-        let rule = Fresh::FAMILIES
-            .iter()
-            .map(|family| at(family.label))
-            .chain(
-                Making::FROM_WAVS
-                    .iter()
-                    .filter(|making| making.instrument_file())
-                    .map(|making| at(making.item().0)),
-            )
-            .max()
-            .expect("the instrument files are above it");
-        let below: Vec<&str> = Fresh::LOOSE
-            .iter()
-            .map(|kind| kind.label())
-            .chain(
-                Making::FROM_WAVS
-                    .iter()
-                    .filter(|making| !making.instrument_file())
-                    .map(|making| making.item().0),
-            )
-            .chain(["New folder"])
-            .collect();
-        for item in below {
-            assert!(at(item) > rule, "{item} belongs below the rule: {said:?}");
-        }
-    }
+    use crate::workspace::Fresh;
 
     /// ⚠️ A row shows the sound's name without its format tag. The name the workspace
     /// holds keeps the tag; only the drawn text drops it.

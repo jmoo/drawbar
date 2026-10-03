@@ -14,14 +14,14 @@ use nord_format::accept::Family;
 use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
-use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, qualifier, Act, Browser, Bulk, Item, Kept, Kind, Qualifier};
+use crate::app::{accent, tint, ui as ui_text, warn};
+use crate::browser::{qualifier, Act, Browser, Item, Kept, Kind, Qualifier};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
-use crate::icon::{icon, painted, Glyph};
-use crate::panel::{chip, cut, inset, list_width, row_ink, Track, GLYPH, PAD};
+use crate::icon::{painted, Glyph};
+use crate::panel::{cut, list_width, pill_at, row_ink, view_header, Track, ROW_INSET};
 use crate::queue::{Diff, Queue};
-use crate::shell::{Page, Shell};
+use crate::shell::Shell;
 use crate::strings::{counted, folder, place, shown};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
@@ -47,7 +47,7 @@ pub enum Where {
 }
 
 impl Where {
-    /// The short word in the WHERE column.
+    /// The short word on the Where column's pill.
     pub fn short(self) -> &'static str {
         match self {
             Where::Both(Some(true)) => "both =",
@@ -128,7 +128,7 @@ pub enum Needs {
 }
 
 impl Needs {
-    /// The text in the NEEDS column.
+    /// The text in the Needs column.
     pub fn text(&self) -> String {
         match self {
             Needs::Nothing => String::new(),
@@ -401,8 +401,8 @@ fn wrote(entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
     })
 }
 
-/// What a mark on a row claims: the dot the tree paints at a row's right end, the color
-/// of the table's WHERE cell, and the star after a name.
+/// What a mark on a row claims: the dot the tree paints at a row's right end, and the
+/// star after a name.
 ///
 /// [`mark_words`] explains each one wherever it is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -426,7 +426,7 @@ pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
 
 /// What a mark means, in words.
 ///
-/// The tree dot's hover, the colored WHERE cell's hover, and the document header's hint
+/// The tree dot's hover, the table's Where cell's hover, and the document header's hint
 /// all use these words, so every mark in the window is explained the same way.
 pub fn mark_words(mark: Mark) -> &'static str {
     match mark {
@@ -503,7 +503,6 @@ fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
 /// One column of the table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Column {
-    Mark,
     Glyph,
     Kind,
     Name,
@@ -531,8 +530,7 @@ impl Order {
 }
 
 impl Column {
-    pub const ALL: [Column; 9] = [
-        Column::Mark,
+    pub const ALL: [Column; 8] = [
         Column::Glyph,
         Column::Kind,
         Column::Name,
@@ -543,25 +541,24 @@ impl Column {
         Column::Needs,
     ];
 
-    /// The column's heading. The two columns that show a mark have none.
+    /// The column's heading. The glyph column has none: its word is the kind beside it.
     fn head(self) -> &'static str {
         match self {
-            Column::Mark | Column::Glyph => "",
-            Column::Kind => "kind",
-            Column::Name => "name",
-            Column::Tags => "tags",
-            Column::Where => "where",
-            Column::At => "at",
-            Column::Size => "size",
-            Column::Needs => "needs",
+            Column::Glyph => "",
+            Column::Kind => "Kind",
+            Column::Name => "Name",
+            Column::Tags => "Tags",
+            Column::Where => "Where",
+            Column::At => "At",
+            Column::Size => "Size",
+            Column::Needs => "Needs",
         }
     }
 
     /// What the column asks for: a fixed width, or a share of what the fixed ones leave.
     fn track(self) -> Track {
         match self {
-            Column::Mark => Track::Px(18.0),
-            Column::Glyph => Track::Px(20.0),
+            Column::Glyph => Track::Px(16.0),
             // 96 px holds the longest kind word. It is a capped share so a narrow center
             // gives the room to the name.
             Column::Kind => Track::Capped {
@@ -569,20 +566,21 @@ impl Column {
                 max: 96.0,
             },
             Column::Name => Track::Share(1.9),
-            Column::Tags => Track::Px(38.0),
-            Column::Where => Track::Px(64.0),
-            Column::At => Track::Px(50.0),
-            Column::Size => Track::Px(54.0),
+            Column::Tags => Track::Px(34.0),
+            // Holds the widest word, "computer", on its pill.
+            Column::Where => Track::Px(72.0),
+            Column::At => Track::Px(44.0),
+            Column::Size => Track::Px(56.0),
             Column::Needs => Track::Share(1.3),
         }
     }
 }
 
 /// The gap between two columns.
-const GAP: f32 = 8.0;
+const GAP: f32 = 10.0;
 
 /// Where each column sits across `width`, laid out by [`crate::panel::tracks`].
-pub fn tracks(width: f32) -> [Range<f32>; 9] {
+pub fn tracks(width: f32) -> [Range<f32>; 8] {
     let wanted = Column::ALL.map(Column::track);
     let held = crate::panel::tracks(width, &wanted, GAP);
     std::array::from_fn(|index| held[index].clone())
@@ -611,9 +609,6 @@ pub fn arrange(mut rows: Vec<Row>, query: &str, by: Column, order: Order) -> Vec
 
 fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
     match by {
-        // The mark is a control, not a fact about the row, so sorting by it leaves the
-        // order to the tie-breakers.
-        Column::Mark => Ordering::Equal,
         // The glyph and the word beside it are the same fact, so a click on either
         // orders the table the same way.
         Column::Glyph | Column::Kind => word(a).cmp(&word(b)),
@@ -626,7 +621,7 @@ fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
     }
 }
 
-/// The word in the KIND column, which the glyph beside it also represents.
+/// The word in the Kind column, which the glyph beside it also represents.
 fn word(row: &Row) -> String {
     crate::strings::kind_word(row.kind, row.qualifier)
 }
@@ -639,8 +634,9 @@ fn address(row: &Row) -> (bool, u32, u32, u32) {
     }
 }
 
-/// What sending the picked rows would do, in one sentence.
-pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String {
+/// What sending the picked rows would do, in one sentence, or `None` when no row is
+/// bound for a slot and nothing about them needs saying.
+pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> Option<String> {
     let mut going: Vec<(ObjectClass, Location)> =
         rows.iter().filter_map(|row| row.destination()).collect();
     going.sort_unstable_by_key(|(class, at)| (class.to_raw(), at.bank, at.slot));
@@ -686,10 +682,7 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String
             n => said.push(format!("{n} need a {named} the instrument has not named")),
         }
     }
-    match said.is_empty() {
-        true => "Nothing selected goes to the instrument.".to_string(),
-        false => said.join(" · "),
-    }
+    (!said.is_empty()).then(|| said.join(" · "))
 }
 
 /// The destinations as one run per folder: `Programs 7:1–7:4`, in the order `going` is
@@ -715,21 +708,31 @@ fn spans(going: &[(ObjectClass, Location)]) -> String {
     runs.join(", ")
 }
 
-/// The height of a row, of the column heads, and of the bar above them.
-const ROW: f32 = 24.0;
-const HEAD: f32 = 20.0;
-const BAR: f32 = 28.0;
+/// The height of a row, the gap between two rows, and the height of the column heads.
+const ROW: f32 = 32.0;
+const ROW_GAP: f32 = 2.0;
+const HEAD: f32 = 28.0;
 
-/// The glyphs beside a count.
-const SMALL: f32 = 10.0;
+/// The padding at each end of a row and of the column heads.
+const CELL_PAD: f32 = 10.0;
 
-/// The selection mark's box.
-const MARK: f32 = 11.0;
+/// The space between the column heads and the first row.
+const ABOVE: f32 = 6.0;
+
+/// The glyphs beside a count, and the glyph of a row's kind.
+const SMALL: f32 = 11.0;
+const KIND: f32 = 15.0;
+
+/// A filter chip's height, its padding at each end, and the size of its glyph.
+const CHIP: f32 = 26.0;
+const CHIP_PAD: f32 = 10.0;
+const CHIP_GLYPH: f32 = 12.0;
 
 /// The font sizes a cell uses. Cells are painted directly, so the sizes are set here and
 /// not taken from the named styles in [`crate::app`].
-const NAME: f32 = 12.0;
-const MONO: f32 = 10.5;
+const NAME: f32 = 13.0;
+const TEXT: f32 = 12.0;
+const MONO: f32 = 11.5;
 
 /// The center panel's default view.
 pub struct Library {
@@ -756,8 +759,6 @@ impl Library {
         queue: &Queue,
         shell: &Shell,
     ) -> Vec<Act> {
-        // The bar, the heads, and the rows are flush, so the table's own lines are its
-        // only horizontal rules.
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut acts = Vec::new();
         let held = rows(
@@ -773,29 +774,7 @@ impl Library {
             queue.len(),
             crate::queue::changed(workspace, &device.state, queue).len(),
         ];
-        bar(ui, counts, browser.tags(), &shell.filter, &mut acts);
-        let picked: Vec<&Row> = held
-            .iter()
-            .filter(|row| browser.picked().holds(row.item))
-            .collect();
-        if !picked.is_empty() {
-            // Laid out before the table, so the strip keeps its height and the table takes
-            // what is left.
-            egui::TopBottomPanel::bottom("library_footer")
-                .resizable(false)
-                .frame(egui::Frame::new())
-                .show_inside(ui, |ui| {
-                    footer(
-                        ui,
-                        &picked,
-                        browser,
-                        workspace,
-                        &device.state,
-                        queue,
-                        &mut acts,
-                    )
-                });
-        }
+        header(ui, counts, browser.tags(), &shell.filter, &mut acts);
         self.table(ui, &held, browser, workspace, device, queue, &mut acts);
         acts
     }
@@ -811,15 +790,25 @@ impl Library {
         queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
-        let ui = &mut inset(ui);
-        let width = list_width(ui, rows.len(), ROW, HEAD);
-        let tracks = tracks(width);
+        let room = ui.available_rect_before_wrap();
+        let ui = &mut ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_max(
+                    room.min + egui::vec2(ROW_INSET, 0.0),
+                    room.max - egui::Vec2::splat(ROW_INSET),
+                ))
+                .layout(*ui.layout()),
+        );
+        let width = list_width(ui, rows.len(), ROW + ROW_GAP, HEAD + ABOVE);
+        let tracks = tracks((width - 2.0 * CELL_PAD).max(0.0));
         self.head(ui, width, &tracks);
+        ui.add_space(ABOVE);
         if rows.is_empty() {
             return nothing(ui);
         }
 
         let list: Vec<Item> = rows.iter().map(|row| row.item).collect();
+        ui.spacing_mut().item_spacing.y = ROW_GAP;
         let shown = egui::ScrollArea::vertical()
             .id_salt("library_table")
             .auto_shrink([false; 2])
@@ -845,14 +834,20 @@ impl Library {
 
     /// The column heads. Clicking one sorts by that column, and clicking it again reverses
     /// the order.
-    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 9]) {
+    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 8]) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::click());
         let visuals = ui.visuals().clone();
         let painter = ui.painter().clone();
-        painter.rect_filled(rect, 0.0, visuals.faint_bg_color);
+        painter.hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+        );
         let quiet = crate::app::caption(&visuals);
         let strong = visuals.widgets.active.fg_stroke.color;
+        let font = crate::app::section().resolve(ui.style());
+        let content = rect.shrink2(egui::vec2(CELL_PAD, 0.0));
 
         for (column, track) in Column::ALL.iter().zip(tracks) {
             if column.head().is_empty() {
@@ -873,8 +868,8 @@ impl Library {
                 };
                 let box_ = egui::Rect::from_min_size(
                     egui::pos2(
-                        rect.left() + track.end - SMALL,
-                        rect.center().y - SMALL / 2.0,
+                        content.left() + track.end - SMALL,
+                        content.center().y - SMALL / 2.0,
                     ),
                     egui::Vec2::splat(SMALL),
                 );
@@ -883,17 +878,17 @@ impl Library {
             }
             cut(
                 &painter,
-                rect.left() + track.start,
-                rect.center().y,
+                content.left() + track.start,
+                content.center().y,
                 room,
-                &column.head().to_uppercase(),
-                egui::TextFormat::simple(egui::FontId::proportional(9.5), ink),
+                column.head(),
+                egui::TextFormat::simple(font.clone(), ink),
             );
         }
 
         let Some(column) = response
             .clicked()
-            .then(|| under(&response, rect, tracks))
+            .then(|| under(&response, content, tracks))
             .flatten()
         else {
             return;
@@ -908,57 +903,111 @@ impl Library {
     }
 }
 
-/// The bar over the table: what the library shows, the tags narrowing it, and what needs
-/// attention.
+/// The header over the table: what the library shows, and the filters narrowing it or
+/// asking for attention.
 ///
 /// ⚠️ Both counts cover the whole list, not this view. They match the numbers on the
 /// tree's rows and what the toolbar's Send acts on. A chip counting only what passes its
 /// own filter would change the moment it was clicked.
-fn bar(ui: &mut egui::Ui, counts: [usize; 2], tags: &Tags, filter: &Filter, acts: &mut Vec<Act>) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), BAR), egui::Sense::hover());
-    let mut inner = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(PAD, 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    let ui = &mut inner;
-    ui.spacing_mut().item_spacing.x = 6.0;
-    let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-    icon(ui, Glyph::LibraryBig, GLYPH, ink);
-    ui.label(
-        egui::RichText::new(format!("Library · {}", over(filter)))
-            .size(12.0)
-            .color(ink),
-    );
-    for tag in filter.tags.iter().filter_map(|id| tags.name_of(*id)) {
-        chip(ui, Glyph::Tag, SMALL, tag, ink, None);
-    }
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+fn header(
+    ui: &mut egui::Ui,
+    counts: [usize; 2],
+    tags: &Tags,
+    filter: &Filter,
+    acts: &mut Vec<Act>,
+) {
+    let accent = accent(ui.visuals());
+    let shows = over(filter);
+    view_header(ui, Glyph::LibraryBig, accent, "Library", &shows, |ui| {
         let states = [
-            (State::Waiting, Glyph::Clock),
-            (State::Differs, Glyph::CircleAlert),
+            (State::Differs, Glyph::CircleAlert, counts[1]),
+            (State::Waiting, Glyph::Clock, counts[0]),
         ];
-        for ((state, glyph), count) in states.into_iter().zip(counts) {
+        for (state, glyph, count) in states {
+            let on = filter.on(Narrow::State(state));
             // A chip whose count is zero stays while it is the active filter, so there is
             // always something to click to clear it.
-            if count == 0 && !filter.on(Narrow::State(state)) {
+            if count == 0 && !on {
                 continue;
             }
             let text = format!("{count} {}", state.word());
-            let drawn = chip(ui, glyph, SMALL, &text, warn(ui.visuals()), None);
-            let picked = ui
-                .interact(
-                    drawn.rect,
-                    drawn.id.with(state.word()),
-                    egui::Sense::click(),
-                )
-                .on_hover_text(state.sentence());
-            if picked.clicked() {
+            let signal = warn(ui.visuals());
+            if filter_chip(ui, glyph, Some(signal), &text, on)
+                .on_hover_text(state.sentence())
+                .clicked()
+            {
                 acts.push(Act::Narrow(Narrow::State(state)));
             }
         }
+        let worn: Vec<(u64, &str)> = filter
+            .tags
+            .iter()
+            .filter_map(|id| Some((*id, tags.name_of(*id)?)))
+            .collect();
+        for (id, name) in worn.into_iter().rev() {
+            if filter_chip(ui, Glyph::Tag, None, name, true)
+                .on_hover_text(format!("only what is tagged {name}"))
+                .clicked()
+            {
+                acts.push(Act::Narrow(Narrow::Tag(id)));
+            }
+        }
     });
+}
+
+/// A filter as a pill: a glyph and a word, ringed and washed in the accent while it
+/// narrows the library. A click toggles it.
+///
+/// `signal` colors the glyph whether or not the filter is on, for a count that asks for
+/// attention.
+fn filter_chip(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    signal: Option<egui::Color32>,
+    text: &str,
+    on: bool,
+) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let ink = match on {
+        true => visuals.widgets.active.fg_stroke.color,
+        false => crate::app::caption(&visuals),
+    };
+    let word = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), egui::FontId::proportional(TEXT), ink);
+    let width = CHIP_PAD + CHIP_GLYPH + 5.0 + word.size().x + CHIP_PAD;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CHIP), egui::Sense::click());
+    let accent = accent(&visuals);
+    let (edge, fill) = match (on, response.hovered()) {
+        (true, _) => (tint(accent, 0.55), tint(accent, 0.14)),
+        (false, true) => (
+            visuals.widgets.hovered.bg_stroke.color,
+            egui::Color32::TRANSPARENT,
+        ),
+        (false, false) => (
+            visuals.widgets.noninteractive.bg_stroke.color,
+            egui::Color32::TRANSPARENT,
+        ),
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        CHIP / 2.0,
+        fill,
+        egui::Stroke::new(1.0_f32, edge),
+        egui::StrokeKind::Inside,
+    );
+    let mark = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + CHIP_PAD + CHIP_GLYPH / 2.0, rect.center().y),
+        egui::Vec2::splat(CHIP_GLYPH),
+    );
+    painted(ui, glyph, mark, signal.unwrap_or(ink));
+    ui.painter().galley(
+        egui::pos2(mark.right() + 5.0, rect.center().y - word.size().y / 2.0),
+        word,
+        egui::Color32::PLACEHOLDER,
+    );
+    response
 }
 
 /// What the library shows, in the words the filter's rows use.
@@ -979,16 +1028,26 @@ fn over(filter: &Filter) -> String {
     if let Some(state) = filter.state {
         narrowed.push(state.word().to_string());
     }
-    match narrowed.is_empty() {
+    let said = match narrowed.is_empty() {
         true => "everything".to_string(),
         false => narrowed.join(" · "),
-    }
+    };
+    let mut letters = said.chars();
+    letters
+        .next()
+        .map(|first| first.to_uppercase().chain(letters).collect())
+        .unwrap_or_default()
 }
 
 /// Which column the pointer is over, for the tooltip and for the head's sort click.
-fn under(response: &egui::Response, rect: egui::Rect, tracks: &[Range<f32>; 9]) -> Option<Column> {
+/// `content` is the row or head less its padding, where the tracks start.
+fn under(
+    response: &egui::Response,
+    content: egui::Rect,
+    tracks: &[Range<f32>; 8],
+) -> Option<Column> {
     let at = response.interact_pointer_pos().or(response.hover_pos())?;
-    let x = at.x - rect.left();
+    let x = at.x - content.left();
     Column::ALL
         .iter()
         .zip(tracks)
@@ -996,18 +1055,42 @@ fn under(response: &egui::Response, rect: egui::Rect, tracks: &[Range<f32>; 9]) 
         .map(|(column, _)| *column)
 }
 
+/// The Where pill's ink and fill: the signal of what the row needs, if anything.
+///
+/// ⚠️ On the selection fill every signal fails contrast, so a selected row's pill takes
+/// the selection's text color and the word carries the state.
+fn where_look(
+    state: Option<State>,
+    selected: bool,
+    visuals: &egui::Visuals,
+) -> (egui::Color32, egui::Color32) {
+    let signal = match state {
+        Some(State::Waiting) => Some(accent(visuals)),
+        Some(State::Differs) => Some(warn(visuals)),
+        None => None,
+    };
+    match (selected, signal) {
+        (true, _) => {
+            let ink = visuals.selection.stroke.color;
+            (ink, tint(ink, 0.12))
+        }
+        (false, Some(signal)) => (signal, tint(signal, 0.15)),
+        (false, None) => (visuals.text_color(), visuals.widgets.inactive.weak_bg_fill),
+    }
+}
+
 /// One row of the table.
 ///
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a label
 /// allocates a hover rect that wins the hit test over the row, so a click would land on
-/// whichever word is under the pointer. Only the row and its checkbox sense input, and
-/// the tooltip comes from the cell under the pointer.
+/// whichever word is under the pointer. Only the row senses input, and the tooltip comes
+/// from the cell under the pointer.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     ui: &mut egui::Ui,
     row: &Row,
     width: f32,
-    tracks: &[Range<f32>; 9],
+    tracks: &[Range<f32>; 8],
     browser: &mut Browser,
     list: &[Item],
     workspace: &Workspace,
@@ -1021,50 +1104,48 @@ fn paint(
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let (ink, quiet) = row_ink(&painter, rect, selected, response.hovered(), &visuals);
+    let content = rect.shrink2(egui::vec2(CELL_PAD, 0.0));
 
-    let cell = |column: Column| crate::panel::cell(rect, &tracks[column as usize]);
-    let write =
-        |box_: egui::Rect, text: &str, font: egui::FontId, tint: egui::Color32, italics: bool| {
-            let format = egui::TextFormat {
-                italics,
-                ..egui::TextFormat::simple(font, tint)
-            };
-            cut(
-                &painter,
-                box_.left(),
-                box_.center().y,
-                box_.width(),
-                text,
-                format,
-            );
-        };
+    let cell = |column: Column| crate::panel::cell(content, &tracks[column as usize]);
+    let write = |box_: egui::Rect, text: &str, format: egui::TextFormat| {
+        cut(
+            &painter,
+            box_.left(),
+            box_.center().y,
+            box_.width(),
+            text,
+            format,
+        );
+    };
+    let plain = |size: f32, tint: egui::Color32| {
+        egui::TextFormat::simple(egui::FontId::proportional(size), tint)
+    };
+    let mono = |size: f32| egui::TextFormat::simple(egui::FontId::monospace(size), quiet);
 
-    let checkbox = mark(ui, cell(Column::Mark), selected, &response);
     let glyph = cell(Column::Glyph);
     if glyph.width() > 0.0 {
         painted(
             ui,
             row.kind.glyph(),
             egui::Rect::from_center_size(
-                egui::pos2(glyph.left() + GLYPH / 2.0, glyph.center().y),
-                egui::Vec2::splat(GLYPH),
+                egui::pos2(glyph.left() + KIND / 2.0, glyph.center().y),
+                egui::Vec2::splat(KIND),
             ),
-            ink,
+            quiet,
         );
     }
-    write(
-        cell(Column::Kind),
-        &word(row),
-        egui::FontId::proportional(NAME - 1.0),
-        quiet,
-        false,
-    );
+    write(cell(Column::Kind), &word(row), plain(TEXT, quiet));
+    let family = match selected {
+        true => crate::app::bold(),
+        false => egui::FontFamily::Proportional,
+    };
     write(
         cell(Column::Name),
         &crate::browser::starred(&row.name, row.unsaved),
-        egui::FontId::proportional(NAME),
-        ink,
-        row.unsaved,
+        egui::TextFormat {
+            italics: row.unsaved,
+            ..egui::TextFormat::simple(egui::FontId::new(NAME, family), ink)
+        },
     );
     if row.tags > 0 {
         let tags = cell(Column::Tags);
@@ -1077,55 +1158,31 @@ fn paint(
             ),
             quiet,
         );
-        let count = tags.with_min_x(tags.left() + SMALL + 3.0);
-        write(
-            count,
-            &row.tags.to_string(),
-            egui::FontId::monospace(MONO),
-            quiet,
-            false,
-        );
+        let count = tags.with_min_x(tags.left() + SMALL + 4.0);
+        write(count, &row.tags.to_string(), mono(MONO - 0.5));
     }
-    // The same mark the tree's dot paints, as the color of this column's word.
-    let mark = row
-        .item
-        .local()
-        .and_then(|id| row.where_.mark(queue.holds(id)));
-    write(
-        cell(Column::Where),
+    let where_ = cell(Column::Where);
+    let (pill_ink, pill_fill) = where_look(state(row.item, row.where_, queue), selected, &visuals);
+    pill_at(
+        &painter,
+        where_.left(),
+        where_.center().y,
+        where_.width(),
         row.where_.short(),
-        egui::FontId::proportional(NAME - 1.0),
-        match mark {
-            Some(mark) => cell_ink(selected, mark_ink(mark, &visuals), &visuals),
-            None => quiet,
-        },
-        false,
+        pill_ink,
+        pill_fill,
     );
     if let Some((_, at)) = row.at {
-        write(
-            cell(Column::At),
-            &shown(at),
-            egui::FontId::monospace(MONO),
-            quiet,
-            false,
-        );
+        write(cell(Column::At), &shown(at), mono(MONO));
     }
     write(
         cell(Column::Size),
         &crate::room::measure(row.size),
-        egui::FontId::monospace(MONO),
-        quiet,
-        false,
+        mono(MONO),
     );
     // ⚠️ Weak ink even for a bare id. An unresolved id is a question nobody has asked
     // the instrument, not a library reported missing.
-    write(
-        cell(Column::Needs),
-        &row.needs.text(),
-        egui::FontId::proportional(NAME - 1.0),
-        quiet,
-        false,
-    );
+    write(cell(Column::Needs), &row.needs.text(), plain(TEXT, quiet));
 
     // A table row drags like a tree row, with the same payload, so it has the same drop
     // targets and meaning.
@@ -1136,19 +1193,11 @@ fn paint(
         }
     }
 
-    let checked = checkbox
-        .map(|box_| {
-            box_.on_hover_text(tooltip(
-                row,
-                Column::Mark,
-                mark,
-                browser.tags(),
-                workspace,
-                device,
-            ))
-        })
-        .is_some_and(|box_| box_.clicked());
-    let response = match under(&response, rect, tracks) {
+    let mark = row
+        .item
+        .local()
+        .and_then(|id| row.where_.mark(queue.holds(id)));
+    let response = match under(&response, content, tracks) {
         Some(column) => response.on_hover_text(tooltip(
             row,
             column,
@@ -1159,9 +1208,7 @@ fn paint(
         )),
         None => response,
     };
-    if checked {
-        browser.check(row.item);
-    } else if response.double_clicked() {
+    if response.double_clicked() {
         acts.push(Act::Open(row.item));
     } else if response.clicked() {
         browser.pick(ui, row.item, list);
@@ -1169,50 +1216,12 @@ fn paint(
     response.context_menu(|ui| browser.menu(ui, row.item, workspace, device, queue, acts));
 }
 
-/// The checkbox that shows whether a row is checked and takes the click that toggles it.
-/// A column too narrow for the box offers none.
-fn mark(
-    ui: &egui::Ui,
-    box_: egui::Rect,
-    picked: bool,
-    row: &egui::Response,
-) -> Option<egui::Response> {
-    if box_.width() < MARK {
-        return None;
-    }
-    let visuals = ui.visuals().clone();
-    let at = egui::Rect::from_center_size(
-        egui::pos2(box_.left() + MARK / 2.0, box_.center().y),
-        egui::Vec2::splat(MARK),
-    );
-    match picked {
-        true => {
-            ui.painter().rect_filled(at, 2.0, accent(&visuals));
-            painted(
-                ui,
-                Glyph::Check,
-                at.shrink(1.5),
-                visuals.selection.stroke.color,
-            );
-        }
-        false => {
-            ui.painter().rect_stroke(
-                at,
-                2.0,
-                egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
-                egui::StrokeKind::Inside,
-            );
-        }
-    }
-    Some(ui.interact(at, row.id.with("mark"), egui::Sense::click()))
-}
-
 /// The hover text for a cell.
 ///
 /// Three columns add a fact the row does not carry: the tags column shows a count and
 /// the hover names the tags, the address may be one of several slots holding the same
-/// bytes, and the WHERE cell's color is a [`Mark`] the row does not hold. All three are
-/// computed for the hovered row only.
+/// bytes, and the Where cell adds the [`Mark`] the tree paints for the row. All three
+/// are computed for the hovered row only.
 fn tooltip(
     row: &Row,
     column: Column,
@@ -1222,17 +1231,13 @@ fn tooltip(
     device: &Device,
 ) -> String {
     match column {
-        Column::Mark => {
-            "check it to act on several at once; a click on the row selects it alone".to_string()
-        }
         Column::Glyph | Column::Kind => word(row),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
             names => names.join(", "),
         },
-        // The cell takes the mark's color, so the hover explains the color under the
-        // sentence saying where the row is.
+        // Under the sentence saying where the row is, what the tree's dot for it claims.
         Column::Where => match mark {
             Some(mark) => format!("{}\n{}", row.where_.sentence(), mark_words(mark)),
             None => row.where_.sentence().to_string(),
@@ -1279,73 +1284,19 @@ fn worn(row: &Row, tags: &Tags) -> Vec<String> {
         .collect()
 }
 
-/// The strip under the table: what is checked, what sending it would do, and everything
-/// that can be asked of the whole set.
-#[allow(clippy::too_many_arguments)]
-fn footer(
-    ui: &mut egui::Ui,
-    picked: &[&Row],
-    browser: &mut Browser,
-    workspace: &Workspace,
-    device: &DeviceState,
-    queue: &Queue,
-    acts: &mut Vec<Act>,
-) {
-    let checked: Vec<Item> = picked.iter().map(|row| row.item).collect();
-    egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0_f32, accent(ui.visuals())))
-        .inner_margin(egui::Margin::symmetric(8, 4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    egui::RichText::new(format!("{} selected", picked.len()))
-                        .text_style(ui_text())
-                        .strong(),
-                );
-                ui.scope(|ui| {
-                    crate::panel::flat(ui);
-                    if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("clear").text_style(ui_text()),
-                        ))
-                        .on_hover_text("clear the selection, or press Escape")
-                        .clicked()
-                    {
-                        browser.unpick();
-                    }
-                });
-                ui.label(
-                    egui::RichText::new(consequence(picked, device, queue))
-                        .text_style(ui_text())
-                        .weak(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().button_padding.y = 0.0;
-                    if ui.small_button("Review send queue").clicked() {
-                        acts.push(Act::ShowPage(Page::Queue));
-                    }
-                    // Reversed: the strip runs right to left, so [`Bulk::ALL`]'s first
-                    // action has to be drawn last to sit farthest left.
-                    for action in Bulk::ALL.iter().rev() {
-                        browser.bulk_item(ui, *action, &checked, workspace, device, acts);
-                    }
-                });
-            });
-        });
-}
-
 /// The line the table shows when no row passes the filters.
 fn nothing(ui: &mut egui::Ui) {
-    ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(
-            "Nothing to show. Open Nord files, connect an instrument, or clear the search and filters.",
-        )
-        .text_style(micro())
-        .weak()
-        .italics(),
-    );
+    ui.horizontal(|ui| {
+        ui.add_space(CELL_PAD);
+        ui.label(
+            egui::RichText::new(
+                "Nothing to show. Open Nord files, connect an instrument, or clear the search and filters.",
+            )
+            .text_style(ui_text())
+            .weak()
+            .italics(),
+        );
+    });
 }
 
 #[cfg(test)]
@@ -1410,7 +1361,7 @@ mod tests {
     /// center is narrow: programs are told apart by their names.
     #[test]
     fn the_kind_reaches_96_px_when_wide_and_yields_to_the_name_when_narrow() {
-        let width_of = |tracks: &[Range<f32>; 9], column: Column| {
+        let width_of = |tracks: &[Range<f32>; 8], column: Column| {
             let track = &tracks[column as usize];
             track.end - track.start
         };
@@ -2086,10 +2037,10 @@ mod tests {
         }
     }
 
-    /// A WHERE cell takes its color from the mark the tree paints as a dot, so its hover
-    /// explains the color as well as where the row is.
+    /// A Where cell's hover says what the tree's dot for the row claims, as well as where
+    /// the row is.
     #[test]
-    fn a_colored_where_cell_says_what_its_color_claims() {
+    fn a_where_cell_says_what_the_trees_mark_claims() {
         let Bench {
             workspace, device, ..
         } = Bench::new();
@@ -2116,10 +2067,10 @@ mod tests {
         assert!(marked.ends_with(mark_words(Mark::Differs)), "{marked}");
     }
 
-    /// The sentence the footer says: where the picked rows go, how many of those slots
+    /// The sentence about a selection: where the picked rows go, how many of those slots
     /// are taken, what is already waiting, and what nothing has named.
     #[test]
-    fn the_footer_says_where_a_selection_goes_and_what_it_would_replace() {
+    fn the_selection_says_where_it_goes_and_what_it_would_replace() {
         let Bench {
             mut workspace,
             mut device,
@@ -2147,8 +2098,11 @@ mod tests {
         };
         let picked: Vec<&Row> = going.iter().collect();
         assert_eq!(
-            consequence(&picked, &device.state, &queue),
-            "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not named"
+            consequence(&picked, &device.state, &queue).as_deref(),
+            Some(
+                "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not \
+                 named"
+            )
         );
 
         // One of them is already in the queue, and the sentence says so.
@@ -2164,11 +2118,8 @@ mod tests {
             at(6, 3),
         );
         let picked: Vec<&Row> = going.iter().collect();
-        assert!(
-            consequence(&picked, &device.state, &queue).contains("1 already waiting"),
-            "{}",
-            consequence(&picked, &device.state, &queue)
-        );
+        let said = consequence(&picked, &device.state, &queue).unwrap_or_default();
+        assert!(said.contains("1 already waiting"), "{said}");
 
         // A row already on the instrument goes nowhere, so nothing is claimed for it.
         let there = vec![row(
@@ -2185,21 +2136,21 @@ mod tests {
         };
         assert_eq!(
             consequence(&only.iter().collect::<Vec<_>>(), &device.state, &queue),
-            "Nothing selected goes to the instrument."
+            None
         );
-        assert_eq!(
-            consequence(&[], &device.state, &queue),
-            "Nothing selected goes to the instrument."
-        );
+        assert_eq!(consequence(&[], &device.state, &queue), None);
     }
 
-    /// A box is a checkbox: a plain click on one puts its row in the checked set and
-    /// leaves whatever was checked before it alone, so several rows are checked with no
-    /// modifier held.
-    #[test]
-    fn a_click_on_a_row_box_checks_it_beside_what_is_already_checked() {
-        const WIDTH: f32 = 900.0;
+    /// The middle of the table's row `index`, far enough in to land on its name.
+    fn on_row(index: usize) -> egui::Pos2 {
+        let top = crate::panel::VIEW_HEADER + HEAD + ABOVE + (ROW + ROW_GAP) * index as f32;
+        egui::pos2(160.0, top + ROW / 2.0)
+    }
 
+    /// A row joins the selection by a ⌘-click on it, beside what is already selected,
+    /// where a plain click selects it alone.
+    #[test]
+    fn a_command_click_on_a_row_adds_it_beside_what_is_selected() {
         let Bench {
             ctx,
             mut browser,
@@ -2215,32 +2166,81 @@ mod tests {
             workspace.create(kind, &mut log).unwrap();
         }
 
-        // The table starts PAD in, and the mark is the first track inside it.
-        let box_x = PAD + tracks(WIDTH - PAD)[Column::Mark as usize].start + MARK / 2.0;
-        let on_box = |index: f32| egui::pos2(box_x, BAR + HEAD + ROW * (index + 0.5));
-        let mut frames = Vec::new();
-        for index in [0.0_f32, 1.0] {
-            let on = on_box(index);
-            frames.push(vec![egui::Event::PointerMoved(on)]);
-            frames.push(vec![testing::button(on, true), testing::button(on, false)]);
-            frames.push(Vec::new());
-        }
-        for events in frames {
-            let input = testing::screen(egui::vec2(WIDTH, 540.0), events);
-            testing::run(&ctx, input, |ctx| {
+        // A second, so no click lands soon enough after the last to count as a double.
+        let mut time = 0.0;
+        let mut click = |index: usize, modifiers: egui::Modifiers| {
+            let on = on_row(index);
+            let frames = [
+                vec![egui::Event::PointerMoved(on)],
+                vec![testing::button(on, true), testing::button(on, false)],
+                Vec::new(),
+            ];
+            for events in frames {
+                time += 1.0;
+                let input = egui::RawInput {
+                    modifiers,
+                    time: Some(time),
+                    ..testing::screen(egui::vec2(900.0, 540.0), events)
+                };
+                testing::run(&ctx, input, |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new())
+                        .show(ctx, |ui| {
+                            library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                        });
+                });
+            }
+            browser.picked().items().count()
+        };
+        click(0, egui::Modifiers::NONE);
+        assert_eq!(
+            click(1, egui::Modifiers::COMMAND),
+            2,
+            "the ⌘-click added its row and kept the one already selected"
+        );
+        assert_eq!(
+            click(2, egui::Modifiers::NONE),
+            1,
+            "a plain click selected its row alone"
+        );
+    }
+
+    /// A tag narrowing the library shows as a chip in the header, and a click on the chip
+    /// stops narrowing by it.
+    #[test]
+    fn a_click_on_a_tag_chip_turns_its_filter_off() {
+        let mut bench = Bench::new();
+        let mut library = Library::default();
+        bench.act(vec![Act::NewTag(Vec::new())]);
+        let tag = bench.browser.tags().all()[0].id;
+        bench.act(vec![Act::RenameTag {
+            id: tag,
+            name: "Friday".into(),
+        }]);
+        bench.shell.filter.narrow(Narrow::Tag(tag));
+
+        let ctx = bench.ctx.clone();
+        let mut frame = |events: Vec<egui::Event>, bench: &mut Bench| {
+            let input = testing::screen(egui::vec2(900.0, 540.0), events);
+            testing::painted(&testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show(ctx, |ui| {
-                        library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
+                        let acts = library.ui(
+                            ui,
+                            &mut bench.browser,
+                            &bench.workspace,
+                            &bench.device,
+                            &bench.queue,
+                            &bench.shell,
+                        );
+                        bench.act(acts);
                     });
-            });
-        }
-
-        assert_eq!(
-            browser.picked().items().count(),
-            2,
-            "both boxes were checked, and neither click dropped the other row"
-        );
+            }))
+        };
+        let chip = testing::where_(&frame(Vec::new(), &mut bench), "Friday").center();
+        frame(testing::click(chip), &mut bench);
+        assert!(!bench.shell.filter.on(Narrow::Tag(tag)));
     }
 
     /// One mark, four states: no slot to stand on, a slot holding what this was saved
@@ -2359,7 +2359,7 @@ mod tests {
         testing::screen(egui::vec2(900.0, 540.0), Vec::new())
     }
 
-    /// The KIND column shows the same word as the browser, so the table and the tree
+    /// The Kind column shows the same word as the browser, so the table and the tree
     /// cannot name one thing two ways, and its heading sorts by it.
     #[test]
     fn the_kind_column_writes_the_browsers_own_word_and_sorts_by_it() {
@@ -2385,7 +2385,7 @@ mod tests {
                     library.ui(ui, &mut browser, &workspace, &device, &queue, &shell);
                 });
         }));
-        assert!(said.contains(&"KIND".to_string()), "{said:?}");
+        assert!(said.contains(&"Kind".to_string()), "{said:?}");
         for word in ["program", "settings"] {
             assert!(said.contains(&word.to_string()), "{word}: {said:?}");
         }
@@ -2487,7 +2487,7 @@ mod tests {
     }
 
     /// Paints the table headlessly at the center's width with both docks open and with
-    /// none, and picks a row at each so the footer is drawn too. Nothing checks pixels:
+    /// none, and picks a row at each. Nothing checks pixels:
     /// this catches a layout that panics or an id that collides.
     #[test]
     fn the_table_paints_at_every_width_the_center_has() {
@@ -2502,13 +2502,11 @@ mod tests {
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
         device.pretend_scanned(ObjectClass::SetList, 1, &["Sunday"]);
 
-        // The first row's middle: the bar, the head, and half a row down; and far enough
-        // in to land in the name column at either width.
-        let on_a_row = egui::pos2(60.0, BAR + HEAD + ROW / 2.0);
+        // Far enough in to land in the name column at either width.
+        let on_a_row = on_row(0);
         let ctx = bench.ctx.clone();
         for width in [430.0_f32, 900.0] {
-            // The pointer moves, then presses, then the next frame has a row picked and
-            // draws the footer under the table.
+            // The pointer moves, then presses, then the next frame has a row picked.
             let frames: [Vec<egui::Event>; 4] = [
                 Vec::new(),
                 vec![egui::Event::PointerMoved(on_a_row)],

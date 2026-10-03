@@ -1,8 +1,7 @@
 //! The app: the light and dark themes, and the routing between the regions.
 //!
-//! The regions themselves (the title bar, the toolbar, the three docks, the status bar)
-//! live in [`crate::shell`]; `DrawbarApp::update` sets only the order they claim space
-//! in.
+//! The regions themselves (the top bar, the two side cards, the status line) live in
+//! [`crate::shell`]; `DrawbarApp::update` sets only the order they claim space in.
 
 use eframe::egui;
 
@@ -13,8 +12,9 @@ use crate::keyboard::Keyboard;
 use crate::library::Library;
 use crate::log::Log;
 use crate::midi::{Midi, Played};
+use crate::platform::Platform;
 use crate::queue::Queue;
-use crate::shell::Shell;
+use crate::shell::{Dock, Shell};
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Origin, Workspace};
 
@@ -68,10 +68,10 @@ pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
 ///
 /// Both themes share it: a key is the same color in either theme, and the stops are the
 /// instrument's own plastic, not part of the app's styling.
-pub const STOP_WHITE: egui::Color32 = egui::Color32::from_rgb(0xd8, 0xd6, 0xd0);
+pub const STOP_WHITE: egui::Color32 = rgb(0xe4e1da);
 
 /// The ebony of a black key or a mutation drawbar stop.
-pub const STOP_BLACK: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x2a, 0x2e);
+pub const STOP_BLACK: egui::Color32 = rgb(0x303036);
 
 /// The persisted theme choice. `System` follows the host preference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,6 +102,10 @@ impl ThemeChoice {
         }
     }
 
+    /// Every choice, in the order the theme button cycles through them.
+    pub(crate) const ALL: [ThemeChoice; 3] =
+        [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
+
     pub(crate) fn next(self) -> ThemeChoice {
         match self {
             ThemeChoice::System => ThemeChoice::Light,
@@ -110,12 +114,12 @@ impl ThemeChoice {
         }
     }
 
-    /// The label beside the sun or moon icon.
-    pub(crate) fn label(self) -> &'static str {
+    /// The choice's name in the Theme menu.
+    pub(crate) fn name(self) -> &'static str {
         match self {
-            ThemeChoice::System => "Theme: auto",
-            ThemeChoice::Light => "Theme: light",
-            ThemeChoice::Dark => "Theme: dark",
+            ThemeChoice::System => "Auto",
+            ThemeChoice::Light => "Light",
+            ThemeChoice::Dark => "Dark",
         }
     }
 
@@ -167,6 +171,11 @@ pub struct DrawbarApp {
     pub(crate) splash: crate::splash::Splash,
     /// The About box while it is showing. Not kept between sessions.
     pub(crate) about: Option<crate::about::About>,
+    /// Where this build runs, and who draws the window's frame on this run.
+    pub(crate) platform: Platform,
+    pub(crate) chrome: crate::platform::Frame,
+    #[cfg(target_os = "macos")]
+    menubar: Option<crate::menubar::MenuBar>,
     /// The list's revision as the store last saw it.
     saved: u64,
     /// When the store was last written, in egui time.
@@ -207,6 +216,10 @@ impl DrawbarApp {
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
+            platform: Platform::current(),
+            chrome: crate::platform::Frame::of(Platform::current()),
+            #[cfg(target_os = "macos")]
+            menubar: None,
             saved: 0,
             saved_at: 0.0,
             left: crate::store::Left::default(),
@@ -222,6 +235,52 @@ impl DrawbarApp {
         }
         app.saved = app.workspace.revision();
         app
+    }
+
+    /// The app with the macOS menu bar installed and its window's title bar fitted to the
+    /// top bar. Only the window's own app, never a test, may own the one menu bar the
+    /// system has.
+    #[cfg(target_os = "macos")]
+    pub fn in_mac_window(mut self, cc: &eframe::CreationContext<'_>) -> DrawbarApp {
+        match crate::menubar::MenuBar::install(&cc.egui_ctx) {
+            Ok(bar) => self.menubar = Some(bar),
+            Err(e) => {
+                self.log.error(format!("the menu bar: {e}"));
+                self.log
+                    .trouble("drawbar could not build its menu bar; the menus are not there.");
+            }
+        }
+        crate::platform::center_traffic_lights(cc);
+        self
+    }
+
+    /// Run what was picked from the macOS menu bar, and bring its items up to date.
+    #[cfg(target_os = "macos")]
+    fn menu_bar_events(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        acts: &mut Vec<browser::Act>,
+    ) {
+        let Some(mut bar) = self.menubar.take() else {
+            return;
+        };
+        let picked = bar.picked();
+        // ⚠️ A pick from the menu bar is not an egui event, so nothing else asks for the
+        // frame that shows what it did.
+        if !picked.is_empty() {
+            ctx.request_repaint();
+        }
+        for command in picked {
+            if self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+            {
+                self.run(ctx, frame, command, acts);
+            }
+        }
+        bar.refresh(|command| self.offer_now(ctx, command));
+        self.menubar = Some(bar);
     }
 
     /// Ingest anything dropped on the window, or hand it to the New dialog while one is
@@ -396,22 +455,43 @@ impl eframe::App for DrawbarApp {
         crate::about::dialog(ctx, &mut self.about, &self.log);
 
         // Before the panels, so an editor open this frame still has focus when Escape is
-        // handled.
-        self.browser.let_go(ctx);
+        // handled. An overlay takes Escape for itself: the activity log, or any modal up
+        // last frame, which an Escape this frame has already closed.
+        if !crate::menu::covered(ctx) && !self.shell.log_open {
+            self.browser.let_go(ctx);
+        }
 
         // Outside in: each panel claims its space from what the earlier ones left.
         let mut acts = self
             .document
             .released(ctx, &mut self.workspace, &mut self.log);
         acts.extend(asked);
+        #[cfg(target_os = "macos")]
+        self.menu_bar_events(ctx, frame, &mut acts);
+        self.shortcuts(ctx, frame, &mut acts);
         self.browser.dialog(ctx, &mut acts);
-        self.titlebar(ctx, frame, &mut acts);
-        self.toolbar(ctx, &mut acts);
-        self.status_bar(ctx, &mut acts);
-        self.bottom_dock(ctx, &mut acts);
-        self.browser_dock(ctx, &mut acts);
-        self.inspector_dock(ctx, &mut acts);
+        self.backdrop(ctx);
+        self.top_bar(ctx, frame, &mut acts);
+        self.status_line(ctx, &mut acts);
+        self.browser_card(ctx, &mut acts);
+        self.inspector_card(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
+        // An instrument that goes away takes its queue's review with it.
+        self.shell.review_open &= self.attached();
+        if self.shell.review_open {
+            self.shell.review_open = crate::queue::review(
+                ctx,
+                &mut self.queue,
+                &self.workspace,
+                &self.device.state,
+                &mut acts,
+            );
+        }
+        if self.shell.log_open {
+            self.shell.log_open =
+                self.log
+                    .popover(ctx, &mut self.shell.log_problems, self.shell.status_rect);
+        }
 
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
@@ -438,20 +518,30 @@ impl eframe::App for DrawbarApp {
 }
 
 impl DrawbarApp {
-    /// The tab strip, and the view of the front tab.
+    /// The row of tabs between the two panel toggles, and the front tab's view in the
+    /// document card under it.
     ///
     /// Keys `played` on a MIDI controller reach only the key map of the front document.
     fn center(&mut self, ctx: &egui::Context, played: &Played, acts: &mut Vec<browser::Act>) {
-        let fill = ctx.style().visuals.panel_fill;
+        let gutter = crate::panel::GUTTER as i8;
+        let margin = egui::Margin {
+            left: gutter,
+            right: gutter,
+            top: 0,
+            bottom: gutter,
+        };
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(fill))
+            .frame(egui::Frame::NONE.inner_margin(margin))
             .show(ctx, |ui| {
-                self.tabs.ui(ui, &self.workspace, acts);
+                self.tab_row(ui, acts);
+                let rect = ui.available_rect_before_wrap();
+                let mut inside = crate::shell::card(ui, rect);
+                let ui_ = &mut inside;
                 match self.tabs.showing() {
                     Spot::Library => {
                         self.document.leave();
                         acts.extend(self.library.ui(
-                            ui,
+                            ui_,
                             &mut self.browser,
                             &self.workspace,
                             &self.device,
@@ -462,7 +552,7 @@ impl DrawbarApp {
                     Spot::Keyboard => {
                         self.document.leave();
                         acts.extend(self.keyboard.ui(
-                            ui,
+                            ui_,
                             &mut self.browser,
                             &self.workspace,
                             &self.device,
@@ -470,9 +560,37 @@ impl DrawbarApp {
                             &self.tabs,
                         ));
                     }
-                    Spot::Document(id) => self.open_document(ui, id, played, acts),
+                    Spot::Document(id) => self.open_document(ui_, id, played, acts),
                 }
+                crate::shell::round_off(ui, rect);
             });
+    }
+
+    /// The browser's toggle, the tabs, and the inspector's toggle, across the top of the
+    /// center.
+    fn tab_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<browser::Act>) {
+        let row = egui::Rect::from_min_size(
+            ui.cursor().min,
+            egui::vec2(ui.available_width(), crate::tabs::HEIGHT),
+        );
+        let along = |ui: &mut egui::Ui, layout| {
+            ui.new_child(egui::UiBuilder::new().max_rect(row).layout(layout))
+        };
+        let mut start = along(ui, egui::Layout::left_to_right(egui::Align::Center));
+        self.panel_toggle(&mut start, Dock::Browser, acts);
+        let mut end = along(ui, egui::Layout::right_to_left(egui::Align::Center));
+        self.panel_toggle(&mut end, Dock::Inspector, acts);
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(start.min_rect().right() + 4.0, row.top()),
+            egui::pos2(end.min_rect().left() - 4.0, row.bottom()),
+        );
+        let mut tabs = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(strip)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        self.tabs.ui(&mut tabs, &self.workspace, acts);
+        ui.advance_cursor_after_rect(row);
     }
 
     /// A document owns its own room: the header is full bleed and the body inside it
@@ -539,41 +657,122 @@ fn drop_hint(ctx: &egui::Context) {
 /// The dark theme, like the instrument panel, with accent colors reserved for status.
 fn dark() -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = egui::Color32::from_rgb(0x16, 0x17, 0x19);
-    visuals.window_fill = egui::Color32::from_rgb(0x1c, 0x1d, 0x20);
-    visuals.faint_bg_color = egui::Color32::from_rgb(0x22, 0x23, 0x26);
-    // A group's border is the only separator between sections, so it is brighter than
-    // egui's default hairline.
-    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x4e);
+    visuals.panel_fill = rgb(0x18191c);
+    visuals.window_fill = rgb(0x1f2024);
+    visuals.faint_bg_color = rgb(0x26272b);
+    visuals.extreme_bg_color = rgb(0x121316);
+    let widgets = &mut visuals.widgets;
+    widgets.noninteractive.bg_fill = rgb(0x1d1e21);
+    widgets.noninteractive.bg_stroke.color = rgb(0x2c2d31);
     // ⚠️ Both slots use the body text color: `Visuals::text_color` returns
     // `noninteractive`, so a painted row and a button would otherwise differ. The quieter
     // caption color is `caption`.
-    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(0x7a, 0x24, 0x24);
+    widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
+    widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
+    fill(&mut widgets.inactive, rgb(0x2b2c30));
+    fill(&mut widgets.hovered, rgb(0x35363b));
+    widgets.hovered.bg_stroke.color = rgb(0x4d4e54);
+    widgets.hovered.fg_stroke.color = rgb(0xf2f2f4);
+    fill(&mut widgets.active, rgb(0x3d3e44));
+    widgets.active.bg_stroke.color = rgb(0x6a6b72);
+    widgets.active.fg_stroke.color = rgb(0xf6f6f7);
+    fill(&mut widgets.open, rgb(0x2a2b2f));
+    widgets.open.bg_stroke.color = rgb(0x36373c);
+    widgets.open.fg_stroke.color = rgb(0xd6d7db);
+    visuals.selection.bg_fill = rgb(0x4b2420);
     // ⚠️ This also colors drop targets and focused knobs; inheriting egui's blue would
     // introduce a second accent.
-    visuals.selection.stroke.color = egui::Color32::from_rgb(0xff, 0xdf, 0xd8);
+    visuals.selection.stroke.color = rgb(0xffd9d1);
     // Slot numbers and knob captions use the weak text color.
     visuals.weak_text_alpha = 0.85;
     visuals.hyperlink_color = bad(&visuals);
-    visuals
+    softened(visuals, egui::Color32::from_black_alpha(107))
 }
 
 /// The light theme, with stronger text and marks than egui's defaults.
 fn light() -> egui::Visuals {
     let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = egui::Color32::from_rgb(0xf2, 0xf1, 0xee);
-    visuals.window_fill = egui::Color32::from_rgb(0xfa, 0xf9, 0xf7);
-    visuals.faint_bg_color = egui::Color32::from_rgb(0xdc, 0xd8, 0xce);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(0xe9, 0xa9, 0x9f);
-    visuals.selection.stroke.color = egui::Color32::from_rgb(0x3a, 0x14, 0x10);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x1c);
-    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
-    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x8a);
+    visuals.panel_fill = rgb(0xf4f3f0);
+    visuals.window_fill = rgb(0xfbfaf8);
+    visuals.faint_bg_color = rgb(0xe9e6df);
+    visuals.selection.bg_fill = rgb(0xf3d4cd);
+    visuals.selection.stroke.color = rgb(0x3a1410);
+    let widgets = &mut visuals.widgets;
+    widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x1c);
+    widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
+    widgets.noninteractive.bg_stroke.color = rgb(0xdedad2);
+    fill(&mut widgets.inactive, rgb(0xeae8e3));
+    fill(&mut widgets.hovered, rgb(0xe0ddd6));
+    widgets.hovered.bg_stroke.color = rgb(0xb9b5ac);
+    fill(&mut widgets.active, rgb(0xd4d0c7));
+    widgets.active.bg_stroke.color = rgb(0x8d8980);
+    fill(&mut widgets.open, rgb(0xe6e3dd));
+    widgets.open.bg_stroke.color = rgb(0xd2cec6);
+    widgets.open.fg_stroke.color = rgb(0x4a4a4c);
     visuals.weak_text_alpha = 0.9;
     visuals.hyperlink_color = bad(&visuals);
+    softened(
+        visuals,
+        egui::Color32::from_rgba_unmultiplied(40, 30, 20, 41),
+    )
+}
+
+/// An opaque color written as `0xrrggbb`.
+const fn rgb(hex: u32) -> egui::Color32 {
+    egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// A widget state's resting fill, for both the filled and the frameless widgets.
+fn fill(state: &mut egui::style::WidgetVisuals, color: egui::Color32) {
+    state.bg_fill = color;
+    state.weak_bg_fill = color;
+}
+
+/// The shape both themes share: rounded controls, and menus and sheets that float on a
+/// soft shadow of `shade`.
+fn softened(mut visuals: egui::Visuals, shade: egui::Color32) -> egui::Visuals {
+    let widgets = &mut visuals.widgets;
+    for state in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.corner_radius = egui::CornerRadius::same(CONTROL_RADIUS);
+    }
+    visuals.window_corner_radius = egui::CornerRadius::same(POPUP_RADIUS);
+    visuals.menu_corner_radius = egui::CornerRadius::same(POPUP_RADIUS);
+    let shadow = egui::Shadow {
+        offset: [0, 14],
+        blur: 36,
+        spread: 0,
+        color: shade,
+    };
+    visuals.popup_shadow = shadow;
+    visuals.window_shadow = shadow;
     visuals
+}
+
+/// The rounding of a button, a field, or any other control.
+pub const CONTROL_RADIUS: u8 = 5;
+
+/// The rounding of a menu, a popover, or a sheet.
+pub const POPUP_RADIUS: u8 = 10;
+
+/// The window behind the cards: the gaps between the panels, and the bars at the top and
+/// bottom, which sit on it with no fill of their own.
+pub fn canvas(visuals: &egui::Visuals) -> egui::Color32 {
+    match visuals.dark_mode {
+        true => rgb(0x0f1013),
+        false => rgb(0xe7e4dd),
+    }
+}
+
+/// `color` thinned to `alpha` over whatever is under it: the fill of a chip, a pill, or a
+/// row that carries a signal. Text on it keeps the full-strength color.
+pub fn tint(color: egui::Color32, alpha: f32) -> egui::Color32 {
+    color.gamma_multiply(alpha)
 }
 
 /// The bold family, used only for the word mark.
@@ -581,13 +780,29 @@ pub fn bold() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
 
-/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces.
+/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces, with
+/// drawbar's own glyphs under every family.
 ///
-/// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
-/// Licence 1.0 beside them. egui bundles only Ubuntu Light, so without these there is no
-/// bold weight and no regular (400) weight for body text.
+/// The Ubuntu files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu
+/// Font Licence 1.0 beside them. egui bundles only Ubuntu Light, so without these there
+/// is no bold weight and no regular (400) weight for body text. `drawbar-glyphs.ttf`
+/// draws the characters drawbar's text uses that no other face has; `scripts/glyphs.py`
+/// generates it.
 pub(crate) fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "drawbar-glyphs".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/drawbar-glyphs.ttf"
+        ))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("drawbar-glyphs".to_owned());
+    }
     let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
     for (family, face, ttf) in [
         (
@@ -612,16 +827,21 @@ pub(crate) fn fonts() -> egui::FontDefinitions {
     fonts
 }
 
-/// The text of the shell itself: menus, tabs, rail rows and cells.
+/// The text of the shell itself: menus, tabs, tree rows and cells.
 ///
 /// A function rather than a const because [`egui::TextStyle::Name`] holds an `Arc<str>`.
 pub fn ui() -> egui::TextStyle {
     egui::TextStyle::Name("ui".into())
 }
 
-/// The smallest text: panel headers and column heads, which are also uppercased.
+/// The smallest text: the document editors' captions, which are also uppercased.
 pub fn micro() -> egui::TextStyle {
     egui::TextStyle::Name("micro".into())
+}
+
+/// The text of a section label or a column head in the shell: bold, in sentence case.
+pub fn section() -> egui::TextStyle {
+    egui::TextStyle::Name("section".into())
 }
 
 /// The spacing both themes share: the size of a control and the space around it.
@@ -630,19 +850,42 @@ pub fn micro() -> egui::TextStyle {
 pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(8.0, 4.0);
-    spacing.button_padding = egui::vec2(7.0, 3.0);
+    spacing.button_padding = egui::vec2(8.0, 2.0);
     // Panels own their inner padding, so the shared margin claims none of it.
     spacing.window_margin = egui::Margin::same(0);
-    spacing.menu_margin = egui::Margin::same(4);
+    spacing.menu_margin = egui::Margin::same(5);
     spacing.indent = 18.0;
-    spacing.interact_size.y = 18.0;
-    spacing.scroll.bar_width = 8.0;
-    style
-        .text_styles
-        .insert(ui(), egui::FontId::proportional(11.5));
-    style
-        .text_styles
-        .insert(micro(), egui::FontId::proportional(9.5));
+    spacing.interact_size.y = 22.0;
+    spacing.slider_rail_height = 4.0;
+    // ⚠️ Floating only so the track can be transparent: the bar claims the width a solid
+    // one would, and content laid out beside it never runs under the thumb.
+    let solid = egui::style::ScrollStyle {
+        bar_width: 8.0,
+        ..egui::style::ScrollStyle::solid()
+    };
+    spacing.scroll = egui::style::ScrollStyle {
+        floating: true,
+        floating_width: solid.bar_width,
+        floating_allocated_width: solid.allocated_width(),
+        dormant_background_opacity: 0.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
+        dormant_handle_opacity: 1.0,
+        active_handle_opacity: 1.0,
+        interact_handle_opacity: 1.0,
+        ..solid
+    };
+    style.animation_time = 0.14;
+    for (style_, font) in [
+        (egui::TextStyle::Body, egui::FontId::proportional(13.0)),
+        (egui::TextStyle::Button, egui::FontId::proportional(13.0)),
+        (egui::TextStyle::Small, egui::FontId::proportional(10.0)),
+        (ui(), egui::FontId::proportional(12.5)),
+        (micro(), egui::FontId::proportional(9.5)),
+        (section(), egui::FontId::new(11.5, bold())),
+    ] {
+        style.text_styles.insert(style_, font);
+    }
 }
 
 #[cfg(test)]
@@ -824,7 +1067,9 @@ mod tests {
             let selected = visuals.selection.bg_fill;
             let ink = contrast(visuals.selection.stroke.color, selected);
             assert!(ink >= 4.5, "{where_} selected text: {ink:.2}:1");
-            assert!(contrast(selected, panel) >= 1.4, "{where_} selected fill");
+            // The fill is quiet on purpose: a selected row's ink and weight carry it too.
+            let fill = contrast(selected, panel);
+            assert!(fill >= 1.25, "{where_} selected fill: {fill:.2}:1");
         }
     }
 
@@ -866,16 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn a_group_border_separates_it_from_the_panel_behind_it() {
-        for visuals in [dark(), light()] {
-            let (where_, panel) = (named(&visuals), visuals.panel_fill);
-            let border = visuals.widgets.noninteractive.bg_stroke.color;
-            let ratio = contrast(border, panel);
-            assert!(ratio >= 1.9, "{where_} group border: {ratio:.2}:1");
-        }
-    }
-
-    #[test]
     fn each_family_leads_with_its_ubuntu_face_over_the_same_fallbacks() {
         let fonts = fonts();
         assert!(fonts.font_data.contains_key("Ubuntu"));
@@ -889,5 +1124,123 @@ mod tests {
             !body[1..].is_empty(),
             "a glyph Ubuntu lacks would draw as an empty box"
         );
+    }
+
+    #[test]
+    fn every_character_in_drawbar_text_has_a_glyph_in_both_families() {
+        let faces = egui::epaint::text::Fonts::new(1.0, 2048, Default::default(), fonts());
+        let written = written();
+        assert!(written.contains_key(&'→'), "{written:?}");
+        for (char, at) in written {
+            for font in [
+                egui::FontId::proportional(12.0),
+                egui::FontId::monospace(12.0),
+            ] {
+                assert!(
+                    faces.has_glyph(&font, char),
+                    "{char:?} (U+{:04X}), written at {at}, draws as an empty box in {:?}",
+                    u32::from(char),
+                    font.family
+                );
+            }
+        }
+    }
+
+    /// Every non-ASCII character of a string or character literal drawbar compiles outside
+    /// its tests, with the first `file:line` that writes it. Attributes, doc comments
+    /// among them, are not drawn, so they are left out.
+    fn written() -> std::collections::BTreeMap<char, String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut found = std::collections::BTreeMap::new();
+        let mut files = vec![root.join("src/lib.rs"), root.join("src/main.rs")];
+        while let Some(path) = files.pop() {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let tokens = source
+                .parse()
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let file = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let mut modules = Vec::new();
+            literals(tokens, &file, &mut found, &mut modules);
+            let owner = match path.file_name().and_then(|name| name.to_str()) {
+                Some("lib.rs" | "main.rs" | "mod.rs") => path.with_file_name(""),
+                _ => path.with_extension(""),
+            };
+            files.extend(modules.into_iter().map(|name| {
+                let flat = owner.join(format!("{name}.rs"));
+                match flat.exists() {
+                    true => flat,
+                    false => owner.join(name).join("mod.rs"),
+                }
+            }));
+        }
+        found
+    }
+
+    /// Record the literals in `tokens` into `found`, and the names of the modules they
+    /// declare in their own files into `modules`, skipping items built only for tests.
+    fn literals(
+        tokens: proc_macro2::TokenStream,
+        file: &str,
+        found: &mut std::collections::BTreeMap<char, String>,
+        modules: &mut Vec<String>,
+    ) {
+        use proc_macro2::{Delimiter, TokenTree};
+        let ends_item = |token: &TokenTree| match token {
+            TokenTree::Group(group) => group.delimiter() == Delimiter::Brace,
+            token => is_punct(Some(token), ';'),
+        };
+        let mut tokens = tokens.into_iter().peekable();
+        while let Some(token) = tokens.next() {
+            match token {
+                TokenTree::Punct(hash) if hash.as_char() == '#' => {
+                    let attribute = tokens.by_ref().find_map(|token| match token {
+                        TokenTree::Group(group) => Some(group.stream().to_string()),
+                        _ => None,
+                    });
+                    // ⚠️ The gated item runs to its first `;` or `{}` block, as every item
+                    // drawbar builds only for tests does.
+                    if attribute.as_deref().is_some_and(tests_only) {
+                        tokens.by_ref().find(ends_item);
+                    }
+                }
+                TokenTree::Ident(word) if word == "mod" => {
+                    if let Some(TokenTree::Ident(name)) = tokens.next() {
+                        if is_punct(tokens.peek(), ';') {
+                            modules.push(name.to_string());
+                        }
+                    }
+                }
+                TokenTree::Group(group) => literals(group.stream(), file, found, modules),
+                TokenTree::Literal(literal) => {
+                    let line = literal.span().start().line;
+                    let text = match syn::Lit::new(literal) {
+                        syn::Lit::Str(text) => text.value(),
+                        syn::Lit::Char(char) => char.value().to_string(),
+                        _ => continue,
+                    };
+                    for char in text.chars().filter(|char| !char.is_ascii()) {
+                        found
+                            .entry(char)
+                            .or_insert_with(|| format!("{file}:{line}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn is_punct(token: Option<&proc_macro2::TokenTree>, char: char) -> bool {
+        matches!(token, Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == char)
+    }
+
+    /// Whether an attribute builds its item only for tests.
+    fn tests_only(attribute: &str) -> bool {
+        let attribute = attribute.replace(' ', "");
+        attribute == "cfg(test)" || attribute.starts_with("cfg(all(test,")
     }
 }

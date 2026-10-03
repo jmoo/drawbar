@@ -8,13 +8,16 @@ use eframe::egui;
 use nord_usb::wire::{AllocationUnit, Status};
 use nord_usb::ObjectClass;
 
-use crate::app::{accent, warn};
+use crate::app::{accent, canvas, warn};
 use crate::device::DeviceState;
 use crate::queue::Queue;
 use crate::workspace::Workspace;
 
-/// The trough's height, wherever a meter is drawn.
-pub const TROUGH: f32 = 5.0;
+/// The trough's height and rounding, wherever a meter is drawn, and the gap between what
+/// a folder holds and what the queue would add.
+pub const TROUGH: f32 = 6.0;
+const ROUND: u8 = 3;
+const SPLIT: f32 = 2.0;
 
 /// The fill fraction past which a meter shows a warning.
 const CROWDED: f32 = 0.9;
@@ -211,33 +214,56 @@ pub fn bar(ui: &mut egui::Ui, meter: Meter) {
         egui::vec2(ui.available_width(), TROUGH),
         egui::Sense::hover(),
     );
-    let visuals = ui.visuals().clone();
-    let painter = ui.painter().clone();
-    painter.rect_filled(rect, 1.0, visuals.extreme_bg_color);
-
-    let filled = rect.width() * meter.filled();
+    let visuals = ui.visuals();
     let tone = match meter.crowded() {
-        true => warn(&visuals),
-        false => accent(&visuals),
+        true => warn(visuals),
+        false => accent(visuals),
     };
-    if filled > 0.0 {
+    let painter = ui.painter();
+    painter.rect_filled(rect, ROUND, canvas(visuals));
+    for (span, part) in segments(rect.x_range(), meter) {
+        let fill = match part {
+            Segment::Held => tone,
+            Segment::Queued => warn(visuals),
+        };
         painter.rect_filled(
-            egui::Rect::from_min_size(rect.min, egui::vec2(filled, rect.height())),
-            1.0,
-            tone,
+            egui::Rect::from_x_y_ranges(span, rect.y_range()),
+            ROUND,
+            fill,
         );
     }
-    let incoming = rect.width() * meter.incoming();
-    if incoming > 0.0 {
-        painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(rect.left() + filled, rect.top()),
-                egui::vec2(incoming, rect.height()),
-            ),
-            1.0,
-            warn(&visuals),
-        );
+}
+
+/// A part of a meter's trough.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Segment {
+    /// What the folder holds.
+    Held,
+    /// What the queue would add.
+    Queued,
+}
+
+/// Where a meter's segments lie across `trough`, with [`SPLIT`] between them when both
+/// show. A segment with no width is left out.
+///
+/// ⚠️ The split comes out of the queued segment, so the held one always measures the
+/// share it stands for, and the queued one never runs past the end of the trough.
+fn segments(trough: egui::Rangef, meter: Meter) -> Vec<(egui::Rangef, Segment)> {
+    let held = trough.min + trough.span() * meter.filled();
+    let queued = trough.span() * meter.incoming();
+    let mut drawn = Vec::new();
+    if held > trough.min {
+        drawn.push((egui::Rangef::new(trough.min, held), Segment::Held));
     }
+    let start = match held > trough.min {
+        true => held + SPLIT,
+        false => held,
+    };
+    let end = held + queued;
+    if queued > 0.0 && end > start {
+        drawn.push((egui::Rangef::new(start, end), Segment::Queued));
+    }
+    drawn
 }
 
 #[cfg(test)]
@@ -419,6 +445,41 @@ mod tests {
             queued: 4,
         };
         assert_eq!((unread.filled(), unread.incoming()), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_queued_segment_stands_apart_from_what_is_held_and_inside_the_trough() {
+        let trough = egui::Rangef::new(0.0, 100.0);
+        let meter = |used, queued| Meter {
+            used,
+            total: 100,
+            queued,
+        };
+        assert_eq!(
+            segments(trough, meter(50, 10)),
+            [
+                (egui::Rangef::new(0.0, 50.0), Segment::Held),
+                (egui::Rangef::new(52.0, 60.0), Segment::Queued),
+            ]
+        );
+        assert_eq!(
+            segments(trough, meter(0, 10)),
+            [(egui::Rangef::new(0.0, 10.0), Segment::Queued)],
+            "with nothing held there is nothing to stand apart from"
+        );
+        assert_eq!(
+            segments(trough, meter(95, 50)),
+            [
+                (egui::Rangef::new(0.0, 95.0), Segment::Held),
+                (egui::Rangef::new(97.0, 100.0), Segment::Queued),
+            ]
+        );
+        assert_eq!(
+            segments(trough, meter(99, 1)),
+            [(egui::Rangef::new(0.0, 99.0), Segment::Held)],
+            "a queued sliver narrower than the gap is not drawn"
+        );
+        assert!(segments(trough, meter(0, 0)).is_empty());
     }
 
     #[test]

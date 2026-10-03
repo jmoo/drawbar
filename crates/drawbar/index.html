@@ -13,8 +13,9 @@
     />
     <link rel="canonical" href="https://drawbar.app/" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-    <meta name="theme-color" content="#161719" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0f1013" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#e7e4dd" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="dark light" />
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="drawbar" />
@@ -50,7 +51,42 @@
         "sameAs": ["https://github.com/jmoo/drawbar"]
       }
     </script>
+    <script>
+      /* The face the app opens in (`ThemeChoice` in app.rs, kept under the same key),
+         so the page does not show the other one while the module downloads. */
+      try {
+        const kept = localStorage.getItem("drawbar.theme");
+        const light =
+          kept === "light" ||
+          (kept !== "dark" && matchMedia("(prefers-color-scheme: light)").matches);
+        if (light) document.documentElement.classList.add("light");
+      } catch {}
+    </script>
     <style>
+      /* The app's tokens (app.rs), for the page the app replaces. */
+      :root {
+        --canvas: #0f1013;
+        --panel: #18191c;
+        --ink: #c8c8c8;
+        --ink-strong: #f6f6f7;
+        --quiet: #9d9ea4;
+        --inactive: #2b2c30;
+        --hovered: #35363b;
+        --accent: #d6463a;
+        --bad: #e05040;
+      }
+
+      :root.light {
+        --canvas: #e7e4dd;
+        --panel: #f4f3f0;
+        --ink: #1c1c1c;
+        --ink-strong: #000000;
+        --quiet: #4a4a4c;
+        --inactive: #eae8e3;
+        --hovered: #e0ddd6;
+        --accent: #b01e12;
+        --bad: #a3140c;
+      }
       html,
       body {
         margin: 0;
@@ -58,10 +94,9 @@
         width: 100%;
         height: 100%;
         overflow: hidden;
-        /* Matches the app's panel fill, so the page does not flash white while the
-           module downloads. */
-        background: #161719;
-        color: #cfd2d6;
+        /* The window behind the app's cards, which its first frame paints. */
+        background: var(--canvas);
+        color: var(--ink);
         font-family: ui-sans-serif, system-ui, sans-serif;
       }
 
@@ -86,10 +121,14 @@
         gap: 26px;
       }
 
+      /* The bars sit on a card, as a drawbar does in the app. */
       #bars {
         display: flex;
         align-items: flex-start;
         gap: 7px;
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: var(--panel);
       }
 
       #splash.failed #bars {
@@ -100,8 +139,9 @@
         position: relative;
         width: 21px;
         height: 104px;
-        border-radius: 3px;
-        background: #111113;
+        border-radius: 6px;
+        background: #141518;
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
       }
 
       .stop {
@@ -110,7 +150,7 @@
         top: 0;
         width: 19px;
         height: 15px;
-        border-radius: 2px;
+        border-radius: 4px;
         font-family: ui-monospace, Menlo, Consolas, monospace;
         font-size: 10px;
         line-height: 15px;
@@ -134,13 +174,13 @@
         font-size: 18px;
         font-weight: 600;
         letter-spacing: 0.05em;
-        color: #ffffff;
+        color: var(--ink-strong);
       }
 
       #version {
         font-family: ui-monospace, Menlo, Consolas, monospace;
         font-size: 12px;
-        color: #8c8c8c;
+        color: var(--quiet);
       }
 
       #stage {
@@ -149,24 +189,24 @@
         gap: 8px;
         min-height: 18px;
         font-size: 12px;
-        color: #b4b4b4;
+        color: var(--ink);
       }
 
       #splash.failed #stage {
-        color: #e05040;
+        color: var(--bad);
       }
 
       #figure {
         font-family: ui-monospace, Menlo, Consolas, monospace;
         font-size: 11.5px;
-        color: #8c8c8c;
+        color: var(--quiet);
       }
 
       #note {
         max-width: 420px;
         font-size: 11px;
         line-height: 1.55;
-        color: #8c8c8c;
+        color: var(--quiet);
         text-align: center;
       }
 
@@ -190,9 +230,9 @@
         display: flex;
         align-items: center;
         gap: 6px;
-        height: 24px;
+        height: 30px;
         padding: 0 12px;
-        border-radius: 2px;
+        border-radius: 8px;
         font-family: inherit;
         font-size: 11.5px;
         text-decoration: none;
@@ -200,24 +240,24 @@
       }
 
       #retry {
-        border: 1px solid #d6463a;
-        background: #373737;
-        color: #ffffff;
+        border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+        background: color-mix(in srgb, var(--accent) 16%, transparent);
+        color: var(--ink-strong);
       }
 
       #retry:hover {
-        background: #464646;
+        background: color-mix(in srgb, var(--accent) 26%, transparent);
       }
 
       #wrong {
-        border: 1px solid #3c3c3c;
-        background: transparent;
-        color: #b4b4b4;
+        border: none;
+        background: var(--inactive);
+        color: var(--ink);
       }
 
       #wrong:hover {
-        background: #464646;
-        color: #ffffff;
+        background: var(--hovered);
+        color: var(--ink-strong);
       }
 
       #footer {
@@ -234,12 +274,12 @@
         align-items: center;
         gap: 6px;
         font-size: 10.5px;
-        color: #e05040;
+        color: var(--bad);
         text-decoration: none;
       }
 
       #guide:hover {
-        color: #d6463a;
+        color: var(--accent);
       }
 
       #splash.failed #guide {
@@ -248,7 +288,7 @@
 
       #foot {
         font-size: 10.5px;
-        color: #8c8c8c;
+        color: var(--quiet);
       }
 
       .icon {
@@ -284,7 +324,7 @@
         z-index: 1;
         box-sizing: border-box;
         padding: 0 16px;
-        background: #161719;
+        background: var(--canvas);
         flex-direction: column;
         align-items: center;
         justify-content: center;
@@ -302,12 +342,12 @@
       }
 
       #toosmall a {
-        color: #e05040;
+        color: var(--bad);
       }
 
       /* `drawbar::shell::LEAST`; a test keeps these two numbers equal to it. The app
          lays itself out in points, and a point is a CSS pixel. */
-      @media (width < 660px), (height < 430px) {
+      @media (width < 692px), (height < 400px) {
         #toosmall {
           display: flex;
         }
@@ -395,6 +435,44 @@
     </svg>
 
     <script type="module">
+      /* Keys the app binds that the browser would also act on: ⌘R would reload the page
+         out from under unsaved work. A key the browser takes before the page sees it is
+         still the browser's. A test in `menu.rs` keeps this list to the app's keys. */
+      const TAKEN = new Set([
+        "mod+k",
+        "mod+o",
+        "mod+s",
+        "mod+r",
+        "mod+shift+e",
+        "mod+shift+s",
+        "mod+alt+b",
+        "mod+alt+i",
+        "mod+alt+l",
+        "alt+w",
+        "alt+2",
+        "alt+3",
+        "ctrl+w",
+        "ctrl+2",
+        "ctrl+3",
+      ]);
+      const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+      addEventListener(
+        "keydown",
+        (event) => {
+          const held = [
+            (MAC ? event.metaKey : event.ctrlKey) && "mod",
+            MAC && event.ctrlKey && "ctrl",
+            event.altKey && "alt",
+            event.shiftKey && "shift",
+            event.code.replace(/^(Key|Digit)/, "").toLowerCase(),
+          ];
+          if (TAKEN.has(held.filter(Boolean).join("+"))) {
+            event.preventDefault();
+          }
+        },
+        { capture: true },
+      );
+
       const WASM = "./pkg/drawbar_bg.wasm";
       const MB = 1024 * 1024;
 
@@ -411,9 +489,9 @@
         "white",
       ];
       const STOP = {
-        black: { fill: "#2a2a2e", ink: "#ffffff" },
+        black: { fill: "#303036", ink: "#ffffff" },
         brown: { fill: "#6b4a33", ink: "#ffffff" },
-        white: { fill: "#d8d6d0", ink: "#000000" },
+        white: { fill: "#e4e1da", ink: "#000000" },
       };
 
       /* A stop slides 89px down its 104px track in the eight clicks a drawbar has. */

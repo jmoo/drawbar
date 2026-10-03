@@ -1219,7 +1219,7 @@ fn viewing_banner(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
         return false;
     };
     let mut keep = false;
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    crate::panel::group_frame(ui.visuals()).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 egui::RichText::new(format!("Viewing {where_} on the instrument."))
