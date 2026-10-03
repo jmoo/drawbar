@@ -70,5 +70,10 @@ the crate free of any particular async runtime. Building `web` needs
 `--cfg=web_sys_unstable_apis`, which `crates/.cargo/config.toml` supplies when
 Cargo runs from `crates/`.
 
+A write reads its file through the `FileSource` trait, one transfer chunk at a
+time, so memory does not grow with the file. The body is read twice: once to
+check its checksum before the first frame, and again to send it. If the bytes
+change in between, the last chunk is held back and the write fails unfinished.
+
 The API documentation is on [docs.rs](https://docs.rs/nord-usb), and
 [Testing](testing.md) covers the replay suite.
