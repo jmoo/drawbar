@@ -10,17 +10,18 @@
 html.light, html.rust, .light, .rust {
   color-scheme: light;
 
-  --db-panel-fill: #f2f1ee;
-  --db-window-fill: #faf9f7;
-  --db-faint-bg: #dcd8ce;
+  --db-panel-fill: #f4f3f0;
+  --db-window-fill: #fbfaf8;
+  --db-faint-bg: #e9e6df;
+  --db-hovered: #e0ddd6;
   --db-extreme-bg: #ffffff;
   --db-accent: #b01e12;
   --db-good: #0f622a;
   --db-warn: #8a4b00;
   --db-bad: #a3140c;
   --db-unlit: #828282;
-  --db-selection-fill: #e9a99f;
-  --db-rule: #bfbbb1;
+  --db-selection-fill: #f3d4cd;
+  --db-rule: #dedad2;
   --db-ink: #282828;
   --db-ink-weak: #56534d;
   --db-ink-strong: #000000;
@@ -33,17 +34,18 @@ html.light, html.rust, .light, .rust {
 html.coal, html.navy, html.ayu, .coal, .navy, .ayu {
   color-scheme: dark;
 
-  --db-panel-fill: #161719;
-  --db-window-fill: #1c1d20;
-  --db-faint-bg: #222326;
-  --db-extreme-bg: #0a0a0a;
+  --db-panel-fill: #18191c;
+  --db-window-fill: #1f2024;
+  --db-faint-bg: #26272b;
+  --db-hovered: #35363b;
+  --db-extreme-bg: #121316;
   --db-accent: #d6463a;
   --db-good: #60c070;
   --db-warn: #e0a030;
   --db-bad: #e05040;
   --db-unlit: #5a5a5a;
-  --db-selection-fill: #7a2424;
-  --db-rule: #3c3c3c;
+  --db-selection-fill: #4b2420;
+  --db-rule: #2c2d31;
   --db-ink: #e2e0da;
   --db-ink-weak: #a8a5a0;
   --db-ink-strong: #f5f3ee;
@@ -86,7 +88,7 @@ html.light, html.rust, html.coal, html.navy, html.ayu,
 
   --theme-popup-bg: var(--db-panel-fill);
   --theme-popup-border: var(--db-rule);
-  --theme-hover: var(--db-faint-bg);
+  --theme-hover: var(--db-hovered);
 
   --quote-bg: var(--db-faint-bg);
   --quote-border: var(--db-accent);
@@ -111,8 +113,9 @@ html.light, html.rust, html.coal, html.navy, html.ayu,
 
   --color-scheme: light dark;
 
-  /* panel geometry, copied from the app */
-  --db-radius: 2px;
+  /* panel geometry, copied from the app: a control's rounding, and a row's */
+  --db-radius: 5px;
+  --db-row-radius: 7px;
 }
 
 /* --- type ---------------------------------------------------------------- */
@@ -161,8 +164,6 @@ body,
 .content h5,
 .content h6 {
   font-size: 1.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
   color: var(--db-ink-weak);
 }
 
@@ -311,27 +312,24 @@ html.js .sidebar .sidebar-resize-handle {
 .chapter li a {
   flex: 1;
   padding: 0.35rem 0.6rem;
-  border-radius: var(--db-radius);
+  border-radius: var(--db-row-radius);
   font-size: 1.45rem;
 }
 .chapter li a:hover {
-  background: var(--db-faint-bg);
+  background: var(--db-hovered);
   color: var(--db-ink-strong);
 }
+/* A selected row, as the app's tree draws one. */
 .chapter li a.active {
-  background: var(--db-faint-bg);
-  border-left: 2px solid var(--db-accent);
-  padding-left: calc(0.6rem - 2px);
+  background: var(--db-selection-fill);
   color: var(--db-ink-strong);
   font-weight: 700;
 }
 .chapter li.part-title {
   margin: 2rem 0 0.4rem;
   padding-left: 0.6rem;
-  font-size: 1.15rem;
+  font-size: 1.3rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
   color: var(--db-ink-weak);
 }
 .chapter .spacer {
@@ -356,7 +354,7 @@ html.js .sidebar .sidebar-resize-handle {
   padding: 1rem 1.6rem;
   border: 1px solid var(--db-rule);
   border-left: 3px solid var(--quote-border);
-  border-radius: 0;
+  border-radius: var(--db-radius);
   background: var(--quote-bg);
   color: var(--db-ink);
 }
@@ -407,9 +405,7 @@ html.js .sidebar .sidebar-resize-handle {
 #mdbook-searchresults-header {
   color: var(--searchresults-header-fg);
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 1.2rem;
+  font-size: 1.3rem;
 }
 
 /* --- theme popup --------------------------------------------------------- */
