@@ -291,8 +291,8 @@ decodes them and takes their slot checksum, so they match their slots on the
 instrument before anything shows them. A remembered file is skipped, since its
 summary already carries that checksum. They go 32 files or 16 MiB at a time,
 and a read the user waits on runs after the batch in flight. A tracked file
-whose CRC neither the index nor the cache knows, and that no background read
-will cover, has its CRC taken alone, 64 files or 64 MiB at a time
+whose CRC the index does not know, and that no background read will cover, has
+its CRC taken alone, 64 files or 64 MiB at a time
 (`Cmd::Fingerprint`), so that an outside rename keeps its row.
 
 ### The memory budget
@@ -554,8 +554,9 @@ The CRC is taken only where the contents decide something:
 - the resting check of a piano or sample instrument, and any whole read;
 - in the background, for tracked rows that lack one.
 
-A file listed with the length and time its cache entry was taken at also gets
-the entry's CRC.
+Every read takes the CRC afresh, so a file rewritten under its old length and
+time is fingerprinted by what it now holds. The derived cache holds no CRC; a
+fingerprint's CRC only ever comes from reading the file.
 
 ### When drawbar looks again
 
@@ -679,8 +680,9 @@ only reads. It is never kept in the library. Where it lives on each system is on
 
 ### What an entry holds
 
-An entry is a file's length, modification time and whole-file CRC-32 when it was
-read, and a `Summary` of what the read found:
+An entry is a file's length and modification time when it was read, and a
+`Summary` of what the read found. It holds no whole-file CRC, so nothing taken
+from the cache reaches the index's fingerprints:
 
 | Field | Meaning |
 |---|---|
@@ -714,8 +716,8 @@ As each part of a listing is folded in, and again once the cache's entries
 arrive, every unread asset whose file has the length and time of its entry is
 given the entry's summary (`Store::recall`, `Workspace::remember`). Its verify
 state becomes `VerifyState::Remembered(verdict)`, `LocalEntity::remembered`
-holds the summary, `saved.crc32` takes the slot checksum, and the entry's CRC
-fills in the file's fingerprint where none is known.
+holds the summary, and `saved.crc32` takes the slot checksum. The file's
+fingerprint is untouched.
 
 A remembered asset is still `unread()`: it holds no bytes, and an act reads it
 first. It is not `reading()`, so a row in view does not read it, while `hurry`
@@ -730,8 +732,8 @@ finds an unread file changed takes its summary away (`Workspace::stale`).
 
 No read is asked, in the foreground or behind, until the cache has answered, so
 a file it remembers is not read meanwhile. A tracked file it remembers is not
-read in the background, and where its entry has a CRC, it is not read for one
-either.
+read in the background; its CRC, where the index lacks one, is still taken
+from the file.
 
 ### Following the library
 
