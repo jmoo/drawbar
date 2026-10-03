@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 mod web;
 
 #[cfg(target_arch = "wasm32")]
-pub use web::{install, online, report_id, share, sharing, submit, visit, Sharing, Undelivered};
+pub use web::{install, online, report_id, share, sharing, submit, visit, Sharing};
 
 /// Where the collector listens.
 pub const ENDPOINT: &str = "https://t.drawbar.app";
@@ -364,6 +364,15 @@ pub(crate) fn language(tag: Option<&str>) -> String {
         .filter(|primary| primary.len() <= 3 && primary.chars().all(|c| c.is_ascii_alphabetic()))
         .map(str::to_ascii_lowercase)
         .unwrap_or_default()
+}
+
+/// Why a report did not arrive.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Undelivered {
+    /// No answer: offline, or the collector was out of reach.
+    Unreachable,
+    /// The collector answered with this status.
+    Refused(u16),
 }
 
 /// The report's fields as one JSON object. Absent parts are empty strings.

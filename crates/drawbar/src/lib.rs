@@ -31,7 +31,7 @@ pub mod newproject;
 pub mod panel;
 pub mod platform;
 pub mod queue;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod report;
 pub mod room;
 pub mod sheet;
