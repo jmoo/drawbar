@@ -745,7 +745,7 @@ impl DrawbarApp {
         }
         ui.menu_button("New", |ui| new_menu(ui, acts));
         ui.separator();
-        if !self.browser.folders.libraries.is_empty() {
+        if crate::libraries::can_pick() || !self.browser.folders.libraries.is_empty() {
             crate::browser::library_items(ui, &self.browser.folders, acts);
             ui.separator();
         }

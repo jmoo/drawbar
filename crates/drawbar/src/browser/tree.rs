@@ -152,7 +152,8 @@ fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
 }
 
 /// The items that open another folder as the library, switch to a recent one, and show
-/// the open one's folder. Only where [`crate::folders::Folders::libraries`] lists some.
+/// the open one's folder. Shown where this build can pick a folder, or where
+/// [`crate::folders::Folders::libraries`] lists some.
 pub fn library_items(ui: &mut egui::Ui, folders: &crate::folders::Folders, acts: &mut Vec<Act>) {
     if let Some(library) = &folders.reconnect {
         let label = format!("Reconnect {}", library.name);
@@ -424,7 +425,7 @@ impl Browser {
                 if marked(ui, SHOW_ALL_FILES, all, None) {
                     browser.folders.all_files = !all;
                 }
-                if !browser.folders.libraries.is_empty() {
+                if crate::libraries::can_pick() || !browser.folders.libraries.is_empty() {
                     ui.separator();
                     library_items(ui, &browser.folders, acts);
                 }
