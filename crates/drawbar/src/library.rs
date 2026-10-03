@@ -386,7 +386,7 @@ pub fn agrees(
     }
     match queue.entry(entity.id).map(|held| &held.diff) {
         Some(Diff::Identical) => Some(true),
-        Some(Diff::Fields(_) | Diff::Bytes { .. }) => Some(false),
+        Some(Diff::Fields(_) | Diff::Bytes { .. } | Diff::Checksum) => Some(false),
         _ => None,
     }
 }

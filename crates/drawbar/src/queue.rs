@@ -62,6 +62,9 @@ pub enum Diff {
     Fields(Vec<FieldDiff>),
     /// One of them has no registry, so the difference is an offset into the wire body.
     Bytes { first_at: usize },
+    /// The wire bodies' checksums differ. An asset resting in its file is compared by
+    /// checksum alone, so where its bytes first differ is not looked for.
+    Checksum,
     /// There is nothing to replace.
     Empty,
 }
@@ -147,9 +150,7 @@ impl Occupant {
 
     /// The occupant a compare read answered with, for a slot no walk had reached.
     fn read(name: &str, bytes: &[u8]) -> Occupant {
-        let body = nord_usb::envelope::unwrap(bytes)
-            .map(|read| read.body.0.len())
-            .unwrap_or(bytes.len());
+        let body = wire_sum(bytes).map_or(bytes.len(), |(body, _)| body.len());
         Occupant {
             name: name.trim().to_string(),
             crc: None,
@@ -594,13 +595,35 @@ impl Queue {
     }
 }
 
-/// [`compare`] against what an asset holds. One resting in its file is read whole, and
-/// one whose file does not read has no diff yet.
+/// [`compare`] against what an asset holds. One resting in its file is compared by the
+/// checksum a slot holding it reports, as [`crate::library::agrees`] compares it, and is
+/// never read. One not read yet, or whose check has not answered, has no diff yet.
 fn compare_with(entity: &LocalEntity, there: &[u8]) -> Diff {
-    match entity.whole() {
-        Ok(here) => compare(&here, there),
-        Err(_) => Diff::Pending,
+    if entity.unread() {
+        return Diff::Pending;
     }
+    if entity.rests().is_none() {
+        return compare(&entity.bytes, there);
+    }
+    let Some(here) = &entity.container else {
+        return Diff::Pending;
+    };
+    match wire_sum(there) {
+        Some((body, crc)) if crc == here.body_crc32 && body.len() == here.body.len() => {
+            Diff::Identical
+        }
+        _ => Diff::Checksum,
+    }
+}
+
+/// Where a file's wire body lies, and its CRC-32: the checksum a slot holding it
+/// reports. `None` for bytes that are not a CBIN container.
+fn wire_sum(bytes: &[u8]) -> Option<(Range<usize>, u32)> {
+    let info = nord_format::cbin::inspect(&mut Cursor::new(bytes)).ok()?;
+    let start = usize::try_from(info.header.generation.body_start()).ok()?;
+    let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
+    let body = bytes.get(start..end)?;
+    Some((start..end, nord_format::crc::crc32(body)))
 }
 
 /// How what is waiting differs from what the slot holds.
@@ -784,6 +807,11 @@ fn summarize(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, S
             Glyph::ArrowRight,
             warn(visuals),
             format!("bytes differ from {first_at:#06x}"),
+        ),
+        Diff::Checksum => (
+            Glyph::ArrowRight,
+            warn(visuals),
+            "the body differs from what the slot holds".into(),
         ),
         // A field list is drawn as rows, not as this line.
         Diff::Fields(_) => (Glyph::ArrowRight, warn(visuals), String::new()),
@@ -1903,6 +1931,48 @@ mod tests {
             (class, at(0), Purpose::Compare),
             "the answer that never came is asked for again"
         );
+    }
+
+    /// A piano resting in its file is compared with the slot's occupant by checksum, as
+    /// [`crate::library::agrees`] compares it: the same body is identical, another body
+    /// differs, and neither answer reads the file.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_resting_piano_is_compared_with_the_occupant_without_reading_its_file() {
+        let (mut workspace, mut log, _) = bench();
+        let (mut device, _tabs) = attached(&workspace);
+        let dir = testing::Temp::new();
+        let bytes = testing::piano(40);
+        let file = testing::on_disk(&dir, "Upright.npno", &bytes);
+        let id = testing::rest(&mut workspace, "Upright.npno", file.clone());
+        workspace.settle_files(&mut log);
+        file.take_reads();
+        let mut other = bytes.clone();
+        let last = other.len() - 1;
+        other[last] ^= 1;
+
+        let class = ObjectClass::Piano;
+        for (there, identical) in [(&bytes, true), (&other, false)] {
+            let mut queue = Queue::default();
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                class,
+                at(0),
+            );
+            assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
+            queue.arrived(class, at(0), "Grand", there, &workspace);
+
+            let diff = &queue.entry(id).unwrap().diff;
+            match identical {
+                true => assert!(matches!(diff, Diff::Identical), "the same body"),
+                false => assert!(matches!(diff, Diff::Checksum), "another body"),
+            }
+        }
+        assert_eq!(file.take_reads(), [], "nothing read the file");
     }
 
     /// A bank no walk has reached says nothing about its slots, so an entry for one waits
