@@ -497,38 +497,6 @@ pub fn dashed_round_rect(
     painter.extend(egui::Shape::dashed_line(&path, stroke, DASH, DASH));
 }
 
-/// The height of a [`tonal_button`].
-pub const TONAL: f32 = 30.0;
-
-/// A glyph and a word on a quiet fill that darkens under the pointer: a view's own
-/// action, beside its title.
-pub fn tonal_button(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
-    const PAD_X: f32 = 11.0;
-    let font = crate::app::ui().resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font, egui::Color32::PLACEHOLDER);
-    let width = PAD_X + GLYPH + GAP + galley.size().x + PAD_X;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, TONAL), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    let look = ui.style().interact(&response);
-    let (fill, ink) = (look.weak_bg_fill, look.fg_stroke.color);
-    ui.painter().rect_filled(rect, ROW_RADIUS, fill);
-    let mark = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + PAD_X + GLYPH / 2.0, rect.center().y),
-        egui::Vec2::splat(GLYPH),
-    );
-    crate::icon::painted(ui, glyph, mark, ink);
-    ui.painter().galley(
-        egui::pos2(mark.right() + GAP, rect.center().y - galley.size().y / 2.0),
-        galley,
-        ink,
-    );
-    response
-}
-
 /// How tall a view's header block is: [`view_header`]'s title and subtitle with the
 /// padding around them.
 pub const VIEW_HEADER: f32 = 56.0;
@@ -878,7 +846,7 @@ mod tests {
     fn a_tonal_button_shows_the_pointer_with_its_fill_and_takes_a_click() {
         let ctx = context();
         let widgets = ctx.style().visuals.widgets.clone();
-        let button = |ui: &mut egui::Ui| tonal_button(ui, Glyph::Plus, "New tag");
+        let button = |ui: &mut egui::Ui| tonal_button(ui, Some(Glyph::Plus), "New tag");
         for (under_pointer, fill) in [
             (false, widgets.inactive.weak_bg_fill),
             (true, widgets.hovered.weak_bg_fill),

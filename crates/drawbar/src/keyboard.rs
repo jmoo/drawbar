@@ -299,7 +299,7 @@ fn header(ui: &mut egui::Ui, device: &Device, class: ObjectClass, acts: &mut Vec
     let product = device.state.product().unwrap_or_default().to_string();
     let good = crate::app::good(ui.visuals());
     view_header(ui, Glyph::Keyboard, good, &product, &said, |ui| {
-        if tonal_button(ui, Glyph::RefreshCw, "Read again")
+        if tonal_button(ui, Some(Glyph::RefreshCw), "Read again")
             .on_hover_text(format!("read {} again", device.state.folder_name(class)))
             .clicked()
         {

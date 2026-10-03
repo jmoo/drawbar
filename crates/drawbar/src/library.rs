@@ -15,7 +15,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, tint, ui as ui_text, warn};
-use crate::browser::{cell_ink, qualifier, Act, Browser, Bulk, Item, Kept, Kind, Qualifier};
+use crate::browser::{qualifier, Act, Browser, Bulk, Item, Kept, Kind, Qualifier};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{painted, Glyph};
@@ -2323,8 +2323,12 @@ mod tests {
     fn a_click_on_a_tag_chip_turns_its_filter_off() {
         let mut bench = Bench::new();
         let mut library = Library::default();
-        bench.act(vec![Act::NewTag("Friday".into())]);
+        bench.act(vec![Act::NewTag(Vec::new())]);
         let tag = bench.browser.tags().all()[0].id;
+        bench.act(vec![Act::RenameTag {
+            id: tag,
+            name: "Friday".into(),
+        }]);
         bench.shell.filter.narrow(Narrow::Tag(tag));
 
         let ctx = bench.ctx.clone();
