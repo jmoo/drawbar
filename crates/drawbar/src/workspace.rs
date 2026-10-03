@@ -1102,6 +1102,9 @@ pub struct Workspace {
     /// How many times [`Workspace::families_present`] has been taken.
     #[cfg(test)]
     pub(crate) families_taken: std::cell::Cell<usize>,
+    /// How many times the list has been searched end to end for an id.
+    #[cfg(test)]
+    pub(crate) searched: std::cell::Cell<usize>,
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
@@ -1167,6 +1170,8 @@ impl Workspace {
             families: Default::default(),
             #[cfg(test)]
             families_taken: Default::default(),
+            #[cfg(test)]
+            searched: Default::default(),
             next_id: 1,
             revision: 0,
             layout: 1,
@@ -1237,10 +1242,12 @@ impl Workspace {
         self.layout += 1;
     }
 
-    /// Where `id` sits in the list.
-    fn position(&self, id: u64) -> Option<usize> {
+    /// Where each id sits in the list, taken again where the layout moved since.
+    fn positions(&self) -> std::cell::RefMut<'_, (u64, std::collections::HashMap<u64, usize>)> {
         let mut at = self.at.borrow_mut();
         if at.0 != self.layout {
+            #[cfg(test)]
+            self.searched.set(self.searched.get() + 1);
             let positions = self.entities.iter().enumerate();
             *at = (
                 self.layout,
@@ -1249,6 +1256,12 @@ impl Workspace {
                     .collect(),
             );
         }
+        at
+    }
+
+    /// Where `id` sits in the list.
+    fn position(&self, id: u64) -> Option<usize> {
+        let at = self.positions();
         // A change to the list that did not bump the layout is caught here: the list is
         // searched rather than another asset handed back.
         match at.1.get(&id) {
@@ -1260,7 +1273,11 @@ impl Workspace {
             {
                 Some(position)
             }
-            _ => self.entities.iter().position(|held| held.id == id),
+            _ => {
+                #[cfg(test)]
+                self.searched.set(self.searched.get() + 1);
+                self.entities.iter().position(|held| held.id == id)
+            }
         }
     }
 
@@ -2397,6 +2414,8 @@ impl Workspace {
     /// already in the list.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
         let mut refused = 0;
+        // Kept current with each asset restored, so an id is looked up, not searched for.
+        let mut held = std::mem::take(&mut *self.positions());
         for Saved {
             id,
             name,
@@ -2413,7 +2432,7 @@ impl Workspace {
                 continue;
             };
             // Every id held is below the next one, so only an id below it can be held.
-            if id < self.next_id && self.position(id).is_some() {
+            if id < self.next_id && held.1.contains_key(&id) {
                 refused += 1;
                 continue;
             }
@@ -2476,12 +2495,15 @@ impl Workspace {
                 log.warn(format!("{}: {e}", entity.name));
             }
             self.next_id = self.next_id.max(next);
+            held.1.insert(id, self.entities.len());
             self.entities.push(entity);
         }
         if let Some(next) = next_id {
             self.next_id = self.next_id.max(next);
         }
         self.moved();
+        held.0 = self.layout;
+        *self.at.get_mut() = held;
         self.next_check();
         refused
     }
@@ -3430,6 +3452,36 @@ mod tests {
         );
         let ids: Vec<u64> = workspace.listed().map(|entity| entity.id).collect();
         assert_eq!(ids, [5, 3]);
+    }
+
+    /// A restore in parts, as a listing brings a library back, looks each id up rather
+    /// than searching the list for it, however many assets it already holds.
+    #[test]
+    fn a_restore_in_parts_never_searches_the_list_per_asset() {
+        const PARTS: u64 = 8;
+        const PART: u64 = 256;
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let listed = |id| Saved {
+            id,
+            name: format!("{id}.ne5p"),
+            path: None,
+            origin: Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(10),
+            unsaved: None,
+        };
+        // Ids arrive out of order, each below the next id the listing has given out.
+        for part in 0..PARTS {
+            let ids = (0..PART).map(|n| 1 + n * PARTS + part);
+            let refused =
+                workspace.restore(ids.map(listed).collect(), Some(1 + PARTS * PART), &mut log);
+            assert_eq!(refused, 0);
+        }
+        assert_eq!(workspace.listed().count() as u64, PARTS * PART);
+        let searched = workspace.searched.get();
+        assert!(searched <= PARTS as usize, "searched {searched} times");
     }
 
     /// The assets asked for first are decoded first, whatever order the rest arrived in.
