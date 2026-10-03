@@ -896,6 +896,50 @@ impl Verifier {
     }
 }
 
+impl Verifier {
+    /// The checksum the bytes supplied call for, and where it goes: the splice that seals
+    /// them as [`write_with`] seals a container it writes. What the bytes hold where the
+    /// checksum goes is not read, so they may be a container written with any checksum,
+    /// such as one whose body was written before its checksum could be known.
+    pub fn seal(self) -> Result<Splice, Error> {
+        let Verifying::Body {
+            header,
+            hash,
+            body_len,
+            held,
+            ..
+        } = self.state
+        else {
+            return Err(
+                ParseError::AssertFail("the file ends inside its container header".into()).into(),
+            );
+        };
+        let trailer = header.generation.trailer_len();
+        let len = header
+            .generation
+            .body_start()
+            .checked_add(body_len)
+            .and_then(|len| len.checked_add(trailer))
+            .and_then(|len| usize::try_from(len).ok());
+        let at = len.and_then(|len| header.generation.checksum_range(len));
+        let (Some(at), true) = (at, held.len() as u64 == trailer) else {
+            return Err(ParseError::AssertFail(format!(
+                "{}: the file ends before its checksum",
+                tag_str(&header.tag)
+            ))
+            .into());
+        };
+        let bytes = match hash {
+            Hash::V0(h) => h.value().to_le_bytes().to_vec(),
+            Hash::V1(h) => h.value().to_le_bytes().to_vec(),
+        };
+        Ok(Splice {
+            at: at.start as u64,
+            bytes,
+        })
+    }
+}
+
 /// The longest header: a type-1 header with its checksum and pad.
 const HEADER_MAX: usize = 0x2c;
 
@@ -1555,6 +1599,44 @@ mod tests {
             }
         }
         assert!(accepted > 0 && refused > 0 && failed > 0);
+    }
+
+    /// The splice a seal answers is the checksum a write stores, of either generation,
+    /// whatever the supplied file held in its place and however it was cut.
+    #[test]
+    fn a_seal_is_the_checksum_a_write_stores() {
+        for len in [0, 1, 300] {
+            let body: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            for file in [v1_file(&body), v0_file(&body)] {
+                let generation = Header::from_prefix(&file).unwrap().generation;
+                let at = generation.checksum_range(file.len()).unwrap();
+                let mut blank = file.clone();
+                blank[at.clone()].fill(0);
+                for chunk in [1, 3, 0x2c, file.len()] {
+                    let mut verifier = Verifier::new();
+                    for piece in blank.chunks(chunk) {
+                        verifier.update(piece).unwrap();
+                    }
+                    let seal = verifier.seal().unwrap();
+                    assert_eq!(seal.at, at.start as u64, "{generation:?}, {len}-byte body");
+                    assert_eq!(
+                        seal.bytes,
+                        file[at.clone()],
+                        "{generation:?}, {len}-byte body"
+                    );
+                }
+            }
+        }
+        let v0 = v0_file(&[1, 2, 3]);
+        let mut cut = Verifier::new();
+        cut.update(&v0[..0x18 + 1]).unwrap();
+        assert!(
+            cut.seal().is_err(),
+            "a type-0 file too short for its trailer"
+        );
+        let mut header = Verifier::new();
+        header.update(&v0[..4]).unwrap();
+        assert!(header.seal().is_err(), "a file cut inside its header");
     }
 
     #[test]

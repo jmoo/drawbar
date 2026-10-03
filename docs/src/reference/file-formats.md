@@ -19,7 +19,8 @@ file's headers and stroke directory, through `Read` and `Seek`, and give the byt
 range of each stroke's audio. A caller reads one stroke by its range and decodes
 it. The index does not verify the container checksum, which covers every byte;
 `cbin::inspect` checks it in one streaming pass, and `cbin::Verifier` does the
-same over chunks a caller supplies.
+same over chunks a caller supplies. `Verifier::seal` gives the checksum such
+chunks call for, for a writer that streams a body before its checksum is known.
 
 An edit is saved without a whole read too. A sample instrument's
 `nsmp::Outline`, from its index, answers what a whole read answers outside the
