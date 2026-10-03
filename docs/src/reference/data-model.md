@@ -130,7 +130,10 @@ read-only.
   the library read-only.
 - `tmp/` holds the temporary files of writes in flight. On the desktop that is
   only the index's own files; a library file is staged as a hidden sibling,
-  `.<name>.drawbar-tmp`, so its rename never crosses a volume. In the browser
+  `.<name>.drawbar-tmp`, so its rename never crosses a volume. A temporary is
+  made only where no entry is, after removing a stale one, so a link left at its
+  name is never written through; a name taken again gives way to
+  `.<name>.<n>.drawbar-tmp`. In the browser
   every write is staged in `tmp/`. It also holds a slot's occupant while a write
   to the instrument replaces it, as `nord-rescued-…`, which the open's sweep
   leaves.
@@ -440,9 +443,9 @@ the edit itself, and the next open makes it again over the file.
 
 Duplicate, Keep both, and an Overwrite that puts a resting file over another, are
 copies the library makes too (`Workspace::arrive`, `store::CopyOf`): `Cmd::Import`
-copies the library's own file byte for byte (`std::fs::copy` on the desktop,
-which clones the file where the disk can, and slice by slice through the writer
-in the browser), or writes the edit held of it through as it copies. The copy's
+copies the library's own file byte for byte (on the desktop a clone where the
+disk can make one and a streamed copy otherwise, and slice by slice through the
+writer in the browser), or writes the edit held of it through as it copies. The copy's
 asset is unread until it lands, then rests in it. A file a copy is still to be
 made of is not deleted until the copy answers, and the asset an Overwrite moved
 over another file goes only once its copy has landed: one that fails leaves it. Exporting a resting file copies it across

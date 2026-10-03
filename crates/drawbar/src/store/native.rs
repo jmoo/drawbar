@@ -48,11 +48,16 @@ const LOCK: &str = ".drawbar/lock";
 
 /// Where [`Fs::replace`] and [`Fs::create`] write before the rename: `.drawbar/tmp/` for
 /// the index's own files, and a hidden sibling in the same folder for a library file, so
-/// the rename never crosses a volume.
-fn temp_for(path: &str) -> String {
+/// the rename never crosses a volume. Each `attempt` after the first takes another name
+/// the open's sweep still finds.
+fn temp_for(path: &str, attempt: u32) -> String {
     let (parent, leaf) = match path.rsplit_once('/') {
         Some((parent, leaf)) => (Some(parent), leaf),
         None => (None, path),
+    };
+    let leaf = match attempt {
+        0 => leaf.to_string(),
+        n => format!("{leaf}.{n}"),
     };
     match (path.starts_with(".drawbar/"), parent) {
         (true, _) => format!("{TMP}/{leaf}"),
@@ -60,6 +65,9 @@ fn temp_for(path: &str) -> String {
         (false, None) => format!(".{leaf}{TEMP}"),
     }
 }
+
+/// How many names a temporary tries before a write gives up.
+const TEMPS: u32 = 8;
 
 /// A folder as a `file:` URL, or `None` for a path that is not absolute.
 fn folder_url(dir: &Path) -> Option<String> {
@@ -199,18 +207,67 @@ impl Disk {
         path: &str,
         write: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> io::Result<PathBuf> {
-        let temp = self.locate(&temp_for(path))?;
-        let wrote = File::create(&temp).and_then(|mut file| {
-            write(&mut file)?;
-            file.sync_all()
-        });
-        match wrote {
+        let (temp, mut file) = self.fresh(path)?;
+        match write(&mut file).and_then(|()| file.sync_all()) {
             Ok(()) => Ok(temp),
             Err(e) => {
                 let _ = fs::remove_file(&temp);
                 Err(e)
             }
         }
+    }
+
+    /// A new temporary for `path`, made where no entry is, so a link left at its name
+    /// is never followed: a stale entry is removed first, which removes a link and not
+    /// what it names, and a name taken again before the file is made gives way to the
+    /// next.
+    fn fresh(&self, path: &str) -> io::Result<(PathBuf, File)> {
+        for attempt in 0..TEMPS {
+            let temp = self.locate(&temp_for(path, attempt))?;
+            match fs::remove_file(&temp) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            match File::options().write(true).create_new(true).open(&temp) {
+                Ok(file) => return Ok((temp, file)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("no temporary name beside {path} stayed free"),
+        ))
+    }
+
+    /// A temporary for `path` that shares the blocks of `source`, on a disk that can clone
+    /// a file. `None` where it cannot, and nothing is made. A clone is made only where no
+    /// entry is, so it never follows a link left at its name.
+    #[cfg(target_vendor = "apple")]
+    fn clone_of(&self, source: &File, path: &str) -> io::Result<Option<PathBuf>> {
+        use rustix::fs::{fclonefileat, CloneFlags, CWD};
+
+        for attempt in 0..TEMPS {
+            let temp = self.locate(&temp_for(path, attempt))?;
+            match fs::remove_file(&temp) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            match fclonefileat(source, CWD, &temp, CloneFlags::NOFOLLOW) {
+                Ok(()) => {
+                    File::open(&temp)?.sync_all()?;
+                    return Ok(Some(temp));
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(_) => return Ok(None),
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    fn clone_of(&self, _: &File, _: &str) -> io::Result<Option<PathBuf>> {
+        Ok(None)
     }
 
     /// Put the temporary `temp` at `path`: over whatever is there where `over` is set,
@@ -448,13 +505,11 @@ impl Fs for Disk {
         if !over {
             self.free(path)?;
         }
-        let temp = self.locate(&temp_for(path))?;
-        let copied = fs::copy(self.locate(from)?, &temp)
-            .and_then(|_| File::options().write(true).open(&temp)?.sync_all());
-        if let Err(e) = copied {
-            let _ = fs::remove_file(&temp);
-            return Err(e);
-        }
+        let mut source = File::open(self.locate(from)?)?;
+        let temp = match self.clone_of(&source, path)? {
+            Some(temp) => temp,
+            None => self.stage(path, |file| io::copy(&mut source, file).map(|_| ()))?,
+        };
         self.place(temp, path, over)
     }
 
@@ -798,6 +853,61 @@ mod tests {
         assert!(answer.is_none(), "{answer:?}");
         assert!(largest < 8 << 20, "{largest} bytes held at once");
         assert!(!root.at("Grand.npno").exists());
+    }
+
+    /// A link left at the name a write's temporary takes is never followed: the file it
+    /// names, outside the library, keeps what it holds, and the write lands. The same
+    /// holds for a copy of one of the library's files.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_temporary_name_is_never_written_through() {
+        let (root, outside) = (Temp::new(), Temp::new());
+        fs::write(outside.at("precious"), b"outside").unwrap();
+        let plant = |leaf: &str| {
+            std::os::unix::fs::symlink(outside.at("precious"), root.at(leaf)).unwrap();
+        };
+        fs::write(root.at("Grand.ne5p"), b"first").unwrap();
+        plant(".Saved.ne5p.drawbar-tmp");
+        plant(".Copy.ne5p.drawbar-tmp");
+
+        let saved = execute(
+            &mut disk(&root),
+            Cmd::Save {
+                id: 1,
+                path: LibPath::root().join("Saved.ne5p"),
+                bytes: b"saved".to_vec(),
+                expect: None,
+            },
+        );
+        assert!(
+            matches!(saved, Some(Event::Saved { result: Ok(_), .. })),
+            "{saved:?}"
+        );
+        let stat = stat(&fs::metadata(root.at("Grand.ne5p")).unwrap());
+        let copied = execute(
+            &mut disk(&root),
+            Cmd::Import {
+                id: 2,
+                path: LibPath::root().join("Copy.ne5p"),
+                from: crate::store::Source::Library(
+                    LibPath::root().join("Grand.ne5p"),
+                    Fingerprint::unread(stat),
+                ),
+                expect: None,
+            },
+        );
+        assert!(
+            matches!(copied, Some(Event::Imported { result: Ok(_), .. })),
+            "{copied:?}"
+        );
+
+        assert_eq!(outside.read("precious"), b"outside");
+        assert_eq!(root.read("Saved.ne5p"), b"saved");
+        assert_eq!(root.read("Copy.ne5p"), b"first");
+        assert_eq!(
+            root.names(""),
+            [".drawbar", "Copy.ne5p", "Grand.ne5p", "Saved.ne5p"]
+        );
     }
 
     /// A file whose stat moves while its edit is written is not written over, and the

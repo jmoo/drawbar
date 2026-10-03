@@ -58,7 +58,7 @@ url = "2"
 
 [target.'cfg(unix)'.dependencies]
 # The open-file limit, raised at start. Linux builds already ship it, through eframe.
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
