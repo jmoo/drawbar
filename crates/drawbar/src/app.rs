@@ -780,13 +780,29 @@ pub fn bold() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
 
-/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces.
+/// Ubuntu Regular for the body and Ubuntu Bold beside it, over egui's own faces, with
+/// drawbar's own glyphs under every family.
 ///
-/// The files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu Font
-/// Licence 1.0 beside them. egui bundles only Ubuntu Light, so without these there is no
-/// bold weight and no regular (400) weight for body text.
+/// The Ubuntu files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu
+/// Font Licence 1.0 beside them. egui bundles only Ubuntu Light, so without these there
+/// is no bold weight and no regular (400) weight for body text. `drawbar-glyphs.ttf`
+/// draws the characters drawbar's text uses that no other face has; `scripts/glyphs.py`
+/// generates it.
 pub(crate) fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "drawbar-glyphs".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/drawbar-glyphs.ttf"
+        ))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("drawbar-glyphs".to_owned());
+    }
     let bundled = fonts.families[&egui::FontFamily::Proportional].clone();
     for (family, face, ttf) in [
         (
@@ -1108,5 +1124,123 @@ mod tests {
             !body[1..].is_empty(),
             "a glyph Ubuntu lacks would draw as an empty box"
         );
+    }
+
+    #[test]
+    fn every_character_in_drawbar_text_has_a_glyph_in_both_families() {
+        let faces = egui::epaint::text::Fonts::new(1.0, 2048, Default::default(), fonts());
+        let written = written();
+        assert!(written.contains_key(&'→'), "{written:?}");
+        for (char, at) in written {
+            for font in [
+                egui::FontId::proportional(12.0),
+                egui::FontId::monospace(12.0),
+            ] {
+                assert!(
+                    faces.has_glyph(&font, char),
+                    "{char:?} (U+{:04X}), written at {at}, draws as an empty box in {:?}",
+                    u32::from(char),
+                    font.family
+                );
+            }
+        }
+    }
+
+    /// Every non-ASCII character of a string or character literal drawbar compiles outside
+    /// its tests, with the first `file:line` that writes it. Attributes, doc comments
+    /// among them, are not drawn, so they are left out.
+    fn written() -> std::collections::BTreeMap<char, String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut found = std::collections::BTreeMap::new();
+        let mut files = vec![root.join("src/lib.rs"), root.join("src/main.rs")];
+        while let Some(path) = files.pop() {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let tokens = source
+                .parse()
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let file = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let mut modules = Vec::new();
+            literals(tokens, &file, &mut found, &mut modules);
+            let owner = match path.file_name().and_then(|name| name.to_str()) {
+                Some("lib.rs" | "main.rs" | "mod.rs") => path.with_file_name(""),
+                _ => path.with_extension(""),
+            };
+            files.extend(modules.into_iter().map(|name| {
+                let flat = owner.join(format!("{name}.rs"));
+                match flat.exists() {
+                    true => flat,
+                    false => owner.join(name).join("mod.rs"),
+                }
+            }));
+        }
+        found
+    }
+
+    /// Record the literals in `tokens` into `found`, and the names of the modules they
+    /// declare in their own files into `modules`, skipping items built only for tests.
+    fn literals(
+        tokens: proc_macro2::TokenStream,
+        file: &str,
+        found: &mut std::collections::BTreeMap<char, String>,
+        modules: &mut Vec<String>,
+    ) {
+        use proc_macro2::{Delimiter, TokenTree};
+        let ends_item = |token: &TokenTree| match token {
+            TokenTree::Group(group) => group.delimiter() == Delimiter::Brace,
+            token => is_punct(Some(token), ';'),
+        };
+        let mut tokens = tokens.into_iter().peekable();
+        while let Some(token) = tokens.next() {
+            match token {
+                TokenTree::Punct(hash) if hash.as_char() == '#' => {
+                    let attribute = tokens.by_ref().find_map(|token| match token {
+                        TokenTree::Group(group) => Some(group.stream().to_string()),
+                        _ => None,
+                    });
+                    // ⚠️ The gated item runs to its first `;` or `{}` block, as every item
+                    // drawbar builds only for tests does.
+                    if attribute.as_deref().is_some_and(tests_only) {
+                        tokens.by_ref().find(ends_item);
+                    }
+                }
+                TokenTree::Ident(word) if word == "mod" => {
+                    if let Some(TokenTree::Ident(name)) = tokens.next() {
+                        if is_punct(tokens.peek(), ';') {
+                            modules.push(name.to_string());
+                        }
+                    }
+                }
+                TokenTree::Group(group) => literals(group.stream(), file, found, modules),
+                TokenTree::Literal(literal) => {
+                    let line = literal.span().start().line;
+                    let text = match syn::Lit::new(literal) {
+                        syn::Lit::Str(text) => text.value(),
+                        syn::Lit::Char(char) => char.value().to_string(),
+                        _ => continue,
+                    };
+                    for char in text.chars().filter(|char| !char.is_ascii()) {
+                        found
+                            .entry(char)
+                            .or_insert_with(|| format!("{file}:{line}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn is_punct(token: Option<&proc_macro2::TokenTree>, char: char) -> bool {
+        matches!(token, Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == char)
+    }
+
+    /// Whether an attribute builds its item only for tests.
+    fn tests_only(attribute: &str) -> bool {
+        let attribute = attribute.replace(' ', "");
+        attribute == "cfg(test)" || attribute.starts_with("cfg(all(test,")
     }
 }

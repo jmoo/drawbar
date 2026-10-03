@@ -39,6 +39,9 @@ rfd = "0.15"
 nord-format = { path = "../nord-format", version = "0.8.0", features = [
   "synthetic",
 ] }
+# Read drawbar's own source, to find every character its text needs a glyph for.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # MIDI input only. drawbar opens no output port.

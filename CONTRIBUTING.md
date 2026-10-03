@@ -233,6 +233,10 @@ Cargo from `crates/` inside the development shell; the parent
 - `scripts/licenses.bash` regenerates the license notices drawbar shows for its
   Rust crates. The drawbar suite fails when the registry packages drawbar reaches
   in `Cargo.lock` change, until the script is re-run.
+- `scripts/glyphs.py` regenerates `drawbar-glyphs.ttf`, which draws the
+  characters drawbar's text uses that no other bundled font has. Change a glyph
+  in the script's table and re-run it; the drawbar suite fails when the text
+  uses a character no face draws.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
 would change, and treats Clippy warnings as failures. The public suite must
