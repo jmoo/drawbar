@@ -139,7 +139,7 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
                 answer(Event::Opened(Err(why)));
             }
         }
-        cmd => step(fs, cmd, answer).await,
+        cmd => step(fs, cmd, &mut 0, answer).await,
     }
 }
 
@@ -151,8 +151,10 @@ fn writes(cmd: &Cmd) -> bool {
     )
 }
 
-/// Run any command but an open, which runs once, first.
-async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
+/// Run any command but an open, which runs once, first. `ran` counts it among the
+/// commands run, and any it runs while it lasts.
+async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut(Event)) {
+    *ran += 1;
     if writes(&cmd) {
         if let Err(why) = take(fs).await {
             if let Cmd::Move { from, to } = cmd {
@@ -167,7 +169,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
             Err("the library is open already".to_string()),
         )),
         Cmd::Scan { known } => Some(Event::Scanned(
-            scan(fs, &known, answer).await.map_err(|e| e.to_string()),
+            scan(fs, &known, ran, answer)
+                .await
+                .map_err(|e| e.to_string()),
         )),
         Cmd::Check { known } => Some(Event::Checked(Ok(check(fs, &known).await))),
         // Outside an open's listing the whole tree has been listed already.
@@ -216,10 +220,13 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 
 /// Run the reads waiting, each as it comes, until a command that is not one is next.
 /// That one is left to run after the rescan, and so is every command behind it.
-async fn reads_between(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) {
+async fn reads_between(fs: &mut impl Fs, ran: &mut u64, answer: &mut impl FnMut(Event)) {
     while let Some(cmd) = fs.waiting() {
         match cmd {
-            Cmd::Read { files, room } => answer(Event::Read(read_all(fs, files, room).await)),
+            Cmd::Read { files, room } => {
+                *ran += 1;
+                answer(Event::Read(read_all(fs, files, room).await))
+            }
             cmd => return fs.hold(cmd),
         }
     }
@@ -319,6 +326,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
 async fn scan(
     fs: &mut impl Fs,
     known: &BTreeMap<LibPath, (Fingerprint, Holds)>,
+    ran: &mut u64,
     answer: &mut impl FnMut(Event),
 ) -> io::Result<Listing> {
     let mut walk = Walk::start(fs).await?;
@@ -327,7 +335,7 @@ async fn scan(
         for entry in entries {
             rescan.take(fs, entry).await;
         }
-        reads_between(fs, answer).await;
+        reads_between(fs, ran, answer).await;
     }
     let mut listing = rescan.finish(fs).await;
     listing.sort();
@@ -678,15 +686,15 @@ impl Lister {
     async fn between(&mut self, fs: &mut impl Fs, walk: &mut Walk, answer: &mut impl FnMut(Event)) {
         while let Some(cmd) = fs.waiting() {
             self.send(answer);
-            self.ran += 1;
             if let Cmd::Walk(dir) = cmd {
+                self.ran += 1;
                 self.urgent.push(dir);
                 self.walked(walk, answer);
                 continue;
             }
             let follow = Follow::of(&cmd);
             let mut done = true;
-            step(fs, cmd, &mut |event| {
+            step(fs, cmd, &mut self.ran, &mut |event| {
                 done &= !failed(&event);
                 answer(event)
             })
@@ -1462,7 +1470,10 @@ mod tests {
             (path("Moved.ne5p"), (print(9), Holds::Whole)),
             (path("Unread.ne5p"), (print(9), Holds::Unread)),
         ]);
-        let listing = now(scan(&mut fs, &known, &mut |event| panic!("{event:?}"))).unwrap();
+        let listing = now(scan(&mut fs, &known, &mut 0, &mut |event| {
+            panic!("{event:?}")
+        }))
+        .unwrap();
         let read: Vec<(&str, bool)> = listing
             .files
             .iter()
@@ -1722,6 +1733,29 @@ mod tests {
             Event::Listed { part, .. } => named(part).iter().any(|named| named == name),
             _ => false,
         })
+    }
+
+    /// A read a rescan answers while the walk is in flight counts among the commands
+    /// run, so the parts after it say how many have.
+    #[test]
+    fn a_read_a_rescan_answers_while_the_walk_is_in_flight_counts_as_run() {
+        let mut fs = Claimed::of([("a/x.ne5p".to_string(), 1)]);
+        fs.waiting.push_back(Cmd::Scan {
+            known: BTreeMap::new(),
+        });
+        fs.waiting.push_back(Cmd::Read {
+            files: Vec::new(),
+            room: 0,
+        });
+        let events = listing(&mut fs, Vec::new());
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Scanned(Ok(_)))));
+        assert!(events.iter().any(|event| matches!(event, Event::Read(_))));
+        let Some(Event::Listed { ran, .. }) = events.last() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*ran, 2, "commands run");
     }
 
     /// A check sent while the walk is in flight is answered between two folders, and a
