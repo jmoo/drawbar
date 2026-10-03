@@ -258,8 +258,8 @@ impl Found {
     }
 }
 
-/// The library's tree as the disk has it. `.drawbar/` and names starting with a dot are
-/// left out.
+/// The library's tree as the disk has it, or one part of it. `.drawbar/` and names
+/// starting with a dot are left out.
 #[derive(Clone, Debug, Default)]
 pub struct Listing {
     /// Every folder below the root, in path order.
@@ -277,7 +277,27 @@ pub struct Listing {
     pub unwalked: Vec<LibPath>,
 }
 
-/// What opening a library found.
+impl Listing {
+    /// Take in another part of the same listing.
+    pub fn extend(&mut self, part: Listing) {
+        self.dirs.extend(part.dirs);
+        self.files.extend(part.files);
+        self.unread.extend(part.unread);
+        self.others.extend(part.others);
+        self.unwalked.extend(part.unwalked);
+    }
+
+    /// Put every list in path order.
+    pub fn sort(&mut self) {
+        self.dirs.sort();
+        self.files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.unread.sort();
+        self.others.sort();
+        self.unwalked.sort();
+    }
+}
+
+/// What opening a library found before listing it.
 #[derive(Debug)]
 pub struct Opened {
     /// `Err` with the reason when nothing may be written here. The library still opens,
@@ -289,11 +309,21 @@ pub struct Opened {
     /// The index, or an empty one for a library that has none or one this build must not
     /// read.
     pub sidecar: Sidecar,
-    pub listing: Listing,
     /// The working copies the index names, by asset id. One that is not there is left
     /// out, and one that did not read leaves the library read-only.
     pub working: std::collections::BTreeMap<u64, Vec<u8>>,
     /// How many leftovers of interrupted writes were removed.
+    pub swept: usize,
+}
+
+/// The end of an open's listing.
+#[derive(Debug)]
+pub struct Complete {
+    /// Files at paths the index does not name, each the length of a file it does, which
+    /// may be that file moved and so wait for the whole tree. Each whose length is that of
+    /// a file not found comes with its CRC.
+    pub strangers: Vec<Found>,
+    /// How many temporary siblings of interrupted saves were removed.
     pub swept: usize,
 }
 
@@ -315,7 +345,8 @@ pub enum Failure {
 pub enum Cmd {
     /// Read the index, and list and read every file. Where `.drawbar/` exists, take the
     /// lock and sweep interrupted writes first; where it does not, write nothing. Answered
-    /// by [`Event::Opened`].
+    /// by [`Event::Opened`], then the listing in [`Event::Listed`] parts, breadth first,
+    /// then [`Event::Complete`]. Only [`Event::Opened`] answers an open that failed.
     Open,
     /// List the tree again, reading every file whose [`Stat`] is not the one `known`
     /// holds under its path. Answered by [`Event::Scanned`].
@@ -354,6 +385,9 @@ pub enum Cmd {
 #[derive(Debug)]
 pub enum Event {
     Opened(Result<Opened, String>),
+    /// One part of an open's listing.
+    Listed(Listing),
+    Complete(Complete),
     Scanned(Result<Listing, String>),
     Saved {
         id: u64,

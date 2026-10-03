@@ -4,6 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -87,24 +88,28 @@ pub struct Backend {
     tx: Option<Sender<Cmd>>,
     rx: Receiver<Event>,
     worker: Option<JoinHandle<()>>,
+    /// Set once the library is let go, so a listing still running stops.
+    stop: Arc<AtomicBool>,
 }
 
 impl Backend {
     pub fn start(ctx: &egui::Context, root: PathBuf) -> Backend {
         let (tx, commands) = channel::<Cmd>();
         let (answers, rx) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
         let mut disk = Disk {
             root: root.clone(),
             prepared: false,
             lock: None,
+            stop: stop.clone(),
         };
         let ctx = ctx.clone();
         let worker = std::thread::spawn(move || {
             for cmd in commands {
-                if let Some(event) = exec::execute(&mut disk, cmd) {
+                exec::execute(&mut disk, cmd, &mut |event| {
                     let _ = answers.send(event);
                     ctx.request_repaint();
-                }
+                });
             }
         });
         Backend {
@@ -112,6 +117,7 @@ impl Backend {
             tx: Some(tx),
             rx,
             worker: Some(worker),
+            stop,
         }
     }
 
@@ -146,8 +152,10 @@ impl Backend {
             .ok()
     }
 
-    /// Run every command already sent, then let the library go.
+    /// Run every command already sent, then let the library go. A listing in flight stops
+    /// where it is, since nothing will read the rest of it.
     pub fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         self.tx = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -168,6 +176,7 @@ struct Disk {
     prepared: bool,
     /// The lock file, held open, and locked, while this library is written.
     lock: Option<File>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Disk {
@@ -286,6 +295,10 @@ fn parent(path: &Path) -> &Path {
 }
 
 impl Fs for Disk {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
     async fn prepare(&mut self) -> io::Result<()> {
         if self.prepared {
             return Ok(());
@@ -442,7 +455,16 @@ mod tests {
             root: root.0.clone(),
             prepared: false,
             lock: None,
+            stop: Arc::default(),
         }
+    }
+
+    /// Run a command that answers at most once.
+    fn execute(disk: &mut Disk, cmd: Cmd) -> Option<Event> {
+        let mut answers = Vec::new();
+        exec::execute(disk, cmd, &mut |event| answers.push(event));
+        assert!(answers.len() <= 1, "{answers:?}");
+        answers.pop()
     }
 
     #[cfg(unix)]
@@ -468,7 +490,7 @@ mod tests {
     fn a_rename_that_changes_only_case_goes_through() {
         let root = Temp::new();
         fs::write(root.at("c3.ne5p"), b"lower").unwrap();
-        let moved = exec::execute(
+        let moved = execute(
             &mut disk(&root),
             Cmd::Move {
                 from: LibPath::root().join("c3.ne5p"),
@@ -490,7 +512,7 @@ mod tests {
         if root.names("").len() < 2 {
             return;
         }
-        let moved = exec::execute(
+        let moved = execute(
             &mut disk(&root),
             Cmd::Move {
                 from: LibPath::root().join("c3.ne5p"),
@@ -514,7 +536,7 @@ mod tests {
         };
         let path = LibPath::root().join("c3.ne5p");
         let remove = |crc| {
-            exec::execute(
+            execute(
                 &mut disk(&root),
                 Cmd::RemoveFile {
                     path: path.clone(),

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use super::diff::{match_files, Known};
-use super::exec::{MOST_BYTES, MOST_ENTRIES};
+use super::exec::MOST_BYTES;
 use super::sidecar::{self, Read};
 use super::*;
 use crate::browser::Kind;
@@ -26,8 +26,16 @@ impl Session {
         let bench = Bench::new();
         let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
         let mut session = Session { store, bench };
-        assert!(session.next(), "opening answered");
+        session.opened();
         session
+    }
+
+    /// Wait for the open's answer, and for every part of its listing.
+    fn opened(&mut self) {
+        assert!(self.next(), "opening answered");
+        while self.store.scanning() {
+            assert!(self.next(), "the listing answered");
+        }
     }
 
     fn next(&mut self) -> bool {
@@ -1161,18 +1169,17 @@ fn a_held_file_of_a_kind_drawbar_does_not_open_stays_held() {
     assert!(second.bench.browser.folders.others.is_empty());
 }
 
-/// A listing looks at a bounded number of entries, breadth first, so a folder like a
-/// whole Music folder opens without walking all of it. A file drawbar holds is still
-/// found where the walk stopped short of it.
+/// A library past ten thousand entries is listed whole, however deep its files are, and
+/// a file drawbar holds keeps its id and tags wherever it is.
 #[test]
-fn a_large_tree_is_listed_only_as_far_as_the_bound() {
+fn a_large_tree_is_listed_whole() {
     let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
-    for dir in ["a", "b", "c"] {
+    for dir in ["a", "b", "c", "c/d"] {
         fs::create_dir(root.at(dir)).unwrap();
     }
     fs::write(root.at("top.ne5p"), &program).unwrap();
-    fs::write(root.at("c/kept.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("c/d/kept.ne5p"), with_gain(&program, "12")).unwrap();
     let mut first = Session::open(&root);
     let kept = first
         .bench
@@ -1185,32 +1192,48 @@ fn a_large_tree_is_listed_only_as_far_as_the_bound() {
     first.bench.browser.tags.set(kept, tag, true);
     first.close();
 
-    for n in 0..MOST_ENTRIES {
+    const PAST: usize = 10_001;
+    for n in 0..PAST {
         fs::write(root.at(&format!("a/{n:05}.jpg")), b"").unwrap();
     }
     fs::write(root.at("b/deep.ne5p"), &program).unwrap();
     let session = Session::open(&root);
     let folders = &session.bench.browser.folders;
-    let unwalked: Vec<&str> = folders.unwalked.iter().map(LibPath::as_str).collect();
-    assert_eq!(unwalked, ["a", "b", "c"]);
-    assert!(
-        folders.others.len() < MOST_ENTRIES,
-        "{}",
-        folders.others.len()
-    );
-    let names: Vec<&str> = session
+    assert!(folders.unwalked.is_empty(), "{:?}", folders.unwalked);
+    assert_eq!(folders.others.len(), PAST);
+    let mut names: Vec<&str> = session
         .bench
         .workspace
         .listed()
         .map(|entity| entity.name.as_str())
         .collect();
-    assert!(names.contains(&"top.ne5p"), "{names:?}");
-    assert!(!names.contains(&"deep.ne5p"), "past the bound: {names:?}");
-    assert!(
-        session.bench.browser.tags.worn(kept).contains(&tag),
-        "a held file past the bound keeps its id and tags"
-    );
-    assert_eq!(session.said("holds more than drawbar lists"), 1);
+    names.sort();
+    assert_eq!(names, ["deep.ne5p", "kept.ne5p", "top.ne5p"]);
+    assert!(session.bench.browser.tags.worn(kept).contains(&tag));
+    assert_eq!(session.said("not listed"), 0);
+}
+
+/// A library let go before its listing has all come back keeps, in its index, the rows
+/// no listed file had claimed yet.
+#[test]
+fn a_library_let_go_while_it_is_listed_keeps_what_its_index_held() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(id, tag, true);
+    first.close();
+
+    let bench = Bench::new();
+    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let mut second = Session { store, bench };
+    assert!(second.next(), "opening answered");
+    assert!(second.store.scanning(), "its listing has not come back");
+    second.close();
+
+    let third = Session::open(&root);
+    assert!(third.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(third.path(id).as_deref(), Some("untitled.ne5p"));
 }
 
 /// Everything drawbar holds is in memory, so it reads only so much from one folder. A
@@ -1270,7 +1293,7 @@ fn an_asset_under_an_id_already_given_out_takes_a_new_one_with_its_edit() {
     let floor = bench.workspace.next_id();
     let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
     let mut second = Session { store, bench };
-    assert!(second.next(), "opening answered");
+    second.opened();
     let back = second
         .bench
         .workspace

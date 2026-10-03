@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::diff::{self, match_files, Known};
 use super::exec::working_name;
 use super::sidecar::{Row, Sidecar, VERSION};
-use super::{names, Backend, Cmd, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened};
+use super::{
+    names, Backend, Cmd, Complete, Event, Failure, Fingerprint, Found, LibPath, Listing, Opened,
+};
 use crate::browser::Browser;
 use crate::folders::{Op, Where};
 use crate::log::Log;
@@ -62,6 +64,33 @@ struct Record {
     rests: bool,
 }
 
+/// An open whose listing is still arriving: the index's rows, as the files listed so far
+/// have claimed them.
+struct Loading {
+    /// Under the ids this session gives them.
+    rows: BTreeMap<u64, Row>,
+    /// The row naming each path.
+    by_path: BTreeMap<LibPath, u64>,
+    /// The rows a listed file has claimed.
+    claimed: BTreeSet<u64>,
+    /// The working copies not yet taken up, by id.
+    working: BTreeMap<u64, Vec<u8>>,
+    /// The new id of each row that moved with a working copy, and that copy's file.
+    renamed: Vec<(u64, String)>,
+    /// The id the next file the index does not name takes.
+    next: u64,
+    /// Every folder listed so far.
+    dirs: Vec<LibPath>,
+    /// How many files have come back so far.
+    files: usize,
+    /// How many leftovers of interrupted writes the open removed.
+    swept: usize,
+}
+
+/// How many parts of a listing one [`Store::poll`] folds in, so a listing faster than the
+/// frames fills the tree over several of them.
+const PARTS_A_FRAME: usize = 4;
+
 /// An unsaved edit's bytes, as written to `working/`.
 struct Working {
     generation: u64,
@@ -82,7 +111,9 @@ pub struct Store {
     indexed: bool,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
+    /// A rescan, or the open's listing, is in flight.
     scanning: bool,
+    loading: Option<Loading>,
     /// A send is waiting for the rescan in flight.
     send_waits: bool,
     /// An unsaved view of a slot is kept here as a working copy. Off once the library is
@@ -110,6 +141,7 @@ impl Store {
             indexed: false,
             focused: true,
             scanning: false,
+            loading: None,
             send_waits: false,
             keeps_views: true,
             name: None,
@@ -216,12 +248,13 @@ impl Store {
                 Phase::ReadOnly(why) => Some(format!("read-only: {why}")),
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
-            opening: matches!(self.phase, Phase::Opening),
+            opening: matches!(self.phase, Phase::Opening) || self.loading.is_some(),
+            listing: self.loading.as_ref().map(|loading| loading.files),
         }
     }
 
-    /// Fold in whatever the backend has answered. Returns whether a send held by
-    /// [`Store::hold_send`] may now go ahead.
+    /// Fold in what the backend has answered, up to [`PARTS_A_FRAME`] parts of a
+    /// listing. Returns whether a send held by [`Store::hold_send`] may now go ahead.
     pub fn poll(
         &mut self,
         workspace: &mut Workspace,
@@ -230,8 +263,16 @@ impl Store {
         log: &mut Log,
     ) -> bool {
         let mut released = false;
-        while let Some(event) = self.backend.try_recv() {
+        let mut parts = 0;
+        while parts < PARTS_A_FRAME {
+            let Some(event) = self.backend.try_recv() else {
+                break;
+            };
+            parts += usize::from(matches!(event, Event::Listed(_)));
             released |= self.handle(event, workspace, browser, queue, log);
+        }
+        if parts == PARTS_A_FRAME {
+            workspace.ctx().request_repaint();
         }
         browser.folders.place = Some(self.place());
         released
@@ -279,7 +320,14 @@ impl Store {
         log: &mut Log,
     ) -> bool {
         match event {
-            Event::Opened(Ok(opened)) => self.load(opened, workspace, browser, log),
+            Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, log),
+            Event::Listed(part) => self.listed(part, workspace, browser, log),
+            Event::Complete(complete) => {
+                self.complete(complete, workspace, browser, log);
+                if std::mem::take(&mut self.send_waits) {
+                    return self.release(&BTreeSet::new(), queue, workspace, log);
+                }
+            }
             Event::Opened(Err(why)) => {
                 log.error(format!("opening the library: {why}"));
                 log.trouble(format!(
@@ -485,7 +533,9 @@ impl Store {
         false
     }
 
-    fn load(
+    /// Take in what an open found before its listing: the index, and the working copies.
+    /// Nothing is written, and no rescan sent, until the listing is complete.
+    fn begin(
         &mut self,
         opened: Opened,
         workspace: &mut Workspace,
@@ -496,7 +546,6 @@ impl Store {
             writable,
             indexed,
             sidecar,
-            listing,
             mut working,
             swept,
         } = opened;
@@ -511,17 +560,6 @@ impl Store {
             }
         };
         self.indexed = indexed;
-        if swept > 0 {
-            log.info(format!("removed {swept} leftovers of interrupted writes"));
-        }
-        let Listing {
-            dirs,
-            files,
-            unread,
-            others,
-            unwalked,
-        } = listing;
-        beside(&mut browser.folders, unread, others, unwalked, log);
         self.next_generation = sidecar.next_generation.max(1);
         let Sidecar { tags, assets, .. } = sidecar;
 
@@ -532,20 +570,15 @@ impl Store {
         let mut next = floor
             .max(sidecar.next_id)
             .max(assets.keys().max().map_or(0, |id| id.saturating_add(1)));
-        let mut fresh = || {
-            let id = next;
-            next = next.saturating_add(1);
-            id
-        };
         let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
-        // The new id of each asset that moved with a working copy, and that copy's file.
         let mut renamed = Vec::new();
         for (id, row) in assets {
             if id >= floor {
                 rows.insert(id, row);
                 continue;
             }
-            let moved = fresh();
+            let moved = next;
+            next = next.saturating_add(1);
             if let Some(bytes) = working.remove(&id) {
                 working.insert(moved, bytes);
             }
@@ -554,9 +587,154 @@ impl Store {
             }
             rows.insert(moved, row);
         }
-
-        let known = rows
+        browser.tags.restore(
+            tags,
+            rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
+        );
+        let by_path = rows
             .iter()
+            .filter_map(|(id, row)| Some((row.path.clone()?, *id)))
+            .collect();
+        self.loading = Some(Loading {
+            rows,
+            by_path,
+            claimed: BTreeSet::new(),
+            working,
+            renamed,
+            next,
+            dirs: Vec::new(),
+            files: 0,
+            swept,
+        });
+        self.scanning = true;
+    }
+
+    /// Fold in one part of the open's listing: each file the index names comes back as
+    /// its asset, and each it does not as a new one.
+    fn listed(
+        &mut self,
+        part: Listing,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let Some(mut loading) = self.loading.take() else {
+            return;
+        };
+        let Listing {
+            dirs,
+            files,
+            unread,
+            others,
+            unwalked,
+        } = part;
+        beside(&browser.folders, &unread, &unwalked, log);
+        let folders = &mut browser.folders;
+        folders.unread.extend(unread);
+        folders.others.extend(others);
+        folders.unwalked.extend(unwalked);
+        folders.add(&dirs);
+        loading.dirs.extend(dirs);
+
+        let mut back = Vec::new();
+        let mut conflicts = Vec::new();
+        loading.files += files.len();
+        for found in files {
+            let Some(id) = loading.by_path.get(&found.path).copied() else {
+                let id = loading.next;
+                if let Some(saved) = newcomer(id, found, &mut self.records) {
+                    loading.next = id.saturating_add(1);
+                    back.push(saved);
+                }
+                continue;
+            };
+            loading.claimed.insert(id);
+            let print = loading.rows.get(&id).and_then(|row| row.fingerprint);
+            let changed = !diff::same(print, &found);
+            if let Some((saved, conflicted)) = self.claim(&mut loading, id, found, changed) {
+                back.push(saved);
+                if conflicted {
+                    conflicts.push(id);
+                }
+            }
+        }
+        self.restored(back, &loading, workspace, log);
+        for id in conflicts {
+            conflict(id, workspace, browser, log);
+        }
+        self.loading = Some(loading);
+    }
+
+    /// A listed file at the path of a row, or one matched to a row it moved from: the
+    /// asset it comes back as, with the edit its working copy holds over it, and whether
+    /// that edit is over a file that changed.
+    fn claim(
+        &mut self,
+        loading: &mut Loading,
+        id: u64,
+        found: Found,
+        changed: bool,
+    ) -> Option<(Saved, bool)> {
+        let row = loading.rows.get(&id).filter(|_| found.read())?;
+        let print = diff::kept(row.fingerprint, &found);
+        let mine = loading
+            .working
+            .remove(&id)
+            .filter(|mine| match (&found.bytes, &found.file) {
+                (Some(bytes), _) => mine != bytes,
+                (None, Some(file)) => !file.holds(mine),
+                (None, None) => true,
+            });
+        let conflicted = changed && mine.is_some();
+        self.records.insert(id, Record::of_found(&found, print));
+        let saved = Saved {
+            id,
+            name: found.path.leaf().to_string(),
+            path: Some(found.path),
+            origin: Origin::from(&row.origin),
+            saved: found.bytes.unwrap_or_default(),
+            file: found.file,
+            unsaved: mine,
+        };
+        Some((saved, conflicted))
+    }
+
+    /// Put assets back in the workspace, and record what each was restored as.
+    fn restored(
+        &mut self,
+        back: Vec<Saved>,
+        loading: &Loading,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) {
+        let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
+        workspace.restore(back, Some(loading.next), log);
+        for id in ids {
+            self.settle(id, workspace, &loading.rows);
+        }
+    }
+
+    /// The open's listing is complete: the files that may be ones moved are matched to
+    /// the rows no file claimed, and whatever is left of the index is let go or kept.
+    fn complete(
+        &mut self,
+        complete: Complete,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        self.scanning = false;
+        let Some(mut loading) = self.loading.take() else {
+            return;
+        };
+        let swept = loading.swept + complete.swept;
+        if swept > 0 {
+            log.info(format!("removed {swept} leftovers of interrupted writes"));
+        }
+        let known = loading
+            .rows
+            .iter()
+            .filter(|(id, _)| !loading.claimed.contains(*id))
             .filter_map(|(id, row)| {
                 Some((
                     *id,
@@ -567,46 +745,19 @@ impl Store {
                 ))
             })
             .collect();
-        let matched = match_files(&known, files);
+        let matched = match_files(&known, complete.strangers);
         let mut back = Vec::new();
-        let mut conflicts = Vec::new();
-        let mut missing = Vec::new();
-        let on_disk = matched.same.into_iter().chain(matched.renamed);
-        let changed = matched
-            .changed
-            .into_iter()
-            .map(|(id, found)| (id, found, true));
-        for (id, found, changed) in on_disk.map(|(id, found)| (id, found, false)).chain(changed) {
-            let Some(row) = rows.get(&id).filter(|_| found.read()) else {
-                continue;
-            };
-            let print = diff::kept(row.fingerprint, &found);
-            let mine = working
-                .remove(&id)
-                .filter(|mine| match (&found.bytes, &found.file) {
-                    (Some(bytes), _) => mine != bytes,
-                    (None, Some(file)) => !file.holds(mine),
-                    (None, None) => true,
-                });
-            if changed && mine.is_some() {
-                conflicts.push(id);
+        for (id, found) in matched.renamed {
+            if let Some((saved, _)) = self.claim(&mut loading, id, found, false) {
+                back.push(saved);
             }
-            self.records.insert(id, Record::of_found(&found, print));
-            back.push(Saved {
-                id,
-                name: found.path.leaf().to_string(),
-                path: Some(found.path),
-                origin: Origin::from(&row.origin),
-                saved: found.bytes.unwrap_or_default(),
-                file: found.file,
-                unsaved: mine,
-            });
         }
+        let mut missing = Vec::new();
         for id in matched.vanished {
-            let Some(row) = rows.get(&id) else {
+            let Some(row) = loading.rows.get(&id) else {
                 continue;
             };
-            match working.remove(&id) {
+            match loading.working.remove(&id) {
                 Some(bytes) => {
                     let mut record = Record::of_file(row.path.clone().unwrap_or_default(), None);
                     record.fingerprint = row.fingerprint;
@@ -622,28 +773,23 @@ impl Store {
         // Rows with no path are views of slots that held an edit; each comes back as a
         // file on this computer. Its working copy stays until that file is written.
         let mut viewed = Vec::new();
-        for (id, row) in rows.iter().filter(|(_, row)| row.path.is_none()) {
-            if let (Some(bytes), Some(generation)) = (working.remove(id), row.working) {
+        for (id, row) in loading.rows.iter().filter(|(_, row)| row.path.is_none()) {
+            if let (Some(bytes), Some(generation)) = (loading.working.remove(id), row.working) {
                 viewed.push((*id, generation));
                 back.push(saved_from(*id, row, bytes));
             }
         }
         for found in matched.arrived {
-            let Some(saved) = newcomer(fresh(), found, &mut self.records) else {
-                continue;
-            };
-            back.push(saved);
+            let id = loading.next;
+            if let Some(saved) = newcomer(id, found, &mut self.records) {
+                loading.next = id.saturating_add(1);
+                back.push(saved);
+            }
         }
-
-        let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
-        let count = ids.len();
-        workspace.restore(back, Some(next), log);
+        self.restored(back, &loading, workspace, log);
         for id in &missing {
             workspace.unsave(*id, log);
             browser.folders.missing.insert(*id);
-        }
-        for id in &ids {
-            self.settle(*id, workspace, &rows);
         }
         for (id, generation) in viewed {
             let stamp = workspace.get(id).map_or(0, |entity| entity.stamp);
@@ -654,21 +800,16 @@ impl Store {
         }
         // A working copy is named by its asset's id, so one whose asset moved is written
         // again under the new id, and the old one dropped, at the next full pass.
-        for (id, old) in renamed {
+        for (id, old) in std::mem::take(&mut loading.renamed) {
             if let Some(record) = self.records.get_mut(&id) {
                 record.working = None;
             }
             self.stale.push(old);
         }
-        browser.tags.restore(
-            tags,
-            rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
-        );
-        browser.folders.sync(&dirs);
+        browser.folders.sync(&loading.dirs);
         flag_duplicates(workspace, browser, log);
-        for id in conflicts {
-            conflict(id, workspace, browser, log);
-        }
+        let count = self.records.values().filter(|record| record.path.is_some());
+        let count = count.count();
         if count > 0 {
             log.say(match count {
                 1 => "1 file on this computer.".to_string(),
@@ -714,7 +855,10 @@ impl Store {
             others,
             unwalked,
         } = listing;
-        beside(&mut browser.folders, unread, others, unwalked, log);
+        beside(&browser.folders, &unread, &unwalked, log);
+        browser.folders.unread = unread;
+        browser.folders.others = others;
+        browser.folders.unwalked = unwalked.into_iter().collect();
         let known = self
             .records
             .iter()
@@ -1184,6 +1328,17 @@ impl Store {
             row.tags = browser.tags.worn(lost.id).clone();
             assets.insert(lost.id, row);
         }
+        // ⚠️ An index written before the listing is complete keeps the rows no file has
+        // claimed yet, or a quit while opening would forget them.
+        let unclaimed = self.loading.iter().flat_map(|loading| {
+            let claimed = &loading.claimed;
+            loading.rows.iter().filter(|(id, _)| !claimed.contains(*id))
+        });
+        for (id, row) in unclaimed {
+            let mut row = row.clone();
+            row.tags = browser.tags.worn(*id).clone();
+            assets.entry(*id).or_insert(row);
+        }
         Sidecar {
             version: VERSION,
             next_id: workspace.next_id(),
@@ -1221,16 +1376,15 @@ impl Record {
     }
 }
 
-/// Take what a listing found beside the assets, and say what is new in it: a file that
-/// did not read, and a library too large to list whole.
+/// Say what is new in what a listing found beside the assets: a file that did not read,
+/// and a library too large to list whole.
 fn beside(
-    folders: &mut crate::folders::Folders,
-    unread: Vec<(LibPath, String)>,
-    others: Vec<LibPath>,
-    unwalked: Vec<LibPath>,
+    folders: &crate::folders::Folders,
+    unread: &[(LibPath, String)],
+    unwalked: &[LibPath],
     log: &mut Log,
 ) {
-    for (path, why) in &unread {
+    for (path, why) in unread {
         if !folders.unread.contains(&(path.clone(), why.clone())) {
             log.warn(format!("{path}: {why}"));
         }
@@ -1241,9 +1395,6 @@ fn beside(
              folders drawbar cannot read.",
         );
     }
-    folders.unread = unread;
-    folders.others = others;
-    folders.unwalked = unwalked.into_iter().collect();
 }
 
 /// Whether an index holds something no file in the library says: a tag, an unsaved edit,

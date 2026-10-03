@@ -63,6 +63,8 @@ pub struct Where {
     pub note: Option<String>,
     /// It is still being read.
     pub opening: bool,
+    /// How many files its listing has found, while it is still being listed.
+    pub listing: Option<usize>,
 }
 
 /// A library a window can open, for the menus that switch between them.
@@ -306,6 +308,25 @@ impl Folders {
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
         self.generation += 1;
         id
+    }
+
+    /// Take in folders a listing found so far, keeping every folder already known. The
+    /// listing's end takes them all again through [`Folders::sync`].
+    pub(crate) fn add(&mut self, dirs: &[LibPath]) {
+        let known: BTreeSet<&LibPath> = self.list.iter().map(|folder| &folder.path).collect();
+        let new: Vec<LibPath> = dirs
+            .iter()
+            .filter(|dir| !known.contains(dir))
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        let ids = self.next_id()..;
+        self.list
+            .extend(ids.zip(new).map(|(id, path)| Folder { id, path }));
+        self.list.sort_by(|a, b| a.path.cmp(&b.path));
+        self.generation += 1;
     }
 
     /// Take the folders the disk has, keeping the id of each one already known, with the

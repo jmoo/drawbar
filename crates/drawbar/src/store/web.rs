@@ -238,14 +238,15 @@ async fn drive(
     ctx: egui::Context,
 ) {
     let private = root == Root::Private;
-    let mut fs = Folder::open(root, room.clone()).await;
+    let mut fs = Folder::open(root, room.clone(), inbox.clone()).await;
     while let Some(cmd) = next(&inbox).await {
-        let event = match &mut fs {
-            Ok(fs) => exec::run(fs, cmd).await,
-            Err(why) => Some(refused(cmd, why)),
-        };
-        if let Some(event) = event {
+        let mut answer = |event| {
             events.borrow_mut().push_back(event);
+            ctx.request_repaint();
+        };
+        match &mut fs {
+            Ok(fs) => exec::run(fs, cmd, &mut answer).await,
+            Err(why) => answer(refused(cmd, why)),
         }
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
@@ -559,6 +560,8 @@ struct Folder {
     room: Rc<RefCell<Room>>,
     /// Whether the browser has been asked to keep the files.
     asked: bool,
+    /// The commands for this library, closed once it is let go.
+    inbox: Rc<RefCell<Inbox>>,
 }
 
 /// A folder of the library and the name of one entry in it.
@@ -567,7 +570,11 @@ type Spot = (FileSystemDirectoryHandle, String);
 impl Folder {
     /// The folder at `root`, or why this browser gives the page no storage. Some private
     /// windows refuse it.
-    async fn open(root: Root, room: Rc<RefCell<Room>>) -> Result<Folder, String> {
+    async fn open(
+        root: Root,
+        room: Rc<RefCell<Room>>,
+        inbox: Rc<RefCell<Inbox>>,
+    ) -> Result<Folder, String> {
         let (root, writes) = match root {
             Root::Private => (Folder::private().await?, Writes::Worker(None)),
             Root::Picked(picked) => (
@@ -585,6 +592,7 @@ impl Folder {
             temps: 0,
             room,
             asked: false,
+            inbox,
         })
     }
 
@@ -816,6 +824,10 @@ fn move_tree<'a>(
 }
 
 impl Fs for Folder {
+    fn stopped(&self) -> bool {
+        self.inbox.borrow().closed
+    }
+
     async fn prepare(&mut self) -> io::Result<()> {
         if self.prepared {
             return Ok(());

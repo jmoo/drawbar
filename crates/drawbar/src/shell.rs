@@ -430,6 +430,14 @@ fn item(ui: &mut egui::Ui, label: &str, shortcut: Option<egui::KeyboardShortcut>
     clicked
 }
 
+/// What the status line says while the library is being read, if it is.
+fn reading(place: &crate::folders::Where) -> Option<String> {
+    Some(match place.listing? {
+        1 => "Reading the library… 1 file".to_string(),
+        files => format!("Reading the library… {files} files"),
+    })
+}
+
 /// The title bar's MIDI input status: a short label, the lamp beside it, and the details
 /// on hover. `None` while MIDI is off.
 ///
@@ -1010,12 +1018,17 @@ impl DrawbarApp {
             .show(ctx, |ui| {
                 edge(ui, Side::Top);
                 along(ui, |ui| {
-                    let said = match &self.device.state.in_flight {
-                        Some(words) => {
+                    let reading = self.browser.folders.place.as_ref().and_then(reading);
+                    let said = match (&self.device.state.in_flight, reading) {
+                        (Some(words), _) => {
                             ui.spinner();
                             egui::RichText::new(&words.doing).size(11.0)
                         }
-                        None => {
+                        (None, Some(reading)) => {
+                            ui.spinner();
+                            egui::RichText::new(reading).size(11.0)
+                        }
+                        (None, None) => {
                             let (level, text) = self.log.status();
                             let tint = level.color(ui.visuals());
                             let glyph = match level {
