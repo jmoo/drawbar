@@ -1364,7 +1364,7 @@ mod tests {
             bytes,
             &mut bench.log,
         );
-        let held = bench.workspace.get(id).unwrap().bytes.clone();
+        let held = bench.workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
         bench.workspace.replace_bytes(id, edited, &mut bench.log);
@@ -1388,7 +1388,7 @@ mod tests {
             id,
             class: ObjectClass::Program,
             at: at(3),
-            bytes: bench.workspace.get(id).unwrap().bytes.clone(),
+            bytes: bench.workspace.get(id).unwrap().bytes.to_vec(),
         });
         bench.device.poll(
             &mut bench.log,
@@ -1424,7 +1424,7 @@ mod tests {
             &mut bench.log,
         );
         for id in [linked, alone] {
-            let held = bench.workspace.get(id).unwrap().bytes.clone();
+            let held = bench.workspace.get(id).unwrap().bytes.to_vec();
             let (_, edited) =
                 crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
             bench.workspace.replace_bytes(id, edited, &mut bench.log);
@@ -2329,7 +2329,7 @@ mod tests {
             id: ids[0],
             class,
             at: at(0),
-            bytes: bench.workspace.get(ids[0]).unwrap().bytes.clone(),
+            bytes: bench.workspace.get(ids[0]).unwrap().bytes.to_vec(),
         });
         bench.device.pretend(DeviceEvent::OpFailed(
             "Programs 7:2 is occupied, and the instrument does not overwrite in place".into(),

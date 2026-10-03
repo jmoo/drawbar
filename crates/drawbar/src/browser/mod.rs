@@ -793,7 +793,7 @@ mod tests {
         let sunday = browser.tags.make("Sunday").unwrap();
         browser.tags.make("Loud").unwrap();
         browser.tags.set(filed, sunday, true);
-        let bytes = workspace.get(filed).unwrap().bytes.clone();
+        let bytes = workspace.get(filed).unwrap().bytes.to_vec();
         workspace.view(
             "Africa-Split.ne5p".into(),
             Origin::Device {

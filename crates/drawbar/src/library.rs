@@ -1711,7 +1711,7 @@ mod tests {
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Settings, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let held = workspace.get(id).unwrap();
         let crc = held.saved.crc32.expect("a container");
         let body_len = held.container.as_ref().expect("a container").body_len();
@@ -1870,7 +1870,7 @@ mod tests {
         let held_at = at(6, 0);
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let saved_as = workspace.get(id).unwrap().saved.crc32.unwrap();
 
         // Edited before anything is read, so there is no earlier link to fall back on.
@@ -1982,7 +1982,7 @@ mod tests {
         let (tags, mut queue) = (Tags::default(), Queue::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let crc = workspace
             .get(id)
             .and_then(|entity| entity.saved.crc32)
@@ -2347,7 +2347,7 @@ mod tests {
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
 
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);

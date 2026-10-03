@@ -730,7 +730,7 @@ mod tests {
             "nothing has moved yet"
         );
 
-        let bytes = workspace.get(id).expect("it is open").bytes.clone();
+        let bytes = workspace.get(id).expect("it is open").bytes.to_vec();
         let (_, edited) = crate::fields::apply(
             &bytes,
             &[("center_panel.gain".to_string(), "96".to_string())],

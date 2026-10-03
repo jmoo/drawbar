@@ -1872,7 +1872,7 @@ mod tests {
 
         let bytes = {
             let id = workspace.create(Fresh::Program, &mut log).unwrap();
-            let bytes = workspace.get(id).unwrap().bytes.clone();
+            let bytes = workspace.get(id).unwrap().bytes.to_vec();
             workspace.remove(id, &mut log);
             bytes
         };
@@ -1912,7 +1912,7 @@ mod tests {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
-            bytes: workspace.get(landed).unwrap().bytes.clone(),
+            bytes: workspace.get(landed).unwrap().bytes.to_vec(),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
@@ -1927,7 +1927,7 @@ mod tests {
         let made = workspace
             .create(crate::workspace::Fresh::Program, log)
             .unwrap();
-        let bytes = workspace.get(made).unwrap().bytes.clone();
+        let bytes = workspace.get(made).unwrap().bytes.to_vec();
         workspace.remove(made, log);
         let id = workspace.ingest("Africa-Split.ne5p".into(), origin, bytes, log);
         let crc = workspace
@@ -1942,7 +1942,7 @@ mod tests {
         let made = workspace
             .create(crate::workspace::Fresh::Stage4Program, log)
             .unwrap();
-        let bytes = workspace.get(made).unwrap().bytes.clone();
+        let bytes = workspace.get(made).unwrap().bytes.to_vec();
         workspace.remove(made, log);
         let id = workspace.ingest("Africa-Split.ns4p".into(), origin, bytes, log);
         let crc = workspace
@@ -2083,7 +2083,7 @@ mod tests {
             "standing nowhere, it takes the lowest address holding it"
         );
 
-        let sent = workspace.get(id).unwrap().bytes.clone();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
         workspace.landed(id, class, high, sent);
         device.relink(&mut workspace);
         assert_eq!(
@@ -2203,7 +2203,7 @@ mod tests {
         let (id, crc) = program(&mut workspace, &mut log, Origin::Device { class, at });
 
         // Changed here before anything was attached, and saved.
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
@@ -2254,7 +2254,7 @@ mod tests {
         );
 
         // The match is on the name alone, trimmed and case-sensitive.
-        let bytes = workspace.get(settings).unwrap().bytes.clone();
+        let bytes = workspace.get(settings).unwrap().bytes.to_vec();
         let by_name = |workspace: &mut Workspace, name: &str, log: &mut Log| {
             let id = workspace.ingest(name.into(), Origin::Fresh, bytes.clone(), log);
             let at = super::named(
@@ -2350,7 +2350,7 @@ mod tests {
             let (id, crc) = program(&mut workspace, &mut log, origin);
             device.pretend_attached();
 
-            let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+            let sent = workspace.get(id).expect("it is on the list").bytes.to_vec();
             device.pretend(DeviceEvent::Sent {
                 id,
                 class,
@@ -2452,7 +2452,7 @@ mod tests {
         crate::queue::enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
 
         // What the write carries is what the asset held when it went out.
-        let sent = workspace.get(id).expect("it is on the list").bytes.clone();
+        let sent = workspace.get(id).expect("it is on the list").bytes.to_vec();
 
         let (_, edited) = crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())])
             .expect("the registry takes the set");

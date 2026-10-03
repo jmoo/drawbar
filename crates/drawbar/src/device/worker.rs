@@ -1287,7 +1287,7 @@ mod wire_tests {
         let id = workspace
             .create(crate::workspace::Fresh::Program, &mut log)
             .expect("a fresh default");
-        workspace.get(id).expect("just made").bytes.clone()
+        workspace.get(id).expect("just made").bytes.to_vec()
     }
 
     fn drive(puppet: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {

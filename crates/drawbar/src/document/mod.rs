@@ -1468,7 +1468,7 @@ mod tests {
         }
 
         fn set(&mut self, sets: &[(&str, &str)]) {
-            let bytes = self.entity().bytes.clone();
+            let bytes = self.entity().bytes.to_vec();
             let sets: Vec<(String, String)> = sets
                 .iter()
                 .map(|(path, value)| ((*path).to_string(), (*value).to_string()))
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn the_headers_words_never_run_under_its_controls() {
         let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.clone();
+        let bytes = open.entity().bytes.to_vec();
         open.id = open.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -1873,7 +1873,7 @@ mod tests {
     #[test]
     fn the_loud_action_carries_the_count_where_there_is_somewhere_to_send_it() {
         let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.clone();
+        let bytes = open.entity().bytes.to_vec();
         open.id = open.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -2163,7 +2163,7 @@ mod tests {
     fn a_refused_cell_keeps_its_error() {
         let mut open = Open::fresh(Fresh::Program);
         open.frame(Vec::new());
-        let (id, before) = (open.id, open.entity().bytes.clone());
+        let (id, before) = (open.id, open.entity().bytes.to_vec());
 
         // The same call the frame makes, so this covers how the table handles the
         // library's answer.
@@ -2315,7 +2315,7 @@ mod tests {
         } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
         let local = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
         assert!(local.name.is_none(), "nothing has been asked");
@@ -2351,7 +2351,7 @@ mod tests {
             .workspace
             .create(Fresh::Program, &mut open.log)
             .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.clone();
+        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
         let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
             .expect("a program can name a piano");
         open.id = open.workspace.ingest(
@@ -2421,7 +2421,7 @@ mod tests {
         } = Bench::new();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
 
         // Nothing scanned: the dial stays numeric.
@@ -2679,7 +2679,7 @@ mod tests {
         open.frame(vec![testing::button(PAGE_CORNER, true)]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
 
-        let written = String::from_utf8(open.entity().bytes.clone()).expect("still text");
+        let written = String::from_utf8(open.entity().bytes.to_vec()).expect("still text");
         assert!(written.contains('X'), "X is in the bytes: {written:?}");
         assert_eq!(
             written.replace('X', ""),

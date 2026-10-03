@@ -1843,7 +1843,7 @@ impl Store {
         {
             return false;
         }
-        let bytes = || entity.saved.bytes.clone();
+        let bytes = || entity.saved.bytes.to_vec();
         if !self
             .records
             .get(&entity.id)
@@ -1948,7 +1948,7 @@ impl Store {
             (true, _) => {
                 let generation = self.next_generation;
                 self.next_generation += 1;
-                writes.push((working_name(entity.id, generation), entity.bytes.clone()));
+                writes.push((working_name(entity.id, generation), entity.bytes.to_vec()));
                 if let Some(old) = record.working.replace(Working {
                     generation,
                     stamp: entity.stamp,

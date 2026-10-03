@@ -1574,7 +1574,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = app.workspace.get(fresh).unwrap().bytes.to_vec();
         app.workspace.remove(fresh, &mut app.log);
         let id = app.workspace.ingest(
             "Africa-Split.ne5p".into(),
@@ -1703,7 +1703,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let bytes = app.workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         app.workspace.replace_bytes(id, edited, &mut app.log);

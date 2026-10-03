@@ -228,6 +228,62 @@ fn body_of(info: &nord_format::cbin::Info) -> Option<std::ops::Range<usize>> {
     Some(start..end)
 }
 
+/// An asset's bytes, which its saved baseline shares while they are the same bytes. An
+/// edit puts new bytes in place; nothing writes through a shared allocation.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Bytes(Arc<[u8]>);
+
+impl Bytes {
+    /// Whether these and `other` are one allocation, held once.
+    pub fn shares(&self, other: &Bytes) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(bytes: Vec<u8>) -> Bytes {
+        Bytes(bytes.into())
+    }
+}
+
+impl PartialEq<[u8]> for Bytes {
+    fn eq(&self, other: &[u8]) -> bool {
+        *self.0 == *other
+    }
+}
+
+impl PartialEq<&[u8]> for Bytes {
+    fn eq(&self, other: &&[u8]) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl PartialEq<Vec<u8>> for Bytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// What an asset was last saved as: the bytes, and the checksum a slot holding them
 /// would report.
 ///
@@ -235,7 +291,7 @@ fn body_of(info: &nord_format::cbin::Info) -> Option<std::ops::Range<usize>> {
 /// streams the whole body, and every listed row asks for it while the library is shown.
 #[derive(Clone, Default)]
 pub struct Baseline {
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
     /// The checksum a slot holding these bytes would report. [`crate::device::link`] and
     /// [`crate::library::agrees`] both decide on it.
     ///
@@ -261,7 +317,7 @@ pub struct Baseline {
 
 impl Baseline {
     /// The baseline of bytes not yet inspected, stamped with `stamp`.
-    pub(crate) fn read(bytes: Vec<u8>, stamp: u64) -> Baseline {
+    pub(crate) fn read(bytes: Bytes, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
         Baseline {
             bytes_crc: Some(nord_format::crc::crc32(&bytes)),
@@ -275,7 +331,7 @@ impl Baseline {
 
     fn on_disk(file: Arc<OnDisk>, stamp: u64) -> Baseline {
         Baseline {
-            bytes: Vec::new(),
+            bytes: Bytes::default(),
             crc32: None,
             stamp,
             file: Some(file),
@@ -385,7 +441,7 @@ pub struct LocalEntity {
     /// ⚠️ Empty while the asset [`rests`](LocalEntity::rests) in its file. Anything that
     /// needs the whole body asks [`LocalEntity::whole`], and its length is
     /// [`LocalEntity::size`].
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
     /// Boxed, since a decode is kilobytes and most assets of a large library have none.
     pub entity: Option<Box<Entity>>,
     pub parse_error: Option<String>,
@@ -430,7 +486,7 @@ pub struct LocalEntity {
 }
 
 impl LocalEntity {
-    fn new(id: u64, name: String, origin: Origin, bytes: Vec<u8>, stamp: u64) -> LocalEntity {
+    fn new(id: u64, name: String, origin: Origin, bytes: Bytes, stamp: u64) -> LocalEntity {
         let decoded = Decoded::of(&bytes);
         let mut held = LocalEntity::undecoded(id, name, origin, bytes, stamp);
         held.decoded(decoded);
@@ -440,7 +496,7 @@ impl LocalEntity {
     /// An asset whose file nothing has read yet, `len` bytes long. It is
     /// [`VerifyState::Reading`], and its kind is what its name says.
     fn listed(id: u64, name: String, origin: Origin, len: u64, stamp: u64) -> LocalEntity {
-        let mut held = LocalEntity::undecoded(id, name, origin, Vec::new(), stamp);
+        let mut held = LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp);
         held.saved.unread = Some(len);
         held
     }
@@ -448,7 +504,7 @@ impl LocalEntity {
     /// An asset whose bytes are not decoded yet, as [`VerifyState::Reading`] says. Until
     /// [`LocalEntity::decoded`] it has no decode, no container, and the kind its name
     /// says.
-    fn undecoded(id: u64, name: String, origin: Origin, bytes: Vec<u8>, stamp: u64) -> LocalEntity {
+    fn undecoded(id: u64, name: String, origin: Origin, bytes: Bytes, stamp: u64) -> LocalEntity {
         LocalEntity {
             id,
             name,
@@ -514,7 +570,7 @@ impl LocalEntity {
             name,
             path: None,
             origin,
-            bytes: Vec::new(),
+            bytes: Bytes::default(),
             entity: None,
             parse_error: None,
             container: None,
@@ -589,6 +645,16 @@ impl LocalEntity {
             }
             (state, _) => Err(state.detail()),
         }
+    }
+
+    /// How many bytes it holds whole in memory: its bytes, and its baseline's where they
+    /// are not the same allocation.
+    pub fn held_whole(&self) -> u64 {
+        let saved = match self.saved.bytes.shares(&self.bytes) {
+            true => 0,
+            false => self.saved.bytes.len(),
+        };
+        (self.bytes.len() + saved) as u64
     }
 
     /// Whether it holds `bytes`. Never, while it is unread.
@@ -1484,7 +1550,7 @@ impl Workspace {
         }
         let stamp = self.stamp_for(id, &theirs);
         if let Some(entity) = self.get_mut(id) {
-            entity.saved = Baseline::read(theirs, stamp);
+            entity.saved = Baseline::read(theirs.into(), stamp);
         }
     }
 
@@ -1534,7 +1600,7 @@ impl Workspace {
                         id,
                         held.name.clone(),
                         held.origin.clone(),
-                        bytes,
+                        bytes.into(),
                         held.stamp,
                     )
                 });
@@ -1682,7 +1748,7 @@ impl Workspace {
         );
         let job = work::run(&self.ctx, move |_| {
             let bytes = read.whole().map_err(|e| e.to_string())?;
-            Ok(LocalEntity::new(id, name, origin, bytes, stamp))
+            Ok(LocalEntity::new(id, name, origin, bytes.into(), stamp))
         });
         self.waking.push(Wake { id, file, job });
     }
@@ -1806,7 +1872,8 @@ impl Workspace {
         match (bytes, file) {
             (Some(bytes), _) => {
                 self.swap(id, false, |held| {
-                    LocalEntity::undecoded(id, held.name.clone(), held.origin.clone(), bytes, stamp)
+                    let (name, origin) = (held.name.clone(), held.origin.clone());
+                    LocalEntity::undecoded(id, name, origin, bytes.into(), stamp)
                 });
                 self.undecoded.push_back(id);
                 self.hurried.get_mut().insert(id);
@@ -1857,13 +1924,9 @@ impl Workspace {
         self.wanted.get_mut().insert(id);
     }
 
-    /// How many bytes of the library's files the assets hold whole in memory.
+    /// How many bytes the assets hold whole in memory, their baselines' included.
     pub fn held_whole(&self) -> u64 {
-        self.entities
-            .iter()
-            .filter(|entity| entity.rests().is_none() && !entity.unread())
-            .map(|entity| entity.bytes.len() as u64)
-            .sum()
+        self.entities.iter().map(LocalEntity::held_whole).sum()
     }
 
     /// Decode these assets now, on this thread, where they are read and still to be
@@ -1989,7 +2052,7 @@ impl Workspace {
     ) -> (u64, Arrival) {
         let id = self.next_id;
         self.next_id += 1;
-        let entity = LocalEntity::new(id, name, origin, bytes, self.stamp());
+        let entity = LocalEntity::new(id, name, origin, bytes.into(), self.stamp());
         let arrival = match (&entity.parse_error, &entity.verify) {
             // A note has no format to decode, so a parse error on text is not a
             // failure.
@@ -2189,7 +2252,7 @@ impl Workspace {
             });
             return;
         }
-        self.save_bytes(name, entity.bytes.clone());
+        self.save_bytes(name, entity.bytes.to_vec());
     }
 
     /// Hand bytes to the user under `name`, through this target's way of saving a file.
@@ -2297,13 +2360,17 @@ impl Workspace {
             // The file changed under the send, and what the instrument now holds is what
             // was sent.
             Some(false) => {
-                self.respell(id, sent.clone());
+                self.respell(id, sent.clone().into());
             }
             None => {}
         }
         let stamp = self.stamp_for(id, &sent);
         let Some(entity) = self.get_mut(id) else {
             return;
+        };
+        let sent = match stamp == entity.stamp {
+            true => entity.bytes.clone(),
+            false => sent.into(),
         };
         entity.saved = Baseline::read(sent, stamp);
         entity.link = Some((class, at));
@@ -2326,7 +2393,7 @@ impl Workspace {
     /// The decode and the verify run again: an editor's output is bytes like any other and
     /// is checked the same way as a file from disk.
     pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        let Some(verify) = self.respell(id, bytes) else {
+        let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
         let note = self.get(id).is_some_and(|held| held.is_text);
@@ -2347,7 +2414,7 @@ impl Workspace {
     /// and its revert are measured against the same bytes. The link and the last write
     /// are kept too, because both are evidence about a slot, which an edit here says
     /// nothing about.
-    fn respell(&mut self, id: u64, bytes: Vec<u8>) -> Option<VerifyState> {
+    fn respell(&mut self, id: u64, bytes: Bytes) -> Option<VerifyState> {
         if self.get(id).is_none_or(|entity| entity.holds(&bytes)) {
             return None;
         }
@@ -2376,6 +2443,10 @@ impl Workspace {
                 false => saved.stamp,
             },
             ..saved
+        };
+        let bytes = match held {
+            true => saved.bytes.clone(),
+            false => bytes,
         };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
@@ -2520,14 +2591,14 @@ impl Workspace {
                     LocalEntity {
                         saved: Baseline::on_disk(file, held),
                         path,
-                        ..LocalEntity::new(id, name, origin, bytes, stamp)
+                        ..LocalEntity::new(id, name, origin, bytes.into(), stamp)
                     }
                 }
                 (None, None, None) => {
                     self.undecoded.push_back(id);
                     LocalEntity {
                         path,
-                        ..LocalEntity::undecoded(id, name, origin, saved, stamp)
+                        ..LocalEntity::undecoded(id, name, origin, saved.into(), stamp)
                     }
                 }
                 (None, Some(bytes), Some(len)) => {
@@ -2539,15 +2610,16 @@ impl Workspace {
                     LocalEntity {
                         saved,
                         path,
-                        ..LocalEntity::new(id, name, origin, bytes, stamp)
+                        ..LocalEntity::new(id, name, origin, bytes.into(), stamp)
                     }
                 }
                 (None, Some(bytes), None) => {
-                    // The saved and held bytes share a stamp only when they are the same
-                    // bytes.
-                    let held = match bytes == saved {
-                        true => stamp,
-                        false => self.stamp(),
+                    // The saved and held bytes share a stamp, and are held once, only when
+                    // they are the same bytes.
+                    let saved = Bytes::from(saved);
+                    let (held, bytes) = match saved == bytes {
+                        true => (stamp, saved.clone()),
+                        false => (self.stamp(), bytes.into()),
                     };
                     LocalEntity {
                         saved: Baseline::read(saved, held),
@@ -2701,7 +2773,7 @@ mod tests {
     use super::*;
 
     fn ingest(name: &str, bytes: Vec<u8>) -> LocalEntity {
-        LocalEntity::new(1, name.into(), Origin::Fresh, bytes, 0)
+        LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
     }
 
     /// Closing a library lets go of the files its assets rested in, checks still waiting
@@ -2927,7 +2999,7 @@ mod tests {
         assert_eq!(workspace.entities().len(), 2);
 
         // Edited, it stays a view; kept, it stops being one and keeps its edit.
-        let edited = workspace.get(viewed).unwrap().bytes.clone();
+        let edited = workspace.get(viewed).unwrap().bytes.to_vec();
         workspace.replace_bytes(viewed, [edited, vec![]].concat(), &mut log);
         assert!(workspace.is_view(viewed));
         workspace.keep(viewed, &mut log);
@@ -2971,7 +3043,7 @@ mod tests {
         let mut log = Log::default();
         let at = Location { bank: 6, slot: 3 };
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let sent = workspace.get(id).unwrap().bytes.clone();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
         workspace.landed(id, ObjectClass::Program, at, sent.clone());
         let wrote = |workspace: &Workspace| {
             workspace
@@ -3044,7 +3116,7 @@ mod tests {
         let owed = view(&mut workspace, 1, &mut log);
         let untouched = view(&mut workspace, 2, &mut log);
 
-        let bytes = workspace.get(edited).unwrap().bytes.clone();
+        let bytes = workspace.get(edited).unwrap().bytes.to_vec();
         workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
         let mut queue = Queue::default();
         crate::queue::enqueue(
@@ -3211,7 +3283,7 @@ mod tests {
         let mut log = Log::default();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let opened = workspace.get(id).unwrap().bytes.clone();
+        let opened = workspace.get(id).unwrap().bytes.to_vec();
         let stamp = |workspace: &Workspace| workspace.get(id).unwrap().stamp;
         let first = stamp(&workspace);
 
@@ -3243,7 +3315,7 @@ mod tests {
         let mut log = Log::default();
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let opened = workspace.get(id).unwrap().bytes.clone();
+        let opened = workspace.get(id).unwrap().bytes.to_vec();
         let unsaved = |workspace: &Workspace| workspace.get(id).unwrap().is_unsaved();
         assert!(!unsaved(&workspace), "a fresh asset starts saved");
 
@@ -3318,7 +3390,7 @@ mod tests {
         let mut log = Log::default();
         let at = Location { bank: 6, slot: 3 };
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let sent = workspace.get(id).unwrap().bytes.clone();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
@@ -3428,7 +3500,7 @@ mod tests {
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
 
         // An edit: new bytes, same name.
-        let bytes = workspace.get(id).unwrap().bytes.clone();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);

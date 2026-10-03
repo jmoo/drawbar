@@ -1273,7 +1273,7 @@ mod tests {
 
     /// Change a document's bytes the way an edit does.
     fn edit(workspace: &mut Workspace, id: u64, log: &mut Log) {
-        let bytes = workspace.get(id).expect("it is in memory").bytes.clone();
+        let bytes = workspace.get(id).expect("it is in memory").bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, log);
@@ -1848,7 +1848,7 @@ mod tests {
         assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
 
         for gain in ["96", "97", "98"] {
-            let held = workspace.get(id).unwrap().bytes.clone();
+            let held = workspace.get(id).unwrap().bytes.to_vec();
             let (_, edited) =
                 crate::fields::apply(&held, &[("center_panel.gain".into(), gain.into())]).unwrap();
             workspace.replace_bytes(id, edited, &mut log);

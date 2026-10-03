@@ -1339,7 +1339,7 @@ mod tests {
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         assert_eq!(lives(workspace.get(fresh).unwrap()), "This computer");
 
-        let bytes = workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = workspace.get(fresh).unwrap().bytes.to_vec();
         let copied = workspace.ingest(
             "Africa.ne5p".to_string(),
             Origin::Device {
@@ -1485,7 +1485,7 @@ mod tests {
         let device = crate::device::Device::new(egui::Context::default());
         let (mut workspace, mut log) = workspace();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let mut edited = workspace.get(id).unwrap().bytes.clone();
+        let mut edited = workspace.get(id).unwrap().bytes.to_vec();
         *edited.last_mut().expect("a byte to move") ^= 0xff;
         workspace.replace_bytes(id, edited, &mut log);
 
@@ -1617,7 +1617,7 @@ mod tests {
         let (mut workspace, mut log) = workspace();
         let at = Location { bank: 6, slot: 3 };
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(fresh).unwrap().bytes.clone();
+        let bytes = workspace.get(fresh).unwrap().bytes.to_vec();
         let copied = workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {
@@ -1649,7 +1649,7 @@ mod tests {
             "a program the instrument does not hold has no slot to load"
         );
 
-        let mut edited = workspace.get(copied).unwrap().bytes.clone();
+        let mut edited = workspace.get(copied).unwrap().bytes.to_vec();
         *edited.last_mut().expect("a byte to move") ^= 0xff;
         workspace.replace_bytes(copied, edited, &mut log);
         assert_eq!(

@@ -1032,7 +1032,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let bytes = app.workspace.get(id).unwrap().bytes.to_vec();
         frame(&ctx, &mut app);
         app.save(&mut crate::testing::Fake::default());
         app.on_exit(None);
@@ -1076,7 +1076,7 @@ mod tests {
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
         frame(&ctx, &mut app);
-        let saved = app.workspace.get(id).unwrap().bytes.clone();
+        let saved = app.workspace.get(id).unwrap().bytes.to_vec();
         let edit = |bytes: &[u8]| {
             crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
                 .unwrap()
@@ -1172,7 +1172,7 @@ mod tests {
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .expect("a fresh default");
-        let bytes = app.workspace.get(fresh).expect("just made").bytes.clone();
+        let bytes = app.workspace.get(fresh).expect("just made").bytes.to_vec();
         let id = app.workspace.ingest(
             "Africa Split.ne5p".into(),
             Origin::Device {

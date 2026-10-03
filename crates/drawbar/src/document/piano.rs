@@ -1381,19 +1381,15 @@ impl State {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        // ⚠️ A baseline resting in its file is read whole here, off the frame; one held
-        // is copied whole, on it.
+        // ⚠️ A baseline resting in its file is read whole here, off the frame.
         let file = entity.saved.file.clone();
-        let held = match file {
-            Some(_) => Vec::new(),
-            None => entity.saved.bytes.clone(),
-        };
+        let held = entity.saved.bytes.clone();
         let laying = plan.clone();
         let job = work::run(ctx, move |progress| {
             let saved = match file {
                 Some(file) => {
                     progress.say("reading the library");
-                    file.whole().map_err(|e| e.to_string())?
+                    file.whole().map_err(|e| e.to_string())?.into()
                 }
                 None => held,
             };
@@ -4756,7 +4752,13 @@ mod tests {
     #[test]
     fn a_switch_thrown_leaves_the_bytes_alone_and_the_header_says_so() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        let saved = editor
+            .workspace
+            .get(editor.id)
+            .unwrap()
+            .saved
+            .bytes
+            .to_vec();
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         let held = editor.workspace.get(editor.id).unwrap();
@@ -4840,7 +4842,13 @@ mod tests {
     #[test]
     fn a_save_waits_for_the_plan_to_be_laid_over_the_library() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        let saved = editor
+            .workspace
+            .get(editor.id)
+            .unwrap()
+            .saved
+            .bytes
+            .to_vec();
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
 
         let held = editor
@@ -4912,7 +4920,13 @@ mod tests {
     #[test]
     fn a_plan_changed_during_an_apply_starts_it_again() {
         let mut editor = Editor::new(facts().total * 2);
-        let saved = editor.workspace.get(editor.id).unwrap().saved.bytes.clone();
+        let saved = editor
+            .workspace
+            .get(editor.id)
+            .unwrap()
+            .saved
+            .bytes
+            .to_vec();
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         assert!(editor
             .state

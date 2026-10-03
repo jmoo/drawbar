@@ -215,7 +215,7 @@ impl Session {
     }
 
     fn bytes(&self, id: u64) -> Vec<u8> {
-        self.bench.workspace.get(id).expect("held").bytes.clone()
+        self.bench.workspace.get(id).expect("held").bytes.to_vec()
     }
 
     fn path(&self, id: u64) -> Option<String> {
@@ -2171,6 +2171,35 @@ fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
     let entity = session.bench.workspace.get(c).unwrap();
     assert!(!entity.unread(), "read once there is room");
     assert_eq!(entity.saved.bytes, with_gain(&program, "36"));
+}
+
+/// A file read and not edited is held once: the asset's bytes and what it was saved as
+/// are one allocation, counted once against what drawbar holds whole. An edit holds a
+/// second copy, and a revert lets it go.
+#[test]
+fn a_clean_asset_holds_its_bytes_once() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let len = program.len() as u64;
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("Grand.ne5p");
+    let held = |session: &Session| {
+        let workspace = &session.bench.workspace;
+        let entity = workspace.get(id).unwrap();
+        let shared = entity.bytes.shares(&entity.saved.bytes);
+        (shared, workspace.held_whole())
+    };
+    assert_eq!(held(&session), (true, len));
+
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, with_gain(&program, "96"), log);
+    assert_eq!(held(&session), (false, 2 * len));
+
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.revert(id, log);
+    assert_eq!(held(&session), (true, len));
+    assert_eq!(session.bench.workspace.get(id).unwrap().bytes, program);
 }
 
 /// An id this session has given out already, here to views read before the library
