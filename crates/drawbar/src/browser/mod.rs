@@ -213,8 +213,8 @@ impl Browser {
 
     /// Escape clears the selection, wherever its rows were drawn.
     ///
-    /// ⚠️ Called whether or not the browser dock is open: the library's table shows the
-    /// same selection, and a selection nothing draws could never be cleared.
+    /// ⚠️ Called whether or not the browser is shown: the library's table shows the same
+    /// selection, and a selection nothing draws could never be cleared.
     ///
     /// During a rename or a question, Escape cancels that and the selection stays.
     pub fn let_go(&mut self, ctx: &egui::Context) {
@@ -440,7 +440,7 @@ impl Browser {
 
     /// The open question, if any, and the acts a yes to it runs.
     ///
-    /// ⚠️ Called whether or not the browser dock is open: the toolbar, the library and the
+    /// ⚠️ Called whether or not the browser is shown: the top bar, the library and the
     /// document header ask questions too.
     pub fn dialog(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         let Some(ask) = &self.ask else {

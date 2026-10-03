@@ -452,8 +452,10 @@ impl eframe::App for DrawbarApp {
         crate::about::dialog(ctx, &mut self.about, &self.log);
 
         // Before the panels, so an editor open this frame still has focus when Escape is
-        // handled.
-        self.browser.let_go(ctx);
+        // handled. An overlay takes Escape for itself, as a question does.
+        if !self.shell.review_open && !self.shell.log_open {
+            self.browser.let_go(ctx);
+        }
 
         // Outside in: each panel claims its space from what the earlier ones left.
         let mut acts = self

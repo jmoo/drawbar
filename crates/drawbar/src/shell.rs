@@ -1710,6 +1710,37 @@ mod tests {
         assert!(app.shell.log_open && app.shell.log_problems);
     }
 
+    /// Escape closes the review or the activity log and leaves the selection as it was;
+    /// with neither open, it lets go of the selection.
+    #[test]
+    fn escape_closes_an_overlay_without_letting_go_of_the_selection() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let escape = || pressed(egui::Key::Escape, egui::Modifiers::NONE);
+        let picked = |app: &DrawbarApp| app.browser.picked().items().count();
+        let _ = settled(&ctx, &mut app, SCREEN);
+        app.browser.check(crate::browser::Item::Local(id));
+        app.shell.review_open = true;
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
+        assert!(!app.shell.review_open, "Escape closes the review");
+        assert_eq!(picked(&app), 1, "and keeps the selection");
+
+        app.shell.log_open = true;
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
+        assert!(!app.shell.log_open, "Escape closes the activity log");
+        assert_eq!(picked(&app), 1, "and keeps the selection");
+
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
+        assert_eq!(picked(&app), 0, "with nothing open, Escape lets go");
+    }
+
     /// What was hidden comes back hidden in the next session's window.
     #[test]
     fn the_panels_come_back_where_the_last_session_left_them() {
