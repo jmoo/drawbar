@@ -1674,7 +1674,8 @@ impl Workspace {
         }
     }
 
-    /// [`Workspace::hurry`] for every asset whose row is in view.
+    /// [`Workspace::hurry`] for every asset whose row is in view, for a list that draws
+    /// only those rows.
     pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
         for id in ids {
             self.hurry(id);
@@ -1743,12 +1744,6 @@ impl Workspace {
             .filter(|entity| entity.rests().is_none() && !entity.unread())
             .map(|entity| entity.bytes.len() as u64)
             .sum()
-    }
-
-    /// Whether `id` has been asked for ahead of the others.
-    #[cfg(test)]
-    pub fn hurried(&self, id: u64) -> bool {
-        self.hurried.borrow().contains(&id)
     }
 
     /// Decode these assets now, on this thread, where they are read and still to be

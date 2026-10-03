@@ -76,9 +76,7 @@ pub trait Fs {
     }
     /// The next command sent and not yet run, where one is already waiting. A listing
     /// takes the ones it may run between two folders.
-    fn waiting(&mut self) -> Option<Cmd> {
-        None
-    }
+    fn waiting(&mut self) -> Option<Cmd>;
     /// Put back a command [`Fs::waiting`] gave, to run before any other.
     fn hold(&mut self, cmd: Cmd);
     /// Create the root, `.drawbar/`, and its `tmp/` and `working/`, where missing.
@@ -469,9 +467,7 @@ impl Walk {
         }
         Ok(entries)
     }
-}
 
-impl Walk {
     /// Whether a folder in `dir`, or `dir` itself, is still to be listed.
     fn waits_in(&self, dir: &LibPath) -> bool {
         let dir = dir.as_str();
