@@ -8,17 +8,6 @@ use crate::js::field;
 /// paragraph of version numbers, and the sheet has one line.
 const MOST: usize = 60;
 
-/// Whether this browser has WebUSB at all.
-///
-/// ⚠️ Read from `navigator` directly: `web_sys::Navigator::usb` returns a `Usb` object
-/// whatever the browser supports.
-pub fn has_usb() -> bool {
-    let Some(navigator) = navigator() else {
-        return false;
-    };
-    field(&navigator, "usb").is_some()
-}
-
 /// The browser and operating system, as briefly as possible.
 pub fn agent() -> String {
     let Some(navigator) = navigator() else {

@@ -560,10 +560,7 @@ impl DrawbarApp {
             Command::Welcome => self.splash.open_welcome(),
             Command::CopyLog => acts.push(Act::CopyLog),
             Command::About => {
-                self.about = Some(crate::about::About::new(
-                    &self.device.state,
-                    &self.workspace,
-                ))
+                self.about = Some(crate::about::About::new(&self.device, &self.workspace))
             }
         }
     }
