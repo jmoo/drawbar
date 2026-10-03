@@ -1138,7 +1138,7 @@ async fn read_one(
     let file = fs.rest(path.as_str(), unmoved).await.map_err(io)?;
     let bytes = match file {
         Some(_) => None,
-        None if stat.len > room => return Err(Failure::Io(too_much())),
+        None if stat.len > room => return Err(Failure::Room(stat.len)),
         None => Some(fs.read(path.as_str()).await.map_err(io)?),
     };
     Ok(Found {
@@ -1158,10 +1158,11 @@ fn crc(found: &Found) -> Option<u32> {
     }
 }
 
-fn too_much() -> String {
+/// Why a read [`Failure::Room`] refused did not run.
+pub fn too_much() -> String {
     format!(
         "drawbar holds at most {} GiB of one library's files in memory, and the files read \
-         already come to that",
+         or being read already come to that",
         MOST_BYTES >> 30
     )
 }

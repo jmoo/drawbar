@@ -1798,6 +1798,34 @@ impl Workspace {
         self.revision += 1;
     }
 
+    /// Whether something needs an unread asset not yet asked of the library.
+    pub fn wants(&self) -> bool {
+        !self.wanted.borrow().is_empty()
+    }
+
+    /// The listed length of every file asked of the library and not yet answered.
+    pub fn asked_whole(&self) -> u64 {
+        let asked = self.asked.iter().filter_map(|id| self.get(*id));
+        asked
+            .filter(|entity| entity.unread())
+            .map(LocalEntity::size)
+            .sum()
+    }
+
+    /// Ask the library again for an asset it could not read, as something needs it.
+    pub fn retry(&mut self, id: u64) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
+            return;
+        };
+        if !matches!(entity.verify, VerifyState::NotRead(_)) {
+            return;
+        }
+        entity.parse_error = None;
+        entity.verify = VerifyState::Reading;
+        self.revision += 1;
+        self.wanted.get_mut().insert(id);
+    }
+
     /// How many bytes of the library's files the assets hold whole in memory.
     pub fn held_whole(&self) -> u64 {
         self.entities

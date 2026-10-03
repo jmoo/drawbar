@@ -1939,6 +1939,56 @@ fn a_file_past_the_most_drawbar_reads_is_listed_and_its_read_refused() {
     assert!(matches!(small.unwrap().verify, VerifyState::Ok));
 }
 
+/// Reads in flight count against what drawbar holds whole, so two asked one after the
+/// other never read past it together. A read refused for want of room is asked for again
+/// once room frees, here as an asset held whole is removed.
+#[test]
+fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let len = program.len() as u64;
+    for (name, gain) in [("A.ne5p", "12"), ("B.ne5p", "24"), ("C.ne5p", "36")] {
+        fs::write(root.at(name), with_gain(&program, gain)).unwrap();
+    }
+    let mut session = Session::listed(&root);
+    let budget = 2 * len + 1;
+    session.store.budget(budget);
+    let [a, b, c] = ["A.ne5p", "B.ne5p", "C.ne5p"].map(|name| session.named(name));
+
+    session.bench.workspace.in_view([a]);
+    let Bench { workspace, log, .. } = &mut session.bench;
+    session.store.ask(workspace, log);
+    session.bench.workspace.in_view([b, c]);
+    session.answer_reads();
+    let workspace = &session.bench.workspace;
+    assert!(
+        workspace.held_whole() <= budget,
+        "{} held",
+        workspace.held_whole()
+    );
+    let unread: Vec<u64> = [a, b, c]
+        .into_iter()
+        .filter(|id| workspace.get(*id).unwrap().unread())
+        .collect();
+    assert_eq!(unread, [c]);
+    let VerifyState::NotRead(why) = &workspace.get(c).unwrap().verify else {
+        panic!("{}", workspace.get(c).unwrap().verify.detail());
+    };
+    assert!(why.contains("at most 1 GiB"), "{why}");
+
+    session.answer_reads();
+    assert!(
+        session.bench.workspace.get(c).unwrap().unread(),
+        "no room yet"
+    );
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.remove(a, log);
+    session.answer_reads();
+    let entity = session.bench.workspace.get(c).unwrap();
+    assert!(!entity.unread(), "read once there is room");
+    assert_eq!(entity.saved.bytes, with_gain(&program, "36"));
+}
+
 /// An id this session has given out already, here to views read before the library
 /// opened, is not given to an asset of the library. The asset takes a new one, and its
 /// unsaved edit moves to a working copy under it.

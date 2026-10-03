@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::diff::{self, match_files, Known};
-use super::exec::working_name;
+use super::exec::{too_much, working_name};
 use super::sidecar::{Row, Sidecar, VERSION};
 use super::{
     names, Backend, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing,
@@ -288,6 +288,11 @@ pub struct Store {
     printed: BTreeSet<u64>,
     /// A [`Cmd::Fingerprint`] is in flight.
     fingerprinting: bool,
+    /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
+    budget: u64,
+    /// The assets whose read was refused for want of room, each with its file's length,
+    /// to ask for again once that much is free. One that could never fit is not.
+    roomless: BTreeMap<u64, u64>,
     /// How many writing commands have been sent.
     sent: u64,
     /// How many commands have been sent since the open.
@@ -318,6 +323,8 @@ impl Store {
             unprinted: Default::default(),
             printed: BTreeSet::new(),
             fingerprinting: false,
+            budget: MOST_BYTES,
+            roomless: BTreeMap::new(),
             sent: 0,
             issued: 0,
         }
@@ -488,12 +495,31 @@ impl Store {
         self.loading.as_mut()?.ready()
     }
 
+    /// Read at most this much of the library's files whole, in place of [`MOST_BYTES`].
+    #[cfg(test)]
+    pub fn budget(&mut self, bytes: u64) {
+        self.budget = bytes;
+    }
+
     /// Ask the backend for the files of the unread assets something needs, reading at
-    /// most what keeps the assets' whole bytes within [`MOST_BYTES`].
+    /// most what keeps the assets' whole bytes within [`MOST_BYTES`], counting each read
+    /// still in flight at its file's listed length. An asset refused for want of room
+    /// is asked for again once there is room for it.
     pub(crate) fn ask(&mut self, workspace: &mut Workspace, log: &mut Log) {
-        if !self.opened() {
+        if !self.opened() || (!workspace.wants() && self.roomless.is_empty()) {
             return;
         }
+        let held = workspace
+            .held_whole()
+            .saturating_add(workspace.asked_whole());
+        let room = self.budget.saturating_sub(held);
+        self.roomless.retain(|id, len| {
+            let waits = *len > room && workspace.get(*id).is_some();
+            if !waits {
+                workspace.retry(*id);
+            }
+            waits
+        });
         let mut files = Vec::new();
         for id in workspace.take_wanted() {
             let record = self.records.get(&id);
@@ -509,7 +535,6 @@ impl Store {
         if files.is_empty() {
             return;
         }
-        let room = MOST_BYTES.saturating_sub(workspace.held_whole());
         self.send(Cmd::Read { files, room });
     }
 
@@ -591,6 +616,13 @@ impl Store {
                     self.rescan();
                     let why = "it is gone from the library folder".to_string();
                     workspace.unreadable(id, why, log);
+                    continue;
+                }
+                Err(Failure::Room(len)) => {
+                    if len <= self.budget {
+                        self.roomless.insert(id, len);
+                    }
+                    workspace.unreadable(id, too_much(), log);
                     continue;
                 }
                 Err(Failure::Io(why)) => {
@@ -1513,6 +1545,7 @@ impl Store {
                 self.rescan();
                 "it changed on disk since drawbar read it".to_string()
             }
+            Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
         };
         workspace.unsave(id, log);

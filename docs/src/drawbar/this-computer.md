@@ -66,8 +66,8 @@ folder you remove waits until everything in it has been listed.
 
 drawbar lists at most a million files and folders in a library, and holds at most
 1 GiB of its files in memory. A folder it did not list in full, or could not
-read, shows **not all listed**. A file it could not read, or one past the 1 GiB,
-is marked **not read**.
+read, shows **not all listed**. A file it could not read is marked **not read**.
+So is one past the 1 GiB, until there is room for it again.
 
 Piano libraries and sample instruments run to hundreds of megabytes, so on the
 desktop they stay in their files: drawbar holds in memory only the part it shows

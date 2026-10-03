@@ -369,6 +369,9 @@ pub enum Failure {
     /// The file is not what drawbar last read: something else wrote it, moved it, or put
     /// a file where a new one was to go.
     Moved,
+    /// A read that would have taken what drawbar holds whole past the room it was given:
+    /// the file's length.
+    Room(u64),
     Io(String),
 }
 
