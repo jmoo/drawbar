@@ -28,6 +28,7 @@ pub mod menu;
 mod menubar;
 pub mod midi;
 pub mod named;
+pub mod net;
 pub mod newproject;
 pub mod panel;
 pub mod platform;

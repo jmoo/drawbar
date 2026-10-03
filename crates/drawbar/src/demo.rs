@@ -35,7 +35,7 @@ const PUBLISHED: &str = "https://drawbar.app/demo/";
 pub async fn fetch() -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut files = Vec::with_capacity(FILES.len());
     for (published, kept) in FILES {
-        let bytes = get(&format!("{PUBLISHED}{published}"))
+        let bytes = crate::net::get(&format!("{PUBLISHED}{published}"))
             .await
             .map_err(|why| format!("Could not fetch the demo sounds: {published}: {why}."))?;
         files.push((kept.to_string(), bytes));
@@ -69,77 +69,6 @@ pub fn file(
         folders.file(id, Some(folder));
     }
     added
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn get(url: &str) -> Result<Vec<u8>, String> {
-    use wasm_bindgen::JsCast as _;
-    use wasm_bindgen_futures::JsFuture;
-
-    let window = web_sys::window().ok_or("no window to fetch from")?;
-    let response: web_sys::Response = JsFuture::from(window.fetch_with_str(url))
-        .await
-        .map_err(|_| "the request failed".to_string())?
-        .dyn_into()
-        .map_err(|_| "the reply was not a response".to_string())?;
-    if !response.ok() {
-        return Err(format!("the server answered {}", response.status()));
-    }
-    let body = response
-        .array_buffer()
-        .map_err(|_| "the reply has no body".to_string())?;
-    let body = JsFuture::from(body)
-        .await
-        .map_err(|_| "the body did not arrive".to_string())?;
-    bounded(js_sys::Uint8Array::new(&body).to_vec())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn get(url: &str) -> Result<Vec<u8>, String> {
-    use std::time::Duration;
-    use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
-
-    // ⚠️ ureq is built without a crypto provider, so rustls has none until one is
-    // installed. Installing again once one is in place is refused, which is harmless.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let found = rustls_native_certs::load_native_certs();
-    if found.certs.is_empty() {
-        return Err(match found.errors.first() {
-            Some(why) => format!("the system's trusted certificates did not load ({why})"),
-            None => "the system trusts no certificates".to_string(),
-        });
-    }
-    let roots: Vec<Certificate<'static>> = found
-        .certs
-        .iter()
-        .map(|cert| Certificate::from_der(cert.as_ref()).to_owned())
-        .collect();
-    let tls = TlsConfig::builder()
-        .provider(TlsProvider::Rustls)
-        .root_certs(RootCerts::new_with_certs(&roots))
-        .build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(tls)
-        .https_only(true)
-        .timeout_global(Some(Duration::from_secs(60)))
-        .build()
-        .into();
-    let mut response = agent.get(url).call().map_err(|e| e.to_string())?;
-    let bytes = response
-        .body_mut()
-        .with_config()
-        .limit(crate::store::MAX_ENTITY as u64 + 1)
-        .read_to_vec()
-        .map_err(|e| e.to_string())?;
-    bounded(bytes)
-}
-
-/// `bytes`, unless there are more of them than this computer keeps for one asset.
-fn bounded(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    match bytes.len() > crate::store::MAX_ENTITY {
-        true => Err(format!("{} bytes is more than a demo holds", bytes.len())),
-        false => Ok(bytes),
-    }
 }
 
 #[cfg(test)]

@@ -52,7 +52,7 @@ nord-usb = { path = "../nord-usb", version = "0.8.0", features = [
 ] }
 # `playback` alone: the decoders are for files, and drawbar feeds it raw samples.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
-# HTTPS for the demo sounds. `ring` is the crypto provider, and the trusted roots are
+# HTTPS for `net`. `ring` is the crypto provider, and the trusted roots are
 # the system's own rather than a bundled set.
 rustls = { version = "0.23", default-features = false, features = [
   "ring",
