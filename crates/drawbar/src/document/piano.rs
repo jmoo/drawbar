@@ -1441,6 +1441,9 @@ const NOTE: f32 = 10.5;
 const MONO: f32 = 10.5;
 const MICRO: f32 = 9.5;
 
+/// The gain slider's height: egui draws a slider's thumb at 0.8 of it, a 14 px thumb.
+const SLIDER_H: f32 = 17.5;
+
 /// A lamp's box, which a cell must leave room for.
 const LAMP: egui::Vec2 = egui::vec2(30.0, 20.0);
 
@@ -2293,6 +2296,7 @@ fn playback(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan) {
     ui.horizontal_wrapped(|ui| {
         field(ui, "Instrument gain", "0x40c, tenths of a decibel", |ui| {
             let mut decibels = f64::from(plan.gain.unwrap_or(facts.gain)) / 10.0;
+            ui.spacing_mut().interact_size.y = SLIDER_H;
             let moved = ui.add(
                 egui::Slider::new(&mut decibels, -12.7..=12.7)
                     .step_by(0.1)

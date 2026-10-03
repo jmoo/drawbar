@@ -817,7 +817,25 @@ pub(crate) fn metrics(style: &mut egui::Style) {
     spacing.menu_margin = egui::Margin::same(5);
     spacing.indent = 18.0;
     spacing.interact_size.y = 22.0;
-    spacing.scroll.bar_width = 8.0;
+    spacing.slider_rail_height = 4.0;
+    // ⚠️ Floating only so the track can be transparent: the bar claims the width a solid
+    // one would, and content laid out beside it never runs under the thumb.
+    let solid = egui::style::ScrollStyle {
+        bar_width: 8.0,
+        ..egui::style::ScrollStyle::solid()
+    };
+    spacing.scroll = egui::style::ScrollStyle {
+        floating: true,
+        floating_width: solid.bar_width,
+        floating_allocated_width: solid.allocated_width(),
+        dormant_background_opacity: 0.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
+        dormant_handle_opacity: 1.0,
+        active_handle_opacity: 1.0,
+        interact_handle_opacity: 1.0,
+        ..solid
+    };
     style.animation_time = 0.14;
     for (style_, font) in [
         (egui::TextStyle::Body, egui::FontId::proportional(13.0)),

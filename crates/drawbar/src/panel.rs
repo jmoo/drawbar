@@ -648,4 +648,51 @@ mod tests {
         frame(true, &mut open);
         assert!(open, "the next click opens it again");
     }
+
+    /// A scroll bar is a thumb with nothing under it, and the rows it scrolls stop short
+    /// of it instead of running under it.
+    #[test]
+    fn a_scroll_bar_paints_no_track_and_keeps_clear_of_the_rows() {
+        let ctx = context();
+        let mut rows = egui::Rect::NOTHING;
+        let mut output = None;
+        // Enough frames, a tenth of a second apart, for the bar to finish appearing.
+        for frame in 0..10 {
+            let input = egui::RawInput {
+                time: Some(f64::from(frame) / 10.0),
+                ..testing::screen(egui::vec2(300.0, 200.0), Vec::new())
+            };
+            output = Some(testing::run(&ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let area = egui::ScrollArea::vertical().auto_shrink(false);
+                    area.show(ui, |ui| {
+                        rows = ui.max_rect();
+                        for row in 0..40 {
+                            ui.label(format!("row {row}"));
+                        }
+                    });
+                });
+            }));
+        }
+        let output = output.expect("a frame ran");
+        let thumb_fill = ctx.style().visuals.widgets.inactive.bg_fill;
+        let thumb = testing::rects(&output)
+            .into_iter()
+            .find(|drawn| drawn.fill == thumb_fill)
+            .expect("the overflowing list shows a thumb")
+            .rect;
+        assert!(
+            rows.right() < thumb.left(),
+            "rows end at {} and the thumb starts at {}",
+            rows.right(),
+            thumb.left()
+        );
+        let under: Vec<egui::Color32> = testing::rects(&output)
+            .into_iter()
+            .filter(|drawn| drawn.rect.x_range() == thumb.x_range() && drawn.rect != thumb)
+            .map(|drawn| drawn.fill)
+            .filter(|fill| fill.a() > 0)
+            .collect();
+        assert!(under.is_empty(), "the bar painted a track: {under:?}");
+    }
 }
