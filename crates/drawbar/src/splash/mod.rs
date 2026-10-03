@@ -226,7 +226,7 @@ impl Start {
             },
             Start::Demo => Card {
                 glyph: Glyph::AudioWaveform,
-                label: "Get the demo sounds",
+                label: "Start with a demo",
                 sub: "A tine piano and a pad, in a Demo sounds folder on this computer.",
                 hint: "From drawbar.app; anything already here is not added again",
                 lead: false,

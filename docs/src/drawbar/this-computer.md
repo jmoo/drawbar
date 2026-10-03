@@ -18,7 +18,7 @@ Stage file has every control at zero. It is not a factory program.
 
 ## Demo sounds
 
-**Get the demo sounds** on the welcome sheet (**Help ▸ Welcome**) fetches a tine
+**Start with a demo** on the welcome sheet (**Help ▸ Welcome**) fetches a tine
 electric piano and a looped pad from drawbar.app into a **Demo sounds** folder.
 The pad comes in two sample formats, v2 (`.nsmp`) and v4 (`.nsmp4`).
 [What is supported](../getting-started/support.md) says which has been played on
