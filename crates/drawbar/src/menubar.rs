@@ -7,7 +7,7 @@
 use std::sync::mpsc::{channel, Receiver};
 
 use eframe::egui;
-use muda::accelerator::{Accelerator, Code, Modifiers};
+use muda::accelerator::{Key, KeyAccelerator, Modifiers};
 use muda::{CheckMenuItem, IsMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::menu::{label, menus, shortcut, Command, Entry, Offer};
@@ -160,7 +160,8 @@ fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>) {
                 let resting = label(*command);
                 match checkable(*command) {
                     true => {
-                        let item = CheckMenuItem::new(resting, true, false, accelerator(*command));
+                        let item = CheckMenuItem::new(resting, true, false, None);
+                        let _ = item.set_key_accelerator(accelerator(*command));
                         append(submenu, &item);
                         lines.push(Line {
                             command: *command,
@@ -178,7 +179,8 @@ fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>) {
 
 /// A plain item for `command`, recorded in `lines`.
 fn plain(lines: &mut Vec<Line>, command: Command, label: &str) -> MenuItem {
-    let item = MenuItem::new(label, true, accelerator(command));
+    let item = MenuItem::new(label, true, None);
+    let _ = item.set_key_accelerator(accelerator(command));
     lines.push(Line {
         command,
         item: Item::Plain(item.clone()),
@@ -202,21 +204,22 @@ fn checkable(command: Command) -> bool {
     )
 }
 
-/// The native key equivalent of a command's shortcut.
-fn accelerator(command: Command) -> Option<Accelerator> {
+/// The native key equivalent of a command's shortcut: the character its key types. Setting
+/// one fails only for a key equivalent longer than a character, which none here is.
+fn accelerator(command: Command) -> Option<KeyAccelerator> {
     let keys = shortcut(command, Platform::Mac, true)?;
-    let code = match keys.logical_key {
-        egui::Key::B => Code::KeyB,
-        egui::Key::E => Code::KeyE,
-        egui::Key::I => Code::KeyI,
-        egui::Key::L => Code::KeyL,
-        egui::Key::O => Code::KeyO,
-        egui::Key::Q => Code::KeyQ,
-        egui::Key::R => Code::KeyR,
-        egui::Key::S => Code::KeyS,
-        egui::Key::W => Code::KeyW,
-        egui::Key::Num2 => Code::Digit2,
-        egui::Key::Num3 => Code::Digit3,
+    let typed = match keys.logical_key {
+        egui::Key::B => "b",
+        egui::Key::E => "e",
+        egui::Key::I => "i",
+        egui::Key::L => "l",
+        egui::Key::O => "o",
+        egui::Key::Q => "q",
+        egui::Key::R => "r",
+        egui::Key::S => "s",
+        egui::Key::W => "w",
+        egui::Key::Num2 => "2",
+        egui::Key::Num3 => "3",
         _ => return None,
     };
     let with = keys.modifiers;
@@ -231,7 +234,10 @@ fn accelerator(command: Command) -> Option<Accelerator> {
             modifiers |= modifier;
         }
     }
-    Some(Accelerator::new(modifiers, code))
+    Some(KeyAccelerator::new(
+        modifiers,
+        Key::Character(typed.to_string()),
+    ))
 }
 
 #[cfg(test)]
