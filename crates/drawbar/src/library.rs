@@ -450,32 +450,17 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
 
 /// The library a program names, and its name if the instrument has reported one.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let Some(fields) = entity.entity.as_deref().and_then(crate::fields::fields_of) else {
+    let Some(plays) = entity.plays else {
         return Needs::Nothing;
     };
-    // One cell, so it shows the first library the program names.
-    for (path, class) in [
-        ("piano_panel.id", ObjectClass::Piano),
-        ("sample_panel.id", ObjectClass::Sample),
-    ] {
-        // Zero is "this program references no library", not an id to go looking for.
-        let Some(id) = fields
-            .iter()
-            .find(|field| field.path == path)
-            .and_then(|field| crate::document::library_id(&field.value))
-            .filter(|id| *id != 0)
-        else {
-            continue;
-        };
-        return match device.dependency_name(class, id) {
-            Some(name) => Needs::Named {
-                class,
-                name: name.to_string(),
-            },
-            None => Needs::Wanted { class, id },
-        };
+    let (class, id) = (plays.class(), plays.id());
+    match device.dependency_name(class, id) {
+        Some(name) => Needs::Named {
+            class,
+            name: name.to_string(),
+        },
+        None => Needs::Wanted { class, id },
     }
-    Needs::Nothing
 }
 
 /// What the instrument said a slot plays, if that slot is the one it was last asked

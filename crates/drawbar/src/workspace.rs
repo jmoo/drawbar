@@ -23,6 +23,7 @@ use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
 use crate::store::{names, LibPath};
+use crate::summary::Plays;
 use crate::work;
 
 /// Where an entity came from.
@@ -385,6 +386,7 @@ pub struct Wrote {
 struct Decoded {
     container: Option<Container>,
     entity: Option<Box<Entity>>,
+    plays: Option<Plays>,
     parse_error: Option<String>,
     verify: VerifyState,
     is_text: bool,
@@ -398,6 +400,7 @@ impl Decoded {
         Decoded {
             container: None,
             entity: None,
+            plays: None,
             parse_error: Some(why.to_string()),
             verify: VerifyState::Failed(why.to_string()),
             is_text: false,
@@ -417,6 +420,7 @@ impl Decoded {
         };
         Decoded {
             container: Container::read(bytes),
+            plays: entity.as_deref().and_then(Plays::of),
             entity,
             parse_error,
             verify,
@@ -444,6 +448,11 @@ pub struct LocalEntity {
     pub bytes: Bytes,
     /// Boxed, since a decode is kilobytes and most assets of a large library have none.
     pub entity: Option<Box<Entity>>,
+    /// The library its decode plays, taken with the decode.
+    ///
+    /// ⚠️ Taken off the frame: finding it lists every field of the body, and every listed
+    /// row asks for it.
+    pub plays: Option<Plays>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     /// Whether the bytes are a note, from [`crate::document::text::is_text`].
@@ -522,6 +531,7 @@ impl LocalEntity {
             },
             bytes,
             entity: None,
+            plays: None,
             parse_error: None,
             container: None,
             is_text: false,
@@ -553,6 +563,7 @@ impl LocalEntity {
         self.saved.bytes_crc = decoded.crc;
         self.container = decoded.container;
         self.entity = decoded.entity;
+        self.plays = decoded.plays;
         self.parse_error = decoded.parse_error;
         self.verify = decoded.verify;
         self.is_text = decoded.is_text;
@@ -575,6 +586,7 @@ impl LocalEntity {
             origin,
             bytes: Bytes::default(),
             entity: None,
+            plays: None,
             parse_error: None,
             container: None,
             is_text: false,

@@ -35,6 +35,7 @@ pub mod shell;
 pub mod splash;
 pub mod store;
 pub mod strings;
+pub mod summary;
 pub mod tabs;
 pub mod tags;
 #[cfg(test)]
