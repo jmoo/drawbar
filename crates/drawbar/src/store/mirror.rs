@@ -85,6 +85,72 @@ struct Loading {
     files: usize,
     /// How many leftovers of interrupted writes the open removed.
     swept: usize,
+    /// Each rename sent while the listing is in flight, with the count of commands sent
+    /// since the open that it brought to. A part the backend gathered before it ran names
+    /// what it moved where it was.
+    moves: Vec<(u64, LibPath, LibPath)>,
+}
+
+impl Loading {
+    /// Bring a path the backend gave after `ran` commands to where it is now.
+    fn now(&self, ran: u64, path: &mut LibPath) {
+        for (_, from, to) in self.moves.iter().filter(|(sent, _, _)| *sent > ran) {
+            if let Some(moved) = path.moved(from, to) {
+                *path = moved;
+            }
+        }
+    }
+
+    /// [`Loading::now`] for every path of a part, and forget the renames every part to
+    /// come has seen.
+    fn caught_up(&mut self, ran: u64, part: &mut Listing) {
+        let Listing {
+            dirs,
+            files,
+            unread,
+            others,
+            unwalked,
+        } = part;
+        let found = files.iter_mut().map(|found| &mut found.path);
+        let unread = unread.iter_mut().map(|(path, _)| path);
+        for path in dirs
+            .iter_mut()
+            .chain(found)
+            .chain(unread)
+            .chain(others)
+            .chain(unwalked)
+        {
+            self.now(ran, path);
+        }
+        self.moves.retain(|(sent, _, _)| *sent > ran);
+    }
+
+    /// Follow a folder renamed while the listing is in flight: the rows no file has
+    /// claimed yet, and the folders listed so far, move with it.
+    fn relocate(&mut self, from: &LibPath, to: &LibPath) {
+        for row in self.rows.values_mut() {
+            if let Some(moved) = row.path.as_ref().and_then(|at| at.moved(from, to)) {
+                row.path = Some(moved);
+            }
+        }
+        self.by_path = by_path(&self.rows);
+        for dir in &mut self.dirs {
+            if let Some(moved) = dir.moved(from, to) {
+                *dir = moved;
+            }
+        }
+    }
+}
+
+/// The row naming each path: the first, where the index names one twice.
+fn by_path(rows: &BTreeMap<u64, Row>) -> BTreeMap<LibPath, u64> {
+    let mut by_path = BTreeMap::new();
+    for (id, row) in rows {
+        if let Some(path) = &row.path {
+            by_path.entry(path.clone()).or_insert(*id);
+        }
+    }
+    by_path
 }
 
 /// How many parts of a listing one [`Store::poll`] folds in, so a listing faster than the
@@ -111,9 +177,13 @@ pub struct Store {
     indexed: bool,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
-    /// A rescan, or the open's listing, is in flight.
+    /// A rescan, or a check of the files read so far, is in flight.
     scanning: bool,
     loading: Option<Loading>,
+    /// The paths the check in flight looks at.
+    checking: BTreeSet<LibPath>,
+    /// A rescan is owed once the open's listing is complete.
+    owes: bool,
     /// A send is waiting for the rescan in flight.
     send_waits: bool,
     /// An unsaved view of a slot is kept here as a working copy. Off once the library is
@@ -126,6 +196,8 @@ pub struct Store {
     stale: Vec<String>,
     /// How many writing commands have been sent.
     sent: u64,
+    /// How many commands have been sent since the open.
+    issued: u64,
 }
 
 impl Store {
@@ -142,11 +214,14 @@ impl Store {
             focused: true,
             scanning: false,
             loading: None,
+            checking: BTreeSet::new(),
+            owes: false,
             send_waits: false,
             keeps_views: true,
             name: None,
             stale: Vec::new(),
             sent: 0,
+            issued: 0,
         }
     }
 
@@ -263,13 +338,14 @@ impl Store {
         log: &mut Log,
     ) -> bool {
         self.ask(workspace, log);
+        self.walk(browser);
         let mut released = false;
         let mut parts = 0;
         while parts < PARTS_A_FRAME {
             let Some(event) = self.backend.try_recv() else {
                 break;
             };
-            parts += usize::from(matches!(event, Event::Listed(_)));
+            parts += usize::from(matches!(event, Event::Listed { .. }));
             released |= self.handle(event, workspace, browser, queue, log);
         }
         if parts == PARTS_A_FRAME {
@@ -319,7 +395,27 @@ impl Store {
             return;
         }
         let room = MOST_BYTES.saturating_sub(workspace.held_whole());
-        self.backend.send(Cmd::Read { files, room });
+        self.send(Cmd::Read { files, room });
+    }
+
+    /// Ask the backend to list the folders whose removal waits on what is in them. Once
+    /// the whole tree is listed, every folder is.
+    fn walk(&mut self, browser: &mut Browser) {
+        for dir in browser.folders.take_walks() {
+            match self.loading.is_some() {
+                true => self.send(Cmd::Walk(dir)),
+                false => browser.folders.walked(dir),
+            }
+        }
+    }
+
+    /// Send a command, counting it.
+    fn send(&mut self, cmd: Cmd) {
+        self.issued += 1;
+        if let (Some(loading), Cmd::Move { from, to }) = (&mut self.loading, &cmd) {
+            loading.moves.push((self.issued, from.clone(), to.clone()));
+        }
+        self.backend.send(cmd);
     }
 
     /// Take in the files read for the assets that asked. Each comes back as it is now: a
@@ -371,6 +467,18 @@ impl Store {
         self.scanning
     }
 
+    /// Whether the open's listing is still arriving.
+    #[cfg(test)]
+    pub fn listing(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Whether a send is held for a rescan or check still in flight.
+    #[cfg(test)]
+    pub fn holds_send(&self) -> bool {
+        self.send_waits
+    }
+
     /// Whether nothing may be written, and why.
     #[cfg(test)]
     pub fn read_only(&self) -> Option<&str> {
@@ -390,11 +498,23 @@ impl Store {
     ) -> bool {
         match event {
             Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, log),
-            Event::Listed(part) => self.listed(part, workspace, browser, log),
+            Event::Listed { part, ran } => self.listed(part, ran, workspace, browser, log),
             Event::Complete(complete) => {
                 self.complete(complete, workspace, browser, log);
+                self.pay();
+            }
+            Event::Walked { mut dir, ran } => {
+                if let Some(loading) = &self.loading {
+                    loading.now(ran, &mut dir);
+                }
+                browser.folders.walked(dir);
+            }
+            Event::Checked(Ok(files)) => {
+                self.scanning = false;
+                let moved = self.checked(files, workspace, browser, queue, log);
+                self.pay();
                 if std::mem::take(&mut self.send_waits) {
-                    return self.release(&BTreeSet::new(), queue, workspace, log);
+                    return self.release(&moved, queue, workspace, log);
                 }
             }
             Event::Opened(Err(why)) => {
@@ -412,7 +532,7 @@ impl Store {
                     return self.release(&moved, queue, workspace, log);
                 }
             }
-            Event::Scanned(Err(why)) => {
+            Event::Scanned(Err(why)) | Event::Checked(Err(why)) => {
                 self.scanning = false;
                 self.send_waits = false;
                 log.error(format!("reading the library again: {why}"));
@@ -468,7 +588,7 @@ impl Store {
     fn write(&mut self, cmd: Cmd) {
         self.indexed = true;
         self.sent += 1;
-        self.backend.send(cmd);
+        self.send(cmd);
     }
 
     /// Rescan when the window comes back into focus, since anything may have changed
@@ -491,9 +611,24 @@ impl Store {
         true
     }
 
+    /// List the tree again, to fold in what changed outside drawbar. While the open's
+    /// listing is in flight, the files read so far are looked at again instead, and the
+    /// rescan is owed until the listing is complete.
     pub(crate) fn rescan(&mut self) {
         if !self.opened() || self.scanning {
             return;
+        }
+        if self.loading.is_some() {
+            self.owes = true;
+            let known: BTreeMap<LibPath, Fingerprint> = self
+                .records
+                .values()
+                .filter(|record| record.holds != Holds::Unread)
+                .filter_map(|record| Some((record.path.clone()?, record.fingerprint?)))
+                .collect();
+            self.checking = known.keys().cloned().collect();
+            self.scanning = true;
+            return self.send(Cmd::Check { known });
         }
         let mut known = BTreeMap::new();
         for record in self.records.values() {
@@ -503,7 +638,15 @@ impl Store {
             known.insert(path.clone(), (print, record.holds));
         }
         self.scanning = true;
-        self.backend.send(Cmd::Scan { known });
+        self.send(Cmd::Scan { known });
+    }
+
+    /// Send the rescan owed, once nothing stands in its way.
+    fn pay(&mut self) {
+        if self.owes && self.loading.is_none() && !self.scanning {
+            self.owes = false;
+            self.rescan();
+        }
     }
 
     /// Write everything, waiting for the saves in flight to answer, then let the library
@@ -546,7 +689,7 @@ impl Store {
                 None => return false,
                 // ⚠️ A listing taken before the last pass's moves would read each as a
                 // deletion, and nothing needs it now.
-                Some(Event::Scanned(_)) => self.scanning = false,
+                Some(Event::Scanned(_) | Event::Checked(_)) => self.scanning = false,
                 Some(event) => {
                     self.handle(event, workspace, browser, queue, log);
                 }
@@ -600,7 +743,6 @@ impl Store {
     }
 
     /// Take in what an open found before its listing: the index, and the working copies.
-    /// Nothing is written, and no rescan sent, until the listing is complete.
     fn begin(
         &mut self,
         opened: Opened,
@@ -657,15 +799,9 @@ impl Store {
             tags,
             rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
         );
-        let mut by_path = BTreeMap::new();
-        for (id, row) in &rows {
-            if let Some(path) = &row.path {
-                by_path.entry(path.clone()).or_insert(*id);
-            }
-        }
         self.loading = Some(Loading {
+            by_path: by_path(&rows),
             rows,
-            by_path,
             claimed: BTreeSet::new(),
             working,
             renamed,
@@ -673,15 +809,16 @@ impl Store {
             dirs: Vec::new(),
             files: 0,
             swept,
+            moves: Vec::new(),
         });
-        self.scanning = true;
     }
 
-    /// Fold in one part of the open's listing: each file the index names comes back as
-    /// its asset, and each it does not as a new one.
+    /// Fold in one part of the open's listing, gathered after `ran` commands: each file
+    /// the index names comes back as its asset, and each it does not as a new one.
     fn listed(
         &mut self,
-        part: Listing,
+        mut part: Listing,
+        ran: u64,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
@@ -689,6 +826,7 @@ impl Store {
         let Some(mut loading) = self.loading.take() else {
             return;
         };
+        loading.caught_up(ran, &mut part);
         let Listing {
             dirs,
             files,
@@ -785,15 +923,17 @@ impl Store {
     /// the rows no file claimed, and whatever is left of the index is let go or kept.
     fn complete(
         &mut self,
-        complete: Complete,
+        mut complete: Complete,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        self.scanning = false;
         let Some(mut loading) = self.loading.take() else {
             return;
         };
+        for found in &mut complete.strangers {
+            loading.now(complete.ran, &mut found.path);
+        }
         let swept = loading.swept + complete.swept;
         if swept > 0 {
             log.info(format!("removed {swept} leftovers of interrupted writes"));
@@ -924,14 +1064,47 @@ impl Store {
         browser.folders.unread = unread;
         browser.folders.others = others;
         browser.folders.unwalked = unwalked.into_iter().collect();
+        let touched = self.fold(|_| true, files, workspace, browser, queue, log);
+        browser.folders.sync(&dirs);
+        flag_duplicates(workspace, browser, log);
+        touched
+    }
+
+    /// Fold in what a check found of the files read so far, and return the assets whose
+    /// files moved or changed.
+    fn checked(
+        &mut self,
+        files: Vec<Found>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> BTreeSet<u64> {
+        let checking = std::mem::take(&mut self.checking);
+        let looked = |path: &LibPath| checking.contains(path);
+        self.fold(looked, files, workspace, browser, queue, log)
+    }
+
+    /// Match the files found to the records whose paths `looked` at, and fold in where
+    /// each landed. Returns the assets whose files moved or changed.
+    fn fold(
+        &mut self,
+        looked: impl Fn(&LibPath) -> bool,
+        files: Vec<Found>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> BTreeSet<u64> {
         let known = self
             .records
             .iter()
             .filter_map(|(id, record)| {
+                let path = record.path.clone().filter(|path| looked(path))?;
                 Some((
                     *id,
                     Known {
-                        path: record.path.clone()?,
+                        path,
                         fingerprint: record.fingerprint,
                     },
                 ))
@@ -994,8 +1167,6 @@ impl Store {
                 self.settle(id, workspace, &BTreeMap::new());
             }
         }
-        browser.folders.sync(&dirs);
-        flag_duplicates(workspace, browser, log);
         touched
     }
 
@@ -1195,15 +1366,30 @@ impl Store {
         done
     }
 
+    /// Send one change to the folders. One made or removed while the open's listing is in
+    /// flight is one the listing's end keeps or drops with the rest.
     fn tree_op(&mut self, op: Op) {
         match op {
-            Op::MakeDir(path) => self.write(Cmd::MakeDir(path)),
-            Op::RemoveDir(path) => self.write(Cmd::RemoveDir(path)),
+            Op::MakeDir(path) => {
+                if let Some(loading) = &mut self.loading {
+                    loading.dirs.push(path.clone());
+                }
+                self.write(Cmd::MakeDir(path))
+            }
+            Op::RemoveDir(path) => {
+                if let Some(loading) = &mut self.loading {
+                    loading.dirs.retain(|dir| *dir != path);
+                }
+                self.write(Cmd::RemoveDir(path))
+            }
             Op::MoveDir { from, to } => {
                 for record in self.records.values_mut() {
                     if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(&from, &to)) {
                         record.path = Some(moved);
                     }
+                }
+                if let Some(loading) = &mut self.loading {
+                    loading.relocate(&from, &to);
                 }
                 self.write(Cmd::Move { from, to });
             }

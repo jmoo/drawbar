@@ -166,6 +166,10 @@ pub struct Folders {
     pub unread: Vec<(LibPath, String)>,
     /// Folders whose contents were not all listed.
     pub unwalked: BTreeSet<LibPath>,
+    /// Folders to list whole ahead of the rest of a listing still in flight, each with
+    /// whether it has been asked for, and those listed whole since.
+    walks: BTreeMap<LibPath, bool>,
+    walked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
     pub all_files: bool,
     /// The libraries the window can switch to, the open one among them. Empty where
@@ -462,8 +466,54 @@ impl Folders {
                 lost.row.path = Some(moved);
             }
         }
+        let others = self.others.iter_mut();
+        let unread = self.unread.iter_mut().map(|(path, _)| path);
+        for path in others.chain(unread) {
+            if let Some(moved) = path.moved(&from, &to) {
+                *path = moved;
+            }
+        }
+        self.walks = std::mem::take(&mut self.walks)
+            .into_iter()
+            .map(|(path, asked)| (path.moved(&from, &to).unwrap_or(path), asked))
+            .collect();
+        for paths in [&mut self.unwalked, &mut self.walked] {
+            *paths = std::mem::take(paths)
+                .into_iter()
+                .map(|path| path.moved(&from, &to).unwrap_or(path))
+                .collect();
+        }
         workspace.relocate(&from, &to);
         self.ops.push(Op::MoveDir { from, to });
+    }
+
+    /// Whether everything in `dir` has been listed: the whole library has, or `dir` was
+    /// listed ahead of the rest.
+    pub(crate) fn listed_whole(&self, dir: &LibPath) -> bool {
+        let listing = self.place.as_ref().is_some_and(|at| at.listing.is_some());
+        !listing || self.walked.iter().any(|done| dir.is_in(done))
+    }
+
+    /// Want `dir` listed whole ahead of the rest of the listing.
+    pub(crate) fn walk(&mut self, dir: &LibPath) {
+        self.walks.entry(dir.clone()).or_insert(false);
+    }
+
+    /// The folders wanted and not yet asked for, which are asked for now.
+    pub(crate) fn take_walks(&mut self) -> Vec<LibPath> {
+        let unasked = self.walks.iter_mut().filter(|(_, asked)| !**asked);
+        unasked
+            .map(|(dir, asked)| {
+                *asked = true;
+                dir.clone()
+            })
+            .collect()
+    }
+
+    /// Record that everything in `dir` has been listed.
+    pub(crate) fn walked(&mut self, dir: LibPath) {
+        self.walks.remove(&dir);
+        self.walked.insert(dir);
     }
 
     /// Remove an empty folder. The caller moves out what was in it first.

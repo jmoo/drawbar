@@ -147,7 +147,10 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 
 /// Whether a command writes, and so first takes the library.
 fn writes(cmd: &Cmd) -> bool {
-    !matches!(cmd, Cmd::Open | Cmd::Scan { .. } | Cmd::Read { .. })
+    !matches!(
+        cmd,
+        Cmd::Open | Cmd::Scan { .. } | Cmd::Check { .. } | Cmd::Walk(_) | Cmd::Read { .. }
+    )
 }
 
 /// Run any command but an open, which runs once, first.
@@ -164,6 +167,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
         Cmd::Scan { known } => Some(Event::Scanned(
             scan(fs, &known, answer).await.map_err(|e| e.to_string()),
         )),
+        Cmd::Check { known } => Some(Event::Checked(Ok(check(fs, &known).await))),
+        // Outside an open's listing the whole tree has been listed already.
+        Cmd::Walk(dir) => Some(Event::Walked { dir, ran: 0 }),
         Cmd::Read { files, room } => Some(Event::Read(read_all(fs, files, room).await)),
         Cmd::Commit {
             sidecar,
@@ -207,7 +213,7 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 }
 
 /// Run the reads waiting, each as it comes, until a command that is not one is next.
-/// That one is left to run after the listing, and so is every command behind it.
+/// That one is left to run after the rescan, and so is every command behind it.
 async fn reads_between(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) {
     while let Some(cmd) = fs.waiting() {
         match cmd {
@@ -288,7 +294,8 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     lister.rows(fs, rows, answer).await;
     lister.walk(fs, walk, answer).await;
     let (last, strangers) = lister.finish(fs).await;
-    answer(Event::Listed(last));
+    let ran = lister.ran;
+    answer(Event::Listed { part: last, ran });
     let mut swept = 0;
     if sweeps {
         for temp in std::mem::take(&mut lister.temps) {
@@ -297,7 +304,11 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
             }
         }
     }
-    answer(Event::Complete(Complete { strangers, swept }));
+    answer(Event::Complete(Complete {
+        strangers,
+        swept,
+        ran,
+    }));
     Ok(())
 }
 
@@ -377,6 +388,8 @@ struct Walk {
     /// The root's entries, listed when the walk started.
     root: Option<Vec<Entry>>,
     folders: VecDeque<String>,
+    /// Every folder listed or waiting to be, so none is listed twice.
+    seen: BTreeSet<String>,
     /// Entries looked at so far, and the most it looks at: [`MOST_ENTRIES`].
     looked: usize,
     most: usize,
@@ -393,6 +406,7 @@ impl Walk {
         let mut walk = Walk {
             root: None,
             folders: VecDeque::new(),
+            seen: BTreeSet::from([String::new()]),
             looked: 0,
             most,
         };
@@ -403,10 +417,19 @@ impl Walk {
     /// The entries of the next folder, or `None` once every folder has been listed. A
     /// folder inside that cannot be read is left unlisted, not the library.
     async fn next(&mut self, fs: &impl Fs) -> Option<Vec<Entry>> {
+        self.next_of(fs, &[]).await
+    }
+
+    /// [`Walk::next`], taking first a folder in one of `urgent`, where any is waiting.
+    async fn next_of(&mut self, fs: &impl Fs, urgent: &[LibPath]) -> Option<Vec<Entry>> {
         if let Some(root) = self.root.take() {
             return Some(root);
         }
-        let prefix = self.folders.pop_front()?;
+        let first = self
+            .folders
+            .iter()
+            .position(|folder| urgent.iter().any(|dir| within(folder, dir.as_str())));
+        let prefix = self.folders.remove(first.unwrap_or(0))?;
         let unwalked = |path| Entry {
             path,
             kind: Kind::Unwalked,
@@ -438,13 +461,51 @@ impl Walk {
                 true => name.clone(),
                 false => format!("{prefix}/{name}"),
             };
-            if matches!(kind, Kind::Dir) && !name.starts_with('.') {
+            if matches!(kind, Kind::Dir) && !name.starts_with('.') && self.seen.insert(path.clone())
+            {
                 self.folders.push_back(path.clone());
             }
             entries.push(Entry { path, kind });
         }
         Ok(entries)
     }
+}
+
+impl Walk {
+    /// Whether a folder in `dir`, or `dir` itself, is still to be listed.
+    fn waits_in(&self, dir: &LibPath) -> bool {
+        let dir = dir.as_str();
+        self.root.is_some() || self.folders.iter().any(|folder| within(folder, dir))
+    }
+
+    /// Follow a folder renamed while the walk is in flight.
+    fn moved(&mut self, from: &str, to: &str) {
+        let moved = |path: &String| match within(path, from) {
+            true => format!("{to}{}", &path[from.len()..]),
+            false => path.clone(),
+        };
+        self.folders = self.folders.iter().map(moved).collect();
+        self.seen = self.seen.iter().map(moved).collect();
+    }
+
+    /// Follow a folder made or removed while the walk is in flight.
+    fn made(&mut self, dir: &str) {
+        self.seen.insert(dir.to_string());
+    }
+
+    fn removed(&mut self, dir: &str) {
+        self.folders.retain(|folder| !within(folder, dir));
+        self.seen.retain(|folder| !within(folder, dir));
+    }
+}
+
+/// Whether `path` is `dir` or inside it, both joined by `/`. Everything is inside the
+/// root.
+fn within(path: &str, dir: &str) -> bool {
+    dir.is_empty()
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// How many entries one part of a listing covers before it is sent.
@@ -465,9 +526,13 @@ struct Row {
 /// before the walk begins; the walk leaves those files out. A file the walk finds whose
 /// length is that of a row not found, where that row's CRC is known, may be that row's
 /// file moved, so it is held back until the walk ends and its CRC taken.
+///
+/// The commands sent meanwhile run between folders, each after the part gathered before
+/// it is sent, and the listing follows what each did to the tree.
 #[derive(Default)]
 struct Lister {
-    /// Files already sent, which the walk leaves out.
+    /// Files already sent, or written by a command since the walk began, which the walk
+    /// leaves out.
     told: BTreeSet<LibPath>,
     /// The lengths of the rows not found whose CRC is known.
     lens: BTreeSet<u64>,
@@ -480,6 +545,42 @@ struct Lister {
     strangers: Vec<Found>,
     /// The temporary siblings interrupted saves left.
     temps: Vec<String>,
+    /// How many commands sent since the open have run.
+    ran: u64,
+    /// The folders [`Cmd::Walk`] asked for, listed ahead of the rest.
+    urgent: Vec<LibPath>,
+}
+
+/// What a command a listing ran did to the tree, which the rest of the listing follows.
+enum Follow {
+    Moved { from: LibPath, to: LibPath },
+    Wrote(LibPath),
+    Made(LibPath),
+    Removed(LibPath),
+    Nothing,
+}
+
+impl Follow {
+    fn of(cmd: &Cmd) -> Follow {
+        match cmd {
+            Cmd::Move { from, to } => Follow::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            Cmd::Save { path, .. } => Follow::Wrote(path.clone()),
+            Cmd::MakeDir(path) => Follow::Made(path.clone()),
+            Cmd::RemoveDir(path) => Follow::Removed(path.clone()),
+            _ => Follow::Nothing,
+        }
+    }
+}
+
+/// Whether an answer says the command did not do what it was sent to.
+fn failed(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Failed(_) | Event::ReadOnly(_) | Event::Saved { result: Err(_), .. }
+    )
 }
 
 impl Lister {
@@ -503,11 +604,20 @@ impl Lister {
                 Err(e) => self.part.unread.push((row.path, e.to_string())),
             }
             if self.taken >= PART {
-                answer(Event::Listed(self.cut()));
+                self.send(answer);
             }
         }
+        self.send(answer);
+    }
+
+    /// Send the part gathered so far, where it holds anything.
+    fn send(&mut self, answer: &mut impl FnMut(Event)) {
         if self.taken > 0 {
-            answer(Event::Listed(self.cut()));
+            let part = self.cut();
+            answer(Event::Listed {
+                part,
+                ran: self.ran,
+            });
         }
     }
 
@@ -532,17 +642,108 @@ impl Lister {
         self.part.files.push(found);
     }
 
-    /// Take every entry the walk lists, sending each part once it is full. The reads sent
-    /// meanwhile are answered between folders.
+    /// Take every entry the walk lists, sending each part once it is full, and run the
+    /// commands sent meanwhile between folders.
+    ///
+    /// ⚠️ A folder's entries are taken before any command runs after they were listed, the
+    /// root's among them, which are listed before the open answers: a command may rename
+    /// what they name.
     async fn walk(&mut self, fs: &mut impl Fs, mut walk: Walk, answer: &mut impl FnMut(Event)) {
-        while let Some(entries) = walk.next(fs).await.filter(|_| !fs.stopped()) {
+        loop {
+            let next = walk.next_of(fs, &self.urgent).await;
+            let Some(entries) = next.filter(|_| !fs.stopped()) else {
+                break;
+            };
             for entry in entries {
                 self.take(entry);
                 if self.taken >= PART {
-                    answer(Event::Listed(self.cut()));
+                    self.send(answer);
                 }
             }
-            reads_between(fs, answer).await;
+            self.walked(&walk, answer);
+            self.between(fs, &mut walk, answer).await;
+        }
+    }
+
+    /// Run each command waiting, in order, after sending the part gathered before it.
+    async fn between(&mut self, fs: &mut impl Fs, walk: &mut Walk, answer: &mut impl FnMut(Event)) {
+        while let Some(cmd) = fs.waiting() {
+            self.send(answer);
+            self.ran += 1;
+            if let Cmd::Walk(dir) = cmd {
+                self.urgent.push(dir);
+                self.walked(walk, answer);
+                continue;
+            }
+            let follow = Follow::of(&cmd);
+            let mut done = true;
+            step(fs, cmd, &mut |event| {
+                done &= !failed(&event);
+                answer(event)
+            })
+            .await;
+            if done {
+                self.follow(follow, walk);
+            }
+        }
+    }
+
+    /// Answer each folder asked for that has no folder left to list in it.
+    fn walked(&mut self, walk: &Walk, answer: &mut impl FnMut(Event)) {
+        let (waiting, done): (Vec<LibPath>, Vec<LibPath>) = std::mem::take(&mut self.urgent)
+            .into_iter()
+            .partition(|dir| walk.waits_in(dir));
+        self.urgent = waiting;
+        if done.is_empty() {
+            return;
+        }
+        self.send(answer);
+        for dir in done {
+            answer(Event::Walked { dir, ran: self.ran });
+        }
+    }
+
+    /// Follow what a command did to the tree, so nothing is listed twice and nothing
+    /// under a renamed folder is lost.
+    fn follow(&mut self, follow: Follow, walk: &mut Walk) {
+        match follow {
+            Follow::Moved { from, to } => {
+                let folder = self.dirs.contains(&from);
+                for paths in [&mut self.told, &mut self.dirs] {
+                    *paths = std::mem::take(paths)
+                        .into_iter()
+                        .map(|path| path.moved(&from, &to).unwrap_or(path))
+                        .collect();
+                }
+                for found in &mut self.strangers {
+                    if let Some(moved) = found.path.moved(&from, &to) {
+                        found.path = moved;
+                    }
+                }
+                for dir in &mut self.urgent {
+                    if let Some(moved) = dir.moved(&from, &to) {
+                        *dir = moved;
+                    }
+                }
+                match folder {
+                    true => walk.moved(from.as_str(), to.as_str()),
+                    false => {
+                        self.told.insert(to);
+                    }
+                }
+            }
+            Follow::Wrote(path) => {
+                self.told.insert(path);
+            }
+            Follow::Made(dir) => {
+                walk.made(dir.as_str());
+                self.dirs.insert(dir);
+            }
+            Follow::Removed(dir) => {
+                walk.removed(dir.as_str());
+                self.dirs.remove(&dir);
+            }
+            Follow::Nothing => {}
         }
     }
 
@@ -765,6 +966,30 @@ impl<'a> Rescan<'a> {
     }
 }
 
+/// What [`Cmd::Check`] finds: each file `known` names that is still where it says, read
+/// again where its [`Stat`] is not the known one, with its CRC where the known one has a
+/// CRC. A file that is gone, or that cannot be looked at or read again, is left out.
+async fn check(fs: &impl Fs, known: &BTreeMap<LibPath, Fingerprint>) -> Vec<Found> {
+    let mut checked = Vec::new();
+    for (path, print) in known {
+        let Ok(Some(stat)) = fs.stat(path.as_str()).await else {
+            continue;
+        };
+        let mut found = Found::unread(path.clone(), stat);
+        if stat != print.stat() {
+            let Ok((bytes, file)) = read(fs, path, None).await else {
+                continue;
+            };
+            (found.bytes, found.file) = (bytes, file);
+            if print.crc.is_some() {
+                found.crc = crc(&found);
+            }
+        }
+        checked.push(found);
+    }
+    checked
+}
+
 /// A file read for a listing: left resting in place where the backend reads it by range,
 /// with the CRC of `known` where its stat says that is still the file, and otherwise read
 /// whole.
@@ -932,12 +1157,14 @@ mod tests {
 
     /// A library whose files claim whatever size they are given, without taking it. The
     /// ones in `rests` are left in place, as the desktop leaves a sample instrument, and
-    /// the folders in `unreadable` cannot be read. It counts the files it reads whole.
+    /// the folders in `unreadable` cannot be read. It counts the files it reads whole. The
+    /// commands in `waiting` were sent while a listing is in flight.
     struct Claimed {
         files: BTreeMap<String, u64>,
         rests: BTreeMap<String, Arc<OnDisk>>,
         unreadable: BTreeSet<String>,
         reads: Cell<usize>,
+        waiting: VecDeque<Cmd>,
     }
 
     impl Claimed {
@@ -947,6 +1174,7 @@ mod tests {
                 rests: BTreeMap::new(),
                 unreadable: BTreeSet::new(),
                 reads: Cell::new(0),
+                waiting: VecDeque::new(),
             }
         }
     }
@@ -963,14 +1191,17 @@ mod tests {
     }
 
     impl Fs for Claimed {
+        fn waiting(&mut self) -> Option<Cmd> {
+            self.waiting.pop_front()
+        }
         fn hold(&mut self, cmd: Cmd) {
-            panic!("nothing is waiting to be put back: {cmd:?}")
+            self.waiting.push_front(cmd);
         }
         async fn prepare(&mut self) -> io::Result<()> {
-            Err(refused())
+            Ok(())
         }
         async fn lock(&mut self) -> io::Result<bool> {
-            Err(refused())
+            Ok(true)
         }
         async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
             if self.unreadable.contains(dir) {
@@ -1004,14 +1235,26 @@ mod tests {
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
             Ok(self.files.get(path).map(|len| stat(*len)))
         }
-        async fn create(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
-            Err(refused())
+        async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
+            self.files.insert(path.to_string(), bytes.len() as u64);
+            Ok(())
         }
         async fn replace(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
             Err(refused())
         }
-        async fn rename(&mut self, _: &str, _: &str) -> io::Result<()> {
-            Err(refused())
+        async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
+            let moved: Vec<String> = self
+                .files
+                .keys()
+                .filter(|path| within(path, from))
+                .cloned()
+                .collect();
+            for path in moved {
+                let len = self.files.remove(&path).unwrap_or(0);
+                self.files
+                    .insert(format!("{to}{}", &path[from.len()..]), len);
+            }
+            Ok(())
         }
         async fn make_dir(&mut self, _: &str) -> io::Result<()> {
             Err(refused())
@@ -1045,27 +1288,50 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
-    /// Every part of an open's listing over these rows of the index, the files held back
-    /// last.
-    fn parts(fs: &mut Claimed, rows: Vec<Row>) -> Vec<Listing> {
+    /// Every answer of an open's listing over these rows of the index, with the files
+    /// held back last, as a part of their own.
+    fn listing(fs: &mut Claimed, rows: Vec<Row>) -> Vec<Event> {
         now(async {
             let walk = Walk::start(fs).await.unwrap();
             let mut lister = Lister::default();
-            let mut parts = Vec::new();
-            let mut answer = |event| match event {
-                Event::Listed(part) => parts.push(part),
-                other => panic!("{other:?}"),
-            };
+            let mut events = Vec::new();
+            let mut answer = |event| events.push(event);
             lister.rows(fs, rows, &mut answer).await;
             lister.walk(fs, walk, &mut answer).await;
             let (last, strangers) = lister.finish(fs).await;
-            parts.push(last);
-            parts.push(Listing {
+            let ran = lister.ran;
+            answer(Event::Listed { part: last, ran });
+            let strangers = Listing {
                 files: strangers,
                 ..Listing::default()
+            };
+            answer(Event::Listed {
+                part: strangers,
+                ran,
             });
-            parts
+            events
         })
+    }
+
+    /// Every part of an open's listing, where nothing else is answered.
+    fn parts(fs: &mut Claimed, rows: Vec<Row>) -> Vec<Listing> {
+        listing(fs, rows)
+            .into_iter()
+            .map(|event| match event {
+                Event::Listed { part, .. } => part,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Each folder and file a part of a listing names, by name.
+    fn named(part: &Listing) -> Vec<String> {
+        let files = part.files.iter().map(|found| &found.path);
+        part.dirs
+            .iter()
+            .chain(files)
+            .map(LibPath::to_string)
+            .collect()
     }
 
     fn files(listing: &Listing) -> Vec<&str> {
@@ -1322,5 +1588,107 @@ mod tests {
             .iter()
             .flat_map(|part| &part.files)
             .all(|found| found.crc.is_none() && !found.read()));
+    }
+
+    /// A folder renamed while the walk is in flight is listed under its new name. What
+    /// was listed before the rename comes in parts that say so, and nothing after it
+    /// names the old one.
+    #[test]
+    fn a_folder_renamed_while_the_walk_is_in_flight_is_listed_where_it_went() {
+        let files = ["a/x.ne5p", "a/sub/y.ne5p", "top.ne5p"];
+        let mut fs = Claimed::of(files.map(|path| (path.to_string(), 1)));
+        fs.waiting.push_back(Cmd::Move {
+            from: path("a"),
+            to: path("b"),
+        });
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for event in listing(&mut fs, Vec::new()) {
+            let Event::Listed { part, ran } = event else {
+                panic!("{event:?}");
+            };
+            match ran {
+                0 => before.extend(named(&part)),
+                _ => after.extend(named(&part)),
+            }
+        }
+        before.sort();
+        after.sort();
+        assert_eq!(before, ["a", "top.ne5p"]);
+        assert_eq!(after, ["b/sub", "b/sub/y.ne5p", "b/x.ne5p"]);
+    }
+
+    /// A file a command wrote while the walk is in flight is not listed again where the
+    /// walk then comes to it.
+    #[test]
+    fn a_file_written_while_the_walk_is_in_flight_is_not_listed_again() {
+        let mut fs = Claimed::of([("a/x.ne5p".to_string(), 1)]);
+        fs.waiting.push_back(Cmd::Save {
+            id: 1,
+            path: path("a/new.ne5p"),
+            bytes: vec![0; 3],
+            expect: None,
+        });
+        let mut listed = Vec::new();
+        let mut saved = false;
+        for event in listing(&mut fs, Vec::new()) {
+            match event {
+                Event::Listed { part, .. } => listed.extend(named(&part)),
+                Event::Saved { result, .. } => saved = result.is_ok(),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(saved);
+        listed.sort();
+        assert_eq!(listed, ["a", "a/x.ne5p"]);
+    }
+
+    /// A folder asked for is listed whole ahead of the rest, and answered once it is.
+    #[test]
+    fn a_folder_asked_for_is_listed_whole_ahead_of_the_rest() {
+        let files = ["a/1.ne5p", "b/2.ne5p", "c/deep/3.ne5p", "c/4.ne5p"];
+        let mut fs = Claimed::of(files.map(|path| (path.to_string(), 1)));
+        fs.waiting.push_back(Cmd::Walk(path("c")));
+        let events = listing(&mut fs, Vec::new());
+        let walked = events
+            .iter()
+            .position(|event| matches!(event, Event::Walked { dir, .. } if dir.as_str() == "c"))
+            .expect("the folder is answered");
+        assert!(
+            listed(&events, "c/deep/3.ne5p") < Some(walked),
+            "{events:?}"
+        );
+        assert!(listed(&events, "a/1.ne5p") > Some(walked), "{events:?}");
+    }
+
+    /// Where among the answers the part listing `name` is.
+    fn listed(events: &[Event], name: &str) -> Option<usize> {
+        events.iter().position(|event| match event {
+            Event::Listed { part, .. } => named(part).iter().any(|named| named == name),
+            _ => false,
+        })
+    }
+
+    /// A check sent while the walk is in flight is answered between two folders, and a
+    /// file whose length moved is read for it.
+    #[test]
+    fn a_check_sent_while_the_walk_is_in_flight_is_answered_between_folders() {
+        let files = [("a/x.ne5p", 1), ("Held.ne5p", 10)];
+        let mut fs = Claimed::of(files.map(|(path, len)| (path.to_string(), len)));
+        let known = BTreeMap::from([(path("Held.ne5p"), Fingerprint::unread(stat(9)))]);
+        fs.waiting.push_back(Cmd::Check { known });
+        let events = listing(&mut fs, Vec::new());
+        let checked = events
+            .iter()
+            .position(|event| matches!(event, Event::Checked(_)))
+            .expect("the check is answered");
+        let Event::Checked(Ok(found)) = &events[checked] else {
+            panic!("{:?}", events[checked]);
+        };
+        let read: Vec<(&str, bool)> = found
+            .iter()
+            .map(|found| (found.path.as_str(), found.read()))
+            .collect();
+        assert_eq!(read, [("Held.ne5p", true)], "(path, read)");
+        assert!(Some(checked) < listed(&events, "a/x.ne5p"), "{events:?}");
     }
 }

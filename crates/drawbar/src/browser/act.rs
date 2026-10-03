@@ -9,7 +9,7 @@ use crate::device::{
     fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Purpose,
 };
 use crate::filter::Narrow;
-use crate::folders::{Clash, Occupant};
+use crate::folders::{Clash, Folders, Occupant};
 use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
@@ -399,15 +399,20 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
 /// Whether an act may run now.
 enum Ready {
     Now,
-    /// An asset it reads is still being read.
+    /// An asset it reads is still being read, or a folder it removes still being listed.
     Later,
     /// An asset it reads could not be read, and this says so.
     Never(String),
 }
 
-/// Whether every asset `act` reads has been read. One not read yet is asked for, and the
-/// act waits for it.
-fn ready(act: &Act, workspace: &Workspace) -> Ready {
+/// Whether every asset `act` reads has been read, and everything in a folder it removes
+/// has been listed. One not read yet is asked for, and so is the listing of a folder, and
+/// the act waits for them.
+fn ready(act: &Act, workspace: &Workspace, folders: &mut Folders) -> Ready {
+    if let Some(dir) = removing(act, folders).filter(|dir| !folders.listed_whole(dir)) {
+        folders.walk(&dir);
+        return Ready::Later;
+    }
     let mut later = false;
     for id in act.reads() {
         let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) else {
@@ -422,6 +427,14 @@ fn ready(act: &Act, workspace: &Workspace) -> Ready {
     match later {
         true => Ready::Later,
         false => Ready::Now,
+    }
+}
+
+/// The folder an act removes, if it removes one.
+fn removing(act: &Act, folders: &Folders) -> Option<LibPath> {
+    match act {
+        Act::RemoveFolder(id) => folders.path_of(*id).cloned(),
+        _ => None,
     }
 }
 
@@ -452,7 +465,7 @@ pub fn apply(
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
-        match ready(&act, workspace) {
+        match ready(&act, workspace, &mut browser.folders) {
             Ready::Now => {}
             Ready::Later => {
                 browser.held.push(act);
@@ -869,9 +882,6 @@ fn rename_folder(
     let Some(from) = browser.folders.path_of(id).cloned() else {
         return;
     };
-    if let Some(why) = still_listing(browser, from.leaf()) {
-        return log.trouble(why);
-    }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!("“{name}” cannot be a folder's name: {why}."));
     }
@@ -889,24 +899,12 @@ fn rename_folder(
     }
 }
 
-/// Why a folder cannot be renamed or removed yet: the library is still being listed, and
-/// files still to come back may be in it.
-fn still_listing(browser: &Browser, name: &str) -> Option<String> {
-    let place = browser.folders.place.as_ref()?;
-    place.listing.map(|_| {
-        format!("“{name}” was left as it is while the library is still being read. Try again once it is listed.")
-    })
-}
-
 /// Remove a folder, moving what was in it up a level. Nothing is deleted, and nothing
 /// moves unless everything can.
 fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
     let Some(path) = browser.folders.path_of(id).cloned() else {
         return;
     };
-    if let Some(why) = still_listing(browser, path.leaf()) {
-        return log.trouble(why);
-    }
     if browser.folders.holds_strangers(&path) {
         return log.trouble(format!(
             "“{}” was not removed: it holds files drawbar does not hold.",

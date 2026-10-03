@@ -351,12 +351,14 @@ pub struct Opened {
 /// The end of an open's listing.
 #[derive(Debug)]
 pub struct Complete {
-    /// Files at paths the index does not name, each the length of a file it does, which
-    /// may be that file moved and so wait for the whole tree. Each whose length is that of
-    /// a file not found comes with its CRC.
+    /// Files at paths the index does not name, each the length of a file it names that is
+    /// not where it says, which may be that file moved and so wait for the whole tree.
+    /// Each comes read, with its CRC.
     pub strangers: Vec<Found>,
     /// How many temporary siblings of interrupted saves were removed.
     pub swept: usize,
+    /// How many commands sent since the open had run when the listing ended.
+    pub ran: u64,
 }
 
 /// Why a save did not land.
@@ -382,8 +384,9 @@ pub enum Cmd {
     /// [`Event::Listed`] parts, then the rest of the listing in parts, breadth first,
     /// then [`Event::Complete`]. Only [`Event::Opened`] answers an open that failed.
     ///
-    /// A [`Cmd::Read`] sent while the listing is in flight runs between two of its
-    /// folders.
+    /// Every command sent while the listing is in flight runs between two of its folders,
+    /// in the order sent, and the rest of the listing follows what it moved, made or
+    /// removed. A file a command wrote is not listed again.
     Open,
     /// List the tree again. A file `known` holds whole or resting is read again where its
     /// [`Stat`] is not the known one; no other file is read. Answered by
@@ -391,6 +394,15 @@ pub enum Cmd {
     Scan {
         known: std::collections::BTreeMap<LibPath, (Fingerprint, Holds)>,
     },
+    /// Look again at the files `known` names, as a rescan would, without listing the
+    /// tree: a file whose [`Stat`] is not the known one is read. Answered by
+    /// [`Event::Checked`].
+    Check {
+        known: std::collections::BTreeMap<LibPath, Fingerprint>,
+    },
+    /// List this folder and everything below it ahead of the rest of an open's listing.
+    /// Answered by [`Event::Walked`] once its parts have been sent.
+    Walk(LibPath),
     /// Read each of these files for the asset whose id comes with it, reading at most
     /// `room` bytes whole between them. A piano or sample instrument may be left resting
     /// in its file instead, which takes none of `room`. The fingerprint is what drawbar
@@ -429,10 +441,22 @@ pub enum Cmd {
 #[derive(Debug)]
 pub enum Event {
     Opened(Result<Opened, String>),
-    /// One part of an open's listing.
-    Listed(Listing),
+    /// One part of an open's listing, gathered after the first `ran` commands sent since
+    /// the open had run, and before the next.
+    Listed {
+        part: Listing,
+        ran: u64,
+    },
     Complete(Complete),
     Scanned(Result<Listing, String>),
+    /// The files a [`Cmd::Check`] found where it looked.
+    Checked(Result<Vec<Found>, String>),
+    /// The folder a [`Cmd::Walk`] asked for, as it was after `ran` commands, is listed
+    /// whole.
+    Walked {
+        dir: LibPath,
+        ran: u64,
+    },
     /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),

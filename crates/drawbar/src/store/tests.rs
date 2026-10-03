@@ -38,6 +38,43 @@ impl Session {
         session
     }
 
+    /// Open the library and fold in the first part of its listing only, so the rest is
+    /// still to come.
+    fn opening(root: &Temp) -> Session {
+        let bench = Bench::new();
+        let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+        let mut session = Session { store, bench };
+        assert!(session.next(), "opening answered");
+        assert!(session.next(), "the first part answered");
+        assert!(session.store.listing());
+        session
+    }
+
+    /// Fold in the rest of the open's listing, and any rescan or check in flight.
+    fn listed_whole(&mut self) {
+        while self.store.listing() || self.store.scanning() {
+            assert!(self.next(), "the listing answered");
+        }
+    }
+
+    /// Run frames of the store until `done` says so.
+    fn until(&mut self, done: impl Fn(&Session) -> bool) {
+        loop {
+            let Bench {
+                workspace,
+                browser,
+                queue,
+                log,
+                ..
+            } = &mut self.bench;
+            self.store.poll(workspace, browser, queue, log);
+            if done(self) {
+                return;
+            }
+            assert!(self.next(), "the backend answered");
+        }
+    }
+
     /// Ask for every file not read yet, and wait until each is read and decoded, and
     /// each left resting is checked.
     fn read_all(&mut self) {
@@ -77,7 +114,7 @@ impl Session {
     /// Wait for the open's answer, and for every part of its listing.
     fn opened(&mut self) {
         assert!(self.next(), "opening answered");
-        while self.store.scanning() {
+        while self.store.listing() || self.store.scanning() {
             assert!(self.next(), "the listing answered");
         }
     }
@@ -1418,6 +1455,153 @@ fn a_file_is_checked_against_what_was_read_and_not_what_was_listed() {
     assert_eq!(session.said("was not saved, because it changed on disk"), 1);
 }
 
+/// A folder renamed while the library is still being listed is renamed on disk at once.
+/// Everything under it goes with it: the rows of the index, with their tags and their
+/// unsaved edits, and the files the listing had still to bring back. Writes go meanwhile,
+/// and a file saved while the listing is in flight is not listed twice.
+#[test]
+fn a_folder_renamed_while_the_library_is_listed_takes_everything_under_it() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Gig/Deep")).unwrap();
+    fs::write(root.at("Gig/Grand.ne5p"), &program).unwrap();
+    fs::write(root.at("Gig/Deep/Pad.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.named("Grand.ne5p");
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(grand, tag, true);
+    let mine = with_gain(&program, "96");
+    let log = &mut first.bench.log;
+    first
+        .bench
+        .workspace
+        .replace_bytes(grand, mine.clone(), log);
+    first.close();
+    fs::write(root.at("Gig/Deep/New.ne5p"), with_gain(&program, "64")).unwrap();
+
+    let mut second = Session::opening(&root);
+    let folders = &second.bench.browser.folders;
+    let gig = folders.id_of(&LibPath::parse("Gig").unwrap());
+    let gig = gig.expect("the folder of a row of the index");
+    let rename = crate::browser::Act::RenameFolder {
+        id: gig,
+        name: "Set".into(),
+    };
+    second
+        .bench
+        .act(vec![rename, crate::browser::Act::NewFolder]);
+    let new = LibPath::parse("New folder").unwrap();
+    let folder = second.bench.browser.folders.id_of(&new);
+    let made = second.create();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut second.bench;
+    assert!(
+        second.store.sync(workspace, browser, queue, Pass::Files),
+        "nothing waits for the listing"
+    );
+    second.listed_whole();
+    assert_eq!(second.bench.browser.folders.id_of(&new), folder, "it stays");
+    let set = LibPath::parse("Set").unwrap();
+    assert_eq!(second.bench.browser.folders.id_of(&set), Some(gig));
+    second.sync();
+    let mut paths: Vec<String> = second
+        .bench
+        .workspace
+        .listed()
+        .filter_map(|entity| Some(entity.path.as_ref()?.to_string()))
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "Set/Deep/New.ne5p",
+            "Set/Deep/Pad.ne5p",
+            "Set/Grand.ne5p",
+            "untitled.ne5p"
+        ]
+    );
+    assert_eq!(second.path(made).as_deref(), Some("untitled.ne5p"));
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "New folder", "Set", "untitled.ne5p"]
+    );
+    assert_eq!(root.names("Set/Deep"), ["New.ne5p", "Pad.ne5p"]);
+    let entity = second.bench.workspace.get(grand).unwrap();
+    assert_eq!(entity.bytes, mine);
+    assert!(entity.is_unsaved());
+    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
+    second.close();
+
+    let third = Session::listed(&root);
+    assert_eq!(third.path(grand).as_deref(), Some("Set/Grand.ne5p"));
+    assert!(third.bench.browser.tags.worn(grand).contains(&tag));
+    let entity = third.bench.workspace.get(grand).unwrap();
+    assert_eq!(entity.bytes, mine, "its edit came back");
+    assert!(entity.is_unsaved());
+}
+
+/// A folder removed while the library is still being listed waits until everything in
+/// it has been listed, and then the usual rules apply: it goes, and what was in it moves
+/// up, unless it holds a file drawbar does not.
+#[test]
+fn a_folder_removed_while_the_library_is_listed_is_listed_first() {
+    let program = Fresh::Program.bytes().unwrap();
+    for stranger in [false, true] {
+        let root = Temp::new();
+        fs::create_dir_all(root.at("Old/Inner")).unwrap();
+        fs::write(root.at("top.ne5p"), &program).unwrap();
+        fs::write(root.at("Old/a.ne5p"), &program).unwrap();
+        fs::write(root.at("Old/Inner/b.ne5p"), &program).unwrap();
+        if stranger {
+            fs::write(root.at("Old/Inner/scan.pdf"), b"").unwrap();
+        }
+        let mut session = Session::opening(&root);
+        let old = LibPath::parse("Old").unwrap();
+        let id = session.bench.browser.folders.id_of(&old).expect("listed");
+        session
+            .bench
+            .act(vec![crate::browser::Act::RemoveFolder(id)]);
+        assert!(
+            session.bench.browser.folders.id_of(&old).is_some(),
+            "not before it is listed"
+        );
+        session.until(|session| session.bench.browser.folders.listed_whole(&old));
+        session.bench.act(Vec::new());
+        session.listed_whole();
+        session.sync();
+        match stranger {
+            false => {
+                assert_eq!(root.names(""), [".drawbar", "Inner", "a.ne5p", "top.ne5p"]);
+                assert_eq!(root.names("Inner"), ["b.ne5p"]);
+            }
+            true => {
+                assert_eq!(root.names(""), ["Old", "top.ne5p"]);
+                assert_eq!(session.said("holds files drawbar does not hold"), 1);
+            }
+        }
+    }
+}
+
+/// A send held while the library is still being listed is let go once the files read so
+/// far are looked at again, without a rescan of the whole tree.
+#[test]
+fn a_send_held_while_the_library_is_listed_goes_once_what_was_read_is_checked() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::opening(&root);
+    assert!(session.store.hold_send(), "the send waits");
+    assert!(session.store.scanning());
+    while session.store.holds_send() {
+        assert!(session.next(), "the check answered");
+    }
+    assert_eq!(session.said("nothing was sent"), 0);
+    session.listed_whole();
+}
+
 /// An act on a file not read yet waits for it to be read, and decodes it before it runs.
 #[test]
 fn acting_on_a_file_not_read_yet_reads_and_decodes_it_first() {
@@ -1456,7 +1640,7 @@ fn a_library_let_go_while_it_is_listed_keeps_what_its_index_held() {
     let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
     let mut second = Session { store, bench };
     assert!(second.next(), "opening answered");
-    assert!(second.store.scanning(), "its listing has not come back");
+    assert!(second.store.listing(), "its listing has not come back");
     second.close();
 
     let third = Session::open(&root);
