@@ -759,19 +759,23 @@ fn drop_down_style(ui: &mut egui::Ui) {
 }
 
 /// A section's title in the one-button menu: quiet, bold, and not a control.
+///
+/// ⚠️ As wide as its words, not the available width: a popup's first frame is a sizing
+/// pass with no width limit, and the popup keeps whatever width that pass took.
 fn section_title(ui: &mut egui::Ui, title: &str) {
     let ink = crate::app::caption(ui.visuals());
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), SECTION),
-        egui::Sense::hover(),
-    );
-    ui.painter().text(
-        egui::pos2(rect.left() + 8.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        title,
+    let galley = ui.painter().layout_no_wrap(
+        title.to_owned(),
         egui::FontId::new(11.5, crate::app::bold()),
         ink,
     );
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + 16.0, SECTION),
+        egui::Sense::hover(),
+    );
+    let top = rect.center().y - galley.size().y / 2.0;
+    ui.painter()
+        .galley(egui::pos2(rect.left() + 8.0, top), galley, ink);
 }
 
 #[cfg(test)]

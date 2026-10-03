@@ -1505,6 +1505,20 @@ mod tests {
                 assert!(painted.wrote(title), "{height}: {title}");
             }
             assert_eq!(painted.wrote("Open…"), flat, "{height}: File's items");
+            let widest = ctx.memory(|memory| {
+                memory
+                    .areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter(|layer| layer.order == egui::Order::Foreground)
+                    .filter_map(|layer| memory.area_rect(layer.id))
+                    .map(|rect| rect.width())
+                    .fold(0.0_f32, f32::max)
+            });
+            assert!(
+                widest < 400.0,
+                "{height}: the menu is {widest} wide, wider than its items"
+            );
         }
     }
 
