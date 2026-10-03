@@ -716,7 +716,7 @@ impl Browser {
         let library = self.sections.places && self.open.contains(&Branch::Computer);
         let naming = Naming {
             kept: match library {
-                true => super::families_present(workspace),
+                true => workspace.families_present(),
                 false => Vec::new(),
             },
             instrument: device.state.product().and_then(Family::from_product),

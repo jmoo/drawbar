@@ -383,21 +383,6 @@ fn qualified(kept: &[Family], asset: Option<Family>, instrument: Option<Family>)
     matches!((asset, instrument), (Some(asset), Some(held)) if asset != held)
 }
 
-/// The families of the assets on this computer, in [`Family::ALL`] order.
-///
-/// Files that name no family (the shared library formats, the carriers, bytes that did
-/// not decode) add none, so a list of samples spans no families.
-pub fn families_present(workspace: &Workspace) -> Vec<Family> {
-    let here: Vec<Family> = workspace
-        .listed()
-        .filter_map(|entity| Family::of_tag(&entity.tag()))
-        .collect();
-    Family::ALL
-        .into_iter()
-        .filter(|family| here.contains(family))
-        .collect()
-}
-
 /// One row of the tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {

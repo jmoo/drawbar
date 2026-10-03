@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use eframe::egui;
-use nord_format::accept::Slot;
+use nord_format::accept::{self, Slot};
 use nord_format::cbin::{Cbin, Generation, Header};
 use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
 use nord_format::{Entity, OrganPreset, PianoPreset, Program, Synth};
@@ -1080,6 +1080,14 @@ enum Incoming {
     Failed(String),
 }
 
+/// The families of the listed assets, as [`Workspace::families_present`] last took them.
+#[derive(Default)]
+struct Families {
+    /// The revision and layout they were taken at.
+    taken: Option<(u64, u64)>,
+    families: Vec<accept::Family>,
+}
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
@@ -1090,6 +1098,10 @@ pub struct Workspace {
     revision: u64,
     /// Bumped by every change to which assets are listed, or to their names and paths.
     layout: u64,
+    families: std::cell::RefCell<Families>,
+    /// How many times [`Workspace::families_present`] has been taken.
+    #[cfg(test)]
+    pub(crate) families_taken: std::cell::Cell<usize>,
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
@@ -1152,6 +1164,9 @@ impl Workspace {
         Workspace {
             entities: Vec::new(),
             at: Default::default(),
+            families: Default::default(),
+            #[cfg(test)]
+            families_taken: Default::default(),
             next_id: 1,
             revision: 0,
             layout: 1,
@@ -1185,6 +1200,35 @@ impl Workspace {
     /// of where they are is taken again only when it would differ.
     pub fn layout(&self) -> u64 {
         self.layout
+    }
+
+    /// The families of the listed assets, in [`accept::Family::ALL`] order.
+    ///
+    /// Files that name no family (the shared library formats, the carriers, bytes that did
+    /// not decode) add none, so a list of samples spans no families. Taken again only
+    /// when the list or one of its assets changes, so a frame that draws a family word
+    /// per row does not take it per row.
+    pub fn families_present(&self) -> Vec<accept::Family> {
+        let now = Some((self.revision, self.layout));
+        let mut held = self.families.borrow_mut();
+        if held.taken == now {
+            return held.families.clone();
+        }
+        let here: std::collections::HashSet<accept::Family> = self
+            .listed()
+            .filter_map(|entity| accept::Family::of_tag(&entity.tag()))
+            .collect();
+        let families: Vec<accept::Family> = accept::Family::ALL
+            .into_iter()
+            .filter(|family| here.contains(family))
+            .collect();
+        *held = Families {
+            taken: now,
+            families: families.clone(),
+        };
+        #[cfg(test)]
+        self.families_taken.set(self.families_taken.get() + 1);
+        families
     }
 
     /// Record a change to which assets are held, or to their names or paths.

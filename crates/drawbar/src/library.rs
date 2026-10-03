@@ -15,7 +15,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, micro, ui as ui_text, warn};
-use crate::browser::{cell_ink, families_present, qualifier, Act, Browser, Bulk, Item, Kind};
+use crate::browser::{cell_ink, qualifier, Act, Browser, Bulk, Item, Kind};
 use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{icon, painted, Glyph};
@@ -208,7 +208,7 @@ pub fn rows(
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
-    let kept = families_present(workspace);
+    let kept = workspace.families_present();
     let instrument = device.product().and_then(Family::from_product);
     for entity in workspace.listed() {
         // Claim the row's slot so the instrument's list does not repeat it.
@@ -290,7 +290,7 @@ pub fn row_of(
                 device,
                 queue,
                 tags.worn(id).len(),
-                &families_present(workspace),
+                &workspace.families_present(),
                 instrument,
             ))
         }
@@ -2392,6 +2392,72 @@ mod tests {
         });
         assert!(workspace.wanted(1), "the first row is in view");
         assert!(!workspace.wanted(500), "the last row is not");
+    }
+
+    /// Frames of the tree beside the table take the library's families once, and a file
+    /// read since is in them on the next frame.
+    #[test]
+    fn frames_take_the_families_once_per_change() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let mut library = Library::default();
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ns4p".into(),
+            path: Some(crate::store::LibPath::root().join("Grand.ns4p")),
+            origin: Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(1),
+            unsaved: None,
+        };
+        workspace.restore(vec![saved], None, &mut log);
+        let mut draw = |browser: &mut Browser, workspace: &Workspace| {
+            testing::run(
+                &ctx,
+                testing::screen(egui::vec2(1200.0, 600.0), Vec::new()),
+                |ctx| {
+                    egui::SidePanel::left("browser")
+                        .exact_width(crate::shell::BROWSER)
+                        .show(ctx, |ui| {
+                            browser.ui(ui, workspace, &device, &queue, &shell.filter);
+                        });
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new())
+                        .show(ctx, |ui| {
+                            library.ui(ui, browser, workspace, &device, &queue, &shell);
+                        });
+                },
+            );
+        };
+        for _ in 0..3 {
+            draw(&mut browser, &workspace);
+        }
+        assert_eq!(workspace.families_taken.get(), 1);
+        assert_eq!(
+            workspace.families_present(),
+            [Family::Stage4],
+            "what its name says"
+        );
+
+        workspace.take_wanted();
+        workspace.took(1, Some(Fresh::Program.bytes().unwrap()), None);
+        workspace.settle_files(&mut log);
+        draw(&mut browser, &workspace);
+        assert_eq!(workspace.families_taken.get(), 2);
+        assert_eq!(
+            workspace.families_present(),
+            [Family::Electro5],
+            "what it holds"
+        );
     }
 
     /// A frame of the table at the center's width with no dock open.

@@ -32,9 +32,7 @@ mod selection;
 mod tree;
 
 pub use act::{apply, bulk, foreign_format, Act, Bulk, LOAD_ON_INSTRUMENT};
-pub use drag::{
-    families_present, kinds_present, landing, qualifier, tagged, Carried, Held, Item, Kind, Onto,
-};
+pub use drag::{kinds_present, landing, qualifier, tagged, Carried, Held, Item, Kind, Onto};
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
