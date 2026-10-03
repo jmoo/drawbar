@@ -634,8 +634,9 @@ fn address(row: &Row) -> (bool, u32, u32, u32) {
     }
 }
 
-/// What sending the picked rows would do, in one sentence.
-pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String {
+/// What sending the picked rows would do, in one sentence, or `None` when no row is
+/// bound for a slot and nothing about them needs saying.
+pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> Option<String> {
     let mut going: Vec<(ObjectClass, Location)> =
         rows.iter().filter_map(|row| row.destination()).collect();
     going.sort_unstable_by_key(|(class, at)| (class.to_raw(), at.bank, at.slot));
@@ -681,10 +682,7 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> String
             n => said.push(format!("{n} need a {named} the instrument has not named")),
         }
     }
-    match said.is_empty() {
-        true => "Nothing selected goes to the instrument.".to_string(),
-        false => said.join(" · "),
-    }
+    (!said.is_empty()).then(|| said.join(" · "))
 }
 
 /// The destinations as one run per folder: `Programs 7:1–7:4`, in the order `going` is
@@ -2100,8 +2098,11 @@ mod tests {
         };
         let picked: Vec<&Row> = going.iter().collect();
         assert_eq!(
-            consequence(&picked, &device.state, &queue),
-            "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not named"
+            consequence(&picked, &device.state, &queue).as_deref(),
+            Some(
+                "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not \
+                 named"
+            )
         );
 
         // One of them is already in the queue, and the sentence says so.
@@ -2117,11 +2118,8 @@ mod tests {
             at(6, 3),
         );
         let picked: Vec<&Row> = going.iter().collect();
-        assert!(
-            consequence(&picked, &device.state, &queue).contains("1 already waiting"),
-            "{}",
-            consequence(&picked, &device.state, &queue)
-        );
+        let said = consequence(&picked, &device.state, &queue).unwrap_or_default();
+        assert!(said.contains("1 already waiting"), "{said}");
 
         // A row already on the instrument goes nowhere, so nothing is claimed for it.
         let there = vec![row(
@@ -2138,12 +2136,9 @@ mod tests {
         };
         assert_eq!(
             consequence(&only.iter().collect::<Vec<_>>(), &device.state, &queue),
-            "Nothing selected goes to the instrument."
+            None
         );
-        assert_eq!(
-            consequence(&[], &device.state, &queue),
-            "Nothing selected goes to the instrument."
-        );
+        assert_eq!(consequence(&[], &device.state, &queue), None);
     }
 
     /// The middle of the table's row `index`, far enough in to land on its name.

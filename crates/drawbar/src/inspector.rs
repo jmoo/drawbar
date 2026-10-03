@@ -324,8 +324,8 @@ fn about_selection(
     }
 }
 
-/// What sending the selection would do, then every action on the whole of it, wrapped
-/// to the card's width.
+/// What sending the selection would do, when there is something to say, then every
+/// action on the whole of it, wrapped to the card's width.
 #[allow(clippy::too_many_arguments)]
 fn bulk_actions(
     ui: &mut egui::Ui,
@@ -338,9 +338,8 @@ fn bulk_actions(
     acts: &mut Vec<Act>,
 ) {
     let rows: Vec<&Row> = rows.iter().collect();
-    let going = crate::library::consequence(&rows, &device.state, queue);
     ui.add_space(4.0);
-    if !going.is_empty() {
+    if let Some(going) = crate::library::consequence(&rows, &device.state, queue) {
         ui.add(egui::Label::new(egui::RichText::new(going).text_style(ui_text()).weak()).wrap());
     }
     ui.add_space(4.0);
