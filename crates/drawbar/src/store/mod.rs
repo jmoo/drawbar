@@ -45,6 +45,41 @@ pub use web::{default_root, permission, Backend, Picked, Root};
 #[cfg(not(target_arch = "wasm32"))]
 pub type Root = std::path::PathBuf;
 
+/// A file outside the library, to be copied into it: a path on the desktop.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Outside = std::path::PathBuf;
+
+/// A file outside the library, to be copied into it: a file the browser handed the page.
+#[cfg(target_arch = "wasm32")]
+pub type Outside = web_sys::File;
+
+/// The name a file outside the library goes by.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn outside_name(from: &Outside) -> String {
+    from.file_name().map_or_else(
+        || from.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The name a file outside the library goes by.
+#[cfg(target_arch = "wasm32")]
+pub fn outside_name(from: &Outside) -> String {
+    from.name()
+}
+
+/// How many bytes a file outside the library holds, where that can be told.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn outside_len(from: &Outside) -> Option<u64> {
+    std::fs::metadata(from).ok().map(|meta| meta.len())
+}
+
+/// How many bytes a file outside the library holds.
+#[cfg(target_arch = "wasm32")]
+pub fn outside_len(from: &Outside) -> Option<u64> {
+    Some(from.size() as u64)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub use cache::keep_libraries;
 pub use cache::Cache;
@@ -441,6 +476,16 @@ pub enum Cmd {
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].
     Move { from: LibPath, to: LibPath },
+    /// Copy a file from outside the library to `path`, as [`Cmd::Save`] writes one: a new
+    /// file when `expect` is `None`, otherwise over a file that must still hold what
+    /// `expect` says. Nothing is read whole: a piano or sample instrument is left resting
+    /// in the copy, and any other file is left unread. Answered by [`Event::Imported`].
+    Import {
+        id: u64,
+        path: LibPath,
+        from: Outside,
+        expect: Option<Fingerprint>,
+    },
     /// Answered only on failure.
     MakeDir(LibPath),
     /// Delete a file that must still hold what `expect` says. Answered only on failure.
@@ -480,6 +525,12 @@ pub enum Event {
         id: u64,
         path: LibPath,
         result: Result<Fingerprint, Failure>,
+    },
+    /// What a [`Cmd::Import`] copied, as a listing finds it.
+    Imported {
+        id: u64,
+        path: LibPath,
+        result: Result<Found, Failure>,
     },
     /// Whether a [`Cmd::Move`] moved anything, and why not.
     Moved {

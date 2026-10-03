@@ -10,6 +10,8 @@ pub mod browser;
 pub mod device;
 pub mod document;
 pub mod drawbar_widget;
+#[cfg(target_arch = "wasm32")]
+mod dropped;
 pub mod fields;
 pub mod filter;
 pub mod folders;

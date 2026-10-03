@@ -22,7 +22,7 @@ use crate::log::Log;
 use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
-use crate::store::{names, LibPath};
+use crate::store::{names, LibPath, Outside};
 use crate::summary::{Naming, Plays, Summary, Verdict};
 use crate::work;
 
@@ -1181,6 +1181,8 @@ enum Incoming {
         name: String,
         bytes: Vec<u8>,
     },
+    /// A file File ▸ Open… picked, to be copied into the library.
+    Picked(Outside),
     /// Every file one pick of WAVs returned, together, because the draft asks one
     /// question about the whole set.
     Wavs {
@@ -1233,6 +1235,11 @@ pub struct Workspace {
     waking: Vec<Wake>,
     /// The files, by [`OnDisk::serial`], a read whole out of failed. Each is read once.
     unwoken: std::collections::BTreeSet<u64>,
+    /// Assets whose file is being copied in from outside the library, each with the file
+    /// it comes from. Each is unread until its copy lands.
+    arriving: std::collections::BTreeMap<u64, Outside>,
+    /// The files File ▸ Open… picked, not yet taken.
+    picked: Vec<Outside>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
     /// asked for first.
     undecoded: VecDeque<u64>,
@@ -1304,6 +1311,8 @@ impl Workspace {
             checking: None,
             waking: Vec::new(),
             unwoken: Default::default(),
+            arriving: Default::default(),
+            picked: Vec::new(),
             undecoded: VecDeque::new(),
             hurried: Default::default(),
             wanted: Default::default(),
@@ -1897,6 +1906,9 @@ impl Workspace {
         let Some(entity) = self.get(id) else {
             return;
         };
+        if self.arriving.contains_key(&id) {
+            return;
+        }
         entity.seen.set(self.frame);
         let remembered = matches!(entity.verify, VerifyState::Remembered(_));
         if !entity.reading() && !(whole && remembered) {
@@ -2292,6 +2304,73 @@ impl Workspace {
         (id, arrival)
     }
 
+    /// Take the file outside the library at `from`, `len` bytes, onto this computer at
+    /// `path`: an asset unread until the library has copied the file there, which it then
+    /// reads as any file of its own.
+    pub fn arrive(&mut self, path: LibPath, from: Outside, len: u64) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = path.leaf().to_string();
+        let stamp = self.stamp();
+        let origin = Origin::File(name.clone());
+        self.entities.push(LocalEntity {
+            path: Some(path),
+            ..LocalEntity::listed(id, name, origin, len, stamp)
+        });
+        self.layout += 1;
+        self.arriving.insert(id, from);
+        id
+    }
+
+    /// Copy the file outside the library at `from`, `len` bytes, over the file of the
+    /// asset `id`, which is unread until the copy lands. Its tags and its place stay.
+    pub fn arrive_over(&mut self, id: u64, from: Outside, len: u64) {
+        self.relist(id, len);
+        if self.get(id).is_some() {
+            self.arriving.insert(id, from);
+        }
+    }
+
+    /// Copy `from` in again for an asset whose copy did not land.
+    pub fn arrive_again(&mut self, id: u64, from: Outside) {
+        if self.get(id).is_some() {
+            self.arriving.insert(id, from);
+        }
+    }
+
+    /// The file outside the library an asset's copy comes from, while it is arriving.
+    pub fn arriving(&self, id: u64) -> Option<&Outside> {
+        self.arriving.get(&id)
+    }
+
+    /// An asset's copy has answered: it no longer arrives.
+    pub fn arrived(&mut self, id: u64) -> Option<Outside> {
+        self.arriving.remove(&id)
+    }
+
+    /// Let go of what an asset holds, unread again as a file of `len` bytes under a new
+    /// stamp, for a file that holds something else now.
+    pub fn relist(&mut self, id: u64, len: u64) {
+        let stamp = self.stamp();
+        self.swap(id, false, |held| {
+            let (name, origin) = (held.name.clone(), held.origin.clone());
+            LocalEntity::listed(id, name, origin, len, stamp)
+        });
+    }
+
+    /// Read the file outside the library at `from` whole, and open it as a file kept
+    /// nowhere yet, as a library that cannot take a copy of it holds it.
+    pub fn read_outside(&self, name: String, from: Outside) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        spawn(async move {
+            let _ = tx.send(match read_outside(&from).await {
+                Ok(bytes) => Incoming::Opened { name, bytes },
+                Err(e) => Incoming::Failed(format!("{name}: {e}")),
+            });
+            ctx.request_repaint();
+        });
+    }
+
     /// Take `bytes` onto this computer, and say so.
     pub fn ingest(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
         let (id, arrival) = self.add(name.clone(), origin, bytes, log);
@@ -2338,6 +2417,7 @@ impl Workspace {
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 Incoming::Opened { name, bytes } => opened.push((name, bytes)),
+                Incoming::Picked(from) => self.picked.push(from),
                 Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Note(text) => log.say(text),
                 Incoming::Failed(text) => log.trouble(text),
@@ -2382,14 +2462,15 @@ impl Workspace {
                 .pick_files()
                 .await;
             for handle in picked.unwrap_or_default() {
-                let bytes = handle.read().await;
-                let _ = tx.send(Incoming::Opened {
-                    name: handle.file_name(),
-                    bytes,
-                });
+                let _ = tx.send(Incoming::Picked(handle.inner().to_owned()));
             }
             ctx.request_repaint();
         });
+    }
+
+    /// The files File ▸ Open… picked since the last call.
+    pub fn take_picked(&mut self) -> Vec<Outside> {
+        std::mem::take(&mut self.picked)
     }
 
     /// Pick the WAVs a new project or instrument is laid out from.
@@ -2700,6 +2781,7 @@ impl Workspace {
     /// Let go of an asset without a word, as when it turns out to be another asset's
     /// file.
     pub fn forget(&mut self, id: u64) -> Option<LocalEntity> {
+        self.arriving.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
         self.moved();
@@ -2866,6 +2948,19 @@ impl Workspace {
             }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_outside(from: &Outside) -> std::io::Result<Vec<u8>> {
+    std::fs::read(from)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn read_outside(from: &Outside) -> std::io::Result<Vec<u8>> {
+    let buffer = wasm_bindgen_futures::JsFuture::from(from.array_buffer())
+        .await
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
 /// Hand `bytes` to the user under `name`, however this target saves a file.

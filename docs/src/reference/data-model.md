@@ -352,6 +352,22 @@ its own. A `File` snapshot fails to read once its file is written, so a move thi
 tab makes takes the snapshot again where the file went, and a file written over
 is indexed again.
 
+A file from outside, dropped or picked with File ▸ Open…, is copied into the
+library by `Cmd::Import` and never held (`Act::Take`). Its asset waits unread
+until the copy lands (`Workspace::arrive`), then rests where it is a piano or
+sample instrument and is read on demand otherwise. A name already taken asks, as
+a rename does: Overwrite copies over the file there (`Act::TakeOver`), with the
+same check a save makes, and Keep both copies under a free name. A copy whose name
+something took first is placed again, and one that fails, as at a library that
+turns read-only, is read into memory instead. On the desktop the copy streams
+into a hidden sibling and is linked into place; in the browser the page slices the
+`File` and hands each slice to the writer, or to the picked folder's writable
+stream, without passing it through the tab's memory. The browser catches a drop on its way to the canvas
+(`dropped.rs`), since eframe reads a dropped file whole, and lands it in the
+folder whose tree row it fell on. The desktop windowing reports no drop point, so
+there a drop lands at the top level unless the pointer moved over the window while
+the files hovered.
+
 Some acts still need the whole file. They read it whole off the frame first
 (`Workspace::wake`): opening a sample in its editor, laying out a piano edit to
 save it, a send, Keep both, Duplicate, and an Overwrite that replaces another
@@ -376,6 +392,7 @@ asynchronously.
 | `Read` | `Read`: each file, held whole or resting, or why not. |
 | `Fingerprint` | `Fingerprinted`: the CRCs of files whose stat has not moved. |
 | `Save` | `Saved`: the new fingerprint, or why not. |
+| `Import` | `Imported`: the copy of a file from outside, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
 | `Commit`, `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |
 

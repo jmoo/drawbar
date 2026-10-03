@@ -21,6 +21,7 @@ use crate::device::{read_only, Device, DeviceState};
 use crate::filter::Filter;
 use crate::folders::Folders;
 use crate::queue::Queue;
+use crate::store::LibPath;
 use crate::tags::Tags;
 use crate::workspace::Workspace;
 
@@ -138,6 +139,9 @@ pub struct Browser {
     rows: Rows,
     /// Acts waiting for the assets they read to be read, in the order they were asked.
     held: Vec<Act>,
+    /// Where this computer's folders were drawn as places a drop lands, in drawing order:
+    /// `None` for the library's own top level.
+    targets: Vec<(egui::Rect, Option<u64>)>,
 }
 
 impl Default for Browser {
@@ -154,6 +158,7 @@ impl Default for Browser {
             jump: None,
             rows: Rows::default(),
             held: Vec::new(),
+            targets: Vec::new(),
         }
     }
 }
@@ -382,6 +387,11 @@ impl Browser {
         onto: Onto,
         acts: &mut Vec<Act>,
     ) {
+        match onto {
+            Onto::Computer => self.targets.push((response.rect, None)),
+            Onto::Group(folder) => self.targets.push((response.rect, Some(folder))),
+            Onto::Slot { .. } => {}
+        }
         if let Some(carried) = response.dnd_hover_payload::<Carried>() {
             if landing(&carried.head, onto).is_ok() {
                 ui.painter().rect_stroke(
@@ -396,6 +406,28 @@ impl Browser {
             return;
         };
         self.land(&carried, onto, acts);
+    }
+
+    /// The folder a file dropped from outside at `at` lands in: the one whose row was
+    /// drawn there last frame, and otherwise the library's top level.
+    pub fn landing_dir(&self, at: Option<egui::Pos2>) -> LibPath {
+        let folder = at.and_then(|at| {
+            let (_, folder) = self
+                .targets
+                .iter()
+                .rev()
+                .find(|(rect, _)| rect.contains(at))?;
+            Some(*folder)
+        });
+        folder
+            .flatten()
+            .and_then(|folder| self.folders.path_of(folder).cloned())
+            .unwrap_or_else(LibPath::root)
+    }
+
+    /// Forget where the folders were drawn, before the frame draws them again.
+    pub fn forget_targets(&mut self) {
+        self.targets.clear();
     }
 
     /// Run the drop for the pressed row, and for the rest of what it carries when the
@@ -1008,6 +1040,40 @@ mod tests {
         assert!(
             matches!(onto_loose.as_slice(), [Act::File { folder: None, .. }]),
             "a drop on a loose row takes the asset out of the folder"
+        );
+    }
+
+    /// A file dropped from outside lands in the folder whose row it was dropped on, and
+    /// anywhere else, or where the drop point is not known, at the library's top level.
+    #[test]
+    fn a_file_dropped_on_a_folder_row_lands_in_that_folder() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        let folder = browser.folders.make(&LibPath::root(), &workspace);
+        let path = browser.folders.path_of(folder).cloned().unwrap();
+        let input = testing::screen(egui::vec2(400.0, 600.0), Vec::new());
+        let output = testing::run(&ctx, input, |ctx| {
+            egui::SidePanel::left("places").show(ctx, |ui| {
+                browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+            });
+        });
+        let row = testing::where_(&testing::painted(&output), path.leaf());
+        assert_eq!(browser.landing_dir(Some(row.center())), path);
+        let elsewhere = egui::pos2(390.0, 590.0);
+        assert_eq!(browser.landing_dir(Some(elsewhere)), LibPath::root());
+        assert_eq!(browser.landing_dir(None), LibPath::root());
+
+        browser.forget_targets();
+        assert_eq!(
+            browser.landing_dir(Some(row.center())),
+            LibPath::root(),
+            "only where the rows were drawn last"
         );
     }
 

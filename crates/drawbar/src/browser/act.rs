@@ -14,7 +14,7 @@ use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Page, Shell};
-use crate::store::{names, LibPath};
+use crate::store::{names, outside_len, LibPath, Outside};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Origin, VerifyState, Workspace};
@@ -42,6 +42,18 @@ pub enum Act {
     Import {
         name: String,
         bytes: Vec<u8>,
+    },
+    /// Copy a file from outside the library into the folder `dir`, as `name`.
+    Take {
+        from: Outside,
+        dir: LibPath,
+        name: String,
+    },
+    /// Copy a file from outside the library over the file of the asset `id`, which keeps
+    /// its id, folder and tags.
+    TakeOver {
+        id: u64,
+        from: Outside,
     },
     /// Put bytes over an existing asset, which keeps its id, folder and tags. `gone` is an
     /// asset the overwrite came from and removes: one renamed or moved onto the name.
@@ -220,6 +232,8 @@ impl Act {
             | Act::Resync
             | Act::ReadAgain(_)
             | Act::Import { .. }
+            | Act::Take { .. }
+            | Act::TakeOver { .. }
             | Act::Forget(_)
             | Act::NewFolder
             | Act::NewFolderIn(_)
@@ -535,6 +549,8 @@ pub fn apply(
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
+            Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
+            Act::TakeOver { id, from } => take_over(workspace, log, id, from),
             Act::Overwrite { id, bytes, gone } => {
                 workspace.replace_bytes(id, bytes, log);
                 workspace.mark_saved(id);
@@ -793,19 +809,19 @@ fn over(
     bytes: Vec<u8>,
     gone: Option<u64>,
 ) -> Option<Vec<Act>> {
+    let id = overwritable(occupant, workspace)?;
+    Some(vec![Act::Overwrite { id, bytes, gone }])
+}
+
+/// The asset a clash may overwrite: not a folder, a row whose file is gone, or an asset
+/// holding the only copy of something.
+fn overwritable(occupant: Occupant, workspace: &Workspace) -> Option<u64> {
     let Occupant::Asset(held) = occupant else {
         return None;
     };
-    let entity = workspace.get(held)?;
     // The queue is not consulted: an asset waiting to be sent can take new bytes, and
     // the queue diffs them again.
-    (!entity.is_unsaved()).then(|| {
-        vec![Act::Overwrite {
-            id: held,
-            bytes,
-            gone,
-        }]
-    })
+    (!workspace.get(held)?.is_unsaved()).then_some(held)
 }
 
 fn ambiguous(held: &[String], dir: &LibPath) -> String {
@@ -847,6 +863,59 @@ fn import(
             let over = over(occupant, workspace, bytes, None);
             browser.ask_clash(&name, &root, over, both, &free);
         }
+    }
+}
+
+/// A file from outside the library, copied into the folder `dir` as `name`, where it is
+/// then read as any file of the library's own.
+fn take(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    log: &mut Log,
+    from: Outside,
+    dir: LibPath,
+    name: String,
+) {
+    if let Some(why) = names::refusal(&name) {
+        return log.trouble(format!(
+            "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
+        ));
+    }
+    let Some(len) = outside_len(&from) else {
+        return log.trouble(format!("“{name}” could not be read."));
+    };
+    match browser.folders.clash(&dir, &name, workspace, None) {
+        Clash::Free => {
+            workspace.arrive(dir.join(&name), from, len);
+        }
+        Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
+        Clash::Taken(occupant) => {
+            let free = browser.folders.free(&dir, &name, workspace);
+            let over = overwritable(occupant, workspace).map(|id| {
+                vec![Act::TakeOver {
+                    id,
+                    from: from.clone(),
+                }]
+            });
+            let both = vec![Act::Take {
+                from,
+                dir: dir.clone(),
+                name: free.clone(),
+            }];
+            browser.ask_clash(&name, &dir, over, both, &free);
+        }
+    }
+}
+
+/// A file from outside the library, copied over the file of the asset `id`.
+fn take_over(workspace: &mut Workspace, log: &mut Log, id: u64, from: Outside) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    let name = entity.name.clone();
+    match outside_len(&from) {
+        Some(len) => workspace.arrive_over(id, from, len),
+        None => log.trouble(format!("The file to put over “{name}” could not be read.")),
     }
 }
 

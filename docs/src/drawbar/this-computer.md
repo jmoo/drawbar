@@ -5,10 +5,14 @@ you copy off an instrument.
 
 ## Opening and making
 
-Drop files on the window, or use **File ▸ Open…**. Every file is decoded and
-immediately re-encoded to check that its bytes come back identical, and the
-activity log tells you if one does not. A file drawbar cannot read still gets a
-row, so you can see what went wrong.
+Drop files on the window, or use **File ▸ Open…**, and drawbar copies them into
+the library; the files you chose stay where they were. A file dropped on a folder
+in the tree goes into that folder where the browser or the system says where it
+was dropped, and into the top level otherwise. A library drawbar cannot write
+holds what you open in memory instead. Every file is decoded and immediately
+re-encoded to check that its bytes come back identical, and the activity log
+tells you if one does not. A file drawbar cannot read still gets a row, so you
+can see what went wrong.
 
 **New** makes a fresh program, live slot, set list, settings file or preset for
 the instruments drawbar supports, a sample instrument or piano library from WAVs,

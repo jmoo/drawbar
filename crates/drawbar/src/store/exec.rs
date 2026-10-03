@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use super::sidecar::{self, Read, Sidecar};
 use super::{
-    Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened, Stat,
+    Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened, Outside,
+    Stat,
 };
 use crate::ondisk::OnDisk;
 
@@ -113,6 +114,9 @@ pub trait Fs {
     /// Write a file over whatever is there. Afterwards, or after a crash at any point,
     /// the path holds the old contents or the new, never part of either.
     async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
+    /// [`Fs::create`], or [`Fs::replace`] where `over` is set, of a copy of the file
+    /// outside the library at `from`, which is never held whole.
+    async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()>;
     /// Rename a file or folder. Refused when another entry is at `to`.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
     async fn make_dir(&mut self, path: &str) -> io::Result<()>;
@@ -170,9 +174,16 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
     *ran += 1;
     if writes(&cmd) {
         if let Err(why) = take(fs).await {
-            if let Cmd::Move { from, to } = cmd {
-                let result = Err(why.clone());
-                answer(Event::Moved { from, to, result });
+            match cmd {
+                Cmd::Move { from, to } => {
+                    let result = Err(why.clone());
+                    answer(Event::Moved { from, to, result });
+                }
+                Cmd::Import { id, path, .. } => {
+                    let result = Err(Failure::Io(why.clone()));
+                    answer(Event::Imported { id, path, result });
+                }
+                _ => {}
             }
             return answer(Event::ReadOnly(why));
         }
@@ -212,6 +223,15 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             let result = fs.rename(from.as_str(), to.as_str()).await;
             let result = result.map_err(|e| e.to_string());
             Some(Event::Moved { from, to, result })
+        }
+        Cmd::Import {
+            id,
+            path,
+            from,
+            expect,
+        } => {
+            let result = import(fs, &path, &from, expect).await;
+            Some(Event::Imported { id, path, result })
         }
         Cmd::MakeDir(path) => fs
             .make_dir(path.as_str())
@@ -601,7 +621,7 @@ impl Follow {
                 from: from.clone(),
                 to: to.clone(),
             },
-            Cmd::Save { path, .. } => Follow::Wrote(path.clone()),
+            Cmd::Save { path, .. } | Cmd::Import { path, .. } => Follow::Wrote(path.clone()),
             Cmd::MakeDir(path) => Follow::Made(path.clone()),
             Cmd::RemoveDir(path) => Follow::Removed(path.clone()),
             _ => Follow::Nothing,
@@ -616,6 +636,7 @@ fn failed(event: &Event) -> bool {
         Event::Failed(_)
             | Event::ReadOnly(_)
             | Event::Saved { result: Err(_), .. }
+            | Event::Imported { result: Err(_), .. }
             | Event::Moved { result: Err(_), .. }
     )
 }
@@ -1246,6 +1267,37 @@ async fn save(
     Ok(Fingerprint::of(stat, bytes))
 }
 
+/// Copy the file at `from` into the library at `path`, and find it there as a listing
+/// would: resting, where it is a piano or sample instrument, and otherwise unread.
+async fn import(
+    fs: &mut impl Fs,
+    path: &LibPath,
+    from: &Outside,
+    expect: Option<Fingerprint>,
+) -> Result<Found, Failure> {
+    let io = |e: io::Error| Failure::Io(e.to_string());
+    match expect {
+        None => match fs.copy_in(path.as_str(), from, false).await {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Moved),
+            copied => copied.map_err(io)?,
+        },
+        Some(expect) => match still(fs, path, &expect).await.map_err(io)? {
+            Some(true) => fs.copy_in(path.as_str(), from, true).await.map_err(io)?,
+            Some(false) | None => return Err(Failure::Moved),
+        },
+    }
+    let stat = fs
+        .stat(path.as_str())
+        .await
+        .map_err(io)?
+        .ok_or_else(|| Failure::Io("the file was gone as soon as it was copied".into()))?;
+    let file = fs.rest(path.as_str(), None).await.map_err(io)?;
+    Ok(Found {
+        file,
+        ..Found::unread(path.clone(), stat)
+    })
+}
+
 /// Remove a folder drawbar has emptied. macOS leaves a `.DS_Store` in any folder Finder
 /// has shown, which would otherwise keep it from being removed.
 async fn remove_dir(fs: &mut impl Fs, path: &LibPath) -> io::Result<()> {
@@ -1377,6 +1429,10 @@ mod tests {
             self.files.insert(path.to_string(), bytes.len() as u64);
             Ok(())
         }
+        async fn copy_in(&mut self, _: &str, _: &Outside, _: bool) -> io::Result<()> {
+            Err(refused())
+        }
+
         async fn replace(&mut self, _: &str, _: &[u8]) -> io::Result<()> {
             Err(refused())
         }

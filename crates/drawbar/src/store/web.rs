@@ -35,7 +35,7 @@ use web_sys::{
 };
 
 use super::exec::{self, Children, Fs, Kind, TMP, WORKING};
-use super::{names, Cmd, Event, Failure, Fingerprint, Stat};
+use super::{names, Cmd, Event, Failure, Fingerprint, Outside, Stat};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
 use crate::room::measure as size;
@@ -298,6 +298,11 @@ fn refused(cmd: Cmd, why: &str) -> Event {
             path,
             result: Err(Failure::Io(why.to_string())),
         },
+        Cmd::Import { id, path, .. } => Event::Imported {
+            id,
+            path,
+            result: Err(Failure::Io(why.to_string())),
+        },
         Cmd::Move { from, to } => Event::Moved {
             from,
             to,
@@ -472,21 +477,21 @@ impl Writer {
         ))
     }
 
-    /// Write `bytes` to a new file at `temp`, flushed, in chunks. A file begun and not
+    /// Write `contents` to a new file at `temp`, flushed, in chunks. A file begun and not
     /// finished is deleted.
-    async fn write(&self, temp: &str, bytes: &[u8]) -> io::Result<()> {
+    async fn write(&self, temp: &str, contents: Contents<'_>) -> io::Result<()> {
         let wrote = async {
             self.ask("begin", temp, &[]).await?;
-            for (n, chunk) in bytes.chunks(CHUNK).enumerate() {
-                let data = Uint8Array::new_with_length(chunk.len() as u32);
-                data.copy_from(chunk);
-                let at = (n * CHUNK) as f64;
+            let mut at = 0;
+            while let Some(data) = contents.chunk(at).await? {
+                let len = data.byte_length() as usize;
                 self.ask(
                     "write",
                     temp,
-                    &[("at", at.into()), ("data", data.buffer().into())],
+                    &[("at", (at as f64).into()), ("data", data.into())],
                 )
                 .await?;
+                at += len;
             }
             self.ask("end", temp, &[]).await
         }
@@ -495,6 +500,48 @@ impl Writer {
             let _ = self.ask("abandon", temp, &[]).await;
         }
         wrote.map(|_| ())
+    }
+}
+
+/// What a write puts in a file: bytes this tab holds, or a file the browser handed it,
+/// which crosses to the file a slice at a time without passing through this tab's memory.
+#[derive(Clone, Copy)]
+enum Contents<'a> {
+    Bytes(&'a [u8]),
+    Blob(&'a web_sys::Blob),
+}
+
+impl Contents<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Contents::Bytes(bytes) => bytes.len(),
+            Contents::Blob(blob) => blob.size() as usize,
+        }
+    }
+
+    /// The chunk that starts at `at`, or `None` past the end.
+    async fn chunk(&self, at: usize) -> io::Result<Option<js_sys::ArrayBuffer>> {
+        let end = self.len().min(at.saturating_add(CHUNK));
+        if at >= end {
+            return Ok(None);
+        }
+        match self {
+            Contents::Bytes(bytes) => {
+                let data = Uint8Array::new_with_length((end - at) as u32);
+                data.copy_from(&bytes[at..end]);
+                Ok(Some(data.buffer()))
+            }
+            Contents::Blob(blob) => {
+                let slice = blob
+                    .slice_with_f64_and_f64(at as f64, end as f64)
+                    .map_err(failed)?;
+                let data: js_sys::ArrayBuffer = settle(slice.array_buffer()).await?;
+                if data.byte_length() as usize != end - at {
+                    return Err(io::Error::other("the file changed while it was copied"));
+                }
+                Ok(Some(data))
+            }
+        }
     }
 }
 
@@ -691,11 +738,11 @@ impl Folder {
         }
     }
 
-    /// Write `bytes` to a new file under `.drawbar/tmp/`, flushed, and return its path.
+    /// Write `contents` to a new file under `.drawbar/tmp/`, flushed, and return its path.
     ///
     /// The file takes `path`'s extension: Chrome reads a file moved to a new extension
     /// whole, for a Safe Browsing check, before it lets the move land.
-    async fn stage(&mut self, path: &str, bytes: &[u8]) -> io::Result<String> {
+    async fn stage(&mut self, path: &str, contents: Contents<'_>) -> io::Result<String> {
         let extension = path
             .rsplit('/')
             .next()
@@ -708,8 +755,8 @@ impl Folder {
             ask_to_keep(self.room.clone());
         }
         let wrote = match &mut self.writes {
-            Writes::Worker(writer) => started(writer)?.write(&temp, bytes).await,
-            Writes::Streams { .. } => self.stream(&temp, bytes).await,
+            Writes::Worker(writer) => started(writer)?.write(&temp, contents).await,
+            Writes::Streams { .. } => self.stream(&temp, contents).await,
         };
         match wrote {
             Ok(()) => Ok(temp),
@@ -718,9 +765,9 @@ impl Folder {
         }
     }
 
-    /// Write `bytes` to a new file at `temp` through a writable stream, which the browser
-    /// applies to the file only as it closes.
-    async fn stream(&self, temp: &str, bytes: &[u8]) -> io::Result<()> {
+    /// Write `contents` to a new file at `temp` through a writable stream, which the
+    /// browser applies to the file only as it closes.
+    async fn stream(&self, temp: &str, contents: Contents<'_>) -> io::Result<()> {
         let (dir, leaf) = self.spot(temp).await?;
         let options = FileSystemGetFileOptions::new();
         options.set_create(true);
@@ -728,9 +775,9 @@ impl Folder {
             settle(dir.get_file_handle_with_options(&leaf, &options)).await?;
         let stream: FileSystemWritableFileStream = settle(file.create_writable()).await?;
         let wrote = async {
-            for chunk in bytes.chunks(CHUNK) {
-                let data = Uint8Array::new_with_length(chunk.len() as u32);
-                data.copy_from(chunk);
+            let mut at = 0;
+            while let Some(data) = contents.chunk(at).await? {
+                at += data.byte_length() as usize;
                 let writing = stream.write_with_buffer_source(&data).map_err(failed)?;
                 JsFuture::from(writing).await.map_err(failed)?;
             }
@@ -1132,13 +1179,25 @@ impl Fs for Folder {
         if self.taken(path).await? {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        let temp = self.stage(path, bytes).await?;
+        let temp = self.stage(path, Contents::Bytes(bytes)).await?;
         self.place(&temp, path).await
     }
 
     async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let temp = self.stage(path, bytes).await?;
+        let temp = self.stage(path, Contents::Bytes(bytes)).await?;
         self.forget(path);
+        self.place(&temp, path).await
+    }
+
+    /// ⚠️ As [`Fs::create`], the check and the move are two steps.
+    async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()> {
+        if !over && self.taken(path).await? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let temp = self.stage(path, Contents::Blob(from)).await?;
+        if over {
+            self.forget(path);
+        }
         self.place(&temp, path).await
     }
 

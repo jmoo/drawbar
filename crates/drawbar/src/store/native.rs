@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use eframe::egui;
 
 use super::exec::{self, Children, Fs, Kind, TEMP, TMP, WORKING};
-use super::{Cmd, Event, Fingerprint, Stat};
+use super::{Cmd, Event, Fingerprint, Outside, Stat};
 use crate::ondisk::OnDisk;
 
 /// The folder the default library is, inside drawbar's own data.
@@ -186,11 +186,15 @@ impl Disk {
         Ok(at)
     }
 
-    /// Write `bytes` to the temporary for `path`, synced to the disk.
-    fn stage(&self, path: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    /// Write the temporary for `path` with `write`, synced to the disk.
+    fn stage(
+        &self,
+        path: &str,
+        write: impl FnOnce(&mut File) -> io::Result<()>,
+    ) -> io::Result<PathBuf> {
         let temp = self.locate(&temp_for(path))?;
         let wrote = File::create(&temp).and_then(|mut file| {
-            file.write_all(bytes)?;
+            write(&mut file)?;
             file.sync_all()
         });
         match wrote {
@@ -199,6 +203,36 @@ impl Disk {
                 let _ = fs::remove_file(&temp);
                 Err(e)
             }
+        }
+    }
+
+    /// Put the temporary `temp` at `path`: over whatever is there where `over` is set,
+    /// and otherwise only where nothing is, as [`Fs::create`] says.
+    fn place(&self, temp: PathBuf, path: &str, over: bool) -> io::Result<()> {
+        let target = self.locate(path)?;
+        let placed = match over {
+            true => fs::rename(&temp, &target),
+            // A hard link appears whole and refuses a name already taken, which a rename
+            // would overwrite. A volume without links (FAT, some shares) falls back to the
+            // check before the write and a rename.
+            false => match fs::hard_link(&temp, &target) {
+                Ok(()) => fs::remove_file(&temp),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+                Err(_) => fs::rename(&temp, &target),
+            },
+        };
+        if placed.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        placed?;
+        sync_dir(parent(&target))
+    }
+
+    /// Refuse a new file where an entry already is.
+    fn free(&self, path: &str) -> io::Result<()> {
+        match fs::symlink_metadata(self.locate(path)?) {
+            Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
+            Err(_) => Ok(()),
         }
     }
 }
@@ -376,34 +410,25 @@ impl Fs for Disk {
     }
 
     async fn create(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let target = self.locate(path)?;
-        if fs::symlink_metadata(&target).is_ok() {
-            return Err(io::ErrorKind::AlreadyExists.into());
-        }
-        let temp = self.stage(path, bytes)?;
-        // A hard link appears whole and refuses a name already taken, which a rename
-        // would overwrite. A volume without links (FAT, some shares) falls back to the
-        // check above and a rename.
-        let placed = match fs::hard_link(&temp, &target) {
-            Ok(()) => fs::remove_file(&temp),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
-            Err(_) => fs::rename(&temp, &target),
-        };
-        if placed.is_err() {
-            let _ = fs::remove_file(&temp);
-        }
-        placed?;
-        sync_dir(parent(&target))
+        self.free(path)?;
+        let temp = self.stage(path, |file| file.write_all(bytes))?;
+        self.place(temp, path, false)
     }
 
     async fn replace(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let target = self.locate(path)?;
-        let temp = self.stage(path, bytes)?;
-        if let Err(e) = fs::rename(&temp, &target) {
-            let _ = fs::remove_file(&temp);
-            return Err(e);
+        let temp = self.stage(path, |file| file.write_all(bytes))?;
+        self.place(temp, path, true)
+    }
+
+    async fn copy_in(&mut self, path: &str, from: &Outside, over: bool) -> io::Result<()> {
+        if !over {
+            self.free(path)?;
         }
-        sync_dir(parent(&target))
+        let temp = self.stage(path, |file| {
+            io::copy(&mut File::open(from)?, file)?;
+            Ok(())
+        })?;
+        self.place(temp, path, over)
     }
 
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {

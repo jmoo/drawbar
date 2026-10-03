@@ -15,7 +15,7 @@ use super::exec::{too_much, working_name};
 use super::sidecar::{Row, Sidecar, VERSION};
 use super::{
     names, Backend, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing,
-    Opened, MOST_BYTES,
+    Opened, Outside, MOST_BYTES,
 };
 use crate::browser::Browser;
 use crate::folders::{Folders, Op, Where};
@@ -454,6 +454,12 @@ impl Store {
 
     fn open(&self) -> bool {
         matches!(self.phase, Phase::Open)
+    }
+
+    /// Whether a file from outside can be copied into the library: it is open, and
+    /// nothing has said it may not be written.
+    pub fn takes_files(&self) -> bool {
+        self.open()
     }
 
     fn opened(&self) -> bool {
@@ -956,6 +962,9 @@ impl Store {
             },
             Event::Saved { id, path, result } => {
                 self.saved(id, path, result, workspace, browser, log)
+            }
+            Event::Imported { id, path, result } => {
+                self.imported(id, path, result, workspace, browser, log)
             }
             Event::ReadOnly(why) => self.refused(why, workspace, log),
             Event::Failed(why) => {
@@ -1802,6 +1811,68 @@ impl Store {
         ));
     }
 
+    /// Take in what a copy from outside the library found where it landed. A copy whose
+    /// name was taken first is placed again; one that failed is read into memory instead,
+    /// as a file kept nowhere yet, and an overwrite that failed leaves the file as it was.
+    fn imported(
+        &mut self,
+        id: u64,
+        path: LibPath,
+        result: Result<Found, Failure>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let from = workspace.arrived(id);
+        let Some(record) = self.records.get_mut(&id) else {
+            return;
+        };
+        record.saving = false;
+        let name = path.leaf().to_string();
+        let why = match result {
+            Ok(found) => {
+                record.fingerprint = Some(found.fingerprint());
+                record.missing = false;
+                record.holds = found.holds();
+                record.summarized = None;
+                browser.folders.missing.remove(&id);
+                workspace.took(id, None, found.file);
+                return log.say(format!("“{name}” is on this computer."));
+            }
+            Err(Failure::Moved) if record.fingerprint.is_none() => {
+                // A file took the name first. The asset takes another at the next sync.
+                self.records.remove(&id);
+                workspace.unplace(id);
+                if let Some(from) = from {
+                    workspace.arrive_again(id, from);
+                }
+                return self.rescan();
+            }
+            Err(Failure::Moved) => "it changed on disk since drawbar read it".to_string(),
+            Err(Failure::Room(_)) => too_much(),
+            Err(Failure::Io(why)) => why,
+        };
+        log.error(format!("copying {name} into the library: {why}"));
+        match record.fingerprint {
+            Some(print) => {
+                workspace.relist(id, print.len);
+                log.trouble(format!("“{name}” was not overwritten, because {why}."));
+                self.rescan();
+            }
+            None => {
+                self.records.remove(&id);
+                workspace.forget(id);
+                if let Some(from) = from {
+                    log.trouble(format!(
+                        "“{name}” was not copied into the library, because {why}. It is kept \
+                         in memory instead."
+                    ));
+                    workspace.read_outside(name, from);
+                }
+            }
+        }
+    }
+
     /// Bring the files level with the workspace, and return whether it did. A save that
     /// must wait for the one before it to answer makes it return `false`, and the next
     /// sync sends it.
@@ -1862,7 +1933,7 @@ impl Store {
         };
         let mut done = true;
         for entity in workspace.entities() {
-            done &= self.file(entity, &waiting);
+            done &= self.file(entity, workspace.arriving(entity.id), &waiting);
             if full {
                 self.working(entity, queue, &mut writes, &mut drops);
             }
@@ -2168,10 +2239,16 @@ impl Store {
         }
     }
 
-    /// Send what one asset's file needs: its first write, a move, or a save. Returns
-    /// `false` when a save or a move has to wait. `waiting` are the renames and other
-    /// folder changes not settled yet, each from and to.
-    fn file(&mut self, entity: &LocalEntity, waiting: &[(LibPath, LibPath)]) -> bool {
+    /// Send what one asset's file needs: its first write, a move, a save, or the copy of
+    /// the file from outside it arrives from. Returns `false` when a save or a move has
+    /// to wait. `waiting` are the renames and other folder changes not settled yet, each
+    /// from and to.
+    fn file(
+        &mut self,
+        entity: &LocalEntity,
+        arriving: Option<&Outside>,
+        waiting: &[(LibPath, LibPath)],
+    ) -> bool {
         let (true, Some(path)) = (entity.kept, &entity.path) else {
             return true;
         };
@@ -2187,6 +2264,10 @@ impl Store {
                 .any(|at| unsettled(waiting, at))
         {
             return false;
+        }
+        if let Some(from) = arriving {
+            self.import(entity, path, from);
+            return true;
         }
         let bytes = || entity.saved.bytes.to_vec();
         if !self
@@ -2261,6 +2342,28 @@ impl Store {
             });
         }
         !waits
+    }
+
+    /// Send the copy an asset arriving from outside the library waits on: a new file at
+    /// its path, or a copy over the file it has, unless a copy is in flight already.
+    fn import(&mut self, entity: &LocalEntity, path: &LibPath, from: &Outside) {
+        let record = self
+            .records
+            .entry(entity.id)
+            .or_insert_with(|| Record::of_file(path.clone(), None));
+        if record.saving {
+            return;
+        }
+        record.saving = true;
+        record.saved = entity.saved.stamp;
+        let path = record.path.get_or_insert_with(|| path.clone()).clone();
+        let expect = record.fingerprint.filter(|_| !record.missing);
+        self.write(Cmd::Import {
+            id: entity.id,
+            path,
+            from: from.clone(),
+            expect,
+        });
     }
 
     /// Write a working copy for an edit not yet saved, or drop the one a save made

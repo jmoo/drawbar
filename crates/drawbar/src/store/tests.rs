@@ -3039,6 +3039,135 @@ fn the_cache_is_never_written_inside_the_library() {
     assert!(entity.reading(), "it was kept for that session only");
 }
 
+/// A file from outside is copied into the folder it was dropped on, and left where it
+/// came from. The copy of a sample instrument rests, never held whole, and the copy of a
+/// small file is read as any file of the library's own once something needs it.
+#[test]
+fn a_file_from_outside_is_copied_in_and_read_as_the_librarys_own() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::create_dir(root.at("Gigs")).unwrap();
+    let (sample, program) = (
+        crate::testing::sample_bytes(),
+        Fresh::Program.bytes().unwrap(),
+    );
+    fs::write(outside.at("Marimba.nsmp"), &sample).unwrap();
+    fs::write(outside.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let gigs = LibPath::parse("Gigs").unwrap();
+    session.bench.act(vec![
+        crate::browser::Act::Take {
+            from: outside.at("Marimba.nsmp"),
+            dir: gigs.clone(),
+            name: "Marimba.nsmp".into(),
+        },
+        crate::browser::Act::Take {
+            from: outside.at("Grand.ne5p"),
+            dir: LibPath::root(),
+            name: "Grand.ne5p".into(),
+        },
+    ]);
+    session.sync();
+
+    assert_eq!(root.read("Gigs/Marimba.nsmp"), sample);
+    assert_eq!(root.read("Grand.ne5p"), program);
+    assert_eq!(
+        outside.read("Marimba.nsmp"),
+        sample,
+        "the outside file stays"
+    );
+    let marimba = session.named("Marimba.nsmp");
+    let entity = session.bench.workspace.get(marimba).unwrap();
+    assert_eq!(session.path(marimba).as_deref(), Some("Gigs/Marimba.nsmp"));
+    assert!(entity.rests().is_some(), "the copy rests in its file");
+    assert_eq!(entity.held_whole(), 0);
+
+    let grand = session.named("Grand.ne5p");
+    assert!(session.bench.workspace.get(grand).unwrap().unread());
+    session.read(&[grand]);
+    assert_eq!(session.bytes(grand), program);
+    assert_eq!(session.said("is on this computer"), 2);
+}
+
+/// A file from outside whose name is taken asks first. Overwrite copies it over the
+/// file there, which keeps its id and tags; Keep both copies it beside under a free name.
+#[test]
+fn a_file_from_outside_onto_a_taken_name_asks_and_overwrite_copies_over() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    let theirs = with_gain(&program, "12");
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(outside.at("Grand.ne5p"), &theirs).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.only();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(grand, tag, true);
+    let take = || crate::browser::Act::Take {
+        from: outside.at("Grand.ne5p"),
+        dir: LibPath::root(),
+        name: "Grand.ne5p".into(),
+    };
+
+    session.bench.act(vec![take()]);
+    let (_, answers) = session.bench.browser.asking().expect("a question");
+    assert_eq!(answers, ["Cancel", "Keep both", "Overwrite"]);
+    let acts = session.bench.browser.answer("Keep both");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.read("Grand 2.ne5p"), theirs);
+    assert_eq!(root.read("Grand.ne5p"), program, "beside, not over");
+
+    session.bench.act(vec![take()]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.read("Grand.ne5p"), theirs);
+    session.read(&[grand]);
+    assert_eq!(
+        session.bytes(grand),
+        theirs,
+        "the same asset holds the copy"
+    );
+    assert!(session.bench.browser.tags.worn(grand).contains(&tag));
+}
+
+/// A file from outside a library that turns read-only at the copy is held in memory
+/// instead, as a file kept nowhere yet, and nothing lands in the library.
+#[test]
+fn a_file_from_outside_a_library_that_cannot_take_it_is_held_in_memory() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(outside.at("Grand.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    first.create();
+    first.sync();
+
+    second.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Grand.ne5p"),
+        dir: LibPath::root(),
+        name: "Grand.ne5p".into(),
+    }]);
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut second.bench;
+    second.store.sync(workspace, browser, queue, Pass::Last);
+    while second.store.read_only().is_none() {
+        assert!(second.next(), "the copy answered");
+    }
+    assert!(!root.at("Grand.ne5p").exists());
+    let opened = loop {
+        let opened = second.bench.workspace.poll(&mut second.bench.log);
+        if !opened.is_empty() {
+            break opened;
+        }
+        std::thread::yield_now();
+    };
+    assert_eq!(opened, [("Grand.ne5p".to_string(), program)]);
+}
+
 /// The default library is a folder of drawbar's own data, and the cache sits in that
 /// data beside it, not inside it, so the cache is kept between sessions.
 #[test]

@@ -190,6 +190,10 @@ pub struct DrawbarApp {
     synced: u64,
     /// When the index was last written, in egui time.
     synced_at: f64,
+    /// Where the pointer was last seen while files from outside hovered over the window.
+    /// The desktop's windowing may not say, and a drop then lands at the top level.
+    #[cfg(not(target_arch = "wasm32"))]
+    dragged_at: Option<egui::Pos2>,
 }
 
 impl DrawbarApp {
@@ -272,6 +276,8 @@ impl DrawbarApp {
             leaving,
             synced: 0,
             synced_at: 0.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            dragged_at: None,
         };
         if let Some(storage) = cc.storage {
             app.shell.restore(storage);
@@ -286,14 +292,18 @@ impl DrawbarApp {
         app
     }
 
-    /// Take anything dropped on the window onto this computer, or hand it to the New
-    /// dialog while one is open and it is a WAV.
+    /// Copy anything dropped on the window into the library, in the folder it was dropped
+    /// on, or hand it to the New dialog while one is open and it is a WAV. A library that
+    /// cannot take a copy holds it in memory.
     ///
-    /// The web backend fills `bytes` and the native backend fills `path`, so both are
-    /// handled on every target.
+    /// The native backend fills `path` and the web backend fills `bytes`, which in the
+    /// browser only a drop the page did not catch carries.
     fn take_dropped_files(&mut self, ctx: &egui::Context) -> Vec<browser::Act> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let at = self.dropped_at(ctx);
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         let drafting = self.workspace.draft_mut().is_some();
+        let takes = !drafting && self.store.as_ref().is_some_and(Store::takes_files);
         let mut joining = Vec::new();
         let mut imports = Vec::new();
         for file in dropped {
@@ -305,6 +315,15 @@ impl DrawbarApp {
                     .unwrap_or_else(|| path.display().to_string()),
                 (true, None) => "dropped".to_string(),
             };
+            #[cfg(not(target_arch = "wasm32"))]
+            if let (true, Some(path)) = (takes, &file.path) {
+                imports.push(browser::Act::Take {
+                    from: path.clone(),
+                    dir: self.browser.landing_dir(at),
+                    name,
+                });
+                continue;
+            }
             let bytes = match (&file.bytes, &file.path) {
                 (Some(bytes), _) => Some(bytes.to_vec()),
                 (None, Some(path)) => match std::fs::read(path) {
@@ -330,7 +349,63 @@ impl DrawbarApp {
         if let Some(draft) = self.workspace.draft_mut() {
             draft.add(joining);
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (from, at) in crate::dropped::take() {
+                imports.extend(self.take_in(from, self.browser.landing_dir(Some(at)), takes));
+            }
+            crate::dropped::catch(ctx, takes);
+        }
         imports
+    }
+
+    /// Where files dropped this frame landed: the pointer as last seen while they hovered,
+    /// where the windowing reported it moving then.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dropped_at(&mut self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        let (hovering, dropped, moved) = ctx.input(|i| {
+            let moved = i.raw.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerMoved(at) => Some(*at),
+                _ => None,
+            });
+            let hovering = !i.raw.hovered_files.is_empty();
+            (hovering, !i.raw.dropped_files.is_empty(), moved)
+        });
+        if hovering {
+            self.dragged_at = moved.or(self.dragged_at);
+        }
+        let at = self.dragged_at.filter(|_| dropped);
+        if !hovering {
+            self.dragged_at = None;
+        }
+        at
+    }
+
+    /// The files File ▸ Open… picked, copied into the top level of the library, or held
+    /// in memory by a library that cannot take a copy.
+    fn take_picked(&mut self) -> Vec<browser::Act> {
+        let takes = self.store.as_ref().is_some_and(Store::takes_files);
+        let picked = self.workspace.take_picked();
+        picked
+            .into_iter()
+            .filter_map(|from| self.take_in(from, crate::store::LibPath::root(), takes))
+            .collect()
+    }
+
+    /// Copy `from` into the folder `dir`, where the library `takes` a copy, and otherwise
+    /// read it into memory.
+    fn take_in(
+        &mut self,
+        from: crate::store::Outside,
+        dir: crate::store::LibPath,
+        takes: bool,
+    ) -> Option<browser::Act> {
+        let name = crate::store::outside_name(&from);
+        if takes {
+            return Some(browser::Act::Take { from, dir, name });
+        }
+        self.workspace.read_outside(name, from);
+        None
     }
 
     /// Hold a send to the instrument until the library's files have been checked for
@@ -683,6 +758,8 @@ impl eframe::App for DrawbarApp {
         // or the keyboard are dropped instead of sounding when a document comes forward.
         let played = self.midi.played(ctx.input(|input| input.time));
         arrived.extend(self.take_dropped_files(ctx));
+        arrived.extend(self.take_picked());
+        self.browser.forget_targets();
         #[cfg(not(target_arch = "wasm32"))]
         arrived.extend(self.picker.picked().map(browser::Act::OpenLibrary));
         #[cfg(target_arch = "wasm32")]
