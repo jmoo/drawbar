@@ -14,7 +14,7 @@ use nord_usb::ObjectClass;
 use crate::app::{accent, bold, canvas, good, tint, ui as ui_text, warn, DrawbarApp, ThemeChoice};
 use crate::browser::{new_menu, Act};
 use crate::filter::Filter;
-use crate::icon::{icon, painted, sized, Glyph};
+use crate::icon::{painted, sized, Glyph};
 use crate::log::Level;
 use crate::menu::{key_text, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
@@ -37,7 +37,7 @@ const SIDE_LEAST: f32 = 180.0;
 /// is whatever leaves this much, so it is computed from the room left each frame and not
 /// stored.
 const CENTER_WIDE: f32 = 300.0;
-const CENTER_TALL: f32 = 240.0;
+const CENTER_TALL: f32 = 280.0;
 
 /// The smallest screen the shell lays out in: both side cards at their minimum widths,
 /// around a center that still keeps [`CENTER_WIDE`] by [`CENTER_TALL`] under its tabs.
@@ -1198,8 +1198,687 @@ pub fn too_small_notice(ctx: &egui::Context) {
         });
 }
 
-/// A glyph drawn at a fixed size in a layout.
-#[allow(dead_code)]
-fn glyph(ui: &mut egui::Ui, glyph: Glyph, size: f32, tint: egui::Color32) {
-    icon(ui, glyph, size, tint);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Fake;
+    use crate::testing;
+    use eframe::{App, Storage};
+
+    /// The window size the design is drawn for.
+    const SCREEN: egui::Vec2 = egui::vec2(900.0, 540.0);
+
+    /// The regions, in the order they claim space.
+    const REGIONS: [&str; 4] = ["topbar", "status", "browser", "inspector"];
+
+    fn app(ctx: &egui::Context, storage: Option<&dyn eframe::Storage>) -> DrawbarApp {
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.storage = storage;
+        DrawbarApp::new(&cc)
+    }
+
+    /// Attach an instrument, which the full layout needs.
+    fn attach(app: &mut DrawbarApp) {
+        app.device
+            .pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
+    }
+
+    /// What one frame laid out and painted.
+    struct Painted {
+        center: egui::Rect,
+        panels: Vec<(String, egui::Rect)>,
+        /// Every string the frame painted, headers and button labels included.
+        words: Vec<String>,
+    }
+
+    impl Painted {
+        fn wrote(&self, word: &str) -> bool {
+            self.words.iter().any(|said| said == word)
+        }
+
+        fn region(&self, want: &str) -> Option<egui::Rect> {
+            self.panels
+                .iter()
+                .find(|(id, _)| id == want)
+                .map(|(_, rect)| *rect)
+        }
+    }
+
+    fn drawn(ctx: &egui::Context, app: &mut DrawbarApp) -> Painted {
+        drawn_at(ctx, app, SCREEN)
+    }
+
+    fn drawn_at(ctx: &egui::Context, app: &mut DrawbarApp, screen: egui::Vec2) -> Painted {
+        frame_of(ctx, app, screen, Vec::new())
+    }
+
+    /// One frame with something arriving in it.
+    fn frame_of(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        screen: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Painted {
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = testing::screen(screen, events);
+        let mut center = egui::Rect::NOTHING;
+        let output = testing::run(ctx, input, |ctx| {
+            app.update(ctx, &mut frame);
+            // Panels shrink this as they are added; the central panel does not.
+            center = ctx.available_rect();
+        });
+        let panels = REGIONS
+            .iter()
+            .filter_map(|id| {
+                let state = egui::containers::panel::PanelState::load(ctx, egui::Id::new(*id))?;
+                Some((id.to_string(), state.rect))
+            })
+            .collect();
+        Painted {
+            center,
+            panels,
+            words: testing::words(&output),
+        }
+    }
+
+    /// Two frames, the second laid out against the first.
+    fn settled(ctx: &egui::Context, app: &mut DrawbarApp, screen: egui::Vec2) -> Painted {
+        let _ = drawn_at(ctx, app, screen);
+        drawn_at(ctx, app, screen)
+    }
+
+    fn pressed(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// The gate depends only on the screen size and the layout metrics: hidden panels and
+    /// the kind of device do not make room the shell does not have.
+    #[test]
+    fn a_screen_short_of_the_least_room_is_gated_in_either_dimension_alone() {
+        assert!(
+            !too_small(LEAST),
+            "the smallest screen the shell lays out in"
+        );
+        assert!(!too_small(SCREEN), "the window the design is drawn for");
+        assert!(
+            too_small(LEAST - egui::vec2(1.0, 0.0)),
+            "a point too narrow"
+        );
+        assert!(too_small(LEAST - egui::vec2(0.0, 1.0)), "a point too short");
+        assert!(too_small(egui::vec2(390.0, 844.0)));
+        assert!(too_small(egui::vec2(844.0, 390.0)));
+        assert!(too_small(egui::Vec2::ZERO));
+    }
+
+    /// At [`LEAST`] and at the design's own size, every region fits in the window and the
+    /// center keeps the room no card may take from it.
+    #[test]
+    fn every_region_fits_and_the_center_keeps_its_own_room() {
+        for screen in [LEAST, SCREEN] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            attach(&mut app);
+            let painted = settled(&ctx, &mut app, screen);
+
+            let window = egui::Rect::from_min_size(egui::Pos2::ZERO, screen);
+            assert_eq!(painted.panels.len(), REGIONS.len(), "every region drew");
+            for (id, rect) in &painted.panels {
+                assert!(
+                    window.contains_rect(*rect),
+                    "{id} is outside {screen:?}: {rect:?}"
+                );
+            }
+            let center = painted.center;
+            assert!(center.width() >= CENTER_WIDE, "{screen:?}: {center:?}");
+            assert!(center.height() >= CENTER_TALL, "{screen:?}: {center:?}");
+        }
+    }
+
+    /// The bars and cards take the sizes the design gives them, with a gutter of canvas
+    /// between the cards and the window's edges.
+    #[test]
+    fn the_cards_sit_a_gutter_apart_between_the_two_bars() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        let painted = settled(&ctx, &mut app, SCREEN);
+        let at = |want: &str| painted.region(want).unwrap();
+
+        assert_eq!(at("topbar").height(), TOPBAR);
+        assert_eq!(at("status").height(), STATUS);
+        assert_eq!(at("browser").width(), BROWSER + GUTTER);
+        assert_eq!(at("inspector").width(), INSPECTOR + GUTTER);
+        assert_eq!(at("browser").left(), 0.0, "its gutter is inside it");
+        assert_eq!(painted.center.left(), at("browser").right());
+    }
+
+    /// ⚠️ A hidden panel leaves no rail behind: the center reaches the window's edge but
+    /// for its gutter.
+    #[test]
+    fn a_hidden_panel_takes_no_room_at_all() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.browser_open = false;
+        app.shell.inspector_open = false;
+        let painted = settled(&ctx, &mut app, SCREEN);
+
+        assert_eq!(painted.region("browser"), None);
+        assert_eq!(painted.region("inspector"), None);
+        assert_eq!(painted.center.width(), SCREEN.x);
+        assert!(painted.wrote("Library"), "the center still draws its tabs");
+    }
+
+    /// ⚠️ The page must turn a phone away before the module has loaded, so `index.html`
+    /// repeats the threshold and the words. The shell's layout points are CSS pixels.
+    #[test]
+    fn the_page_gates_where_the_shell_does_and_says_the_same_thing() {
+        let page = include_str!("../index.html");
+        let gate = format!("@media (width < {}px), (height < {}px)", LEAST.x, LEAST.y);
+        assert!(page.contains(&gate), "index.html does not gate at `{gate}`");
+        assert!(page.contains(TOO_SMALL), "index.html: {TOO_SMALL:?}");
+        assert!(
+            page.contains(TOO_SMALL_WHY),
+            "index.html: {TOO_SMALL_WHY:?}"
+        );
+    }
+
+    #[test]
+    fn the_favicon_is_the_logo_mark_in_both_accents() {
+        let favicon = include_str!("../favicon.svg");
+        let mark = include_str!("../assets/icons/sliders-vertical.svg");
+        for line in mark.lines().filter(|l| l.trim_start().starts_with("<line")) {
+            assert!(
+                favicon.contains(line),
+                "favicon.svg lacks `{}`",
+                line.trim()
+            );
+        }
+        let hex = |visuals: egui::Visuals| {
+            let [r, g, b, _] = accent(&visuals).to_array();
+            format!("#{r:02x}{g:02x}{b:02x}")
+        };
+        let light = format!("stroke=\"{}\"", hex(egui::Visuals::light()));
+        let dark = format!("stroke: {};", hex(egui::Visuals::dark()));
+        assert!(favicon.contains(&light), "favicon.svg lacks `{light}`");
+        assert!(favicon.contains(&dark), "favicon.svg lacks `{dark}`");
+    }
+
+    /// A gated frame draws only the notice: what is wrong, and a link to the guide.
+    #[test]
+    fn the_notice_says_what_is_wrong_and_offers_the_guide() {
+        let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
+        let output = testing::run(&egui::Context::default(), input, too_small_notice);
+        let said = testing::words(&output);
+
+        assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");
+        assert!(said.iter().any(|word| word == TOO_SMALL_WHY), "{said:?}");
+        assert!(said.iter().any(|word| word == "User guide"), "{said:?}");
+    }
+
+    /// Switching the theme changes only colors: the metrics live on the style both themes
+    /// share, so every region stays in place.
+    #[test]
+    fn flipping_the_theme_leaves_every_region_where_it_was() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+
+        ctx.set_theme(egui::ThemePreference::Dark);
+        let dark = settled(&ctx, &mut app, SCREEN);
+        ctx.set_theme(egui::ThemePreference::Light);
+        let light = settled(&ctx, &mut app, SCREEN);
+
+        assert_eq!(dark.center, light.center);
+        assert_eq!(dark.panels, light.panels);
+    }
+
+    /// Each platform keeps its menus where its users look for them: the Mac in the
+    /// system's menu bar, Windows as titles in the window, and Linux and the web behind
+    /// one button.
+    #[test]
+    fn each_platform_draws_its_menus_where_it_keeps_them() {
+        for (platform, chrome, titled) in [
+            (Platform::Mac, Frame::System, false),
+            (Platform::Windows, Frame::Captions, true),
+            (Platform::Linux, Frame::System, false),
+            (Platform::Web, Frame::System, false),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            app.platform = platform;
+            app.chrome = chrome;
+            let painted = settled(&ctx, &mut app, egui::vec2(1440.0, 900.0));
+            for title in ["File", "View", "Instrument", "Help"] {
+                assert_eq!(painted.wrote(title), titled, "{platform:?}: {title}");
+            }
+            let word_mark = painted.wrote("drawbar");
+            assert_eq!(
+                word_mark,
+                platform == Platform::Web,
+                "{platform:?}: the word mark"
+            );
+        }
+    }
+
+    /// The bar's search box sits on the window's center line while both sides fit
+    /// beside it, and otherwise between the two sides, never narrower than its least.
+    #[test]
+    fn the_search_stays_centered_until_a_side_needs_its_room() {
+        let wide = search_span(1440.0, 300.0, 200.0);
+        assert_eq!(wide.end - wide.start, SEARCH_MOST);
+        assert_eq!((wide.start + wide.end) / 2.0, 720.0, "on the center line");
+
+        let tight = search_span(900.0, 380.0, 200.0);
+        assert_eq!(tight.start, 380.0 + SIDES_GAP, "after the wider side");
+        assert!(tight.end <= 900.0 - 200.0 - SIDES_GAP, "{tight:?}");
+
+        let crushed = search_span(700.0, 380.0, 320.0);
+        assert_eq!(crushed.end - crushed.start, SEARCH_LEAST);
+    }
+
+    /// The offer to queue what a send would skip counts the changed set, and is not drawn
+    /// when nothing has changed.
+    #[test]
+    fn the_queue_button_offers_what_a_send_would_skip() {
+        use nord_usb::Location;
+
+        let class = ObjectClass::Program;
+        let at = Location { bank: 6, slot: 0 };
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+
+        let fresh = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let bytes = app.workspace.get(fresh).unwrap().bytes.clone();
+        app.workspace.remove(fresh, &mut app.log);
+        let id = app.workspace.ingest(
+            "Africa-Split.ne5p".into(),
+            crate::workspace::Origin::Device { class, at },
+            bytes.clone(),
+            &mut app.log,
+        );
+        let held = app.workspace.get(id).unwrap().saved.crc32.unwrap();
+        app.device
+            .pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
+        app.device.relink(&mut app.workspace);
+        assert!(
+            !settled(&ctx, &mut app, SCREEN).wrote("Queue 1"),
+            "the slot holds what this is saved as"
+        );
+
+        // Saved on this computer and nowhere else: the slot holds the older body.
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace.mark_saved(id);
+        app.device.relink(&mut app.workspace);
+        assert!(
+            settled(&ctx, &mut app, SCREEN).wrote("Queue 1"),
+            "one to offer"
+        );
+
+        crate::queue::queue_changed(
+            &app.workspace,
+            &mut app.device,
+            &mut app.queue,
+            &mut app.log,
+        );
+        let painted = settled(&ctx, &mut app, SCREEN);
+        assert!(!painted.wrote("Queue 1"), "nothing is left to offer");
+        assert!(painted.wrote("Send 1"), "and the change is waiting");
+    }
+
+    /// ⚠️ With nothing attached there is nothing to send to and no room to report. Every
+    /// control that acts on an instrument is hidden, not disabled, and the bar offers to
+    /// connect one instead. The selection's card stays either way.
+    #[test]
+    fn no_instrument_means_no_instrument_controls() {
+        const ONLY_WITH_ONE: [&str; 3] = ["Send", "Room", "Info"];
+
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let alone = settled(&ctx, &mut app, egui::vec2(1440.0, 900.0));
+
+        assert!(!app.attached(), "nothing was attached");
+        for control in ONLY_WITH_ONE {
+            assert!(
+                !alone.wrote(control),
+                "{control} is painted with none attached"
+            );
+        }
+        assert!(alone.wrote("Connect instrument…"));
+        assert!(alone.wrote("Selection"), "the inspector still answers");
+
+        attach(&mut app);
+        let answering = settled(&ctx, &mut app, egui::vec2(1440.0, 900.0));
+        for control in ONLY_WITH_ONE {
+            assert!(
+                answering.wrote(control),
+                "{control} is missing with one attached"
+            );
+        }
+        assert!(!answering.wrote("Connect instrument…"));
+        assert_eq!(answering.region("inspector"), alone.region("inspector"));
+    }
+
+    /// ⚠️ The search box filters only the library's table, so typing into it with a
+    /// document in front must bring the library forward.
+    #[test]
+    fn typing_a_search_with_a_document_in_front_brings_the_library_forward() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        app.tabs.open(id);
+        let _ = drawn(&ctx, &mut app);
+        assert_eq!(app.tabs.showing(), Spot::Document(id));
+
+        let command_k = pressed(egui::Key::K, egui::Modifiers::COMMAND);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![command_k]);
+        let _ = frame_of(
+            &ctx,
+            &mut app,
+            SCREEN,
+            vec![egui::Event::Text("afr".into())],
+        );
+        assert_eq!(
+            app.shell.omnibox, "afr",
+            "its key put the cursor in the box"
+        );
+        assert_eq!(app.tabs.showing(), Spot::Library);
+
+        // The next frame types nothing and leaves the tab where the user put it.
+        app.tabs.show(Spot::Document(id));
+        let _ = drawn(&ctx, &mut app);
+        assert_eq!(app.tabs.showing(), Spot::Document(id));
+    }
+
+    /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
+    /// an unconsumed ⇧⌘S goes on to match ⌘S. Asking to review the send queue would then
+    /// mark the open document saved and lose its revert.
+    #[test]
+    fn the_send_queue_shortcut_never_falls_through_to_save() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let bytes = app.workspace.get(id).unwrap().bytes.clone();
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.tabs.open(id);
+        assert!(app.workspace.get(id).unwrap().is_unsaved());
+
+        let review = || {
+            pressed(
+                egui::Key::S,
+                egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+            )
+        };
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![review()]);
+        assert!(!app.attached(), "nothing was attached");
+        assert!(!app.shell.review_open, "there is no queue to review");
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "and no save either"
+        );
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![review()]);
+        assert!(app.shell.review_open);
+        assert!(
+            app.workspace.get(id).unwrap().is_unsaved(),
+            "reviewing the queue is not saving"
+        );
+    }
+
+    /// ⚠️ ⌘R is the browser tab's reload. Left unconsumed, it reloads the page out from
+    /// under whatever is open, so it is consumed whether or not an instrument is attached.
+    #[test]
+    fn the_read_everything_shortcut_is_taken_with_nothing_attached() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let reload = |event: &egui::Event| match event {
+            egui::Event::Key { key, .. } => *key == egui::Key::R,
+            _ => false,
+        };
+        let left = |ctx: &egui::Context| ctx.input(|input| input.events.iter().any(reload));
+        let command_r = || pressed(egui::Key::R, egui::Modifiers::COMMAND);
+
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![command_r()]);
+        assert!(!left(&ctx), "⌘R reached the tab with nothing attached");
+
+        attach(&mut app);
+        let _ = drawn(&ctx, &mut app);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![command_r()]);
+        assert!(!left(&ctx), "⌘R reached the tab with one attached");
+    }
+
+    /// The activity popover opens from the status line and its key, and Escape closes
+    /// it. Asking for the problems opens it on the problems alone.
+    #[test]
+    fn the_activity_popover_opens_from_the_status_line_and_closes_on_escape() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.log.trouble("Could not read the instrument.");
+        let painted = settled(&ctx, &mut app, SCREEN);
+        assert!(painted.wrote("1 problem"));
+        assert!(!painted.wrote("Activity"));
+
+        let activity = pressed(
+            egui::Key::L,
+            egui::Modifiers::COMMAND.plus(egui::Modifiers::ALT),
+        );
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![activity]);
+        assert!(app.shell.log_open && !app.shell.log_problems);
+        assert!(settled(&ctx, &mut app, SCREEN).wrote("Activity"));
+
+        let escape = pressed(egui::Key::Escape, egui::Modifiers::NONE);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape]);
+        assert!(!app.shell.log_open);
+
+        crate::browser::apply(
+            &mut app.browser,
+            &mut app.shell,
+            vec![Act::ShowProblems],
+            &mut app.workspace,
+            &mut app.device,
+            &mut app.tabs,
+            &mut app.queue,
+            &mut app.log,
+        );
+        assert!(app.shell.log_open && app.shell.log_problems);
+    }
+
+    /// What was hidden comes back hidden in the next session's window.
+    #[test]
+    fn the_panels_come_back_where_the_last_session_left_them() {
+        let mut store = Fake::default();
+        {
+            let ctx = egui::Context::default();
+            let mut before = app(&ctx, None);
+            before.shell.browser_open = false;
+            before.save(&mut store);
+        }
+        let ctx = egui::Context::default();
+        let after = app(&ctx, Some(&store));
+        assert!(!after.shell.browser_open);
+    }
+
+    #[test]
+    fn the_layout_comes_back_as_it_was_left() {
+        let mut store = Fake::default();
+        let before = Shell {
+            browser_open: false,
+            inspector_open: true,
+            room_open: false,
+            info_open: true,
+            browser_width: 301.0,
+            inspector_width: 199.0,
+            omnibox: "typed and not kept".into(),
+            log_open: true,
+            ..Shell::default()
+        };
+        before.keep(&mut store);
+
+        let mut after = Shell::default();
+        after.restore(&store);
+        assert!(!after.browser_open);
+        assert!(after.inspector_open);
+        assert!(
+            !after.room_open,
+            "a collapsed inspector card comes back collapsed"
+        );
+        assert!(after.info_open, "and an open one comes back open");
+        assert_eq!(after.browser_width, 301.0);
+        assert_eq!(after.inspector_width, 199.0);
+        assert!(after.omnibox.is_empty(), "a search is not a layout");
+        assert!(!after.log_open, "a popover is not a layout");
+    }
+
+    /// A stored size this build would never have laid out is ignored, so the panel opens
+    /// at its default size, not as a sliver or at a nonsense size.
+    #[test]
+    fn a_size_outside_what_a_panel_opens_to_comes_back_as_the_default() {
+        let mut store = Fake::default();
+        store.set_string(
+            Shell::KEY,
+            format!(
+                "{}\nbrowser_width\t12\ninspector_width\twide\n",
+                Shell::VERSION
+            ),
+        );
+        let mut shell = Shell::default();
+        shell.restore(&store);
+        assert_eq!(shell.browser_width, BROWSER + GUTTER, "below its minimum");
+        assert_eq!(shell.inspector_width, INSPECTOR + GUTTER, "not a number");
+    }
+
+    /// However far a card was dragged last session, the center keeps its room: a card's
+    /// maximum is computed from the window every frame.
+    #[test]
+    fn cards_wider_than_the_window_still_leave_the_center_its_room() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.browser_width = 5_000.0;
+        app.shell.inspector_width = 5_000.0;
+        attach(&mut app);
+        let painted = settled(&ctx, &mut app, SCREEN);
+
+        assert!(
+            painted.center.width() >= CENTER_WIDE,
+            "{:?}",
+            painted.center
+        );
+        assert!(app.shell.browser_width >= SIDE_LEAST);
+    }
+
+    /// A card keeps the width it was left at across frames, so the stored width is what
+    /// the window showed, not the design's default.
+    #[test]
+    fn a_card_drawn_narrower_writes_the_width_it_was_drawn_at() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.shell.browser_width = 190.0;
+        attach(&mut app);
+        let painted = settled(&ctx, &mut app, SCREEN);
+
+        assert_eq!(painted.region("browser").unwrap().width(), 190.0);
+        assert_eq!(app.shell.browser_width, 190.0);
+    }
+
+    /// An unknown version is not read, so the defaults stand.
+    #[test]
+    fn an_unknown_version_leaves_the_default_layout() {
+        let mut store = Fake::default();
+        store.set_string(Shell::KEY, "drawbar docks 99\nbrowser\t0\n".to_string());
+        let mut shell = Shell::default();
+        shell.restore(&store);
+        assert!(shell.browser_open, "the default stands");
+    }
+
+    /// A store holding nothing about the panels is not an error, and neither is one
+    /// holding lines this build has no field for.
+    #[test]
+    fn an_empty_or_partial_store_is_a_store() {
+        let mut shell = Shell::default();
+        shell.restore(&Fake::default());
+        assert!(shell.browser_open && shell.inspector_open);
+
+        let mut store = Fake::default();
+        store.set_string(
+            Shell::KEY,
+            format!("{}\ninspector\t0\ndock\t1\n", Shell::VERSION),
+        );
+        shell.restore(&store);
+        assert!(!shell.inspector_open);
+        assert!(shell.browser_open, "a field nobody wrote keeps its default");
+    }
+
+    #[test]
+    fn the_midi_chip_names_the_controllers_heard_and_the_ports_that_would_not_open() {
+        let visuals = egui::Visuals::dark();
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            midi_reading(&crate::midi::State::Off, &visuals).is_none(),
+            "nothing while MIDI is off"
+        );
+
+        let (label, lamp, detail) = listening(&names(&["Launchkey"]), &[], &visuals);
+        assert_eq!(
+            (label.as_str(), detail.as_str()),
+            ("Launchkey", "Listening to Launchkey.")
+        );
+        assert_eq!(lamp, good(&visuals));
+
+        let (label, lamp, detail) = listening(
+            &names(&["Launchkey", "Pads"]),
+            &names(&["Keystation"]),
+            &visuals,
+        );
+        assert_eq!(label, "2 MIDI inputs");
+        assert_eq!(
+            detail,
+            "Listening to Launchkey, Pads. Could not open Keystation; another program may \
+             be using it."
+        );
+        assert_eq!(lamp, warn(&visuals));
+
+        let (label, lamp, _) = listening(&[], &[], &visuals);
+        assert_eq!(label, "No MIDI input");
+        assert_eq!(lamp, warn(&visuals));
+    }
+
+    #[test]
+    fn a_failure_to_listen_is_named_and_its_cause_left_to_the_log() {
+        let visuals = egui::Visuals::dark();
+        let raw = "TypeError: getObject(arg0).requestMIDIAccess is not a function";
+        let (label, lamp, detail) =
+            midi_reading(&crate::midi::State::Failed(raw.to_string()), &visuals)
+                .expect("a failure is shown");
+        assert_eq!(label, "MIDI failed");
+        assert_eq!(lamp, crate::app::bad(&visuals));
+        assert!(!detail.contains("TypeError"), "{detail}");
+    }
 }
