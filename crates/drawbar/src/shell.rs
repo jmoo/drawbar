@@ -9,7 +9,6 @@
 //! The top bar is the one place the platforms differ; see [`crate::platform`].
 
 use eframe::egui;
-use nord_usb::ObjectClass;
 
 use crate::app::{accent, bold, canvas, good, tint, ui as ui_text, warn, DrawbarApp, ThemeChoice};
 use crate::browser::Act;
@@ -19,7 +18,6 @@ use crate::log::Level;
 use crate::menu::{key_text, new_menu, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
 use crate::platform::{Frame, Platform, CRAMPED};
-use crate::strings::folder;
 use crate::tabs::Spot;
 
 /// The top bar: the platform's edges, the file tools, the search, and the instrument.
@@ -874,8 +872,8 @@ impl DrawbarApp {
         }
     }
 
-    /// The status line: what just happened, whether anything went wrong, and how much
-    /// room is left on the instrument. The first two open the activity popover.
+    /// The status line: what just happened and whether anything went wrong. Either opens
+    /// the activity popover.
     pub(crate) fn status_line(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         egui::TopBottomPanel::bottom("status")
             .resizable(false)
@@ -891,12 +889,6 @@ impl DrawbarApp {
                 );
                 row.spacing_mut().item_spacing.x = 6.0;
                 self.said(&mut row, acts);
-                let mut right = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(ui.max_rect().shrink2(egui::vec2(STATUS_PAD, 0.0)))
-                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                );
-                self.room_figures(&mut right);
             });
     }
 
@@ -979,41 +971,6 @@ impl DrawbarApp {
             .clicked()
         {
             acts.push(Act::ShowProblems);
-        }
-    }
-
-    /// How full the instrument is, as figures separated by dots. A class nearly full is in
-    /// the warning color.
-    fn room_figures(&self, ui: &mut egui::Ui) {
-        let visuals = ui.visuals().clone();
-        let quiet = visuals.weak_text_color();
-        let mut first = true;
-        for class in [ObjectClass::Program, ObjectClass::Sample] {
-            let state = &self.device.state;
-            let unit = state.allocation_unit(class);
-            let Some(room) = crate::device::occupancy(class, &state.inventory, unit) else {
-                continue;
-            };
-            let full = state
-                .inventory
-                .iter()
-                .find(|status| status.class == class)
-                .is_some_and(|status| status.used_percent() >= NEARLY_FULL);
-            if !first {
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 1.5, quiet);
-            }
-            first = false;
-            let ink = match full {
-                true => warn(&visuals),
-                false => quiet,
-            };
-            ui.label(
-                egui::RichText::new(format!("{room} {}", folder(class).to_lowercase()))
-                    .monospace()
-                    .size(10.5)
-                    .color(ink),
-            );
         }
     }
 
@@ -1147,9 +1104,6 @@ impl DrawbarApp {
     }
 }
 
-/// A class this full is shown in the warning color.
-const NEARLY_FULL: f32 = 90.0;
-
 /// The mark at the left of the bar on Windows and the web: the slider glyph on an
 /// accent-tinted tile.
 fn logo(ui: &mut egui::Ui) {
@@ -1204,6 +1158,7 @@ mod tests {
     use crate::store::Fake;
     use crate::testing;
     use eframe::{App, Storage};
+    use nord_usb::ObjectClass;
 
     /// The window size the design is drawn for.
     const SCREEN: egui::Vec2 = egui::vec2(900.0, 540.0);
