@@ -50,6 +50,15 @@ impl Platform {
         self != Platform::Web
     }
 
+    /// The top bar's height. The Mac's matches the title area an empty unified toolbar
+    /// gives the window, so the bar's controls share the traffic lights' center line.
+    pub const fn top_bar(self) -> f32 {
+        match self {
+            Platform::Mac => 52.0,
+            Platform::Windows | Platform::Linux | Platform::Web => 46.0,
+        }
+    }
+
     /// The window width under which the top bar's chips drop their labels. Windows needs
     /// more, for its caption buttons.
     pub fn narrow(self) -> f32 {

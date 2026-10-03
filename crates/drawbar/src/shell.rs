@@ -20,9 +20,6 @@ use crate::panel::{flat, CARD_RADIUS, GUTTER};
 use crate::platform::{Frame, Platform, CRAMPED};
 use crate::tabs::Spot;
 
-/// The top bar: the platform's edges, the file tools, the search, and the instrument.
-pub const TOPBAR: f32 = 46.0;
-
 /// The status line at the bottom of the window.
 pub const STATUS: f32 = 30.0;
 
@@ -44,7 +41,7 @@ const CENTER_TALL: f32 = 280.0;
 /// the web build shows [`too_small_notice`] instead of a shell that cannot fit.
 pub const LEAST: egui::Vec2 = egui::vec2(
     SIDE_LEAST + CENTER_WIDE + SIDE_LEAST + 4.0 * GUTTER,
-    TOPBAR + STATUS + crate::tabs::HEIGHT + CENTER_TALL + GUTTER,
+    Platform::Web.top_bar() + STATUS + crate::tabs::HEIGHT + CENTER_TALL + GUTTER,
 );
 
 /// What that notice says, and what `index.html` says before the module has loaded.
@@ -503,7 +500,7 @@ impl DrawbarApp {
     ) {
         egui::TopBottomPanel::top("topbar")
             .resizable(false)
-            .exact_height(TOPBAR)
+            .exact_height(self.platform.top_bar())
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
@@ -1325,7 +1322,7 @@ mod tests {
         let painted = settled(&ctx, &mut app, SCREEN);
         let at = |want: &str| painted.region(want).unwrap();
 
-        assert_eq!(at("topbar").height(), TOPBAR);
+        assert_eq!(at("topbar").height(), app.platform.top_bar());
         assert_eq!(at("status").height(), STATUS);
         assert_eq!(at("browser").width(), BROWSER + GUTTER);
         assert_eq!(at("inspector").width(), INSPECTOR + GUTTER);
