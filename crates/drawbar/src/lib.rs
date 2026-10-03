@@ -31,6 +31,8 @@ pub mod newproject;
 pub mod panel;
 pub mod platform;
 pub mod queue;
+#[cfg(any(target_arch = "wasm32", test))]
+mod report;
 pub mod room;
 pub mod sheet;
 pub mod shell;
@@ -39,6 +41,7 @@ pub mod store;
 pub mod strings;
 pub mod tabs;
 pub mod tags;
+pub mod telemetry;
 #[cfg(test)]
 mod testing;
 pub mod work;
@@ -50,7 +53,9 @@ pub use app::DrawbarApp;
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_bindgen::JsValue> {
-    eframe::WebRunner::new()
+    let runner = eframe::WebRunner::new();
+    telemetry::install();
+    runner
         .start(
             canvas,
             eframe::WebOptions::default(),

@@ -220,6 +220,32 @@ impl DeviceCmd {
         }
     }
 
+    /// What telemetry calls this operation. `None` for a release, which asks nothing of
+    /// the instrument.
+    pub fn metric(&self) -> Option<crate::telemetry::Op> {
+        let (name, class, asked) = match self {
+            DeviceCmd::ScanClass { class } => ("scan-class", class, false),
+            DeviceCmd::ScanBank { class, .. } => ("scan-bank", class, false),
+            DeviceCmd::SlotInfo { class, .. } => ("info", class, false),
+            DeviceCmd::Deps { class, .. } => ("deps", class, false),
+            DeviceCmd::Get { class, why, .. } => ("get", class, *why != Purpose::Compare),
+            DeviceCmd::Put { class, .. } => ("put", class, true),
+            DeviceCmd::SendAll { class, .. } => ("send-all", class, true),
+            DeviceCmd::Move { class, .. } => ("move", class, true),
+            DeviceCmd::Duplicate { class, .. } => ("duplicate", class, true),
+            DeviceCmd::Delete { class, .. } => ("delete", class, true),
+            DeviceCmd::Rename { class, .. } => ("rename", class, true),
+            DeviceCmd::Select { class, .. } => ("select", class, false),
+            DeviceCmd::Reload { class, .. } => ("reload", class, false),
+            DeviceCmd::Disconnect => return None,
+        };
+        Some(crate::telemetry::Op {
+            name,
+            class: Some(class.to_raw()),
+            asked,
+        })
+    }
+
     /// The plain sentences the status strip shows for this operation.
     pub fn words(&self) -> Words {
         match self {
@@ -1404,6 +1430,7 @@ impl Device {
             heard = true;
             match event {
                 DeviceEvent::Connected(card) => {
+                    crate::telemetry::attached(Some(&card));
                     log.info(format!(
                         "connected: {} ({:04x}:{:04x})",
                         card.product, card.vendor_id, card.product_id
@@ -1414,12 +1441,17 @@ impl Device {
                     self.pending.clear();
                 }
                 DeviceEvent::ConnectFailed(why) => {
+                    crate::telemetry::fault("usb", "connect-failed");
                     log.error(why);
                     log.trouble("No instrument could be opened.");
                     self.state.connection = Connection::Disconnected;
                 }
                 // ⚠️ Disconnection must not clear local edits waiting for the instrument.
                 DeviceEvent::Disconnected { lost } => {
+                    if lost {
+                        crate::telemetry::fault("usb", "lost");
+                    }
+                    crate::telemetry::attached(None);
                     match lost {
                         true => log.trouble("The instrument went away. Reconnect when it's back."),
                         false => log.say("The instrument was released."),

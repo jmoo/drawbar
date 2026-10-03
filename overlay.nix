@@ -59,6 +59,8 @@ let
           || path == toString (workspace + "/drawbar/index.html")
           # The page's icon, which a test holds to the titlebar's mark.
           || path == toString (workspace + "/drawbar/favicon.svg")
+          # The collector's schema, which a test holds to the rows drawbar sends.
+          || path == toString (workspace + "/drawbar/telemetry.json")
         );
     };
 

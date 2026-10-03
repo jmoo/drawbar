@@ -36,3 +36,4 @@
 ---
 
 [Community](community.md)
+[Privacy](privacy.md)
