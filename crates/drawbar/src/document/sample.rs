@@ -1110,7 +1110,7 @@ const VALUE_TEXT: f32 = 11.5;
 const ACTION_H: f32 = 20.0;
 const ACTION_TEXT: f32 = 11.0;
 const ACTION_GLYPH: f32 = 12.0;
-const RADIUS: f32 = 2.0;
+const RADIUS: f32 = app::CONTROL_RADIUS as f32;
 
 /// A run of cells across an open row, wrapping where the window is narrow.
 pub fn strip(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
