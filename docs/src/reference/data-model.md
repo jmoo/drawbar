@@ -429,9 +429,12 @@ recording a piano's layout with a writer that keeps each stroke's range rather
 than its audio, and each range is sliced from the `File` and handed to the
 writer; a piano's checksum is taken as the copy streams (`cbin::Verifier::seal`)
 and written last. A sample's copy checks its checksum as it streams, so a file
-changed since its index was read is refused, and either kind is refused where
-the file's stat moved while the copy was written. Nothing is put over the file
-then. An export or send of an asset holding such an edit waits for it to be
+changed since its index was read is refused. A piano's copy reads the file's
+prefix and stroke directory again first, and refuses one that is not the
+directory its index read; its audio is not compared. Either kind is refused
+where the file's stat moved while the copy was written. Nothing is put over the
+file then. In the browser a file written since its `File` was taken fails to
+read at all. An export or send of an asset holding such an edit waits for it to be
 saved first. An edit held this way is kept across a quit as a working copy of
 the edit itself, and the next open makes it again over the file.
 

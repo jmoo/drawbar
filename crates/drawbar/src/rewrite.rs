@@ -128,7 +128,8 @@ impl Rewrite {
                     e => changed(e.to_string()),
                 })
             }
-            (Rewrite::Piano(library), ondisk::Index::Piano(_)) => {
+            (Rewrite::Piano(library), ondisk::Index::Piano(index)) => {
+                unchanged(from, index)?;
                 library.write_from(out, from).map_err(|e| match e {
                     nord_format::error::Error::Io(e) => e,
                     e => io::Error::other(e.to_string()),
@@ -299,6 +300,26 @@ impl Seek for Recorder<'_> {
             .filter(|at| *at <= self.end)
             .ok_or_else(|| io::Error::other("a seek outside what was written"))?;
         Ok(self.at)
+    }
+}
+
+/// Refuse a piano library whose prefix or stroke directory is no longer the one `index`
+/// read: the audio read by its ranges would not be the audio those records describe.
+/// Reads the file's header, prefix and directory again, a few kilobytes.
+///
+/// ⚠️ The audio itself is not compared. A file changed in place with its directory, its
+/// length and its time kept reads as unchanged.
+fn unchanged(from: &mut (impl Read + Seek), index: &npno::Index) -> io::Result<()> {
+    from.seek(SeekFrom::Start(0))?;
+    let now = npno::Index::read_from(from).map_err(|e| match e {
+        nord_format::error::Error::Io(e) => e,
+        e => changed(e.to_string()),
+    })?;
+    match now.library() == index.library() && now.audio_ranges() == index.audio_ranges() {
+        true => Ok(()),
+        false => Err(changed(
+            "its stroke directory is not the one drawbar read".to_string(),
+        )),
     }
 }
 
@@ -564,12 +585,17 @@ mod tests {
     /// A piano library of three roots with two layers each, every stroke a different
     /// length.
     fn piano() -> Vec<u8> {
+        piano_of([3, 4, 5])
+    }
+
+    /// [`piano`] with each root's attack strokes `blocks` long, by root.
+    fn piano_of(blocks: [u16; 3]) -> Vec<u8> {
         use nord_format::formats::npno::synthetic::{take, Build};
         use nord_format::formats::npno::Bank;
 
         let mut takes = Vec::new();
         for (i, root) in [48u8, 60, 72].into_iter().enumerate() {
-            let blocks = 3 + i as u16;
+            let blocks = blocks[i];
             takes.push(take(root, Bank::Attack, 0, blocks));
             takes.push(take(root, Bank::Attack, 1, blocks + 4));
             takes.push(take(root, Bank::Release, 0, 2));
@@ -639,7 +665,15 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         edit.write_from(&mut source, &file.index, &mut out).unwrap();
         assert!(out.into_inner() == whole, "the desktop's copy");
-        assert_eq!(source.reads, kept, "one read of each kept stroke");
+        let first = index.audio_ranges()[0].start;
+        let (head, audio): (Vec<_>, Vec<_>) =
+            source.reads.into_iter().partition(|read| read.end <= first);
+        assert_eq!(
+            head.last().map(|read| read.end),
+            Some(first),
+            "the directory again"
+        );
+        assert_eq!(audio, kept, "one read of each kept stroke");
 
         let pieces = edit.pieces(&file).unwrap();
         let (out, reads) = streamed(&pieces, &bytes);
@@ -652,5 +686,35 @@ mod tests {
             }
         }
         assert_eq!(reads, runs, "one read of each run of kept strokes");
+    }
+
+    /// A piano library replaced in place under its index by another of the same length,
+    /// its time put back, whose strokes sit elsewhere is refused before anything is
+    /// written: its audio would be read by ranges the new directory does not describe.
+    #[test]
+    fn a_piano_whose_directory_changed_under_its_index_is_not_written_through() {
+        let bytes = piano();
+        let theirs = piano_of([4, 3, 5]);
+        assert_eq!(bytes.len(), theirs.len(), "the same length");
+        let dir = Temp::new();
+        let file = on_disk(&dir, "Grand.npno", &bytes);
+        let path = dir.at("Grand.npno");
+        let time = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, &theirs).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|held| held.set_modified(time))
+            .unwrap();
+        let ondisk::Index::Piano(index) = &file.index else {
+            panic!("a piano library")
+        };
+        let mut library = index.library().clone();
+        library.set_name("Trimmed").unwrap();
+
+        let mut out = Cursor::new(Vec::new());
+        let e = Rewrite::Piano(library).write(&file, &mut out).unwrap_err();
+        assert!(is_changed(&e), "{e}");
+        assert!(out.into_inner().is_empty(), "nothing was written");
     }
 }

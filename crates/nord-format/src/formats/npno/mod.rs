@@ -570,7 +570,7 @@ impl Extent {
 ///
 /// The record is kept as read except for its audio offset, which is recomputed every
 /// time a library is written.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Stroke<'a> {
     /// The note the recording was made at. It comes from the record's position in
     /// the count table, not from a field of the record. Confirmed on hardware.
@@ -679,7 +679,10 @@ impl fmt::Debug for Stroke<'_> {
 /// derives: the stroke count, the per-root counts and every audio offset.
 /// [`Library::to_body`] computes them from the stroke list, so an unmodified library
 /// rebuilds to the bytes it was read from.
-#[derive(Clone)]
+///
+/// Two libraries are equal where they hold the same header, prefix and records, and the
+/// same audio, or, read through an [`Index`], the same ranges of their streams.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Library<'a> {
     /// The container header, carried so a transform yields a whole file.
     pub header: Header,
