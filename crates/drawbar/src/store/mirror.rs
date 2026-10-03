@@ -84,19 +84,69 @@ struct Loading {
     files: usize,
     /// How many leftovers of interrupted writes the open removed.
     swept: usize,
-    /// Each rename sent while the listing is in flight, with the count of commands sent
-    /// since the open that it brought to. A part the backend gathered before it ran names
-    /// what it moved where it was.
-    moves: Vec<(u64, LibPath, LibPath)>,
+    /// Each rename sent while the listing is in flight that has not failed. A part the
+    /// backend gathered before it ran names what it moved where it was.
+    moves: Vec<Rename>,
+    /// Answers of the listing gathered before a rename that has not answered yet, in
+    /// order. Each waits to know whether the rename moved what it names.
+    held: std::collections::VecDeque<Event>,
+}
+
+/// A rename sent while the listing is in flight.
+struct Rename {
+    /// The count of commands sent since the open that it brought to.
+    sent: u64,
+    from: LibPath,
+    to: LibPath,
+    /// The rows no file had claimed that it took along.
+    rows: Vec<u64>,
+    /// It answered that it moved.
+    moved: bool,
 }
 
 impl Loading {
     /// Bring a path the backend gave after `ran` commands to where it is now.
+    ///
+    /// ⚠️ Only for a path no rename still to answer may have moved: see
+    /// [`Loading::waits`].
     fn now(&self, ran: u64, path: &mut LibPath) {
-        for (_, from, to) in self.moves.iter().filter(|(sent, _, _)| *sent > ran) {
-            if let Some(moved) = path.moved(from, to) {
+        for rename in self.moves.iter().filter(|rename| rename.sent > ran) {
+            if let Some(moved) = path.moved(&rename.from, &rename.to) {
                 *path = moved;
             }
+        }
+    }
+
+    /// Whether an answer of the listing gathered after `ran` commands waits for a rename
+    /// sent after them to answer.
+    fn waits(&self, ran: u64) -> bool {
+        self.moves
+            .iter()
+            .any(|rename| !rename.moved && rename.sent > ran)
+    }
+
+    /// The rename that answered, as it answered: one that moved stays to bring the
+    /// parts gathered before it to where it put them, and one that failed goes.
+    fn answered(&mut self, from: &LibPath, to: &LibPath, moved: bool) -> Option<Rename> {
+        let at = self
+            .moves
+            .iter()
+            .position(|rename| !rename.moved && rename.from == *from && rename.to == *to)?;
+        match moved {
+            true => {
+                self.moves[at].moved = true;
+                None
+            }
+            false => Some(self.moves.remove(at)),
+        }
+    }
+
+    /// The next answer held back that no rename still to answer may have moved.
+    fn ready(&mut self) -> Option<Event> {
+        let ran = gathered(self.held.front()?)?;
+        match self.waits(ran) {
+            true => None,
+            false => self.held.pop_front(),
         }
     }
 
@@ -121,23 +171,56 @@ impl Loading {
         {
             self.now(ran, path);
         }
-        self.moves.retain(|(sent, _, _)| *sent > ran);
+        self.moves.retain(|rename| rename.sent > ran);
     }
 
     /// Follow a folder renamed while the listing is in flight: the rows no file has
-    /// claimed yet, and the folders listed so far, move with it.
-    fn relocate(&mut self, from: &LibPath, to: &LibPath) {
-        for row in self.rows.values_mut() {
-            if let Some(moved) = row.path.as_ref().and_then(|at| at.moved(from, to)) {
-                row.path = Some(moved);
+    /// claimed yet, and the folders listed so far, move with it. Returns the rows it
+    /// moved.
+    fn relocate(&mut self, from: &LibPath, to: &LibPath) -> Vec<u64> {
+        let mut moved = Vec::new();
+        for (id, row) in &mut self.rows {
+            if let Some(at) = row.path.as_ref().and_then(|at| at.moved(from, to)) {
+                row.path = Some(at);
+                moved.push(*id);
             }
         }
         self.by_path = by_path(&self.rows);
         for dir in &mut self.dirs {
-            if let Some(moved) = dir.moved(from, to) {
-                *dir = moved;
+            if let Some(at) = dir.moved(from, to) {
+                *dir = at;
             }
         }
+        moved
+    }
+
+    /// Put back what a rename that failed took along.
+    fn unmoved(&mut self, rename: Rename) {
+        let Rename { from, to, rows, .. } = rename;
+        for id in rows {
+            let Some(row) = self.rows.get_mut(&id) else {
+                continue;
+            };
+            if let Some(at) = row.path.as_ref().and_then(|at| at.moved(&to, &from)) {
+                row.path = Some(at);
+            }
+        }
+        self.by_path = by_path(&self.rows);
+        for dir in &mut self.dirs {
+            if let Some(at) = dir.moved(&to, &from) {
+                *dir = at;
+            }
+        }
+    }
+}
+
+/// How many commands had run when the backend gathered an answer of the listing, or
+/// `None` for any other answer.
+fn gathered(event: &Event) -> Option<u64> {
+    match event {
+        Event::Listed { ran, .. } | Event::Walked { ran, .. } => Some(*ran),
+        Event::Complete(complete) => Some(complete.ran),
+        _ => None,
     }
 }
 
@@ -345,11 +428,18 @@ impl Store {
         let mut released = false;
         let mut parts = 0;
         while parts < PARTS_A_FRAME {
-            let Some(event) = self.backend.try_recv() else {
-                break;
+            let (event, held) = match self.ready() {
+                Some(event) => (event, true),
+                None => match self.backend.try_recv() {
+                    Some(event) => (event, false),
+                    None => break,
+                },
             };
             parts += usize::from(matches!(event, Event::Listed { .. }));
-            released |= self.handle(event, workspace, browser, queue, log);
+            released |= match held {
+                true => self.react(event, workspace, browser, queue, log),
+                false => self.handle(event, workspace, browser, queue, log),
+            };
         }
         if parts == PARTS_A_FRAME {
             workspace.ctx().request_repaint();
@@ -368,12 +458,22 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        let Some(event) = self.backend.recv() else {
-            return false;
+        match self.ready() {
+            Some(event) => self.react(event, workspace, browser, queue, log),
+            None => {
+                let Some(event) = self.backend.recv() else {
+                    return false;
+                };
+                self.handle(event, workspace, browser, queue, log)
+            }
         };
-        self.handle(event, workspace, browser, queue, log);
         browser.folders.place = Some(self.place());
         true
+    }
+
+    /// The next answer of the listing held back that may now be folded in.
+    fn ready(&mut self) -> Option<Event> {
+        self.loading.as_mut()?.ready()
     }
 
     /// Ask the backend for the files of the unread assets something needs, reading at
@@ -415,10 +515,47 @@ impl Store {
     /// Send a command, counting it.
     fn send(&mut self, cmd: Cmd) {
         self.issued += 1;
-        if let (Some(loading), Cmd::Move { from, to }) = (&mut self.loading, &cmd) {
-            loading.moves.push((self.issued, from.clone(), to.clone()));
-        }
         self.backend.send(cmd);
+    }
+
+    /// Rename a file or folder, with the rows no file has claimed yet that it takes
+    /// along.
+    fn rename(&mut self, from: LibPath, to: LibPath, rows: Vec<u64>) {
+        self.write(Cmd::Move {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        if let Some(loading) = &mut self.loading {
+            loading.moves.push(Rename {
+                sent: self.issued,
+                from,
+                to,
+                rows,
+                moved: false,
+            });
+        }
+    }
+
+    /// Put back where they were the paths a rename that failed had moved.
+    fn unmoved(
+        &mut self,
+        from: &LibPath,
+        to: &LibPath,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+    ) {
+        for record in self.records.values_mut() {
+            if let Some(back) = record.path.as_ref().and_then(|at| at.moved(to, from)) {
+                record.path = Some(back);
+            }
+        }
+        if let Some(loading) = &mut self.loading {
+            if let Some(rename) = loading.answered(from, to, false) {
+                loading.unmoved(rename);
+            }
+        }
+        workspace.relocate(to, from);
+        browser.folders.follow(to, from);
     }
 
     /// Take in the files read for the assets that asked. Each comes back as it is now: a
@@ -499,6 +636,22 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        match self.hold(event) {
+            Some(event) => self.react(event, workspace, browser, queue, log),
+            None => false,
+        }
+    }
+
+    /// Fold in one answer, in its turn. Returns whether a send held by
+    /// [`Store::hold_send`] may now go ahead.
+    fn react(
+        &mut self,
+        event: Event,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> bool {
         match event {
             Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, log),
             Event::Listed { part, ran } => self.listed(part, ran, workspace, browser, log),
@@ -542,6 +695,22 @@ impl Store {
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
             Event::Read(answers) => self.took(answers, workspace, log),
+            Event::Moved { from, to, result } => match result {
+                Ok(()) => {
+                    if let Some(loading) = &mut self.loading {
+                        loading.answered(&from, &to, true);
+                    }
+                }
+                Err(why) => {
+                    let why = format!("moving {from} to {to}: {why}");
+                    log.error(why.clone());
+                    log.trouble(format!(
+                        "The library folder did not change as asked: {why}."
+                    ));
+                    self.unmoved(&from, &to, workspace, browser);
+                    self.rescan();
+                }
+            },
             Event::Saved { id, path, result } => {
                 self.saved(id, path, result, workspace, browser, log)
             }
@@ -564,6 +733,23 @@ impl Store {
             }
         }
         false
+    }
+
+    /// Hold back an answer of the listing gathered before a rename that has not
+    /// answered, and any behind one held already, so the answers stay in order. Returns
+    /// the answer where it is not held.
+    fn hold(&mut self, event: Event) -> Option<Event> {
+        let Some(loading) = &mut self.loading else {
+            return Some(event);
+        };
+        let Some(ran) = gathered(&event) else {
+            return Some(event);
+        };
+        if loading.held.is_empty() && !loading.waits(ran) {
+            return Some(event);
+        }
+        loading.held.push_back(event);
+        None
     }
 
     /// A write found the library closed to it: another drawbar took the lock first, or
@@ -812,6 +998,7 @@ impl Store {
             files: 0,
             swept,
             moves: Vec::new(),
+            held: Default::default(),
         });
     }
 
@@ -1407,10 +1594,11 @@ impl Store {
                         record.path = Some(moved);
                     }
                 }
-                if let Some(loading) = &mut self.loading {
-                    loading.relocate(&from, &to);
-                }
-                self.write(Cmd::Move { from, to });
+                let rows = self
+                    .loading
+                    .as_mut()
+                    .map(|loading| loading.relocate(&from, &to));
+                self.rename(from, to, rows.unwrap_or_default());
             }
         }
     }
@@ -1482,10 +1670,7 @@ impl Store {
             record.fingerprint.filter(|_| !missing)
         });
         if let Some(from) = from {
-            self.write(Cmd::Move {
-                from,
-                to: path.clone(),
-            });
+            self.rename(from, path.clone(), Vec::new());
         }
         if let Some(expect) = save {
             self.write(Cmd::Save {

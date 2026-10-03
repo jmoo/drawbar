@@ -1593,6 +1593,72 @@ fn an_asset_made_while_the_library_is_listed_shares_no_id_with_a_file() {
     }
 }
 
+/// A folder rename the disk refuses while the library is still being listed leaves
+/// everything where the disk has it: the files listed before the refusal and after it
+/// keep their ids and tags under the old name, and nothing reads as deleted or new.
+#[test]
+fn a_folder_rename_refused_while_the_library_is_listed_leaves_everything_where_it_was() {
+    const FILES: usize = 300;
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    for n in 0..FILES {
+        fs::write(root.at(&format!("Gig/{n:03}.ne5p")), vec![0xa5; 10 + n]).unwrap();
+    }
+    let mut session = Session::opening(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    let listed: Vec<u64> = session.bench.workspace.listed().map(|e| e.id).collect();
+    assert!(
+        !listed.is_empty() && listed.len() < FILES,
+        "{} listed",
+        listed.len()
+    );
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(listed[0], tag, true);
+    // A folder the listing has not shown takes the name first.
+    fs::create_dir(root.at("Set")).unwrap();
+    let rename = crate::browser::Act::RenameFolder {
+        id: folder,
+        name: "Set".into(),
+    };
+    session.bench.act(vec![rename]);
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Files);
+    session.listed_whole();
+    session.settle();
+
+    let workspace = &session.bench.workspace;
+    let mut paths: Vec<String> = workspace
+        .listed()
+        .filter_map(|entity| Some(entity.path.as_ref()?.to_string()))
+        .collect();
+    paths.sort();
+    let expected: Vec<String> = (0..FILES).map(|n| format!("Gig/{n:03}.ne5p")).collect();
+    assert_eq!(paths, expected);
+    for &id in &listed {
+        let entity = workspace.get(id).expect("the same id");
+        assert!(
+            entity.path.as_ref().unwrap().is_in(&gig),
+            "{:?}",
+            entity.path
+        );
+    }
+    assert!(session.bench.browser.tags.worn(listed[0]).contains(&tag));
+    assert_eq!(session.bench.browser.folders.id_of(&gig), Some(folder));
+    assert_eq!(session.said("deleted outside drawbar"), 0);
+    assert_eq!(session.said("appeared in the library folder"), 0);
+    assert_eq!(root.names("Gig").len(), FILES);
+    assert_eq!(
+        session.said("did not change as asked: moving Gig to Set"),
+        1
+    );
+}
+
 /// A folder removed while the library is still being listed waits until everything in
 /// it has been listed, and then the usual rules apply: it goes, and what was in it moves
 /// up, unless it holds a file drawbar does not.

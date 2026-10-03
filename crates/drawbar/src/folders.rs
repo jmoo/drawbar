@@ -454,37 +454,43 @@ impl Folders {
         let Some(from) = self.path_of(id).cloned() else {
             return;
         };
+        self.follow(&from, &to);
+        workspace.relocate(&from, &to);
+        self.ops.push(Op::MoveDir { from, to });
+    }
+
+    /// Move whatever is shown under `from`, file or folder, to the same place under
+    /// `to`, without sending the change to the disk.
+    pub(crate) fn follow(&mut self, from: &LibPath, to: &LibPath) {
         for folder in &mut self.list {
-            if let Some(moved) = folder.path.moved(&from, &to) {
+            if let Some(moved) = folder.path.moved(from, to) {
                 folder.path = moved;
             }
         }
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
         self.generation += 1;
         for lost in &mut self.lost {
-            if let Some(moved) = lost.row.path.as_ref().and_then(|at| at.moved(&from, &to)) {
+            if let Some(moved) = lost.row.path.as_ref().and_then(|at| at.moved(from, to)) {
                 lost.row.path = Some(moved);
             }
         }
         let others = self.others.iter_mut();
         let unread = self.unread.iter_mut().map(|(path, _)| path);
         for path in others.chain(unread) {
-            if let Some(moved) = path.moved(&from, &to) {
+            if let Some(moved) = path.moved(from, to) {
                 *path = moved;
             }
         }
         self.walks = std::mem::take(&mut self.walks)
             .into_iter()
-            .map(|(path, asked)| (path.moved(&from, &to).unwrap_or(path), asked))
+            .map(|(path, asked)| (path.moved(from, to).unwrap_or(path), asked))
             .collect();
         for paths in [&mut self.unwalked, &mut self.walked] {
             *paths = std::mem::take(paths)
                 .into_iter()
-                .map(|path| path.moved(&from, &to).unwrap_or(path))
+                .map(|path| path.moved(from, to).unwrap_or(path))
                 .collect();
         }
-        workspace.relocate(&from, &to);
-        self.ops.push(Op::MoveDir { from, to });
     }
 
     /// Whether everything in `dir` has been listed: the whole library has, or `dir` was

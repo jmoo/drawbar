@@ -426,8 +426,8 @@ pub enum Cmd {
         bytes: Vec<u8>,
         expect: Option<Fingerprint>,
     },
-    /// Rename a file or folder. Refused where `to` already exists. Answered only on
-    /// failure.
+    /// Rename a file or folder. Refused where `to` already exists. Answered by
+    /// [`Event::Moved`].
     Move { from: LibPath, to: LibPath },
     /// Answered only on failure.
     MakeDir(LibPath),
@@ -465,7 +465,13 @@ pub enum Event {
         path: LibPath,
         result: Result<Fingerprint, Failure>,
     },
-    /// A command other than a save failed: what it was doing, and why.
+    /// Whether a [`Cmd::Move`] moved anything, and why not.
+    Moved {
+        from: LibPath,
+        to: LibPath,
+        result: Result<(), String>,
+    },
+    /// A command other than a save or a move failed: what it was doing, and why.
     Failed(String),
     /// A write found that nothing may be written after all, and why: another drawbar
     /// took the lock first, or the folder refused the sidecar. The write did not run.

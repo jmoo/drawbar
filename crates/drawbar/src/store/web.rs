@@ -291,6 +291,11 @@ fn refused(cmd: Cmd, why: &str) -> Event {
             path,
             result: Err(Failure::Io(why.to_string())),
         },
+        Cmd::Move { from, to } => Event::Moved {
+            from,
+            to,
+            result: Err(why.to_string()),
+        },
         _ => Event::Failed(why.to_string()),
     }
 }

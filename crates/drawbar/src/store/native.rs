@@ -524,7 +524,10 @@ mod tests {
                 to: LibPath::root().join("C3.ne5p"),
             },
         );
-        assert!(moved.is_none(), "{moved:?}");
+        assert!(
+            matches!(moved, Some(Event::Moved { result: Ok(()), .. })),
+            "{moved:?}"
+        );
         assert_eq!(root.names(""), [".drawbar", "C3.ne5p"]);
         assert_eq!(root.read("C3.ne5p"), b"lower");
     }
@@ -546,7 +549,10 @@ mod tests {
                 to: LibPath::root().join("C3.ne5p"),
             },
         );
-        assert!(matches!(moved, Some(Event::Failed(_))), "{moved:?}");
+        assert!(
+            matches!(moved, Some(Event::Moved { result: Err(_), .. })),
+            "{moved:?}"
+        );
         assert_eq!(root.read("c3.ne5p"), b"lower");
         assert_eq!(root.read("C3.ne5p"), b"upper");
     }

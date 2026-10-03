@@ -155,6 +155,10 @@ fn writes(cmd: &Cmd) -> bool {
 async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
     if writes(&cmd) {
         if let Err(why) = take(fs).await {
+            if let Cmd::Move { from, to } = cmd {
+                let result = Err(why.clone());
+                answer(Event::Moved { from, to, result });
+            }
             return answer(Event::ReadOnly(why));
         }
     }
@@ -186,11 +190,11 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
             let result = save(fs, &path, &bytes, expect).await;
             Some(Event::Saved { id, path, result })
         }
-        Cmd::Move { from, to } => fs
-            .rename(from.as_str(), to.as_str())
-            .await
-            .err()
-            .map(|e| Event::Failed(format!("moving {from} to {to}: {e}"))),
+        Cmd::Move { from, to } => {
+            let result = fs.rename(from.as_str(), to.as_str()).await;
+            let result = result.map_err(|e| e.to_string());
+            Some(Event::Moved { from, to, result })
+        }
         Cmd::MakeDir(path) => fs
             .make_dir(path.as_str())
             .await
@@ -581,7 +585,10 @@ impl Follow {
 fn failed(event: &Event) -> bool {
     matches!(
         event,
-        Event::Failed(_) | Event::ReadOnly(_) | Event::Saved { result: Err(_), .. }
+        Event::Failed(_)
+            | Event::ReadOnly(_)
+            | Event::Saved { result: Err(_), .. }
+            | Event::Moved { result: Err(_), .. }
     )
 }
 
@@ -1605,8 +1612,10 @@ mod tests {
         });
         let (mut before, mut after) = (Vec::new(), Vec::new());
         for event in listing(&mut fs, Vec::new()) {
-            let Event::Listed { part, ran } = event else {
-                panic!("{event:?}");
+            let (part, ran) = match event {
+                Event::Listed { part, ran } => (part, ran),
+                Event::Moved { result: Ok(()), .. } => continue,
+                other => panic!("{other:?}"),
             };
             match ran {
                 0 => before.extend(named(&part)),
