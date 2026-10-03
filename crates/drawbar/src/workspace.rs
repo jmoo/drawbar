@@ -2788,11 +2788,13 @@ impl Workspace {
     }
 
     /// Record a write that sent the file `file` to a slot, read from it a chunk at a time:
-    /// the file is the saved baseline, and the slot becomes the link. `crc32` is the
-    /// checksum a slot holding the file reports.
+    /// the slot becomes the link, and the write is recorded with `crc32`, the checksum a
+    /// slot holding the file reports.
     ///
-    /// ⚠️ An asset saved as something else while the file was sent is saved as the file
-    /// again, under a stamp of its own, for the reason [`Workspace::landed`] gives.
+    /// ⚠️ An asset resting in another file now, as one whose edit was saved while the
+    /// file was sent does, keeps resting there: the edit is on disk, and the slot holds
+    /// what it was saved as before. One holding bytes in memory instead is saved as the
+    /// file again, under a stamp of its own, for the reason [`Workspace::landed`] gives.
     pub fn landed_file(
         &mut self,
         id: u64,
@@ -2803,7 +2805,8 @@ impl Workspace {
     ) {
         let moved = self.get(id).is_some_and(|entity| {
             let saved = &entity.saved;
-            saved.size() != file.len || saved.crc32 != Some(crc32)
+            let other = saved.size() != file.len || saved.crc32 != Some(crc32);
+            entity.rests().is_none() && other
         });
         let stamp = match moved {
             true => Some(self.stamp()),
@@ -3253,6 +3256,36 @@ mod tests {
 
     fn ingest(name: &str, bytes: Vec<u8>) -> LocalEntity {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
+    }
+
+    /// A send of a resting file that lands after the asset's edit was saved into another
+    /// file leaves the asset resting in what the save wrote: the edit stays saved, and
+    /// the write records the checksum of the file the slot took.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_send_landing_after_an_edit_was_saved_keeps_the_saved_edit() {
+        let dir = crate::testing::Temp::new();
+        let sent = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(4));
+        let edited = crate::testing::on_disk(&dir, "Edited.npno", &crate::testing::piano(5));
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Upright.npno", sent.clone());
+        workspace.settle_files(&mut log);
+        let crc32 = workspace.get(id).unwrap().saved.crc32.expect("checked");
+
+        workspace.edit_saved(id, edited.clone());
+        workspace.settle_files(&mut log);
+        let (class, at) = (ObjectClass::Piano, Location::from_user(1, 1));
+        workspace.landed_file(id, class, at, sent, crc32);
+
+        let entity = workspace.get(id).unwrap();
+        assert!(entity
+            .rests()
+            .is_some_and(|file| Arc::ptr_eq(file, &edited)));
+        assert!(!entity.is_unsaved(), "the edit is saved");
+        assert_eq!(entity.link, Some((class, at)));
+        assert!(entity.wrote.is_some_and(|wrote| wrote.crc32 == crc32));
+        assert_ne!(entity.saved.crc32, Some(crc32), "so the slot is behind");
     }
 
     /// Closing a library lets go of the files its assets rested in, checks still waiting

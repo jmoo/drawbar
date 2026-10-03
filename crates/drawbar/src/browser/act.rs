@@ -212,6 +212,22 @@ pub enum Act {
 }
 
 impl Act {
+    /// The assets whose bytes the act carries out of the app: saved into their files,
+    /// exported, queued, or written to the instrument.
+    pub fn carries(&self, queue: &Queue) -> Vec<u64> {
+        match self {
+            Act::SaveDoc(id)
+            | Act::WriteBack(id)
+            | Act::Export(id)
+            | Act::Send { id, .. }
+            | Act::Retarget { id, .. }
+            | Act::Replace { id, .. } => vec![*id],
+            Act::SendChecked(ids) => ids.clone(),
+            Act::SendAll => will_write(queue).map(|held| held.id).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The assets on this computer whose contents the act works from. It waits until
     /// each has been read, and decodes it first where that is still to be done.
     pub fn reads(&self) -> Vec<u64> {

@@ -799,7 +799,7 @@ impl eframe::App for DrawbarApp {
         // it is.
         let acts = self
             .document
-            .settle(ctx, acts, &mut self.workspace, &mut self.log);
+            .settle(ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
         let acts = match released {
             true => acts,
             false => self.hold_sends(acts),

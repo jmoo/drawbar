@@ -285,10 +285,16 @@ pub struct Document {
     reading: Option<(u64, Asked)>,
     /// The edits of sample instruments resting in their files.
     samples: sample::Edits,
-    /// Acts waiting for an edit of an asset resting in its file to be saved into that
-    /// file, each with the asset and the [`crate::ondisk::OnDisk::serial`] of the file it
-    /// rested in as it began.
-    saving: Vec<(u64, u64, crate::browser::Act)>,
+    /// Acts waiting for the edits of assets resting in their files to be saved into
+    /// those files.
+    saving: Vec<Saving>,
+}
+
+/// An act waiting for edits to be saved: each asset it carries that held one, with the
+/// [`crate::ondisk::OnDisk::serial`] of the file it rested in as the act began.
+struct Saving {
+    files: Vec<(u64, u64)>,
+    act: crate::browser::Act,
 }
 
 impl Document {
@@ -644,6 +650,7 @@ impl Document {
         ctx: &egui::Context,
         acts: Vec<crate::browser::Act>,
         workspace: &mut Workspace,
+        queue: &Queue,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
         for id in self.samples.ids() {
@@ -657,7 +664,8 @@ impl Document {
                 self.piano.forget(*id);
                 self.samples.forget(*id);
             }
-            if let Some(act) = self.save_first(act, workspace) {
+            let carried = act.carries(queue);
+            if let Some(act) = self.save_first(act, &carried, workspace) {
                 out.extend(self.piano.hold(ctx, act, workspace));
             }
         }
@@ -666,41 +674,48 @@ impl Document {
         out
     }
 
-    /// Hold an act that would carry an asset out of the app while the asset holds an
-    /// edit over the file it rests in, and ask for that edit to be saved into the file
+    /// Hold an act that carries assets out of the app while any of them holds an edit
+    /// over the file it rests in, and ask for each such edit to be saved into its file
     /// first. Returns the act where it is free to run now.
     fn save_first(
         &mut self,
         act: crate::browser::Act,
+        carried: &[u64],
         workspace: &mut Workspace,
     ) -> Option<crate::browser::Act> {
-        let id = piano::waits_on(&act).filter(|id| workspace.edit_of(*id).is_some());
-        let Some((id, file)) = id.and_then(|id| Some((id, workspace.get(id)?.rests()?))) else {
+        let files: Vec<(u64, u64)> = carried
+            .iter()
+            .filter(|id| workspace.edit_of(**id).is_some())
+            .filter_map(|id| Some((*id, workspace.get(*id)?.rests()?.serial)))
+            .collect();
+        if files.is_empty() {
             return Some(act);
-        };
-        let serial = file.serial;
-        workspace.save_edit(id);
-        self.saving.push((id, serial, act));
+        }
+        for (id, _) in &files {
+            workspace.save_edit(*id);
+        }
+        self.saving.push(Saving { files, act });
         None
     }
 
-    /// The acts whose saves have answered: each runs where its save landed, and is
-    /// dropped, with a word, where it did not.
+    /// The acts whose saves have all answered: each runs where every save landed, and
+    /// is dropped, with a word, where one did not.
     fn saved(&mut self, workspace: &Workspace, log: &mut Log) -> Vec<crate::browser::Act> {
         let (answered, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.saving)
             .into_iter()
-            .partition(|(id, _, _)| !workspace.saving_edit(*id));
+            .partition(|held| held.files.iter().all(|(id, _)| !workspace.saving_edit(*id)));
         self.saving = waiting;
         let mut out = Vec::new();
-        for (id, serial, act) in answered {
-            let Some(entity) = workspace.get(id) else {
-                continue;
-            };
-            let moved = entity.rests().is_some_and(|file| file.serial != serial);
-            match (moved && !entity.is_unsaved(), &act) {
-                (true, _) => out.push(act),
-                (false, crate::browser::Act::SaveDoc(_)) => {}
-                (false, _) => log.say(format!(
+        for Saving { files, act } in answered {
+            let unsaved = files.iter().find_map(|(id, serial)| {
+                let entity = workspace.get(*id)?;
+                let moved = entity.rests().is_some_and(|file| file.serial != *serial);
+                (!moved || entity.is_unsaved()).then_some(entity)
+            });
+            match (unsaved, &act) {
+                (None, _) => out.push(act),
+                (Some(_), crate::browser::Act::SaveDoc(_)) => {}
+                (Some(entity), _) => log.say(format!(
                     "“{}” was not saved, so what waited on its save did not run.",
                     entity.name
                 )),
@@ -748,7 +763,7 @@ impl Document {
     /// Export the document's bytes once any pending edit has reached them.
     fn export(&mut self, ctx: &egui::Context, id: u64, workspace: &mut Workspace) {
         let held = self
-            .save_first(crate::browser::Act::Export(id), workspace)
+            .save_first(crate::browser::Act::Export(id), &[id], workspace)
             .and_then(|act| self.piano.hold(ctx, act, workspace));
         if held.is_some() {
             workspace.export(id);
@@ -1610,6 +1625,26 @@ mod tests {
             self.workspace.get(self.id).expect("it is still open")
         }
 
+        /// Run `acts` as the app runs a frame's acts: held here first where they wait on
+        /// the document, then applied.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn act(&mut self, acts: Vec<crate::browser::Act>) {
+            let ctx = self.ctx.clone();
+            let acts =
+                self.document
+                    .settle(&ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
+            crate::browser::apply(
+                &mut crate::browser::Browser::default(),
+                &mut crate::shell::Shell::default(),
+                acts,
+                &mut self.workspace,
+                &mut self.device,
+                &mut crate::tabs::Tabs::default(),
+                &mut self.queue,
+                &mut self.log,
+            );
+        }
+
         /// The open document's state.
         fn state(&mut self) -> &mut Opened {
             self.document.open.as_mut().expect("a document is open")
@@ -1759,10 +1794,11 @@ mod tests {
         let Open {
             document,
             workspace,
+            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, log);
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
         assert_eq!(ran, [], "the save waits for the file");
         assert!(workspace.saving_edit(id));
 
@@ -1773,7 +1809,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let whole = sample::apply(&bytes, &sets).unwrap();
@@ -1783,6 +1819,89 @@ mod tests {
         assert!(!open.entity().is_unsaved());
         let named = open.document.instrument_name(id, &open.workspace);
         assert_eq!(named, "Vibes", "read from the file the save wrote");
+    }
+
+    /// A queued send of a sample resting in its file under an edit waits for the edit to
+    /// be saved into the file, and then sends the file the save wrote, unread.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_send_of_a_resting_sample_saves_its_edit_and_sends_the_file_saved() {
+        use crate::browser::Act;
+        use crate::device::{DeviceCmd, Payload};
+
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        let (class, at) = (ObjectClass::Sample, Location::from_user(1, 1));
+        open.device.pretend_scanned(class, 1, &[""]);
+        open.act(vec![Act::Send { id, class, at }]);
+        assert!(open.queue.entry(id).is_some(), "it waits to be sent");
+
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets.clone(), workspace, log).unwrap();
+        open.twice();
+        open.act(vec![Act::SendAll]);
+        let sent = |open: &Open| {
+            let batch = open.device.queued().iter().find_map(|cmd| match cmd {
+                DeviceCmd::SendAll { items, .. } => Some(items),
+                _ => None,
+            });
+            batch.map(|items| items[0].payload.clone())
+        };
+        assert!(sent(&open).is_none(), "nothing is sent before the save");
+        assert!(open.workspace.saving_edit(id));
+
+        let (from, edit) = open.workspace.send_edit(id).expect("the store takes it");
+        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
+        edit.write(&from, &mut out).unwrap();
+        drop(out);
+        let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
+        open.workspace.edit_saved(id, saved.clone());
+        open.workspace.settle_files(&mut open.log);
+        saved.take_reads();
+        open.act(Vec::new());
+
+        let Some(Payload::File { file: sent, .. }) = sent(&open) else {
+            panic!("the file the save wrote is sent: {:?}", open.log.status())
+        };
+        assert!(std::sync::Arc::ptr_eq(&sent, &saved));
+        assert!(dir.read("Saved.nsmp") == sample::apply(&bytes, &sets).unwrap());
+        assert_eq!(saved.take_reads(), [], "nothing read it to send it");
+    }
+
+    /// An edit of a sample resting in its file is not sent as the file without it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_holding_an_unsaved_edit_is_not_sendable_as_its_file() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        assert!(crate::device::Payload::of(open.entity()).is_ok());
+
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets, workspace, log).unwrap();
+        assert!(crate::device::Payload::of(open.entity()).is_err());
     }
 
     /// Every kind, in both the dark and the light theme.
@@ -3387,6 +3506,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::SaveDoc(open.id)],
             &mut open.workspace,
+            &open.queue,
             &mut open.log,
         );
         assert!(
@@ -3446,10 +3566,11 @@ mod tests {
         let Open {
             document,
             workspace,
+            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, log);
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
         assert_eq!(ran, [], "the save waits for the file");
         assert!(!document.piano.applying(), "nothing lays it out in memory");
 
@@ -3460,7 +3581,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let renamed = piano::snapshot(
@@ -3498,6 +3619,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::Revert(open.id)],
             &mut open.workspace,
+            &open.queue,
             &mut open.log,
         );
         assert!(

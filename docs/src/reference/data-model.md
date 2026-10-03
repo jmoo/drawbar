@@ -156,9 +156,12 @@ it every frame, and a piano library is hundreds of megabytes.
 A send that lands moves the baseline to what it sent (`Workspace::landed`). An
 asset sent from the file it rests in keeps that file as its baseline, and
 `Workspace::landed_file` sets the link and the write from the checksum its check
-took; nothing reads the file again. Where the baseline moved while the file was
-sent, the file becomes the baseline again under a stamp of its own, so an edit
-saved meanwhile shows as unsaved.
+took; nothing reads the file again. An asset resting in another file by the
+time the send lands, as one whose edit was saved during the send does, keeps
+resting there, and its write records the checksum of what the slot took, so the
+slot shows as behind. An asset that holds its bytes in memory by then takes the
+sent file as its baseline again under a stamp of its own, so an edit made
+meanwhile shows as unsaved.
 
 ### Ids
 

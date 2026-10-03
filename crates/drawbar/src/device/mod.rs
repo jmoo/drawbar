@@ -184,11 +184,15 @@ pub enum Payload {
 }
 
 impl Payload {
-    /// What sending `entity` writes, or why the instrument must not be sent it.
+    /// What sending `entity` writes, or why the instrument must not be sent it. One resting
+    /// in its file under an edit is sent once the edit is saved there.
     pub fn of(entity: &LocalEntity) -> Result<Payload, String> {
         entity.sendable()?;
         match (entity.rests(), &entity.container) {
             (None, _) => Ok(Payload::Bytes(entity.bytes.to_vec())),
+            (Some(_), _) if entity.is_unsaved() => {
+                Err("it holds an edit not yet saved into its file".into())
+            }
             (Some(file), Some(container)) => Ok(Payload::File {
                 file: file.clone(),
                 crc32: container.body_crc32,
