@@ -97,7 +97,9 @@ impl Session {
             .filter(|entity| entity.unread())
             .map(|entity| entity.id)
             .collect();
-        workspace.in_view(unread);
+        for id in unread {
+            workspace.hurry(id);
+        }
         self.answer_reads();
     }
 
@@ -124,7 +126,9 @@ impl Session {
 
     /// Something needs these assets now: read and decode each not read yet.
     fn read(&mut self, ids: &[u64]) {
-        self.bench.workspace.in_view(ids.iter().copied());
+        for id in ids {
+            self.bench.workspace.hurry(*id);
+        }
         self.answer_reads();
         let Bench { workspace, log, .. } = &mut self.bench;
         workspace.settle_files(log);
@@ -2245,7 +2249,8 @@ fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
     assert_eq!(unread(&session), [a], "the one needed least recently");
     let evicted = session.bench.workspace.get(a).unwrap();
     assert!(evicted.bytes.is_empty() && evicted.entity.is_none());
-    assert_eq!(evicted.verify.note(), Some("reading…"));
+    assert_eq!(evicted.verify.note(), None, "it still draws as read");
+    assert_eq!(Kind::of(evicted), Kind::Program);
     assert!(evicted.saved.crc32.is_some(), "it still matches its slot");
     assert!(session.bench.workspace.held_whole() <= budget);
 

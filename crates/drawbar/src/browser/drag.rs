@@ -94,11 +94,15 @@ impl Kind {
     ///
     /// Bytes that did not decode are a note when
     /// [`is_text`](crate::document::text::is_text) said so on arrival, and
-    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads,
-    /// and one not read or decoded yet is what its name says.
+    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads.
+    /// One not read or decoded yet is what a read before found, where one is
+    /// [`remembered`](LocalEntity::remembered), and what its name says otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         if entity.reading() || entity.unread() {
-            return Kind::of_name(&entity.name);
+            return match entity.remembered.as_deref() {
+                Some(known) => known.kind,
+                None => Kind::of_name(&entity.name),
+            };
         }
         match entity.indexed() {
             Some(crate::ondisk::Index::Piano(_)) => return Kind::Piano,

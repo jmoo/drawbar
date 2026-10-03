@@ -448,9 +448,15 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
     whereabouts(entity, device, queue).mark(queue.holds(entity.id))
 }
 
-/// The library a program names, and its name if the instrument has reported one.
+/// The library a program names, and its name if the instrument has reported one. A
+/// program not read this session names what a read of it found before.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let Some(plays) = entity.plays else {
+    let plays = match (&entity.entity, entity.remembered.as_deref()) {
+        (Some(_), _) => entity.plays,
+        (None, Some(known)) => known.plays,
+        (None, None) => None,
+    };
+    let Some(plays) = plays else {
         return Needs::Nothing;
     };
     let (class, id) = (plays.class(), plays.id());

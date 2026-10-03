@@ -23,7 +23,7 @@ use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
 use crate::queue::Queue;
 use crate::store::{names, LibPath};
-use crate::summary::Plays;
+use crate::summary::{Plays, Summary, Verdict};
 use crate::work;
 
 /// Where an entity came from.
@@ -85,6 +85,10 @@ pub enum VerifyState {
     Reading,
     /// A file from the library that could not be read, and why.
     NotRead(String),
+    /// A file from the library not read this session, whose
+    /// [`Summary`](crate::summary::Summary) says what a read of it found before. It is
+    /// read once something needs its bytes.
+    Remembered(Verdict),
 }
 
 impl VerifyState {
@@ -97,6 +101,12 @@ impl VerifyState {
             VerifyState::Failed(_) => "failed",
             VerifyState::NotRead(_) => "not read",
             VerifyState::NotApplicable(_) => "n/a",
+            VerifyState::Remembered(verdict) => match verdict {
+                Verdict::Ok | Verdict::Checked => "ok",
+                Verdict::Differs { .. } => "differs",
+                Verdict::Failed => "failed",
+                Verdict::NotApplicable => "n/a",
+            },
         }
     }
 
@@ -109,18 +119,28 @@ impl VerifyState {
             VerifyState::Differs { at } => format!("first difference at byte {at:#06x}"),
             VerifyState::Failed(why) | VerifyState::NotRead(why) => why.clone(),
             VerifyState::NotApplicable(why) => (*why).to_string(),
+            VerifyState::Remembered(Verdict::Differs { at }) => {
+                format!("first difference at byte {at:#06x} when it was last read")
+            }
+            VerifyState::Remembered(_) => "as it was when it was last read".into(),
         }
     }
 
     pub fn color(&self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
-            VerifyState::Ok | VerifyState::Checked => crate::app::good(visuals),
-            VerifyState::Differs { .. } | VerifyState::Failed(_) | VerifyState::NotRead(_) => {
+            VerifyState::Ok
+            | VerifyState::Checked
+            | VerifyState::Remembered(Verdict::Ok | Verdict::Checked) => crate::app::good(visuals),
+            VerifyState::Differs { .. }
+            | VerifyState::Failed(_)
+            | VerifyState::NotRead(_)
+            | VerifyState::Remembered(Verdict::Differs { .. } | Verdict::Failed) => {
                 crate::app::bad(visuals)
             }
-            VerifyState::Checking | VerifyState::Reading | VerifyState::NotApplicable(_) => {
-                visuals.weak_text_color()
-            }
+            VerifyState::Checking
+            | VerifyState::Reading
+            | VerifyState::NotApplicable(_)
+            | VerifyState::Remembered(Verdict::NotApplicable) => visuals.weak_text_color(),
         }
     }
 
@@ -129,12 +149,15 @@ impl VerifyState {
         match self {
             VerifyState::Checking => Some("checking…"),
             VerifyState::Reading => Some("reading…"),
-            VerifyState::Failed(_) => Some("failed verification"),
+            VerifyState::Failed(_) | VerifyState::Remembered(Verdict::Failed) => {
+                Some("failed verification")
+            }
             VerifyState::NotRead(_) => Some("not read"),
             VerifyState::Ok
             | VerifyState::Checked
             | VerifyState::Differs { .. }
-            | VerifyState::NotApplicable(_) => None,
+            | VerifyState::NotApplicable(_)
+            | VerifyState::Remembered(_) => None,
         }
     }
 }
@@ -492,6 +515,9 @@ pub struct LocalEntity {
     ///
     /// [`Workspace::forget_writes`] clears it when the instrument goes.
     pub wrote: Option<Wrote>,
+    /// What a read of its file found before, while it is unread: its kind, tag, slot
+    /// checksum and what it plays, without its bytes. See [`Workspace::remember`].
+    pub remembered: Option<Box<Summary>>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
 }
@@ -541,19 +567,30 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
+            remembered: None,
             seen: Default::default(),
         }
     }
 
-    /// Whether its bytes are still to be decoded, or read.
+    /// Whether what it is waits on its bytes being read or decoded. One whose summary is
+    /// [`remembered`](LocalEntity::remembered) does not, though it is still
+    /// [`unread`](LocalEntity::unread).
     pub fn reading(&self) -> bool {
         matches!(self.verify, VerifyState::Reading)
     }
 
-    /// Whether it holds nothing but a file nothing has read yet: no bytes, no decode, and
-    /// the length and kind its listing gave.
+    /// Whether it holds nothing but a file nothing has read this session: no bytes, no
+    /// decode, the length its listing gave, and the kind its name or its summary gives.
+    /// Anything that acts on it reads it first.
     pub fn unread(&self) -> bool {
         self.saved.unread.is_some() && self.stamp == self.saved.stamp
+    }
+
+    /// Draw as `known` says, and match its slot by the checksum it gives.
+    fn know(&mut self, known: Summary) {
+        self.saved.crc32 = known.crc32;
+        self.verify = VerifyState::Remembered(known.verdict);
+        self.remembered = Some(Box::new(known));
     }
 
     /// Take what its bytes decode to. They are what it was saved as, since nothing can
@@ -597,6 +634,7 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
+            remembered: None,
             seen: Default::default(),
         }
     }
@@ -734,10 +772,10 @@ impl LocalEntity {
             (Some(entity), _) => entity.identity().format.to_string(),
             (None, Some(container)) => container.tag(),
             (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
-            (None, None) => match (self.rests(), self.listed_tag()) {
+            (None, None) => match (self.rests(), self.remembered.as_deref()) {
                 (Some(file), _) => file.index.tag().to_string(),
-                (None, Some(tag)) => tag.to_string(),
-                (None, None) => "?".into(),
+                (None, Some(known)) => known.tag.clone(),
+                (None, None) => self.listed_tag().unwrap_or("?").to_string(),
             },
         }
     }
@@ -1838,29 +1876,36 @@ impl Workspace {
         decoding.count() + self.wanted.borrow().len()
     }
 
-    /// Something needs `id`: its row is in view, it is picked, or it is open. One not
-    /// read yet is asked of the library, and one not decoded yet is decoded ahead of the
-    /// others. Either way it is needed now, and is not let go for room until a frame
-    /// passes without it being needed.
+    /// Something needs `id` whole: it is picked, open, or acted on. One not read yet is
+    /// asked of the library, and one not decoded yet is decoded ahead of the others.
+    /// Either way it is needed now, and is not let go for room until a frame passes
+    /// without it being needed.
     pub fn hurry(&self, id: u64) {
+        self.need(id, true);
+    }
+
+    /// Each of these assets is a row a list draws. A row draws what a summary remembers,
+    /// so only one with nothing remembered is read for it; otherwise as
+    /// [`Workspace::hurry`].
+    pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
+        for id in ids {
+            self.need(id, false);
+        }
+    }
+
+    fn need(&self, id: u64, whole: bool) {
         let Some(entity) = self.get(id) else {
             return;
         };
         entity.seen.set(self.frame);
-        if !entity.reading() {
+        let remembered = matches!(entity.verify, VerifyState::Remembered(_));
+        if !entity.reading() && !(whole && remembered) {
             return;
         }
         if !entity.unread() {
             self.hurried.borrow_mut().insert(id);
         } else if !self.asked.contains(&id) && self.wanted.borrow_mut().insert(id) {
             self.ctx.request_repaint();
-        }
-    }
-
-    /// [`Workspace::hurry`] for each of these assets, as for the rows a list draws.
-    pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
-        for id in ids {
-            self.hurry(id);
         }
     }
 
@@ -1919,6 +1964,7 @@ impl Workspace {
         log.warn(format!("{}: {why}", entity.name));
         entity.parse_error = Some(why.clone());
         entity.verify = VerifyState::NotRead(why);
+        entity.remembered = None;
         self.revision += 1;
     }
 
@@ -1999,30 +2045,53 @@ impl Workspace {
     }
 
     /// Let go of what a clean asset holds whole and what it decodes to, so it is unread
-    /// again under a new stamp, which this returns. It keeps the checksum a slot holding
-    /// it would report, so it still matches that slot. `None`, and nothing let go, where
+    /// again under a new stamp, which this returns. It keeps its summary, so it still
+    /// draws as it did and matches its slot. `None`, and nothing let go, where
     /// [`Workspace::evictable`] keeps it.
     pub fn evict(&mut self, id: u64) -> Option<u64> {
         self.evictable(id)?;
         let entity = self.get(id)?;
-        let (len, crc32) = (entity.size(), entity.saved.crc32);
+        let (len, crc32, known) = (entity.size(), entity.saved.crc32, Summary::of(entity));
         let stamp = self.stamp();
         self.swap(id, false, |held| {
             let (name, origin) = (held.name.clone(), held.origin.clone());
             let mut listed = LocalEntity::listed(id, name, origin, len, stamp);
             listed.saved.crc32 = crc32;
+            if let Some(known) = known {
+                listed.know(known);
+            }
             listed
         });
         Some(stamp)
     }
 
-    /// An unread asset's file changed on disk: the checksum it kept from before it was let
-    /// go no longer stands for it.
+    /// Give an unread asset what a read of its file found before, so it draws as it did
+    /// once read without being read. Nothing for an asset read since, or one that could
+    /// not be read. A read wanted only for its row is no longer asked for; something
+    /// that needs it whole asks again.
+    pub fn remember(&mut self, id: u64, summary: Summary) {
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        if entity.unread() && entity.reading() {
+            entity.know(summary);
+            self.wanted.get_mut().remove(&id);
+            self.revision += 1;
+        }
+    }
+
+    /// An unread asset's file changed on disk: what it remembers of it from before no
+    /// longer stands for it.
     pub fn stale(&mut self, id: u64) {
         let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
             return;
         };
-        if entity.saved.crc32.take().is_some() {
+        let crc32 = entity.saved.crc32.take();
+        let known = entity.remembered.take();
+        if matches!(entity.verify, VerifyState::Remembered(_)) {
+            entity.verify = VerifyState::Reading;
+        }
+        if crc32.is_some() || known.is_some() {
             self.revision += 1;
         }
     }
