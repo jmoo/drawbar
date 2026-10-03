@@ -786,7 +786,7 @@ fn stored_name(
             let held = sample::snapshot(decoded)?.ok()?;
             Some((
                 Named::Stored {
-                    limit: Some(held.max_name_len),
+                    limit: Some(held.max_name_len?),
                     variant: None,
                     width: NAME,
                 },

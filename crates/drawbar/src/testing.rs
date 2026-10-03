@@ -201,6 +201,21 @@ pub(crate) fn sample_bytes() -> Vec<u8> {
         .unwrap()
 }
 
+/// [`sample_bytes`] with its `hdr` cut short of the name field, as the original
+/// Sample Library stores it.
+pub(crate) fn nameless_sample_bytes() -> Vec<u8> {
+    use nord_format::formats::nsmp::section;
+    let decoded = nord_format::from_stream(&mut std::io::Cursor::new(sample_bytes())).unwrap();
+    let nord_format::Entity::Sample(nord_format::Sample::V2(mut body)) = decoded else {
+        panic!("the default options build the narrow chain");
+    };
+    section::find_mut(&mut body.body.sections, section::HDR)
+        .unwrap()
+        .payload
+        .truncate(18);
+    body.to_bytes().unwrap()
+}
+
 /// Everything [`apply`] runs a browser act against, on one context.
 pub(crate) struct Bench {
     pub ctx: egui::Context,
