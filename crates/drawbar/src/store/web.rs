@@ -1014,6 +1014,41 @@ impl Fs for Folder {
         }
     }
 
+    /// Every file is asked for before any is waited on, and then every snapshot, so the
+    /// browser looks them up together.
+    async fn stats(&self, paths: &[&str]) -> Vec<io::Result<Option<Stat>>> {
+        let mut handles = Vec::with_capacity(paths.len());
+        for path in paths {
+            handles.push(match self.spot(path).await {
+                Ok((dir, leaf)) => Ok(JsFuture::from(dir.get_file_handle(&leaf))),
+                Err(e) => Err(e),
+            });
+        }
+        let mut snapshots = Vec::with_capacity(paths.len());
+        for handle in handles {
+            snapshots.push(match handle {
+                Ok(handle) => handle.await.map_err(failed).map(|handle| {
+                    JsFuture::from(handle.unchecked_into::<FileSystemFileHandle>().get_file())
+                }),
+                Err(e) => Err(e),
+            });
+        }
+        let mut stats = Vec::with_capacity(paths.len());
+        for (path, snapshot) in paths.iter().zip(snapshots) {
+            let snapshot = match snapshot {
+                Ok(snapshot) => snapshot.await.map_err(failed),
+                Err(e) => Err(e),
+            };
+            stats.push(match snapshot {
+                Ok(file) => Ok(Some(stat(file.unchecked_ref()))),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) if e.to_string().starts_with("TypeMismatchError") => self.stat(path).await,
+                Err(e) => Err(e),
+            });
+        }
+        stats
+    }
+
     /// ⚠️ The check and the move are two steps. No other drawbar writes between them,
     /// because this tab holds the library's lock, but in a picked folder another program
     /// may, and the move replaces what it wrote.

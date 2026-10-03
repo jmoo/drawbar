@@ -98,6 +98,14 @@ pub trait Fs {
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     /// The file at `path`, or `None` where no file is: nothing, a folder, or a link.
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
+    /// [`Fs::stat`] of each of `paths`, in order.
+    async fn stats(&self, paths: &[&str]) -> Vec<io::Result<Option<Stat>>> {
+        let mut stats = Vec::with_capacity(paths.len());
+        for path in paths {
+            stats.push(self.stat(path).await);
+        }
+        stats
+    }
     /// Write a file where none is. It appears whole or not at all, and a file that
     /// appeared there first is left alone and reported as
     /// [`io::ErrorKind::AlreadyExists`].
@@ -616,24 +624,34 @@ impl Lister {
     /// Look at every row where the index says it is, and send what is there. A row's
     /// folders are sent with it, though the walk has not listed them yet.
     async fn rows(&mut self, fs: &impl Fs, rows: Vec<Row>, answer: &mut impl FnMut(Event)) {
-        for row in rows {
-            let hidden = row.path.components().any(|part| part.starts_with('.'));
-            if hidden || !self.told.insert(row.path.clone()) {
-                continue;
+        let rows: Vec<Row> = rows
+            .into_iter()
+            .filter(|row| !row.path.components().any(|part| part.starts_with('.')))
+            .filter(|row| self.told.insert(row.path.clone()))
+            .collect();
+        let mut rows = rows.into_iter();
+        loop {
+            let part: Vec<Row> = rows.by_ref().take(PART).collect();
+            if part.is_empty() {
+                break;
             }
-            self.taken += 1;
-            match fs.stat(row.path.as_str()).await {
-                Ok(Some(stat)) => self.row(fs, row, stat).await,
-                Ok(None) => {
-                    self.told.remove(&row.path);
-                    if let Some((len, _)) = row.print.and_then(|print| print.contents()) {
-                        self.lens.insert(len);
+            let paths: Vec<&str> = part.iter().map(|row| row.path.as_str()).collect();
+            let stats = fs.stats(&paths).await;
+            for (row, stat) in part.into_iter().zip(stats) {
+                self.taken += 1;
+                match stat {
+                    Ok(Some(stat)) => self.row(fs, row, stat).await,
+                    Ok(None) => {
+                        self.told.remove(&row.path);
+                        if let Some((len, _)) = row.print.and_then(|print| print.contents()) {
+                            self.lens.insert(len);
+                        }
                     }
+                    Err(e) => self.part.unread.push((row.path, e.to_string())),
                 }
-                Err(e) => self.part.unread.push((row.path, e.to_string())),
-            }
-            if self.taken >= PART {
-                self.send(answer);
+                if self.taken >= PART {
+                    self.send(answer);
+                }
             }
         }
         self.send(answer);
