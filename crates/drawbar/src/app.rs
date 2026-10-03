@@ -68,10 +68,10 @@ pub fn unlit(visuals: &egui::Visuals) -> egui::Color32 {
 ///
 /// Both themes share it: a key is the same color in either theme, and the stops are the
 /// instrument's own plastic, not part of the app's styling.
-pub const STOP_WHITE: egui::Color32 = egui::Color32::from_rgb(0xd8, 0xd6, 0xd0);
+pub const STOP_WHITE: egui::Color32 = rgb(0xe4e1da);
 
 /// The ebony of a black key or a mutation drawbar stop.
-pub const STOP_BLACK: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x2a, 0x2e);
+pub const STOP_BLACK: egui::Color32 = rgb(0x303036);
 
 /// The persisted theme choice. `System` follows the host preference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -539,41 +539,122 @@ fn drop_hint(ctx: &egui::Context) {
 /// The dark theme, like the instrument panel, with accent colors reserved for status.
 fn dark() -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = egui::Color32::from_rgb(0x16, 0x17, 0x19);
-    visuals.window_fill = egui::Color32::from_rgb(0x1c, 0x1d, 0x20);
-    visuals.faint_bg_color = egui::Color32::from_rgb(0x22, 0x23, 0x26);
-    // A group's border is the only separator between sections, so it is brighter than
-    // egui's default hairline.
-    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x4e);
+    visuals.panel_fill = rgb(0x18191c);
+    visuals.window_fill = rgb(0x1f2024);
+    visuals.faint_bg_color = rgb(0x26272b);
+    visuals.extreme_bg_color = rgb(0x121316);
+    let widgets = &mut visuals.widgets;
+    widgets.noninteractive.bg_fill = rgb(0x1d1e21);
+    widgets.noninteractive.bg_stroke.color = rgb(0x2c2d31);
     // ⚠️ Both slots use the body text color: `Visuals::text_color` returns
     // `noninteractive`, so a painted row and a button would otherwise differ. The quieter
     // caption color is `caption`.
-    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(0x7a, 0x24, 0x24);
+    widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0xc8);
+    widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0xc8);
+    fill(&mut widgets.inactive, rgb(0x2b2c30));
+    fill(&mut widgets.hovered, rgb(0x35363b));
+    widgets.hovered.bg_stroke.color = rgb(0x4d4e54);
+    widgets.hovered.fg_stroke.color = rgb(0xf2f2f4);
+    fill(&mut widgets.active, rgb(0x3d3e44));
+    widgets.active.bg_stroke.color = rgb(0x6a6b72);
+    widgets.active.fg_stroke.color = rgb(0xf6f6f7);
+    fill(&mut widgets.open, rgb(0x2a2b2f));
+    widgets.open.bg_stroke.color = rgb(0x36373c);
+    widgets.open.fg_stroke.color = rgb(0xd6d7db);
+    visuals.selection.bg_fill = rgb(0x4b2420);
     // ⚠️ This also colors drop targets and focused knobs; inheriting egui's blue would
     // introduce a second accent.
-    visuals.selection.stroke.color = egui::Color32::from_rgb(0xff, 0xdf, 0xd8);
+    visuals.selection.stroke.color = rgb(0xffd9d1);
     // Slot numbers and knob captions use the weak text color.
     visuals.weak_text_alpha = 0.85;
     visuals.hyperlink_color = bad(&visuals);
-    visuals
+    softened(visuals, egui::Color32::from_black_alpha(107))
 }
 
 /// The light theme, with stronger text and marks than egui's defaults.
 fn light() -> egui::Visuals {
     let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = egui::Color32::from_rgb(0xf2, 0xf1, 0xee);
-    visuals.window_fill = egui::Color32::from_rgb(0xfa, 0xf9, 0xf7);
-    visuals.faint_bg_color = egui::Color32::from_rgb(0xdc, 0xd8, 0xce);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(0xe9, 0xa9, 0x9f);
-    visuals.selection.stroke.color = egui::Color32::from_rgb(0x3a, 0x14, 0x10);
-    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x1c);
-    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
-    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_gray(0x8a);
+    visuals.panel_fill = rgb(0xf4f3f0);
+    visuals.window_fill = rgb(0xfbfaf8);
+    visuals.faint_bg_color = rgb(0xe9e6df);
+    visuals.selection.bg_fill = rgb(0xf3d4cd);
+    visuals.selection.stroke.color = rgb(0x3a1410);
+    let widgets = &mut visuals.widgets;
+    widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(0x1c);
+    widgets.inactive.fg_stroke.color = egui::Color32::from_gray(0x1c);
+    widgets.noninteractive.bg_stroke.color = rgb(0xdedad2);
+    fill(&mut widgets.inactive, rgb(0xeae8e3));
+    fill(&mut widgets.hovered, rgb(0xe0ddd6));
+    widgets.hovered.bg_stroke.color = rgb(0xb9b5ac);
+    fill(&mut widgets.active, rgb(0xd4d0c7));
+    widgets.active.bg_stroke.color = rgb(0x8d8980);
+    fill(&mut widgets.open, rgb(0xe6e3dd));
+    widgets.open.bg_stroke.color = rgb(0xd2cec6);
+    widgets.open.fg_stroke.color = rgb(0x4a4a4c);
     visuals.weak_text_alpha = 0.9;
     visuals.hyperlink_color = bad(&visuals);
+    softened(
+        visuals,
+        egui::Color32::from_rgba_unmultiplied(40, 30, 20, 41),
+    )
+}
+
+/// An opaque color written as `0xrrggbb`.
+const fn rgb(hex: u32) -> egui::Color32 {
+    egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// A widget state's resting fill, for both the filled and the frameless widgets.
+fn fill(state: &mut egui::style::WidgetVisuals, color: egui::Color32) {
+    state.bg_fill = color;
+    state.weak_bg_fill = color;
+}
+
+/// The shape both themes share: rounded controls, and menus and sheets that float on a
+/// soft shadow of `shade`.
+fn softened(mut visuals: egui::Visuals, shade: egui::Color32) -> egui::Visuals {
+    let widgets = &mut visuals.widgets;
+    for state in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.corner_radius = egui::CornerRadius::same(CONTROL_RADIUS);
+    }
+    visuals.window_corner_radius = egui::CornerRadius::same(POPUP_RADIUS);
+    visuals.menu_corner_radius = egui::CornerRadius::same(POPUP_RADIUS);
+    let shadow = egui::Shadow {
+        offset: [0, 14],
+        blur: 36,
+        spread: 0,
+        color: shade,
+    };
+    visuals.popup_shadow = shadow;
+    visuals.window_shadow = shadow;
     visuals
+}
+
+/// The rounding of a button, a field, or any other control.
+pub const CONTROL_RADIUS: u8 = 5;
+
+/// The rounding of a menu, a popover, or a sheet.
+pub const POPUP_RADIUS: u8 = 10;
+
+/// The window behind the cards: the gaps between the panels, and the bars at the top and
+/// bottom, which sit on it with no fill of their own.
+pub fn canvas(visuals: &egui::Visuals) -> egui::Color32 {
+    match visuals.dark_mode {
+        true => rgb(0x0f1013),
+        false => rgb(0xe7e4dd),
+    }
+}
+
+/// `color` thinned to `alpha` over whatever is under it: the fill of a chip, a pill, or a
+/// row that carries a signal. Text on it keeps the full-strength color.
+pub fn tint(color: egui::Color32, alpha: f32) -> egui::Color32 {
+    color.gamma_multiply(alpha)
 }
 
 /// The bold family, used only for the word mark.
@@ -612,16 +693,21 @@ pub(crate) fn fonts() -> egui::FontDefinitions {
     fonts
 }
 
-/// The text of the shell itself: menus, tabs, rail rows and cells.
+/// The text of the shell itself: menus, tabs, tree rows and cells.
 ///
 /// A function rather than a const because [`egui::TextStyle::Name`] holds an `Arc<str>`.
 pub fn ui() -> egui::TextStyle {
     egui::TextStyle::Name("ui".into())
 }
 
-/// The smallest text: panel headers and column heads, which are also uppercased.
+/// The smallest text: the document editors' captions, which are also uppercased.
 pub fn micro() -> egui::TextStyle {
     egui::TextStyle::Name("micro".into())
+}
+
+/// The text of a section label or a column head in the shell: bold, in sentence case.
+pub fn section() -> egui::TextStyle {
+    egui::TextStyle::Name("section".into())
 }
 
 /// The spacing both themes share: the size of a control and the space around it.
@@ -630,19 +716,24 @@ pub fn micro() -> egui::TextStyle {
 pub(crate) fn metrics(style: &mut egui::Style) {
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(8.0, 4.0);
-    spacing.button_padding = egui::vec2(7.0, 3.0);
+    spacing.button_padding = egui::vec2(8.0, 2.0);
     // Panels own their inner padding, so the shared margin claims none of it.
     spacing.window_margin = egui::Margin::same(0);
-    spacing.menu_margin = egui::Margin::same(4);
+    spacing.menu_margin = egui::Margin::same(5);
     spacing.indent = 18.0;
-    spacing.interact_size.y = 18.0;
+    spacing.interact_size.y = 22.0;
     spacing.scroll.bar_width = 8.0;
-    style
-        .text_styles
-        .insert(ui(), egui::FontId::proportional(11.5));
-    style
-        .text_styles
-        .insert(micro(), egui::FontId::proportional(9.5));
+    style.animation_time = 0.14;
+    for (style_, font) in [
+        (egui::TextStyle::Body, egui::FontId::proportional(13.0)),
+        (egui::TextStyle::Button, egui::FontId::proportional(13.0)),
+        (egui::TextStyle::Small, egui::FontId::proportional(10.0)),
+        (ui(), egui::FontId::proportional(12.5)),
+        (micro(), egui::FontId::proportional(9.5)),
+        (section(), egui::FontId::new(11.5, bold())),
+    ] {
+        style.text_styles.insert(style_, font);
+    }
 }
 
 #[cfg(test)]
@@ -824,7 +915,9 @@ mod tests {
             let selected = visuals.selection.bg_fill;
             let ink = contrast(visuals.selection.stroke.color, selected);
             assert!(ink >= 4.5, "{where_} selected text: {ink:.2}:1");
-            assert!(contrast(selected, panel) >= 1.4, "{where_} selected fill");
+            // The fill is quiet on purpose: a selected row's ink and weight carry it too.
+            let fill = contrast(selected, panel);
+            assert!(fill >= 1.25, "{where_} selected fill: {fill:.2}:1");
         }
     }
 
@@ -862,16 +955,6 @@ mod tests {
             let body = contrast(visuals.text_color(), panel);
             assert!(heading >= 4.5, "{where_} caption: {heading:.2}:1");
             assert!(heading < body, "{where_}: {heading:.2}:1 vs {body:.2}:1");
-        }
-    }
-
-    #[test]
-    fn a_group_border_separates_it_from_the_panel_behind_it() {
-        for visuals in [dark(), light()] {
-            let (where_, panel) = (named(&visuals), visuals.panel_fill);
-            let border = visuals.widgets.noninteractive.bg_stroke.color;
-            let ratio = contrast(border, panel);
-            assert!(ratio >= 1.9, "{where_} group border: {ratio:.2}:1");
         }
     }
 

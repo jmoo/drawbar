@@ -24,6 +24,22 @@ pub(crate) const GAP: f32 = 6.0;
 /// The size of a glyph in a bar: a toolbar action, a tab's kind, a menu item's mark.
 pub(crate) const GLYPH: f32 = 13.0;
 
+/// The canvas left between two cards, and between a card and the window's edge.
+pub const GUTTER: f32 = 8.0;
+
+/// The rounding of a card on the canvas: a side panel, or the document under the tabs.
+pub const CARD_RADIUS: u8 = 12;
+
+/// The rounding of a card inside a card: an inspector section, a note, a diff.
+pub const INNER_RADIUS: u8 = 10;
+
+/// The rounding of a list row, and how far a row stands in from its card's edges.
+pub const ROW_RADIUS: u8 = 7;
+pub const ROW_INSET: f32 = 6.0;
+
+/// The height of a pill: a badge, a chip, a state on a row.
+pub const PILL: f32 = 18.0;
+
 /// The size of the collapse triangle, and of the grip before a dock header's title.
 const CHEVRON: f32 = 12.0;
 const GRIP: f32 = 12.0;
@@ -192,11 +208,11 @@ pub fn row_ink(
 ) -> (egui::Color32, egui::Color32) {
     let fill = match (selected, hovered) {
         (true, _) => Some(visuals.selection.bg_fill),
-        (false, true) => Some(visuals.faint_bg_color),
+        (false, true) => Some(visuals.widgets.hovered.weak_bg_fill),
         (false, false) => None,
     };
     if let Some(fill) = fill {
-        painter.rect_filled(rect, 3.0, fill);
+        painter.rect_filled(rect, ROW_RADIUS, fill);
     }
     (
         cell_ink(selected, visuals.text_color(), visuals),
@@ -233,6 +249,45 @@ pub fn chip(
             );
         })
         .response
+}
+
+/// A section label or a column head in the shell, in the caller's sentence case.
+pub fn section_label(text: &str) -> egui::RichText {
+    egui::RichText::new(text).text_style(crate::app::section())
+}
+
+/// A word on a rounded pill: `ink` on `fill`, in monospace. A state, a count, or where
+/// something is.
+pub fn pill(
+    ui: &mut egui::Ui,
+    text: &str,
+    ink: egui::Color32,
+    fill: egui::Color32,
+) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), egui::FontId::monospace(10.5), ink);
+    let size = egui::vec2(galley.size().x + 14.0, PILL);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, PILL / 2.0, fill);
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    response
+}
+
+/// A pill tinted by a signal: the signal's own color on a faint wash of it.
+pub fn signal_pill(ui: &mut egui::Ui, text: &str, signal: egui::Color32) -> egui::Response {
+    pill(ui, text, signal, crate::app::tint(signal, 0.15))
+}
+
+/// A quiet pill, for a fact with no signal in it.
+pub fn quiet_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let visuals = ui.visuals();
+    let (ink, fill) = (visuals.text_color(), visuals.widgets.inactive.weak_bg_fill);
+    pill(ui, text, ink, fill)
 }
 
 /// A header title: [`crate::app::micro`], uppercased.
