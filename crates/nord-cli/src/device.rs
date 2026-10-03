@@ -512,6 +512,9 @@ pub fn get(
         return Err("--body writes a file; give -o a path".into());
     }
     let mut device = open_usb()?;
+    if let (Some(path), false) = (&out, body) {
+        return get_into(ui, &mut device, at, class, path);
+    }
     let (info, file) = read_object(&mut device, at, class, body)?;
 
     if let Some(path) = out {
@@ -542,6 +545,38 @@ pub fn get(
         info.version
     ));
     crate::summary::print(ui, &entity);
+    Ok(())
+}
+
+/// [`get`] into a file, written a transfer chunk at a time as it arrives, so that a piano
+/// is never held whole.
+fn get_into<T: Transport + Recorded>(
+    ui: &Ui,
+    device: &mut Device<T>,
+    at: Location,
+    class: ObjectClass,
+    path: &Path,
+) -> Result<(), String> {
+    let mut read = None;
+    crate::edit::replace_with(path, |file| {
+        let received = transact(device, format!("{} get {}", noun(class), addr(at)), |d| {
+            nord_usb::block_on(d.read(class, async |s| {
+                usb_op::info(s, at).await?;
+                usb_op::read_into(s, at, file).await
+            }))
+        })
+        .map_err(|e| explain(e, at))?;
+        read = Some(received);
+        Ok(())
+    })?;
+    let info = read.expect("a written file was read").info;
+    ui.note(format!(
+        "read {:?} ({} bytes) from {} -> {}",
+        info.name,
+        u64::from(info.body_len) + nord_format::cbin::Generation::V1.body_start(),
+        shown(at),
+        path.display(),
+    ));
     Ok(())
 }
 
@@ -2724,6 +2759,29 @@ mod tests {
                 saved == envelope::wrap("ne5p", AT, 4, &occupant).unwrap(),
                 "the rescue is the occupant's file"
             );
+        }
+
+        /// A `get` into a file writes the file as the read arrives, and the file is the
+        /// one the instrument's bytes make.
+        #[test]
+        fn a_large_get_is_written_to_its_file() {
+            let dir = crate::edit::tests::scratch("get-streams");
+            let occupant = body(64 * CHUNK + 99);
+            let mut steps = vec![
+                ask(cmd::INFO, slot()),
+                info(occupant.len(), nord_format::crc::crc32(&occupant)),
+            ];
+            steps.extend(read(&occupant));
+            let mut device = Device::new(ReplayTransport::new(session(steps)));
+            let path = dir.join("big.ne5p");
+
+            get_into(&Ui::piped(), &mut device, AT, ObjectClass::Program, &path).unwrap();
+            assert!(device.transport().is_exhausted());
+            assert!(
+                std::fs::read(&path).unwrap() == envelope::wrap("ne5p", AT, 4, &occupant).unwrap(),
+                "the file is the occupant's"
+            );
+            assert_eq!(rescued(&dir), ["big.ne5p"], "no temporary is left");
         }
 
         /// An earlier rescue of the same slot is never written over by a later backup.
