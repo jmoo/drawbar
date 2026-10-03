@@ -17,7 +17,7 @@ use super::{
     Opened, MOST_BYTES,
 };
 use crate::browser::Browser;
-use crate::folders::{Op, Where};
+use crate::folders::{Folders, Op, Where};
 use crate::log::Log;
 use crate::queue::Queue;
 use crate::workspace::{precious, LocalEntity, Origin, Saved, Workspace};
@@ -1096,12 +1096,24 @@ impl Store {
             others,
             unwalked,
         } = part;
+        // The folder changes not yet sent have moved what the browser shows on already.
+        let ahead = |paths: Vec<LibPath>| -> Vec<LibPath> {
+            paths
+                .iter()
+                .map(|path| browser.folders.ahead(path))
+                .collect()
+        };
+        let (shown, others, unwalked) = (ahead(dirs.clone()), ahead(others), ahead(unwalked));
+        let unread: Vec<(LibPath, String)> = unread
+            .into_iter()
+            .map(|(path, why)| (browser.folders.ahead(&path), why))
+            .collect();
         beside(&browser.folders, &unread, &unwalked, log);
         let folders = &mut browser.folders;
         folders.unread.extend(unread);
         folders.others.extend(others);
         folders.unwalked.extend(unwalked);
-        folders.add(&dirs);
+        folders.add(&shown);
         loading.dirs.extend(dirs);
 
         let mut back = Vec::new();
@@ -1124,7 +1136,7 @@ impl Store {
                 }
             }
         }
-        self.restored(back, &loading, workspace, log);
+        self.restored(back, &loading, workspace, &browser.folders, log);
         for id in conflicts {
             conflict(id, workspace, browser, log);
         }
@@ -1172,12 +1184,30 @@ impl Store {
         back: Vec<Saved>,
         loading: &Loading,
         workspace: &mut Workspace,
+        folders: &Folders,
         log: &mut Log,
     ) {
         let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
         workspace.restore(back, Some(loading.next), log);
         for id in ids {
             self.settle(id, workspace, &loading.rows);
+            self.place_ahead(id, workspace, folders);
+        }
+    }
+
+    /// Put an asset just restored where the folder changes not yet sent will put its
+    /// file. Its record keeps the path the disk has now, and those changes move it.
+    fn place_ahead(&self, id: u64, workspace: &mut Workspace, folders: &Folders) {
+        let Some(path) = self
+            .records
+            .get(&id)
+            .and_then(|record| record.path.as_ref())
+        else {
+            return;
+        };
+        let ahead = folders.ahead(path);
+        if ahead != *path {
+            workspace.place(id, ahead);
         }
     }
 
@@ -1272,7 +1302,7 @@ impl Store {
                 back.push(saved_from(*id, row, bytes));
             }
         }
-        self.restored(back, &loading, workspace, log);
+        self.restored(back, &loading, workspace, &browser.folders, log);
         for path in &complete.gone {
             if let Some(id) = listed.get(path) {
                 self.vanished(*id, workspace, browser, queue, log);
@@ -1446,15 +1476,7 @@ impl Store {
             workspace.restore(back, Some(next), log);
             for id in ids {
                 self.settle(id, workspace, &BTreeMap::new());
-                // The disk has it where it was before the folder changes still to send.
-                let path = self
-                    .records
-                    .get(&id)
-                    .and_then(|record| record.path.as_ref());
-                let ahead = path.map(|path| browser.folders.ahead(path));
-                if ahead.as_ref().is_some_and(|ahead| Some(ahead) != path) {
-                    workspace.place(id, ahead.expect("checked"));
-                }
+                self.place_ahead(id, workspace, &browser.folders);
             }
         }
         touched

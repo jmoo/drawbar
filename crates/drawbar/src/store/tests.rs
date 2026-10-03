@@ -1897,6 +1897,53 @@ fn a_folder_renamed_while_a_file_in_it_is_renamed_waits_for_it() {
     assert_eq!(session.said("did not change as asked"), 1);
 }
 
+/// Parts of a listing that arrive while a rename of their folder waits are shown where
+/// that rename puts them. When it lands, nothing is moved back, and nothing fails.
+#[test]
+fn a_listing_inside_a_folder_whose_rename_waits_lands_with_it() {
+    const FILES: usize = 300;
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    for n in 0..FILES {
+        fs::write(root.at(&format!("Gig/{n:03}.ne5p")), vec![0xa5; 10 + n]).unwrap();
+    }
+    let mut session = Session::opening(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    assert!(
+        session.bench.workspace.listed().count() < FILES,
+        "more to come"
+    );
+    // A file's rename in the folder holds the folder's rename until it answers.
+    let first = session.named("000.ne5p");
+    let renamed = LibPath::parse("Gig/first.ne5p").unwrap();
+    session.bench.workspace.place(first, renamed);
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Files);
+    session.rename_folder(folder, "Sets");
+    session.listed_whole();
+    session.sync();
+
+    assert_eq!(session.said("did not change as asked"), 0);
+    assert_eq!(root.names(""), [".drawbar", "Sets"]);
+    assert_eq!(root.names("Sets").len(), FILES);
+    let workspace = &session.bench.workspace;
+    assert_eq!(workspace.listed().count(), FILES);
+    let sets = LibPath::parse("Sets").unwrap();
+    assert!(workspace
+        .listed()
+        .all(|entity| entity.path.as_ref().is_some_and(|at| at.is_in(&sets))));
+    assert_eq!(session.path(first).as_deref(), Some("Sets/first.ne5p"));
+    let folders = &session.bench.browser.folders;
+    assert_eq!(folders.id_of(&gig), None);
+    assert_eq!(folders.id_of(&sets), Some(folder));
+}
+
 /// A folder removed while the library is still being listed waits until everything in
 /// it has been listed, and then the usual rules apply: it goes, and what was in it moves
 /// up, unless it holds a file drawbar does not.
