@@ -19,7 +19,8 @@ a file, and a move is a rename. Any folder can be opened as a library.
   app's data in (`eframe::storage_dir`): `~/Library/Application Support/drawbar`
   on macOS, `$XDG_DATA_HOME/drawbar` or `~/.local/share/drawbar` on Linux. On
   Windows that folder is in the roaming app data, which a domain profile copies at
-  every sign-in, so the library is `%LOCALAPPDATA%\drawbar\library` instead
+  every sign-in, so the library is `%LOCALAPPDATA%\drawbar\library` instead,
+  falling back to the roaming folder when `LOCALAPPDATA` is unset
   (`store::native::default_root`).
 - **Browser:** the default library is the root of the origin private file system
   (OPFS). In browsers with `showDirectoryPicker`, the user can also pick a folder

@@ -21,20 +21,26 @@ const LIBRARY: &str = "library";
 /// The default library: `library` in drawbar's own data, beside eframe's store.
 #[cfg(not(windows))]
 pub fn default_root() -> Option<PathBuf> {
-    Some(eframe::storage_dir(crate::APP)?.join(LIBRARY))
+    beside_store()
 }
 
-/// The default library: `drawbar\library` in the local app data.
+/// The default library: `drawbar\library` in the local app data, or beside eframe's
+/// store where `LOCALAPPDATA` names no absolute folder.
 ///
 /// ⚠️ Not beside eframe's store, which is in the roaming app data: a domain profile copies
 /// that to and from a server at every sign-in, and a piano library runs to hundreds of
 /// megabytes. The local app data stays on this machine.
 #[cfg(windows)]
 pub fn default_root() -> Option<PathBuf> {
-    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
-    local
-        .is_absolute()
-        .then(|| local.join(crate::APP).join(LIBRARY))
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|local| local.is_absolute())
+        .map(|local| local.join(crate::APP).join(LIBRARY))
+        .or_else(beside_store)
+}
+
+fn beside_store() -> Option<PathBuf> {
+    Some(eframe::storage_dir(crate::APP)?.join(LIBRARY))
 }
 
 const LOCK: &str = ".drawbar/lock";
@@ -639,13 +645,21 @@ mod tests {
         let held = std::env::var_os("LOCALAPPDATA");
         std::env::set_var("LOCALAPPDATA", &local.0);
         let named = default_root();
+        std::env::set_var("LOCALAPPDATA", "relative\\data");
+        let relative = default_root();
         std::env::remove_var("LOCALAPPDATA");
         let unset = default_root();
         if let Some(held) = held {
             std::env::set_var("LOCALAPPDATA", held);
         }
         assert_eq!(named, Some(local.at("drawbar").join("library")));
-        assert_eq!(unset, None);
+        let roaming = eframe::storage_dir(crate::APP).expect("the system names one");
+        assert_eq!(
+            unset,
+            Some(roaming.join(LIBRARY)),
+            "without LOCALAPPDATA, beside eframe's store"
+        );
+        assert_eq!(relative, unset, "a relative LOCALAPPDATA is ignored");
     }
 
     /// The derived cache sits beside `app.ron`, one level above the default library, so
