@@ -2036,11 +2036,11 @@ fn ends(op: &Op) -> [&LibPath; 2] {
     }
 }
 
-/// Whether `path` is in, or is, either side of one of these renames.
+/// Whether `path` is in, is, or holds either side of one of these renames.
 fn unsettled(moving: &[(LibPath, LibPath)], path: &LibPath) -> bool {
     moving
         .iter()
-        .any(|(from, to)| path.is_in(from) || path.is_in(to))
+        .any(|(from, to)| path.is_in(from) || from.is_in(path) || path.is_in(to) || to.is_in(path))
 }
 
 /// Say what is new in what a listing found beside the assets: a file that did not read,
