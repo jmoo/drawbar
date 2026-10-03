@@ -14,6 +14,7 @@
 //! target, then refuse without `--yes`. Editing a file in place takes the same
 //! guard, and `-o` avoids it.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use nord_format::cbin::Generation;
@@ -66,9 +67,16 @@ pub fn run(ui: &Ui, args: EditArgs, class: ObjectClass) -> Result<(), String> {
         // An explicit destination is the unambiguous case, whatever the source was.
         (_, Some(out)) => write_file(ui, &out, &edited),
         // The slot keeps whatever it is already called, so the write carries no name.
-        (Some(Target::Slot(at)), None) => {
-            crate::device::send(ui, &edited, at, class, args.common.yes, what, None, None)
-        }
+        (Some(Target::Slot(at)), None) => crate::device::send(
+            ui,
+            &mut edited.as_slice(),
+            at,
+            class,
+            args.common.yes,
+            what,
+            None,
+            None,
+        ),
         (None, None) => {
             Err("editing a fresh default needs -o: there is nothing to write back to".into())
         }
@@ -317,6 +325,18 @@ pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), Strin
 /// first. Editing through a symlink rewrites the file it points at and keeps the link,
 /// and the replacement keeps the target's permissions instead of the umask default.
 pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    replace_with(path, |file| {
+        file.write_all(bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
+/// [`replace_file`] with the file's contents written by `write`, into the temporary file
+/// the rename puts in place. A `write` that fails leaves the target as it was.
+pub(crate) fn replace_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
+) -> Result<(), String> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let name = target
         .file_name()
@@ -333,7 +353,13 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&temp);
         format!("{}: {e}", path.display())
     };
-    std::fs::write(&temp, bytes).map_err(failed)?;
+    let mut file = std::fs::File::create(&temp).map_err(failed)?;
+    if let Err(e) = write(&mut file) {
+        drop(file);
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    drop(file);
     if let Some(permissions) = existing {
         std::fs::set_permissions(&temp, permissions).map_err(failed)?;
     }
