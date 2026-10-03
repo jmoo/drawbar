@@ -11,54 +11,103 @@ use eframe::egui;
 use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
-use crate::app::{accent, ui as ui_text, warn};
+use crate::app::{accent, caption, tint, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Browser, Held, Item, Kind, Onto};
 use crate::device::{occupancy, read_only, Device};
-use crate::icon::{icon, painted, Glyph};
+use crate::icon::{painted, Glyph};
 use crate::library::Needs;
-use crate::panel::{caps, cut, inset, list_width, row_ink, Track, GAP, GLYPH, PAD};
+use crate::panel::{
+    cut, list_width, row_ink, tonal_button, view_header, Track, GAP, GLYPH, PAD, ROW_INSET,
+    VIEW_PAD,
+};
 use crate::queue::{Queue, Queued};
 use crate::room;
 use crate::strings::{place, shown};
 use crate::tabs::Tabs;
 use crate::workspace::Workspace;
 
-/// The heights of the bands above the folder.
-const HEADER: f32 = 28.0;
-const SWITCHER: f32 = 26.0;
-const BANKS: f32 = 24.0;
+/// The space under each band above the folder.
+const UNDER: f32 = 10.0;
 
-/// The heights of a list's column heads and of one row.
-const HEAD: f32 = 20.0;
-const ROW: f32 = 24.0;
+/// The switcher: a segment's height and side padding, and the track's padding around
+/// the segments and between them.
+const SEGMENT: f32 = 28.0;
+const SEGMENT_PAD: f32 = 11.0;
+const TRACK_PAD: i8 = 3;
+const TRACK_GAP: f32 = 2.0;
 
-/// A map cell's size, and the gap between cells.
+/// A bank square's size.
+const BANK: egui::Vec2 = egui::vec2(28.0, 26.0);
+
+/// The heights of a list's column heads and of one row, the gap between two rows, and
+/// the padding at each end of a row.
+const HEAD: f32 = 28.0;
+const ROW: f32 = 32.0;
+const ROW_GAP: f32 = 2.0;
+const CELL_PAD: f32 = 10.0;
+
+/// How the slots of a bank are laid out: a card's height, the gap between cards, and
+/// the margin at each side.
+struct Lattice {
+    height: f32,
+    gap: f32,
+    margin: f32,
+}
+
+/// The map's cards, as many to a row as fit at [`CARD_MIN`] or wider.
+const MAP: Lattice = Lattice {
+    height: 54.0,
+    gap: 6.0,
+    margin: VIEW_PAD,
+};
+const CARD_MIN: f32 = 150.0;
+
+/// A picker's cells, a count to a row the picker chooses, each [`CELL`] wide.
+const PICKER: Lattice = Lattice {
+    height: CELL,
+    gap: 4.0,
+    margin: PAD,
+};
 const CELL: f32 = 42.0;
-const CELL_GAP: f32 = 4.0;
 
-/// Cells per row in the map. A picker drawn narrower or wider passes its own count to
-/// [`grid`].
-pub const COLUMNS: usize = 5;
+/// The rounding of a card, in the map or a picker.
+const CARD_RADIUS: f32 = 9.0;
 
-/// A chip's height and its padding at each end.
-const CHIP: f32 = 19.0;
-const CHIP_PAD: f32 = 6.0;
+/// How a card's contents are set: its padding, the sizes of its address and its name,
+/// and the size of its state's glyph.
+struct Face {
+    pad: egui::Vec2,
+    address: f32,
+    name: f32,
+    glyph: f32,
+}
 
-/// A cell's padding inside its border, and the gap between a chip's parts.
-const INSET: f32 = 5.0;
+/// A map card's text, and a picker cell's, which has less room.
+const CARD_FACE: Face = Face {
+    pad: egui::vec2(10.0, 7.0),
+    address: 10.5,
+    name: 12.5,
+    glyph: SMALL,
+};
+const CELL_FACE: Face = Face {
+    pad: egui::vec2(3.0, 4.0),
+    address: 9.5,
+    name: 11.0,
+    glyph: 10.0,
+};
 
-/// The size of the glyph at the end of a row.
-const SMALL: f32 = 11.0;
+/// The size of a state's glyph on a card or at the end of a row.
+const SMALL: f32 = 12.0;
 
 /// Font sizes for this view. It paints its text directly, so the sizes are set here
 /// instead of taken from the named styles in [`crate::app`].
-const NAME: f32 = 12.0;
-const CELL_NAME: f32 = 11.0;
-const MONO: f32 = 10.5;
-const ADDRESS: f32 = 9.5;
+const NAME: f32 = 13.0;
+const TEXT: f32 = 12.0;
+const MONO: f32 = 11.5;
+const READOUT: f32 = 10.5;
 
 /// The gap between two columns of a list.
-const LIST_GAP: f32 = 10.0;
+const LIST_GAP: f32 = 12.0;
 
 /// The columns every list shares: address, name, size, the folder's own fact, and the
 /// state at the end.
@@ -67,7 +116,7 @@ const LIST: [Track; 5] = [
     Track::Share(1.5),
     Track::Px(74.0),
     Track::Share(1.0),
-    Track::Px(20.0),
+    Track::Px(SMALL),
 ];
 
 /// The center's view of the attached instrument.
@@ -103,7 +152,6 @@ impl Keyboard {
             nothing(ui, "Nothing is attached.");
             return acts;
         }
-        // The bands and the body are flush; the folder's own lines are the only rules.
         ui.spacing_mut().item_spacing.y = 0.0;
         let class = tabs.keyboard_class().unwrap_or(ObjectClass::Program);
         header(ui, device, class, &mut acts);
@@ -127,7 +175,7 @@ impl Keyboard {
             .or_else(|| banks.first().copied())
     }
 
-    /// A bank of equal slots, five to a row.
+    /// A bank of equal slots, as many cards to a row as fit.
     #[allow(clippy::too_many_arguments)]
     fn map(
         &mut self,
@@ -176,29 +224,55 @@ impl Keyboard {
             .id_salt("keyboard_map")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                grid(ui, COLUMNS, slots.len(), |ui, index, rect| {
+                let columns = columns(ui.available_width());
+                lay(ui, &MAP, columns, slots.len(), |ui, index, rect| {
                     let at = Location::from_user(bank, index as u32 + 1);
                     cell(ui, browser, &view, rect, at, slots[index].as_ref(), acts);
                 });
+                ui.add_space(MAP.margin - MAP.gap);
             });
     }
 }
 
-/// Lay out a bank of slots as a grid of 42 px cells, `columns` across. `each` gets one
-/// slot's index and its rect.
+/// How many map cards of at least [`CARD_MIN`] fit across `width`, and never none.
+fn columns(width: f32) -> usize {
+    let room = width - 2.0 * MAP.margin + MAP.gap;
+    ((room / (CARD_MIN + MAP.gap)).floor() as usize).max(1)
+}
+
+/// Lay out a bank of slots as a picker's grid of 42 px cells, `columns` across. `each`
+/// gets one slot's index and its rect.
 pub fn grid(
     ui: &mut egui::Ui,
     columns: usize,
     slots: usize,
+    each: impl FnMut(&mut egui::Ui, usize, egui::Rect),
+) {
+    ui.add_space(PICKER.gap);
+    lay(ui, &PICKER, columns, slots, each);
+}
+
+/// The width a picker's grid of `columns` cells needs.
+pub fn grid_width(columns: usize) -> f32 {
+    2.0 * PICKER.margin + CELL * columns as f32 + PICKER.gap * (columns.saturating_sub(1)) as f32
+}
+
+/// Lay out `slots` cards `columns` across, filling the width inside the lattice's
+/// margins. `each` gets one slot's index and its rect.
+fn lay(
+    ui: &mut egui::Ui,
+    lattice: &Lattice,
+    columns: usize,
+    slots: usize,
     mut each: impl FnMut(&mut egui::Ui, usize, egui::Rect),
 ) {
-    ui.add_space(CELL_GAP);
+    let columns = columns.max(1);
     for row in 0..slots.div_ceil(columns) {
         let (strip, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), CELL + CELL_GAP),
+            egui::vec2(ui.available_width(), lattice.height + lattice.gap),
             egui::Sense::hover(),
         );
-        let room = strip.width() - 2.0 * PAD - CELL_GAP * (columns - 1) as f32;
+        let room = strip.width() - 2.0 * lattice.margin - lattice.gap * (columns - 1) as f32;
         let width = (room / columns as f32).max(0.0);
         for column in 0..columns {
             let index = row * columns + column;
@@ -207,48 +281,30 @@ pub fn grid(
             }
             let rect = egui::Rect::from_min_size(
                 egui::pos2(
-                    strip.left() + PAD + (width + CELL_GAP) * column as f32,
+                    strip.left() + lattice.margin + (width + lattice.gap) * column as f32,
                     strip.top(),
                 ),
-                egui::vec2(width, CELL),
+                egui::vec2(width, lattice.height),
             );
             each(ui, index, rect);
         }
     }
 }
 
-/// The width a grid of `columns` cells needs.
-pub fn grid_width(columns: usize) -> f32 {
-    2.0 * PAD + CELL * columns as f32 + CELL_GAP * (columns - 1) as f32
-}
-
-/// The 28 px header: what is attached, how old the shown contents are, and a button to
+/// The header block: what is attached, how old the shown contents are, and a button to
 /// read them again.
 fn header(ui: &mut egui::Ui, device: &Device, class: ObjectClass, acts: &mut Vec<Act>) {
     let now = ui.input(|input| input.time);
     let said = freshness(device, class, now);
     let product = device.state.product().unwrap_or_default().to_string();
-    band(ui, HEADER, None, |ui| {
-        let ink = ui.visuals().widgets.inactive.fg_stroke.color;
-        icon(ui, Glyph::Keyboard, GLYPH, ink);
-        ui.label(egui::RichText::new(product).size(12.5).strong().color(ink));
-        if !said.is_empty() {
-            ui.label(egui::RichText::new(said).size(10.5).weak());
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if chip(
-                ui,
-                Some(Glyph::RefreshCw),
-                ("Read again", egui::FontId::proportional(11.0)),
-                None,
-                false,
-            )
+    let good = crate::app::good(ui.visuals());
+    view_header(ui, Glyph::Keyboard, good, &product, &said, |ui| {
+        if tonal_button(ui, Glyph::RefreshCw, "Read again")
             .on_hover_text(format!("read {} again", device.state.folder_name(class)))
             .clicked()
-            {
-                acts.push(Act::ReadAgain(class));
-            }
-        });
+        {
+            acts.push(Act::ReadAgain(class));
+        }
     });
 }
 
@@ -270,10 +326,10 @@ fn ago(seconds: f64) -> String {
     }
 }
 
-/// The 26 px switcher: one chip per folder, with the shown one highlighted.
+/// The switcher: one segment per folder on a sunken track, with the shown one raised.
 ///
 /// Switching reads nothing. Every folder here has already been read, and the header's
-/// chip reads it again.
+/// button reads it again.
 fn switcher(ui: &mut egui::Ui, device: &Device, on: ObjectClass, acts: &mut Vec<Act>) {
     let classes = device.state.classes();
     let rooms: Vec<Option<String>> = classes
@@ -286,51 +342,156 @@ fn switcher(ui: &mut egui::Ui, device: &Device, on: ObjectClass, acts: &mut Vec<
             )
         })
         .collect();
-    let faint = ui.visuals().faint_bg_color;
-    band(ui, SWITCHER, Some(faint), |ui| {
-        for (class, room) in classes.iter().zip(&rooms) {
-            let picked = chip(
-                ui,
-                Some(Kind::from_class(*class).glyph()),
-                (
-                    device.state.folder_name(*class),
-                    egui::FontId::proportional(11.0),
-                ),
-                room.as_deref(),
-                *class == on,
-            )
-            .clicked();
-            if picked {
-                acts.push(Act::ShowClass(*class));
-            }
-        }
+    let canvas = crate::app::canvas(ui.visuals());
+    band(ui, |ui| {
+        egui::Frame::new()
+            .fill(canvas)
+            .corner_radius(10.0)
+            .inner_margin(TRACK_PAD)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::splat(TRACK_GAP);
+                    for (class, room) in classes.iter().zip(&rooms) {
+                        let picked = segment(
+                            ui,
+                            Kind::from_class(*class).glyph(),
+                            device.state.folder_name(*class),
+                            room.as_deref(),
+                            *class == on,
+                        )
+                        .clicked();
+                        if picked {
+                            acts.push(Act::ShowClass(*class));
+                        }
+                    }
+                });
+            });
     });
 }
 
-/// The 24 px bank row: the folder's banks, and what the shown one holds. Returns the
-/// bank clicked, if any.
+/// One segment of the switcher: a glyph, a word, and an optional monospace readout after
+/// it. The shown folder's segment is raised off the track.
+fn segment(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    word: &str,
+    readout: Option<&str>,
+    on: bool,
+) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter().clone();
+    let word = painter.layout_no_wrap(
+        word.to_string(),
+        ui_text().resolve(ui.style()),
+        egui::Color32::PLACEHOLDER,
+    );
+    let readout = readout.map(|held| {
+        painter.layout_no_wrap(
+            held.to_string(),
+            egui::FontId::monospace(READOUT),
+            egui::Color32::PLACEHOLDER,
+        )
+    });
+    let counted = readout.as_ref().map_or(0.0, |held| GAP + held.size().x);
+    let width = SEGMENT_PAD + GLYPH + GAP + word.size().x + counted + SEGMENT_PAD;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, SEGMENT), egui::Sense::click());
+
+    let ink = match (on, response.hovered()) {
+        (true, _) => visuals.widgets.active.fg_stroke.color,
+        (false, true) => visuals.widgets.hovered.fg_stroke.color,
+        (false, false) => caption(&visuals),
+    };
+    if on {
+        let lift = egui::Shadow {
+            offset: [0, 1],
+            blur: 2,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(64),
+        };
+        painter.add(lift.as_shape(rect, 7.0));
+        painter.rect_filled(rect, 7.0, visuals.panel_fill);
+    }
+    let mut x = rect.left() + SEGMENT_PAD;
+    painted(
+        ui,
+        glyph,
+        egui::Rect::from_center_size(
+            egui::pos2(x + GLYPH / 2.0, rect.center().y),
+            egui::Vec2::splat(GLYPH),
+        ),
+        ink,
+    );
+    x += GLYPH + GAP;
+    let word_width = word.size().x;
+    painter.galley(
+        egui::pos2(x, rect.center().y - word.size().y / 2.0),
+        word,
+        ink,
+    );
+    if let Some(readout) = readout {
+        painter.galley(
+            egui::pos2(
+                x + word_width + GAP,
+                rect.center().y - readout.size().y / 2.0,
+            ),
+            readout,
+            ink.gamma_multiply(0.75),
+        );
+    }
+    response
+}
+
+/// The bank row: the folder's banks, and what the shown one holds. Returns the bank
+/// clicked, if any.
 fn bank_row(ui: &mut egui::Ui, on: u32, banks: &[u32], said: &str) -> Option<u32> {
-    let names: Vec<String> = banks.iter().map(u32::to_string).collect();
     let mut picked = None;
-    band(ui, BANKS, None, |ui| {
-        let ink = crate::app::caption(ui.visuals());
-        ui.label(caps("bank").color(ink));
-        for (bank, name) in banks.iter().zip(&names) {
-            if chip(
-                ui,
-                None,
-                (name, egui::FontId::monospace(MONO)),
-                None,
-                *bank == on,
-            )
-            .clicked()
-            {
-                picked = Some(*bank);
+    band(ui, |ui| {
+        let quiet = caption(ui.visuals());
+        ui.label(egui::RichText::new("Bank").size(TEXT).color(quiet));
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            for bank in banks {
+                if square(ui, &bank.to_string(), *bank == on).clicked() {
+                    picked = Some(*bank);
+                }
             }
-        }
-        ui.label(egui::RichText::new(said).text_style(ui_text()).weak());
+        });
+        ui.label(egui::RichText::new(said).size(TEXT).color(quiet));
     });
     picked
+}
+
+/// One bank's square: its number, ringed and washed in the accent while it is shown.
+fn square(ui: &mut egui::Ui, name: &str, on: bool) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let ink = match on {
+        true => visuals.widgets.active.fg_stroke.color,
+        false => caption(&visuals),
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(name.to_string(), egui::FontId::monospace(MONO), ink);
+    let size = egui::vec2(BANK.x.max(galley.size().x + 8.0), BANK.y);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let accent = accent(&visuals);
+    let (fill, edge) = match (on, response.hovered()) {
+        (true, _) => (tint(accent, 0.14), tint(accent, 0.6)),
+        (false, true) => (visuals.window_fill, visuals.widgets.hovered.bg_stroke.color),
+        (false, false) => (visuals.window_fill, egui::Color32::TRANSPARENT),
+    };
+    ui.painter().rect(
+        rect,
+        7.0,
+        fill,
+        egui::Stroke::new(1.0_f32, edge),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+    response
 }
 
 /// What a bank holds and what is queued for it.
@@ -367,13 +528,13 @@ impl State {
         }
     }
 
-    /// The border color, and whether it is dashed.
-    fn edge(self, visuals: &egui::Visuals) -> (egui::Color32, bool) {
+    /// The border, if the state has one of its own.
+    fn edge(self, visuals: &egui::Visuals) -> Option<egui::Color32> {
         match self {
-            State::Empty => (visuals.widgets.noninteractive.bg_stroke.color, true),
-            State::Held => (visuals.widgets.noninteractive.bg_stroke.color, false),
-            State::Incoming => (warn(visuals), false),
-            State::Loaded => (accent(visuals), false),
+            State::Empty => Some(visuals.widgets.noninteractive.bg_stroke.color),
+            State::Held => None,
+            State::Incoming => Some(tint(warn(visuals), 0.7)),
+            State::Loaded => Some(tint(accent(visuals), 0.7)),
         }
     }
 
@@ -419,8 +580,11 @@ fn cell(
     gestures(ui, browser, view, at, info, &response, acts);
 }
 
-/// A slot painted as a cell: the background for its state and selection, the border,
-/// the address, and what it holds. The caller handles input.
+/// A slot painted as a card: the fill for its state and selection, the border, the
+/// address, and what it holds. The caller handles input.
+///
+/// An empty slot has a dashed border and no fill. Under the pointer, every border takes
+/// the hovered stroke.
 pub fn paint_cell(
     ui: &egui::Ui,
     rect: egui::Rect,
@@ -432,43 +596,55 @@ pub fn paint_cell(
 ) {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    let ground = match (state, selected, hovered) {
-        (_, true, _) | (State::Loaded, _, _) => Some(visuals.selection.bg_fill),
-        (_, false, true) => Some(visuals.faint_bg_color),
-        (State::Empty, _, _) => None,
-        _ => Some(visuals.window_fill),
+    let lit = selected || state == State::Loaded;
+    let fill = match (lit, state) {
+        (true, _) => Some(visuals.selection.bg_fill),
+        (false, State::Empty) => None,
+        (false, _) => Some(visuals.window_fill),
     };
-    if let Some(fill) = ground {
-        painter.rect_filled(rect, 3.0, fill);
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, CARD_RADIUS, fill);
     }
-    let (edge, dashed) = state.edge(&visuals);
-    let stroke = egui::Stroke::new(1.0_f32, cell_ink(selected, edge, &visuals));
-    match dashed {
-        true => crate::panel::dashed_rect(&painter, rect, stroke),
-        false => {
-            painter.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+    let edge = match hovered {
+        true => Some(visuals.widgets.hovered.bg_stroke.color),
+        false => state.edge(&visuals),
+    };
+    if let Some(edge) = edge {
+        let stroke = egui::Stroke::new(1.0_f32, cell_ink(selected, edge, &visuals));
+        match state {
+            State::Empty => {
+                crate::panel::dashed_round_rect(&painter, rect.shrink(0.5), CARD_RADIUS, stroke)
+            }
+            _ => {
+                painter.rect_stroke(rect, CARD_RADIUS, stroke, egui::StrokeKind::Inside);
+            }
         }
     }
 
-    let lit = selected || state == State::Loaded;
     let ink = cell_ink(lit, visuals.text_color(), &visuals);
     let quiet = cell_ink(lit, visuals.weak_text_color(), &visuals);
-    let room = (rect.width() - 2.0 * INSET).max(0.0);
+    let face = match rect.height() < MAP.height {
+        true => &CELL_FACE,
+        false => &CARD_FACE,
+    };
+    let inner = rect.shrink2(face.pad);
+    let glyph = state.glyph(&visuals);
+    let beside = glyph.map_or(0.0, |_| face.glyph);
     cut(
         &painter,
-        rect.left() + INSET,
-        rect.top() + 4.0 + SMALL / 2.0,
-        room - SMALL,
+        inner.left(),
+        inner.top() + face.glyph / 2.0,
+        inner.width() - beside,
         &shown(at),
-        egui::TextFormat::simple(egui::FontId::monospace(ADDRESS), quiet),
+        egui::TextFormat::simple(egui::FontId::monospace(face.address), quiet),
     );
-    if let Some((glyph, tint)) = state.glyph(&visuals) {
+    if let Some((glyph, tint)) = glyph {
         painted(
             ui,
             glyph,
             egui::Rect::from_min_size(
-                egui::pos2(rect.right() - INSET - SMALL, rect.top() + 4.0),
-                egui::Vec2::splat(SMALL),
+                egui::pos2(inner.right() - face.glyph, inner.top()),
+                egui::Vec2::splat(face.glyph),
             ),
             cell_ink(lit, tint, &visuals),
         );
@@ -479,19 +655,19 @@ pub fn paint_cell(
             "empty",
             egui::TextFormat {
                 italics: true,
-                ..egui::TextFormat::simple(egui::FontId::proportional(CELL_NAME), quiet)
+                ..egui::TextFormat::simple(egui::FontId::proportional(face.name), quiet)
             },
         ),
         false => (
             name,
-            egui::TextFormat::simple(egui::FontId::proportional(CELL_NAME), ink),
+            egui::TextFormat::simple(egui::FontId::proportional(face.name), ink),
         ),
     };
     cut(
         &painter,
-        rect.left() + INSET,
-        rect.bottom() - INSET - CELL_NAME / 2.0,
-        room,
+        inner.left(),
+        inner.bottom() - face.name / 2.0,
+        inner.width(),
         name,
         format,
     );
@@ -514,20 +690,24 @@ fn list(
     }
     // A library partition fills by bytes, not slots, so its free space decides whether
     // the next send fits.
-    if class.is_library() {
+    if let Some(held) = class
+        .is_library()
+        .then(|| room::meter(class, &device.state, queue, workspace))
+        .flatten()
+    {
         egui::TopBottomPanel::bottom("keyboard_room")
             .resizable(false)
             .frame(egui::Frame::new())
-            .show_inside(ui, |ui| footer(ui, class, device, queue, workspace));
+            .show_inside(ui, |ui| boxed(ui, |ui| meter(ui, class, device, held)));
     }
     // Settings is a single live object, so what a queued write would change is shown
-    // here as well as in the dock.
+    // here as well as in the send queue.
     if class == ObjectClass::Settings {
         if let Some(held) = waiting_in(queue, class) {
             egui::TopBottomPanel::bottom("keyboard_settings")
                 .resizable(false)
                 .frame(egui::Frame::new())
-                .show_inside(ui, |ui| crate::queue::table(ui, held));
+                .show_inside(ui, |ui| boxed(ui, |ui| crate::queue::table(ui, held)));
         }
     }
 
@@ -548,10 +728,16 @@ fn list(
         .map(|(at, _)| Item::Slot { class, at: *at })
         .collect();
 
-    let ui = &mut inset(ui);
-    let width = list_width(ui, slots.len(), ROW, HEAD);
-    let tracks = crate::panel::tracks(width, &LIST, LIST_GAP);
+    let room = ui.available_rect_before_wrap();
+    let ui = &mut ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(room.shrink2(egui::vec2(ROW_INSET, 0.0)))
+            .layout(*ui.layout()),
+    );
+    let width = list_width(ui, slots.len(), ROW + ROW_GAP, HEAD + ROW_INSET);
+    let tracks = crate::panel::tracks((width - 2.0 * CELL_PAD).max(0.0), &LIST, LIST_GAP);
     head(ui, class, width, &tracks);
+    ui.add_space(ROW_INSET);
 
     let view = View {
         class,
@@ -560,6 +746,7 @@ fn list(
         device,
         queue,
     };
+    ui.spacing_mut().item_spacing.y = ROW_GAP;
     egui::ScrollArea::vertical()
         .id_salt("keyboard_list")
         .auto_shrink([false; 2])
@@ -574,28 +761,34 @@ fn list(
 /// carries.
 fn column(class: ObjectClass) -> &'static str {
     match class {
-        ObjectClass::SetList => "plays",
-        ObjectClass::Sample => "played by",
-        ObjectClass::Piano => "category",
+        ObjectClass::SetList => "Plays",
+        ObjectClass::Sample => "Played by",
+        ObjectClass::Piano => "Category",
         _ => "",
     }
 }
 
-/// The 20 px column heads over a list.
+/// The column heads over a list, on a hairline.
 fn head(ui: &mut egui::Ui, class: ObjectClass, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
-    painter.rect_filled(rect, 0.0, visuals.faint_bg_color);
-    let ink = crate::app::caption(&visuals);
-    for (head, track) in ["at", "name", "size", column(class), ""].iter().zip(tracks) {
+    painter.hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+    );
+    let ink = caption(&visuals);
+    let font = crate::app::section().resolve(ui.style());
+    let content = rect.shrink2(egui::vec2(CELL_PAD, 0.0));
+    for (head, track) in ["At", "Name", "Size", column(class), ""].iter().zip(tracks) {
         cut(
             &painter,
-            rect.left() + track.start,
-            rect.center().y,
+            content.left() + track.start,
+            content.center().y,
             track.end - track.start,
-            &head.to_uppercase(),
-            egui::TextFormat::simple(egui::FontId::proportional(ADDRESS), ink),
+            head,
+            egui::TextFormat::simple(font.clone(), ink),
         );
     }
 }
@@ -629,6 +822,7 @@ fn row(
     // too: the signal colors are not legible on that fill.
     let lit = selected || state == State::Loaded;
     let (ink, quiet) = row_ink(&painter, rect, lit, response.hovered(), &visuals);
+    let content = rect.shrink2(egui::vec2(CELL_PAD, 0.0));
 
     let text = cells(view, at, info);
     let faces = [
@@ -641,13 +835,13 @@ fn row(
             },
         },
         egui::TextFormat::simple(egui::FontId::monospace(MONO), quiet),
-        egui::TextFormat::simple(egui::FontId::proportional(NAME - 1.0), quiet),
+        egui::TextFormat::simple(egui::FontId::proportional(TEXT), quiet),
     ];
     for ((said, face), track) in text.iter().zip(faces).zip(tracks) {
         cut(
             &painter,
-            rect.left() + track.start,
-            rect.center().y,
+            content.left() + track.start,
+            content.center().y,
             track.end - track.start,
             said,
             face,
@@ -659,7 +853,10 @@ fn row(
             ui,
             glyph,
             egui::Rect::from_center_size(
-                egui::pos2(rect.left() + track.start + SMALL / 2.0, rect.center().y),
+                egui::pos2(
+                    content.left() + track.start + SMALL / 2.0,
+                    content.center().y,
+                ),
                 egui::Vec2::splat(SMALL),
             ),
             cell_ink(lit, tint, &visuals),
@@ -751,32 +948,38 @@ fn played_by(name: &str, workspace: &Workspace, device: &Device) -> Option<Strin
     (!played.is_empty()).then(|| played.join(", "))
 }
 
-/// The library footer: how full the partition is, and how much space is left.
-fn footer(
-    ui: &mut egui::Ui,
-    class: ObjectClass,
-    device: &Device,
-    queue: &Queue,
-    workspace: &Workspace,
-) {
-    let Some(held) = room::meter(class, &device.state, queue, workspace) else {
-        return;
-    };
+/// A library partition's meter: how full it is, and how much space is left.
+fn meter(ui: &mut egui::Ui, class: ObjectClass, device: &Device, held: room::Meter) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        let unit = device.state.allocation_unit(class);
+        if let Some(room) = occupancy(class, &device.state.inventory, unit) {
+            ui.label(egui::RichText::new(room).monospace().size(MONO));
+        }
+        if let Some(free) = room::free_space(class, &device.state) {
+            ui.label(egui::RichText::new(free).text_style(ui_text()).weak());
+        }
+    });
+    room::bar(ui, held);
+}
+
+/// A box of its own under a list, padded like the bands above it.
+fn boxed<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(8, 4))
+        .fill(ui.visuals().window_fill)
+        .corner_radius(CARD_RADIUS)
+        .inner_margin(12)
+        .outer_margin(egui::Margin {
+            left: VIEW_PAD as i8,
+            right: VIEW_PAD as i8,
+            top: 12,
+            bottom: 14,
+        })
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
-                let unit = device.state.allocation_unit(class);
-                if let Some(room) = occupancy(class, &device.state.inventory, unit) {
-                    ui.label(egui::RichText::new(room).monospace().size(MONO));
-                }
-                if let Some(free) = room::free_space(class, &device.state) {
-                    ui.label(egui::RichText::new(free).text_style(ui_text()).weak());
-                }
-            });
-            room::bar(ui, held);
-        });
+            ui.spacing_mut().item_spacing.y = 5.0;
+            contents(ui)
+        })
+        .inner
 }
 
 /// The first queued entry for any slot in a folder.
@@ -850,105 +1053,31 @@ fn gestures(
     }
 }
 
-/// A full-width band: filled, padded at each end, laid out left to right.
-fn band<R>(
-    ui: &mut egui::Ui,
-    height: f32,
-    fill: Option<egui::Color32>,
-    contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
-    if let Some(fill) = fill {
-        ui.painter().rect_filled(rect, 0.0, fill);
-    }
-    let mut inner = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(PAD, 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    inner.spacing_mut().item_spacing.x = GAP;
-    contents(&mut inner)
-}
-
-/// One chip: an optional glyph, a word, and an optional monospace readout after it.
-fn chip(
-    ui: &mut egui::Ui,
-    glyph: Option<Glyph>,
-    text: (&str, egui::FontId),
-    readout: Option<&str>,
-    active: bool,
-) -> egui::Response {
-    let visuals = ui.visuals().clone();
-    let ink = match active {
-        true => visuals.selection.stroke.color,
-        false => visuals.widgets.inactive.fg_stroke.color,
-    };
-    let quiet = cell_ink(active, visuals.weak_text_color(), &visuals);
-    let painter = ui.painter().clone();
-    let word = painter.layout_no_wrap(text.0.to_string(), text.1, ink);
-    let count = readout
-        .map(|held| painter.layout_no_wrap(held.to_string(), egui::FontId::monospace(MONO), quiet));
-
-    let marked = glyph.map_or(0.0, |_| GLYPH + INSET);
-    let counted = count.as_ref().map_or(0.0, |held| INSET + held.size().x);
-    let width = CHIP_PAD + marked + word.size().x + counted + CHIP_PAD;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CHIP), egui::Sense::click());
-
-    let fill = match (active, response.hovered()) {
-        (true, _) => Some(visuals.selection.bg_fill),
-        (false, true) => Some(visuals.window_fill),
-        (false, false) => None,
-    };
-    if let Some(fill) = fill {
-        painter.rect_filled(rect, 2.0, fill);
-    }
-    if !active {
-        painter.rect_stroke(
-            rect,
-            2.0,
-            egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-    let mut x = rect.left() + CHIP_PAD;
-    if let Some(glyph) = glyph {
-        painted(
-            ui,
-            glyph,
-            egui::Rect::from_center_size(
-                egui::pos2(x + GLYPH / 2.0, rect.center().y),
-                egui::Vec2::splat(GLYPH),
-            ),
-            ink,
-        );
-        x += GLYPH + INSET;
-    }
-    painter.galley(
-        egui::pos2(x, rect.center().y - word.size().y / 2.0),
-        word.clone(),
-        egui::Color32::PLACEHOLDER,
-    );
-    if let Some(count) = count {
-        painter.galley(
-            egui::pos2(
-                x + word.size().x + INSET,
-                rect.center().y - count.size().y / 2.0,
-            ),
-            count,
-            egui::Color32::PLACEHOLDER,
-        );
-    }
-    response
+/// A band under the header: padded at each side like the header, laid out left to
+/// right, and wrapping when the center is narrow.
+fn band<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: VIEW_PAD as i8,
+            right: VIEW_PAD as i8,
+            top: 0,
+            bottom: UNDER as i8,
+        })
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(10.0, 4.0);
+                contents(ui)
+            })
+            .inner
+        })
+        .inner
 }
 
 /// The line a folder shows when there is nothing to draw.
 fn nothing(ui: &mut egui::Ui, said: &str) {
-    ui.add_space(GAP);
+    ui.add_space(VIEW_PAD);
     ui.horizontal(|ui| {
-        ui.add_space(PAD);
+        ui.add_space(VIEW_PAD);
         ui.label(
             egui::RichText::new(said)
                 .text_style(ui_text())
@@ -1087,7 +1216,7 @@ mod tests {
         // from the click.
         let asked = bench.device.queued().len();
 
-        // The first chip of the switcher is the first folder the instrument declares.
+        // The switcher's first segment is the first folder the instrument declares.
         let first = bench.device.state.classes()[0];
         let name = bench.device.state.folder_name(first).to_string();
         let drawn = draw(900.0, Vec::new(), &mut keyboard, &mut bench);
@@ -1111,6 +1240,106 @@ mod tests {
             asked,
             "the click asked the instrument for nothing"
         );
+    }
+
+    /// A click on a bank's square shows that bank's slots in the map.
+    #[test]
+    fn a_click_on_a_bank_square_shows_that_bank() {
+        let mut bench = bench();
+        let mut keyboard = Keyboard::default();
+        bench.tabs.show(Spot::Keyboard);
+        bench.tabs.keyboard_on(ObjectClass::Program);
+
+        let said = testing::painted(&draw(900.0, Vec::new(), &mut keyboard, &mut bench));
+        assert!(
+            said.iter().any(|word| word.text == "Africa Split"),
+            "{said:?}"
+        );
+        let square = testing::where_(&said, "8").center();
+        draw(900.0, testing::click(square), &mut keyboard, &mut bench);
+        let said = testing::words(&draw(900.0, Vec::new(), &mut keyboard, &mut bench));
+        assert!(said.contains(&"Bass Manual".to_string()), "{said:?}");
+        assert!(!said.contains(&"Africa Split".to_string()), "{said:?}");
+    }
+
+    /// The header's button asks for the shown folder again.
+    #[test]
+    fn read_again_asks_for_the_shown_folder() {
+        let mut bench = bench();
+        let mut keyboard = Keyboard::default();
+        bench.tabs.show(Spot::Keyboard);
+        bench.tabs.keyboard_on(ObjectClass::SetList);
+
+        let said = testing::painted(&draw(900.0, Vec::new(), &mut keyboard, &mut bench));
+        let button = testing::where_(&said, "Read again").center();
+        let input = testing::screen(egui::vec2(900.0, 540.0), testing::click(button));
+        let mut asked = Vec::new();
+        testing::run(&bench.ctx.clone(), input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(ctx, |ui| {
+                    asked = keyboard.ui(
+                        ui,
+                        &mut bench.browser,
+                        &bench.workspace,
+                        &bench.device,
+                        &bench.queue,
+                        &bench.tabs,
+                    );
+                });
+        });
+        assert!(
+            matches!(asked.as_slice(), [Act::ReadAgain(ObjectClass::SetList)]),
+            "{asked:?}"
+        );
+    }
+
+    /// Every card in the map is at least 150 px wide, unless the center is too narrow for
+    /// even one, and a wider center fits more of them.
+    #[test]
+    fn the_map_fits_as_many_cards_as_the_width_holds_at_their_minimum() {
+        for width in [100.0_f32, 330.0, 430.0, 900.0, 1600.0] {
+            let fit = columns(width);
+            let room = width - 2.0 * MAP.margin - MAP.gap * (fit - 1) as f32;
+            assert!(
+                fit == 1 || room / fit as f32 >= CARD_MIN,
+                "{fit} cards at {width}"
+            );
+            let one_more = width - 2.0 * MAP.margin - MAP.gap * fit as f32;
+            assert!(
+                one_more / ((fit + 1) as f32) < CARD_MIN,
+                "one more card would fit at {width}"
+            );
+        }
+        assert_eq!(columns(100.0), 1);
+        assert!(columns(900.0) > columns(430.0));
+    }
+
+    /// A slot's address and the word "empty" fit whole on a map card and on a picker's
+    /// smaller cell, beside the glyph of a queued write.
+    #[test]
+    fn a_card_writes_its_address_and_empty_in_full_at_the_map_and_picker_sizes() {
+        let ctx = testing::context();
+        let at = Location { bank: 6, slot: 49 };
+        for size in [egui::vec2(CARD_MIN, MAP.height), egui::Vec2::splat(CELL)] {
+            let said = testing::painted(&testing::run(
+                &ctx,
+                testing::screen(egui::vec2(400.0, 200.0), Vec::new()),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), size);
+                        paint_cell(ui, rect, at, None, State::Incoming, false, false);
+                    });
+                },
+            ));
+            for word in ["7:50", "empty"] {
+                assert!(
+                    said.iter()
+                        .any(|painted| painted.text == word && !painted.galley.elided),
+                    "{word} at {size:?}: {said:?}"
+                );
+            }
+        }
     }
 
     #[test]
