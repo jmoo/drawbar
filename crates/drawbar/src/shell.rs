@@ -1387,7 +1387,7 @@ mod tests {
     #[test]
     fn the_notice_says_what_is_wrong_and_offers_the_guide() {
         let input = testing::screen(egui::vec2(390.0, 844.0), Vec::new());
-        let output = testing::run(&egui::Context::default(), input, too_small_notice);
+        let output = testing::run(&testing::context(), input, too_small_notice);
         let said = testing::words(&output);
 
         assert!(said.iter().any(|word| word == TOO_SMALL), "{said:?}");

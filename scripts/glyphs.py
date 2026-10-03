@@ -28,7 +28,8 @@ AXIS = 300
 # Each glyph is an advance width and its shapes, in font units:
 #   ("line", points) strokes an open polyline WEIGHT wide, with flat ends;
 #   ("ring", points) strokes a closed polygon WEIGHT wide, leaving its middle open;
-#   ("fill", points) fills a polygon.
+#   ("fill", points) fills a polygon;
+#   ("hole", points) cuts a polygon out of a fill around it.
 # Corners are mitered.
 GLYPHS = {
     "→": (  # RIGHTWARDS ARROW
@@ -59,6 +60,60 @@ GLYPHS = {
         600,
         [("line", [(90, 360), (300, 625), (510, 360)])],
     ),
+    "⌘": (  # PLACE OF INTEREST SIGN, the Command key
+        753,
+        [
+            ("ring", [(280, 230), (473, 230), (473, 423), (280, 423)]),
+            (
+                "ring",
+                [
+                    (280, 230),
+                    (160, 230),
+                    (90, 160),
+                    (90, 110),
+                    (160, 40),
+                    (210, 40),
+                    (280, 110),
+                ],
+            ),
+            (
+                "ring",
+                [
+                    (473, 230),
+                    (593, 230),
+                    (663, 160),
+                    (663, 110),
+                    (593, 40),
+                    (543, 40),
+                    (473, 110),
+                ],
+            ),
+            (
+                "ring",
+                [
+                    (280, 423),
+                    (160, 423),
+                    (90, 493),
+                    (90, 543),
+                    (160, 613),
+                    (210, 613),
+                    (280, 543),
+                ],
+            ),
+            (
+                "ring",
+                [
+                    (473, 423),
+                    (593, 423),
+                    (663, 493),
+                    (663, 543),
+                    (593, 613),
+                    (543, 613),
+                    (473, 543),
+                ],
+            ),
+        ],
+    ),
     "⌥": (  # OPTION KEY
         800,
         [
@@ -72,6 +127,14 @@ GLYPHS = {
     "▸": (  # BLACK RIGHT-POINTING SMALL TRIANGLE
         480,
         [("fill", [(80, AXIS - 180), (80, AXIS + 180), (392, AXIS)])],
+    ),
+    "⚠": (  # WARNING SIGN
+        820,
+        [
+            ("fill", [(35, 0), (785, 0), (410, 650)]),
+            ("hole", [(365, 230), (455, 230), (455, 470), (365, 470)]),
+            ("hole", [(365, 90), (455, 90), (455, 180), (365, 180)]),
+        ],
     ),
     # VARIATION SELECTOR-16 asks for the emoji form of the character before it, and is
     # not itself drawn. Without a glyph, egui draws it as an empty box.
@@ -131,6 +194,8 @@ def contours(kind, points):
     half = WEIGHT / 2
     if kind == "fill":
         return [wound(points, True)]
+    if kind == "hole":
+        return [wound(points, False)]
     if kind == "line":
         outline = offset(points, half, False) + offset(points, -half, False)[::-1]
         return [wound(outline, True)]
