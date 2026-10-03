@@ -247,9 +247,14 @@ pub fn welcome(ctx: &egui::Context) -> Option<Wanted> {
 fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
     ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
     let mut wanted = None;
+    // The start cards stay under the scrolling middle, so a short window scrolls the
+    // support table and never hides the choices. Their height is last frame's; when it
+    // changes, the frame is discarded and redrawn.
+    let pinned = ui.id().with("start block");
+    let below: f32 = ui.data(|data| data.get_temp(pinned)).unwrap_or(0.0);
     egui::ScrollArea::vertical()
         .id_salt("welcome")
-        .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+        .max_height(sheet::middle(ui.ctx(), AROUND + below, FEWEST))
         .show(ui, |ui| {
             ui.add_space(GAP * 4.5);
             sheet::section(ui, |ui| {
@@ -260,10 +265,18 @@ fn welcome_body(ui: &mut egui::Ui) -> Option<Wanted> {
                 support(ui);
                 ui.add_space(GAP * 2.0);
                 legend(ui);
-                sheet::heading(ui, "Start here", None);
-                wanted = starts(ui);
             });
         });
+    let top = ui.cursor().top();
+    sheet::section(ui, |ui| {
+        sheet::heading(ui, "Start here", None);
+        wanted = starts(ui);
+    });
+    let height = ui.cursor().top() - top;
+    if height != below {
+        ui.data_mut(|data| data.insert_temp(pinned, height));
+        ui.ctx().request_discard("start block");
+    }
     sheet::foot(
         ui,
         |ui| sheet::disclaimer(ui, DISMISS),
@@ -1151,27 +1164,36 @@ mod tests {
     }
 
     /// The shell refuses a smaller screen than this, so both sheets must fit in it with
-    /// their dismiss button on screen.
+    /// their dismiss button on screen, and the welcome with its warning and every start
+    /// card too: the support table scrolls instead.
     #[test]
-    fn the_welcome_sheet_keeps_its_button_on_the_smallest_screen_the_shell_allows() {
+    fn the_welcome_sheet_keeps_its_button_and_its_choices_on_the_smallest_screen() {
         let ctx = headless();
         let size = crate::shell::LEAST;
-        // Twice, because the second frame lays out against the first.
-        let _ = drawn_at(&ctx, size, |ctx| {
-            welcome(ctx);
-        });
-        let said = drawn_at(&ctx, size, |ctx| {
-            welcome(ctx);
-        });
+        // Three times: each frame lays out against the one before, and the cards settle
+        // their own height first.
+        let mut said = Vec::new();
+        for _ in 0..3 {
+            said = drawn_at(&ctx, size, |ctx| {
+                welcome(ctx);
+            });
+        }
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let button = box_of(&said, "I understand")
-            .unwrap_or_else(|| panic!("the button was never painted: {said:?}"));
-        assert!(
-            screen.contains_rect(button.expand(6.0)),
-            "the button is off a {size:?} screen: {button:?}"
-        );
-        assert!(box_of(&said, "Nord Electro 5").is_some(), "{said:?}");
+        for label in [
+            "I understand",
+            "Connect an instrument…",
+            "Open files…",
+            "Read the guide",
+            &format!("{RISK_LEAD}{RISK_REST}"),
+        ] {
+            let drawn = box_of(&said, label)
+                .unwrap_or_else(|| panic!("{label} was never painted: {said:?}"));
+            assert!(
+                screen.contains_rect(drawn.expand(6.0)),
+                "{label} is off a {size:?} screen: {drawn:?}"
+            );
+        }
     }
 
     #[test]
