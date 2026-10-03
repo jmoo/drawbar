@@ -422,6 +422,7 @@ async fn transfer_in<T: Transport>(
 ) -> Result<()> {
     let body = opened.body.clone();
     let len = body.len();
+    let mut verifier = opened.verifier()?;
 
     session.notify(&ui::label("Downloading...")?).await?;
 
@@ -431,18 +432,19 @@ async fn transfer_in<T: Transport>(
         .await?;
 
     let mut buf = vec![0; chunk_size.min(len)];
-    let mut hash = opened.hash();
     let mut offset = 0usize;
     let mut painted = None;
     while offset < len {
         let end = offset.saturating_add(chunk_size).min(len);
         let chunk = &mut buf[..end - offset];
         file.read_at((body.start + offset) as u64, chunk).await?;
-        hash.update(chunk);
+        verifier
+            .update(chunk)
+            .map_err(|e| Error::Envelope(e.to_string()))?;
         let data = Message::program(cmd::WRITE_DATA, write_data_args(at, offset, chunk)?);
         // Only the final chunk is acknowledged.
         if end == len {
-            if !opened.matches(&hash) {
+            if !opened.matches(std::mem::take(&mut verifier))? {
                 return Err(Error::Envelope(
                     "the file changed after its checksum was checked, so its last chunk \
                      was not sent"

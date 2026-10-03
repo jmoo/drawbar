@@ -6,8 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::wire::Location;
-use nord_format::cbin::{self, Cbin, Generation, Header, RawBody};
-use nord_format::crc::{Crc16Stream, Crc32Stream};
+use nord_format::cbin::{self, Cbin, Generation, Header, RawBody, Verifier};
 use std::io::{self, Cursor};
 use std::ops::Range;
 
@@ -134,74 +133,34 @@ impl FileSource for &[u8] {
 pub(crate) struct Opened {
     pub header: Header,
     pub body: Range<usize>,
-    stored: u32,
-    /// The file's first bytes, which a type-0 checksum covers ahead of the body.
+    /// The file's bytes before the body and after it, as they were verified.
     head: Vec<u8>,
+    tail: Vec<u8>,
+    stored: u32,
 }
 
-/// The checksum a file's generation stores, accumulated over its body.
-pub(crate) enum Hash {
-    V0(Crc16Stream<'static>),
-    V1(Crc32Stream<'static>),
-}
-
-impl Hash {
-    pub fn update(&mut self, bytes: &[u8]) {
-        match self {
-            Hash::V0(h) => h.update(bytes),
-            Hash::V1(h) => h.update(bytes),
-        }
-    }
-
-    fn value(&self) -> u32 {
-        match self {
-            Hash::V0(h) => h.value().into(),
-            Hash::V1(h) => h.value(),
-        }
-    }
+fn envelope(e: nord_format::error::Error) -> Error {
+    Error::Envelope(e.to_string())
 }
 
 impl Opened {
-    /// An accumulator that has seen what the checksum covers before the body.
-    pub fn hash(&self) -> Hash {
-        match self.header.generation {
-            Generation::V0 => {
-                let mut hash = Crc16Stream::new();
-                hash.update(&self.head[..Generation::V0.body_start() as usize]);
-                Hash::V0(hash)
-            }
-            Generation::V1 => Hash::V1(Crc32Stream::new()),
-        }
+    /// A check that has seen the file up to its body.
+    pub fn verifier(&self) -> Result<Verifier> {
+        let mut verifier = Verifier::new();
+        verifier.update(&self.head).map_err(envelope)?;
+        Ok(verifier)
     }
 
-    /// Whether `hash`, having seen the whole body, matches the checksum the file stores.
-    pub fn matches(&self, hash: &Hash) -> bool {
-        hash.value() == self.stored
-    }
-
-    /// One pass over the body in pieces of `chunk` bytes, checking it against the
-    /// stored checksum.
-    async fn verify(&self, file: &mut impl FileSource, chunk: usize) -> Result<()> {
-        let mut hash = self.hash();
-        let mut buf = vec![0; chunk.min(self.body.len())];
-        for at in self.body.clone().step_by(chunk) {
-            let piece = &mut buf[..chunk.min(self.body.end - at)];
-            file.read_at(at as u64, piece).await?;
-            hash.update(piece);
-        }
-        if self.matches(&hash) {
-            return Ok(());
-        }
-        Err(Error::Envelope(format!(
-            "{}: stored checksum {:#x} does not match the file's {:#x}",
-            tag(&self.header),
-            self.stored,
-            hash.value()
-        )))
+    /// Whether `verifier`, having seen the whole body, finds the checksum the file
+    /// stored when it was opened.
+    pub fn matches(&self, mut verifier: Verifier) -> Result<bool> {
+        verifier.update(&self.tail).map_err(envelope)?;
+        let info = verifier.finish().map_err(envelope)?;
+        Ok(info.checksum_ok && info.stored_checksum == self.stored)
     }
 }
 
-/// [`unwrap`] through a [`FileSource`]: the header is read alone, and the body in
+/// [`unwrap`] through a [`FileSource`]: the header is read alone, and the rest in
 /// pieces of `chunk` bytes, which are checked against the stored checksum and dropped.
 pub(crate) async fn open(file: &mut impl FileSource, chunk: usize) -> Result<Opened> {
     let len = usize::try_from(file.len()).map_err(|_| {
@@ -209,34 +168,40 @@ pub(crate) async fn open(file: &mut impl FileSource, chunk: usize) -> Result<Ope
     })?;
     let mut head = vec![0; len.min(Generation::V1.body_start() as usize)];
     file.read_at(0, &mut head).await?;
-    // The header checks are nord-format's: the longer header's worth of bytes, or the
-    // whole of a shorter file, is a container it can inspect without the body.
-    let info =
-        cbin::inspect(&mut Cursor::new(&head)).map_err(|e| Error::Envelope(e.to_string()))?;
+    let header = Header::from_prefix(&head).map_err(envelope)?;
+    head.truncate(header.generation.body_start() as usize);
 
-    let start = info.header.generation.body_start() as usize;
-    let (body, stored) = match info.header.generation {
-        Generation::V1 => (start..len, info.stored_checksum),
-        // The crc16 trails the file, out of the header's reach. Inspecting has refused a
-        // file too short to hold it.
-        Generation::V0 => {
-            let mut trailer = [0u8; 2];
-            let end = len - trailer.len();
-            file.read_at(end as u64, &mut trailer).await?;
-            (start..end, u16::from_le_bytes(trailer).into())
-        }
-    };
-    let opened = Opened {
-        header: info.header,
-        body,
-        stored,
-        head,
-    };
-    opened.verify(file, chunk).await?;
-    if opened.body.is_empty() {
+    let mut verifier = Verifier::new();
+    verifier.update(&head).map_err(envelope)?;
+    let mut buf = vec![0; chunk.min(len - head.len())];
+    for at in (head.len()..len).step_by(chunk) {
+        let piece = &mut buf[..chunk.min(len - at)];
+        file.read_at(at as u64, piece).await?;
+        verifier.update(piece).map_err(envelope)?;
+    }
+    let info = verifier.finish().map_err(envelope)?;
+    if !info.checksum_ok {
+        return Err(Error::Envelope(format!(
+            "{}: stored checksum {:#x} does not match the file",
+            tag(&info.header),
+            info.stored_checksum
+        )));
+    }
+
+    // The body lies within a file whose length is a `usize`.
+    let body = head.len()..head.len() + info.body_len as usize;
+    if body.is_empty() {
         return Err(Error::Envelope(BARE_HEADER.into()));
     }
-    Ok(opened)
+    let mut tail = vec![0; len - body.end];
+    file.read_at(body.end as u64, &mut tail).await?;
+    Ok(Opened {
+        header: info.header,
+        body,
+        head,
+        tail,
+        stored: info.stored_checksum,
+    })
 }
 
 #[cfg(test)]
