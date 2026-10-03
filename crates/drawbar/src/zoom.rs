@@ -27,7 +27,7 @@ pub enum Stop {
     Room,
 }
 
-/// One of [`STEPS`], by its index.
+/// One of the zooms offered, by its index among them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Zoom(usize);
 
