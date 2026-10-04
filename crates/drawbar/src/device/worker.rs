@@ -304,14 +304,14 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::CopyAll { class, slots } => {
-            copy_all(device, class, &slots, scratch, emit, gone).await
+            copy_all(device, class, &slots, scratch, emit, fault).await
         }
 
         DeviceCmd::Gather {
             roots,
             also,
             request,
-        } => gather(device, &roots, &also, request, scratch, emit, gone).await,
+        } => gather(device, &roots, &also, request, scratch, emit, fault).await,
 
         DeviceCmd::Put {
             id,
@@ -1164,7 +1164,7 @@ async fn copy_all<T: Transport>(
     slots: &[Location],
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Option<String>, String> {
     let mut copied = 0;
     let read = device
@@ -1199,7 +1199,7 @@ async fn copy_all<T: Transport>(
             Ok(())
         })
         .await;
-    read.map_err(spoil(gone, None))?;
+    read.map_err(spoil(fault, None))?;
     Ok(Some(format!(
         "copied {copied} of {} from {} in one session",
         slots.len(),
@@ -1215,11 +1215,11 @@ async fn gather<T: Transport>(
     request: u64,
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Option<String>, String> {
     let closure = nord_usb::bundle::closure(device, roots)
         .await
-        .map_err(spoil(gone, None))?;
+        .map_err(spoil(fault, None))?;
     for (class, at, deps) in &closure.objects {
         let (class, at, deps) = (*class, *at, deps.clone());
         emit.send(DeviceEvent::Deps { class, at, deps });
@@ -1252,7 +1252,7 @@ async fn gather<T: Transport>(
             .map(|(_, at)| *at)
             .collect();
         if !of.is_empty() {
-            copy_all(device, class, &of, scratch, emit, gone).await?;
+            copy_all(device, class, &of, scratch, emit, fault).await?;
         }
     }
     Ok(Some(format!(

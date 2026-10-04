@@ -301,6 +301,15 @@ impl DeviceCmd {
             DeviceCmd::Rename { class, .. } => ("rename", class, true),
             DeviceCmd::Select { class, .. } => ("select", class, false),
             DeviceCmd::Reload { class, .. } => ("reload", class, false),
+            DeviceCmd::CopyAll { class, .. } => ("copy-all", class, true),
+            // A bundle's closure crosses classes, so the row names none.
+            DeviceCmd::Gather { .. } => {
+                return Some(crate::telemetry::Op {
+                    name: "gather",
+                    class: None,
+                    asked: true,
+                })
+            }
             DeviceCmd::Disconnect => return None,
         };
         Some(crate::telemetry::Op {
