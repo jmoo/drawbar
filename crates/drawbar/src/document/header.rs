@@ -1182,16 +1182,16 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
             folder(class)
         ));
     }
-    if let Some((over, free)) = over(entity, class, device) {
+    if let Some((over, free)) = over(entity, class, at, device) {
         return Loud {
             label: format!("Won't fit · {} over", room::measure(over)),
             short: format!("{} over", room::measure(over)),
             glyph: Glyph::CircleAlert,
             tone: Tone::Blocked,
             hint: format!(
-                "{} is free in {}, and this is {}",
+                "{} is free for {}, and this is {}",
                 room::measure(free),
-                folder(class),
+                place(class, at),
                 room::measure(entity.size())
             ),
             send: None,
@@ -1210,10 +1210,22 @@ pub(super) fn loads(entity: &LocalEntity, device: &DeviceState) -> Option<(Objec
         .filter(|(class, at)| loadable(device, *class, *at))
 }
 
-/// How far the document exceeds the free space in its folder, and that free space.
+/// How far the document exceeds the room it would have in its slot, and that room.
 /// `None` where the folder does not count in bytes or the document fits.
-fn over(entity: &LocalEntity, class: ObjectClass, device: &DeviceState) -> Option<(u64, u64)> {
-    let free = room::free_bytes(class, device)?;
+///
+/// ⚠️ The room is the folder's free space plus what the slot holds now, since the write
+/// frees what it replaces.
+fn over(
+    entity: &LocalEntity,
+    class: ObjectClass,
+    at: Location,
+    device: &DeviceState,
+) -> Option<(u64, u64)> {
+    let held = device
+        .slot(class, at)
+        .flatten()
+        .map_or(0, |info| u64::from(info.body_len));
+    let free = room::free_bytes(class, device)?.saturating_add(held);
     let bytes = entity.size();
     bytes
         .checked_sub(free)
@@ -1579,7 +1591,57 @@ mod tests {
             format!("Won't fit · {} over", room::measure(bytes.len() as u64))
         );
         assert_eq!(held.send, None, "a blocked action queues nothing");
-        assert!(held.hint.contains("free in Pianos"), "{}", held.hint);
+        assert!(held.hint.contains("free for Pianos 1:4"), "{}", held.hint);
+    }
+
+    /// A send replaces what its slot holds, so a full folder still takes a document no
+    /// larger than that occupant.
+    #[test]
+    fn a_send_counts_the_occupant_it_replaces_as_room() {
+        use crate::device::Device;
+        use nord_usb::wire::Status;
+
+        let (mut workspace, mut log) = workspace();
+        let bytes = Fresh::SetList.bytes().unwrap();
+        let mut device = Device::new(egui::Context::default());
+        device.pretend_scanned(ObjectClass::SetList, 7, &["Old", ""]);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        assert!(
+            bytes.len() <= 121,
+            "the occupant pretend_scanned makes is 121 bytes"
+        );
+        device.state.inventory.push(Status {
+            class: ObjectClass::SetList,
+            count: 1,
+            free: 0,
+            used: 121,
+            dirty: 0,
+            spare: 0,
+        });
+        let sent_to = |slot: u32, workspace: &mut Workspace, log: &mut Log| {
+            let at = Location::from_user(7, slot);
+            let id = workspace.ingest(
+                "Blue Room.ne5t".into(),
+                Origin::Device {
+                    class: ObjectClass::SetList,
+                    at,
+                },
+                bytes.clone(),
+                log,
+            );
+            action(workspace.get(id).unwrap(), &device.state)
+        };
+
+        let held = sent_to(1, &mut workspace, &mut log);
+        assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
+        assert_eq!(held.hint, "replaces Set lists 7:1");
+
+        let held = sent_to(2, &mut workspace, &mut log);
+        assert_eq!(held.tone, Tone::Blocked, "an empty slot frees nothing");
+        assert_eq!(
+            held.label,
+            format!("Won't fit · {} over", room::measure(bytes.len() as u64))
+        );
     }
 
     /// A project lives on this computer, so its loud action is a build. The build is

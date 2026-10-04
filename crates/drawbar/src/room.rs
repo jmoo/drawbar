@@ -153,23 +153,30 @@ fn counted(class: ObjectClass, device: &DeviceState) -> Option<&Status> {
     device.inventory.iter().find(|status| status.class == class)
 }
 
-/// The largest item in the queue, and whether it fits in the free space.
+/// The item in the queue that needs the most room, and whether it has it.
+///
+/// ⚠️ An entry's room is the free space plus what its slot holds now, since the write
+/// frees what it replaces.
 pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) -> Option<String> {
-    let (name, bytes, class) = queue
+    let (name, bytes, class, freed) = queue
         .entries()
         .iter()
         .filter_map(|held| {
             let entity = workspace.get(held.id)?;
-            Some((entity.name.clone(), entity.size(), held.class))
+            let freed = held
+                .replaces
+                .occupant()
+                .map_or(0, |occupant| u64::from(occupant.body_len));
+            Some((entity.name.clone(), entity.size(), held.class, freed))
         })
-        .max_by_key(|(_, bytes, _)| *bytes)?;
-    let free = free_bytes(class, device)?;
+        .max_by_key(|(_, bytes, _, freed)| bytes.saturating_sub(*freed))?;
+    let free = free_bytes(class, device)?.saturating_add(freed);
     let verdict = match bytes <= free {
         true => "it fits",
         false => "it does not fit",
     };
     Some(format!(
-        "{name} is {} and {} is free, so {verdict}.",
+        "{name} is {} and {} is free for it, so {verdict}.",
         measure(bytes),
         measure(free)
     ))
@@ -518,13 +525,42 @@ mod tests {
         device.pretend_partitions(&crate::device::ELECTRO5);
         assert_eq!(
             constraint(&queue, &workspace, &device.state).as_deref(),
-            Some("Grand is 5.1 MB and 8.0 MB is free, so it fits.")
+            Some("Grand is 5.1 MB and 8.0 MB is free for it, so it fits.")
         );
 
         device.state.inventory.clear();
         device.state.inventory.push(status(class, 84, 8, 1528));
         assert!(constraint(&queue, &workspace, &device.state)
             .is_some_and(|said| said.ends_with("it does not fit.")));
+    }
+
+    #[test]
+    fn a_queued_replace_has_the_room_its_occupant_frees() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let class = ObjectClass::SetList;
+        let mut queue = Queue::default();
+        device.pretend_scanned(class, 1, &["Old"]);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.state.inventory.push(status(class, 1, 0, 121));
+        let id = workspace.ingest("New".into(), Origin::Fresh, vec![0; 121], &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        assert_eq!(
+            constraint(&queue, &workspace, &device.state).as_deref(),
+            Some("New is 121 B and 121 B is free for it, so it fits.")
+        );
     }
 
     #[test]
