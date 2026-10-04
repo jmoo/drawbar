@@ -16,7 +16,7 @@ use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::Glyph;
-use crate::menu::{marked, new_menu};
+use crate::menu::{self, marked, new_menu};
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::strings::{place, shown};
@@ -350,7 +350,7 @@ impl Browser {
         drawn.response.context_menu(|ui| {
             self.set_menu(ui, &listed, workspace, device, acts, |_, ui, acts| {
                 offer(ui, "Open…", None, Act::OpenFiles, acts);
-                ui.menu_button("New", |ui| new_menu(ui, acts));
+                menu::button(ui, "New", |ui| new_menu(ui, acts));
             });
         });
     }
@@ -618,7 +618,7 @@ impl Browser {
         }
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(id), acts);
-        ui.menu_button("Tag", |ui| self.tag_items(ui, &picked, acts));
+        menu::button(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
         ui.separator();
         offer(ui, "Remove from list", None, Act::Remove(id), acts);
     }
@@ -628,7 +628,7 @@ impl Browser {
         if self.folders.all().is_empty() {
             return;
         }
-        ui.menu_button("Move to folder", |ui| {
+        menu::button(ui, "Move to folder", |ui| {
             for folder in self.folders.all() {
                 if marked(ui, &folder.name, filed == Some(folder.id)) {
                     acts.push(Act::File {

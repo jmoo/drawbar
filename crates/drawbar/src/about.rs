@@ -103,14 +103,6 @@ const NOTICES: &[Notice] = &[
         text: include_str!("../licenses/ns4decode.txt"),
     },
     Notice {
-        covers: "emoji-icon-font",
-        holder: "Copyright (c) 2014 John Slegers",
-        page: "https://github.com/jslegers/emoji-icon-font",
-        source: Some("egui's epaint_default_fonts 0.32.3"),
-        license: "MIT",
-        text: include_str!("../assets/fonts/egui/emoji-icon-font-mit-license.txt"),
-    },
-    Notice {
         covers: "Hack Regular",
         holder: "Copyright (c) 2018 Source Foundry Authors",
         page: "https://github.com/source-foundry/Hack",
@@ -127,18 +119,10 @@ const NOTICES: &[Notice] = &[
         text: include_str!("../assets/icons/LICENSE"),
     },
     Notice {
-        covers: "Noto Emoji Regular",
-        holder: "Copyright 2013 Google Inc.",
-        page: "https://github.com/googlefonts/noto-emoji",
-        source: Some("egui's epaint_default_fonts 0.32.3"),
-        license: "SIL Open Font License 1.1",
-        text: include_str!("../assets/fonts/egui/OFL.txt"),
-    },
-    Notice {
-        covers: "Ubuntu Regular, Bold and Light",
+        covers: "Ubuntu Regular and Bold",
         holder: "Copyright 2011 Canonical Ltd.",
         page: "https://design.ubuntu.com/font",
-        source: Some("Ubuntu font family 0.83; Light from egui's epaint_default_fonts 0.32.3"),
+        source: Some("Ubuntu font family 0.83"),
         license: "Ubuntu Font Licence 1.0",
         text: include_str!("../assets/fonts/LICENCE.txt"),
     },
@@ -685,10 +669,8 @@ mod tests {
     }
 
     fn headless() -> egui::Context {
-        let ctx = egui::Context::default();
+        let ctx = crate::testing::context();
         egui_extras::install_image_loaders(&ctx);
-        ctx.set_fonts(crate::app::fonts());
-        ctx.all_styles_mut(crate::app::metrics);
         ctx
     }
 
@@ -786,10 +768,6 @@ mod tests {
                     "Permission is hereby granted",
                     "BITSTREAM VERA LICENSE",
                 ],
-            ),
-            (
-                "SIL Open Font License 1.1",
-                &["SIL OPEN FONT LICENSE Version 1.1"],
             ),
             (
                 "Ubuntu Font Licence 1.0",
