@@ -732,7 +732,10 @@ pub fn apply(
             Act::DuplicateSlot { class, from, to } => {
                 device.send(DeviceCmd::Duplicate { class, from, to }, log)
             }
-            Act::DeleteSlot { class, at } => device.send(DeviceCmd::Delete { class, at }, log),
+            Act::DeleteSlot { class, at } => {
+                browser.forget_rename(Item::Slot { class, at });
+                device.send(DeviceCmd::Delete { class, at }, log)
+            }
             Act::Remove(id) => remove(browser, workspace, tabs, queue, log, id),
             Act::Export(id) => workspace.export(id),
             Act::SaveDoc(id) => save_doc(browser, workspace, device, queue, log, id, true),
@@ -3253,5 +3256,57 @@ mod tests {
         crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
             .unwrap()
             .1
+    }
+
+    /// Deleting a slot lets go of its row, and a sound linked to it stops claiming to be
+    /// on the keyboard once the bank is read again.
+    #[test]
+    fn a_deleted_slot_leaves_the_selection_and_its_sound_leaves_the_keyboard() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let crc = bench.workspace.get(id).unwrap().saved.crc32.unwrap();
+        bench
+            .device
+            .pretend_bodies(class, 7, &[Some(("New program", crc))]);
+        bench.device.relink(&mut bench.workspace);
+        let dot = |bench: &Bench| {
+            crate::library::keyboard_mark(
+                bench.workspace.get(id).unwrap(),
+                &bench.device.state,
+                &bench.queue,
+            )
+        };
+        assert_eq!(dot(&bench), Some(crate::library::Mark::Agrees));
+        let slot = Item::Slot { class, at: at(0) };
+        bench.browser.selection.only(slot);
+
+        bench.act(vec![Act::DeleteSlot { class, at: at(0) }]);
+        assert!(!bench.browser.selection.holds(slot), "still selected");
+
+        bench.device.pump();
+        bench.device.pretend(crate::device::DeviceEvent::Finished);
+        poll(&mut bench);
+        bench.device.pump();
+        bench.device.pretend(crate::device::DeviceEvent::BankScanned {
+            class,
+            bank: 7,
+            slots: vec![None],
+        });
+        poll(&mut bench);
+        assert_eq!(dot(&bench), None);
+    }
+
+    fn poll(bench: &mut Bench) {
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
     }
 }
