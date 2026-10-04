@@ -252,7 +252,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
 }
 
 /// The label of the button that applies the gain.
-pub const RESCALE: &str = "Rescale";
+pub const APPLY_GAIN: &str = "Apply gain";
 
 /// The gain control, the samples it would clip, and the button that applies it.
 ///
@@ -269,7 +269,7 @@ fn gain(ui: &mut egui::Ui, state: &mut State, sets: &mut Sets) {
     );
     state.gain = (state.gain * 10.0).round() / 10.0;
     let apply = ui
-        .add_enabled(state.gain != 0.0, egui::Button::new(RESCALE))
+        .add_enabled(state.gain != 0.0, egui::Button::new(APPLY_GAIN))
         .on_hover_text(
             "scales every sample by this gain; Revert goes back to the file as it was saved",
         );

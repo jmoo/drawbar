@@ -50,8 +50,8 @@ the build with the reason.
 
 A WAV in your library opens as a document of its own: the whole file's waveform,
 one lane per channel, with its rate, channels and length in the header.
-**Play** plays it. **Gain** with **Rescale** scales every sample by that many
-dB, and the line beside it first says how many samples would clip. A gain is an
+**Play** plays it. **Gain** with **Apply gain** scales every sample by that
+gain, and the line beside it first says how many samples would clip. A gain is an
 edit like any other: Save writes it into the file and Revert takes it back.
 **Encode** makes a one-zone instrument from the WAV. A WAV drawbar cannot read,
 such as a 24-bit one, says why and offers none of these.

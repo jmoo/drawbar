@@ -324,11 +324,12 @@ nothing but the files under working copies (`store/exec.rs`).
    entries left out (`exec::MOST_ENTRIES`). A folder past that, or one that
    cannot be read, is reported as not all listed.
 
-A file's kind is decided by its extension alone: `store::opens` matches it,
-ignoring case, against the formats `nord-format` names by extension
+A listed file's kind is decided by its extension alone: `store::opens` matches
+it, ignoring case, against the formats `nord-format` names by extension
 (`formats::by_extension`), drawbar's notes and WAVs (`browser::tagged`). Any
 other file is listed by name only, as one of the folder's `others`, and shown
-with **Show all files**.
+with **Show all files**. Once read, bytes that decode as no format but hold a
+RIFF/WAVE container are a WAV whatever the file is called.
 
 ### Lazy reads
 
