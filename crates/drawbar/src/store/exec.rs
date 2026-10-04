@@ -1656,9 +1656,9 @@ async fn read_others(fs: &impl Fs, paths: Vec<LibPath>) -> Contents {
 async fn read_other(fs: &impl Fs, path: &LibPath) -> Result<Vec<u8>, Failure> {
     let hidden = path.components().any(|part| part.starts_with('.'));
     if hidden || opens(path.leaf()) {
-        return Err(Failure::Io(format!(
-            "{path} is not a file the library lists by name only"
-        )));
+        return Err(Failure::Io(
+            "not a file the library lists by name only".to_string(),
+        ));
     }
     let io = |e: io::Error| match e.kind() {
         io::ErrorKind::NotFound => Failure::Moved,

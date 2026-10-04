@@ -355,7 +355,7 @@ fn land(
 
 fn refuse(log: &mut Log, project: &str, why: &str) {
     log.error(format!("building {project}: {why}"));
-    log.trouble(format!("“{project}” was not built: {why}."));
+    log.trouble(format!("“{project}” was not built."));
 }
 
 #[cfg(test)]

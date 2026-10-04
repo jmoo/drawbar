@@ -23,7 +23,7 @@ use nord_format::Entity;
 
 use super::capability::{Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
-use super::header::{self, Click, Loud, Tone};
+use super::header::{Click, Loud, Tone};
 use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
@@ -735,11 +735,14 @@ impl Located {
     }
 }
 
+/// What a project's loud action is called.
+pub const BUILD: &str = "Build → .nsmp";
+
 /// The header's loud action for a project: its build, ready once the library lists
 /// every WAV it plays.
 pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
     let build = Loud {
-        label: header::BUILD.to_string(),
+        label: BUILD.to_string(),
         short: "Build".to_string(),
         glyph: Glyph::Hammer,
         tone: Tone::Blocked,
@@ -853,7 +856,7 @@ mod tests {
         let held = loud_over(&["c3.wav", "../Shared/c4.wav"], &others, false);
         assert_eq!(
             (held.label.as_str(), held.tone, held.click),
-            (header::BUILD, Tone::Ready, Click::Build)
+            (BUILD, Tone::Ready, Click::Build)
         );
         assert_eq!(held.glyph, Glyph::Hammer);
         assert!(held.hint.contains("v2"), "{}", held.hint);
