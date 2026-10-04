@@ -970,7 +970,12 @@ impl eframe::App for DrawbarApp {
         drop_hint(ctx);
         // Opened by choosing WAVs under New. It is drawn before anything else this frame
         // because it is a modal over the whole window.
-        if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
+        if let Some(made) = crate::newproject::dialog(
+            ctx,
+            &mut self.workspace,
+            &mut self.browser.folders,
+            &mut self.log,
+        ) {
             self.tabs.open(made);
         }
         let asked = self.splash.show(ctx, crate::splash::Usb::of(&self.device));
