@@ -179,11 +179,8 @@ pub struct Container {
     /// places.
     pub checksum_label: &'static str,
     pub checksum: String,
-    /// The CRC-32 of the wire body, which the device reports for a slot, so a file and
-    /// the slot it came off compare without hashing either body again.
-    ///
-    /// Computed, not read: a type-1 container stores the same number at `0x18`, but a
-    /// type-0 container stores only a CRC-16 over the whole file.
+    /// The checksum a slot holding this body reports. See
+    /// [`nord_format::cbin::Info::body_crc32`].
     pub body_crc32: u32,
 }
 
@@ -191,27 +188,20 @@ impl Container {
     fn read(bytes: &[u8]) -> Option<Container> {
         let info = nord_format::cbin::inspect(&mut std::io::Cursor::new(bytes)).ok()?;
         let body = body_of(&info)?;
-        let body_crc32 = nord_usb::envelope::crc32(bytes.get(body.clone())?);
-        Some(Container::of(info, body, body_crc32))
+        Some(Container::of(info, body))
     }
 
     /// The facts of a file left on disk, from what a checksum pass over it found.
     fn of_file(file: &OnDisk, sums: ondisk::Sums) -> Result<Container, String> {
         let info = nord_format::cbin::Info {
             header: file.index.header().clone(),
-            body_len: sums.body.end - sums.body.start,
-            checksum_ok: sums.checksum_ok,
-            stored_checksum: sums.stored,
+            ..sums.info
         };
         let body = body_of(&info).ok_or("the body is larger than this machine can address")?;
-        Ok(Container::of(info, body, sums.body_crc32))
+        Ok(Container::of(info, body))
     }
 
-    fn of(
-        info: nord_format::cbin::Info,
-        body: std::ops::Range<usize>,
-        body_crc32: u32,
-    ) -> Container {
+    fn of(info: nord_format::cbin::Info, body: std::ops::Range<usize>) -> Container {
         let (checksum_label, checksum) = match info.header.generation {
             Generation::V0 => ("crc16:", format!("{:#06x}", info.stored_checksum)),
             Generation::V1 => ("crc32:", format!("{:#010x}", info.stored_checksum)),
@@ -222,7 +212,7 @@ impl Container {
             checksum_ok: info.checksum_ok,
             checksum_label,
             checksum,
-            body_crc32,
+            body_crc32: info.body_crc32,
         }
     }
 
@@ -3418,7 +3408,7 @@ mod tests {
             .expect("a fresh program is a CBIN file");
         assert_eq!(container.header.generation, Generation::V1);
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
-        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        let hashed = nord_format::crc::crc32(&body.body.0);
         assert_eq!(container.body_crc32, hashed);
         assert_eq!(
             container.body_crc32,
@@ -3441,7 +3431,7 @@ mod tests {
         assert_eq!(container.checksum_label, "crc16:");
 
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
-        let hashed = nord_usb::envelope::crc32(&body.body.0);
+        let hashed = nord_format::crc::crc32(&body.body.0);
         assert_eq!(container.body_crc32, hashed);
         assert_eq!(entity.saved.crc32, Some(hashed));
     }

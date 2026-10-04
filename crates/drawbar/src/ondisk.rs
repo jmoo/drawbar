@@ -169,7 +169,7 @@ impl OnDisk {
     /// file's own CRC-32 on the way.
     pub fn verify(self: &Arc<Self>, ctx: &egui::Context) -> Job<Result<Sums, String>> {
         let file = self.clone();
-        let summing = Summing::new(self.index.header(), self.len);
+        let summing = Summing::new(self.len);
         self.pass(
             ctx,
             summing,
@@ -273,63 +273,39 @@ impl nord_usb::FileSource for &OnDisk {
 /// How much a streaming pass reads at a time.
 const CHUNK: usize = 4 << 20;
 
-/// What a checksum pass found: the file's own CRC-32, and what the container says of its
-/// body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What a checksum pass found: the file's own CRC-32, and what the container says of
+/// itself.
+#[derive(Clone, Debug)]
 pub struct Sums {
     /// CRC-32 over every byte of the file.
     pub crc: u32,
-    /// Where the body sits in the file, a type-0 container's trailing checksum left out.
-    pub body: Range<u64>,
-    /// The checksum the container stores: the type-1 CRC-32, or the type-0 CRC-16 widened.
-    pub stored: u32,
-    /// Whether `stored` is the checksum of what it covers.
-    pub checksum_ok: bool,
-    /// CRC-32 over the body, which the instrument reports for a slot.
-    pub body_crc32: u32,
+    pub info: cbin::Info,
 }
 
 /// A checksum pass in flight, fed the file's bytes in order: [`cbin::Verifier`]'s
-/// verdict, with the CRC-32s of the whole file and of its body.
+/// verdict, with the CRC-32 of the whole file.
 struct Summing {
     len: u64,
     /// How many bytes have been fed.
     at: u64,
-    body: Range<u64>,
     file: Crc32Stream<'static>,
-    body_crc: Crc32Stream<'static>,
     verifier: Verifier,
 }
 
 impl Summing {
-    fn new(header: &Header, len: u64) -> Summing {
-        let generation = header.generation;
-        let start = generation.body_start().min(len);
-        // A checksum stored past the body's start trails it.
-        let end = usize::try_from(len)
-            .ok()
-            .and_then(|len| generation.checksum_range(len))
-            .map(|stored| stored.start as u64)
-            .filter(|&stored| stored >= start)
-            .unwrap_or(len);
+    fn new(len: u64) -> Summing {
         Summing {
             len,
             at: 0,
-            body: start..end,
             file: Crc32Stream::new(),
-            body_crc: Crc32Stream::new(),
             verifier: Verifier::new(),
         }
     }
 
     fn feed(&mut self, chunk: &[u8]) -> Result<(), String> {
-        let span = self.at..self.at + chunk.len() as u64;
-        let start = self.body.start.clamp(span.start, span.end) - span.start;
-        let end = self.body.end.clamp(span.start, span.end) - span.start;
         self.file.update(chunk);
-        self.body_crc.update(&chunk[start as usize..end as usize]);
         self.verifier.update(chunk).map_err(|e| e.to_string())?;
-        self.at = span.end;
+        self.at += chunk.len() as u64;
         Ok(())
     }
 
@@ -337,19 +313,9 @@ impl Summing {
         if self.at != self.len {
             return Err("the file changed while it was read".to_string());
         }
-        let info = self.verifier.finish().map_err(|e| e.to_string())?;
-        if self.body.end - self.body.start != info.body_len {
-            return Err(format!(
-                "the {}-byte body was taken as {:?}",
-                info.body_len, self.body
-            ));
-        }
         Ok(Sums {
             crc: self.file.value(),
-            body: self.body,
-            stored: info.stored_checksum,
-            checksum_ok: info.checksum_ok,
-            body_crc32: self.body_crc.value(),
+            info: self.verifier.finish().map_err(|e| e.to_string())?,
         })
     }
 }
@@ -639,32 +605,24 @@ mod tests {
         assert!(!file.holds(&other));
     }
 
-    /// The pass checks what `cbin::inspect` checks, of a type-1 file and a type-0 one,
-    /// whole and with a byte of the body changed.
+    /// The pass takes the CRC-32 of the whole file, of a type-1 file and a type-0 one,
+    /// and refuses a file that ends before the length it was listed at.
     #[test]
-    fn a_checksum_pass_agrees_with_inspect() {
+    fn a_checksum_pass_takes_the_whole_files_crc() {
         let sample = crate::testing::sample_bytes();
         let type_0 = crate::workspace::as_type_0(&sample);
         for (name, bytes) in [("type 1", sample), ("type 0", type_0)] {
-            let mut broken = bytes.clone();
-            let at = broken.len() - 3;
-            broken[at] ^= 0x40;
-            for bytes in [bytes, broken] {
-                let info = cbin::inspect(&mut Cursor::new(&bytes)).unwrap();
-                let mut summing = Summing::new(&info.header, bytes.len() as u64);
-                for chunk in bytes.chunks(7) {
-                    summing.feed(chunk).unwrap();
-                }
-                let sums = summing.finish().unwrap();
-                assert_eq!(sums.body.end - sums.body.start, info.body_len, "{name}");
-                assert_eq!(sums.checksum_ok, info.checksum_ok, "{name}");
-                assert_eq!(sums.stored, info.stored_checksum, "{name}");
-                assert_eq!(sums.crc, nord_format::crc::crc32(&bytes), "{name}");
-                let body = info.header.generation.body_start() as usize
-                    ..info.header.generation.body_start() as usize + info.body_len as usize;
-                let body = nord_format::crc::crc32(&bytes[body]);
-                assert_eq!(sums.body_crc32, body, "{name}");
+            let mut summing = Summing::new(bytes.len() as u64);
+            for chunk in bytes.chunks(7) {
+                summing.feed(chunk).unwrap();
             }
+            let sums = summing.finish().unwrap();
+            assert!(sums.info.checksum_ok, "{name}");
+            assert_eq!(sums.crc, nord_format::crc::crc32(&bytes), "{name}");
+
+            let mut cut = Summing::new(bytes.len() as u64 + 1);
+            cut.feed(&bytes).unwrap();
+            assert!(cut.finish().is_err(), "{name}");
         }
     }
 }
