@@ -582,6 +582,14 @@ pub enum Cmd {
         files: Vec<(u64, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
+    /// Read each of these files whole: files the library lists by name only, in
+    /// [`Listing::others`]. A path the listing would not list there, as a file drawbar
+    /// opens or one under a name starting with a dot, is refused unread. `id` ties the
+    /// answer to the request. Answered by [`Event::ReadOthers`].
+    ///
+    /// ⚠️ What it reads is not counted in [`MOST_BYTES`]: the asker holds the bytes, and
+    /// no asset does.
+    ReadOthers { id: u64, paths: Vec<LibPath> },
     /// Take the CRC of each of these files, for the asset whose id comes with it, where
     /// its [`Stat`] is still the one its fingerprint gives. Answered by
     /// [`Event::Fingerprinted`].
@@ -648,6 +656,10 @@ pub enum Cmd {
     SetAside,
 }
 
+/// Each path a [`Cmd::ReadOthers`] asked for, with its contents or why they were not
+/// read.
+pub type Contents = Vec<(LibPath, Result<Vec<u8>, Failure>)>;
+
 /// What a backend answers.
 #[derive(Debug)]
 pub enum Event {
@@ -671,6 +683,12 @@ pub enum Event {
     /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),
+    /// What a [`Cmd::ReadOthers`] read, each path with its bytes, in the order asked. A
+    /// file that is not there answers [`Failure::Moved`].
+    ReadOthers {
+        id: u64,
+        files: Contents,
+    },
     /// The files a [`Cmd::Fingerprint`] found as their fingerprints said, each with its
     /// asset's id and its fingerprint, now with its CRC. A file that moved, is gone or
     /// did not read is left out.
@@ -765,6 +783,11 @@ impl Event {
                 .filter_map(|(_, result)| result.as_ref().err())
                 .map(|failure| READ.of(failure))
                 .collect(),
+            Event::ReadOthers { files, .. } => files
+                .iter()
+                .filter_map(|(_, result)| result.as_ref().err())
+                .map(|failure| READ_OTHERS.of(failure))
+                .collect(),
             Event::Saved { result, .. } => SAVE.failed(result),
             Event::Imported { result, .. } => IMPORT.failed(result),
             Event::Rewritten { result, .. } => REWRITE.failed(result),
@@ -811,6 +834,11 @@ const READ: Codes = Codes {
     changed: "read-changed",
     room: "read-room",
     io: "read-io",
+};
+const READ_OTHERS: Codes = Codes {
+    changed: "read-others-changed",
+    room: "read-others-room",
+    io: "read-others-io",
 };
 const SAVE: Codes = Codes {
     changed: "save-changed",

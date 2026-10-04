@@ -6063,3 +6063,46 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     assert_eq!(moved.faults(), ["move"].into());
     assert!(Event::Fingerprinted(Vec::new()).faults().is_empty());
 }
+
+fn path(text: &str) -> LibPath {
+    LibPath::parse(text).unwrap()
+}
+
+#[test]
+fn a_file_listed_by_name_only_is_read_whole_when_asked() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Kit")).unwrap();
+    fs::write(root.at("Kit/c3.wav"), b"RIFF c3").unwrap();
+    fs::write(root.at("Kit/c4.wav"), b"RIFF c4").unwrap();
+    fs::write(root.at("Kit/.c5.wav"), b"RIFF c5").unwrap();
+    let mut session = Session::open(&root);
+    let organ = session.create();
+    session.bench.workspace.place(organ, path("Kit/Organ.ne5p"));
+    session.sync();
+    let listed = &session.bench.browser.folders.others;
+    assert_eq!(listed, &[path("Kit/c3.wav"), path("Kit/c4.wav")]);
+    fs::remove_file(root.at("Kit/c4.wav")).unwrap();
+
+    let asked = ["Kit/c3.wav", "Kit/c4.wav", "Kit/.c5.wav", "Kit/Organ.ne5p"];
+    session.store.read_others(7, asked.map(path).into());
+    let answered = loop {
+        assert!(session.next(), "the read answered");
+        let taken = session.store.take_others();
+        if !taken.is_empty() {
+            break taken;
+        }
+    };
+    let [(7, files)] = answered.as_slice() else {
+        panic!("one answer, to the request: {answered:?}");
+    };
+    let read: Vec<(&str, &Result<Vec<u8>, Failure>)> =
+        files.iter().map(|(at, read)| (at.as_str(), read)).collect();
+    assert_eq!(read[0], ("Kit/c3.wav", &Ok(b"RIFF c3".to_vec())));
+    assert_eq!(read[1], ("Kit/c4.wav", &Err(Failure::Moved)), "gone");
+    for (at, refused) in &read[2..] {
+        assert!(
+            matches!(refused, Err(Failure::Io(why)) if why.contains("by name only")),
+            "{at} is not listed by name only, and is not read: {refused:?}"
+        );
+    }
+}
