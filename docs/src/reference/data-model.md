@@ -550,6 +550,7 @@ asynchronously.
 | `Check` | `Checked`: the named files again, without listing the tree. |
 | `Walk(dir)` | `Walked`, once `dir` is listed whole ahead of the rest of an open. |
 | `Read` | `Read`: each file, held whole or resting, or why not. |
+| `ReadOthers` | `ReadOthers`: files listed by name only, read whole for whoever asked, outside the memory budget; any other path is refused. |
 | `Fingerprint` | `Fingerprinted`: the CRCs of files whose stat has not moved. |
 | `Save` | `Saved`: the new fingerprint, or why not. |
 | `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
