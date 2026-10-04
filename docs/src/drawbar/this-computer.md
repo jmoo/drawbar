@@ -110,7 +110,8 @@ bring back any you deleted.
 - **Failed verification.** The sample or piano file is damaged. drawbar will not
   send it.
 - **No storage in the browser.** Some private windows give drawbar none. drawbar
-  says so, and what you make lasts only until the tab closes.
+  says so, and what you make lasts only until the tab closes. drawbar also cannot
+  keep a copy of a sound it would replace, so it sends only to empty slots.
 
 How the library works underneath is in
 [Library data model](../reference/data-model.md).
