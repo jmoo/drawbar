@@ -1786,6 +1786,7 @@ mod tests {
                 format: "ne5s".into(),
                 version: 1,
                 crc32: None,
+                modified: None,
                 name: "Live Settings".into(),
             })],
         });

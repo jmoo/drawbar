@@ -1375,6 +1375,7 @@ impl Device {
                     format: "ne5p".into(),
                     version: 4,
                     crc32: None,
+                    modified: None,
                     name: (*name).to_string(),
                 })
             })
@@ -1414,6 +1415,7 @@ impl Device {
                     format: "ne5p".into(),
                     version: 4,
                     crc32: Some(crc),
+                    modified: None,
                     name: name.to_string(),
                 })
             })
@@ -1441,6 +1443,7 @@ impl Device {
                     format: "npno".into(),
                     version: 540,
                     crc32: None,
+                    modified: None,
                     name: name.to_string(),
                 })
             })
@@ -2543,6 +2546,7 @@ mod tests {
                 format: "ne5p".into(),
                 version: 4,
                 crc32: Some(crc),
+                modified: None,
                 name: "Africa Split".into(),
             })],
         });
@@ -2614,6 +2618,7 @@ mod tests {
                             format: "ne5p".into(),
                             version: 4,
                             crc32,
+                            modified: None,
                             name: "Africa Split".into(),
                         }),
                     ],

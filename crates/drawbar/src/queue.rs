@@ -1600,6 +1600,7 @@ mod tests {
             format: "ne5p".into(),
             version: 4,
             crc32: crc,
+            modified: None,
             name: name.to_string(),
         }
     }
@@ -2341,6 +2342,7 @@ mod tests {
                         format: "npno".into(),
                         version: 540,
                         crc32: None,
+                        modified: None,
                         name: "Grand".into(),
                     },
                     body_crc32: there,

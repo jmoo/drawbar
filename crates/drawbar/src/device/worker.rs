@@ -1245,6 +1245,7 @@ mod tests {
                 format: "ne5p".into(),
                 version: 4,
                 crc32: None,
+                modified: None,
                 name: name.into(),
             })
         };
@@ -1266,6 +1267,7 @@ mod tests {
                 format: "ne5p".into(),
                 version: 4,
                 crc32: None,
+                modified: None,
                 name: "Africa Split".into(),
             },
         )];
