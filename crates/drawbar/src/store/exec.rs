@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
     names, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened,
-    Outside, Source, Stat,
+    Outside, Source, Stale, Stat,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -249,7 +249,7 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 }
 
 /// Whether a command writes, and so first takes the library.
-fn writes(cmd: &Cmd) -> bool {
+pub fn writes(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
         Cmd::Open
@@ -312,8 +312,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             path,
             bytes,
             expect,
+            stale,
         } => {
-            let result = save(fs, &path, &bytes, expect).await;
+            let result = save(fs, &path, &bytes, expect, stale).await;
             Some(Event::Saved { id, path, result })
         }
         Cmd::Rewrite {
@@ -322,8 +323,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             from,
             edit,
             expect,
+            stale,
         } => {
-            let result = rewrite_over(fs, &path, &from, &edit, expect).await;
+            let result = rewrite_over(fs, &path, &from, &edit, expect, stale).await;
             Some(Event::Rewritten { id, path, result })
         }
         Cmd::Move { from, to } => {
@@ -353,6 +355,10 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             .await
             .err()
             .map(|e| Event::Failed(format!("removing the folder {path}: {e}"))),
+        Cmd::DropUnindexed => drop_unindexed(fs)
+            .await
+            .err()
+            .map(|e| Event::Failed(format!("deleting the unsaved edits: {e}"))),
     };
     if let Some(event) = answered {
         answer(event);
@@ -380,7 +386,14 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     let indexed = fs.names(DIR).await.is_ok();
     // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
     // its `.drawbar/` as that drawbar left it.
-    let (sidecar, mut writable) = index(fs).await;
+    let (sidecar, mut writable, unindexed) = match index(fs).await {
+        Ok(Some(sidecar)) => (sidecar, Ok(()), 0),
+        Ok(None) => match unindexed(fs).await {
+            Ok(copies) => (Sidecar::default(), refuse_unindexed(copies), copies),
+            Err(why) => (Sidecar::default(), Err(why), 0),
+        },
+        Err(why) => (Sidecar::default(), Err(why), 0),
+    };
     let named: BTreeMap<String, (u64, Keeps)> = sidecar
         .assets
         .iter()
@@ -466,6 +479,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         swept,
         stranded,
         rescued,
+        unindexed,
     })));
     let mut lister = Lister::default();
     lister.list(fs, rows, walk, answer).await;
@@ -561,12 +575,12 @@ async fn scan(
     Ok(listing)
 }
 
-/// The index, or an empty one and why nothing may be written where the index is one this
-/// build must not read or rewrite.
-async fn index(fs: &impl Fs) -> (Sidecar, Result<(), String>) {
+/// The index, `None` where there is none, or why nothing may be written where the index
+/// is one this build must not read or rewrite.
+async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
     let why = match fs.read(INDEX).await {
         Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
-            Read::Known(sidecar) => return (sidecar, Ok(())),
+            Read::Known(sidecar) => return Ok(Some(sidecar)),
             Read::Newer(version) => format!(
                 "a newer drawbar wrote this library's index (version {version}), so this one \
                  only reads the library"
@@ -576,10 +590,55 @@ async fn index(fs: &impl Fs) -> (Sidecar, Result<(), String>) {
                  it is"
             ),
         },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return (Sidecar::default(), Ok(())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => format!("the library's index could not be read: {e}"),
     };
-    (Sidecar::default(), Err(why))
+    Err(why)
+}
+
+/// The names of the working copies: none where the folder is not there. A folder that
+/// cannot be listed is an error, never none, since it may hold the only copy of an edit.
+async fn working_names(fs: &impl Fs) -> Result<Vec<String>, String> {
+    match fs.names(WORKING).await {
+        Ok(names) => Ok(names),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!(
+            "the library's index is missing and {WORKING} could not be read ({e}), so \
+             drawbar cannot tell whether unsaved edits remain and leaves the library as it is"
+        )),
+    }
+}
+
+/// How many working copies there are.
+async fn unindexed(fs: &impl Fs) -> Result<usize, String> {
+    working_names(fs).await.map(|names| names.len())
+}
+
+/// Why nothing may be written where there is no index but `copies` working copies
+/// remain. Copies are found only through the index, so a sweep would take every one for
+/// a leftover, and an index put back finds them only where they were.
+fn refuse_unindexed(copies: usize) -> Result<(), String> {
+    match copies {
+        0 => Ok(()),
+        _ => Err(format!(
+            "the library's index is missing, but the unsaved edits it named are still in \
+             {WORKING}, so drawbar leaves the library as it is. Put {INDEX} back, or choose \
+             Open without them to delete them"
+        )),
+    }
+}
+
+/// Delete every working copy, unless an index has appeared to name them since.
+async fn drop_unindexed(fs: &mut impl Fs) -> Result<(), String> {
+    if fs.stat(INDEX).await.map_err(|e| e.to_string())?.is_some() {
+        return Err("the library's index is back, so its unsaved edits stay".to_string());
+    }
+    for name in working_names(fs).await? {
+        fs.remove_file(&format!("{WORKING}/{name}"))
+            .await
+            .map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Make the sidecar where there is none yet, and hold the library's lock, or say why
@@ -1482,17 +1541,34 @@ async fn still(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> io::Result
     Ok(Some((stat.len, fs.crc(path.as_str()).await?) == (len, crc)))
 }
 
+/// Write a stale working copy over with the copy of the save about to be placed.
+async fn freshen(fs: &mut impl Fs, stale: Option<Stale>) -> Result<(), Failure> {
+    let Some(Stale { name, copy }) = stale else {
+        return Ok(());
+    };
+    put(
+        fs,
+        &format!("{WORKING}/{name}"),
+        Staged::Bytes(&copy),
+        Over::Anything,
+    )
+    .await
+    .map_err(|e| Failure::Io(format!("keeping the edit: {e}")))
+}
+
 async fn save(
     fs: &mut impl Fs,
     path: &LibPath,
     bytes: &[u8],
     expect: Option<Fingerprint>,
+    stale: Option<Stale>,
 ) -> Result<Fingerprint, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
     let over = match expect {
         None => Over::Nothing,
         Some(expect) => held(fs, path, &expect).await?,
     };
+    freshen(fs, stale).await?;
     put(fs, path.as_str(), Staged::Bytes(bytes), over)
         .await
         .map_err(refusal)?;
@@ -1512,8 +1588,10 @@ async fn rewrite_over(
     from: &OnDisk,
     edit: &Rewrite,
     expect: Fingerprint,
+    stale: Option<Stale>,
 ) -> Result<Found, Failure> {
     let over = held(fs, path, &expect).await?;
+    freshen(fs, stale).await?;
     let wrote = put(fs, path.as_str(), Staged::Edited(from, edit), over).await;
     wrote.map_err(|e| match rewrite::is_changed(&e) {
         true => Failure::Moved,
@@ -1933,7 +2011,13 @@ mod tests {
             ..Claimed::of([("Grand.ne5p".to_string(), 10)])
         };
         let expect = Fingerprint::unread(stat(10));
-        let saved = now(save(&mut fs, &path("Grand.ne5p"), b"new", Some(expect)));
+        let saved = now(save(
+            &mut fs,
+            &path("Grand.ne5p"),
+            b"new",
+            Some(expect),
+            None,
+        ));
         assert_eq!(saved, Err(Failure::Moved));
         assert_eq!(fs.files["Grand.ne5p"], 99, "what was written there stays");
     }
@@ -2271,6 +2355,7 @@ mod tests {
             path: path("a/new.ne5p"),
             bytes: vec![0; 3],
             expect: None,
+            stale: None,
         });
         let mut listed = Vec::new();
         let mut saved = false;

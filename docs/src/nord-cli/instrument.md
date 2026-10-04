@@ -50,11 +50,15 @@ skips the read.
 ## What a write does
 
 The instrument does not overwrite an occupied slot in place, so a `put` into one
-deletes the old sound first. `nord` reads the old sound before deleting it, and
-puts it back if the write fails. If that fails too, the old bytes are saved in the
-working directory as a file such as `nord-rescued-7-50.ne5p`, which `put` takes
-straight back. Live slots and settings are the exception: the instrument
-overwrites those in place.
+deletes the old sound first. `nord` first saves the old sound in the working
+directory as a file such as `nord-rescued-7-50.ne5p`, and puts it back if the
+write fails. The file is deleted once the slot holds what it should. If the
+write and the put-back both fail, or `nord` is stopped partway, the file stays,
+and `put` takes it straight back. Live slots and settings are the exception: the
+instrument overwrites those in place.
+
+`--rescue-dir <DIR>`, or `NORD_RESCUE_DIR`, saves the old sound in another
+folder. Without a folder it can write to, `nord` leaves the slot alone.
 
 `put` checks that the file is intact before it touches the instrument.
 

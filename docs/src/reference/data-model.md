@@ -119,12 +119,13 @@ read-only.
 
 ### Working copies, `tmp/` and `lock`
 
-- `working/<id>-<generation>` holds an unsaved edit. A working copy is never
-  rewritten: a new edit gets a new generation, and the old file is deleted once
-  the index stops naming it. One that `keeps: Bytes` holds the asset's bytes
-  whole. One that `keeps: Edit` holds an edit of a piano library or sample
-  instrument resting in its file, as RON text under a version of its own
-  (`rewrite::Edit::working`):
+- `working/<id>-<generation>` holds an unsaved edit. A new edit gets a new
+  generation, and the old file is deleted once the index stops naming it. A copy
+  is rewritten only by a save of a later edit, just before the save lands (see
+  [The order of a pass](#the-order-of-a-pass)). One that `keeps: Bytes` holds
+  the asset's bytes whole. One that `keeps: Edit` holds an edit of a piano
+  library or sample instrument resting in its file, as RON text under a version
+  of its own (`rewrite::Edit::working`):
 
   ```text
   (
@@ -479,23 +480,27 @@ and by `File.slice` through the snapshot in the browser. A file that fails to re
 partway through a send fails it as a refused write does, and the slot's occupant
 is put back.
 
-Nor is a slot's occupant held whole. Before a write replaces one, the worker
-reads it back so it can put it back if the write fails (`worker::put`). One of up
-to 1 MiB of body is read into memory. A larger one, a piano or most samples, is
-read through `op::read_into` into a file (`device::scratch`): in the library's
-`.drawbar/tmp/` on the desktop while the library may be written, made where
-missing, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
-otherwise, never the system's temporary folder, and in `.drawbar/tmp/` of the private
-storage in the browser, through a `library-writer.js` of the device's own. The
-restore sends that file through `write_from`, in a session of its own once the
-failed write's session has closed (`worker::put_back`): the instrument drops a write
-left unfinished when its session closes, but keeps it as an object in another slot
-when a second write follows it in the same session. The file is deleted once the slot
-holds what it should. Where the restore fails as well, it stays, and
-`DeviceEvent::Kept` names it in the log; a small occupant becomes a rescued asset
-instead. The file is named as its rescue, `nord-rescued-<bank>-<slot>.<tag>`,
-numbered where that name is taken, and the open's sweep of `tmp/` leaves those
-names, since one left by an interrupted write is the slot's only copy.
+Nor is an occupant held whole. Before a write replaces one, the worker reads it
+back through `op::read_into` into a file, a transfer chunk at a time, so it can put
+it back through `write_from` if the write fails (`worker::put`). It closes the
+file, and syncs its folder, before the delete, so a process that dies with the
+slot empty leaves the occupant on disk. A power cut is covered only where the
+folder sync is: on macOS and Linux, not on Windows, and not in the browser, which
+offers no sync at all. The file (`device::scratch`) is in the
+library's `.drawbar/tmp/` on the desktop while the library may be written, made
+where missing, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
+otherwise, never the system's temporary folder, and in `.drawbar/tmp/` of the
+private storage in the browser, through a `library-writer.js` of the device's own.
+The restore runs in a session of its own once the failed write's session has
+closed (`worker::put_back`): the instrument drops a write left unfinished when its
+session closes, but keeps it as an object in another slot when a second write
+follows it in the same session. The file is deleted once the slot holds what it
+should. Where the restore fails as well, or a delete may have landed, it stays,
+`DeviceEvent::Kept` names it in the log, and the next open offers it. It is the
+only copy drawbar keeps. The file is named as its rescue,
+`nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken, and the
+open's sweep of `tmp/` leaves those names, since one left by an interrupted write
+is the slot's only copy.
 
 Once an open's listing is complete, in a library that may be written, each file
 named that way in its `tmp/` and, on the desktop, in the `rescued` folder is
@@ -609,8 +614,9 @@ contents or the new, never part of either.
 ### On the desktop
 
 `replace` writes the temporary file, syncs it to the disk, renames it over the
-target, and then syncs the target's folder, so the rename survives a power cut
-as well as a crash. `create` does the same with a hard link in place of the
+target, and then syncs the target's folder, so on macOS and Linux the rename
+survives a power cut as well as a crash. Windows cannot open a folder to sync it,
+so there a rename survives a crash but may not survive a power cut. `create` does the same with a hard link in place of the
 rename, because a link refuses a name already taken; on a volume without links
 it falls back to a check and a rename. A rename is refused where another entry
 is at the target, except a rename that only changes case, which finds the entry
@@ -635,9 +641,12 @@ order:
 
 So a working copy exists before an index names it, and is deleted only after
 the index stops naming it. An unsaved edit's working copy is dropped only once
-its save has answered. A crash after a save lands and before the next index
-leaves a working copy equal to the file, and the next open sees that and does
-not count the asset as unsaved.
+its save has answered. A save whose working copy holds an older edit carries it
+(`store::Stale`) and writes the copy of what it saves over that copy before the
+file, so a crash after a save lands and before the next index leaves a working
+copy of what the file holds. The next open sees that and does not count the asset
+as unsaved. A copy newer than the save is left alone, and after a crash it comes
+back over the file as a change made outside drawbar would.
 
 A save over a file sends the file's fingerprint and lands only where the file
 still holds it: its stat is the one taken, or else its CRC is. A file that moved
@@ -660,8 +669,15 @@ holds nothing to sweep, and its lock is taken at the first write.
 
 On the desktop the lock is an exclusive `File::try_lock` on `.drawbar/lock`,
 held for as long as the backend lives. A library opens read-only when its index
-is newer or does not read, when a working copy the index names does not read, or
-when another drawbar holds the lock. A write can also find the library closed
+is newer or does not read, when a working copy the index names does not read,
+when the index is missing but `working/` is not, or when another drawbar holds
+the lock. Working copies are found only through the index, so a sweep without it
+would delete every one, and an index put back finds them only where they were.
+Once listed, such a library asks (`Browser::ask_unindexed`): **Keep read-only**,
+or **Open without them**, which, confirmed with the number of edits it loses,
+sends `Cmd::DropUnindexed` and opens the library again. The command deletes the
+copies only while there is still no index. In the browser's private storage
+that answer is the only way to them short of clearing the site's data. A write can also find the library closed
 to it later: another drawbar took the lock first, or `.drawbar/` could not be
 made. Then the library turns read-only, every save in flight counts as unsaved
 again, and edits stay in memory. An open that fails outright keeps nothing.
@@ -680,6 +696,7 @@ request at a time, each answered once:
 | `write` | Write a transferred `ArrayBuffer` at an offset. |
 | `end` | Flush the file and let it go. |
 | `abandon` | Let a file go, if it is held, and delete it. |
+| `unlock` | Let go of the lock and every file held, as the library is let go, so the next library's lock, which may be this library's again, never finds them still held. |
 
 ```mermaid
 sequenceDiagram
@@ -713,6 +730,16 @@ interrupted move leaves its files split between the two names, none lost. A
 rename that changes only case moves through a free name beside the folder,
 `<name>.<n>.drawbar-move`, since on a disk that ignores case the new name reaches
 the folder itself, and a folder is never removed where it is the one moved into.
+
+A closing tab gets no last pass: the browser runs nothing of the page once it has
+gone, and waits for none of its asynchronous writes. eframe saves when the page
+loses focus or is hidden, which sends a pass, but nothing waits for it to land.
+So while `Store::losing` says that letting the library go would lose an edit (one
+no working copy holds yet, an asset never written, or a command the backend has
+not run through), a `beforeunload` listener cancels the event (`closing.rs`), and
+the browser asks whether to leave. The page keeps running while it asks, so
+staying lets the writes land. A browser asks only after the user has interacted
+with the page, and may close without asking when it discards a tab or quits.
 A folder such a rename left under that name when the tab closed is put back at
 the next open, under the spelling the index's rows use, before the listing
 looks for them; where another folder has the name it stays, and the log says
@@ -831,7 +858,10 @@ Sample Library stores none, so its box renames the file.
 Where a name is taken, `Folders::clash` says by what: an asset, a folder, a lost
 row, or a file drawbar does not hold. The user chooses **Overwrite**, offered
 only where the occupant is an asset with nothing unsaved, which writes the new
-contents into its file and keeps its tags; **Keep both**, under the free name;
+contents into its file and keeps its tags. The asset renamed or moved onto the
+name goes once that save lands, as a removal by hand does (`Store::take_left`),
+and stays where it does not, or where it was edited meanwhile
+(`Workspace::save_over`); **Keep both**, under the free name;
 or **Cancel**. A folder already holding two entries under one key refuses the
 name outright. Such duplicates, found on a disk that tells case apart, are
 flagged and logged and never renamed, since either name may be the one other

@@ -1,7 +1,7 @@
-//! Where the occupant of a slot waits while a write replaces it, when it is too large to
-//! hold: a file under the library's `.drawbar/tmp/` on the desktop, or a `rescued` folder
-//! of drawbar's own data where the library cannot take one, and `.drawbar/tmp/` of the
-//! browser's private storage in the browser.
+//! Where the occupant of a slot waits while a write replaces it: a file under the
+//! library's `.drawbar/tmp/` on the desktop, or a `rescued` folder of drawbar's own data
+//! where the library cannot take one, and `.drawbar/tmp/` of the browser's private
+//! storage in the browser.
 //!
 //! A file is named as the rescue it becomes if the write and its restore both fail
 //! ([`nord_usb::envelope::rescue_name_for`]). The library's sweep of `tmp/` leaves those

@@ -59,7 +59,9 @@ Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
 writes the file, and queues it for sending if the sound came from a slot on the
 connected instrument. **Revert** goes back to the last save.
 It is the only undo. Unsaved edits are kept when you quit. drawbar also keeps
-them every few seconds, so after a crash you may lose the last few seconds.
+them every few seconds, so after a crash you may lose the last few seconds. In
+the browser, closing the tab before drawbar has kept your latest edit makes the
+browser ask whether to leave. Stay a moment, and the edit is kept.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.
@@ -110,12 +112,15 @@ bring back any you deleted.
 - **Read-only.** Another copy of drawbar has this library open, in another window
   or browser tab. Close it. Hover the library's name for the reason. A browser
   tab cannot tell that the desktop app has a folder open, so open a folder in
-  only one of them at a time.
+  only one of them at a time. drawbar also opens a library read-only when its
+  hidden folder has lost the file that lists your unsaved edits, so they are not
+  deleted. On the desktop, put that file back from a backup to get them back.
+  **Open without them** deletes those edits and opens the library as usual.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
-- **A write to the instrument left a file.** If drawbar stopped while it
-  replaced a large sound on your keyboard, the sound that was there may now be
-  only on this computer. drawbar offers it when the library opens: **Keep in
+- **A write to the instrument left a file.** If drawbar stopped, or could not
+  put the old sound back, while it replaced a sound on your keyboard, the sound
+  that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
   library** adds it to your sounds so you can send it back, **Show the file**
   shows where it is, and **Discard** deletes it.
 - **Not read** or **not all listed.** drawbar could not read that file or
@@ -123,7 +128,8 @@ bring back any you deleted.
 - **Failed verification.** The sample or piano file is damaged. drawbar will not
   send it.
 - **No storage in the browser.** Some private windows give drawbar none. drawbar
-  says so, and what you make lasts only until the tab closes.
+  says so, and what you make lasts only until the tab closes. drawbar also cannot
+  keep a copy of a sound it would replace, so it sends only to empty slots.
 
 How the library works underneath is in
 [Library data model](../reference/data-model.md).

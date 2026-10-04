@@ -61,6 +61,12 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     record: Option<PathBuf>,
 
+    /// Where a write into an occupied slot keeps the slot's occupant until the new
+    /// object has landed, and leaves it if the write fails. Defaults to the folder
+    /// `NORD_RESCUE_DIR` names, else the working directory.
+    #[arg(long, global = true, value_name = "DIR")]
+    rescue_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -706,6 +712,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let ui = Ui::new(cli.color);
     device::set_recording(cli.record);
+    device::set_rescue_dir(cli.rescue_dir);
 
     let result = match cli.command {
         Command::Inspect { files, raw } => inspect(&ui, &files, raw),
@@ -943,6 +950,21 @@ mod tests {
             let missing: Vec<_> = slot.iter().filter(|verb| !has.contains(verb)).collect();
             assert!(missing.is_empty(), "nord {noun} lacks {missing:?}");
         }
+    }
+
+    #[test]
+    fn a_rescue_folder_is_taken_after_any_verb() {
+        let cli = Cli::try_parse_from([
+            "nord",
+            "program",
+            "put",
+            "x.ne5p",
+            "7:4",
+            "--rescue-dir",
+            "/somewhere",
+        ])
+        .unwrap();
+        assert_eq!(cli.rescue_dir, Some(PathBuf::from("/somewhere")));
     }
 
     #[test]

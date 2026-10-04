@@ -35,7 +35,7 @@ mod sidecar;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{default_root, Backend};
+pub use native::{default_root, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -87,7 +87,7 @@ pub fn outside_len(from: &Outside) -> Option<u64> {
 pub use cache::keep_libraries;
 pub use cache::Cache;
 pub(crate) use exec::TMP;
-pub use exec::{opens, MOST_BYTES, MOST_ENTRIES};
+pub use exec::{opens, INDEX, MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Keeps, Row, Sidecar, Stored, Working};
 
@@ -394,6 +394,9 @@ pub struct Opened {
     /// The slots' former occupants in `.drawbar/tmp/`, by name, where the library may be
     /// written: see [`Rescue`].
     pub rescued: Vec<(String, Stat)>,
+    /// How many working copies `.drawbar/working/` holds where there is no index, which
+    /// leaves the library read-only.
+    pub unindexed: usize,
 }
 
 /// A slot's former occupant that a write to the instrument left on this computer when
@@ -508,6 +511,15 @@ pub enum Source {
     Edited(Arc<OnDisk>, Arc<Rewrite>),
 }
 
+/// A working copy the index names that holds an edit older than the save it goes with,
+/// and the copy of what that save writes. A save writes `copy` over it before the file,
+/// so a save that landed never leaves the index naming an older edit.
+#[derive(Debug)]
+pub struct Stale {
+    pub name: String,
+    pub copy: Vec<u8>,
+}
+
 /// What the app asks a backend to do. Each runs after the one sent before it.
 ///
 /// Every command that writes first makes `.drawbar/` where there is none and takes the
@@ -567,6 +579,7 @@ pub enum Cmd {
         path: LibPath,
         bytes: Vec<u8>,
         expect: Option<Fingerprint>,
+        stale: Option<Stale>,
     },
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].
@@ -580,6 +593,7 @@ pub enum Cmd {
         from: Arc<OnDisk>,
         edit: Arc<Rewrite>,
         expect: Fingerprint,
+        stale: Option<Stale>,
     },
     /// Copy a file to `path`, as [`Cmd::Save`] writes one: a new file when `expect` is
     /// `None`, otherwise over a file that must still hold what `expect` says. Nothing is
@@ -597,6 +611,9 @@ pub enum Cmd {
     RemoveFile { path: LibPath, expect: Fingerprint },
     /// Delete an empty folder. Answered only on failure.
     RemoveDir(LibPath),
+    /// Delete every working copy, where there is still no index to name any. Answered
+    /// only on failure.
+    DropUnindexed,
 }
 
 /// What a backend answers.

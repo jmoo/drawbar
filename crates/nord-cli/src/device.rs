@@ -350,6 +350,29 @@ pub fn set_recording(path: Option<PathBuf>) {
     let _ = RECORDING.set(path);
 }
 
+/// Where `--rescue-dir` points, for the writes this process makes.
+static RESCUE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Set once, from the parsed global flag, before any command runs.
+pub fn set_rescue_dir(dir: Option<PathBuf>) {
+    let _ = RESCUE_DIR.set(dir);
+}
+
+/// Where a write keeps the occupant it replaces: `--rescue-dir`, else the folder
+/// `NORD_RESCUE_DIR` names, else the working directory. Never the system's temporary
+/// folder, which may be emptied under a slot's only copy.
+fn rescue_dir() -> PathBuf {
+    rescue_dir_of(
+        RESCUE_DIR.get().cloned().flatten(),
+        std::env::var_os("NORD_RESCUE_DIR"),
+    )
+}
+
+fn rescue_dir_of(flag: Option<PathBuf>, env: Option<std::ffi::OsString>) -> PathBuf {
+    flag.or_else(|| env.filter(|dir| !dir.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
 /// What a transaction needs from its transport beyond moving frames: the `--record`
 /// bracket, and the product string the acceptance table reads.
 ///
@@ -834,9 +857,10 @@ fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u3
 /// ⚠️ On most classes an occupied destination is replaced, not overwritten. The
 /// instrument answers status 4 to a write aimed at an occupied slot, so this reads the
 /// occupant, deletes it, writes, and puts the occupant back if the write fails. The slot
-/// is empty in between, and the only copy of its contents is in this process, or for an
-/// occupant larger than [`HELD_OCCUPANT`], in the file it was read into. The classes that [overwrite in place](ObjectClass::overwrites_in_place) skip the delete
-/// and keep the same backup-and-restore guard.
+/// is empty in between, and the only copy of its contents is the synced file it was read
+/// into, which is deleted once the write lands. The classes that [overwrite in
+/// place](ObjectClass::overwrites_in_place) skip the delete and keep the same
+/// backup-and-restore guard.
 #[allow(clippy::too_many_arguments)]
 pub fn send(
     ui: &Ui,
@@ -853,7 +877,7 @@ pub fn send(
     send_with(
         ui,
         &mut open_usb()?,
-        &std::env::current_dir().unwrap_or_default(),
+        &rescue_dir(),
         file,
         at,
         class,
@@ -998,16 +1022,13 @@ fn send_with<T: Transport + Recorded>(
         ) {
             // ⚠️ A status means the instrument declined before the DELETE landed, so the
             // occupant is still there. Any other failure (a close that did not answer, a
-            // read that timed out) may have come after the delete, and this process then
-            // holds the only copy of the slot's contents.
+            // read that timed out) may have come after the delete, and the backup file is
+            // then the only copy of the slot's contents.
             if let nord_usb::Error::DeviceStatus(_) = e {
                 discard(ui, Some(backup));
                 return Err(format!("deleting {}: {}", shown(at), explain(e, at)));
             }
             return Err(spill(
-                ui,
-                spill_into,
-                at,
                 backup,
                 format!("{} may have been deleted: {}", shown(at), explain(e, at)),
             ));
@@ -1056,21 +1077,10 @@ fn send_with<T: Transport + Recorded>(
                 .unwrap_or_else(|| write_name.clone());
             let restore = transact(
                 device,
-                put_intent(class, &backup.file_name(at), at, &restore_name, timestamp),
-                |d| match &backup {
-                    Backup::Held(bytes) => {
-                        nord_usb::block_on(d.write(class, at, bytes, &restore_name, timestamp))
-                    }
-                    Backup::Kept(path) => {
-                        let mut kept = std::fs::File::open(path).and_then(Positional::new)?;
-                        nord_usb::block_on(d.write_from(
-                            class,
-                            at,
-                            &mut kept,
-                            &restore_name,
-                            timestamp,
-                        ))
-                    }
+                put_intent(class, &backup.file_name(), at, &restore_name, timestamp),
+                |d| {
+                    let mut kept = std::fs::File::open(&backup.0).and_then(Positional::new)?;
+                    nord_usb::block_on(d.write_from(class, at, &mut kept, &restore_name, timestamp))
                 },
             );
             match restore {
@@ -1086,9 +1096,6 @@ fn send_with<T: Transport + Recorded>(
                 Err(restore) => {
                     ui.warn("restoring failed too");
                     Err(spill(
-                        ui,
-                        spill_into,
-                        at,
                         &backup,
                         format!(
                             "{} (restoring failed as well: {}) {}",
@@ -1114,33 +1121,22 @@ fn head_tag(file: &mut impl FileSource) -> std::io::Result<Option<String>> {
     }
 }
 
-/// Occupants whose body is at most this many bytes, such as programs, set lists and the
-/// smaller samples, are held in memory while a write replaces them. A larger one, a piano
-/// or most samples, is read into a file in the rescue directory instead.
-const HELD_OCCUPANT: u32 = 1 << 20;
-
-/// What a replace keeps of a slot's occupant until the new object has landed.
-enum Backup {
-    Held(Vec<u8>),
-    /// A file named as its rescue would be, deleted once it is not needed.
-    Kept(PathBuf),
-}
+/// What a replace keeps of a slot's occupant until the new object has landed: a synced
+/// file named as its rescue would be, deleted once it is not needed.
+struct Backup(PathBuf);
 
 impl Backup {
     /// The name the restore's recording gives the file it writes.
-    fn file_name(&self, at: Location) -> String {
-        match self {
-            Backup::Held(bytes) => envelope::rescue_name(at, bytes),
-            Backup::Kept(path) => path
-                .file_name()
-                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
-        }
+    fn file_name(&self) -> String {
+        self.0
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
     }
 }
 
-/// Read the occupant of `info.location` so it can be put back: into memory when it is
-/// small, and otherwise into a new file in `dir`, a transfer chunk at a time. A read that
-/// fails leaves no file behind.
+/// Read the occupant of `info.location` so it can be put back, into a new file in `dir`
+/// a transfer chunk at a time, synced with its entry in `dir` before this returns. A read
+/// that fails leaves no file behind.
 fn back_up<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
@@ -1150,14 +1146,14 @@ fn back_up<T: Transport + Recorded>(
 ) -> Result<Backup, String> {
     let at = info.location;
     let intent = format!("{} read {}", noun(class), addr(at));
-    if info.body_len <= HELD_OCCUPANT {
-        return transact(device, intent, |d| {
-            nord_usb::block_on(d.read(class, async |s| usb_op::read_program(s, at).await))
-        })
-        .map(Backup::Held)
-        .map_err(|e| explain(e, at));
+    if !dir.exists() {
+        return Err(format!(
+            "the rescue folder {} does not exist",
+            dir.display()
+        ));
     }
-    let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))?;
+    let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))
+        .map_err(|e| format!("{e}; run from a folder you can write to, or pass --rescue-dir"))?;
     ui.note(format!(
         "reading {} into {} to put back if the write fails",
         shown(at),
@@ -1166,16 +1162,27 @@ fn back_up<T: Transport + Recorded>(
     let read = transact(device, intent, |d| {
         nord_usb::block_on(d.read(class, async |s| {
             usb_op::read_into(s, at, &mut file).await?;
-            Ok(file.sync_all()?)
+            file.sync_all()?;
+            Ok(sync_dir(dir)?)
         }))
     });
     match read {
-        Ok(()) => Ok(Backup::Kept(path)),
+        Ok(()) => Ok(Backup(path)),
         Err(e) => {
             let _ = std::fs::remove_file(&path);
             Err(explain(e, at))
         }
     }
+}
+
+/// Make a new entry in `dir` survive a power cut, not only a crash. Does nothing off
+/// Unix, where a folder cannot be opened to sync.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// A new file in `dir` named `name`, or `name` with a number before its extension where a
@@ -1207,7 +1214,7 @@ fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, std::fs::File), String> {
 /// Let a backup go once the slot holds what it should. A file that cannot be deleted is
 /// reported, and left.
 fn discard(ui: &Ui, backup: Option<&Backup>) {
-    if let Some(Backup::Kept(path)) = backup {
+    if let Some(Backup(path)) = backup {
         if let Err(e) = std::fs::remove_file(path) {
             ui.warn(format!("{} is no longer needed: {e}", path.display()));
         }
@@ -1229,31 +1236,16 @@ fn fail_after_delete() -> bool {
     false
 }
 
-/// Last resort: the slot's former contents exist only in this process, or in the file it
-/// read them into. Make sure they are on disk before exiting, and say where they are.
+/// Last resort: the slot's former contents exist only in the file they were read into,
+/// which is left where it is. Say where.
 ///
 /// Both paths that can leave a slot without its contents reach this (a delete that may
 /// have landed before its transaction failed, and a write whose restore also failed), so
 /// the next step is worded once.
-fn spill(ui: &Ui, dir: &Path, at: Location, backup: &Backup, lost: String) -> String {
-    let path = match backup {
-        Backup::Held(bytes) => {
-            let path = dir.join(envelope::rescue_name(at, bytes));
-            if let Err(io) = crate::edit::replace_file(&path, bytes) {
-                return format!(
-                    "{lost}, and its former contents could not be saved either ({io}); {} \
-                     bytes are lost",
-                    bytes.len(),
-                );
-            }
-            ui.warn(format!("wrote the original to {}", path.display()));
-            path
-        }
-        Backup::Kept(path) => path.clone(),
-    };
+fn spill(backup: &Backup, lost: String) -> String {
     format!(
         "{lost}; its former contents were saved to {}; send them back with `put`",
-        path.display(),
+        backup.0.display(),
     )
 }
 
@@ -2460,6 +2452,203 @@ mod tests {
             assert!(err.contains("may have been deleted"), "{err}");
             assert!(err.contains("were saved to"), "{err}");
             assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
+        }
+
+        /// The replay, recording what `dir` holds the first time `watch` is sent, or
+        /// removing `dir` then where it `pulls`.
+        struct Watched {
+            replay: ReplayTransport,
+            watch: Vec<u8>,
+            dir: PathBuf,
+            pulls: bool,
+            seen: Option<Vec<(String, Vec<u8>)>>,
+        }
+
+        impl Transport for Watched {
+            async fn write(&mut self, buf: &[u8]) -> nord_usb::Result<()> {
+                if self.pulls && buf == self.watch {
+                    self.pulls = false;
+                    std::fs::remove_dir_all(&self.dir).unwrap();
+                } else if self.seen.is_none() && buf == self.watch {
+                    let mut seen: Vec<_> = rescued(&self.dir)
+                        .into_iter()
+                        .map(|name| {
+                            let bytes = std::fs::read(self.dir.join(&name)).unwrap();
+                            (name, bytes)
+                        })
+                        .collect();
+                    seen.sort();
+                    self.seen = Some(seen);
+                }
+                self.replay.write(buf).await
+            }
+
+            async fn read(&mut self, max: usize) -> nord_usb::Result<Vec<u8>> {
+                self.replay.read(max).await
+            }
+        }
+
+        impl Recorded for Watched {
+            fn mark_intent(&mut self, _intent: &str) {}
+
+            fn mark_expect(&mut self, _e: &nord_usb::Error) {}
+
+            fn finish_recording(&mut self) -> nord_usb::Result<()> {
+                Ok(())
+            }
+
+            fn product(&self) -> Option<&str> {
+                None
+            }
+        }
+
+        /// ⚠️ From the `DELETE` until the write lands, the slot is empty. A process that
+        /// dies there runs no restore and no spill, so the occupant must already be a
+        /// whole file on disk when the `DELETE` is sent, and gone once the write lands.
+        #[test]
+        fn the_occupant_is_on_disk_before_the_delete_is_sent() {
+            let dir = crate::edit::tests::scratch("send-on-disk");
+            let put = recorded();
+            let delete = put[4][5].frame().expect("the DELETE").to_vec();
+            let mut device = Device::new(Watched {
+                replay: ReplayTransport::new(put.concat()),
+                watch: delete,
+                dir: dir.clone(),
+                pulls: false,
+                seen: None,
+            });
+            send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap();
+
+            let seen = device
+                .transport()
+                .seen
+                .clone()
+                .expect("the DELETE was sent");
+            let names: Vec<_> = seen.iter().map(|(name, _)| name.as_str()).collect();
+            assert_eq!(names, ["nord-rescued-7-10.ne5p"]);
+            let (_, kept) = &seen[0];
+            assert!(nord_usb::envelope::unwrap(kept).is_ok(), "a whole file");
+            assert_eq!(rescued(&dir), Vec::<String>::new(), "let go once written");
+        }
+
+        /// ⚠️ The backup's entry in its folder must reach the disk before the `DELETE`, or
+        /// a power cut loses the file with it. A folder that cannot be synced leaves the
+        /// slot alone.
+        #[cfg(unix)]
+        #[test]
+        fn a_backup_whose_folder_cannot_be_synced_stops_the_put_before_the_delete() {
+            let dir = crate::edit::tests::scratch("send-unsynced");
+            let put = recorded();
+            let begin_read = put[2][7].frame().expect("the BEGIN_READ").to_vec();
+            let delete = put[4][5].frame().expect("the DELETE").to_vec();
+            let mut device = Device::new(Watched {
+                replay: ReplayTransport::new(put.concat()),
+                watch: begin_read,
+                dir: dir.clone(),
+                pulls: true,
+                seen: None,
+            });
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+
+            assert!(err.contains("left alone"), "{err}");
+            let sent = device.transport().replay.sent();
+            assert!(!sent.contains(&delete), "the DELETE was never sent");
+        }
+
+        /// A put that has nowhere to keep the occupant touches nothing, and says how to give
+        /// it somewhere.
+        #[cfg(unix)]
+        #[test]
+        fn a_put_with_nowhere_to_keep_the_occupant_names_the_remedy() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = crate::edit::tests::scratch("send-unwritable");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            if std::fs::write(dir.join("probe"), b"").is_ok() {
+                // Permissions do not bind this user.
+                return;
+            }
+            let put = recorded();
+            let delete = put[4][5].frame().expect("the DELETE").to_vec();
+            let mut device = Device::new(ReplayTransport::new(put.concat()));
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert!(err.contains("left alone"), "{err}");
+            assert!(err.contains("pass --rescue-dir"), "{err}");
+            assert!(!device.transport().sent().contains(&delete));
+        }
+
+        /// A rescue folder that is not there is named as such, so a mistyped
+        /// `--rescue-dir` is not taken for a folder that cannot be written.
+        #[test]
+        fn a_rescue_folder_that_does_not_exist_is_named() {
+            let dir = crate::edit::tests::scratch("send-no-folder").join("missing");
+            let mut device = Device::new(ReplayTransport::new(recorded().concat()));
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+            assert!(err.contains("does not exist"), "{err}");
+            assert!(err.contains("left alone"), "{err}");
+        }
+
+        /// `--rescue-dir` wins over `NORD_RESCUE_DIR`, which wins over the working
+        /// directory; an empty one names nothing.
+        #[test]
+        fn the_rescue_folder_is_the_flag_then_the_environment_then_the_working_directory() {
+            let flag = Some(PathBuf::from("/flag"));
+            let env = Some(std::ffi::OsString::from("/env"));
+            assert_eq!(rescue_dir_of(flag, env.clone()), PathBuf::from("/flag"));
+            assert_eq!(rescue_dir_of(None, env), PathBuf::from("/env"));
+            let cwd = std::env::current_dir().unwrap();
+            assert_eq!(rescue_dir_of(None, Some("".into())), cwd);
+            assert_eq!(rescue_dir_of(None, None), cwd);
         }
 
         /// A status from the delete step is the instrument declining before the `DELETE`

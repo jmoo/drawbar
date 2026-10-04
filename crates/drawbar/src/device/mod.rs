@@ -245,6 +245,13 @@ fn words(verbs: (&str, &str, &str), what: String) -> Words {
     }
 }
 
+/// The library whose open offers a slot's former occupant kept in a file. In the
+/// browser that file is in drawbar's own storage, whatever folder is open.
+#[cfg(not(target_arch = "wasm32"))]
+const OFFERED: &str = "the library";
+#[cfg(target_arch = "wasm32")]
+const OFFERED: &str = "drawbar's own library in this browser";
+
 const READING: (&str, &str, &str) = ("Reading", "Read", "read");
 const COPYING: (&str, &str, &str) = ("Copying", "Copied", "copy");
 
@@ -497,15 +504,8 @@ pub enum DeviceEvent {
         /// instrument takes.
         sent: Payload,
     },
-    /// A slot's former contents, left with nowhere else to go by a failed write and a
-    /// failed restore, or by a delete that may have landed.
-    Rescued {
-        at: Location,
-        name: String,
-        bytes: Vec<u8>,
-    },
-    /// A slot's former contents, too large to hold, which a failed write and a failed
-    /// restore left in the file they were read into.
+    /// A slot's former contents, which a failed write and a failed restore, or a delete
+    /// that may have landed, left in the file they were read into.
     Kept {
         at: Location,
         /// Where the file is, in words a person can follow to it.
@@ -1819,11 +1819,12 @@ impl Device {
                 },
                 DeviceEvent::Kept { at, place } => {
                     log.error(format!(
-                        "{} could not be restored; its bytes are kept at {place}",
+                        "{} may have lost what it held; its bytes are kept at {place}",
                         shown(at)
                     ));
                     log.trouble(format!(
-                        "{} is empty. What was in it is kept at {place}.",
+                        "{} may be empty. What was in it is kept at {place}, and drawbar \
+                         offers it the next time {OFFERED} opens.",
                         shown(at)
                     ));
                 }
@@ -1832,18 +1833,6 @@ impl Device {
                     at,
                     received,
                 } => queue.summed(class, at, &received, workspace),
-                DeviceEvent::Rescued { at, name, bytes } => {
-                    log.error(format!(
-                        "what {} held is in the local list as {name}",
-                        shown(at)
-                    ));
-                    log.trouble(format!(
-                        "{} may no longer hold its sound. What was in it is on this computer \
-                         as “{name}”.",
-                        shown(at)
-                    ));
-                    workspace.ingest(name, Origin::Rescued { at }, bytes, log);
-                }
                 // It landed, so it is no longer owed. What landed is what it is saved as,
                 // and the slot it landed in is where it stands. This covers that object
                 // only; the rest of a batch still waits on its own write.

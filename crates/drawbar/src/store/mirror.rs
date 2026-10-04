@@ -15,7 +15,7 @@ use super::exec::{too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stat, MOST_BYTES,
+    LibPath, Listing, Opened, Rescue, Source, Stale, Stat, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -23,7 +23,7 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::rewrite::Edit;
 use crate::summary::Summary;
-use crate::workspace::{precious, LocalEntity, Origin, Saved, Workspace};
+use crate::workspace::{precious, Leaving, LocalEntity, Origin, Saved, Workspace};
 
 /// How far opening has got.
 enum Phase {
@@ -93,6 +93,9 @@ struct Loading {
     /// The slots' former occupants the open found in `.drawbar/tmp/`, offered once the
     /// listing is complete.
     rescued: Vec<(String, Stat)>,
+    /// The working copies the open found with no index, asked about once the listing
+    /// is complete.
+    unindexed: usize,
     /// Each rename sent while the listing is in flight that has not failed. A part the
     /// backend gathered before it ran names what it moved where it was.
     moves: Vec<Rename>,
@@ -270,6 +273,9 @@ pub struct Store {
     next_generation: u64,
     /// The index as last sent, so an unchanged one is not written again.
     committed: Option<Sidecar>,
+    /// Assets to remove now what was copied or saved of them over another has landed
+    /// ([`Store::take_left`]).
+    left: Vec<u64>,
     /// `.drawbar/` exists, or drawbar has written here. Until then the index is written
     /// only once it holds something no file does, so a folder opened and looked at is
     /// left as it was.
@@ -389,6 +395,7 @@ impl Store {
             keeping: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             shelved: BTreeMap::new(),
+            left: Vec::new(),
         }
     }
 
@@ -463,6 +470,25 @@ impl Store {
         self.records.values().any(|record| record.saving)
     }
 
+    /// The assets whose copy or overwrite over another has landed since the last call, to
+    /// remove as the user would.
+    pub fn take_left(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.left)
+    }
+
+    /// Whether anything sent to the disk has not landed yet: a command the backend has not
+    /// run through, or a save or rename whose answer is not folded in.
+    pub fn writing(&self) -> bool {
+        self.backend.busy() || self.saving() || !self.moving.is_empty()
+    }
+
+    /// Whether letting the library go now, with no last pass, would lose an edit: one not
+    /// yet kept as a working copy, an asset never written to a file, or a write that has
+    /// not landed. A browser tab may close without that pass.
+    pub fn losing(&self, workspace: &Workspace) -> bool {
+        self.writing() || self.unheld(workspace).next().is_some()
+    }
+
     /// The names of the assets that letting this library go would lose, where nothing
     /// may be written here: each edit not already kept as a working copy, and each asset
     /// never written to a file. A library open for writing keeps every one at its last
@@ -471,21 +497,23 @@ impl Store {
         if self.open() {
             return Vec::new();
         }
-        workspace
-            .listed()
-            .filter(|entity| {
-                let record = self.records.get(&entity.id);
-                let written = record.is_some_and(|record| record.fingerprint.is_some());
-                let stamp = workspace
-                    .kept_edit(entity.id)
-                    .map_or(entity.stamp, |(_, stamp)| stamp);
-                let held = record
-                    .and_then(|record| record.working.as_ref())
-                    .is_some_and(|working| working.stamp == stamp);
-                !written || (entity.is_unsaved() && !held)
-            })
-            .map(|entity| entity.name.clone())
-            .collect()
+        let unheld = self.unheld(workspace);
+        unheld.map(|entity| entity.name.clone()).collect()
+    }
+
+    /// Each edit not kept as a working copy, and each asset never written to a file.
+    fn unheld<'a>(&'a self, workspace: &'a Workspace) -> impl Iterator<Item = &'a LocalEntity> {
+        workspace.listed().filter(|entity| {
+            let record = self.records.get(&entity.id);
+            let written = record.is_some_and(|record| record.fingerprint.is_some());
+            let stamp = workspace
+                .kept_edit(entity.id)
+                .map_or(entity.stamp, |(_, stamp)| stamp);
+            let held = record
+                .and_then(|record| record.working.as_ref())
+                .is_some_and(|working| working.stamp == stamp);
+            !written || (entity.is_unsaved() && !held)
+        })
     }
 
     /// Where the library is, as the user would look for it.
@@ -1281,6 +1309,7 @@ impl Store {
             swept,
             stranded,
             rescued,
+            unindexed,
         } = opened;
         if !stranded.is_empty() {
             let named: Vec<String> = stranded.iter().map(|dir| format!("“{dir}”")).collect();
@@ -1343,6 +1372,7 @@ impl Store {
             files: 0,
             swept,
             rescued,
+            unindexed,
             moves: Vec::new(),
             held: Default::default(),
         });
@@ -1637,6 +1667,10 @@ impl Store {
                 browser.ask_rescue(rescue);
             }
         }
+        if loading.unindexed > 0 {
+            let reachable = self.backend.reveal().is_some();
+            browser.ask_unindexed(loading.unindexed, reachable);
+        }
     }
 
     /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
@@ -1698,6 +1732,12 @@ impl Store {
             Rescuing::Discard => self.discard_rescue(rescue, log),
         }
         None
+    }
+
+    /// Delete the working copies of a library whose index is missing, to open it again
+    /// without them. The library must be opened again after, since it opened read-only.
+    pub fn drop_unindexed(&mut self) {
+        self.write(Cmd::DropUnindexed);
     }
 
     /// Move a rescue into the library's top level, under its own name or a free one, where
@@ -2031,6 +2071,10 @@ impl Store {
             return;
         };
         record.saving = false;
+        // ⚠️ The asset an overwrite came from holds its bytes until they are saved here.
+        if let Some(leaving) = workspace.saved_over(id, record.saved, result.is_ok()) {
+            leave(&mut self.left, leaving, workspace, log);
+        }
         let name = workspace
             .get(id)
             .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
@@ -2135,6 +2179,10 @@ impl Store {
             if record.saving || unsettled(waiting, &path) {
                 continue;
             }
+            let stale = workspace.kept_edit(id).and_then(|(edit, stamp)| {
+                let copy = || edit.working().ok();
+                stale(id, record.working.as_ref(), Keeps::Edit, stamp, copy)
+            });
             let Some((from, edit)) = workspace.send_edit(id) else {
                 continue;
             };
@@ -2145,6 +2193,7 @@ impl Store {
                 from,
                 edit,
                 expect,
+                stale,
             });
         }
     }
@@ -2187,10 +2236,8 @@ impl Store {
                 workspace.landed_copy(id);
                 // The asset the copy was moved from goes now it has landed, and its file
                 // with it at the next pass.
-                if let Some(from) = workspace.moved_over(id) {
-                    browser.tags.forget(from);
-                    browser.folders.missing.remove(&from);
-                    workspace.remove(from, log);
+                if let Some(leaving) = workspace.moved_over(id) {
+                    leave(&mut self.left, leaving, workspace, log);
                 }
                 return log.say(format!("“{name}” is on this computer."));
             }
@@ -2648,6 +2695,13 @@ impl Store {
                 .records
                 .remove(&entity.id)
                 .and_then(|record| record.working);
+            let stale = stale(
+                entity.id,
+                working.as_ref(),
+                Keeps::Bytes,
+                entity.saved.stamp,
+                || Some(bytes()),
+            );
             self.records.insert(
                 entity.id,
                 Record {
@@ -2662,6 +2716,7 @@ impl Store {
                 path: path.clone(),
                 bytes: bytes(),
                 expect: None,
+                stale,
             });
             return true;
         }
@@ -2696,18 +2751,26 @@ impl Store {
         let save = (unsaved && !record.saving).then(|| {
             record.saved = entity.saved.stamp;
             record.saving = true;
-            record.fingerprint.filter(|_| !missing)
+            let stale = stale(
+                entity.id,
+                record.working.as_ref(),
+                Keeps::Bytes,
+                entity.saved.stamp,
+                || Some(bytes()),
+            );
+            (record.fingerprint.filter(|_| !missing), stale)
         });
         if let Some(from) = from {
             self.cache.moved(&from, path);
             self.rename(from, path.clone(), Vec::new());
         }
-        if let Some(expect) = save {
+        if let Some((expect, stale)) = save {
             self.write(Cmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect,
+                stale,
             });
         }
         !waits
@@ -2957,6 +3020,37 @@ impl Record {
             ..Record::of_file(found.path.clone(), fingerprint)
         }
     }
+}
+
+/// Let the asset a copy or an overwrite came from go, onto `left`, unless it was edited
+/// since: nothing that landed holds that edit.
+fn leave(left: &mut Vec<u64>, leaving: Leaving, workspace: &Workspace, log: &mut Log) {
+    if workspace.unchanged(&leaving) {
+        return left.push(leaving.from);
+    }
+    if let Some(entity) = workspace.get(leaving.from) {
+        log.say(format!(
+            "“{}” was edited while it was moved, so it stays, with its edit.",
+            entity.name
+        ));
+    }
+}
+
+/// `id`'s working copy, where it keeps `keeps` from before `stamp`, the stamp of the save
+/// about to be sent, with `copy` to write over it. A copy of the same edit already
+/// matches the file the save writes, and a newer one holds edits the save does not.
+fn stale(
+    id: u64,
+    working: Option<&Kept>,
+    keeps: Keeps,
+    stamp: u64,
+    copy: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<Stale> {
+    let held = working.filter(|held| held.copy.keeps == keeps && held.stamp < stamp)?;
+    Some(Stale {
+        name: working_name(id, held.copy.generation),
+        copy: copy()?,
+    })
 }
 
 /// The paths a change to the folders acts on, where it was and where it goes.

@@ -114,6 +114,8 @@ struct Inbox {
     wake: Option<Function>,
     /// No command follows those queued; the task ends once they have run.
     closed: bool,
+    /// A command that writes ([`exec::writes`]) taken from `cmds` is running.
+    writing: bool,
 }
 
 impl Inbox {
@@ -223,6 +225,12 @@ impl Backend {
         self.events.borrow_mut().pop_front()
     }
 
+    /// Whether a command that writes has been sent and not run through yet.
+    pub fn busy(&self) -> bool {
+        let inbox = self.inbox.borrow();
+        inbox.writing || inbox.cmds.iter().any(exec::writes)
+    }
+
     /// The next answer already here. The page cannot wait for one that is not.
     pub fn recv(&mut self) -> Option<Event> {
         self.try_recv()
@@ -257,6 +265,7 @@ async fn drive(
             events.borrow_mut().push_back(event);
             ctx.request_repaint();
         };
+        inbox.borrow_mut().writing = exec::writes(&cmd);
         match &mut fs {
             Ok(fs) => {
                 // ⚠️ The folder handles outlast only the commands that read: a rescan
@@ -275,10 +284,14 @@ async fn drive(
             }
             Err(why) => answer(refused(cmd, why)),
         }
+        inbox.borrow_mut().writing = false;
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }
         ctx.request_repaint();
+    }
+    if let Ok(fs) = &mut fs {
+        fs.let_go().await;
     }
 }
 
@@ -704,6 +717,19 @@ struct Folder {
 type Spot = (FileSystemDirectoryHandle, String);
 
 impl Folder {
+    /// Let go of the library's lock before the next library opens, which may be this one
+    /// again. A worker stopped by dropping it closes its handles only when the browser
+    /// gets to it.
+    async fn let_go(&mut self) {
+        match &mut self.writes {
+            Writes::Worker(Some(writer)) => {
+                let _ = writer.ask("unlock", LOCK, &[]).await;
+            }
+            Writes::Worker(None) => {}
+            Writes::Streams { held, .. } => drop(held.take()),
+        }
+    }
+
     /// The folder at `root`, or why this browser gives the page no storage. Some private
     /// windows refuse it.
     async fn open(
@@ -1115,7 +1141,11 @@ impl Fs for Folder {
     }
 
     fn waiting(&mut self) -> Option<Cmd> {
-        self.inbox.borrow_mut().cmds.pop_front()
+        let mut inbox = self.inbox.borrow_mut();
+        let cmd = inbox.cmds.pop_front();
+        // A write run inside the command running counts until that command ends.
+        inbox.writing |= cmd.as_ref().is_some_and(exec::writes);
+        cmd
     }
 
     fn hold(&mut self, cmd: Cmd) {
