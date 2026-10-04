@@ -9,10 +9,10 @@
 //! A piano library needs more per file (a bank and a velocity layer as well as a root),
 //! and encoding it takes long enough that the build runs in the background.
 //!
-//! ⚠️ A project holds **paths, not audio**. It references the WAVs by the names they
-//! were picked under, and the editor looks for them beside the project file. An
-//! instrument and a library hold the audio itself, so the encoder's limits on what a WAV
-//! may be apply to them.
+//! ⚠️ A project holds **paths, not audio**. A new one goes in a folder of its own with a
+//! copy of each WAV it plays, each named by a bare leaf, so the project builds where it
+//! lands and the Sample Editor finds its WAVs beside it. An instrument and a library hold
+//! the audio itself, so the encoder's limits on what a WAV may be apply to them.
 
 use eframe::egui;
 use nord_format::formats::npno::encode::{
@@ -33,7 +33,9 @@ use nord_format::Entity;
 use crate::document::controls::fits;
 use crate::document::encode::{encodable, read, Source};
 use crate::document::note_picker;
+use crate::folders::Folders;
 use crate::log::Log;
+use crate::store::{names, LibPath};
 use crate::work::{self, Job, Progress};
 use crate::workspace::{Origin, Workspace};
 
@@ -87,8 +89,8 @@ impl Making {
         match self {
             Making::Project => (
                 "Sample Editor project…",
-                "pick the WAVs it plays; the project stores their names and the editor \
-                 looks for them beside it",
+                "pick the WAVs it plays; the project and a copy of each WAV go in a new \
+                 folder named after it",
             ),
             Making::Instrument => (
                 "Sample instrument…",
@@ -114,8 +116,8 @@ impl Making {
     fn caption(self) -> &'static str {
         match self {
             Making::Project => {
-                "One zone per file, ordered by root key. The project stores the file \
-                 names and the editor looks for them beside it, so keep them together."
+                "One zone per file, ordered by root key. The project and a copy of each \
+                 WAV go in a new folder named after the project."
             }
             Making::Instrument => {
                 "One zone per file, ordered by root key. The audio is encoded into the \
@@ -132,8 +134,11 @@ impl Making {
 
 /// One picked WAV, as the dialog shows it.
 pub struct Take {
-    /// The name a project would reference it by, resolved beside the project file.
+    /// The name it was picked under.
     pub path: String,
+    /// The file itself, which a new project is filed beside. `None` for what carries the
+    /// audio instead.
+    file: Option<Vec<u8>>,
     /// The decoded file, or the reader's error.
     pub source: Source,
     /// Frames as a project counts them (see [`project_frames`]). Zero if the file did not
@@ -149,18 +154,20 @@ pub struct Take {
 impl Take {
     /// A picked file, keyed at `root` as a zone. A piano stroke takes its key, bank and
     /// layer from [`stroke_defaults`] instead.
-    fn new(making: Making, path: String, bytes: &[u8], root: u8) -> Take {
+    fn new(making: Making, path: String, bytes: Vec<u8>, root: u8) -> Take {
         let (root_key, bank, layer) = match making {
             Making::Piano => stroke_defaults(&path),
             Making::Project | Making::Instrument => (root, Bank::Attack, LayerTag::Index(0)),
         };
-        let source = read(bytes);
+        let source = read(&bytes);
         let frames = match &source {
             Ok(pcm) => project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
             Err(_) => 0,
         };
+        let file = (making == Making::Project).then_some(bytes);
         Take {
             path,
+            file,
             source,
             frames,
             root_key,
@@ -256,9 +263,7 @@ fn stroke_name(path: &str) -> Option<(u8, Bank, LayerTag)> {
 /// the extension is checked; a file that will not read is listed with the reader's error
 /// beside it.
 pub fn is_wav_name(name: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+    crate::browser::Kind::of_name(name) == crate::browser::Kind::Wav
 }
 
 /// The stroke a picked WAV is assumed to hold: the one its name states, or else a root
@@ -304,9 +309,9 @@ impl Draft {
         }
         let paths: Vec<String> = files.iter().map(|(name, _)| name.clone()).collect();
         let takes = files
-            .iter()
+            .into_iter()
             .zip(default_roots(&paths))
-            .map(|((path, bytes), root)| Take::new(making, path.clone(), bytes, root))
+            .map(|((path, bytes), root)| Take::new(making, path, bytes, root))
             .collect();
         Some(Draft {
             making,
@@ -322,7 +327,7 @@ impl Draft {
     pub fn add(&mut self, files: Vec<(String, Vec<u8>)>) {
         for (path, bytes) in files {
             let root = trailing_note(&path).unwrap_or_else(|| self.free_key());
-            let take = Take::new(self.making, path, &bytes, root);
+            let take = Take::new(self.making, path, bytes, root);
             self.takes.push(take);
         }
     }
@@ -454,12 +459,50 @@ impl Draft {
         Some(answer)
     }
 
+    /// Make what the draft describes, as a new asset: an instrument to be filed like any
+    /// new asset, or a project filed at once in a new folder in the library's root, named
+    /// after it and numbered past what is there, with its WAVs beside it under the names
+    /// [`leaves`] gives.
+    pub fn make(
+        &self,
+        workspace: &mut Workspace,
+        folders: &mut Folders,
+        log: &mut Log,
+    ) -> Result<u64, String> {
+        let bytes = self.bytes()?;
+        let name = format!("{}.{}", self.name, self.making.extension());
+        if self.making != Making::Project {
+            return Ok(workspace.ingest(name, Origin::Fresh, bytes, log));
+        }
+        let root = LibPath::root();
+        let folder = folders.free(&root, &names::portable(&self.name), workspace);
+        folders
+            .named_or_made(&root, &folder, workspace)
+            .ok_or_else(|| format!("“{folder}” is taken"))?;
+        let dir = root.join(&folder);
+        let name = names::portable(&name);
+        let made = workspace.ingest(name.clone(), Origin::Fresh, bytes, log);
+        workspace.place(made, dir.join(&name));
+        let mut filed = std::collections::BTreeSet::new();
+        for (take, leaf) in self.takes.iter().zip(leaves(&self.takes)) {
+            if !filed.insert(names::key(&leaf)) {
+                continue;
+            }
+            let bytes = take.file.clone().unwrap_or_default();
+            let origin = Origin::File(take.path.clone());
+            let wav = workspace.ingest(leaf.clone(), origin, bytes, log);
+            workspace.place(wav, dir.join(&leaf));
+        }
+        Ok(made)
+    }
+
     fn project(&self) -> Result<Vec<u8>, String> {
         let zones: Vec<NewZone> = self
             .takes
             .iter()
-            .map(|take| NewZone {
-                path: take.path.clone(),
+            .zip(leaves(&self.takes))
+            .map(|(take, path)| NewZone {
+                path,
                 sample_rate: take.pcm().map_or(0, |pcm| pcm.rate),
                 frames: take.frames,
                 root_key: take.root_key,
@@ -516,6 +559,32 @@ impl Draft {
         .map_err(|e| e.to_string())?;
         instrument.to_bytes().map_err(|e| e.to_string())
     }
+}
+
+/// The leaf each take's WAV is filed under beside a new project: the leaf it was picked
+/// under, made portable, and numbered past an earlier take's under the same
+/// [`names::key`], unless the two hold the same bytes and so share one file.
+fn leaves(takes: &[Take]) -> Vec<String> {
+    let mut filed: Vec<(String, String, Option<&[u8]>)> = Vec::new();
+    takes
+        .iter()
+        .map(|take| {
+            let picked = take.path.rsplit(['/', '\\']).next().unwrap_or_default();
+            let wanted = names::portable(picked);
+            let (key, bytes) = (names::key(&wanted), take.file.as_deref());
+            if let Some((_, leaf, _)) = filed
+                .iter()
+                .find(|(held, _, same)| *held == key && *same == bytes)
+            {
+                return leaf.clone();
+            }
+            let leaf = names::free(&wanted, |taken| {
+                filed.iter().any(|(_, leaf, _)| names::key(leaf) == taken)
+            });
+            filed.push((key, leaf.clone(), bytes));
+            leaf
+        })
+        .collect()
 }
 
 /// One take as a build reads it: the file's audio, and the stroke it becomes.
@@ -604,7 +673,12 @@ fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
 /// The dialog between picking WAVs and having what they make, if a draft is waiting.
 ///
 /// Returns the new asset once it is made, for the caller to open a tab on.
-pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
+pub fn dialog(
+    ctx: &egui::Context,
+    workspace: &mut Workspace,
+    folders: &mut Folders,
+    log: &mut Log,
+) -> Option<u64> {
     if let Some(made) = answered(workspace, log) {
         return Some(made);
     }
@@ -722,13 +796,8 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
         return answered(workspace, log);
     }
     let draft = workspace.take_draft()?;
-    match draft.bytes() {
-        Ok(bytes) => Some(workspace.ingest(
-            format!("{}.{}", draft.name, making.extension()),
-            Origin::Fresh,
-            bytes,
-            log,
-        )),
+    match draft.make(workspace, folders, log) {
+        Ok(made) => Some(made),
         Err(why) => {
             log.error(format!("new {}: {why}", making.label()));
             log.trouble(format!(
@@ -1039,6 +1108,58 @@ mod tests {
         draft.name = "x".repeat(MAX_NAME_LEN + 1);
         let why = draft.refusal().expect("a name the field cannot hold");
         assert!(why.contains(&MAX_NAME_LEN.to_string()), "{why}");
+    }
+
+    /// The project lands in a folder of its own, beside a copy of each WAV under a leaf
+    /// of its own: two picks of one name are numbered apart, and the project names each
+    /// by its leaf, while two picks of the same bytes share a file.
+    #[test]
+    fn a_new_project_is_filed_in_a_folder_of_its_own_beside_its_wavs() {
+        let mut workspace = Workspace::new(crate::testing::context());
+        let mut folders = Folders::default();
+        let mut log = Log::default();
+        folders.named_or_made(&LibPath::root(), "Marimba", &workspace);
+        let (low, high) = (wav(44_100, 4_410), wav(22_050, 2_205));
+        let mut draft = Draft::plan(
+            Making::Project,
+            vec![
+                ("c3.wav".into(), low.clone()),
+                ("C3.wav".into(), high.clone()),
+                ("c3.wav".into(), low.clone()),
+            ],
+        )
+        .unwrap();
+        draft.name = "Marimba".into();
+        let id = draft.make(&mut workspace, &mut folders, &mut log).unwrap();
+
+        let dir = LibPath::parse("Marimba 2").unwrap();
+        assert!(folders.id_of(&dir).is_some(), "a folder of its own");
+        let mut filed: Vec<(String, Vec<u8>)> = workspace
+            .listed()
+            .filter(|entity| entity.path.as_ref().is_some_and(|at| at.parent() == dir))
+            .map(|entity| (entity.name.clone(), entity.bytes.to_vec()))
+            .collect();
+        filed.sort();
+        let names: Vec<&str> = filed.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["C3 2.wav", "Marimba.nsmpproj", "c3.wav"]);
+        assert!(
+            filed[0].1 == high && filed[2].1 == low,
+            "each holds its pick"
+        );
+
+        let Some(Entity::SampleProject(project)) = workspace.get(id).unwrap().entity.as_deref()
+        else {
+            panic!("a Sample Editor project");
+        };
+        let mut paths: Vec<String> = project
+            .audio_files()
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths, ["C3 2.wav", "c3.wav"]);
     }
 
     #[test]

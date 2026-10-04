@@ -57,8 +57,10 @@ edit like any other: Save writes it into the file and Revert takes it back.
 such as a 24-bit one, says why and offers none of these.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
-for each. **New ▸ Sample Editor project…** makes a project from them instead, and
-the Sample Editor expects the WAVs to stay beside it.
+for each. **New ▸ Sample Editor project…** makes a project from them instead, in
+a new folder named after it with a copy of each WAV, so it builds at once and
+the Sample Editor finds its WAVs beside it. Two WAVs with the same name are
+numbered apart, as `c3 2.wav`.
 
 The WAVs must be 16-bit PCM at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else, such as a 24-bit or 48 kHz file,

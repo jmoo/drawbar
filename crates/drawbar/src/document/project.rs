@@ -864,6 +864,29 @@ mod tests {
     }
 
     #[test]
+    fn a_project_made_from_picked_wavs_offers_its_build_at_once() {
+        use crate::newproject::{Draft, Making};
+
+        let mut workspace = Workspace::new(context());
+        let mut folders = crate::folders::Folders::default();
+        let mut log = crate::log::Log::default();
+        let picked = vec![
+            ("Marimba-C3.wav".to_string(), crate::testing::wav_bytes()),
+            ("Marimba-C4.wav".to_string(), crate::testing::wav_bytes()),
+        ];
+        let draft = Draft::plan(Making::Project, picked).unwrap();
+        let id = draft.make(&mut workspace, &mut folders, &mut log).unwrap();
+        let entity = workspace.get(id).unwrap();
+        let held = loud(entity, Located::default().of(entity, &workspace), false);
+        assert_eq!(
+            (held.label.as_str(), held.tone, held.click),
+            (BUILD, Tone::Ready, Click::Build),
+            "{}",
+            held.hint
+        );
+    }
+
+    #[test]
     fn a_wav_renamed_or_removed_is_looked_for_again() {
         let project = Project::new(
             "Marimba",
