@@ -149,7 +149,8 @@ impl Link {
             };
             // ⚠️ The WebUSB transport does not expose the endpoint-0 identity request, so
             // only the firmware is known: `bcdDevice` holds the same hundredths that
-            // request `0x04` answers.
+            // request `0x04` answers, not BCD.
+            // Confirmed on hardware: an Electro 5 on 2.04 reports `bcdDevice` 0x00cc.
             let card = DeviceCard {
                 build: None,
                 firmware: Some(bcd_device(&chosen)),
