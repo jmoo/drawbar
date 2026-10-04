@@ -1166,21 +1166,35 @@ impl Fs for Folder {
 
     /// Every file's snapshot is asked for before any is waited on, so the browser looks
     /// them up together.
-    async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+    async fn children(
+        &self,
+        dir: &str,
+        room: usize,
+        known: &dyn Fn(&str) -> bool,
+    ) -> io::Result<Children> {
         let found = entries(&self.dir(dir, false).await?).await?;
         let more = found.len() > room;
         let found: Vec<(String, FileSystemHandle)> = found.into_iter().take(room).collect();
+        let told: Vec<bool> = found
+            .iter()
+            .map(|(name, handle)| handle.kind() == FileSystemHandleKind::File && known(name))
+            .collect();
         let snapshots: Vec<Option<JsFuture>> = found
             .iter()
-            .map(|(name, handle)| {
+            .zip(&told)
+            .map(|((name, handle), told)| {
                 let file = handle.kind() == FileSystemHandleKind::File && exec::opens(name);
-                file.then(|| {
+                (file && !told).then(|| {
                     JsFuture::from(handle.unchecked_ref::<FileSystemFileHandle>().get_file())
                 })
             })
             .collect();
         let mut children = Vec::new();
-        for ((name, handle), snapshot) in found.into_iter().zip(snapshots) {
+        for (((name, handle), snapshot), told) in found.into_iter().zip(snapshots).zip(told) {
+            if told {
+                children.push((name, None));
+                continue;
+            }
             let kind = match (handle.kind(), snapshot) {
                 (FileSystemHandleKind::Directory, _) => {
                     let path = joined(dir, &name);
