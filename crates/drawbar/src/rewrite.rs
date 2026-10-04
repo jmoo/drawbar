@@ -305,21 +305,15 @@ impl Seek for Recorder<'_> {
 
 /// Refuse a piano library whose prefix or stroke directory is no longer the one `index`
 /// read: the audio read by its ranges would not be the audio those records describe.
-/// Reads the file's header, prefix and directory again, a few kilobytes.
-///
-/// ⚠️ The audio itself is not compared. A file changed in place with its directory, its
-/// length and its time kept reads as unchanged.
+/// See [`npno::Index::still_matches`].
 fn unchanged(from: &mut (impl Read + Seek), index: &npno::Index) -> io::Result<()> {
-    from.seek(SeekFrom::Start(0))?;
-    let now = npno::Index::read_from(from).map_err(|e| match e {
-        nord_format::error::Error::Io(e) => e,
-        e => changed(e.to_string()),
-    })?;
-    match now.library() == index.library() && now.audio_ranges() == index.audio_ranges() {
-        true => Ok(()),
-        false => Err(changed(
+    match index.still_matches(from) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(changed(
             "its stroke directory is not the one drawbar read".to_string(),
         )),
+        Err(nord_format::error::Error::Io(e)) => Err(e),
+        Err(e) => Err(changed(e.to_string())),
     }
 }
 
