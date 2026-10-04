@@ -396,8 +396,9 @@ fn stat(meta: &fs::Metadata) -> Stat {
     }
 }
 
-/// Make a rename or a new entry in `dir` survive a power cut, not only a crash.
-fn sync_dir(dir: &Path) -> io::Result<()> {
+/// Make a rename or a new entry in `dir` survive a power cut, not only a crash. Does
+/// nothing off Unix, where a folder cannot be opened to sync.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
     #[cfg(not(unix))]

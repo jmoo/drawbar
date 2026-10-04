@@ -100,9 +100,10 @@ impl Kept {
         self.path.display().to_string()
     }
 
-    /// Put what was written on the disk.
+    /// Put what was written on the disk, and the file's entry in its folder with it.
     pub async fn close(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        self.file.sync_all()?;
+        crate::store::sync_dir(self.path.parent().unwrap_or(&self.path))
     }
 
     /// The file, read from its start.

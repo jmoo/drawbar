@@ -35,7 +35,7 @@ mod sidecar;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{default_root, Backend};
+pub use native::{default_root, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;

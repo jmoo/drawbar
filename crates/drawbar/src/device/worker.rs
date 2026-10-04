@@ -1293,6 +1293,8 @@ mod wire_tests {
         /// A folder whose files are taken down, by name, when the first delete is heard.
         watched: Option<std::path::PathBuf>,
         at_delete: Option<Vec<(String, Vec<u8>)>>,
+        /// A folder removed when the first read is heard.
+        pulled: Option<std::path::PathBuf>,
     }
 
     /// The Electro 5's bank division, which a default Puppet uses.
@@ -1329,7 +1331,14 @@ mod wire_tests {
                 occupant: (121, "ne5p"),
                 watched: None,
                 at_delete: None,
+                pulled: None,
             }
+        }
+
+        /// Removes `dir` when it hears the first read, so nothing in it can be synced.
+        fn pulling(mut self, dir: &crate::testing::Temp) -> Puppet {
+            self.pulled = Some(dir.0.clone());
+            self
         }
 
         /// Takes down what `dir` holds when it hears the first delete, in
@@ -1632,6 +1641,10 @@ mod wire_tests {
                 self.replies.push_back(
                     Message::new(msg.service, msg.subsystem, msg.command + 1, args).encode(),
                 );
+            }
+            let read = matches!(msg.service, Service::Program) && msg.command == cmd::READ;
+            if let Some(dir) = self.pulled.take_if(|_| read) {
+                std::fs::remove_dir_all(dir).expect("the pulled folder");
             }
             let delete = matches!(msg.service, Service::Program) && msg.command == cmd::DELETE;
             self.deaf |= self.hangs_up_on_delete && delete;
@@ -1948,6 +1961,36 @@ mod wire_tests {
         let occupant = envelope::wrap(format, at, OCCUPANT_VERSION, &occupant_body(len)).unwrap();
         assert!(held[0].1 == occupant, "the file is the occupant's");
         assert_eq!(dir.names(""), Vec::<String>::new(), "let go once written");
+    }
+
+    /// ⚠️ The backup's entry in its folder must reach the disk before the delete, or a
+    /// power cut loses the file with it. A folder that cannot be synced leaves the slot
+    /// alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_whose_folder_cannot_be_synced_stops_the_put_before_the_delete() {
+        let at = Location { bank: 0, slot: 3 };
+        let dir = crate::testing::Temp::new();
+        let scratch = Scratch::default();
+        scratch.keep_in(Some(dir.at("tmp")));
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).pulling(&dir);
+        let (flow, events) = drive_keeping(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                payload: Payload::Bytes(a_program()),
+            },
+            &scratch,
+        );
+        assert!(flow == Flow::Continue);
+
+        assert_eq!(counted(&device, cmd::DELETE), 0, "nothing was deleted");
+        assert_eq!(counted(&device, cmd::BEGIN_WRITE), 0, "nothing was written");
+        let said = refused(events);
+        assert!(said.contains("left alone"), "{said}");
     }
 
     #[test]
