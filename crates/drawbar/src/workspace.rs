@@ -509,6 +509,9 @@ pub struct LocalEntity {
     pub remembered: Option<Box<Summary>>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
+    /// The tag and kind its name says, from [`crate::browser::tagged`], taken whenever
+    /// the name is set so that no frame scans the format table for it.
+    by_name: Option<(&'static str, crate::browser::Kind)>,
 }
 
 impl LocalEntity {
@@ -531,6 +534,7 @@ impl LocalEntity {
     /// [`LocalEntity::decoded`] it has no decode, no container, and the kind its name
     /// says.
     fn undecoded(id: u64, name: String, origin: Origin, bytes: Bytes, stamp: u64) -> LocalEntity {
+        let by_name = crate::browser::tagged(&name);
         LocalEntity {
             id,
             name,
@@ -558,6 +562,7 @@ impl LocalEntity {
             wrote: None,
             remembered: None,
             seen: Default::default(),
+            by_name,
         }
     }
 
@@ -605,6 +610,7 @@ impl LocalEntity {
         file: Arc<OnDisk>,
         stamp: u64,
     ) -> LocalEntity {
+        let by_name = crate::browser::tagged(&name);
         LocalEntity {
             id,
             name,
@@ -625,6 +631,7 @@ impl LocalEntity {
             wrote: None,
             remembered: None,
             seen: Default::default(),
+            by_name,
         }
     }
 
@@ -735,8 +742,19 @@ impl LocalEntity {
     /// The tag its name carries, while its bytes are not decoded.
     fn listed_tag(&self) -> Option<&'static str> {
         let undecoded = self.reading() || self.unread();
-        let (tag, _) = crate::browser::tagged(&self.name).filter(|_| undecoded)?;
+        let (tag, _) = self.by_name.filter(|_| undecoded)?;
         Some(tag)
+    }
+
+    /// The tag and kind its name says, as [`crate::browser::tagged`] gives them.
+    pub fn by_name(&self) -> Option<(&'static str, crate::browser::Kind)> {
+        self.by_name
+    }
+
+    /// Name it, and take what the new name says it is.
+    fn set_name(&mut self, name: String) {
+        self.by_name = crate::browser::tagged(&name);
+        self.name = name;
     }
 
     /// Whether it holds something other than what it was last saved as, an editor's
@@ -791,16 +809,27 @@ impl LocalEntity {
     /// A note has neither, so its tag comes from its bytes being text. See
     /// `document::text::is_text`.
     pub fn tag(&self) -> String {
+        self.held_tag().into_owned()
+    }
+
+    /// [`LocalEntity::tag`], borrowed where it can be.
+    fn held_tag(&self) -> Cow<'_, str> {
         match (self.entity.as_deref(), &self.container) {
-            (Some(entity), _) => entity.identity().format.to_string(),
-            (None, Some(container)) => container.tag(),
-            (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
+            (Some(entity), _) => Cow::Borrowed(entity.identity().format),
+            (None, Some(container)) => Cow::Owned(container.tag()),
+            (None, None) if self.is_text => Cow::Borrowed(crate::document::text::EXTENSION),
             (None, None) => match (self.rests(), self.remembered.as_deref()) {
-                (Some(file), _) => file.index.tag().to_string(),
-                (None, Some(known)) => known.tag.clone(),
-                (None, None) => self.listed_tag().unwrap_or("?").to_string(),
+                (Some(file), _) => Cow::Borrowed(file.index.tag()),
+                (None, Some(known)) => Cow::Borrowed(&known.tag),
+                (None, None) => Cow::Borrowed(self.listed_tag().unwrap_or("?")),
             },
         }
+    }
+
+    /// The family whose files carry its [tag](LocalEntity::tag), as
+    /// [`accept::Family::of_tag`] says.
+    pub fn family(&self) -> Option<accept::Family> {
+        family_of(&self.held_tag())
     }
 
     /// The bytes the wire would carry: the file with its container stripped.
@@ -814,6 +843,23 @@ impl LocalEntity {
 
 /// Why an asset not read yet has no bytes to hand over.
 const UNREAD: &str = "it has not been read yet";
+
+/// [`accept::Family::of_tag`], which scans a table, remembered by tag: every listed row
+/// asks it whenever the list changes.
+fn family_of(tag: &str) -> Option<accept::Family> {
+    thread_local! {
+        static FAMILIES: std::cell::RefCell<std::collections::HashMap<String, Option<accept::Family>>> =
+            Default::default();
+    }
+    FAMILIES.with(|known| {
+        if let Some(family) = known.borrow().get(tag) {
+            return *family;
+        }
+        let family = accept::Family::of_tag(tag);
+        known.borrow_mut().insert(tag.to_string(), family);
+        family
+    })
+}
 
 /// A file's body as the wire carries it, without its container, or `None` for bytes no
 /// container this app unwraps.
@@ -1278,6 +1324,9 @@ pub struct Workspace {
     /// How many times the list has been searched end to end for an id.
     #[cfg(test)]
     pub(crate) searched: std::cell::Cell<usize>,
+    /// How many times a selection has been taken.
+    #[cfg(test)]
+    pub(crate) selections: std::cell::Cell<usize>,
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
@@ -1309,10 +1358,13 @@ pub struct Workspace {
     /// asked for first.
     undecoded: VecDeque<u64>,
     hurried: std::cell::RefCell<std::collections::BTreeSet<u64>>,
-    /// Unread assets something needs, not yet asked of the library, and those asked and
-    /// not yet answered.
-    wanted: std::cell::RefCell<std::collections::BTreeSet<u64>>,
+    /// Unread assets something needs, each with how much, not yet asked of the library,
+    /// and those asked and not yet answered.
+    wanted: std::cell::RefCell<std::collections::BTreeMap<u64, Need>>,
     asked: std::collections::BTreeSet<u64>,
+    /// The selected assets read for the selection, needed whole while they stay
+    /// selected.
+    selected: std::collections::BTreeSet<u64>,
     /// Decodes running off the frame, each of a few assets, and every asset in them.
     decoding: Vec<Decode>,
     flying: std::collections::BTreeSet<u64>,
@@ -1361,6 +1413,21 @@ const DECODES: usize = 1;
 #[cfg(target_arch = "wasm32")]
 const DECODE: (usize, u64) = (16, 2 << 20);
 
+/// How much something needs an unread asset read, least first: the library reads what
+/// is needed most first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Need {
+    /// A row in view, which draws what the read finds.
+    InView,
+    Selected,
+    /// It is open, or acted on.
+    Now,
+}
+
+/// How many files one read asks of the library at most, and how many of their bytes, so
+/// a read something waits on goes in behind no more than this.
+const READ: (usize, u64) = (32, 8 << 20);
+
 /// A file's checksum being checked off the frame.
 struct Check {
     id: u64,
@@ -1383,6 +1450,8 @@ impl Workspace {
             kinds_taken: Default::default(),
             #[cfg(test)]
             searched: Default::default(),
+            #[cfg(test)]
+            selections: Default::default(),
             next_id: 1,
             revision: 0,
             layout: 1,
@@ -1403,6 +1472,7 @@ impl Workspace {
             hurried: Default::default(),
             wanted: Default::default(),
             asked: Default::default(),
+            selected: Default::default(),
             decoding: Vec::new(),
             flying: Default::default(),
             edits: Default::default(),
@@ -1436,10 +1506,8 @@ impl Workspace {
         self.taken(&self.families, || {
             #[cfg(test)]
             self.families_taken.set(self.families_taken.get() + 1);
-            let here: std::collections::HashSet<accept::Family> = self
-                .listed()
-                .filter_map(|entity| accept::Family::of_tag(&entity.tag()))
-                .collect();
+            let here: std::collections::HashSet<accept::Family> =
+                self.listed().filter_map(LocalEntity::family).collect();
             accept::Family::ALL
                 .into_iter()
                 .filter(|family| here.contains(family))
@@ -1642,17 +1710,24 @@ impl Workspace {
     }
 
     /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
-    /// with [`crate::device::link`] as `held_by`.
-    pub fn relink(&mut self, held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>) {
+    /// with [`crate::device::link`] as `held_by`. Returns whether any link moved.
+    pub fn relink(
+        &mut self,
+        held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>,
+    ) -> bool {
+        let mut moved = false;
         for entity in &mut self.entities {
-            entity.link = held_by(entity);
+            let link = held_by(entity);
+            moved |= entity.link != link;
+            entity.link = link;
         }
+        moved
     }
 
     /// Rename an asset held here. Nothing leaves this computer.
     pub fn rename(&mut self, id: u64, name: String) {
         if let Some(entity) = self.get_mut(id) {
-            entity.name = name;
+            entity.set_name(name);
             self.moved();
         }
     }
@@ -1660,7 +1735,7 @@ impl Workspace {
     /// Put an asset's file at `path`, which also names it.
     pub fn place(&mut self, id: u64, path: LibPath) {
         if let Some(entity) = self.get_mut(id) {
-            entity.name = path.leaf().to_string();
+            entity.set_name(path.leaf().to_string());
             entity.path = Some(path);
             self.moved();
         }
@@ -1678,7 +1753,7 @@ impl Workspace {
     pub fn relocate(&mut self, from: &LibPath, to: &LibPath) {
         for entity in &mut self.entities {
             if let Some(moved) = entity.path.as_ref().and_then(|at| at.moved(from, to)) {
-                entity.name = moved.leaf().to_string();
+                entity.set_name(moved.leaf().to_string());
                 entity.path = Some(moved);
             }
         }
@@ -1868,31 +1943,58 @@ impl Workspace {
 
     /// How many assets something needs that are still being read or decoded.
     pub fn reading(&self) -> usize {
-        let decoding = self.entities.iter().filter(|entity| {
-            let undecoded = entity.reading() && !entity.unread();
-            undecoded || self.asked.contains(&entity.id)
-        });
-        decoding.count() + self.wanted.borrow().len()
+        let undecoded = |entity: &LocalEntity| entity.reading() && !entity.unread();
+        let decoding = self.entities.iter().filter(|entity| undecoded(entity));
+        let asked = self.asked.iter().filter_map(|id| self.get(*id));
+        let asked = asked.filter(|entity| !undecoded(entity));
+        decoding.count() + asked.count() + self.wanted.borrow().len()
     }
 
-    /// Something needs `id` whole: it is picked, open, or acted on. One not read yet is
-    /// asked of the library, and one not decoded yet is decoded ahead of the others.
+    /// Something needs `id` whole: it is open, or acted on. One not read yet is asked of
+    /// the library ahead of everything else, and one not decoded yet is decoded ahead of
+    /// the others.
     /// Either way it is needed now, and is not let go for room until a frame passes
     /// without it being needed.
     pub fn hurry(&self, id: u64) {
-        self.need(id, true);
+        self.need(id, Need::Now);
     }
 
-    /// Each of these assets is a row a list draws. A row draws what a summary remembers,
-    /// so only one with nothing remembered is read for it; otherwise as
-    /// [`Workspace::hurry`].
-    pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
-        for id in ids {
-            self.need(id, false);
+    /// These assets are selected, in place of those selected before: as
+    /// [`Workspace::hurry`] while they stay selected, read after what is open or acted
+    /// on. One whose need was let go before its read, as when the cache remembered it or
+    /// a read in the background was refused for room, is asked for again.
+    pub fn select(&mut self, ids: impl IntoIterator<Item = u64>) {
+        #[cfg(test)]
+        self.selections.set(self.selections.get() + 1);
+        self.selected = ids.into_iter().collect();
+        for id in &self.selected {
+            self.need(*id, Need::Selected);
         }
     }
 
-    fn need(&self, id: u64, whole: bool) {
+    /// Whether a selected asset waits on a read that is neither wanted nor asked for.
+    fn unasked_selected(&self, id: u64) -> bool {
+        let Some(entity) = self.get(id) else {
+            return false;
+        };
+        let remembered = matches!(entity.verify, VerifyState::Remembered(_));
+        let reads = entity.unread() && (entity.reading() || remembered);
+        reads
+            && !self.arriving.contains_key(&id)
+            && !self.asked.contains(&id)
+            && !self.wanted.borrow().contains_key(&id)
+    }
+
+    /// Each of these assets is a row a list draws. A row draws what a summary remembers,
+    /// so only one with nothing remembered is read for it, after what is open, acted on
+    /// or selected, and only while it is drawn; otherwise as [`Workspace::hurry`].
+    pub fn in_view(&self, ids: impl IntoIterator<Item = u64>) {
+        for id in ids {
+            self.need(id, Need::InView);
+        }
+    }
+
+    fn need(&self, id: u64, need: Need) {
         let Some(entity) = self.get(id) else {
             return;
         };
@@ -1900,28 +2002,67 @@ impl Workspace {
             return;
         }
         entity.seen.set(self.frame);
+        let whole = need != Need::InView;
         let remembered = matches!(entity.verify, VerifyState::Remembered(_));
         if !entity.reading() && !(whole && remembered) {
             return;
         }
         if !entity.unread() {
             self.hurried.borrow_mut().insert(id);
-        } else if !self.asked.contains(&id) && self.wanted.borrow_mut().insert(id) {
+            return;
+        }
+        if self.asked.contains(&id) {
+            return;
+        }
+        let mut wanted = self.wanted.borrow_mut();
+        let held = wanted.get(&id).copied();
+        if held.is_none_or(|held| held < need) {
+            wanted.insert(id, need);
             self.ctx.request_repaint();
         }
     }
 
-    /// The unread assets something needs, which the library is now asked for.
+    /// The unread assets the library is now asked for: those needed most, a read's worth
+    /// of them. A row no longer drawn is not read for it.
     pub fn take_wanted(&mut self) -> Vec<u64> {
-        let wanted = std::mem::take(self.wanted.get_mut());
-        self.asked.extend(wanted.iter().copied());
-        wanted.into_iter().collect()
+        let lost: Vec<u64> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|id| self.unasked_selected(*id))
+            .collect();
+        self.wanted
+            .get_mut()
+            .extend(lost.into_iter().map(|id| (id, Need::Selected)));
+        let mut wanted = self.wanted.borrow_mut();
+        wanted.retain(|id, need| {
+            *need != Need::InView || self.get(*id).is_some_and(|entity| self.needed_now(entity))
+        });
+        let Some(most) = wanted.values().max().copied() else {
+            return Vec::new();
+        };
+        let (files, bytes) = READ;
+        let mut taken = Vec::new();
+        let mut held = 0;
+        for (id, _) in wanted.iter().filter(|(_, need)| **need == most) {
+            if taken.len() == files || held >= bytes {
+                break;
+            }
+            held += self.get(*id).map_or(0, LocalEntity::size);
+            taken.push(*id);
+        }
+        for id in &taken {
+            wanted.remove(id);
+        }
+        drop(wanted);
+        self.asked.extend(taken.iter().copied());
+        taken
     }
 
     /// Whether `id` is wanted or asked of the library and not yet answered.
     #[cfg(test)]
     pub fn wanted(&self, id: u64) -> bool {
-        self.wanted.borrow().contains(&id) || self.asked.contains(&id)
+        self.wanted.borrow().contains_key(&id) || self.asked.contains(&id)
     }
 
     /// Whether any read asked of the library is still to be answered.
@@ -1972,7 +2113,8 @@ impl Workspace {
 
     /// Whether something needs an unread asset not yet asked of the library.
     pub fn wants(&self) -> bool {
-        !self.wanted.borrow().is_empty()
+        let lost = self.selected.iter().any(|id| self.unasked_selected(*id));
+        lost || !self.wanted.borrow().is_empty()
     }
 
     /// The listed length of every file asked of the library and not yet answered.
@@ -1995,7 +2137,7 @@ impl Workspace {
         entity.parse_error = None;
         entity.verify = VerifyState::Reading;
         self.revision += 1;
-        self.wanted.get_mut().insert(id);
+        self.wanted.get_mut().insert(id, Need::Now);
     }
 
     /// Ask the library again for an asset whose read was refused for want of room, now
@@ -2003,7 +2145,7 @@ impl Workspace {
     pub fn again(&mut self, id: u64) {
         self.asked.remove(&id);
         if self.get(id).is_some_and(LocalEntity::unread) {
-            self.wanted.get_mut().insert(id);
+            self.wanted.get_mut().insert(id, Need::Now);
             self.ctx.request_repaint();
         }
     }
@@ -2013,7 +2155,7 @@ impl Workspace {
     /// wanted or asked already.
     pub fn ask_behind(&mut self, id: u64) -> bool {
         let unread = self.get(id).is_some_and(LocalEntity::unread);
-        if !unread || self.wanted.get_mut().contains(&id) {
+        if !unread || self.wanted.get_mut().contains_key(&id) {
             return false;
         }
         self.asked.insert(id)
@@ -2029,7 +2171,7 @@ impl Workspace {
     /// [`Workspace::hurry`].
     fn needed_now(&self, entity: &LocalEntity) -> bool {
         let seen = entity.seen.get();
-        seen > 0 && seen + 1 >= self.frame
+        (seen > 0 && seen + 1 >= self.frame) || self.selected.contains(&entity.id)
     }
 
     /// The frame something last needed this asset in, 0 for never, and how many bytes
@@ -2069,15 +2211,18 @@ impl Workspace {
 
     /// Give an unread asset what a read of its file found before, so it draws as it did
     /// once read without being read. Nothing for an asset read since, or one that could
-    /// not be read. A read wanted only for its row is no longer asked for; something
-    /// that needs it whole asks again.
+    /// not be read. A read wanted only for its row is no longer asked for; one needed
+    /// whole stays wanted.
     pub fn remember(&mut self, id: u64, summary: Summary) {
         let Some(entity) = self.get_mut(id) else {
             return;
         };
         if entity.unread() && entity.reading() {
             entity.know(summary);
-            self.wanted.get_mut().remove(&id);
+            let wanted = self.wanted.get_mut();
+            if wanted.get(&id) == Some(&Need::InView) {
+                wanted.remove(&id);
+            }
             self.revision += 1;
         }
     }
@@ -3211,8 +3356,9 @@ impl Workspace {
         self.moving_over.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));
-        self.wanted.get_mut().retain(|id| held(*id));
+        self.wanted.get_mut().retain(|id, _| held(*id));
         self.asked.retain(|id| held(*id));
+        self.selected.retain(|id| held(*id));
         if self.checking.as_ref().is_some_and(|check| !held(check.id)) {
             self.checking = None;
         }
@@ -4477,6 +4623,111 @@ mod tests {
         );
         workspace.settle_files(&mut log);
         assert_eq!(workspace.reading(), 0);
+    }
+
+    /// Unread assets 1 to `n`, each `len` bytes long, in the root of the library.
+    fn unread_assets(n: u64, len: u64) -> Vec<Saved> {
+        (1..=n)
+            .map(|id| Saved {
+                id,
+                name: format!("Sound {id:03}.ne5p"),
+                path: Some(LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
+                origin: Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(len),
+                unsaved: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_library_is_asked_for_what_is_open_then_selected_then_in_view() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        workspace.restore(unread_assets(100, 1), None, &mut Log::default());
+        workspace.in_view(1..=60);
+        workspace.select([70]);
+        workspace.hurry(80);
+        workspace.in_view([80]);
+
+        assert_eq!(workspace.take_wanted(), [80], "open, alone");
+        assert_eq!(workspace.take_wanted(), [70], "then selected");
+        let rows: Vec<u64> = (1..=60).collect();
+        assert_eq!(
+            workspace.take_wanted(),
+            rows[..READ.0],
+            "then a read of rows"
+        );
+        assert_eq!(workspace.take_wanted(), rows[READ.0..]);
+        assert!(!workspace.wants());
+    }
+
+    #[test]
+    fn a_selected_asset_stays_wanted_until_it_is_read() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        workspace.restore(unread_assets(3, 1), None, &mut log);
+        let made = workspace.create(Fresh::Program, &mut log).unwrap();
+        let summary = Summary::of(workspace.get(made).unwrap()).unwrap();
+        workspace.select([1, 2]);
+        workspace.in_view([3]);
+
+        workspace.remember(1, summary.clone());
+        workspace.remember(3, summary);
+        assert_eq!(workspace.take_wanted(), [1, 2], "remembered or not");
+        assert!(!workspace.wanted(3), "a row drawn from what is remembered");
+
+        workspace.unasked(2);
+        assert!(workspace.wants(), "a read refused for room");
+        assert_eq!(workspace.take_wanted(), [2]);
+
+        for _ in 0..3 {
+            workspace.poll(&mut log);
+        }
+        let entity = workspace.get(1).unwrap();
+        assert!(
+            workspace.needed_now(entity),
+            "needed while it stays selected"
+        );
+        workspace.select([]);
+        let entity = workspace.get(1).unwrap();
+        assert!(!workspace.needed_now(entity));
+    }
+
+    #[test]
+    fn a_read_of_large_files_in_view_stops_at_its_bytes() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let len = READ.1 / 2;
+        workspace.restore(unread_assets(5, len), None, &mut Log::default());
+        workspace.in_view(1..=5);
+        assert_eq!(workspace.take_wanted(), [1, 2]);
+        assert_eq!(workspace.take_wanted(), [3, 4]);
+        assert_eq!(workspace.take_wanted(), [5]);
+    }
+
+    #[test]
+    fn a_row_scrolled_out_of_view_before_its_read_is_not_read() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        workspace.restore(unread_assets(10, 1), None, &mut log);
+        workspace.in_view(1..=5);
+        workspace.select([9]);
+        workspace.poll(&mut log);
+        workspace.in_view(4..=8);
+        workspace.poll(&mut log);
+
+        assert_eq!(workspace.take_wanted(), [9], "selected stays wanted");
+        assert_eq!(
+            workspace.take_wanted(),
+            [4, 5, 6, 7, 8],
+            "the rows drawn last frame"
+        );
+        for id in 1..=3 {
+            assert!(!workspace.wanted(id), "row {id} left the view");
+        }
+        assert!(!workspace.wants());
+        workspace.in_view([2]);
+        assert_eq!(workspace.take_wanted(), [2], "back in view, wanted again");
     }
 
     /// A note read from the library, or restored with an unsaved edit, is words and not

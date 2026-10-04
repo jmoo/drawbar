@@ -1196,6 +1196,8 @@ pub struct Device {
     /// Whether a command failed, a copied slot was empty, or the instrument went, since
     /// the last [`Device::take_failed`].
     failed: bool,
+    /// Counts what the instrument has reported and the links that moved since.
+    revision: u64,
 }
 
 /// The follow-up owed by the command in flight, set when it is dispatched.
@@ -1230,7 +1232,13 @@ impl Device {
             fetched: Vec::new(),
             gathered: None,
             failed: false,
+            revision: 0,
         }
+    }
+
+    /// Changes whenever what the instrument said, or a link derived from it, may have.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Whether an instrument can be reached from here at all. Anything that offers to
@@ -1395,6 +1403,7 @@ impl Device {
             .unwrap_or_default();
         for (class, bank) in &rescan {
             self.state.forget_bank(*class, *bank);
+            self.revision += 1;
         }
         let rewritten = |((class, at), _): &((ObjectClass, Location), Asked)| {
             user_bank(at.bank).is_some_and(|bank| rescan.contains(&(*class, bank)))
@@ -1604,7 +1613,8 @@ impl Device {
     ///
     /// A link is derived from the scan cache each time: it compares a checksum the walk
     /// reported with one the container carries, and never reads a body.
-    pub fn relink(&self, workspace: &mut Workspace) {
+    pub fn relink(&mut self, workspace: &mut Workspace) {
+        self.revision += 1;
         let state = &self.state;
         workspace.relink(|entity| link(state, entity));
     }
@@ -1619,6 +1629,7 @@ impl Device {
         self.state.forget_everything();
         self.asked_deps = None;
         self.running = None;
+        self.revision += 1;
         workspace.relink(|_| None);
         workspace.forget_writes();
     }
@@ -1898,7 +1909,11 @@ impl Device {
         // for the next walk.
         if heard || self.linked != workspace.revision() {
             self.linked = workspace.revision();
-            self.relink(workspace);
+            let state = &self.state;
+            let moved = workspace.relink(|entity| link(state, entity));
+            if heard || moved {
+                self.revision += 1;
+            }
         }
     }
 }

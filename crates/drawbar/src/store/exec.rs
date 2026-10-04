@@ -93,8 +93,14 @@ pub trait Fs {
     }
     /// The first `room` entries of the folder at `dir`, by name, each with its kind, and
     /// whether the folder holds more. `None` leaves an entry out of the listing, though it
-    /// still counts toward [`MOST_ENTRIES`]. Never [`Kind::Unwalked`].
-    async fn children(&self, dir: &str, room: usize) -> io::Result<Children>;
+    /// still counts toward [`MOST_ENTRIES`]: one gone, or a file `known` names, which is
+    /// not looked at. Never [`Kind::Unwalked`].
+    async fn children(
+        &self,
+        dir: &str,
+        room: usize,
+        known: &dyn Fn(&str) -> bool,
+    ) -> io::Result<Children>;
     /// The names in one folder.
     async fn names(&self, dir: &str) -> io::Result<Vec<String>>;
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
@@ -633,18 +639,24 @@ impl Walk {
             looked: 0,
             most,
         };
-        walk.root = Some(walk.folder(fs, String::new()).await?);
+        walk.root = Some(walk.folder(fs, String::new(), &BTreeSet::new()).await?);
         Ok(walk)
     }
 
     /// The entries of the next folder, or `None` once every folder has been listed. A
     /// folder inside that cannot be read is left unlisted, not the library.
     async fn next(&mut self, fs: &impl Fs) -> Option<Vec<Entry>> {
-        self.next_of(fs, &[]).await
+        self.next_of(fs, &[], &BTreeSet::new()).await
     }
 
-    /// [`Walk::next`], taking first a folder in one of `urgent`, where any is waiting.
-    async fn next_of(&mut self, fs: &impl Fs, urgent: &[LibPath]) -> Option<Vec<Entry>> {
+    /// [`Walk::next`], taking first a folder in one of `urgent`, where any is waiting, and
+    /// leaving out the files in `told` unlooked at.
+    async fn next_of(
+        &mut self,
+        fs: &impl Fs,
+        urgent: &[LibPath],
+        told: &BTreeSet<LibPath>,
+    ) -> Option<Vec<Entry>> {
         if let Some(root) = self.root.take() {
             return Some(root);
         }
@@ -660,14 +672,25 @@ impl Walk {
         if self.looked >= self.most {
             return Some(vec![unwalked(prefix)]);
         }
-        Some(match self.folder(fs, prefix.clone()).await {
+        Some(match self.folder(fs, prefix.clone(), told).await {
             Ok(entries) => entries,
             Err(_) => vec![unwalked(prefix)],
         })
     }
 
-    async fn folder(&mut self, fs: &impl Fs, prefix: String) -> io::Result<Vec<Entry>> {
-        let (found, more) = fs.children(&prefix, self.most - self.looked).await?;
+    async fn folder(
+        &mut self,
+        fs: &impl Fs,
+        prefix: String,
+        told: &BTreeSet<LibPath>,
+    ) -> io::Result<Vec<Entry>> {
+        let known = |name: &str| {
+            let path = || LibPath::parse(&joined(&prefix, name));
+            !told.is_empty() && path().is_some_and(|path| told.contains(&path))
+        };
+        let (found, more) = fs
+            .children(&prefix, self.most - self.looked, &known)
+            .await?;
         let mut entries = Vec::new();
         if more {
             entries.push(Entry {
@@ -828,7 +851,23 @@ fn failed(event: &Event) -> bool {
 impl Lister {
     /// Look at every row where the index says it is, and send what is there. A row's
     /// folders are sent with it, though the walk has not listed them yet.
-    async fn rows(&mut self, fs: &impl Fs, rows: Vec<Row>, answer: &mut impl FnMut(Event)) {
+    ///
+    /// A row in the root takes the stat the root's listing found, where it found a file
+    /// there, so that file is not looked at twice.
+    async fn rows(
+        &mut self,
+        fs: &impl Fs,
+        rows: Vec<Row>,
+        root: &[Entry],
+        answer: &mut impl FnMut(Event),
+    ) {
+        let listed: BTreeMap<&str, Stat> = root
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                Kind::File(stat) => Some((entry.path.as_str(), stat)),
+                _ => None,
+            })
+            .collect();
         let rows: Vec<Row> = rows
             .into_iter()
             .filter(|row| !row.path.components().any(|part| part.starts_with('.')))
@@ -840,9 +879,20 @@ impl Lister {
             if part.is_empty() {
                 break;
             }
-            let paths: Vec<&str> = part.iter().map(|row| row.path.as_str()).collect();
-            let stats = fs.stats(&paths).await;
-            for (row, stat) in part.into_iter().zip(stats) {
+            let paths: Vec<&str> = part
+                .iter()
+                .map(|row| row.path.as_str())
+                .filter(|path| !listed.contains_key(path))
+                .collect();
+            let mut stats = fs.stats(&paths).await.into_iter();
+            for row in part {
+                let stat = match listed.get(row.path.as_str()) {
+                    Some(stat) => Ok(Some(*stat)),
+                    None => match stats.next() {
+                        Some(stat) => stat,
+                        None => break,
+                    },
+                };
                 self.taken += 1;
                 match stat {
                     Ok(Some(stat)) => self.row(fs, row, stat).await,
@@ -902,7 +952,7 @@ impl Lister {
     /// what they name.
     async fn walk(&mut self, fs: &mut impl Fs, walk: &mut Walk, answer: &mut impl FnMut(Event)) {
         loop {
-            let next = walk.next_of(fs, &self.urgent).await;
+            let next = walk.next_of(fs, &self.urgent, &self.told).await;
             let Some(entries) = next.filter(|_| !fs.stopped()) else {
                 break;
             };
@@ -1046,7 +1096,9 @@ impl Lister {
         mut walk: Walk,
         answer: &mut impl FnMut(Event),
     ) {
-        self.rows(fs, rows, answer).await;
+        let root = walk.root.take().unwrap_or_default();
+        self.rows(fs, rows, &root, answer).await;
+        walk.root = Some(root);
         self.walk(fs, &mut walk, answer).await;
         self.recognize(fs, &mut walk, answer).await;
         let part = self.cut();
@@ -1562,6 +1614,8 @@ mod tests {
         unreadable: BTreeSet<String>,
         vanished: BTreeSet<String>,
         reads: Rc<Cell<usize>>,
+        /// How many times a file has been looked at, by a stat or a listing.
+        looked: Cell<usize>,
         waiting: VecDeque<Cmd>,
         later: Option<(usize, Cmd)>,
     }
@@ -1575,6 +1629,7 @@ mod tests {
                 unreadable: BTreeSet::new(),
                 vanished: BTreeSet::new(),
                 reads: Rc::default(),
+                looked: Cell::default(),
                 waiting: VecDeque::new(),
                 later: None,
             }
@@ -1612,7 +1667,12 @@ mod tests {
         async fn lock(&mut self) -> io::Result<bool> {
             Ok(true)
         }
-        async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+        async fn children(
+            &self,
+            dir: &str,
+            room: usize,
+            known: &dyn Fn(&str) -> bool,
+        ) -> io::Result<Children> {
             if self.unreadable.contains(dir) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
@@ -1626,10 +1686,14 @@ mod tests {
                     continue;
                 };
                 let (name, kind) = match inside.split_once('/') {
-                    Some((folder, _)) => (folder, Kind::Dir),
-                    None => (inside, Kind::File(stat(*len))),
+                    Some((folder, _)) => (folder, Some(Kind::Dir)),
+                    None if known(inside) => (inside, None),
+                    None => {
+                        self.looked.set(self.looked.get() + 1);
+                        (inside, Some(Kind::File(stat(*len))))
+                    }
                 };
-                found.insert(name.to_string(), Some(kind));
+                found.insert(name.to_string(), kind);
             }
             let more = found.len() > room;
             Ok((found.into_iter().take(room).collect(), more))
@@ -1648,6 +1712,7 @@ mod tests {
             Ok(path.as_bytes().to_vec())
         }
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
+            self.looked.set(self.looked.get() + 1);
             let here = self
                 .files
                 .get(path)
@@ -1822,6 +1887,27 @@ mod tests {
         assert_eq!(parts[0].dirs, [path("deep"), path("deep/er")]);
         let rest: Vec<&str> = parts[1..].iter().flat_map(files).collect();
         assert_eq!(rest, ["Top.ne5p"], "the walk leaves the known file out");
+    }
+
+    #[test]
+    fn an_open_looks_at_each_file_once_those_the_index_names_included() {
+        let paths = ["Top.ne5p", "a/One.ne5p", "a/Two.ne5p", "a/b/Three.ne5p"];
+        let mut fs = Claimed::of(paths.map(|at| (at.to_string(), 1)));
+        let rows = ["Top.ne5p", "a/One.ne5p", "a/b/Three.ne5p"]
+            .into_iter()
+            .map(|at| Row {
+                path: path(at),
+                print: None,
+                working: false,
+            })
+            .collect();
+        let mut listing = Listing::default();
+        for part in parts(&mut fs, rows) {
+            listing.extend(part);
+        }
+        listing.sort();
+        assert_eq!(files(&listing), paths);
+        assert_eq!(fs.looked.get(), paths.len(), "files looked at");
     }
 
     /// The file under a working copy is read, since the copy is compared with it.
