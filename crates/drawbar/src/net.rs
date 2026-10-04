@@ -36,6 +36,23 @@ pub async fn get(url: &str) -> Result<Vec<u8>, String> {
     read(response.body_mut().as_reader())
 }
 
+/// Send `body` to `url` as plain text, returning the status the server answered with,
+/// or why no answer came.
+///
+/// ⚠️ Blocks until the reply is in, so run it off the UI thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn post(url: &str, body: String) -> Result<u16, String> {
+    let response = agent()?
+        .post(url)
+        .header("content-type", "text/plain")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(body)
+        .map_err(|e| e.to_string())?;
+    Ok(response.status().as_u16())
+}
+
 /// A client for one request: HTTPS only, trusting the system's roots, and given a
 /// minute to finish.
 #[cfg(not(target_arch = "wasm32"))]
