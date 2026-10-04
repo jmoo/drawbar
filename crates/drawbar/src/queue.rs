@@ -257,7 +257,8 @@ pub fn enqueue(
 }
 
 /// Why a write of `entity` into `at` would be refused for its name: a slot of the
-/// library already has it, or another entry waiting for the library would write it.
+/// library already has it, or another entry waiting for the library would write it. An
+/// entry waiting for `at` itself is no clash, since queueing this one displaces it.
 ///
 /// ⚠️ The instrument keeps one object of each name in a library. Slot classes take any
 /// number, and this returns `None` for them.
@@ -279,17 +280,24 @@ fn name_clash(
     let other = queue.list.iter().find(|held| {
         held.id != entity.id
             && held.class == class
-            && workspace
-                .get(held.id)
-                .and_then(|other| crate::device::slot_label(&other.name))
-                .as_deref()
-                == Some(label.as_str())
+            && held.at != at
+            && label_of(workspace, held.id).as_deref() == Some(label.as_str())
     })?;
-    Some(format!(
+    Some(waiting(class, other.at))
+}
+
+/// The name a queued asset's write would give its slot.
+fn label_of(workspace: &Workspace, id: u64) -> Option<String> {
+    crate::device::slot_label(&workspace.get(id)?.name)
+}
+
+/// Why the instrument would refuse the second of two queued writes of one name.
+fn waiting(class: ObjectClass, other: Location) -> String {
+    format!(
         "Something waiting for {} has the same name, and the instrument keeps one of each \
          name. Rename one of them.",
-        place(class, other.at)
-    ))
+        place(class, other)
+    )
 }
 
 /// Why the instrument refuses a second object of the name `holder` already has.
@@ -352,15 +360,32 @@ pub fn offer(
 /// carries the reason. A send leaves it out of the batch, so nothing writes it until it
 /// is queued again against an instrument that accepts it.
 pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log: &mut Log) {
-    for held in &mut queue.list {
+    // A rename after queueing can give two entries one name. The first in the queue is
+    // written first, so the later one is held back.
+    let named: Vec<(ObjectClass, Location, Option<String>)> = queue
+        .list
+        .iter()
+        .map(|held| (held.class, held.at, label_of(workspace, held.id)))
+        .collect();
+    for (nth, held) in queue.list.iter_mut().enumerate() {
         let Some(entity) = workspace.get(held.id) else {
             continue;
+        };
+        let (class, _, label) = &named[nth];
+        let earlier = || {
+            named[..nth]
+                .iter()
+                .find(|(peer, _, other)| {
+                    peer == class && class.is_library() && label.is_some() && other == label
+                })
+                .map(|(class, at, _)| waiting(*class, *at))
         };
         let refusal = match fit(state, entity) {
             Fit::Refuses(why) => Some(why),
             Fit::Unattached | Fit::Takes | Fit::Warn(_) => {
                 crate::device::name_taken(state, held.class, held.at, entity)
                     .map(|holder| taken(held.class, holder))
+                    .or_else(earlier)
             }
         };
         // Logged only when the reason changes, so repeated refits stay quiet.

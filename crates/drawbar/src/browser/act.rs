@@ -3428,6 +3428,47 @@ mod tests {
         );
     }
 
+    /// A second sound of one name may still take the first one's place in the queue, and
+    /// a rename that gives two waiting sounds one name holds the later one back.
+    #[test]
+    fn a_library_name_is_checked_against_the_queue_as_it_stands() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 1, &["", "", ""]);
+        let ids: Vec<u64> = ["lead.nsmp", "lead.nsmp", "pad.nsmp"]
+            .into_iter()
+            .map(|name| {
+                bench.workspace.ingest(
+                    name.into(),
+                    Origin::File(name.into()),
+                    crate::testing::sample_bytes(),
+                    &mut bench.log,
+                )
+            })
+            .collect();
+        let slot = |n| Location::from_user(1, n);
+        let send = |id, at| Act::Send { id, class, at };
+
+        bench.act(vec![send(ids[0], slot(1)), send(ids[1], slot(1))]);
+        assert_eq!(bench.queue.ids(), vec![ids[1]], "the second takes the slot");
+
+        bench.act(vec![send(ids[2], slot(2))]);
+        bench.workspace.rename(ids[2], "lead.nsmp".into());
+        crate::queue::refit(
+            &bench.workspace,
+            &bench.device.state,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+        let failure = |id| bench.queue.entry(id).and_then(|held| held.failure.clone());
+        assert_eq!(failure(ids[1]), None, "the first in the queue goes");
+        assert!(
+            failure(ids[2]).is_some_and(|why| why.contains("Something waiting for Samples 1:1")),
+            "the renamed one would be refused after the first landed"
+        );
+    }
+
     fn poll(bench: &mut Bench) {
         bench.device.poll(
             &mut bench.log,
