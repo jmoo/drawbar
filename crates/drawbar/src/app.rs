@@ -862,9 +862,11 @@ impl eframe::App for DrawbarApp {
             .map(|(name, bytes)| browser::Act::Import { name, bytes })
             .collect();
         // What is open or picked is needed whatever is drawn, so the library keeps it.
-        let needed = self.tabs.documents().chain(self.browser.picked().locals());
-        for id in needed {
+        for id in self.tabs.documents() {
             self.workspace.hurry(id);
+        }
+        for id in self.browser.picked().locals() {
+            self.workspace.selected(id);
         }
         let released = match &mut self.store {
             Some(store) => {

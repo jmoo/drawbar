@@ -268,8 +268,19 @@ async fn drive(
         inbox.borrow_mut().writing = exec::writes(&cmd);
         match &mut fs {
             Ok(fs) => {
+                // ⚠️ The folder handles outlast only the commands that read: a rescan
+                // looks again for what moved outside this tab, and a write may move it.
+                let reads = matches!(
+                    cmd,
+                    Cmd::Open | Cmd::Read { .. } | Cmd::Fingerprint(_) | Cmd::Walk(_)
+                );
+                if !reads {
+                    fs.dirs.borrow_mut().clear();
+                }
                 exec::run(fs, cmd, &mut answer).await;
-                fs.dirs.borrow_mut().clear();
+                if !reads {
+                    fs.dirs.borrow_mut().clear();
+                }
             }
             Err(why) => answer(refused(cmd, why)),
         }
@@ -690,12 +701,12 @@ struct Folder {
     asked: bool,
     /// The commands for this library, closed once it is let go.
     inbox: Rc<RefCell<Inbox>>,
-    /// The folders found so far by the command running, by path, so a path is not looked
-    /// up again from the root one name at a time.
+    /// The folders found so far, by path, so a path is not looked up again from the root
+    /// one name at a time.
     ///
     /// ⚠️ Safari and Firefox keep a handle on its folder wherever it moves, so the handles
-    /// are let go after each command, and after every move, new folder or removal this
-    /// tab makes, whether it succeeded or not.
+    /// are let go around each command that is not a read, and after every move, new
+    /// folder or removal this tab makes, whether it succeeded or not.
     dirs: RefCell<HashMap<String, FileSystemDirectoryHandle>>,
     /// The files left resting, each at the path it is at now, so a move takes their
     /// snapshots again where they went.

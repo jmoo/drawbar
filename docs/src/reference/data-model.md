@@ -322,18 +322,19 @@ folder's `others`, and shown with **Show all files**.
 
 ### Lazy reads
 
-A listed asset is read once something needs it. `Workspace::hurry` marks it
-wanted, and the store's next `poll` sends one `Cmd::Read` for all of them.
-Nothing is asked until the cache has said what it remembers. Four things ask:
+A listed asset is read once something needs it. The workspace keeps each one
+wanted with how much it is needed, and the store keeps one `Cmd::Read` in flight:
+when it answers, the next goes out with the most needed of what is wanted then,
+at most 32 files or 8 MiB. Nothing is asked until the cache has said what it
+remembers. In order of need, these ask:
 
-- `Workspace::in_view`, for the rows the tree and the library table draw this
-  frame. A row draws what is remembered of it, so only a row with nothing
-  remembered is read;
-- the app, every frame, for what is open in a tab or selected
-  (`DrawbarApp::update`);
-- the inspector, for the selection;
 - an act that works from an asset's contents, which waits until each asset in
-  `Act::reads` has been read (`browser/act.rs`).
+  `Act::reads` has been read (`browser/act.rs`), and the app, every frame, for
+  what is open in a tab (`Workspace::hurry`);
+- the app, every frame, for what is selected (`Workspace::selected`);
+- `Workspace::in_view`, for the rows the library table draws. A row draws what is
+  remembered of it, so only a row with nothing remembered is read, and a row not
+  drawn this frame or the last is no longer read for it.
 
 An asset needed this frame or the last is not evicted.
 
@@ -348,7 +349,8 @@ summary already carries that checksum. They go 32 files or 16 MiB at a time,
 and a read the user waits on runs after the batch in flight. A tracked file
 whose CRC the index does not know, and that no background read will cover, has
 its CRC taken alone, 64 files or 64 MiB at a time
-(`Cmd::Fingerprint`), so that an outside rename keeps its row.
+(`Cmd::Fingerprint`), so that an outside rename keeps its row. Neither starts
+a batch while a read something needs is wanted or in flight.
 
 ### The memory budget
 
