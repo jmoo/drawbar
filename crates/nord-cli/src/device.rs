@@ -1112,8 +1112,8 @@ impl Backup {
 }
 
 /// Read the occupant of `info.location` so it can be put back, into a new file in `dir`
-/// a transfer chunk at a time, synced before this returns. A read that fails leaves no
-/// file behind.
+/// a transfer chunk at a time, synced with its entry in `dir` before this returns. A read
+/// that fails leaves no file behind.
 fn back_up<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
@@ -1132,7 +1132,8 @@ fn back_up<T: Transport + Recorded>(
     let read = transact(device, intent, |d| {
         nord_usb::block_on(d.read(class, async |s| {
             usb_op::read_into(s, at, &mut file).await?;
-            Ok(file.sync_all()?)
+            file.sync_all()?;
+            Ok(sync_dir(dir)?)
         }))
     });
     match read {
@@ -1142,6 +1143,16 @@ fn back_up<T: Transport + Recorded>(
             Err(explain(e, at))
         }
     }
+}
+
+/// Make a new entry in `dir` survive a power cut, not only a crash. Does nothing off
+/// Unix, where a folder cannot be opened to sync.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// A new file in `dir` named `name`, or `name` with a number before its extension where a
@@ -2413,17 +2424,22 @@ mod tests {
             assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
         }
 
-        /// The replay, recording what `dir` holds the first time `watch` is sent.
+        /// The replay, recording what `dir` holds the first time `watch` is sent, or
+        /// removing `dir` then where it `pulls`.
         struct Watched {
             replay: ReplayTransport,
             watch: Vec<u8>,
             dir: PathBuf,
+            pulls: bool,
             seen: Option<Vec<(String, Vec<u8>)>>,
         }
 
         impl Transport for Watched {
             async fn write(&mut self, buf: &[u8]) -> nord_usb::Result<()> {
-                if self.seen.is_none() && buf == self.watch {
+                if self.pulls && buf == self.watch {
+                    self.pulls = false;
+                    std::fs::remove_dir_all(&self.dir).unwrap();
+                } else if self.seen.is_none() && buf == self.watch {
                     let mut seen: Vec<_> = rescued(&self.dir)
                         .into_iter()
                         .map(|name| {
@@ -2468,6 +2484,7 @@ mod tests {
                 replay: ReplayTransport::new(put.concat()),
                 watch: delete,
                 dir: dir.clone(),
+                pulls: false,
                 seen: None,
             });
             send_with(
@@ -2494,6 +2511,42 @@ mod tests {
             let (_, kept) = &seen[0];
             assert!(nord_usb::envelope::unwrap(kept).is_ok(), "a whole file");
             assert_eq!(rescued(&dir), Vec::<String>::new(), "let go once written");
+        }
+
+        /// ⚠️ The backup's entry in its folder must reach the disk before the `DELETE`, or
+        /// a power cut loses the file with it. A folder that cannot be synced leaves the
+        /// slot alone.
+        #[cfg(unix)]
+        #[test]
+        fn a_backup_whose_folder_cannot_be_synced_stops_the_put_before_the_delete() {
+            let dir = crate::edit::tests::scratch("send-unsynced");
+            let put = recorded();
+            let begin_read = put[2][7].frame().expect("the BEGIN_READ").to_vec();
+            let delete = put[4][5].frame().expect("the DELETE").to_vec();
+            let mut device = Device::new(Watched {
+                replay: ReplayTransport::new(put.concat()),
+                watch: begin_read,
+                dir: dir.clone(),
+                pulls: true,
+                seen: None,
+            });
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+
+            assert!(err.contains("left alone"), "{err}");
+            let sent = device.transport().replay.sent();
+            assert!(!sent.contains(&delete), "the DELETE was never sent");
         }
 
         /// A status from the delete step is the instrument declining before the `DELETE`
