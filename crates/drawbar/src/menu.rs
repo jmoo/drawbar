@@ -60,6 +60,11 @@ pub enum Command {
     Guide,
     WhatsNew,
     Welcome,
+    ReportProblem,
+    SendFeedback,
+    #[cfg(target_arch = "wasm32")]
+    ShareUsage,
+    Privacy,
     CopyLog,
     About,
 }
@@ -140,6 +145,11 @@ pub fn label(command: Command) -> &'static str {
         Command::Guide => "User guide",
         Command::WhatsNew => "What's new",
         Command::Welcome => "Welcome",
+        Command::ReportProblem => "Report a problem…",
+        Command::SendFeedback => "Send feedback…",
+        #[cfg(target_arch = "wasm32")]
+        Command::ShareUsage => "Share anonymous usage",
+        Command::Privacy => "Privacy",
         Command::CopyLog => "Copy activity log",
         Command::About => "About drawbar",
     }
@@ -245,8 +255,14 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         Do(C::WhatsNew),
         Do(C::Welcome),
         Rule,
-        Do(C::CopyLog),
+        Do(C::ReportProblem),
+        Do(C::SendFeedback),
     ];
+    // The desktop sends no usage counts, so it has no switch for them.
+    #[cfg(target_arch = "wasm32")]
+    help.push(Do(C::ShareUsage));
+    help.extend([Do(C::Privacy), Rule]);
+    help.push(Do(C::CopyLog));
     // The Mac's About is the first item of the app menu.
     if platform != Platform::Mac {
         help.push(Do(C::About));
@@ -503,6 +519,27 @@ impl DrawbarApp {
                 place.and_then(|at| at.reveal.as_ref()).map(|_| plain)?
             }
             Command::AllFiles => check(self.browser.folders.all_files),
+            Command::ReportProblem | Command::SendFeedback | Command::Privacy => plain,
+            #[cfg(target_arch = "wasm32")]
+            Command::ShareUsage => {
+                use crate::telemetry::Sharing;
+                let sharing = crate::telemetry::sharing();
+                let why = match sharing {
+                    Sharing::On | Sharing::Off => {
+                        "Counts of visits, errors and instrument operations, with no names, \
+                         files or identifiers. See Privacy."
+                    }
+                    Sharing::Refused => {
+                        "Your browser asks sites not to track it, so drawbar sends nothing."
+                    }
+                    Sharing::Elsewhere => "Only drawbar.app sends usage counts.",
+                };
+                Offer {
+                    enabled: matches!(sharing, Sharing::On | Sharing::Off),
+                    hint: Some(why),
+                    ..check(sharing == Sharing::On)
+                }
+            }
             Command::Save | Command::Export => active.map(|_| plain)?,
             Command::Revert => {
                 let unsaved = self
@@ -638,6 +675,26 @@ impl DrawbarApp {
             Command::Guide => ctx.open_url(egui::OpenUrl::new_tab(crate::shell::GUIDE)),
             Command::WhatsNew => self.whats_new(ctx),
             Command::Welcome => self.splash.open_welcome(),
+            Command::ReportProblem => {
+                self.report = Some(crate::report::Report::problem(
+                    &self.device,
+                    &self.workspace,
+                    self.store.as_ref(),
+                ))
+            }
+            Command::SendFeedback => {
+                self.report = Some(crate::report::Report::feedback(
+                    &self.device,
+                    &self.workspace,
+                    self.store.as_ref(),
+                ))
+            }
+            #[cfg(target_arch = "wasm32")]
+            Command::ShareUsage => {
+                let on = crate::telemetry::sharing() == crate::telemetry::Sharing::On;
+                crate::telemetry::share(!on);
+            }
+            Command::Privacy => ctx.open_url(egui::OpenUrl::new_tab(crate::telemetry::PRIVACY)),
             Command::CopyLog => acts.push(Act::CopyLog),
             Command::About => {
                 self.about = Some(crate::about::About::new(

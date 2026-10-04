@@ -65,13 +65,31 @@
                   '';
               clippy = pkgs.nord.clippy;
               rustdoc = pkgs.nord.rustdoc;
+              telemetry =
+                pkgs.runCommand "check-telemetry"
+                  {
+                    nativeBuildInputs = [ pkgs.nodejs ];
+                    src = lib.fileset.toSource {
+                      fileset = lib.fileset.unions [
+                        ./crates/drawbar/telemetry.json
+                        ./docs/src/privacy.md
+                        ./js/telemetry
+                      ];
+                      root = ./.;
+                    };
+                  }
+                  ''
+                    node --test "$src/js/telemetry/test/check.test.js"
+                    touch "$out"
+                  '';
             };
 
             devShells.default = pkgs.lib.crane.devShell {
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/* (see their `nix-deps` lines), plus `mdbook serve docs`.
+              # scripts/* (see their `nix-deps` lines), `mdbook serve docs`, and the
+              # collector in js/telemetry (its tests, `wrangler dev`).
               packages = with pkgs; [
                 cargo-about
                 curl
@@ -79,8 +97,10 @@
                 jq
                 mdbook
                 mdbook-mermaid
+                nodejs
                 (python3.withPackages (python: [ python.fonttools ]))
                 rust-analyzer
+                wrangler
               ];
             };
 
