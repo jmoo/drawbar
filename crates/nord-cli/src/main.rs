@@ -14,7 +14,8 @@
 //!
 //! `inspect`, `verify`, `edit` and `convert` dispatch on the file format, so they sit at
 //! the top level. `edit` is how the formats with no noun of their own (the Stage bodies,
-//! the Sample Editor project) are edited, and `convert` can turn one class into another.
+//! the Sample Editor project) are edited, and `convert` writes a sample instrument in
+//! another of its generations.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own.

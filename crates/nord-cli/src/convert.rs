@@ -147,7 +147,7 @@ fn choices(args: &ConvertArgs) -> Choices {
 }
 
 /// Plan, report, and write unless a check refuses. A dry run makes every check and
-/// writes nothing, so it fails exactly where the conversion would.
+/// writes nothing, so it fails where the conversion would.
 pub fn run(ui: &Ui, args: ConvertArgs) -> Result<(), String> {
     let layout = args.to.layout();
     let origin = slot::target(&args.input)?;
@@ -178,9 +178,6 @@ pub fn run(ui: &Ui, args: ConvertArgs) -> Result<(), String> {
             plan.report().dropped.len()
         ));
     }
-    if args.dry_run {
-        return Ok(());
-    }
     let path = output(&origin, args.out.as_deref(), args.to)?;
     if let slot::Target::File(input) = &origin {
         if same_file(input, &path) {
@@ -196,7 +193,17 @@ pub fn run(ui: &Ui, args: ConvertArgs) -> Result<(), String> {
             ui.danger("replace"),
             path.display()
         ));
-        ui.confirm(args.yes)?;
+        // A dry run asks nothing, so only `--yes` answers it.
+        match args.dry_run {
+            true if !args.yes => {
+                return Err(format!("refusing to proceed without {}", ui.bold("--yes")))
+            }
+            true => {}
+            false => ui.confirm(args.yes)?,
+        }
+    }
+    if args.dry_run {
+        return Ok(());
     }
     let converted = plan.apply().map_err(|e| e.to_string())?;
     let out = nord_format::to_bytes(&nord_format::Entity::Sample(converted))
@@ -391,10 +398,20 @@ mod tests {
         let input = v4(&dir, Holds::Nothing);
         let path = input.to_string_lossy().into_owned();
         let before = std::fs::read(&input).unwrap();
-        let onto = args(&[&path, "--to", "nsmp4", "--unverified", "-o", &path, "--yes"]);
-        assert!(run(&Ui::piped(), onto)
-            .unwrap_err()
-            .contains("never overwrites"));
+        for dry in [None, Some("--dry-run")] {
+            let mut line = vec![
+                &*path,
+                "--to",
+                "nsmp4",
+                "--unverified",
+                "-o",
+                &path,
+                "--yes",
+            ];
+            line.extend(dry);
+            let err = run(&Ui::piped(), args(&line)).unwrap_err();
+            assert!(err.contains("never overwrites"), "{err}");
+        }
         assert_eq!(std::fs::read(&input).unwrap(), before);
 
         let other = dir.join("other.nsmp");
@@ -408,6 +425,8 @@ mod tests {
             run(&Ui::piped(), args(&line))
         };
         assert!(replace(false).unwrap_err().contains("--yes"));
+        let dry = args(&[&path, "--to", "nsmp", "--force", "-o", &target, "--dry-run"]);
+        assert!(run(&Ui::piped(), dry).unwrap_err().contains("--yes"));
         assert_eq!(std::fs::read(&other).unwrap(), b"keep");
         replace(true).unwrap();
         assert_ne!(std::fs::read(&other).unwrap(), b"keep");
