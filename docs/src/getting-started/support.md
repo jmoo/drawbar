@@ -10,7 +10,7 @@ sample files. Connecting other instruments over USB has not been tried.
 |---|---|---|
 | Electro 5 programs, live slots, set lists and settings | View, edit, transfer | Yes |
 | Stage 2, 3 and 4 programs and live slots, and Stage 3 and 4 presets | View, edit | No |
-| Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, audition, transfer | Playback of v2 files. Files encoded as v3 or v4 have not been played |
+| Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, audition, transfer. nord-cli also converts between the generations | Playback of v2 files encoded from WAVs. Files encoded as v3 or v4, and files converted from another generation, have not been played |
 | Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs, transfer | Trimmed, built and re-encoded libraries play, mono and stereo, across every key they cover. A library built without a template sounds the same as one built with one. Renames, retunes, remaps and a narrowed key range have not been played |
 | Electro 5 bundles (`.ne5pbundle`, `.ne5tbundle`) | Import to a folder, export from this computer or the instrument. Only uncompressed bundles open, as Nord Sound Manager writes them | Nord Sound Manager opens the bundles drawbar writes and sends them to the instrument. Bundles made from the instrument match what nord-cli makes. A piano or sample built in drawbar has not yet gone to the instrument in a bundle |
 | Other Nord files | Recognized and kept byte for byte, without editing | |
