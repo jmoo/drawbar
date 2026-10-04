@@ -35,7 +35,7 @@ stay with their library and come back when you open it again.
 
 This works on the desktop and in Chrome and Edge. Firefox and Safari cannot open
 a folder. Brave can once you turn on `brave://flags/#file-system-access-api` and
-relaunch it.
+relaunch it. In Brave, saving or renaming a large piano takes a little longer.
 
 The first time you open a folder in the browser, drawbar reminds you not to open
 it in the desktop app at the same time.

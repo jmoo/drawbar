@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use super::exec::{self, Children, Fs, Kind, Staged, TEMP, TMP, WORKING};
+use super::exec::{self, Children, Fs, Kind, Over, Staged, TEMP, TMP, WORKING};
 use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
 
@@ -575,7 +575,8 @@ impl Fs for Disk {
         }
     }
 
-    async fn place(&mut self, temp: PathBuf, path: &str, over: bool) -> io::Result<()> {
+    async fn place(&mut self, temp: PathBuf, path: &str, over: Over) -> io::Result<()> {
+        let over = over.replaces();
         if !over {
             if let Err(e) = self.free(path) {
                 let _ = fs::remove_file(&temp);
