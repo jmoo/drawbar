@@ -479,7 +479,9 @@ Nor is an occupant held whole. Before a write replaces one, the worker reads it
 back through `op::read_into` into a file, a transfer chunk at a time, so it can put
 it back through `write_from` if the write fails (`worker::put`). It closes the
 file, and syncs its folder, before the delete, so a process that dies with the
-slot empty leaves the occupant on disk. The file (`device::scratch`) is in the
+slot empty leaves the occupant on disk. A power cut is covered only where the
+folder sync is: on macOS and Linux, not on Windows, and not in the browser, which
+offers no sync at all. The file (`device::scratch`) is in the
 library's `.drawbar/tmp/` on the desktop while the library may be written, made
 where missing, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
 otherwise, never the system's temporary folder, and in `.drawbar/tmp/` of the
@@ -607,8 +609,9 @@ contents or the new, never part of either.
 ### On the desktop
 
 `replace` writes the temporary file, syncs it to the disk, renames it over the
-target, and then syncs the target's folder, so the rename survives a power cut
-as well as a crash. `create` does the same with a hard link in place of the
+target, and then syncs the target's folder, so on macOS and Linux the rename
+survives a power cut as well as a crash. Windows cannot open a folder to sync it,
+so there a rename survives a crash but may not survive a power cut. `create` does the same with a hard link in place of the
 rename, because a link refuses a name already taken; on a volume without links
 it falls back to a check and a rename. A rename is refused where another entry
 is at the target, except a rename that only changes case, which finds the entry
