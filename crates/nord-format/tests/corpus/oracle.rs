@@ -567,27 +567,42 @@ fn wide_renders(s: &Specimen) -> Result<(), String> {
 
 /// The twin law. Of an editor render and its renders in the other generations, the
 /// render at the finer shift, converted to another's generation, is that render. Each
-/// converted stroke decodes to the source's fields at the target's shift; its record
-/// stream and shift are the twin's, and so is its statistic B unless the report says
-/// the sign was inferred; and where the report is empty, the whole file is the twin's.
+/// converted stroke decodes to the source's fields at the target's shift, and its
+/// record stream, shift and statistic B are the twin's. Where the report drops and
+/// changes nothing, the whole file is the twin's, except bytes the report says a rule
+/// filled in.
 ///
 /// The choices are the editor's own: a loop mark is pushed to the narrow floor, and a
-/// zone gain past the narrow record is clamped, which the report states.
+/// zone gain past the narrow record is clamped, which the report states. A wide
+/// render the sidecar lists under `twin_sign_differs` holds the other sign of
+/// statistic B from the one inferred from the narrow render's content.
 ///
 /// A stream past the reach of the stroke directory's 16-bit word pointers is refused:
 /// the editor writes them, and this crate's writer does not.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn twin_law(s: &Specimen) -> Result<(), String> {
-    use nord_format::convert::{self, Choices, Field, GainChoice, LoopMarkChoice, Reason};
-    use nord_format::convert::{NameChoice, OverlapChoice, Target, ZoneField};
+    use nord_format::convert::{self, Choices, GainChoice, LoopMarkChoice, NameChoice};
+    use nord_format::convert::{OverlapChoice, Target};
 
     if s.sidecar.wide_renders.is_empty() {
         return Ok(());
     }
-    let mut renders = vec![(s.bytes.to_vec(), samples::parse(s.bytes)?)];
+    let own = s.path.file_name().unwrap().to_string_lossy().into_owned();
+    let mut renders = vec![(own, s.bytes.to_vec(), samples::parse(s.bytes)?)];
     for name in &s.sidecar.wide_renders {
-        renders.push(related(s.path, name)?);
+        let (bytes, entity) = related(s.path, name)?;
+        renders.push((name.clone(), bytes, entity));
+    }
+    if let Some(stray) = s
+        .sidecar
+        .twin_sign_differs
+        .iter()
+        .find(|name| !s.sidecar.wide_renders.contains(name))
+    {
+        return Err(format!(
+            "twin_sign_differs names {stray}, which is no wide render"
+        ));
     }
     let choices = Choices {
         gain: Some(GainChoice::Clamp),
@@ -595,22 +610,11 @@ fn twin_law(s: &Specimen) -> Result<(), String> {
         overlap: Some(OverlapChoice::Lower),
         loop_mark: Some(LoopMarkChoice::Push),
     };
-    let lattices = |sample: &Sample| -> Result<Vec<nsmp::codec::Lattice>, String> {
-        let layout = sample.layout().context("layout")?;
-        let streams = sample.stroke_streams();
-        let peak = samples::peak(&streams, layout) as u32;
-        sample
-            .zones()
-            .context("zones")?
-            .iter()
-            .map(|z| nsmp::codec::lattice(z.stream, z.at, layout, peak).context("lattice"))
-            .collect()
-    };
     let mut wrong = Vec::new();
-    for (_, source) in &renders {
-        for (twin_bytes, twin) in &renders {
+    for (_, _, source) in &renders {
+        for (twin_name, twin_bytes, twin) in &renders {
             let (from, to) = (samples::sample(source)?, samples::sample(twin)?);
-            let (finer, coarser) = (lattices(from)?, lattices(to)?);
+            let (finer, coarser) = (samples::lattices(from)?, samples::lattices(to)?);
             let layout = to.layout().context("layout")?;
             if from.layout().context("layout")? == layout
                 || finer.iter().zip(&coarser).any(|(f, c)| f.shift > c.shift)
@@ -618,8 +622,7 @@ fn twin_law(s: &Specimen) -> Result<(), String> {
                 continue;
             }
             let pair = format!("{} as {}", from.generation(), to.generation());
-            let reach = nsmp::codec::WRAP * layout.word();
-            let past_reach = from.stroke_streams().iter().any(|(_, st)| st.len() > reach);
+            let past_reach = samples::past_directory_reach(from)?;
             let plan = convert::plan(source, Target::Nsmp(layout), &choices);
             let converted = plan.and_then(|plan| {
                 let report = plan.report().clone();
@@ -639,8 +642,11 @@ fn twin_law(s: &Specimen) -> Result<(), String> {
                 }
                 (Ok(converted), false) => converted,
             };
-            let ours = lattices(&out)?;
+            let sign_differs = s.sidecar.twin_sign_differs.contains(twin_name)
+                && from.layout().context("layout")? == nsmp::codec::Layout::V2;
+            let ours = samples::lattices(&out)?;
             let (out_streams, twin_streams) = (out.stroke_streams(), to.stroke_streams());
+            let mut signs_differ = false;
             for (index, ((source, ours), (our_stroke, their_stroke))) in finer
                 .iter()
                 .zip(&ours)
@@ -648,45 +654,153 @@ fn twin_law(s: &Specimen) -> Result<(), String> {
                 .enumerate()
             {
                 let at = format!("{pair} zone {index}");
-                let rise = ours.shift - source.shift;
-                let decoded = source
-                    .fields
-                    .iter()
-                    .zip(&ours.fields)
-                    .all(|(f, o)| f >> rise == *o);
-                if !decoded || (ours.fields.len() != source.fields.len() && source.mark.is_none()) {
-                    wrong.push(format!("{at}: does not decode to the source's fields"));
+                if let Err(e) = samples::holds_fields(source, ours) {
+                    wrong.push(format!("{at}: {e}"));
                 }
                 let header = layout.header_len();
                 let (ours, theirs) = (our_stroke.1, their_stroke.1);
                 if ours.get(header..) != theirs.get(header..) || ours.get(12) != theirs.get(12) {
                     wrong.push(format!("{at}: the record stream or shift differs"));
                 }
-                let inferred = report.from_rules.iter().any(|l| {
-                    l.field
-                        == Field::Zone {
-                            index,
-                            field: ZoneField::Peak,
-                        }
-                        && l.reason == Reason::SignFromContent
-                });
-                if !inferred && ours.get(13..16) != theirs.get(13..16) {
-                    wrong.push(format!("{at}: statistic B differs"));
+                let peak = |stroke: &[u8]| nsmp::codec::peak(stroke, layout);
+                match (peak(ours) == peak(theirs), sign_differs) {
+                    (true, _) => {}
+                    (false, true) if peak(ours).map(i32::abs) == peak(theirs).map(i32::abs) => {
+                        signs_differ = true
+                    }
+                    (false, _) => wrong.push(format!(
+                        "{at}: statistic B is {:?}, the twin's {:?}",
+                        peak(ours),
+                        peak(theirs)
+                    )),
                 }
             }
+            if sign_differs && !signs_differ {
+                wrong.push(format!("{pair}: twin_sign_differs, and every sign agrees"));
+            }
+            let strokes = out_streams.len();
             let bytes = nord_format::to_bytes(&Entity::Sample(out)).context("write")?;
-            if report.is_empty() && bytes != *twin_bytes {
-                let differs = match bytes.len() == twin_bytes.len() {
-                    true => format!("at {:#x?}", samples::moved(&bytes, twin_bytes)),
-                    false => format!("in length, {} and {}", bytes.len(), twin_bytes.len()),
-                };
-                wrong.push(format!(
-                    "{pair}: nothing is reported, and the file differs {differs}"
-                ));
+            let compared = report.dropped.is_empty() && report.changed.is_empty();
+            if compared {
+                let reparsed = samples::parse(&bytes)?;
+                let filled = filled_by_rules(&report, sign_differs, strokes);
+                if let Err(e) = same_file(samples::sample(&reparsed)?, to, &filled) {
+                    wrong.push(format!("{pair}: nothing is dropped or changed, and {e}"));
+                } else if filled.is_empty() && bytes != *twin_bytes {
+                    wrong.push(format!("{pair}: the bytes differ outside every section"));
+                }
             }
         }
     }
     ensure!(wrong.is_empty(), "{}", wrong.join("; "));
+    Ok(())
+}
+
+/// A byte range of one section, by tag, or of one zone's stroke.
+type Filled = Vec<(String, std::ops::Range<usize>)>;
+
+/// The bytes the report says a rule filled in, where a twin may hold something else.
+fn filled_by_rules(
+    report: &nord_format::convert::Report,
+    sign_differs: bool,
+    strokes: usize,
+) -> Filled {
+    use nord_format::convert::{Field, Reason, ZoneField};
+
+    let stroke = |index: usize| format!("stk {index}");
+    let mut filled: Filled = Vec::new();
+    for line in &report.from_rules {
+        let ranges: Vec<(String, std::ops::Range<usize>)> = match &line.field {
+            Field::Category => vec![("cat".into(), 0..1)],
+            Field::SubCategory => vec![("cat".into(), 1..2)],
+            Field::Timbre => vec![("cat".into(), 2..3)],
+            Field::Envelope => vec![("cat".into(), 3..4)],
+            Field::Motion => vec![("cat".into(), 4..5)],
+            Field::Production | Field::Origin => vec![("cat".into(), 5..usize::MAX)],
+            Field::VelocityToAmplitude => vec![("sty".into(), 4..5)],
+            Field::VelocityToTimbre => vec![("sty".into(), 5..6)],
+            Field::Bytes { section, range, .. } => vec![(section.clone(), range.clone())],
+            Field::Zone {
+                index,
+                field: ZoneField::LoopDecay,
+            } => vec![(stroke(*index), 62..66)],
+            Field::Zone {
+                index,
+                field: ZoneField::Gain,
+            } => match line.reason {
+                Reason::NarrowGain => vec![(stroke(*index), 9..12), (stroke(*index), 57..61)],
+                _ => {
+                    let record = nsmp::zone::RECORDS_AT + nsmp::zone::RECORD_LEN * index;
+                    vec![("map".into(), record + 3..record + 6)]
+                }
+            },
+            _ => vec![],
+        };
+        filled.extend(ranges);
+    }
+    if sign_differs {
+        filled.extend((0..strokes).map(|index| (stroke(index), 13..16)));
+    }
+    filled
+}
+
+/// `ours` against `theirs` header by header and section by section, skipping `filled`.
+fn same_file(ours: &Sample, theirs: &Sample, filled: &Filled) -> Result<(), String> {
+    let header = |sample: &Sample| match sample {
+        Sample::V2(file) => file.header.clone(),
+        Sample::V3(file) => file.header.clone(),
+    };
+    ensure!(
+        header(ours) == header(theirs),
+        "the container header differs"
+    );
+    let sections = |sample: &Sample| -> Vec<(String, u32, Vec<u8>)> {
+        let mut strokes = 0;
+        let mut named = |tag: String| match tag.as_str() {
+            "stk" => {
+                strokes += 1;
+                format!("stk {}", strokes - 1)
+            }
+            _ => tag,
+        };
+        match sample {
+            Sample::V2(file) => file
+                .body
+                .sections
+                .iter()
+                .map(|s| (named(s.tag_str()), u32::from(s.version), s.payload.clone()))
+                .collect(),
+            Sample::V3(file) => file
+                .body
+                .sections
+                .iter()
+                .map(|s| (named(s.tag_str()), s.version, s.payload.clone()))
+                .collect(),
+        }
+    };
+    let (ours, theirs) = (sections(ours), sections(theirs));
+    ensure!(
+        ours.len() == theirs.len(),
+        "{} sections, the twin's {}",
+        ours.len(),
+        theirs.len()
+    );
+    for ((tag, version, payload), (their_tag, their_version, their_payload)) in
+        ours.iter().zip(&theirs)
+    {
+        ensure!(
+            (tag, version) == (their_tag, their_version) && payload.len() == their_payload.len(),
+            "section {tag} v{version} of {} bytes, the twin's {their_tag} v{their_version} of {}",
+            payload.len(),
+            their_payload.len()
+        );
+        let skipped = |at: usize| filled.iter().any(|(t, r)| t == tag && r.contains(&at));
+        if let Some(at) =
+            (0..payload.len()).find(|&at| payload[at] != their_payload[at] && !skipped(at))
+        {
+            return Err(format!("section {tag} differs at byte {at}"));
+        }
+    }
     Ok(())
 }
 

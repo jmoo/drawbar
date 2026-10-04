@@ -156,6 +156,7 @@ fn a_sidecar_stating_every_key_at_its_declared_type_loads() {
         "traits": ["zone_top_notes_overridden"],
         "source": "projects/specimen.nsmpproj",
         "wide_renders": ["specimen.nsmp3"],
+        "twin_sign_differs": ["specimen.nsmp3"],
         "edited_from": "before.nsmp",
         "audio_differs_from": "base.nsmp",
         "render": {"frames": 4409, "channels": 2, "secondary_start": 551.128186,
