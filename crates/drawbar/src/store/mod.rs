@@ -485,6 +485,15 @@ pub enum Source {
     Edited(Arc<OnDisk>, Arc<Rewrite>),
 }
 
+/// A working copy the index names that holds an edit older than the save it goes with,
+/// and the copy of what that save writes. A save writes `copy` over it before the file,
+/// so a save that landed never leaves the index naming an older edit.
+#[derive(Debug)]
+pub struct Stale {
+    pub name: String,
+    pub copy: Vec<u8>,
+}
+
 /// What the app asks a backend to do. Each runs after the one sent before it.
 ///
 /// Every command that writes first makes `.drawbar/` where there is none and takes the
@@ -544,6 +553,7 @@ pub enum Cmd {
         path: LibPath,
         bytes: Vec<u8>,
         expect: Option<Fingerprint>,
+        stale: Option<Stale>,
     },
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].
@@ -557,6 +567,7 @@ pub enum Cmd {
         from: Arc<OnDisk>,
         edit: Arc<Rewrite>,
         expect: Fingerprint,
+        stale: Option<Stale>,
     },
     /// Copy a file to `path`, as [`Cmd::Save`] writes one: a new file when `expect` is
     /// `None`, otherwise over a file that must still hold what `expect` says. Nothing is

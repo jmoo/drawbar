@@ -119,12 +119,13 @@ read-only.
 
 ### Working copies, `tmp/` and `lock`
 
-- `working/<id>-<generation>` holds an unsaved edit. A working copy is never
-  rewritten: a new edit gets a new generation, and the old file is deleted once
-  the index stops naming it. One that `keeps: Bytes` holds the asset's bytes
-  whole. One that `keeps: Edit` holds an edit of a piano library or sample
-  instrument resting in its file, as RON text under a version of its own
-  (`rewrite::Edit::working`):
+- `working/<id>-<generation>` holds an unsaved edit. A new edit gets a new
+  generation, and the old file is deleted once the index stops naming it. A copy
+  is rewritten only by a save of a later edit, just before the save lands (see
+  [The order of a pass](#the-order-of-a-pass)). One that `keeps: Bytes` holds
+  the asset's bytes whole. One that `keeps: Edit` holds an edit of a piano
+  library or sample instrument resting in its file, as RON text under a version
+  of its own (`rewrite::Edit::working`):
 
   ```text
   (
@@ -634,9 +635,12 @@ order:
 
 So a working copy exists before an index names it, and is deleted only after
 the index stops naming it. An unsaved edit's working copy is dropped only once
-its save has answered. A crash after a save lands and before the next index
-leaves a working copy equal to the file, and the next open sees that and does
-not count the asset as unsaved.
+its save has answered. A save whose working copy holds an older edit carries it
+(`store::Stale`) and writes the copy of what it saves over that copy before the
+file, so a crash after a save lands and before the next index leaves a working
+copy of what the file holds. The next open sees that and does not count the asset
+as unsaved. A copy newer than the save is left alone, and after a crash it comes
+back over the file as a change made outside drawbar would.
 
 A save over a file sends the file's fingerprint and lands only where the file
 still holds it: its stat is the one taken, or else its CRC is. A file that moved

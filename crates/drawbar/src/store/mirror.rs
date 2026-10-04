@@ -15,7 +15,7 @@ use super::exec::{too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stat, MOST_BYTES,
+    LibPath, Listing, Opened, Rescue, Source, Stale, Stat, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -2120,6 +2120,10 @@ impl Store {
             if record.saving || unsettled(waiting, &path) {
                 continue;
             }
+            let stale = workspace.kept_edit(id).and_then(|(edit, stamp)| {
+                let copy = || edit.working().ok();
+                stale(id, record.working.as_ref(), Keeps::Edit, stamp, copy)
+            });
             let Some((from, edit)) = workspace.send_edit(id) else {
                 continue;
             };
@@ -2130,6 +2134,7 @@ impl Store {
                 from,
                 edit,
                 expect,
+                stale,
             });
         }
     }
@@ -2625,6 +2630,13 @@ impl Store {
                 .records
                 .remove(&entity.id)
                 .and_then(|record| record.working);
+            let stale = stale(
+                entity.id,
+                working.as_ref(),
+                Keeps::Bytes,
+                entity.saved.stamp,
+                || Some(bytes()),
+            );
             self.records.insert(
                 entity.id,
                 Record {
@@ -2639,6 +2651,7 @@ impl Store {
                 path: path.clone(),
                 bytes: bytes(),
                 expect: None,
+                stale,
             });
             return true;
         }
@@ -2672,18 +2685,26 @@ impl Store {
         let save = (unsaved && !record.saving).then(|| {
             record.saved = entity.saved.stamp;
             record.saving = true;
-            record.fingerprint.filter(|_| !missing)
+            let stale = stale(
+                entity.id,
+                record.working.as_ref(),
+                Keeps::Bytes,
+                entity.saved.stamp,
+                || Some(bytes()),
+            );
+            (record.fingerprint.filter(|_| !missing), stale)
         });
         if let Some(from) = from {
             self.cache.moved(&from, path);
             self.rename(from, path.clone(), Vec::new());
         }
-        if let Some(expect) = save {
+        if let Some((expect, stale)) = save {
             self.write(Cmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect,
+                stale,
             });
         }
         !waits
@@ -2932,6 +2953,23 @@ impl Record {
             ..Record::of_file(found.path.clone(), fingerprint)
         }
     }
+}
+
+/// `id`'s working copy, where it keeps `keeps` from before `stamp`, the stamp of the save
+/// about to be sent, with `copy` to write over it. A copy of the same edit already
+/// matches the file the save writes, and a newer one holds edits the save does not.
+fn stale(
+    id: u64,
+    working: Option<&Kept>,
+    keeps: Keeps,
+    stamp: u64,
+    copy: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<Stale> {
+    let held = working.filter(|held| held.copy.keeps == keeps && held.stamp < stamp)?;
+    Some(Stale {
+        name: working_name(id, held.copy.generation),
+        copy: copy()?,
+    })
 }
 
 /// The paths a change to the folders acts on, where it was and where it goes.

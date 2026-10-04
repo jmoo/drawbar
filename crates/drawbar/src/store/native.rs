@@ -744,6 +744,7 @@ mod tests {
                     from,
                     edit,
                     expect: Fingerprint::unread(stat),
+                    stale: None,
                 },
             )
         });
@@ -874,6 +875,7 @@ mod tests {
                 path: LibPath::root().join("Saved.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: None,
+                stale: None,
             },
         );
         assert!(
@@ -929,6 +931,7 @@ mod tests {
                 path: linked("new.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: None,
+                stale: None,
             },
         );
         assert!(
@@ -942,6 +945,7 @@ mod tests {
                 path: linked("x.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: Some(Fingerprint::unread(x)),
+                stale: None,
             },
         );
         assert!(

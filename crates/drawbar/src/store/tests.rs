@@ -501,6 +501,73 @@ fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
     assert_eq!(entity.bytes, edited, "and the edit over it");
 }
 
+/// ⚠️ A save lands before the index that drops its working copy. A crash in between
+/// leaves a copy of an edit older than the save, and the next open must take the file
+/// as saved rather than offer the older edit back over it.
+#[test]
+fn a_crash_right_after_a_save_brings_back_the_save_and_not_an_older_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let older = with_gain(&session.bytes(id), "96");
+    let saved = with_gain(&older, "12");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, older.clone(), log);
+    session.autosave();
+    session.settle();
+    assert_eq!(
+        rows(&root)[&id].working.map(|copy| copy.keeps),
+        Some(Keeps::Bytes),
+        "the older edit is kept as a working copy"
+    );
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
+    drop(session);
+    assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
+
+    let again = Session::open(&root);
+    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
+    let entity = again.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, saved, "the save, not the older edit");
+    assert!(!entity.is_unsaved());
+}
+
+/// A working copy kept while a save waited for the one before it holds edits newer than
+/// that save, and is never written over by it: after a crash, the newer edit comes back.
+#[test]
+fn a_save_never_writes_over_a_working_copy_newer_than_itself() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let first = with_gain(&session.bytes(id), "96");
+    let second = with_gain(&first, "12");
+    let newer = with_gain(&second, "40");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, first, log);
+    workspace.mark_saved(id);
+    assert!(!session.settled(), "the first save is in flight");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, second.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, newer.clone(), log);
+    session.autosave();
+    while !session.settled() {
+        assert!(session.next(), "the saves answered");
+    }
+    drop(session);
+    assert_eq!(root.read("untitled.ne5p"), second, "the second save landed");
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, newer, "the newer edit came back");
+}
+
 #[test]
 fn a_file_renamed_outside_keeps_its_id_and_tags() {
     let root = Temp::new();
@@ -4207,6 +4274,38 @@ fn a_quit_between_an_edit_copy_and_its_index_keeps_the_edit_the_index_names() {
     };
     crash(&old_index, "Vibes");
     crash(&new_index, "Bells");
+}
+
+/// ⚠️ An edit's save lands before the index that drops its working copy. A crash in
+/// between leaves a copy of an older edit over the saved file, and the next open must take
+/// the file as saved rather than offer the older edit back over it.
+#[test]
+fn a_crash_right_after_an_edit_is_saved_brings_back_the_save_and_not_an_older_edit() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let named =
+        |name: &str| crate::rewrite::Edit::Sample(vec![("name".to_string(), name.to_string())]);
+    session.bench.workspace.hold_edit(id, Some(named("Vibes")));
+    session.autosave();
+    session.settle();
+    assert_eq!(
+        copies(&root)[&id].keeps,
+        Keeps::Edit,
+        "the older edit is kept"
+    );
+    session.rename_resting(id, "Bells");
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
+    drop(session);
+    let saved = crate::document::sample::apply(&bytes, &[("name".into(), "Bells".into())]);
+    assert!(root.read("Zoned.nsmp") == saved.unwrap(), "the save landed");
+
+    let again = Session::listed(&root);
+    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
+    let workspace = &again.bench.workspace;
+    assert_eq!(workspace.edit(id), None, "the save, not the older edit");
+    assert!(!workspace.get(id).unwrap().is_unsaved());
 }
 
 /// A working copy of an edit that this build does not read is never taken for no edit:

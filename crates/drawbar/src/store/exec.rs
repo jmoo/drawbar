@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
     names, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened,
-    Outside, Source, Stat,
+    Outside, Source, Stale, Stat,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -304,8 +304,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             path,
             bytes,
             expect,
+            stale,
         } => {
-            let result = save(fs, &path, &bytes, expect).await;
+            let result = save(fs, &path, &bytes, expect, stale).await;
             Some(Event::Saved { id, path, result })
         }
         Cmd::Rewrite {
@@ -314,8 +315,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             from,
             edit,
             expect,
+            stale,
         } => {
-            let result = rewrite_over(fs, &path, &from, &edit, expect).await;
+            let result = rewrite_over(fs, &path, &from, &edit, expect, stale).await;
             Some(Event::Rewritten { id, path, result })
         }
         Cmd::Move { from, to } => {
@@ -1428,17 +1430,34 @@ async fn still(fs: &impl Fs, path: &LibPath, expect: &Fingerprint) -> io::Result
     Ok(Some((stat.len, fs.crc(path.as_str()).await?) == (len, crc)))
 }
 
+/// Write a stale working copy over with the copy of the save about to be placed.
+async fn freshen(fs: &mut impl Fs, stale: Option<Stale>) -> Result<(), Failure> {
+    let Some(Stale { name, copy }) = stale else {
+        return Ok(());
+    };
+    put(
+        fs,
+        &format!("{WORKING}/{name}"),
+        Staged::Bytes(&copy),
+        Over::Anything,
+    )
+    .await
+    .map_err(|e| Failure::Io(format!("keeping the edit: {e}")))
+}
+
 async fn save(
     fs: &mut impl Fs,
     path: &LibPath,
     bytes: &[u8],
     expect: Option<Fingerprint>,
+    stale: Option<Stale>,
 ) -> Result<Fingerprint, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
     let over = match expect {
         None => Over::Nothing,
         Some(expect) => held(fs, path, &expect).await?,
     };
+    freshen(fs, stale).await?;
     put(fs, path.as_str(), Staged::Bytes(bytes), over)
         .await
         .map_err(refusal)?;
@@ -1458,8 +1477,10 @@ async fn rewrite_over(
     from: &OnDisk,
     edit: &Rewrite,
     expect: Fingerprint,
+    stale: Option<Stale>,
 ) -> Result<Found, Failure> {
     let over = held(fs, path, &expect).await?;
+    freshen(fs, stale).await?;
     let wrote = put(fs, path.as_str(), Staged::Edited(from, edit), over).await;
     wrote.map_err(|e| match rewrite::is_changed(&e) {
         true => Failure::Moved,
@@ -1844,7 +1865,13 @@ mod tests {
             ..Claimed::of([("Grand.ne5p".to_string(), 10)])
         };
         let expect = Fingerprint::unread(stat(10));
-        let saved = now(save(&mut fs, &path("Grand.ne5p"), b"new", Some(expect)));
+        let saved = now(save(
+            &mut fs,
+            &path("Grand.ne5p"),
+            b"new",
+            Some(expect),
+            None,
+        ));
         assert_eq!(saved, Err(Failure::Moved));
         assert_eq!(fs.files["Grand.ne5p"], 99, "what was written there stays");
     }
@@ -2182,6 +2209,7 @@ mod tests {
             path: path("a/new.ne5p"),
             bytes: vec![0; 3],
             expect: None,
+            stale: None,
         });
         let mut listed = Vec::new();
         let mut saved = false;
