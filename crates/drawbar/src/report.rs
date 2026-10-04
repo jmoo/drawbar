@@ -2,19 +2,15 @@
 //! collector only when they press Send. It is sent whatever the sharing switch says,
 //! and it shows everything it attaches before it goes.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-#[cfg(target_arch = "wasm32")]
 use crate::device::Device;
 use crate::log::Log;
 use crate::sheet;
-#[cfg(target_arch = "wasm32")]
 use crate::store::Store;
 use crate::telemetry::{self, Undelivered};
-#[cfg(target_arch = "wasm32")]
 use crate::workspace::Workspace;
 
 /// The widest the sheet grows.
@@ -38,7 +34,6 @@ const CONTACT: usize = 200;
 const LOG: usize = 60_000;
 
 /// How long to wait before trying again once a send found no one, in seconds.
-#[cfg(target_arch = "wasm32")]
 const RETRY: f64 = 15.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,7 +61,7 @@ impl Kind {
 /// Where the send is.
 enum State {
     Drafting,
-    Sending(Rc<RefCell<Option<Result<(), Undelivered>>>>),
+    Sending(Arc<Mutex<Option<Result<(), Undelivered>>>>),
     /// The collector could not be reached; the draft is kept and sent again once the
     /// browser is online and [`RETRY`] has passed.
     Waiting {
@@ -111,7 +106,6 @@ pub struct Report {
     state: State,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl Report {
     pub fn problem(device: &Device, workspace: &Workspace, store: Option<&Store>) -> Report {
         Report::new(Kind::Problem, device, workspace, store)
@@ -143,12 +137,15 @@ impl Report {
     }
 
     fn send(&mut self, ctx: &egui::Context, log: &Log) {
-        let slot = Rc::new(RefCell::new(None));
+        let slot = Arc::new(Mutex::new(None));
         let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
         let body = self.freeze(telemetry::instrument(), tail);
         let (done, ctx) = (slot.clone(), ctx.clone());
-        wasm_bindgen_futures::spawn_local(async move {
-            *done.borrow_mut() = Some(telemetry::submit(body).await);
+        spawn(async move {
+            let answer = telemetry::submit(body).await;
+            if let Ok(mut done) = done.lock() {
+                *done = Some(answer);
+            }
             ctx.request_repaint();
         });
         self.state = State::Sending(slot);
@@ -214,7 +211,7 @@ impl Report {
         let State::Sending(slot) = &self.state else {
             return;
         };
-        let Some(answer) = slot.borrow_mut().take() else {
+        let Some(answer) = slot.lock().ok().and_then(|mut answer| answer.take()) else {
             return;
         };
         self.state = match answer {
@@ -428,9 +425,22 @@ fn none(text: &str) -> &str {
     }
 }
 
+/// Run a send that outlives the frame that started it.
+///
+/// ⚠️ wasm has one thread and cannot block: the future goes to the microtask queue there,
+/// and to a thread of its own in a window, where it blocks until the collector answers.
+#[cfg(target_arch = "wasm32")]
+fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {
+    std::thread::spawn(move || nord_usb::block_on(future));
+}
+
 /// Draw the sheet if it is open, send it when asked, and close it when the reader is
 /// done.
-#[cfg(target_arch = "wasm32")]
 pub fn dialog(ctx: &egui::Context, open: &mut Option<Report>, log: &Log) {
     let Some(report) = open.as_mut() else {
         return;
@@ -454,7 +464,7 @@ mod tests {
 
     /// The state a send reaches once the collector's `answer` arrives at 1 s.
     fn after(answer: Result<(), Undelivered>) -> State {
-        let mut report = report(State::Sending(Rc::new(RefCell::new(Some(answer)))));
+        let mut report = report(State::Sending(Arc::new(Mutex::new(Some(answer)))));
         report.collect(1.0);
         report.state
     }
@@ -520,7 +530,7 @@ mod tests {
 
     #[test]
     fn a_refusal_thaws_the_body_since_nothing_was_kept() {
-        let mut report = report(State::Sending(Rc::new(RefCell::new(Some(Err(
+        let mut report = report(State::Sending(Arc::new(Mutex::new(Some(Err(
             Undelivered::Refused(413),
         ))))));
         report.frozen = Some(Frozen {
@@ -534,7 +544,7 @@ mod tests {
 
     #[test]
     fn a_send_still_out_stays_sending() {
-        let mut report = report(State::Sending(Rc::default()));
+        let mut report = report(State::Sending(Arc::default()));
         report.collect(1.0);
         assert!(matches!(report.state, State::Sending(_)));
     }
@@ -563,7 +573,7 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
         for (name, state, button) in [
             ("drafting", State::Drafting, "Send"),
-            ("sending", State::Sending(Rc::default()), "Send"),
+            ("sending", State::Sending(Arc::default()), "Send"),
             ("waiting", State::Waiting { since: 0.0 }, "Send"),
             ("refused", State::Refused(403), "Send"),
             ("sent", State::Sent, "Close"),

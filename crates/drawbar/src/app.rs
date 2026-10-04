@@ -177,7 +177,6 @@ pub struct DrawbarApp {
     /// The About box while it is showing. Not kept between sessions.
     pub(crate) about: Option<crate::about::About>,
     /// The report sheet while it is showing. Not kept between sessions.
-    #[cfg(target_arch = "wasm32")]
     pub(crate) report: Option<crate::report::Report>,
     /// Where this build runs, and who draws the window's frame on this run.
     pub(crate) platform: Platform,
@@ -287,7 +286,6 @@ impl DrawbarApp {
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
             about: None,
-            #[cfg(target_arch = "wasm32")]
             report: None,
             platform: Platform::current(),
             chrome: crate::platform::Frame::of(Platform::current()),
@@ -907,7 +905,6 @@ impl eframe::App for DrawbarApp {
         }
         let asked = self.splash.show(ctx, self.device.usb());
         crate::about::dialog(ctx, &mut self.about, &self.log);
-        #[cfg(target_arch = "wasm32")]
         crate::report::dialog(ctx, &mut self.report, &self.log);
 
         // Before the panels, so an editor open this frame still has focus when Escape is

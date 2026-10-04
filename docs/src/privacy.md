@@ -3,9 +3,9 @@
 drawbar is made by John Moore. Write to
 [contact@drawbar.app](mailto:contact@drawbar.app) with any question about this page.
 
-The desktop app sends nothing. drawbar at [drawbar.app](https://drawbar.app/) sends
-two things: anonymous usage and error counts, which you can turn off, and reports you
-write and send yourself.
+drawbar at [drawbar.app](https://drawbar.app/) sends two things: anonymous usage and
+error counts, which you can turn off, and reports you write and send yourself. The
+desktop app sends only the reports.
 
 ## Anonymous usage and error counts
 

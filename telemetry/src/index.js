@@ -2,7 +2,7 @@
 // `POST /report` takes one report an operator sent into D1, exactly as sent. Neither
 // keeps the client's address or user agent.
 
-import { agent, allowed, report, rows } from "./check.js";
+import { admitted, agent, allowed, report, rows } from "./check.js";
 import schema from "../../crates/drawbar/telemetry.json";
 
 const ORIGIN = "https://drawbar.app";
@@ -40,7 +40,8 @@ export default {
     if (request.method !== "POST") {
       return reply(405);
     }
-    if (!allowed(origin, env.DEV_ORIGIN)) {
+    const path = new URL(request.url).pathname;
+    if (!admitted(path, origin, env.DEV_ORIGIN)) {
       return reply(403);
     }
     const declared = Number(request.headers.get("content-length") ?? 0);
@@ -55,7 +56,7 @@ export default {
       ...agent(request.headers.get("user-agent") ?? ""),
       country: request.cf?.country ?? "",
     };
-    switch (new URL(request.url).pathname) {
+    switch (path) {
       case "/e":
         for (const point of rows(body, schema, edge)) {
           env.EVENTS.writeDataPoint(point);

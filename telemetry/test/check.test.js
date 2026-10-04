@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { MOST_ROWS, agent, allowed, report, rows } from "../src/check.js";
+import { MOST_ROWS, admitted, agent, allowed, report, rows } from "../src/check.js";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const schema = JSON.parse(read("../../crates/drawbar/telemetry.json"));
@@ -152,4 +152,11 @@ test("only drawbar.app is accepted, and a local run's own origin when it names o
   assert.ok(!allowed("https://fork.example", "http://127.0.0.1:8080"));
   assert.ok(!allowed(null, null));
   assert.ok(!allowed("", ""));
+});
+
+test("a report may come with no origin, as the desktop app sends it, and rows may not", () => {
+  assert.ok(admitted("/report", null));
+  assert.ok(!admitted("/e", null));
+  assert.ok(admitted("/e", "https://drawbar.app"));
+  assert.ok(!admitted("/report", "https://fork.example"));
 });

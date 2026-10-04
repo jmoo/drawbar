@@ -17,6 +17,12 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::{install, online, report_id, share, sharing, submit, visit, Sharing};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{online, report_id, submit};
+
 /// Where the collector listens.
 pub const ENDPOINT: &str = "https://t.drawbar.app";
 
@@ -24,8 +30,11 @@ pub const ENDPOINT: &str = "https://t.drawbar.app";
 /// nothing.
 pub const ORIGIN: &str = "https://drawbar.app";
 
-/// The privacy policy, relative to the app like the guide.
+/// The privacy policy, beside the guide.
+#[cfg(target_arch = "wasm32")]
 pub const PRIVACY: &str = "docs/privacy.html";
+#[cfg(not(target_arch = "wasm32"))]
+pub const PRIVACY: &str = "https://drawbar.app/docs/privacy.html";
 
 /// How a field is written on the wire.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -373,6 +382,16 @@ pub enum Undelivered {
     Unreachable,
     /// The collector answered with this status.
     Refused(u16),
+}
+
+/// A report's id from ten random bytes: ten characters from an alphabet with no
+/// look-alikes, for the operator to quote when asking for it to be deleted.
+pub(crate) fn id_from(random: &[u8; 10]) -> String {
+    const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
+    random
+        .iter()
+        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
+        .collect()
 }
 
 /// The report's fields as one JSON object. Absent parts are empty strings.

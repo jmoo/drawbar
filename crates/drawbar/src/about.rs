@@ -206,7 +206,6 @@ struct Build {
 }
 
 /// The build lines as Copy diagnostics writes them, one per line.
-#[cfg(target_arch = "wasm32")]
 pub(crate) fn build_lines(device: &Device, workspace: &Workspace, store: Option<&Store>) -> String {
     Build::new(device, workspace, store).written()
 }

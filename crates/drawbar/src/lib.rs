@@ -39,7 +39,6 @@ pub mod ondisk;
 pub mod panel;
 pub mod platform;
 pub mod queue;
-#[cfg(any(target_arch = "wasm32", test))]
 mod report;
 pub mod rewrite;
 pub mod room;

@@ -8,6 +8,12 @@ export function allowed(origin, dev) {
   return origin === "https://drawbar.app" || (Boolean(dev) && origin === dev);
 }
 
+// Whether a request to `path` with this `Origin` is accepted. A report may also come
+// with none, from the desktop app; rows only ever come from a browser.
+export function admitted(path, origin, dev) {
+  return allowed(origin, dev) || (path === "/report" && origin === null);
+}
+
 // Rows in one beacon.
 export const MOST_ROWS = 50;
 

@@ -324,16 +324,11 @@ pub async fn submit(body: String) -> Result<(), Undelivered> {
     }
 }
 
-/// A report's id: ten characters from an alphabet with no look-alikes, for the operator
-/// to quote when asking for it to be deleted.
+/// A report's id, from the browser's cryptographic random source.
 pub fn report_id() -> String {
-    const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
     let mut random = [0u8; 10];
     if let Some(crypto) = web_sys::window().and_then(|window| window.crypto().ok()) {
         let _ = crypto.get_random_values_with_u8_array(&mut random);
     }
-    random
-        .iter()
-        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
-        .collect()
+    super::id_from(&random)
 }

@@ -6,8 +6,8 @@
 #
 # URL is the collector (`http://127.0.0.1:8787` under `wrangler dev`, or
 # `https://t.drawbar.app`); ORIGIN is the origin it accepts (`DEV_ORIGIN` locally,
-# `https://drawbar.app` in production). Rows carry version `0.0.0-test` and the report
-# id it prints, so both can be found and deleted afterward.
+# `https://drawbar.app` in production). Rows and reports carry version `0.0.0-test`, and
+# it prints the report ids, so both can be found and deleted afterward.
 #
 # nix-deps: curl
 set -euo pipefail
@@ -51,12 +51,18 @@ expect 404 "an unknown path" "${curl_args[@]}"
 expect 204 "a preflight" -X OPTIONS "$url/report" -H "origin: $origin"
 
 alphabet=23456789abcdefghjkmnpqrstuvwxyz
-id=
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  id+=${alphabet:RANDOM%${#alphabet}:1}
-done
+fresh() {
+  local made=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    made+=${alphabet:RANDOM%${#alphabet}:1}
+  done
+  echo "$made"
+}
+id=$(fresh)
+desktop=$(fresh)
+# A report with text $1, under id $2 (default: $id).
 report() {
-  printf '{"id":"%s","kind":"problem","text":"%s","contact":"","version":"0.0.0-test","model":"","firmware":"","faults":"","build":"","log":""}' "$id" "$1"
+  printf '{"id":"%s","kind":"problem","text":"%s","contact":"","version":"0.0.0-test","model":"","firmware":"","faults":"","build":"","log":""}' "${2:-$id}" "$1"
 }
 
 post /report "$(report 'smoke test')" -H "origin: $origin"
@@ -69,6 +75,8 @@ post /report '{"id":"x"}' -H "origin: $origin"
 expect 400 "a report missing fields" "${curl_args[@]}"
 post /report "$(report 'smoke test')" -H 'origin: https://fork.example'
 expect 403 "a report from another origin" "${curl_args[@]}"
+post /report "$(report 'smoke test' "$desktop")"
+expect 204 "a report naming no origin, as the desktop app sends it" "${curl_args[@]}"
 
-echo "report id: $id"
+echo "report ids: $id $desktop"
 exit "$failed"
