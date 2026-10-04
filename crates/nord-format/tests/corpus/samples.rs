@@ -3,8 +3,11 @@
 
 use crate::Context;
 use nord_format::cbin::{Cbin, Generation};
-use nord_format::formats::{nsmp, nsmpproj};
+use nord_format::formats::nsmp;
+use nord_format::formats::nsmpproj::{self, build};
 use nord_format::{Entity, Sample};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -181,74 +184,46 @@ pub fn wide_stroke_gain(wide: &Cbin<nsmp::SampleV3>, id: u8) -> Option<u64> {
     Some(gain_units(nsmp::codec::zone_gain_db(stroke, layout)?))
 }
 
-/// A project zone, with generated audio of the length the project gives it.
+/// A project's audio files as generated WAVs, each long enough for every stroke that
+/// plays it.
 ///
 /// The editor's WAVs are not corpus material, so the audio is generated. Only the frame
 /// count affects what is compared: a stroke's field count comes from its length, and
 /// every other field compared is metadata.
-pub struct BuiltZone {
-    global_id: u32,
-    root_key: u8,
-    top_note: u8,
-    pub audio: Vec<i16>,
-    pub secondary_start: f64,
+pub struct Synthetic(BTreeMap<u32, usize>);
+
+impl Synthetic {
+    pub fn of(project: &nsmpproj::Project) -> Result<Synthetic, String> {
+        let mut frames = BTreeMap::new();
+        for stroke in project.strokes().context("project strokes")? {
+            let needed = stroke.end.max(stroke.stop).ceil() as usize;
+            let longest = frames.entry(stroke.file_id).or_insert(0);
+            *longest = needed.max(*longest);
+        }
+        Ok(Synthetic(frames))
+    }
 }
 
-pub fn built_zones(project: &nsmpproj::Project) -> Result<Vec<BuiltZone>, String> {
-    let strokes = project.strokes().context("project strokes")?;
-    project
-        .zones()
-        .context("project zones")?
-        .iter()
-        .map(|zone| {
-            let layer = &zone.strokes[0];
-            let stroke = strokes
-                .iter()
-                .find(|s| s.global_id == layer.global_id)
-                .ok_or_else(|| format!("the project has no stroke {}", layer.global_id))?;
-            let frames = (stroke.stop - stroke.start) as usize;
-            Ok(BuiltZone {
-                global_id: layer.global_id,
-                root_key: zone.root_key,
-                top_note: zone.top_note,
-                audio: (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect(),
-                secondary_start: stroke.encoded_secondary_start() - stroke.start,
-            })
-        })
-        .collect()
+impl build::Source for Synthetic {
+    fn wav(&self, file: &nsmpproj::AudioFile) -> Result<Cow<'_, [u8]>, build::Unavailable> {
+        let frames = *self.0.get(&file.id).ok_or(build::Unavailable::Missing)?;
+        let audio: Vec<i16> = (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect();
+        nord_format::wav::mono_pcm16(&audio, nsmp::codec::SOURCE_RATE)
+            .map(Cow::Owned)
+            .map_err(|e| build::Unavailable::Io(std::io::Error::other(e)))
+    }
 }
 
-/// A narrow instrument built from a project's zones, with the editor's predictor
-/// choice.
-pub fn built_v2(
-    project: &nsmpproj::Project,
-    zones: &[BuiltZone],
-) -> Result<Cbin<nsmp::Sample>, String> {
-    let new_zones: Vec<_> = zones
-        .iter()
-        .map(|zone| nsmp::encode::NewZone {
-            source: &zone.audio,
-            channels: 1,
-            root_key: zone.root_key,
-            top_note: zone.top_note,
-            global_id: zone.global_id,
-            loops: None,
-            secondary_start: zone.secondary_start,
-            shift: None,
-            gain: 1.0,
-            loop_decay: nsmp::encode::DEFAULT_LOOP_DECAY,
-        })
-        .collect();
-    let name = project.name().context("project name")?;
-    let instrument = nsmp::encode::Instrument {
-        name: &name,
-        map_gain: 1.0,
-        predictor: nsmp::encode::Predictor::Minimizing,
-        layout: nsmp::codec::Layout::V2,
-        preset: nsmp::encode::Preset::default(),
-    };
-    match nsmp::encode::multi_zone(instrument, &new_zones).context("build")? {
-        Sample::V2(file) => Ok(file),
+/// A project's narrow instrument, as the library plans and encodes it from
+/// [`Synthetic`] audio with the editor's predictor choice.
+pub fn built_v2(project: &nsmpproj::Project) -> Result<(build::Plan, Cbin<nsmp::Sample>), String> {
+    let plan =
+        build::plan(project, nsmp::codec::Layout::V2, &Synthetic::of(project)?).context("plan")?;
+    let built = plan
+        .encode(&plan.name, nsmp::encode::Predictor::Minimizing, None)
+        .context("build")?;
+    match built {
+        Sample::V2(file) => Ok((plan, file)),
         Sample::V3(_) => Err("the narrow layout built a wide chain".into()),
     }
 }
