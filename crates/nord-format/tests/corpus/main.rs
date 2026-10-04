@@ -112,6 +112,7 @@ fn streamed_check_agrees(bytes: &[u8], info: &cbin::Info) -> Result<(), String> 
             i.body_len,
             i.checksum_ok,
             i.stored_checksum,
+            i.body_crc32,
         )
     };
     ensure!(
@@ -129,6 +130,14 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
             .map_err(|e| Failed::from(format!("inspect: {e}")))?;
         if !info.checksum_ok {
             return Err(format!("container checksum mismatch ({:?})", info.header).into());
+        }
+        let body_crc32 = nord_format::crc::crc32(cbin_body(&bytes, &info));
+        if info.body_crc32 != body_crc32 {
+            return Err(format!(
+                "inspect reports a body crc32 of {:#010x}, and the body's is {body_crc32:#010x}",
+                info.body_crc32
+            )
+            .into());
         }
         streamed_check_agrees(&bytes, &info).map_err(Failed::from)?;
         Some(info)

@@ -218,9 +218,12 @@ impl<B> std::ops::DerefMut for Cbin<B> {
     }
 }
 
-/// One checksum accumulator, whichever the generation uses.
+/// One checksum accumulator, whichever the generation uses, with the crc32 of what it
+/// is fed after priming.
 enum Hash {
-    V0(Crc16Stream<'static>),
+    /// The crc16, and the crc32 the type-0 file does not store.
+    V0(Crc16Stream<'static>, Crc32Stream<'static>),
+    /// The crc32, which is both.
     V1(Crc32Stream<'static>),
 }
 
@@ -228,7 +231,7 @@ impl Hash {
     /// The accumulator for `generation`, having seen nothing.
     fn new(generation: Generation) -> Hash {
         match generation {
-            Generation::V0 => Hash::V0(Crc16Stream::new()),
+            Generation::V0 => Hash::V0(Crc16Stream::new(), Crc32Stream::new()),
             Generation::V1 => Hash::V1(Crc32Stream::new()),
         }
     }
@@ -239,15 +242,18 @@ impl Hash {
         let mut hash = Hash::new(header.generation);
         // The crc16 covers the header too. Re-encoding is exact: the magic is verified
         // and the other header bytes are held in `header`.
-        if header.generation == Generation::V0 {
-            hash.update(&header.head_bytes());
+        if let Hash::V0(crc16, _) = &mut hash {
+            crc16.update(&header.head_bytes());
         }
         hash
     }
 
     fn update(&mut self, bytes: &[u8]) {
         match self {
-            Hash::V0(h) => h.update(bytes),
+            Hash::V0(crc16, crc32) => {
+                crc16.update(bytes);
+                crc32.update(bytes);
+            }
             Hash::V1(h) => h.update(bytes),
         }
     }
@@ -255,8 +261,15 @@ impl Hash {
     /// The checksum so far, a crc16 widened.
     fn value(&self) -> u32 {
         match self {
-            Hash::V0(h) => h.value().into(),
+            Hash::V0(h, _) => h.value().into(),
             Hash::V1(h) => h.value(),
+        }
+    }
+
+    /// The crc32 of the bytes fed since priming: of a body, the one a slot reports.
+    fn body_crc32(&self) -> u32 {
+        match self {
+            Hash::V0(_, h) | Hash::V1(h) => h.value(),
         }
     }
 }
@@ -699,7 +712,7 @@ pub(crate) fn write_with<W: Write + Seek>(
             w.write_all(&h.value().to_le_bytes())?;
             w.seek(SeekFrom::Start(body_start + written))?;
         }
-        Hash::V0(h) => w.write_all(&h.value().to_le_bytes())?,
+        Hash::V0(h, _) => w.write_all(&h.value().to_le_bytes())?,
     }
     Ok(written)
 }
@@ -741,6 +754,13 @@ pub struct Info {
     pub checksum_ok: bool,
     /// The checksum the file stores: the type-1 crc32, or the type-0 crc16 widened.
     pub stored_checksum: u32,
+    /// The crc32 of the body, the type-0 trailer excluded: the checksum an instrument
+    /// reports for the slot holding this body, so a file and a slot compare without
+    /// hashing either body again.
+    ///
+    /// ⚠️ Computed from the bytes, never read. A type-1 file stores the same number
+    /// when its checksum is right; a type-0 file stores only a crc16 over the whole file.
+    pub body_crc32: u32,
 }
 
 /// One streaming pass over any CBIN file, with no knowledge of the body. It runs in
@@ -748,12 +768,17 @@ pub struct Info {
 pub fn inspect(r: &mut (impl Read + Seek)) -> Result<Info, Error> {
     let (header, stored_crc32, reader) = open(r, None)?;
     let body_len = reader.len();
-    let (computed, stored) = reader.finish(stored_crc32)?;
+    let Finished {
+        computed,
+        stored,
+        body_crc32,
+    } = reader.finish(stored_crc32)?;
     Ok(Info {
         header,
         body_len,
         checksum_ok: computed == stored,
         stored_checksum: stored,
+        body_crc32,
     })
 }
 
@@ -892,6 +917,7 @@ impl Verifier {
             header,
             body_len,
             stored_checksum: stored,
+            body_crc32: hash.body_crc32(),
         })
     }
 }
@@ -930,7 +956,7 @@ impl Verifier {
             .into());
         };
         let bytes = match hash {
-            Hash::V0(h) => h.value().to_le_bytes().to_vec(),
+            Hash::V0(h, _) => h.value().to_le_bytes().to_vec(),
             Hash::V1(h) => h.value().to_le_bytes().to_vec(),
         };
         Ok(Splice {
@@ -995,24 +1021,30 @@ impl<R: Read + Seek> BodyReader<'_, R> {
         self.len - self.pos
     }
 
-    /// Drain to the end and return the computed and the stored checksum. `stored_crc32`
-    /// is the header's word for a type-1 file; a type-0 file's crc16 is read from the
-    /// trailer.
-    fn finish(mut self, stored_crc32: u32) -> io::Result<(u32, u32)> {
+    /// Drain to the end and return the checksums. `stored_crc32` is the header's word for
+    /// a type-1 file; a type-0 file's crc16 is read from the trailer.
+    fn finish(mut self, stored_crc32: u32) -> io::Result<Finished> {
         self.seek(SeekFrom::Start(self.len))?;
-        match self.hash {
-            Hash::V1(h) => Ok((h.value(), stored_crc32)),
-            Hash::V0(h) => {
+        let stored = match self.hash {
+            Hash::V1(_) => stored_crc32,
+            Hash::V0(..) => {
                 let mut trailer = [0u8; 2];
                 self.inner.read_exact(&mut trailer)?;
-                Ok((h.value().into(), u16::from_le_bytes(trailer).into()))
+                u16::from_le_bytes(trailer).into()
             }
-        }
+        };
+        Ok(Finished {
+            computed: self.hash.value(),
+            stored,
+            body_crc32: self.hash.body_crc32(),
+        })
     }
 
     /// Drain to the end, then check the checksum against the stored one.
     fn verify(self, generation: Generation, stored_crc32: u32, format: &str) -> Result<(), Error> {
-        let (computed, stored) = self.finish(stored_crc32)?;
+        let Finished {
+            computed, stored, ..
+        } = self.finish(stored_crc32)?;
         if computed == stored {
             return Ok(());
         }
@@ -1028,6 +1060,14 @@ impl<R: Read + Seek> BodyReader<'_, R> {
         })
         .into())
     }
+}
+
+/// What a drained [`BodyReader`] found: the checksum the bytes call for, the one the
+/// file stores, a crc16 widened in a type-0 file, and the body's crc32.
+struct Finished {
+    computed: u32,
+    stored: u32,
+    body_crc32: u32,
 }
 
 impl<R: Read + Seek> Read for BodyReader<'_, R> {
@@ -1325,6 +1365,7 @@ mod tests {
             assert_eq!(info.body_len, 3);
             assert!(info.checksum_ok);
             assert_eq!(info.stored_checksum, stored);
+            assert_eq!(info.body_crc32, crc32(&[1, 2, 3]), "{generation:?}");
             let at = generation.checksum_range(bytes.len()).unwrap();
             assert_eq!(bytes[at.clone()], stored.to_le_bytes()[..at.len()]);
 
@@ -1544,15 +1585,39 @@ mod tests {
     }
 
     /// What a check concluded: the facts it reports, or that it refused.
-    fn verdict(info: Result<Info, Error>) -> Option<(Header, u64, bool, u32)> {
+    fn verdict(info: Result<Info, Error>) -> Option<(Header, u64, bool, u32, u32)> {
         info.ok().map(|info| {
             (
                 info.header,
                 info.body_len,
                 info.checksum_ok,
                 info.stored_checksum,
+                info.body_crc32,
             )
         })
+    }
+
+    /// The body's crc32 is the one a type-1 header stores, whatever either generation
+    /// stores and however the file is checked. The expected values are the ISO-HDLC
+    /// check value and the crc32 of nothing.
+    #[test]
+    fn the_body_crc32_is_computed_from_the_body_of_either_generation() {
+        for (body, expected) in [(&b"123456789"[..], 0xcbf4_3926), (&[][..], 0)] {
+            for (generation, bytes) in [
+                (Generation::V1, v1_file(body)),
+                (Generation::V0, v0_file(body)),
+            ] {
+                let info = inspect(&mut Cursor::new(&bytes)).unwrap();
+                assert_eq!(info.body_crc32, expected, "{generation:?}, inspected");
+                let info = verified(&bytes, 5).unwrap();
+                assert_eq!(info.body_crc32, expected, "{generation:?}, streamed");
+            }
+        }
+        let mut corrupt = v1_file(b"123456789");
+        corrupt[0x18] ^= 0xff;
+        let info = inspect(&mut Cursor::new(&corrupt)).unwrap();
+        assert!(!info.checksum_ok);
+        assert_eq!(info.body_crc32, 0xcbf4_3926, "computed, not read");
     }
 
     fn verified(bytes: &[u8], chunk: usize) -> Result<Info, Error> {
@@ -1586,7 +1651,7 @@ mod tests {
             let whole = verdict(inspect(&mut Cursor::new(bytes)));
             match &whole {
                 None => refused += 1,
-                Some((.., true, _)) => accepted += 1,
+                Some((_, _, true, ..)) => accepted += 1,
                 Some(_) => failed += 1,
             }
             for chunk in [1, 2, 3, 7, 0x2c, 64, bytes.len().max(1)] {
