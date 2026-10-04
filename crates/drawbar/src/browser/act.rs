@@ -715,8 +715,16 @@ pub fn apply(
             Act::Retarget { id, class, at } => {
                 retarget(workspace, device, queue, log, id, class, at)
             }
-            Act::Unqueue(id) => queue.forget(id),
-            Act::ClearQueue => queue.clear(),
+            Act::Unqueue(id) => {
+                queue.forget(id);
+                if let Some(entity) = workspace.get(id) {
+                    log.say(format!("“{}” is no longer waiting to be sent.", entity.name));
+                }
+            }
+            Act::ClearQueue => {
+                queue.clear();
+                log.say("The send queue is empty. Nothing was sent.");
+            }
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
             // ⚠️ The queue always belongs to an attached instrument; with none there is
@@ -2237,7 +2245,7 @@ mod tests {
     }
 
     /// Neither removing one entry nor clearing the queue deletes anything from this
-    /// computer.
+    /// computer, and the status line stops saying that something is waiting.
     #[test]
     fn an_entry_leaves_the_queue_alone_and_the_queue_empties_without_deleting_anything() {
         let mut bench = Bench::new();
@@ -2266,9 +2274,17 @@ mod tests {
 
         bench.act(vec![Act::Unqueue(ids[1])]);
         assert_eq!(bench.queue.ids(), vec![ids[0], ids[2]]);
+        assert_eq!(
+            bench.log.status().1,
+            "“sound 1.ne5p” is no longer waiting to be sent."
+        );
 
         bench.act(vec![Act::ClearQueue]);
         assert!(bench.queue.is_empty());
+        assert_eq!(
+            bench.log.status().1,
+            "The send queue is empty. Nothing was sent."
+        );
         assert_eq!(
             bench.workspace.listed().count(),
             3,
