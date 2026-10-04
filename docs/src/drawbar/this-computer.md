@@ -99,9 +99,9 @@ bring back any you deleted.
   deleted. The reason says how to get them back.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
-- **A write to the instrument left a file.** If drawbar stopped while it
-  replaced a sound on your keyboard, the sound that was there may now be only on
-  this computer. drawbar offers it when the library opens: **Keep in
+- **A write to the instrument left a file.** If drawbar stopped, or could not
+  put the old sound back, while it replaced a sound on your keyboard, the sound
+  that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
   library** adds it to your sounds so you can send it back, **Show the file**
   shows where it is, and **Discard** deletes it.
 - **Not read** or **not all listed.** drawbar could not read that file or

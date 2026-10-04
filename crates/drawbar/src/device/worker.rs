@@ -16,7 +16,7 @@ use nord_usb::envelope;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
-use nord_usb::{op, Error, FileSink, Location, ObjectClass, Session};
+use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
 use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload, Purpose};
@@ -341,43 +341,26 @@ async fn execute<T: Transport>(
     }
 }
 
-/// Occupants whose body is at most this many bytes, such as programs, set lists and the
-/// smaller samples, are also held in memory while a write replaces them, so one that
-/// cannot be put back goes to the local list at once.
-const HELD_OCCUPANT: u32 = 1 << 20;
-
-/// What a replace keeps of a slot's occupant until the new object has landed: a file
-/// from [`Scratch`], named as its rescue, and the bytes as well where they are held.
-struct Backup {
-    kept: Kept,
-    held: Option<Vec<u8>>,
-}
-
-/// Read the occupant `info` describes into a new file from `scratch`, and close it, so it
-/// is on disk before anything is deleted: a small one through memory, which it is held
-/// in, and a larger one a transfer chunk at a time. A read that fails leaves no file
-/// behind.
+/// Read the occupant `info` describes into a new file from `scratch`, named as its
+/// rescue, a transfer chunk at a time, and close it, so it is on disk before anything is
+/// deleted. A read that fails leaves no file behind.
 async fn back_up<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     scratch: &Scratch,
     info: &ProgramInfo,
     gone: &mut bool,
-) -> Result<Backup, String> {
+) -> Result<Kept, String> {
     let at = info.location;
     let mut kept = scratch
         .create(&envelope::rescue_name_for(at, &info.format))
         .await
         .map_err(|e| format!("there was nowhere on this computer to keep it: {e}"))?;
-    let read = match info.body_len <= HELD_OCCUPANT {
-        true => hold(s, at, &mut kept).await.map(Some),
-        false => op::read_into(s, at, &mut kept).await.map(|_| None),
-    };
-    let read = match read {
-        Ok(held) => kept.close().await.map(|()| held).map_err(Error::Io),
+    let read = match op::read_into(s, at, &mut kept).await {
+        Ok(_) => kept.close().await.map_err(Error::Io),
         Err(e) => Err(e),
     };
     match read {
-        Ok(held) => Ok(Backup { kept, held }),
+        Ok(()) => Ok(kept),
         Err(e) => {
             let _ = kept.remove().await;
             Err(spoil(gone, Some(at))(e))
@@ -385,39 +368,23 @@ async fn back_up<T: Transport>(
     }
 }
 
-/// Read the object at `at` into memory and write it to `kept`.
-async fn hold<T: Transport>(
-    s: &mut Session<'_, T, ReadWrite>,
-    at: Location,
-    kept: &mut Kept,
-) -> Result<Vec<u8>, Error> {
-    let bytes = op::read_program(s, at).await?;
-    kept.write_at(0, &bytes).await?;
-    Ok(bytes)
-}
-
 /// Put a backup back into its slot.
 async fn restore<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
     at: Location,
-    backup: &Backup,
+    backup: &Kept,
     name: &str,
     timestamp: u32,
 ) -> Result<(), Error> {
-    match &backup.held {
-        Some(bytes) => op::write(s, unit, at, bytes, name, timestamp).await,
-        None => {
-            let mut file = backup.kept.source().await?;
-            op::write_from(s, unit, at, &mut file, name, timestamp).await
-        }
-    }
+    let mut file = backup.source().await?;
+    op::write_from(s, unit, at, &mut file, name, timestamp).await
 }
 
 /// Let a backup go once the slot holds what it should. A file that cannot be deleted is
 /// said, and left.
-async fn discard(backup: Option<Backup>, emit: &Emit) {
-    if let Some(Backup { kept, .. }) = backup {
+async fn discard(backup: Option<Kept>, emit: &Emit) {
+    if let Some(kept) = backup {
         let place = kept.place();
         if let Err(e) = kept.remove().await {
             emit.send(DeviceEvent::Note(format!(
@@ -427,26 +394,15 @@ async fn discard(backup: Option<Backup>, emit: &Emit) {
     }
 }
 
-/// Hand a backup on when the slot may have lost what it held: held bytes to the local
-/// list, and the file left where it is either way, offered again on the next open. Returns
-/// where it went, in words for the failure.
-fn rescue(at: Location, backup: Backup, emit: &Emit) -> String {
-    let Backup { kept, held } = backup;
-    match held {
-        Some(bytes) => {
-            let name = envelope::rescue_name(at, &bytes);
-            emit.send(DeviceEvent::Rescued { at, name, bytes });
-            "its former contents are in the local list as a rescued entity. Put it back".into()
-        }
-        None => {
-            let place = kept.place();
-            emit.send(DeviceEvent::Kept {
-                at,
-                place: place.clone(),
-            });
-            format!("its former contents are kept at {place}. Put them back")
-        }
-    }
+/// Leave a backup where it is when the slot may have lost what it held: the next open
+/// offers it. Returns where it is, in words for the failure.
+fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
+    let place = backup.place();
+    emit.send(DeviceEvent::Kept {
+        at,
+        place: place.clone(),
+    });
+    format!("its former contents are kept at {place}. Put them back")
 }
 
 /// Why a [`put`] stopped short of writing.
@@ -460,7 +416,7 @@ enum Stop {
 /// An occupant to put back into the slot a write into it failed.
 struct Undo {
     at: Location,
-    backup: Backup,
+    backup: Kept,
     /// The occupant's own name, which the slot takes back.
     name: String,
     timestamp: u32,
@@ -1424,8 +1380,8 @@ mod wire_tests {
             self
         }
 
-        /// Refuses the restore as well, which leaves the occupant nowhere to go but the
-        /// local list.
+        /// Refuses the restore as well, which leaves the occupant in the file it was read
+        /// into.
         fn refusing_every_write(mut self) -> Puppet {
             self.refuses_every_write = true;
             self
@@ -1897,13 +1853,15 @@ mod wire_tests {
     }
 
     /// A write that fails and cannot be put back is still one failure, and the occupant
-    /// it displaced reaches the local list once, under the name its bytes are filed as.
+    /// it displaced is kept in one place only: the file it was read into, which the next
+    /// open offers. Nothing hands it on a second time.
     #[test]
-    fn an_occupant_that_cannot_be_restored_is_rescued_once() {
+    fn an_occupant_that_cannot_be_restored_is_kept_once() {
         let at = Location { bank: 0, slot: 3 };
+        let dir = crate::testing::Temp::new();
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_every_write();
-        let (flow, events) = drive(
+        let (flow, events) = drive_keeping(
             &mut device,
             DeviceCmd::Put {
                 id: 1,
@@ -1912,24 +1870,30 @@ mod wire_tests {
                 name: "Africa-Split.ne5p".into(),
                 payload: Payload::Bytes(a_program()),
             },
+            &scratch_in(&dir),
         );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
-        let rescued: Vec<&str> = said
-            .iter()
-            .filter_map(|event| match event {
-                DeviceEvent::Rescued { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rescued, ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(handed_on(&said), [dir.at("nord-rescued-1-4.ne5p")]);
+        assert_eq!(dir.names(""), ["nord-rescued-1-4.ne5p"]);
         assert_eq!(
             failures(&said).len(),
             1,
             "one refusal is one failure: {:?}",
             failures(&said)
         );
+    }
+
+    /// Where each occupant a put displaced went: the file each [`DeviceEvent::Kept`]
+    /// names.
+    fn handed_on(said: &[DeviceEvent]) -> Vec<std::path::PathBuf> {
+        said.iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Kept { place, .. } => Some(place.into()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// ⚠️ From the delete until the write lands, the slot is empty. A process that dies
@@ -1994,11 +1958,12 @@ mod wire_tests {
     }
 
     #[test]
-    fn an_occupant_whose_delete_went_unanswered_is_rescued() {
+    fn an_occupant_whose_delete_went_unanswered_is_kept() {
         let at = Location { bank: 0, slot: 3 };
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).hanging_up_on_delete();
-        let (flow, events) = drive(
+        let dir = crate::testing::Temp::new();
+        let (flow, events) = drive_keeping(
             &mut device,
             DeviceCmd::Put {
                 id: 1,
@@ -2007,18 +1972,12 @@ mod wire_tests {
                 name: "Africa-Split.ne5p".into(),
                 payload: Payload::Bytes(a_program()),
             },
+            &scratch_in(&dir),
         );
         assert!(flow == Flow::Lost, "the instrument stopped answering");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
-        let rescued: Vec<&str> = said
-            .iter()
-            .filter_map(|event| match event {
-                DeviceEvent::Rescued { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rescued, ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(handed_on(&said), [dir.at("nord-rescued-1-4.ne5p")]);
         let failed = failures(&said);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(failed[0].contains("may have been deleted"), "{}", failed[0]);

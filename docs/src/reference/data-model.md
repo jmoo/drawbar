@@ -475,27 +475,25 @@ and by `File.slice` through the snapshot in the browser. A file that fails to re
 partway through a send fails it as a refused write does, and the slot's occupant
 is put back.
 
-Nor is a large occupant held whole. Before a write replaces an occupant, the
-worker reads it back into a file so it can put it back if the write fails
-(`worker::put`), and closes the file before the delete, so a process that dies
-with the slot empty leaves the occupant on disk. One of up to 1 MiB of body is read
-into memory, written to the file from there, and put back from memory. A larger
-one, a piano or most samples, is read through `op::read_into` straight into the
-file and put back from it through `write_from`. The file (`device::scratch`) is in
-the library's `.drawbar/tmp/` on the desktop while the library may be written,
-made where missing, or a `rescued` folder of drawbar's own data
-(`eframe::storage_dir`) otherwise, never the system's temporary folder, and in
-`.drawbar/tmp/` of the private storage in the browser, through a
-`library-writer.js` of the device's own. The restore runs in a session of its own
-once the failed write's session has closed (`worker::put_back`): the instrument
-drops a write left unfinished when its session closes, but keeps it as an object in
-another slot when a second write follows it in the same session. The file is
-deleted once the slot holds what it should. Where the restore fails as well, it
-stays, and `DeviceEvent::Kept` names it in the log; a small occupant also becomes a
-rescued asset at once, and its file is offered again on the next open. The file is
-named as its rescue, `nord-rescued-<bank>-<slot>.<tag>`, numbered where that name
-is taken, and the open's sweep of `tmp/` leaves those names, since one left by an
-interrupted write is the slot's only copy.
+Nor is an occupant held whole. Before a write replaces one, the worker reads it
+back through `op::read_into` into a file, a transfer chunk at a time, so it can put
+it back through `write_from` if the write fails (`worker::put`). It closes the
+file, and syncs its folder, before the delete, so a process that dies with the
+slot empty leaves the occupant on disk. The file (`device::scratch`) is in the
+library's `.drawbar/tmp/` on the desktop while the library may be written, made
+where missing, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
+otherwise, never the system's temporary folder, and in `.drawbar/tmp/` of the
+private storage in the browser, through a `library-writer.js` of the device's own.
+The restore runs in a session of its own once the failed write's session has
+closed (`worker::put_back`): the instrument drops a write left unfinished when its
+session closes, but keeps it as an object in another slot when a second write
+follows it in the same session. The file is deleted once the slot holds what it
+should. Where the restore fails as well, or a delete may have landed, it stays,
+`DeviceEvent::Kept` names it in the log, and the next open offers it. It is the
+only copy drawbar keeps. The file is named as its rescue,
+`nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken, and the
+open's sweep of `tmp/` leaves those names, since one left by an interrupted write
+is the slot's only copy.
 
 Once an open's listing is complete, in a library that may be written, each file
 named that way in its `tmp/` and, on the desktop, in the `rescued` folder is
