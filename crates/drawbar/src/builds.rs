@@ -1,10 +1,9 @@
 //! Building a Sample Editor project in the library into the sample instrument it
 //! describes, beside it.
 //!
-//! A project's WAVs are WAV assets of the library. [`locate`] finds each one,
-//! [`Builds::start`] asks for those not read yet, and [`Builds::poll`] waits for them,
-//! encodes their bytes on a [`Job`], then files the instrument beside the project and
-//! opens it.
+//! A project's WAVs are WAV assets of the library. [`locate`] finds each one when
+//! [`Builds::start`] runs, and [`Builds::poll`] reads them, encodes their bytes on a
+//! [`Job`], then files the instrument beside the project and opens it.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -263,12 +262,11 @@ impl Builds {
         let mut waiting = false;
         let mut refused = None;
         for (stored, (path, at)) in wavs {
+            // Needed every frame, read or not, so making room for one never evicts another.
+            workspace.hurry(*at);
             match held(workspace.get(*at)) {
                 Held::Read(bytes) => _ = read.insert(stored.clone(), bytes),
-                Held::Unread => {
-                    workspace.hurry(*at);
-                    waiting = true;
-                }
+                Held::Unread => waiting = true,
                 Held::Not(why) => {
                     refused = Some(format!("{path}: {why}"));
                     break;
@@ -315,13 +313,8 @@ fn held(entity: Option<&LocalEntity>) -> Held {
     if entity.unread() {
         return Held::Unread;
     }
-    match entity.rests() {
-        None => Held::Read(entity.bytes.clone()),
-        Some(file) => match file.whole() {
-            Ok(bytes) => Held::Read(bytes.into()),
-            Err(why) => Held::Not(why.to_string()),
-        },
-    }
+    // A WAV is read whole: the store leaves only indexed instruments resting in their file.
+    Held::Read(entity.bytes.clone())
 }
 
 /// The instrument `project` describes, from WAVs `source` holds.

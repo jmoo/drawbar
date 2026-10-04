@@ -3302,7 +3302,7 @@ mod tests {
         for offered in [
             "Play",
             "Gain",
-            wav::RESCALE,
+            wav::APPLY_GAIN,
             "Encode",
             "44100 Hz · mono · 1.000 s",
         ] {
@@ -3320,7 +3320,7 @@ mod tests {
             said.iter().any(|word| word.contains("24-bit")),
             "it says why: {said:?}"
         );
-        for refused in ["Play", "Gain", wav::RESCALE, "Encode"] {
+        for refused in ["Play", "Gain", wav::APPLY_GAIN, "Encode"] {
             assert!(
                 !said.iter().any(|word| word == refused),
                 "{refused}: {said:?}"
@@ -3350,7 +3350,7 @@ mod tests {
         let said = open.painted(Vec::new());
         assert!(said.iter().any(|word| word.text == "nothing clips"));
         open.frame(testing::click(
-            testing::where_(&said, wav::RESCALE).center(),
+            testing::where_(&said, wav::APPLY_GAIN).center(),
         ));
         assert!(open.entity().is_unsaved());
         // 11999 at 10^(6/20) = 1.995 times is 23941.
