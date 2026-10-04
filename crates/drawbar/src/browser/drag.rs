@@ -228,7 +228,7 @@ impl Kind {
             Kind::PipeLibrary => Glyph::SlidersVertical,
             Kind::Project => Glyph::FolderGit2,
             Kind::Text => Glyph::FileText,
-            Kind::Wav => Glyph::Square,
+            Kind::Wav => Glyph::FileAudio,
             Kind::Other => Glyph::HardDrive,
         }
     }
