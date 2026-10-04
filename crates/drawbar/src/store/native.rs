@@ -452,7 +452,12 @@ impl Fs for Disk {
         }
     }
 
-    async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+    async fn children(
+        &self,
+        dir: &str,
+        room: usize,
+        known: &dyn Fn(&str) -> bool,
+    ) -> io::Result<Children> {
         let found = match sorted(&self.locate(dir)?) {
             // The default library is made at its first write.
             Err(e)
@@ -464,7 +469,10 @@ impl Fs for Disk {
         };
         let more = found.len() > room;
         let children = found.into_iter().take(room).map(|(name, entry)| {
-            let kind = kind(&entry, &name);
+            let file = entry.file_type().is_ok_and(|kind| kind.is_file());
+            let kind = (!(file && known(&name)))
+                .then(|| kind(&entry, &name))
+                .flatten();
             (name, kind)
         });
         Ok((children.collect(), more))

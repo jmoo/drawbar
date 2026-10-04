@@ -305,8 +305,9 @@ nothing but the files under working copies (`store/exec.rs`).
    of 256, and sent before the walk begins. A row's file that is gone lends its
    length to a set the walk checks for moved files.
 2. The tree is walked breadth first, one folder at a time, so the top of a large
-   tree arrives first. Entries are sent in `Event::Listed` parts of 256, and the
-   app folds in four parts a frame.
+   tree arrives first. A file a row already found is not looked at again. Entries
+   are sent in `Event::Listed` parts of 256, and the app folds in four parts a
+   frame.
 3. Anything under a name that starts with a dot is left out of the listing, and
    a dot folder is not entered. The `.drawbar-tmp` siblings of interrupted saves
    are gathered on the way, to be swept.
@@ -321,20 +322,23 @@ folder's `others`, and shown with **Show all files**.
 
 ### Lazy reads
 
-A listed asset is read once something needs it. `Workspace::hurry` marks it
-wanted, and the store's next `poll` sends one `Cmd::Read` for all of them.
-Nothing is asked until the cache has said what it remembers. Four things ask:
+A listed asset is read once something needs it. The workspace keeps each one
+wanted with how much it is needed, and the store keeps one `Cmd::Read` in flight:
+when it answers, the next goes out with the most needed of what is wanted then,
+at most 32 files or 8 MiB. Nothing is asked until the cache has said what it
+remembers. In order of need, these ask:
 
-- `Workspace::in_view`, for the rows the tree and the library table draw this
-  frame. A row draws what is remembered of it, so only a row with nothing
-  remembered is read;
-- the app, every frame, for what is open in a tab or selected
-  (`DrawbarApp::update`);
-- the inspector, for the selection;
 - an act that works from an asset's contents, which waits until each asset in
-  `Act::reads` has been read (`browser/act.rs`).
+  `Act::reads` has been read (`browser/act.rs`), and the app, every frame, for
+  what is open in a tab (`Workspace::hurry`);
+- the app, once each time the selection changes, for the first 64 assets
+  selected (`Workspace::select`). Each stays wanted until it is read, for as long
+  as it stays selected. An act on the rest reads what it needs;
+- `Workspace::in_view`, for the rows the library table draws. A row draws what is
+  remembered of it, so only a row with nothing remembered is read, and a row not
+  drawn this frame or the last is no longer read for it.
 
-An asset needed this frame or the last is not evicted.
+An asset needed this frame or the last, or selected, is not evicted.
 
 ### Background reads
 
@@ -347,7 +351,8 @@ summary already carries that checksum. They go 32 files or 16 MiB at a time,
 and a read the user waits on runs after the batch in flight. A tracked file
 whose CRC the index does not know, and that no background read will cover, has
 its CRC taken alone, 64 files or 64 MiB at a time
-(`Cmd::Fingerprint`), so that an outside rename keeps its row.
+(`Cmd::Fingerprint`), so that an outside rename keeps its row. Neither starts
+a batch while a read something needs is wanted or in flight.
 
 ### The memory budget
 
@@ -367,7 +372,7 @@ These are never evicted:
 
 - a view, an unsaved asset, or one with a pending edit;
 - one unread already, or resting in its file;
-- one needed this frame or the last;
+- one needed this frame or the last, or selected;
 - one in the send queue;
 - one with a save in flight, a working copy, or a missing file;
 - one whose path is under a rename not yet answered.

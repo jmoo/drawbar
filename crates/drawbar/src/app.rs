@@ -205,6 +205,8 @@ pub struct DrawbarApp {
     synced: u64,
     /// When the index was last written, in egui time.
     synced_at: f64,
+    /// The selection's revision when its first assets were last asked for.
+    picked: Option<u64>,
     /// Where the pointer was last seen while files from outside hovered over the window.
     /// The desktop's windowing may not say, and a drop then lands at the top level.
     #[cfg(not(target_arch = "wasm32"))]
@@ -306,6 +308,7 @@ impl DrawbarApp {
             leaving,
             synced: 0,
             synced_at: 0.0,
+            picked: None,
             #[cfg(not(target_arch = "wasm32"))]
             dragged_at: None,
         };
@@ -554,9 +557,13 @@ impl DrawbarApp {
             false => Pass::Files,
         };
         let synced = store.sync(&mut self.workspace, &mut self.browser, &self.queue, pass);
+        // A full pass that could not finish, as during a rescan, waits out the cadence too,
+        // since each one summarizes every asset.
+        if pass == Pass::Full {
+            self.synced_at = now;
+        }
         if synced && pass == Pass::Full {
             self.synced = self.workspace.revision();
-            self.synced_at = now;
             return;
         }
         // Nothing else may request a frame, and the index is still to be written.
@@ -841,10 +848,17 @@ impl eframe::App for DrawbarApp {
             .into_iter()
             .map(|(name, bytes)| browser::Act::Import { name, bytes })
             .collect();
-        // What is open or picked is needed whatever is drawn, so the library keeps it.
-        let needed = self.tabs.documents().chain(self.browser.picked().locals());
-        for id in needed {
+        // What is open is needed whatever is drawn, so the library keeps it. The first
+        // of what is picked is asked for once each time the selection changes: an act on
+        // the rest reads what it needs.
+        for id in self.tabs.documents() {
             self.workspace.hurry(id);
+        }
+        let picked = self.browser.picked();
+        if self.picked != Some(picked.revision()) {
+            self.picked = Some(picked.revision());
+            let locals = picked.items().filter_map(browser::Item::local);
+            self.workspace.select(locals.take(crate::inspector::MANY));
         }
         let released = match &mut self.store {
             Some(store) => {

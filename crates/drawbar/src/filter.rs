@@ -51,7 +51,7 @@ impl State {
 
 /// What the library shows. Each field that is set narrows the list; an empty one does
 /// not filter.
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Filter {
     pub kind: Option<Kind>,
     pub tags: BTreeSet<u64>,

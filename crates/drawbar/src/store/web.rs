@@ -262,8 +262,19 @@ async fn drive(
         };
         match &mut fs {
             Ok(fs) => {
+                // ⚠️ The folder handles outlast only the commands that read: a rescan
+                // looks again for what moved outside this tab, and a write may move it.
+                let reads = matches!(
+                    cmd,
+                    Cmd::Open | Cmd::Read { .. } | Cmd::Fingerprint(_) | Cmd::Walk(_)
+                );
+                if !reads {
+                    fs.dirs.borrow_mut().clear();
+                }
                 exec::run(fs, cmd, &mut answer).await;
-                fs.dirs.borrow_mut().clear();
+                if !reads {
+                    fs.dirs.borrow_mut().clear();
+                }
             }
             Err(why) => answer(refused(cmd, why)),
         }
@@ -673,12 +684,12 @@ struct Folder {
     asked: bool,
     /// The commands for this library, closed once it is let go.
     inbox: Rc<RefCell<Inbox>>,
-    /// The folders found so far by the command running, by path, so a path is not looked
-    /// up again from the root one name at a time.
+    /// The folders found so far, by path, so a path is not looked up again from the root
+    /// one name at a time.
     ///
     /// ⚠️ Safari and Firefox keep a handle on its folder wherever it moves, so the handles
-    /// are let go after each command, and after every move, new folder or removal this
-    /// tab makes, whether it succeeded or not.
+    /// are let go around each command that is not a read, and after every move, new
+    /// folder or removal this tab makes, whether it succeeded or not.
     dirs: RefCell<HashMap<String, FileSystemDirectoryHandle>>,
     /// The files left resting, each at the path it is at now, so a move takes their
     /// snapshots again where they went.
@@ -1297,21 +1308,35 @@ impl Fs for Folder {
 
     /// Every file's snapshot is asked for before any is waited on, so the browser looks
     /// them up together.
-    async fn children(&self, dir: &str, room: usize) -> io::Result<Children> {
+    async fn children(
+        &self,
+        dir: &str,
+        room: usize,
+        known: &dyn Fn(&str) -> bool,
+    ) -> io::Result<Children> {
         let found = entries(&self.dir(dir, false).await?).await?;
         let more = found.len() > room;
         let found: Vec<(String, FileSystemHandle)> = found.into_iter().take(room).collect();
+        let told: Vec<bool> = found
+            .iter()
+            .map(|(name, handle)| handle.kind() == FileSystemHandleKind::File && known(name))
+            .collect();
         let snapshots: Vec<Option<JsFuture>> = found
             .iter()
-            .map(|(name, handle)| {
+            .zip(&told)
+            .map(|((name, handle), told)| {
                 let file = handle.kind() == FileSystemHandleKind::File && exec::opens(name);
-                file.then(|| {
+                (file && !told).then(|| {
                     JsFuture::from(handle.unchecked_ref::<FileSystemFileHandle>().get_file())
                 })
             })
             .collect();
         let mut children = Vec::new();
-        for ((name, handle), snapshot) in found.into_iter().zip(snapshots) {
+        for (((name, handle), snapshot), told) in found.into_iter().zip(snapshots).zip(told) {
+            if told {
+                children.push((name, None));
+                continue;
+            }
             let kind = match (handle.kind(), snapshot) {
                 (FileSystemHandleKind::Directory, _) => {
                     let path = joined(dir, &name);
