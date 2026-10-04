@@ -40,9 +40,9 @@ one and why: not in the library, outside it (an absolute path, or one that
 climbs above the library's folder), or matching two files whose names differ
 only in case.
 
-A build reads the project as the editor shows it, unsaved edits included, and
-writes a v2 instrument beside it under the project file's name, numbered if that
-name is taken. The instrument opens in a tab. Settings the instrument cannot hold
+A build reads the project and its WAVs as drawbar holds them, unsaved edits
+included, and writes a v2 instrument beside the project under the project file's
+name, numbered if that name is taken. The instrument opens in a tab. Settings the instrument cannot hold
 are listed in the activity log, and anything the encoder cannot reproduce stops
 the build with the reason.
 

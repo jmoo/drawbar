@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
-    names, unwhole, Cmd, Complete, Contents, Event, Failure, Fingerprint, Found, Holds, Keeping,
-    Left, LibPath, Listing, Opened, Outside, Rescue, Source, Stale, Stat, Unkept,
+    names, unwhole, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, Keeping, Left,
+    LibPath, Listing, Opened, Outside, Rescue, Source, Stale, Stat, Unkept,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -39,8 +39,8 @@ pub const MOST_ENTRIES: usize = 1_000_000;
 pub const MOST_BYTES: u64 = 1 << 30;
 
 /// Whether drawbar opens a file of this name, by its extension: a Nord file, a Sample
-/// Editor project, a note, a MIDI file or a SysEx dump. Any other file is listed by its
-/// name only.
+/// Editor project, a note, a WAV, a MIDI file or a SysEx dump. Any other file is listed
+/// by its name only.
 pub fn opens(name: &str) -> bool {
     crate::browser::tagged(name).is_some()
 }
@@ -296,7 +296,6 @@ pub fn writes(cmd: &Cmd) -> bool {
             | Cmd::Check { .. }
             | Cmd::Walk(_)
             | Cmd::Read { .. }
-            | Cmd::ReadOthers { .. }
             | Cmd::Fingerprint(_)
     )
 }
@@ -338,10 +337,6 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
         // Outside an open's listing the whole tree has been listed already.
         Cmd::Walk(dir) => Some(Event::Walked { dir, ran: 0 }),
         Cmd::Read { files, room } => Some(Event::Read(read_all(fs, files, room).await)),
-        Cmd::ReadOthers { id, paths } => Some(Event::ReadOthers {
-            id,
-            files: read_others(fs, paths).await,
-        }),
         Cmd::Fingerprint(files) => Some(Event::Fingerprinted(fingerprints(fs, files).await)),
         Cmd::Commit {
             sidecar,
@@ -419,11 +414,6 @@ async fn reads_between(fs: &mut impl Fs, ran: &mut u64, answer: &mut impl FnMut(
             Cmd::Read { files, room } => {
                 *ran += 1;
                 answer(Event::Read(read_all(fs, files, room).await))
-            }
-            Cmd::ReadOthers { id, paths } => {
-                *ran += 1;
-                let files = read_others(fs, paths).await;
-                answer(Event::ReadOthers { id, files })
             }
             cmd => return fs.hold(cmd),
         }
@@ -1640,35 +1630,6 @@ async fn read_one(
         file,
         ..Found::unread(path, stat)
     })
-}
-
-/// The files a [`Cmd::ReadOthers`] asks for, each read whole where a listing would list
-/// it by name only.
-async fn read_others(fs: &impl Fs, paths: Vec<LibPath>) -> Contents {
-    let mut read = Vec::with_capacity(paths.len());
-    for path in paths {
-        let answer = read_other(fs, &path).await;
-        read.push((path, answer));
-    }
-    read
-}
-
-async fn read_other(fs: &impl Fs, path: &LibPath) -> Result<Vec<u8>, Failure> {
-    let hidden = path.components().any(|part| part.starts_with('.'));
-    if hidden || opens(path.leaf()) {
-        return Err(Failure::Io(
-            "not a file the library lists by name only".to_string(),
-        ));
-    }
-    let io = |e: io::Error| match e.kind() {
-        io::ErrorKind::NotFound => Failure::Moved,
-        _ => Failure::Io(e.to_string()),
-    };
-    fs.stat(path.as_str())
-        .await
-        .map_err(io)?
-        .ok_or(Failure::Moved)?;
-    fs.read(path.as_str()).await.map_err(io)
 }
 
 /// CRC-32 over the whole of what a listing read, or `None` where the file could not be

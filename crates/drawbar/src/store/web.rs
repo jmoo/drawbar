@@ -330,13 +330,6 @@ fn refused(cmd: Cmd, why: &str) -> Event {
                 .map(|(id, _, _)| (id, Err(Failure::Io(why.to_string()))))
                 .collect(),
         ),
-        Cmd::ReadOthers { id, paths } => Event::ReadOthers {
-            id,
-            files: paths
-                .into_iter()
-                .map(|path| (path, Err(Failure::Io(why.to_string()))))
-                .collect(),
-        },
         Cmd::Save { id, path, .. } => Event::Saved {
             id,
             path,

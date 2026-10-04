@@ -14,8 +14,8 @@ use super::diff::{self, match_files, Known};
 use super::exec::{contents, too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
-    names, Backend, Cmd, Complete, Contents, CopyOf, Event, Failure, Fingerprint, Found, Holds,
-    Left, LibPath, Listing, Opened, Rescue, Source, Stale, Unkept, MOST_BYTES,
+    names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
+    LibPath, Listing, Opened, Rescue, Source, Stale, Unkept, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -350,8 +350,6 @@ pub struct Store {
     /// How many times room has been looked for by going through every asset.
     #[cfg(test)]
     pub(crate) looked_for_room: usize,
-    /// What each [`Cmd::ReadOthers`] answered, by its id, until taken.
-    others: Vec<(u64, Contents)>,
     /// How many writing commands have been sent.
     sent: u64,
     /// How many commands have been sent since the open.
@@ -408,7 +406,6 @@ impl Store {
             roomless: BTreeMap::new(),
             #[cfg(test)]
             looked_for_room: 0,
-            others: Vec::new(),
             sent: 0,
             issued: 0,
             #[cfg(not(target_arch = "wasm32"))]
@@ -840,18 +837,6 @@ impl Store {
         self.backend.send(cmd);
     }
 
-    /// Read files the library lists by name only, whole, outside the assets' budget. The
-    /// answer comes back from [`Store::take_others`] under `id`.
-    pub fn read_others(&mut self, id: u64, paths: Vec<LibPath>) {
-        self.send(Cmd::ReadOthers { id, paths });
-    }
-
-    /// The answers to [`Store::read_others`] folded in since the last call, each under
-    /// its request's id.
-    pub fn take_others(&mut self) -> Vec<(u64, Contents)> {
-        std::mem::take(&mut self.others)
-    }
-
     /// Rename a file or folder, with the rows no file has claimed yet that it takes
     /// along.
     fn rename(&mut self, from: LibPath, to: LibPath, rows: Vec<u64>) {
@@ -1108,7 +1093,6 @@ impl Store {
             }
             Event::Read(answers) => self.took(answers, workspace, browser, queue, log),
             Event::Fingerprinted(files) => self.fingerprinted(files),
-            Event::ReadOthers { id, files } => self.others.push((id, files)),
             Event::Moved { from, to, result } => match result {
                 _ if !self.answered_move(&from, &to) => {}
                 Ok(()) => {
