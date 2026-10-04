@@ -72,6 +72,7 @@ const CLAIMS: &[(&str, Claim)] = &[
     ("traits", traits),
     ("source", source),
     ("wide_renders", wide_renders),
+    ("wide_renders", twin_law),
     ("edited_from", edited_from),
     ("audio_differs_from", audio_differs_from),
     ("render", render),
@@ -561,6 +562,131 @@ fn wide_renders(s: &Specimen) -> Result<(), String> {
             "{name}: difference {worst}, limit {allowed}"
         );
     }
+    Ok(())
+}
+
+/// The twin law. Of an editor render and its renders in the other generations, the
+/// render at the finer shift, converted to another's generation, is that render. Each
+/// converted stroke decodes to the source's fields at the target's shift; its record
+/// stream and shift are the twin's, and so is its statistic B unless the report says
+/// the sign was inferred; and where the report is empty, the whole file is the twin's.
+///
+/// The choices are the editor's own: a loop mark is pushed to the narrow floor, and a
+/// zone gain past the narrow record is clamped, which the report states.
+///
+/// A stream past the reach of the stroke directory's 16-bit word pointers is refused:
+/// the editor writes them, and this crate's writer does not.
+///
+/// Inferred from specimens; not confirmed on hardware.
+fn twin_law(s: &Specimen) -> Result<(), String> {
+    use nord_format::convert::{self, Choices, Field, GainChoice, LoopMarkChoice, Reason};
+    use nord_format::convert::{NameChoice, OverlapChoice, Target, ZoneField};
+
+    if s.sidecar.wide_renders.is_empty() {
+        return Ok(());
+    }
+    let mut renders = vec![(s.bytes.to_vec(), samples::parse(s.bytes)?)];
+    for name in &s.sidecar.wide_renders {
+        renders.push(related(s.path, name)?);
+    }
+    let choices = Choices {
+        gain: Some(GainChoice::Clamp),
+        name: Some(NameChoice::Truncate),
+        overlap: Some(OverlapChoice::Lower),
+        loop_mark: Some(LoopMarkChoice::Push),
+    };
+    let lattices = |sample: &Sample| -> Result<Vec<nsmp::codec::Lattice>, String> {
+        let layout = sample.layout().context("layout")?;
+        let streams = sample.stroke_streams();
+        let peak = samples::peak(&streams, layout) as u32;
+        sample
+            .zones()
+            .context("zones")?
+            .iter()
+            .map(|z| nsmp::codec::lattice(z.stream, z.at, layout, peak).context("lattice"))
+            .collect()
+    };
+    let mut wrong = Vec::new();
+    for (_, source) in &renders {
+        for (twin_bytes, twin) in &renders {
+            let (from, to) = (samples::sample(source)?, samples::sample(twin)?);
+            let (finer, coarser) = (lattices(from)?, lattices(to)?);
+            let layout = to.layout().context("layout")?;
+            if from.layout().context("layout")? == layout
+                || finer.iter().zip(&coarser).any(|(f, c)| f.shift > c.shift)
+            {
+                continue;
+            }
+            let pair = format!("{} as {}", from.generation(), to.generation());
+            let reach = nsmp::codec::WRAP * layout.word();
+            let past_reach = from.stroke_streams().iter().any(|(_, st)| st.len() > reach);
+            let plan = convert::plan(source, Target::Nsmp(layout), &choices);
+            let converted = plan.and_then(|plan| {
+                let report = plan.report().clone();
+                plan.apply().map(|out| (report, out))
+            });
+            let (report, out) = match (converted, past_reach) {
+                (Err(_), true) => continue,
+                (Ok(_), true) => {
+                    wrong.push(format!(
+                        "{pair}: a stream past the directory's reach converts"
+                    ));
+                    continue;
+                }
+                (Err(e), false) => {
+                    wrong.push(format!("{pair}: {e}"));
+                    continue;
+                }
+                (Ok(converted), false) => converted,
+            };
+            let ours = lattices(&out)?;
+            let (out_streams, twin_streams) = (out.stroke_streams(), to.stroke_streams());
+            for (index, ((source, ours), (our_stroke, their_stroke))) in finer
+                .iter()
+                .zip(&ours)
+                .zip(out_streams.iter().zip(&twin_streams))
+                .enumerate()
+            {
+                let at = format!("{pair} zone {index}");
+                let rise = ours.shift - source.shift;
+                let decoded = source
+                    .fields
+                    .iter()
+                    .zip(&ours.fields)
+                    .all(|(f, o)| f >> rise == *o);
+                if !decoded || (ours.fields.len() != source.fields.len() && source.mark.is_none()) {
+                    wrong.push(format!("{at}: does not decode to the source's fields"));
+                }
+                let header = layout.header_len();
+                let (ours, theirs) = (our_stroke.1, their_stroke.1);
+                if ours.get(header..) != theirs.get(header..) || ours.get(12) != theirs.get(12) {
+                    wrong.push(format!("{at}: the record stream or shift differs"));
+                }
+                let inferred = report.from_rules.iter().any(|l| {
+                    l.field
+                        == Field::Zone {
+                            index,
+                            field: ZoneField::Peak,
+                        }
+                        && l.reason == Reason::SignFromContent
+                });
+                if !inferred && ours.get(13..16) != theirs.get(13..16) {
+                    wrong.push(format!("{at}: statistic B differs"));
+                }
+            }
+            let bytes = nord_format::to_bytes(&Entity::Sample(out)).context("write")?;
+            if report.is_empty() && bytes != *twin_bytes {
+                let differs = match bytes.len() == twin_bytes.len() {
+                    true => format!("at {:#x?}", samples::moved(&bytes, twin_bytes)),
+                    false => format!("in length, {} and {}", bytes.len(), twin_bytes.len()),
+                };
+                wrong.push(format!(
+                    "{pair}: nothing is reported, and the file differs {differs}"
+                ));
+            }
+        }
+    }
+    ensure!(wrong.is_empty(), "{}", wrong.join("; "));
     Ok(())
 }
 

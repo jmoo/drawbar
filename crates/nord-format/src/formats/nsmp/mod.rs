@@ -9,7 +9,8 @@
 //! byte-exactly and can retune, rename and remap them in either chain without touching
 //! the audio. The [`codec`] decodes that audio in every generation; it is one codec in
 //! three sets of units, and a caller selects the units with [`codec::Layout`].
-//! [`encode`] builds a new instrument from PCM in all three generations.
+//! [`encode`] builds a new instrument from PCM in all three generations, and lays a
+//! stroke's stored fields, a [`codec::Lattice`], out again in any of them.
 //!
 //! [`Index`] reads the zones and the position of each zone's stroke without reading the
 //! audio, so one stroke can be read by range. Its [`Outline`] answers what a whole read
@@ -29,6 +30,7 @@ pub struct ZoneAudio<'a> {
     pub stream: &'a [u8],
 }
 
+pub mod cat;
 pub mod codec;
 pub mod encode;
 mod index;
@@ -183,6 +185,10 @@ impl StringField {
 
     /// The wide chain's main name, in both wide generations.
     pub(super) const NAME_V3: StringField = StringField { at: 10, next: 76 };
+
+    /// The wide chain's sub name, bounded by the end of the `hdr` the editor writes:
+    /// where the field itself ends is unmapped.
+    pub(super) const SUB_NAME_V3: StringField = StringField { at: 76, next: 112 };
 
     /// Whether a payload reaches the end of this field, so a write lands.
     const fn fits(self, payload: &[u8]) -> bool {

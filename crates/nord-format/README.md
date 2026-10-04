@@ -9,7 +9,8 @@ and the bundles that carry them, from a library with no I/O of its own beyond
 What you read, you can write back unchanged. Anything the library does not yet
 decode is kept as raw bytes, so a file survives a round trip even where its
 meaning is not fully known, and every editable field is checked to move no other
-bit.
+bit. A sample instrument converts between its generations without re-encoding
+its audio, with a report of what the target cannot hold.
 
 ## Usage
 
