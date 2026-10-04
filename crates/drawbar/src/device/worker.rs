@@ -751,7 +751,10 @@ async fn send_all<T: Transport>(
 ) -> Result<Option<String>, String> {
     let total = items.len();
     let mut done = 0;
-    let outcome = batch(device, class, &items, total, &mut done, scratch, emit, fault).await;
+    let outcome = batch(
+        device, class, &items, total, &mut done, scratch, emit, fault,
+    )
+    .await;
     let refusal = outcome.map_err(spoil(fault, None))?;
     match refusal {
         None => Ok(Some(format!(

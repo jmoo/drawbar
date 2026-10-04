@@ -115,12 +115,7 @@ impl Report {
         Report::new(Kind::Feedback, device, workspace, store)
     }
 
-    fn new(
-        kind: Kind,
-        device: &Device,
-        workspace: &Workspace,
-        store: Option<&Store>,
-    ) -> Report {
+    fn new(kind: Kind, device: &Device, workspace: &Workspace, store: Option<&Store>) -> Report {
         Report {
             id: telemetry::report_id(),
             kind,
