@@ -46,11 +46,15 @@ impl AudioPath {
 
     /// The file's components from the root of a bounded tree, given the project's
     /// folder `dir` as components from that root. `None` for an absolute path, for a
-    /// `..` that climbs past the root, and for the root itself.
+    /// `..` that climbs past the root, for the root itself, and for a path that names no
+    /// component.
     pub fn within<'a>(&self, dir: impl IntoIterator<Item = &'a str>) -> Option<Vec<String>> {
         let AudioPath::Relative(parts) = self else {
             return None;
         };
+        if parts.is_empty() {
+            return None;
+        }
         let mut resolved: Vec<String> = dir.into_iter().map(String::from).collect();
         for part in parts {
             match part.as_str() {
@@ -92,9 +96,6 @@ pub trait Source {
 pub enum Unavailable {
     #[error("no such file")]
     Missing,
-    /// The path is absolute, or climbs out of the tree the source reads.
-    #[error("outside the tree the project's audio is read from")]
-    Outside,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -386,7 +387,7 @@ impl std::fmt::Display for Warning {
 
 /// The zone gain at which both of the instrument's gain fields overflow their 24 bits.
 /// The file still matches the editor's render, but no longer states the project's gain.
-pub const WRAPPING_ZONE_GAIN: f64 = 16.0;
+const WRAPPING_ZONE_GAIN: f64 = 16.0;
 
 /// One zone of a project, resolved: the audio region it plays and where on the
 /// keyboard it plays it.
@@ -827,12 +828,10 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_path_names_the_projects_own_folder() {
+    fn an_empty_path_names_no_file() {
         assert_eq!(AudioPath::parse(""), AudioPath::Relative(Vec::new()));
-        assert_eq!(
-            AudioPath::parse("").within(["Marimba"]),
-            Some(vec!["Marimba".to_string()])
-        );
+        assert_eq!(AudioPath::parse("").within(["Marimba"]), None);
+        assert_eq!(AudioPath::parse("./").within(["Marimba"]), None);
     }
 
     #[test]
