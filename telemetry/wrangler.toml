@@ -4,6 +4,8 @@ main = "src/index.js"
 compatibility_date = "2026-05-25"
 routes = [{ pattern = "t.drawbar.app", custom_domain = true }]
 workers_dev = false
+# No version is served anywhere but t.drawbar.app.
+preview_urls = false
 
 [[analytics_engine_datasets]]
 binding = "EVENTS"

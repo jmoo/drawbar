@@ -9,12 +9,16 @@
 # `https://drawbar.app` in production). Rows and reports carry version `0.0.0-test`, and
 # it prints the report ids, so both can be found and deleted afterward.
 #
+# Set SMOKE_GAP=4 against production: the edge's rate limit on /report answers 429 to
+# more than three reports in ten seconds from one address.
+#
 # nix-deps: curl
 set -euo pipefail
 
 url=${1:?collector URL}
 origin=${2:?accepted origin}
 failed=0
+gap=${SMOKE_GAP:-0}
 
 # Expect status $1 from a request with the rest of the arguments, described by $2.
 expect() {
@@ -33,6 +37,9 @@ expect() {
 post() {
   local path=$1 body=$2
   shift 2
+  if [[ $path == /report ]]; then
+    sleep "$gap"
+  fi
   curl_args=(-X POST "$url$path" -H 'content-type: text/plain' --data-binary "$body" "$@")
 }
 
