@@ -1313,9 +1313,8 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
             });
         }
     }
-    if let Some(stated) = sample::stated_of(entity) {
-        cells.push(stated);
-    }
+    cells.extend(sample::stated_of(entity));
+    cells.extend(wav::stated(entity));
     cells
 }
 

@@ -73,7 +73,8 @@ pub(super) enum Shape {
     Text,
     /// A body no registry describes, kept byte for byte.
     Verbatim,
-    /// A WAV, which can be encoded into an instrument.
+    /// A WAV: its waveform, audition, gain, and the panel that encodes it into an
+    /// instrument.
     Wav,
     /// Bytes that did not decode.
     Undecoded,
@@ -185,6 +186,8 @@ enum Asked {
     Zone(sample::Ask),
     Root(piano::Ask),
     Encode,
+    /// Play the open WAV, or stop it.
+    Audition,
     /// The header's Export, offered by a body with nothing to edit.
     Export,
     Open(crate::browser::Item),
@@ -208,8 +211,8 @@ struct Opened {
     paths: std::collections::HashMap<u32, String>,
     /// The last refusal message.
     error: Option<String>,
-    /// The encode panel over a WAV, and the read of the WAV it works from.
-    wav: Option<(encode::Draft, encode::Source)>,
+    /// A WAV's read, gain and encode panel.
+    wav: Option<wav::State>,
     /// What the instrument editor keeps between frames: the open zone, the struck key,
     /// the folded key table. Never an edit: edits go to the working copy immediately.
     sample: sample::State,
@@ -241,10 +244,7 @@ impl Opened {
             paths: std::collections::HashMap::new(),
             error: None,
             wav: match asset.shape {
-                Shape::Wav => Some((
-                    encode::Draft::new(&entity.name),
-                    encode::read(&entity.bytes),
-                )),
+                Shape::Wav => Some(wav::State::new(entity)),
                 Shape::Fields
                 | Shape::SetList
                 | Shape::Sample
@@ -371,6 +371,9 @@ impl Document {
         // piano library is hundreds of megabytes with no fields.
         if let (Shape::Fields, Some(open)) = (shape, self.open.as_mut()) {
             open.fields.follow(entity);
+        }
+        if let Some(held) = self.open.as_mut().and_then(|open| open.wav.as_mut()) {
+            held.follow(entity);
         }
         let doc = match (decoded, registry.as_deref()) {
             (Some(decoded), Some(fields)) => Some(field::of(decoded, fields)),
@@ -528,6 +531,7 @@ impl Document {
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
                 Asked::Encode => self.encode(id, workspace, log),
+                Asked::Audition => self.audition(id, workspace, log),
             }
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
@@ -857,7 +861,16 @@ impl Document {
         sets: &mut Sets,
     ) -> Option<Asked> {
         match asset.shape {
-            Shape::Wav | Shape::Undecoded => self.wav_body(ui),
+            Shape::Wav => self.wav_body(ui, asset.entity.id, sets),
+            Shape::Undecoded => {
+                ui.label(
+                    egui::RichText::new(
+                        "This file did not decode, so there is nothing to show but its bytes.",
+                    )
+                    .weak(),
+                );
+                None
+            }
             Shape::Sample => self.sample_body(ui, asset.entity, sets).map(Asked::Zone),
             Shape::Project => {
                 self.project_body(ui, asset.decoded()?, sets);
@@ -885,19 +898,34 @@ impl Document {
         }
     }
 
-    /// Undecoded bytes: the encode panel for a WAV, and a plain notice for anything
-    /// else.
-    fn wav_body(&mut self, ui: &mut egui::Ui) -> Option<Asked> {
-        let Some((draft, source)) = self.open.as_mut().and_then(|open| open.wav.as_mut()) else {
-            ui.label(
-                egui::RichText::new(
-                    "This file did not decode, so there is nothing to show but its bytes.",
-                )
-                .weak(),
-            );
-            return None;
+    fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
+        let playing = self.player.sounds((id, 0));
+        let held = self.open.as_mut()?.wav.as_mut()?;
+        wav::ui(ui, held, playing, sets).map(|ask| match ask {
+            wav::Ask::Audition => Asked::Audition,
+            wav::Ask::Encode => Asked::Encode,
+        })
+    }
+
+    /// Play the open WAV through the app's player, or stop it where it is playing.
+    fn audition(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+        let Some(pcm) = self
+            .open
+            .as_ref()
+            .and_then(|open| open.wav.as_ref())
+            .and_then(wav::State::pcm)
+        else {
+            return;
         };
-        encode::ui(ui, draft, source).then_some(Asked::Encode)
+        hear(
+            &mut self.player,
+            workspace,
+            log,
+            (id, 0),
+            (&pcm.samples, pcm.channels, pcm.rate),
+            Hear::Play,
+            "WAV",
+        );
     }
 
     fn sample_body(
@@ -1213,10 +1241,11 @@ impl Document {
 
     /// Build an instrument from the open WAV as a new asset. The WAV is left unchanged.
     fn encode(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
-        let Some((draft, source)) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
+        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
             return;
         };
-        let made = encode::instrument(draft, source).map(|bytes| {
+        let draft = &held.draft;
+        let made = encode::instrument(draft, held.source()).map(|bytes| {
             (
                 format!("{}.{}", draft.name, draft.layout.extension()),
                 bytes,
@@ -1290,7 +1319,17 @@ impl Document {
             Shape::Piano => self.piano.take(&sets).map(|()| None),
             Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
             Shape::Text => text::apply(&entity.bytes, &sets).map(Some),
-            Shape::Fields | Shape::Verbatim | Shape::Wav | Shape::Undecoded => {
+            Shape::Wav => wav::apply(&entity.bytes, &sets).map(|(out, clipped)| {
+                if clipped > 0 {
+                    log.warn(format!(
+                        "{}: {} clipped",
+                        entity.name,
+                        strings::counted(clipped, "sample", "samples")
+                    ));
+                }
+                Some(out)
+            }),
+            Shape::Fields | Shape::Verbatim | Shape::Undecoded => {
                 fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
             }
         };
@@ -1322,8 +1361,6 @@ impl Document {
 /// Advanced is always offered, because every asset has a record, even bytes that did
 /// not decode.
 fn faces(shape: Shape) -> Vec<Face> {
-    // A WAV does not decode, but it can be encoded into an instrument, so it gets a
-    // panel as well as the byte record.
     let panel = match shape {
         Shape::Fields
         | Shape::SetList
@@ -1412,8 +1449,8 @@ enum Hear {
     Save(String),
 }
 
-/// Play, strike, or save decoded audio. `what` names the zone or root in the trouble
-/// line.
+/// Play, strike, or save decoded audio at `rate`. `what` names the zone or root in the
+/// trouble line.
 fn hear(
     player: &mut crate::audio::Player,
     workspace: &Workspace,
@@ -1423,14 +1460,15 @@ fn hear(
     ask: Hear,
     what: &str,
 ) {
+    let clock = rate as f32 / codec::FIELD_RATE as f32;
     let played = match ask {
-        Hear::Play => player.toggle(key, samples, channels),
+        Hear::Play => player.toggle(key, samples, channels, clock),
         Hear::Strike { semitones, finger } => player.strike(
             finger,
             key,
             samples,
             channels,
-            crate::audio::rate(semitones),
+            crate::audio::rate(semitones) * clock,
         ),
         Hear::Save(name) => {
             match nord_format::wav::pcm16(samples, rate, channels) {
@@ -2138,7 +2176,12 @@ mod tests {
     fn renaming_a_wav_keeps_the_encode_draft_it_is_open_on() {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
         open.frame(Vec::new());
-        let (draft, _) = open.state().wav.as_mut().expect("a WAV opens the panel");
+        let draft = &mut open
+            .state()
+            .wav
+            .as_mut()
+            .expect("a WAV opens the panel")
+            .draft;
         assert_ne!(
             (draft.root_key, draft.top_note),
             (48, 60),
@@ -2154,7 +2197,7 @@ mod tests {
         assert!(renamed.ends_with(".wav"), "{renamed}");
 
         open.frame(Vec::new());
-        let (draft, _) = open.state().wav.as_ref().expect("the same panel");
+        let draft = &open.state().wav.as_ref().expect("the same panel").draft;
         assert_eq!((draft.root_key, draft.top_note), (48, 60));
     }
 
@@ -3248,6 +3291,80 @@ mod tests {
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
         assert!(said.iter().any(|word| word == "Container"), "{said:?}");
+    }
+
+    /// A WAV that reads offers audition, gain and encode, and states its audio in the
+    /// header. One that does not read says why and offers none of them.
+    #[test]
+    fn a_wav_document_offers_what_its_audio_allows() {
+        let mut open = Open::file("Marimba hit.wav", wav_bytes());
+        let said = open.twice();
+        for offered in [
+            "Play",
+            "Gain",
+            wav::RESCALE,
+            "Encode",
+            "44100 Hz · mono · 1.000 s",
+        ] {
+            assert!(
+                said.iter().any(|word| word == offered),
+                "{offered}: {said:?}"
+            );
+        }
+
+        let mut deep = wav_bytes();
+        deep[34] = 24;
+        let mut open = Open::file("Marimba hit.wav", deep);
+        let said = open.twice();
+        assert!(
+            said.iter().any(|word| word.contains("24-bit")),
+            "it says why: {said:?}"
+        );
+        for refused in ["Play", "Gain", wav::RESCALE, "Encode"] {
+            assert!(
+                !said.iter().any(|word| word == refused),
+                "{refused}: {said:?}"
+            );
+        }
+    }
+
+    /// The gain counts what it would clip before it is applied, lands on the working copy
+    /// when applied, and Revert takes it back.
+    #[test]
+    fn an_applied_gain_is_an_edit_that_reverts() {
+        let bytes = wav_bytes();
+        let peak = |bytes: &[u8]| {
+            let pcm = nord_format::wav::read_pcm16(bytes).unwrap();
+            pcm.samples.iter().map(|sample| sample.unsigned_abs()).max()
+        };
+        let mut open = Open::file("Marimba hit.wav", bytes.clone());
+        open.frame(Vec::new());
+        open.state().wav.as_mut().unwrap().gain = 24.0;
+        let said = open.frame(Vec::new());
+        assert!(
+            said.iter().any(|word| word.ends_with("samples clip")),
+            "{said:?}"
+        );
+
+        open.state().wav.as_mut().unwrap().gain = 6.0;
+        let said = open.painted(Vec::new());
+        assert!(said.iter().any(|word| word.text == "nothing clips"));
+        open.frame(testing::click(
+            testing::where_(&said, wav::RESCALE).center(),
+        ));
+        assert!(open.entity().is_unsaved());
+        // 11999 at 10^(6/20) = 1.995 times is 23941.
+        assert_eq!(peak(&bytes), Some(11_999));
+        assert_eq!(peak(&open.entity().bytes), Some(23_941));
+        assert_eq!(open.state().wav.as_ref().unwrap().gain, 0.0);
+
+        open.act(vec![crate::browser::Act::Revert(open.id)]);
+        assert!(!open.entity().is_unsaved());
+        assert!(open.entity().bytes == bytes);
+        open.frame(Vec::new());
+        let held = open.state().wav.as_ref().unwrap();
+        assert_eq!(held.pcm().map(|pcm| pcm.samples.len()), Some(44_100));
+        assert_eq!(peak(&open.entity().bytes), Some(11_999));
     }
 
     #[test]

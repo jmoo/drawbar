@@ -6088,7 +6088,43 @@ fn a_listed_wav_is_a_wav_asset_read_when_its_document_opens() {
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.bytes == wav, "it holds the file");
     assert_eq!(Kind::of(entity), Kind::Wav);
-    assert!(said.iter().any(|word| word == "Encode"), "{said:?}");
+    for offered in ["Play", "Encode"] {
+        assert!(
+            said.iter().any(|word| word == offered),
+            "{offered}: {said:?}"
+        );
+    }
+}
+
+/// A gain is an edit like any other: it leaves the WAV unsaved until it is reverted or
+/// saved into its file.
+#[test]
+fn a_gain_edit_reverts_and_saves_like_any_edit() {
+    let root = Temp::new();
+    let wav = crate::testing::wav_bytes();
+    fs::write(root.at("hit.wav"), &wav).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("hit.wav");
+    let gain = |session: &mut Session| {
+        let sets = [(crate::document::wav::GAIN.to_string(), "6.0".to_string())];
+        let (gained, _) = crate::document::wav::apply(&wav, &sets).unwrap();
+        let Bench { workspace, log, .. } = &mut session.bench;
+        workspace.replace_bytes(id, gained.clone(), log);
+        assert!(workspace.get(id).unwrap().is_unsaved());
+        gained
+    };
+
+    gain(&mut session);
+    session.bench.act(vec![crate::browser::Act::Revert(id)]);
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(!entity.is_unsaved());
+    assert!(entity.bytes == wav, "reverted to the file");
+
+    let gained = gain(&mut session);
+    session.bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+    session.sync();
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(root.read("hit.wav") == gained, "the file holds the gain");
 }
 
 /// Write `stored` WAVs, one second each, under `root`, and a project in `Marimba/`
@@ -6224,6 +6260,31 @@ fn a_project_builds_beside_itself_into_what_its_folder_on_disk_builds() {
         "the app built {} bytes, and the command line {}, not the same",
         built.len(),
         expected.len()
+    );
+}
+
+/// A build takes a WAV as its asset holds it, an unsaved gain included.
+#[test]
+fn a_build_encodes_a_wavs_unsaved_gain() {
+    let root = Temp::new();
+    let project = project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
+    let saved = root.read("Marimba/c3.wav");
+    let sets = [(crate::document::wav::GAIN.to_string(), "-6.0".to_string())];
+    let (gained, _) = crate::document::wav::apply(&saved, &sets).unwrap();
+    let expected = built_from(&project, |_| gained.clone());
+    assert!(expected != built_from(&project, |_| saved.clone()));
+
+    let mut session = Session::open(&root);
+    let wav = session.named("c3.wav");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(wav, gained.clone(), log);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    let made = session.named("Marimba.nsmp");
+    assert!(session.bytes(made) == expected, "the gain was built in");
+    assert!(
+        root.read("Marimba/c3.wav") == saved,
+        "the WAV is still unsaved"
     );
 }
 
