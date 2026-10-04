@@ -26,7 +26,7 @@ pub(super) fn plan(sample: &Sample, to: Layout, choices: &Choices) -> Result<Pla
         open: Vec::new(),
         order: (0..source.zones.len()).collect(),
     };
-    edge.unmodelled(sample, &source)?;
+    edge.unmodeled(sample, &source)?;
     let mut target = source.clone();
     edge.instrument(&mut target);
     edge.zones(&mut target);
@@ -88,7 +88,7 @@ impl Edge<'_> {
 
     /// Stored bytes and header words the model does not carry: whatever differs
     /// between the source and the source's own generation written from the model.
-    fn unmodelled(&mut self, sample: &Sample, source: &Instrument) -> Result<(), ConvertError> {
+    fn unmodeled(&mut self, sample: &Sample, source: &Instrument) -> Result<(), ConvertError> {
         let header = header_of(sample);
         let frame_layout = match self.from.chain {
             Chain::Early => Layout::V2,
@@ -123,7 +123,7 @@ impl Edge<'_> {
                 self.dropped(
                     bytes(&tag, 0..payload.len(), None),
                     hex(&payload),
-                    Reason::Unmodelled,
+                    Reason::Unmodeled,
                 );
                 continue;
             };
@@ -131,7 +131,7 @@ impl Edge<'_> {
                 self.dropped(
                     bytes(&tag, 0..payload.len(), None),
                     hex(&payload),
-                    Reason::Unmodelled,
+                    Reason::Unmodeled,
                 );
                 continue;
             }
@@ -161,7 +161,7 @@ impl Edge<'_> {
                     continue;
                 }
                 let value = hex(&payload[range.clone()]);
-                self.dropped(bytes(&tag, range, known_as), value, Reason::Unmodelled);
+                self.dropped(bytes(&tag, range, known_as), value, Reason::Unmodeled);
             }
         }
         Ok(())
@@ -300,6 +300,19 @@ impl Edge<'_> {
     }
 
     fn velocity_depths(&mut self, target: &mut Instrument) {
+        if self.to == Layout::V2 && self.from.layout != Layout::V2 {
+            // The narrow preset's other bytes follow the category in the editor's
+            // renders, and a wide source states none of them.
+            let preset = &encode::STY_V2_PAYLOAD;
+            for range in [0..3, 6..preset.len()] {
+                let value = hex(&preset[range.clone()]);
+                self.by_rule(
+                    bytes("sty", range, Some("preset")),
+                    value,
+                    Reason::EditorDefault,
+                );
+            }
+        }
         let defaults = encode::Preset::default();
         let depths = [
             (
@@ -353,6 +366,10 @@ impl Edge<'_> {
                 if let Some(decay) = decay {
                     self.dropped(at(ZoneField::LoopDecay), decay, Reason::NoField(self.to));
                 }
+                if self.from.layout != Layout::V2 {
+                    let gain = target.zones[index].gain;
+                    self.by_rule(at(ZoneField::Gain), gain, Reason::DecibelGain);
+                }
                 self.gain(index, target);
             } else if self.widening() {
                 self.by_rule(
@@ -360,6 +377,8 @@ impl Edge<'_> {
                     DEFAULT_LOOP_DECAY,
                     Reason::EditorDefault,
                 );
+                let gain = target.zones[index].gain;
+                self.by_rule(at(ZoneField::Gain), gain, Reason::NarrowGain);
             }
             self.loop_mark(index, &mut target.zones[index].audio);
         }
@@ -453,8 +472,7 @@ impl Edge<'_> {
             };
             let reaches = match zones.get(at + 1) {
                 Some(below) => below.top_note.saturating_add(1),
-                None if low <= KEY_FLOOR => continue,
-                None => 0,
+                None => KEY_FLOOR,
             };
             if low > reaches {
                 self.dropped(
@@ -464,7 +482,7 @@ impl Edge<'_> {
                 );
                 continue;
             }
-            if low == reaches {
+            if low == reaches || at + 1 == zones.len() {
                 continue;
             }
             match self.choices.overlap {
@@ -561,24 +579,28 @@ impl Edge<'_> {
         if self.from.chain == Chain::Early {
             return;
         }
-        let rebuilt = hub::write(source, self.from.layout).ok();
-        let rebuilt = rebuilt.as_ref().map(strokes).unwrap_or_default();
-        for (index, zone) in source.zones.iter().enumerate() {
-            let stroke = strokes(sample)
-                .into_iter()
-                .find(|s| leading_id(s) == Some(zone.global_id));
-            let ours = rebuilt
-                .iter()
-                .find(|s| leading_id(s) == Some(zone.global_id));
-            let (Some(stroke), Some(ours)) = (stroke, ours) else {
-                self.changed(
-                    Field::Zone {
+        let rebuilt = match hub::write(source, self.from.layout) {
+            Ok(rebuilt) => rebuilt,
+            Err(why) => {
+                for (index, zone) in source.zones.iter().enumerate() {
+                    let field = Field::Zone {
                         index,
                         field: ZoneField::Stream,
-                    },
-                    zone.audio.fields.len(),
-                    Reason::Recoded,
-                );
+                    };
+                    let reason = Reason::NotRebuilt {
+                        why: why.to_string(),
+                    };
+                    self.changed(field, zone.audio.fields.len(), reason);
+                }
+                return;
+            }
+        };
+        let rebuilt = strokes(&rebuilt);
+        for (index, zone) in source.zones.iter().enumerate() {
+            let named = |s: &&[u8]| leading_id(s) == Some(zone.global_id);
+            let stroke = strokes(sample).into_iter().find(named);
+            let ours = rebuilt.iter().copied().find(named);
+            let (Some(stroke), Some(ours)) = (stroke, ours) else {
                 continue;
             };
             let header = self
@@ -596,7 +618,7 @@ impl Edge<'_> {
                 self.dropped(
                     bytes(&format!("zones[{index}].stk"), range, None),
                     value,
-                    Reason::Unmodelled,
+                    Reason::Unmodeled,
                 );
             }
             if stroke[header..] != ours[header..] {
