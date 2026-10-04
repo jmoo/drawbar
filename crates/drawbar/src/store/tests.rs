@@ -409,6 +409,188 @@ fn an_unsaved_edit_that_does_not_read_is_left_for_the_next_open() {
     assert!(entity.is_unsaved());
 }
 
+/// A library let go with no last pass, as a closing browser tab lets it go, loses an
+/// edit until a pass has kept it and the disk has it, a commit that answers nothing
+/// included. A tab asks to stay open for as long as it would.
+#[test]
+fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    assert!(!session.store.losing(&session.bench.workspace), "listed");
+    let id = session.only();
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    assert!(session.store.losing(&session.bench.workspace), "edited");
+    session.autosave();
+
+    let started = std::time::Instant::now();
+    while session.store.losing(&session.bench.workspace) {
+        assert!(started.elapsed().as_secs() < 10, "the disk never caught up");
+        std::thread::yield_now();
+    }
+    assert!(
+        rows(&root)[&id].working.is_some(),
+        "the edit is on disk once nothing would be lost"
+    );
+}
+
+/// Reading loses nothing: a library listed, rescanned or read lazily, with no edit, never
+/// has a tab ask to stay open, and an edit then does.
+#[test]
+fn a_library_only_read_is_never_losing() {
+    let root = Temp::new();
+    programs(&root, 300);
+    let mut session = Session::opening(&root);
+    let losing = |session: &Session| session.store.losing(&session.bench.workspace);
+    assert!(!losing(&session), "while listing");
+    session.listed_whole();
+
+    session.store.rescan();
+    assert!(!losing(&session), "while rescanning");
+    while session.store.scanning() {
+        assert!(session.next(), "the rescan answered");
+    }
+
+    let unread: Vec<u64> = session
+        .bench
+        .workspace
+        .listed()
+        .filter(|entity| entity.unread())
+        .map(|entity| entity.id)
+        .take(50)
+        .collect();
+    assert!(!unread.is_empty(), "files are left to read");
+    for id in &unread {
+        session.bench.workspace.hurry(*id);
+    }
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.ask(workspace, browser, queue, log);
+    assert!(!losing(&session), "while reading");
+    session.read(&unread);
+
+    let id = unread[0];
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    assert!(losing(&session), "an unsaved edit");
+}
+
+/// ⚠️ Working copies are found only through the index. One gone missing, deleted or lost
+/// to a sync, leaves copies no index names, which a sweep would take for leftovers: the
+/// library opens read-only and leaves them, and the edit comes back with the index.
+#[test]
+fn unsaved_edits_whose_index_is_missing_are_left_for_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 1, "{working:?}");
+    let index = root.read(".drawbar/library.ron");
+    fs::remove_file(root.at(".drawbar/library.ron")).unwrap();
+
+    let second = Session::open(&root);
+    let why = second.store.read_only().expect("read-only");
+    assert!(why.contains("index is missing"), "{why}");
+    second.close();
+    assert_eq!(root.names(".drawbar/working"), working, "the copy is left");
+
+    fs::write(root.at(".drawbar/library.ron"), index).unwrap();
+    let third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+    let entity = third.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, edited, "the edit came back");
+    assert!(entity.is_unsaved());
+}
+
+/// ⚠️ With no index, a working-copy folder that cannot be listed may still hold edits:
+/// the library opens read-only rather than taking it for empty.
+#[cfg(unix)]
+#[test]
+fn a_library_without_its_index_whose_working_copies_cannot_be_listed_stays_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let first = Session::open(&root);
+    first.close();
+    fs::remove_file(root.at(".drawbar/library.ron")).ok();
+    let working = root.at(".drawbar/working");
+    fs::create_dir_all(&working).unwrap();
+    fs::write(working.join("1-1"), b"an unsaved edit").unwrap();
+    fs::set_permissions(&working, fs::Permissions::from_mode(0o300)).unwrap();
+    if fs::read_dir(&working).is_ok() {
+        // Permissions do not bind this user, so the folder cannot be made unlistable.
+        fs::set_permissions(&working, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let second = Session::open(&root);
+    let why = second.store.read_only().map(str::to_string);
+    second.close();
+    fs::set_permissions(&working, fs::Permissions::from_mode(0o755)).unwrap();
+    let why = why.expect("read-only");
+    assert!(why.contains("could not be read"), "{why}");
+    assert_eq!(root.names(".drawbar/working"), ["1-1"], "the copy is left");
+}
+
+/// A library whose index is missing asks about the working copies it keeps, since in the
+/// browser nothing else can reach them. Opening it without them, confirmed, deletes them,
+/// and the library opens for writing.
+#[test]
+fn a_library_without_its_index_opens_without_its_edits_when_asked() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited, log);
+    first.close();
+    fs::remove_file(root.at(".drawbar/library.ron")).unwrap();
+
+    let mut second = Session::open(&root);
+    assert!(second.store.read_only().is_some());
+    let (_, answers) = second.bench.browser.asking().expect("a question");
+    assert_eq!(answers, ["Keep read-only", "Open without them…"]);
+    let acts = second.bench.browser.answer("Open without them…");
+    second.bench.act(acts);
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Delete 1 unsaved edit?");
+    let acts = second.bench.browser.answer("Delete");
+    assert!(
+        matches!(
+            acts[..],
+            [crate::browser::Act::DropUnindexed {
+                copies: 1,
+                confirmed: true
+            }]
+        ),
+        "{acts:?}"
+    );
+    second.store.drop_unindexed();
+    second.close();
+    assert_eq!(
+        root.names(".drawbar/working"),
+        [""; 0],
+        "the copies are gone"
+    );
+
+    let third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+}
+
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
 /// check, and be refused as a write over someone else's file.
 #[test]
@@ -499,6 +681,73 @@ fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
     let entity = second.bench.workspace.get(id).expect("the same id");
     assert_eq!(entity.saved.bytes, saved, "the file as saved");
     assert_eq!(entity.bytes, edited, "and the edit over it");
+}
+
+/// ⚠️ A save lands before the index that drops its working copy. A crash in between
+/// leaves a copy of an edit older than the save, and the next open must take the file
+/// as saved rather than offer the older edit back over it.
+#[test]
+fn a_crash_right_after_a_save_brings_back_the_save_and_not_an_older_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let older = with_gain(&session.bytes(id), "96");
+    let saved = with_gain(&older, "12");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, older.clone(), log);
+    session.autosave();
+    session.settle();
+    assert_eq!(
+        rows(&root)[&id].working.map(|copy| copy.keeps),
+        Some(Keeps::Bytes),
+        "the older edit is kept as a working copy"
+    );
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
+    drop(session);
+    assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
+
+    let again = Session::open(&root);
+    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
+    let entity = again.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, saved, "the save, not the older edit");
+    assert!(!entity.is_unsaved());
+}
+
+/// A working copy kept while a save waited for the one before it holds edits newer than
+/// that save, and is never written over by it: after a crash, the newer edit comes back.
+#[test]
+fn a_save_never_writes_over_a_working_copy_newer_than_itself() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let first = with_gain(&session.bytes(id), "96");
+    let second = with_gain(&first, "12");
+    let newer = with_gain(&second, "40");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, first, log);
+    workspace.mark_saved(id);
+    assert!(!session.settled(), "the first save is in flight");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, second.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, newer.clone(), log);
+    session.autosave();
+    while !session.settled() {
+        assert!(session.next(), "the saves answered");
+    }
+    drop(session);
+    assert_eq!(root.read("untitled.ne5p"), second, "the second save landed");
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, newer, "the newer edit came back");
 }
 
 #[test]
@@ -4105,6 +4354,7 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     session.bench.act(acts);
     session.sync();
     assert!(root.at("Moved.nsmp").exists(), "kept until the copy lands");
+    session.let_go();
     session.sync();
 
     assert!(root.read("Kept.nsmp") == ours);
@@ -4152,6 +4402,198 @@ fn a_copy_over_that_does_not_land_keeps_the_file_it_came_from() {
     let entity = session.bench.workspace.get(moved).expect("the asset stays");
     assert!(entity.kept);
     assert_eq!(session.said("was not overwritten"), 1);
+}
+
+/// ⚠️ An overwrite with bytes held whole whose save is refused leaves the asset it was
+/// moved from, and that asset's file: until a pass keeps a working copy, nothing else
+/// holds what it holds, and a crash before that pass would lose it.
+#[test]
+fn an_overwrite_whose_save_does_not_land_keeps_the_file_it_came_from() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    assert!(
+        matches!(acts[..], [crate::browser::Act::Overwrite { .. }]),
+        "{acts:?}"
+    );
+    session.bench.act(acts);
+    // Saved over outside drawbar before the save runs, so the save is refused.
+    let outside = with_gain(&program, "40");
+    fs::write(root.at("Kept.ne5p"), [&outside[..], b"!"].concat()).unwrap();
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
+    drop(session);
+
+    assert_eq!(root.read("Moved.ne5p"), ours, "the file it came from stays");
+}
+
+/// A save sent before an overwrite answers for itself: the asset the overwrite came from
+/// waits for the overwrite's own save, and stays where that one does not land.
+#[test]
+fn an_overwrite_waits_for_its_own_save_and_not_the_one_before() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let (kept, moved) = (session.named("Kept.ne5p"), session.named("Moved.ne5p"));
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(kept, with_gain(&program, "40"), log);
+    workspace.mark_saved(kept);
+    assert!(!session.settled(), "the save before is in flight");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    assert!(session.next(), "the save before answered");
+    assert_eq!(root.read("Kept.ne5p"), with_gain(&program, "40"));
+    fs::write(root.at("Kept.ne5p"), b"saved over outside").unwrap();
+    while !session.settled() {
+        assert!(session.next(), "the overwrite's save answered");
+    }
+    drop(session);
+
+    assert_eq!(root.read("Moved.ne5p"), ours, "the file it came from stays");
+}
+
+impl Session {
+    /// Remove what the store let go since the last call, as the app does each frame.
+    fn let_go(&mut self) {
+        let left = self.store.take_left();
+        let acts = left.into_iter().map(crate::browser::Act::Remove).collect();
+        self.bench.act(acts);
+    }
+}
+
+/// The asset an overwrite came from goes, once the overwrite lands, as an asset removed by
+/// hand goes: its tab closes and its place in the send queue goes with it.
+#[test]
+fn an_overwrite_lets_its_source_go_as_a_removal_does() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+    session.bench.tabs.open(moved);
+    let Bench {
+        workspace,
+        device,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    let slot = Location { bank: 0, slot: 2 };
+    crate::queue::enqueue(
+        workspace,
+        device,
+        queue,
+        log,
+        moved,
+        ObjectClass::Program,
+        slot,
+    );
+    assert!(session.bench.queue.holds(moved), "queued");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.let_go();
+    session.sync();
+
+    assert!(session.bench.workspace.get(moved).is_none());
+    assert!(!session.bench.tabs.holds(moved), "its tab closed");
+    assert!(!session.bench.queue.holds(moved), "it left the queue");
+    assert!(
+        !root.at("Moved.ne5p").exists(),
+        "the file it came from is gone"
+    );
+}
+
+/// An edit made to the asset an overwrite came from while the overwrite was in flight is
+/// in nothing the overwrite wrote, so the asset stays, with its edit and its file.
+#[test]
+fn an_overwrite_keeps_its_source_where_it_was_edited_meanwhile() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    let meanwhile = with_gain(&program, "40");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(moved, meanwhile.clone(), log);
+    session.sync();
+    session.let_go();
+    session.sync();
+
+    assert_eq!(root.read("Kept.ne5p"), ours, "the overwrite landed");
+    let entity = session
+        .bench
+        .workspace
+        .get(moved)
+        .expect("the source stays");
+    assert_eq!(entity.bytes, meanwhile, "with its edit");
+    assert_eq!(root.read("Moved.ne5p"), ours, "and its file");
+}
+
+/// An overwrite with bytes held whole removes the asset it was moved from once its save
+/// has landed, and that asset's file with it.
+#[test]
+fn an_overwrite_removes_the_file_it_came_from_once_it_lands() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let (kept, moved) = (session.named("Kept.ne5p"), session.named("Moved.ne5p"));
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.let_go();
+    session.sync();
+
+    assert_eq!(root.read("Kept.ne5p"), ours);
+    assert!(
+        !root.at("Moved.ne5p").exists(),
+        "the file it came from is gone"
+    );
+    assert!(session.bench.workspace.get(moved).is_none());
+    assert!(!session.bench.workspace.get(kept).unwrap().is_unsaved());
 }
 
 /// A sample instrument holding an unsaved edit over its file, whose file is saved over
@@ -4590,6 +5032,38 @@ fn a_quit_between_an_edit_copy_and_its_index_keeps_the_edit_the_index_names() {
     };
     crash(&old_index, "Vibes");
     crash(&new_index, "Bells");
+}
+
+/// ⚠️ An edit's save lands before the index that drops its working copy. A crash in
+/// between leaves a copy of an older edit over the saved file, and the next open must take
+/// the file as saved rather than offer the older edit back over it.
+#[test]
+fn a_crash_right_after_an_edit_is_saved_brings_back_the_save_and_not_an_older_edit() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    let named =
+        |name: &str| crate::rewrite::Edit::Sample(vec![("name".to_string(), name.to_string())]);
+    session.bench.workspace.hold_edit(id, Some(named("Vibes")));
+    session.autosave();
+    session.settle();
+    assert_eq!(
+        copies(&root)[&id].keeps,
+        Keeps::Edit,
+        "the older edit is kept"
+    );
+    session.rename_resting(id, "Bells");
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
+    drop(session);
+    let saved = crate::document::sample::apply(&bytes, &[("name".into(), "Bells".into())]);
+    assert!(root.read("Zoned.nsmp") == saved.unwrap(), "the save landed");
+
+    let again = Session::listed(&root);
+    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
+    let workspace = &again.bench.workspace;
+    assert_eq!(workspace.edit(id), None, "the save, not the older edit");
+    assert!(!workspace.get(id).unwrap().is_unsaved());
 }
 
 /// A working copy of an edit that this build does not read is never taken for no edit:

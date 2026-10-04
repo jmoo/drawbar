@@ -13,6 +13,9 @@
 //   write    Write `data`, a transferred ArrayBuffer, at byte `at` of `path`.
 //   end      Flush `path` to storage and let it go.
 //   abandon  Let `path` go, if it is held, and delete it.
+//   unlock   Let go of the lock and of every file held open. Stopping the worker lets
+//            them go only when the browser gets to it, so the next library's lock may
+//            otherwise find them still held.
 //
 // ⚠️ Before Chrome 108 and Safari 16.4, a handle's flush, truncate and close returned
 // promises. Awaiting them works for both.
@@ -80,6 +83,17 @@ const ops = {
       await access.flush();
     } finally {
       await access.close();
+    }
+  },
+
+  async unlock() {
+    for (const access of held.values()) {
+      await access.close();
+    }
+    held.clear();
+    if (lock) {
+      await lock.close();
+      lock = null;
     }
   },
 

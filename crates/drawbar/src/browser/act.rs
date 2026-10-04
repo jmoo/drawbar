@@ -63,7 +63,8 @@ pub enum Act {
         from: Outside,
     },
     /// Put bytes over an existing asset, which keeps its id, folder and tags. `gone` is an
-    /// asset the overwrite came from and removes: one renamed or moved onto the name.
+    /// asset the overwrite came from, one renamed or moved onto the name, removed once the
+    /// bytes are saved.
     Overwrite {
         id: u64,
         bytes: Vec<u8>,
@@ -235,6 +236,13 @@ pub enum Act {
     /// Do this with a slot's former occupant an interrupted write left. The app runs
     /// it, not [`apply`], since it reaches the library's files.
     Rescue(crate::store::Rescue, Rescuing),
+    /// Delete the `copies` working copies a library with no index keeps, and open it
+    /// again without them: asked again first unless `confirmed`. The app runs the
+    /// confirmed one, not [`apply`], since it reaches the library's files.
+    DropUnindexed {
+        copies: usize,
+        confirmed: bool,
+    },
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -342,6 +350,7 @@ impl Act {
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
             | Act::Rescue(..)
+            | Act::DropUnindexed { .. }
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -614,9 +623,7 @@ pub fn apply(
             Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
             Act::Overwrite { id, bytes, gone } => {
-                workspace.replace_bytes(id, bytes, log);
-                workspace.mark_saved(id);
-                if let Some(gone) = gone {
+                if let Some(gone) = workspace.save_over(id, bytes, gone, log) {
                     remove(browser, workspace, tabs, queue, log, gone);
                 }
                 if let Some(entity) = workspace.get(id) {
@@ -761,11 +768,18 @@ pub fn apply(
                 .ctx()
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
+            Act::DropUnindexed {
+                copies,
+                confirmed: false,
+            } => browser.ask_drop_unindexed(copies),
             // The app takes these before the browser's acts run.
             Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
-            | Act::Rescue(..) => {}
+            | Act::Rescue(..)
+            | Act::DropUnindexed {
+                confirmed: true, ..
+            } => {}
         }
     }
 }
@@ -3132,8 +3146,8 @@ mod tests {
         assert_eq!(bench.workspace.get(kept).unwrap().bytes, incoming);
         assert_eq!(name(&bench, kept), "untitled.ne5p");
         assert!(
-            bench.workspace.get(renamed).is_none(),
-            "the one renamed is gone"
+            bench.workspace.get(renamed).is_some(),
+            "the one renamed stays until the overwrite is saved"
         );
     }
 
