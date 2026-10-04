@@ -975,6 +975,12 @@ impl eframe::App for DrawbarApp {
         self.device.pump();
 
         self.keep_up(ctx);
+        #[cfg(target_arch = "wasm32")]
+        crate::closing::ask_while(
+            self.store
+                .as_ref()
+                .is_some_and(|store| store.losing(&self.workspace)),
+        );
     }
 }
 

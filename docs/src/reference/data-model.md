@@ -718,6 +718,16 @@ interrupted move leaves its files split between the two names, none lost. A
 rename that changes only case moves through a free name beside the folder,
 `<name>.<n>.drawbar-move`, since on a disk that ignores case the new name reaches
 the folder itself, and a folder is never removed where it is the one moved into.
+
+A closing tab gets no last pass: the browser runs nothing of the page once it has
+gone, and waits for none of its asynchronous writes. eframe saves when the page
+loses focus or is hidden, which sends a pass, but nothing waits for it to land.
+So while `Store::losing` says that letting the library go would lose an edit (one
+no working copy holds yet, an asset never written, or a command the backend has
+not run through), a `beforeunload` listener cancels the event (`closing.rs`), and
+the browser asks whether to leave. The page keeps running while it asks, so
+staying lets the writes land. A browser asks only after the user has interacted
+with the page, and may close without asking when it discards a tab or quits.
 A folder such a rename left under that name when the tab closed is put back at
 the next open, under the spelling the index's rows use, before the listing
 looks for them; where another folder has the name it stays, and the log says

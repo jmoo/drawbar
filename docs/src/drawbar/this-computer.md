@@ -59,7 +59,9 @@ Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
 writes the file, and queues it for sending if the sound came from a slot on the
 connected instrument. **Revert** goes back to the last save.
 It is the only undo. Unsaved edits are kept when you quit. drawbar also keeps
-them every few seconds, so after a crash you may lose the last few seconds.
+them every few seconds, so after a crash you may lose the last few seconds. In
+the browser, closing the tab before drawbar has kept your latest edit makes the
+browser ask whether to leave. Stay a moment, and the edit is kept.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.

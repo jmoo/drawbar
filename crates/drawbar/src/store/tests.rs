@@ -409,6 +409,33 @@ fn an_unsaved_edit_that_does_not_read_is_left_for_the_next_open() {
     assert!(entity.is_unsaved());
 }
 
+/// A library let go with no last pass, as a closing browser tab lets it go, loses an
+/// edit until a pass has kept it and the disk has it, a commit that answers nothing
+/// included. A tab asks to stay open for as long as it would.
+#[test]
+fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    assert!(!session.store.losing(&session.bench.workspace), "listed");
+    let id = session.only();
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    assert!(session.store.losing(&session.bench.workspace), "edited");
+    session.autosave();
+
+    let started = std::time::Instant::now();
+    while session.store.losing(&session.bench.workspace) {
+        assert!(started.elapsed().as_secs() < 10, "the disk never caught up");
+        std::thread::yield_now();
+    }
+    assert!(
+        rows(&root)[&id].working.is_some(),
+        "the edit is on disk once nothing would be lost"
+    );
+}
+
 /// ⚠️ Working copies are found only through the index. One gone missing, deleted or lost
 /// to a sync, leaves copies no index names, which a sweep would take for leftovers: the
 /// library opens read-only and leaves them, and the edit comes back with the index.

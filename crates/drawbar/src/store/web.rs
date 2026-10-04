@@ -114,6 +114,8 @@ struct Inbox {
     wake: Option<Function>,
     /// No command follows those queued; the task ends once they have run.
     closed: bool,
+    /// A command taken from `cmds` is running.
+    running: bool,
 }
 
 impl Inbox {
@@ -223,6 +225,12 @@ impl Backend {
         self.events.borrow_mut().pop_front()
     }
 
+    /// Whether a command sent has not run through yet.
+    pub fn busy(&self) -> bool {
+        let inbox = self.inbox.borrow();
+        inbox.running || !inbox.cmds.is_empty()
+    }
+
     /// The next answer already here. The page cannot wait for one that is not.
     pub fn recv(&mut self) -> Option<Event> {
         self.try_recv()
@@ -257,6 +265,7 @@ async fn drive(
             events.borrow_mut().push_back(event);
             ctx.request_repaint();
         };
+        inbox.borrow_mut().running = true;
         match &mut fs {
             Ok(fs) => {
                 exec::run(fs, cmd, &mut answer).await;
@@ -264,6 +273,7 @@ async fn drive(
             }
             Err(why) => answer(refused(cmd, why)),
         }
+        inbox.borrow_mut().running = false;
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }

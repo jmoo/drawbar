@@ -459,6 +459,19 @@ impl Store {
         self.records.values().any(|record| record.saving)
     }
 
+    /// Whether anything sent to the disk has not landed yet: a command the backend has not
+    /// run through, or a save or rename whose answer is not folded in.
+    pub fn writing(&self) -> bool {
+        self.backend.busy() || self.saving() || !self.moving.is_empty()
+    }
+
+    /// Whether letting the library go now, with no last pass, would lose an edit: one not
+    /// yet kept as a working copy, an asset never written to a file, or a write that has
+    /// not landed. A browser tab may close without that pass.
+    pub fn losing(&self, workspace: &Workspace) -> bool {
+        self.writing() || self.unheld(workspace).next().is_some()
+    }
+
     /// The names of the assets that letting this library go would lose, where nothing
     /// may be written here: each edit not already kept as a working copy, and each asset
     /// never written to a file. A library open for writing keeps every one at its last
@@ -467,21 +480,23 @@ impl Store {
         if self.open() {
             return Vec::new();
         }
-        workspace
-            .listed()
-            .filter(|entity| {
-                let record = self.records.get(&entity.id);
-                let written = record.is_some_and(|record| record.fingerprint.is_some());
-                let stamp = workspace
-                    .kept_edit(entity.id)
-                    .map_or(entity.stamp, |(_, stamp)| stamp);
-                let held = record
-                    .and_then(|record| record.working.as_ref())
-                    .is_some_and(|working| working.stamp == stamp);
-                !written || (entity.is_unsaved() && !held)
-            })
-            .map(|entity| entity.name.clone())
-            .collect()
+        let unheld = self.unheld(workspace);
+        unheld.map(|entity| entity.name.clone()).collect()
+    }
+
+    /// Each edit not kept as a working copy, and each asset never written to a file.
+    fn unheld<'a>(&'a self, workspace: &'a Workspace) -> impl Iterator<Item = &'a LocalEntity> {
+        workspace.listed().filter(|entity| {
+            let record = self.records.get(&entity.id);
+            let written = record.is_some_and(|record| record.fingerprint.is_some());
+            let stamp = workspace
+                .kept_edit(entity.id)
+                .map_or(entity.stamp, |(_, stamp)| stamp);
+            let held = record
+                .and_then(|record| record.working.as_ref())
+                .is_some_and(|working| working.stamp == stamp);
+            !written || (entity.is_unsaved() && !held)
+        })
     }
 
     /// Where the library is, as the user would look for it.

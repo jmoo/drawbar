@@ -4,7 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -81,6 +81,8 @@ pub struct Backend {
     worker: Option<JoinHandle<()>>,
     /// Set once the library is let go, so a listing still running stops.
     stop: Arc<AtomicBool>,
+    /// Commands sent and not yet run through.
+    unrun: Arc<AtomicUsize>,
 }
 
 impl Backend {
@@ -88,6 +90,7 @@ impl Backend {
         let (tx, commands) = channel::<Cmd>();
         let (answers, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
+        let unrun = Arc::new(AtomicUsize::new(0));
         let mut disk = Disk {
             root: root.clone(),
             prepared: false,
@@ -95,14 +98,17 @@ impl Backend {
             stop: stop.clone(),
             commands: Some(commands),
             held: None,
+            taken: 0,
         };
         let ctx = ctx.clone();
+        let ran = unrun.clone();
         let worker = std::thread::spawn(move || {
             while let Some(cmd) = disk.next() {
                 exec::execute(&mut disk, cmd, &mut |event| {
                     let _ = answers.send(event);
                     ctx.request_repaint();
                 });
+                ran.fetch_sub(std::mem::take(&mut disk.taken), Ordering::Release);
             }
         });
         Backend {
@@ -111,6 +117,7 @@ impl Backend {
             rx,
             worker: Some(worker),
             stop,
+            unrun,
         }
     }
 
@@ -130,8 +137,16 @@ impl Backend {
 
     pub fn send(&mut self, cmd: Cmd) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(cmd);
+            self.unrun.fetch_add(1, Ordering::AcqRel);
+            if tx.send(cmd).is_err() {
+                self.unrun.fetch_sub(1, Ordering::AcqRel);
+            }
         }
+    }
+
+    /// Whether a command sent has not run through yet.
+    pub fn busy(&self) -> bool {
+        self.unrun.load(Ordering::Acquire) != 0
     }
 
     pub fn try_recv(&mut self) -> Option<Event> {
@@ -174,15 +189,21 @@ struct Disk {
     commands: Option<Receiver<Cmd>>,
     /// A command a listing took and put back, to run next.
     held: Option<Cmd>,
+    /// Commands taken from `commands` since the last one taken by [`Disk::next`] began.
+    /// They have all run once it returns.
+    taken: usize,
 }
 
 impl Disk {
     /// The next command to run, waiting for one, or `None` once the library is let go and
     /// every command sent has run.
     fn next(&mut self) -> Option<Cmd> {
-        self.held
+        let cmd = self
+            .held
             .take()
-            .or_else(|| self.commands.as_ref()?.recv().ok())
+            .or_else(|| self.commands.as_ref()?.recv().ok());
+        self.taken += usize::from(cmd.is_some());
+        cmd
     }
 
     /// Where `path` is on disk. A folder on the way to it that is a link is refused as
@@ -410,13 +431,17 @@ impl Fs for Disk {
     }
 
     fn waiting(&mut self) -> Option<Cmd> {
-        self.held
+        let cmd = self
+            .held
             .take()
-            .or_else(|| self.commands.as_ref()?.try_recv().ok())
+            .or_else(|| self.commands.as_ref()?.try_recv().ok());
+        self.taken += usize::from(cmd.is_some());
+        cmd
     }
 
     fn hold(&mut self, cmd: Cmd) {
         debug_assert!(self.held.is_none(), "one command is put back at a time");
+        self.taken = self.taken.saturating_sub(1);
         self.held = Some(cmd);
     }
 
@@ -588,6 +613,7 @@ mod tests {
             stop: Arc::default(),
             commands: None,
             held: None,
+            taken: 0,
         }
     }
 
