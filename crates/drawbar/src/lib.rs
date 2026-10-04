@@ -39,6 +39,7 @@ pub mod ondisk;
 pub mod panel;
 pub mod platform;
 pub mod queue;
+mod report;
 pub mod rewrite;
 pub mod room;
 pub mod sheet;
@@ -49,6 +50,7 @@ pub mod strings;
 pub mod summary;
 pub mod tabs;
 pub mod tags;
+pub mod telemetry;
 #[cfg(test)]
 mod testing;
 pub mod work;
@@ -64,7 +66,9 @@ pub const APP: &str = "drawbar";
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_bindgen::JsValue> {
-    eframe::WebRunner::new()
+    let runner = eframe::WebRunner::new();
+    telemetry::install();
+    runner
         .start(
             canvas,
             eframe::WebOptions::default(),

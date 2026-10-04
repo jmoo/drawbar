@@ -13,6 +13,7 @@ use std::time::Duration;
 use eframe::egui;
 use nord_usb::device::Device;
 use nord_usb::envelope;
+use nord_usb::error::ErrKind;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
@@ -63,6 +64,7 @@ fn hung_up(e: &Error) -> bool {
 /// knows the instrument has one. The table is read once and kept, and later operations
 /// answer from it.
 pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow {
+    let started = crate::telemetry::now();
     let rows = match device.geometry().await {
         Ok(geometry) => geometry
             .entries()
@@ -75,6 +77,13 @@ pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow
             .collect(),
         Err(e) => {
             let lost = hung_up(&e);
+            let partitions = crate::telemetry::Op {
+                name: "partitions",
+                class: None,
+                asked: false,
+            };
+            let took = crate::telemetry::now() - started;
+            crate::telemetry::op(partitions, Some(e.expect_kind().to_string()), took);
             emit.send(DeviceEvent::OpFailed(format!("partitions: {e}")));
             return match lost {
                 true => Flow::Lost,
@@ -86,11 +95,33 @@ pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow
     Flow::Continue
 }
 
+/// What one command's failures said, gathered as they are turned into sentences.
+#[derive(Default)]
+struct Fault {
+    /// The instrument is no longer there.
+    gone: bool,
+    /// The first failure's kind. `None` when the command refused on its own account.
+    kind: Option<ErrKind>,
+}
+
+impl Fault {
+    fn saw(&mut self, e: &Error) {
+        self.gone |= hung_up(e);
+        self.named(e);
+    }
+
+    /// Record `e`'s kind without deciding whether the instrument is gone; the caller
+    /// leaves that to the attempt that follows.
+    fn named(&mut self, e: &Error) {
+        self.kind.get_or_insert(e.expect_kind());
+    }
+}
+
 /// Turn an error into the sentence for it, noting on the way whether the instrument is
 /// still there. `at` is the slot the operation was aimed at, where it had one.
-fn spoil(gone: &mut bool, at: Option<Location>) -> impl FnOnce(Error) -> String + '_ {
+fn spoil(fault: &mut Fault, at: Option<Location>) -> impl FnOnce(Error) -> String + '_ {
     move |e| {
-        *gone |= hung_up(&e);
+        fault.saw(&e);
         match at {
             Some(at) => explain(e, at),
             None => e.to_string(),
@@ -117,8 +148,21 @@ pub async fn run<T: Transport>(
     let what = cmd.label();
     emit.send(DeviceEvent::Started(what.clone()));
 
-    let mut gone = false;
-    let result = execute(device, cmd, scratch, emit, &mut gone).await;
+    let metric = cmd.metric();
+    let started = crate::telemetry::now();
+    let mut fault = Fault::default();
+    let result = execute(device, cmd, scratch, emit, &mut fault).await;
+    if let Some(metric) = metric {
+        let outcome = match &result {
+            Ok(_) => None,
+            Err(_) => Some(
+                fault
+                    .kind
+                    .map_or("refused".to_string(), |kind| kind.to_string()),
+            ),
+        };
+        crate::telemetry::op(metric, outcome, crate::telemetry::now() - started);
+    }
 
     // State read during this command may already be stale, even when it failed.
     if device.take_changed() {
@@ -130,7 +174,7 @@ pub async fn run<T: Transport>(
         Err(e) => emit.send(DeviceEvent::OpFailed(format!("{what}: {e}"))),
     }
     emit.send(DeviceEvent::Finished);
-    match gone {
+    match fault.gone {
         true => Flow::Lost,
         false => Flow::Continue,
     }
@@ -143,7 +187,7 @@ async fn execute<T: Transport>(
     cmd: DeviceCmd,
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Option<String>, String> {
     match cmd {
         // Handled by `run`; the transport is closed by the caller, which owns it.
@@ -152,7 +196,7 @@ async fn execute<T: Transport>(
         DeviceCmd::ScanBank { class, bank } => {
             let slots = scan_bank(device, class, bank)
                 .await
-                .map_err(spoil(gone, None))?;
+                .map_err(spoil(fault, None))?;
             let filled = slots.iter().filter(|s| s.is_some()).count();
             let note = format!(
                 "bank {bank}: {filled} of {} slots hold something",
@@ -165,7 +209,7 @@ async fn execute<T: Transport>(
         DeviceCmd::ScanClass { class } => {
             let walked = scan_class(device, class, emit)
                 .await
-                .map_err(spoil(gone, None))?;
+                .map_err(spoil(fault, None))?;
             Ok(Some(format!(
                 "{}: {} banks, {} items, {}, one session",
                 class.label(),
@@ -180,7 +224,7 @@ async fn execute<T: Transport>(
                 Ok(info) => Some(info),
                 // Status 1 is a vacant slot, not a failure.
                 Err(Error::DeviceStatus(op::VACANT)) => None,
-                Err(e) => return Err(spoil(gone, Some(at))(e)),
+                Err(e) => return Err(spoil(fault, Some(at))(e)),
             };
             emit.send(DeviceEvent::SlotInfo { class, at, info });
             Ok(None)
@@ -190,7 +234,7 @@ async fn execute<T: Transport>(
             let deps = device
                 .read(class, async |s| op::dependencies(s, at).await)
                 .await
-                .map_err(spoil(gone, Some(at)))?;
+                .map_err(spoil(fault, Some(at)))?;
             let note = format!("{}: {} dependencies", shown(at), deps.len());
             emit.send(DeviceEvent::Deps { class, at, deps });
             Ok(Some(note))
@@ -218,7 +262,7 @@ async fn execute<T: Transport>(
                     });
                     return Ok(None);
                 }
-                Err(e) => return Err(spoil(gone, Some(at))(e)),
+                Err(e) => return Err(spoil(fault, Some(at))(e)),
             };
             let note = format!(
                 "read {:?} from {} through its checksum ({} bytes)",
@@ -242,7 +286,7 @@ async fn execute<T: Transport>(
                     emit.send(DeviceEvent::Vacant { class, at, why });
                     return Ok(None);
                 }
-                Err(e) => return Err(spoil(gone, Some(at))(e)),
+                Err(e) => return Err(spoil(fault, Some(at))(e)),
             };
             let note = format!(
                 "read {:?} from {} ({} bytes)",
@@ -266,9 +310,9 @@ async fn execute<T: Transport>(
             name,
             payload,
         } => {
-            let note = put_one(device, class, at, &name, &payload, scratch, emit, gone)
+            let note = put_one(device, class, at, &name, &payload, scratch, emit, fault)
                 .await
-                .map_err(spoil(gone, Some(at)))??;
+                .map_err(spoil(fault, Some(at)))??;
             // Reported as sent only once its session has closed.
             emit.send(DeviceEvent::Sent {
                 id,
@@ -280,14 +324,14 @@ async fn execute<T: Transport>(
         }
 
         DeviceCmd::SendAll { class, items } => {
-            send_all(device, class, items, scratch, emit, gone).await
+            send_all(device, class, items, scratch, emit, fault).await
         }
 
         DeviceCmd::Select { class, at } => {
             device
                 .read(class, async |s| op::select(s, at).await)
                 .await
-                .map_err(spoil(gone, Some(at)))?;
+                .map_err(spoil(fault, Some(at)))?;
             // `select` puts the panel on the slot, so this is the answer a `FOCUS` read
             // would give, without walking the class.
             emit.send(DeviceEvent::Focus {
@@ -300,7 +344,7 @@ async fn execute<T: Transport>(
         DeviceCmd::Reload { class, written } => {
             let focus = reload(device, class, &written)
                 .await
-                .map_err(spoil(gone, None))?;
+                .map_err(spoil(fault, None))?;
             emit.send(DeviceEvent::Focus { class, at: focus });
             Ok(focus
                 .filter(|at| written.contains(at))
@@ -311,7 +355,7 @@ async fn execute<T: Transport>(
             device
                 .destructive(class, async |s| op::rename(s, at, &name).await)
                 .await
-                .map_err(spoil(gone, Some(at)))?;
+                .map_err(spoil(fault, Some(at)))?;
             Ok(Some(format!("renamed {} to {name:?}", shown(at))))
         }
 
@@ -319,7 +363,7 @@ async fn execute<T: Transport>(
             device
                 .destructive(class, async |s| op::move_object(s, from, to).await)
                 .await
-                .map_err(spoil(gone, Some(from)))?;
+                .map_err(spoil(fault, Some(from)))?;
             Ok(Some(format!("moved {} -> {}", shown(from), shown(to))))
         }
 
@@ -327,7 +371,7 @@ async fn execute<T: Transport>(
             device
                 .destructive(class, async |s| op::duplicate(s, from, to).await)
                 .await
-                .map_err(spoil(gone, Some(from)))?;
+                .map_err(spoil(fault, Some(from)))?;
             Ok(Some(format!("duplicated {} -> {}", shown(from), shown(to))))
         }
 
@@ -335,7 +379,7 @@ async fn execute<T: Transport>(
             device
                 .destructive(class, async |s| op::delete(s, at).await)
                 .await
-                .map_err(spoil(gone, Some(at)))?;
+                .map_err(spoil(fault, Some(at)))?;
             Ok(Some(format!("deleted {}", shown(at))))
         }
     }
@@ -359,14 +403,14 @@ async fn back_up<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     scratch: &Scratch,
     info: &ProgramInfo,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Backup, String> {
     let at = info.location;
     if info.body_len <= HELD_OCCUPANT {
         return op::read_program(s, at)
             .await
             .map(Backup::Held)
-            .map_err(spoil(gone, Some(at)));
+            .map_err(spoil(fault, Some(at)));
     }
     let mut kept = scratch
         .create(&envelope::rescue_name_for(at, &info.format))
@@ -380,7 +424,7 @@ async fn back_up<T: Transport>(
         Ok(()) => Ok(Backup::Kept(kept)),
         Err(e) => {
             let _ = kept.remove().await;
-            Err(spoil(gone, Some(at))(e))
+            Err(spoil(fault, Some(at))(e))
         }
     }
 }
@@ -482,7 +526,7 @@ async fn put<T: Transport>(
     payload: &Payload,
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Result<String, Stop>, Error> {
     let class = s.class();
     let timestamp = unix_now()?;
@@ -490,7 +534,7 @@ async fn put<T: Transport>(
     let existing = match op::info(s, at).await {
         Ok(info) => Some(info),
         Err(Error::DeviceStatus(op::VACANT)) => None,
-        Err(e) => return Ok(Err(Stop::Said(spoil(gone, Some(at))(e)))),
+        Err(e) => return Ok(Err(Stop::Said(spoil(fault, Some(at))(e)))),
     };
     // Confirmed on hardware.
     // Library slots take their name from `BEGIN_WRITE`; buffer classes discard it.
@@ -500,7 +544,7 @@ async fn put<T: Transport>(
 
     // Nothing is deleted until the backup is in hand.
     let backup = match &existing {
-        Some(info) => match back_up(s, scratch, info, gone).await {
+        Some(info) => match back_up(s, scratch, info, fault).await {
             Ok(backup) => Some(backup),
             Err(why) => {
                 return Ok(Err(Stop::Said(format!(
@@ -519,7 +563,7 @@ async fn put<T: Transport>(
         )));
         if let Err(e) = op::delete(s, at).await {
             let refused = matches!(e, Error::DeviceStatus(_));
-            let cause = spoil(gone, Some(at))(e);
+            let cause = spoil(fault, Some(at))(e);
             // ⚠️ A status is the instrument declining before the delete landed, so the
             // occupant is still there. Any other failure may have come after it.
             return Ok(Err(Stop::Said(match (refused, backup) {
@@ -550,17 +594,20 @@ async fn put<T: Transport>(
             Ok(wrote(class, at, what, &write_name))
         }
         (Err(Error::Io(e)), None) => Err(Stop::Said(unreadable(what, &e))),
-        (Err(e), None) => Err(Stop::Said(spoil(gone, Some(at))(e))),
-        (Err(e), Some(backup)) => Err(Stop::Undo(Undo {
-            at,
-            backup,
-            name: existing.map(|info| info.name).unwrap_or_default(),
-            timestamp,
-            why: match e {
-                Error::Io(e) => unreadable(what, &e),
-                e => e.to_string(),
-            },
-        })),
+        (Err(e), None) => Err(Stop::Said(spoil(fault, Some(at))(e))),
+        (Err(e), Some(backup)) => {
+            fault.named(&e);
+            Err(Stop::Undo(Undo {
+                at,
+                backup,
+                name: existing.map(|info| info.name).unwrap_or_default(),
+                timestamp,
+                why: match e {
+                    Error::Io(e) => unreadable(what, &e),
+                    e => e.to_string(),
+                },
+            }))
+        }
     })
 }
 
@@ -578,7 +625,7 @@ async fn put_back<T: Transport>(
     unit: AllocationUnit,
     undo: Undo,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> String {
     let Undo {
         at,
@@ -602,7 +649,7 @@ async fn put_back<T: Transport>(
             format!("{why} ({} was restored, and is unchanged)", shown(at))
         }
         Err(restore) => {
-            *gone |= hung_up(&restore);
+            fault.saw(&restore);
             format!(
                 "{why} (restoring failed as well: {restore}); {}, and {}.",
                 aftermath(class, at),
@@ -672,7 +719,7 @@ async fn put_one<T: Transport>(
     payload: &Payload,
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Result<String, String>, Error> {
     let geometry = device.geometry().await?;
     if let Some(why) = geometry.check_address(class, at)? {
@@ -683,12 +730,12 @@ async fn put_one<T: Transport>(
     let mut undo = None;
     let outcome = device
         .destructive(class, async |s| {
-            let put = put(s, unit, at, what, payload, scratch, emit, gone).await?;
+            let put = put(s, unit, at, what, payload, scratch, emit, fault).await?;
             Ok(put.map_err(|stop| stopped(stop, &mut undo)))
         })
         .await;
     match undo {
-        Some(undo) => Ok(Err(put_back(device, class, unit, undo, emit, gone).await)),
+        Some(undo) => Ok(Err(put_back(device, class, unit, undo, emit, fault).await)),
         None => outcome,
     }
 }
@@ -700,12 +747,15 @@ async fn send_all<T: Transport>(
     items: Vec<Outgoing>,
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Option<String>, String> {
     let total = items.len();
     let mut done = 0;
-    let outcome = batch(device, class, &items, total, &mut done, scratch, emit, gone).await;
-    let refusal = outcome.map_err(spoil(gone, None))?;
+    let outcome = batch(
+        device, class, &items, total, &mut done, scratch, emit, fault,
+    )
+    .await;
+    let refusal = outcome.map_err(spoil(fault, None))?;
     match refusal {
         None => Ok(Some(format!(
             "wrote {done} of {total} to {}",
@@ -726,7 +776,7 @@ async fn batch<T: Transport>(
     done: &mut usize,
     scratch: &Scratch,
     emit: &Emit,
-    gone: &mut bool,
+    fault: &mut Fault,
 ) -> Result<Option<String>, Error> {
     let geometry = device.geometry().await?;
     let unit = geometry.allocation_unit(class)?;
@@ -756,7 +806,7 @@ async fn batch<T: Transport>(
                     &item.payload,
                     scratch,
                     emit,
-                    gone,
+                    fault,
                 );
                 match put.await? {
                     Ok(note) => {
@@ -776,7 +826,7 @@ async fn batch<T: Transport>(
         })
         .await;
     match undo {
-        Some(undo) => Ok(Some(put_back(device, class, unit, undo, emit, gone).await)),
+        Some(undo) => Ok(Some(put_back(device, class, unit, undo, emit, fault).await)),
         None => stopped_at,
     }
 }
@@ -2062,6 +2112,23 @@ mod wire_tests {
             .filter(|command| *command == cmd::SESSION_OPEN)
             .count();
         assert_eq!(opens, 2);
+    }
+
+    #[test]
+    fn a_command_reports_its_first_failure_s_kind_and_any_hang_up() {
+        let mut fault = Fault::default();
+        fault.saw(&Error::DeviceStatus(op::OCCUPIED));
+        fault.saw(&Error::Transport("cable".into()));
+        assert_eq!(fault.kind, Some(ErrKind::DeviceStatus(op::OCCUPIED)));
+        assert!(fault.gone);
+    }
+
+    #[test]
+    fn a_failure_the_instrument_answered_after_is_not_a_hang_up() {
+        let mut fault = Fault::default();
+        fault.named(&Error::Transport("the write timed out".into()));
+        assert_eq!(fault.kind, Some(ErrKind::Transport));
+        assert!(!fault.gone);
     }
 
     #[test]

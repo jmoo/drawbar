@@ -678,6 +678,86 @@ impl std::fmt::Display for Unkept {
     }
 }
 
+impl Event {
+    /// The codes this answer's failures are counted under, each once. Never a path or a
+    /// message, which name files.
+    pub fn faults(&self) -> std::collections::BTreeSet<&'static str> {
+        let one = |code| std::iter::once(code).collect();
+        match self {
+            Event::Opened(Err(_)) => one("open"),
+            Event::Opened(Ok(opened)) if opened.writable.is_err() => one("read-only"),
+            Event::ReadOnly(_) => one("read-only"),
+            Event::Scanned(Err(_)) | Event::Checked(Err(_)) => one("rescan"),
+            Event::Moved { result: Err(_), .. } => one("move"),
+            Event::Failed(_) | Event::Committed(Err(_)) => one("write"),
+            Event::Read(answers) => answers
+                .iter()
+                .filter_map(|(_, result)| result.as_ref().err())
+                .map(|failure| READ.of(failure))
+                .collect(),
+            Event::Saved { result, .. } => SAVE.failed(result),
+            Event::Imported { result, .. } => IMPORT.failed(result),
+            Event::Rewritten { result, .. } => REWRITE.failed(result),
+            Event::Opened(Ok(_))
+            | Event::Listed { .. }
+            | Event::Complete(_)
+            | Event::Scanned(Ok(_))
+            | Event::Checked(Ok(_))
+            | Event::Walked { .. }
+            | Event::Fingerprinted(_)
+            | Event::Committed(Ok(()))
+            | Event::Moved { result: Ok(()), .. } => Default::default(),
+        }
+    }
+}
+
+/// The codes a step on one file fails under.
+struct Codes {
+    changed: &'static str,
+    room: &'static str,
+    io: &'static str,
+}
+
+impl Codes {
+    fn of(&self, failure: &Failure) -> &'static str {
+        match failure {
+            Failure::Moved => self.changed,
+            Failure::Room(_) => self.room,
+            Failure::Io(_) => self.io,
+        }
+    }
+
+    fn failed<T>(&self, result: &Result<T, Failure>) -> std::collections::BTreeSet<&'static str> {
+        result
+            .as_ref()
+            .err()
+            .map(|failure| self.of(failure))
+            .into_iter()
+            .collect()
+    }
+}
+
+const READ: Codes = Codes {
+    changed: "read-changed",
+    room: "read-room",
+    io: "read-io",
+};
+const SAVE: Codes = Codes {
+    changed: "save-changed",
+    room: "save-room",
+    io: "save-io",
+};
+const IMPORT: Codes = Codes {
+    changed: "import-changed",
+    room: "import-room",
+    io: "import-io",
+};
+const REWRITE: Codes = Codes {
+    changed: "rewrite-changed",
+    room: "rewrite-room",
+    io: "rewrite-io",
+};
+
 /// The keys of eframe's store that held the library before it was a folder. Nothing
 /// reads them.
 const LEFT_BEHIND: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.tags"];

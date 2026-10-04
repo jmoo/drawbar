@@ -4675,3 +4675,28 @@ fn a_large_library_with_a_few_tags_keeps_a_small_index() {
     let size = fs::metadata(root.at(exec::INDEX)).unwrap().len();
     assert!(size < 2048, "the index is {size} bytes");
 }
+
+#[test]
+fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
+    let path = LibPath::parse("Strings/Cello.npno").unwrap();
+    let denied = || Err(Failure::Io("permission denied".into()));
+    let read = Event::Read(vec![
+        (1, denied()),
+        (2, denied()),
+        (3, Err(Failure::Room(1 << 30))),
+    ]);
+    assert_eq!(read.faults(), ["read-io", "read-room"].into());
+    let saved = Event::Saved {
+        id: 1,
+        path: path.clone(),
+        result: Err(Failure::Moved),
+    };
+    assert_eq!(saved.faults(), ["save-changed"].into());
+    let moved = Event::Moved {
+        from: path.clone(),
+        to: path,
+        result: Err("taken".into()),
+    };
+    assert_eq!(moved.faults(), ["move"].into());
+    assert!(Event::Fingerprinted(Vec::new()).faults().is_empty());
+}

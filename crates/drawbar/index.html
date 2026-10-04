@@ -543,8 +543,39 @@
       const foot = document.getElementById("foot");
       const version = document.getElementById("version");
 
-      if (version.textContent.startsWith("@")) {
+      const built = version.textContent.startsWith("@") ? "" : version.textContent;
+      if (!built) {
         version.remove();
+      }
+
+      /* The one row this page sends, under the app's rules: from drawbar.app to its
+         collector, or from elsewhere to a developer's `drawbar.telemetry.collector`;
+         never under Do Not Track or Global Privacy Control, never once sharing is off. */
+      function beacon(step, error) {
+        const ours = location.origin === "https://drawbar.app";
+        let collector = ours ? "https://t.drawbar.app" : null;
+        let off = true;
+        try {
+          /* A switch that storage cannot keep could not have been turned off. */
+          localStorage.setItem("drawbar.telemetry.probe", "1");
+          localStorage.removeItem("drawbar.telemetry.probe");
+          off = localStorage.getItem("drawbar.telemetry") !== null;
+          if (!ours) {
+            collector = localStorage.getItem("drawbar.telemetry.collector");
+          }
+        } catch {}
+        const refused =
+          navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true;
+        if (!collector || refused || off) {
+          return;
+        }
+        const row = {
+          event: "start_failed",
+          version: built,
+          step: step,
+          error: error.name || "Error",
+        };
+        navigator.sendBeacon(`${collector}/e`, JSON.stringify([row]));
       }
 
       const bars = FOOTAGE.map((footage, i) => {
@@ -634,7 +665,9 @@
         await start(document.getElementById("drawbar"));
         splash.remove();
       } catch (e) {
-        fail(e instanceof WebAssembly.CompileError ? "start" : step, e);
+        const failed = e instanceof WebAssembly.CompileError ? "start" : step;
+        fail(failed, e);
+        beacon(failed, e);
         throw e;
       }
     </script>
