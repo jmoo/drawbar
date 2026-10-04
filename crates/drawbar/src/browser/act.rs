@@ -333,6 +333,7 @@ impl Act {
             | Act::ShowTab(_)
             | Act::ShowClass(_)
             | Act::Narrow(_)
+            | Act::Reveal(_)
             | Act::CloseTab
             | Act::ToggleDock(_)
             | Act::ReviewQueue
@@ -662,7 +663,7 @@ pub fn apply(
                     tag_all(browser, workspace, log, &ids, id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
-                    browser.reveal(Item::Tag(id));
+                    browser.reveal(Item::Tag(id), workspace);
                     shell.browser_open = true;
                 }
                 None => log.trouble("The tag list is full, so there is no new tag."),
@@ -761,7 +762,7 @@ pub fn apply(
             }
             Act::Narrow(narrow) => shell.filter.narrow(narrow),
             Act::Reveal(item) => {
-                browser.reveal(item);
+                browser.reveal(item, workspace);
                 shell.browser_open = true;
             }
             Act::CloseTab => {

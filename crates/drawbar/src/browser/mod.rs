@@ -360,15 +360,22 @@ impl Browser {
 
     /// Open the section and branches that hold `item`'s row, so a rename asked for
     /// outside the tree has a row to type in.
-    fn reveal(&mut self, item: Item) {
+    fn reveal(&mut self, item: Item, workspace: &Workspace) {
         let branches: Vec<Branch> = match item {
             Item::Tag(_) => {
                 self.sections.tags = true;
                 return;
             }
-            Item::Local(id) => std::iter::once(Branch::Computer)
-                .chain(self.folders.holding(id).map(Branch::Folder))
-                .collect(),
+            Item::Local(id) => {
+                let mut branches = vec![Branch::Computer];
+                let file = workspace.get(id).and_then(|entity| entity.path.as_ref());
+                let mut dir = file.map_or_else(LibPath::root, LibPath::parent);
+                while !dir.is_root() {
+                    branches.extend(self.folders.id_of(&dir).map(Branch::Folder));
+                    dir = dir.parent();
+                }
+                branches
+            }
             Item::Folder(_) => vec![Branch::Computer],
             Item::Slot { class, at } => vec![
                 Branch::Instrument,
@@ -1361,6 +1368,34 @@ mod tests {
         }
         assert_eq!(named.as_deref(), Some("LA Grand"));
         assert!(browser.rename.is_none(), "and the editor closes");
+    }
+
+    #[test]
+    fn revealing_a_filed_asset_opens_every_folder_above_it() {
+        let mut bench = Bench::new();
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let outer = bench
+            .browser
+            .folders
+            .make(&LibPath::root(), &bench.workspace);
+        let within = bench.browser.folders.path_of(outer).unwrap().clone();
+        let inner = bench.browser.folders.make(&within, &bench.workspace);
+        bench
+            .browser
+            .folders
+            .file(&mut bench.workspace, id, Some(inner));
+
+        bench.act(vec![Act::Reveal(Item::Local(id))]);
+        for branch in [
+            Branch::Computer,
+            Branch::Folder(outer),
+            Branch::Folder(inner),
+        ] {
+            assert!(bench.browser.open.contains(&branch), "{branch:?} is shut");
+        }
     }
 
     /// A slot renamed from outside the tree, with the browser hidden and its folder shut,
