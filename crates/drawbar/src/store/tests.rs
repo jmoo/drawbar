@@ -515,6 +515,36 @@ fn unsaved_edits_whose_index_is_missing_are_left_for_it() {
     assert!(entity.is_unsaved());
 }
 
+/// ⚠️ With no index, a working-copy folder that cannot be listed may still hold edits:
+/// the library opens read-only rather than taking it for empty.
+#[cfg(unix)]
+#[test]
+fn a_library_without_its_index_whose_working_copies_cannot_be_listed_stays_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let first = Session::open(&root);
+    first.close();
+    fs::remove_file(root.at(".drawbar/library.ron")).ok();
+    let working = root.at(".drawbar/working");
+    fs::create_dir_all(&working).unwrap();
+    fs::write(working.join("1-1"), b"an unsaved edit").unwrap();
+    fs::set_permissions(&working, fs::Permissions::from_mode(0o300)).unwrap();
+    if fs::read_dir(&working).is_ok() {
+        // Permissions do not bind this user, so the folder cannot be made unlistable.
+        fs::set_permissions(&working, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let second = Session::open(&root);
+    let why = second.store.read_only().map(str::to_string);
+    second.close();
+    fs::set_permissions(&working, fs::Permissions::from_mode(0o755)).unwrap();
+    let why = why.expect("read-only");
+    assert!(why.contains("could not be read"), "{why}");
+    assert_eq!(root.names(".drawbar/working"), ["1-1"], "the copy is left");
+}
+
 /// A library whose index is missing asks about the working copies it keeps, since in the
 /// browser nothing else can reach them. Opening it without them, confirmed, deletes them,
 /// and the library opens for writing.

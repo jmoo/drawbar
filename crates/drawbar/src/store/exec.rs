@@ -388,10 +388,10 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     // its `.drawbar/` as that drawbar left it.
     let (sidecar, mut writable, unindexed) = match index(fs).await {
         Ok(Some(sidecar)) => (sidecar, Ok(()), 0),
-        Ok(None) => {
-            let copies = unindexed(fs).await;
-            (Sidecar::default(), refuse_unindexed(copies), copies)
-        }
+        Ok(None) => match unindexed(fs).await {
+            Ok(copies) => (Sidecar::default(), refuse_unindexed(copies), copies),
+            Err(why) => (Sidecar::default(), Err(why), 0),
+        },
         Err(why) => (Sidecar::default(), Err(why), 0),
     };
     let named: BTreeMap<String, (u64, Keeps)> = sidecar
@@ -596,9 +596,22 @@ async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
     Err(why)
 }
 
+/// The names of the working copies: none where the folder is not there. A folder that
+/// cannot be listed is an error, never none, since it may hold the only copy of an edit.
+async fn working_names(fs: &impl Fs) -> Result<Vec<String>, String> {
+    match fs.names(WORKING).await {
+        Ok(names) => Ok(names),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!(
+            "the library's index is missing and {WORKING} could not be read ({e}), so \
+             drawbar cannot tell whether unsaved edits remain and leaves the library as it is"
+        )),
+    }
+}
+
 /// How many working copies there are.
-async fn unindexed(fs: &impl Fs) -> usize {
-    fs.names(WORKING).await.map_or(0, |names| names.len())
+async fn unindexed(fs: &impl Fs) -> Result<usize, String> {
+    working_names(fs).await.map(|names| names.len())
 }
 
 /// Why nothing may be written where there is no index but `copies` working copies
@@ -620,7 +633,7 @@ async fn drop_unindexed(fs: &mut impl Fs) -> Result<(), String> {
     if fs.stat(INDEX).await.map_err(|e| e.to_string())?.is_some() {
         return Err("the library's index is back, so its unsaved edits stay".to_string());
     }
-    for name in fs.names(WORKING).await.unwrap_or_default() {
+    for name in working_names(fs).await? {
         fs.remove_file(&format!("{WORKING}/{name}"))
             .await
             .map_err(|e| format!("{name}: {e}"))?;
