@@ -919,7 +919,7 @@ impl ObjectClass {
     /// The libraries refuse both with status `0x15`. A library object's name is the one
     /// its write gave it, and a copy needs a write of its own under another name (see
     /// [`crate::op::NAME_TAKEN`]).
-    pub fn edits_in_place(self) -> bool {
+    pub fn renames_and_copies(self) -> bool {
         !self.is_library()
     }
 

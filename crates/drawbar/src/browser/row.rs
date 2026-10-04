@@ -30,7 +30,7 @@ pub struct Cells<'a> {
     /// It differs from what was last saved, which the name shows with a star.
     pub unsaved: bool,
     /// The instrument's panel has this slot loaded. The ring is drawn in the triangle's
-    /// box a leaf skips, so only a leaf wears it, and its name keeps its column.
+    /// box a leaf skips, so the name keeps its column; only set it on a leaf.
     pub loaded: bool,
     /// A row inside a branch: shorter, with a smaller glyph and font.
     pub child: bool,

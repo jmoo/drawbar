@@ -232,12 +232,8 @@ pub fn enqueue(
     if let Fit::Refuses(why) = fit(&device.state, entity) {
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
-    if let Some(holder) = crate::device::name_taken(&device.state, class, at, entity) {
-        return log.trouble(format!(
-            "“{name}” cannot go to {where_}. {} already has its name, and the instrument \
-             keeps one of each name. Send it there to replace that one, or rename it.",
-            place(class, holder)
-        ));
+    if let Some(why) = name_clash(workspace, &device.state, queue, entity, class, at) {
+        return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
     let holds = Occupancy::of(&device.state, class, at);
     let displaced = match queue.put(entity, class, at, holds) {
@@ -258,6 +254,51 @@ pub fn enqueue(
         read_occupant(device, log, class, at);
     }
     log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
+}
+
+/// Why a write of `entity` into `at` would be refused for its name: a slot of the
+/// library already has it, or another entry waiting for the library would write it.
+///
+/// ⚠️ The instrument keeps one object of each name in a library. Slot classes take any
+/// number, and this returns `None` for them.
+fn name_clash(
+    workspace: &Workspace,
+    state: &DeviceState,
+    queue: &Queue,
+    entity: &LocalEntity,
+    class: ObjectClass,
+    at: Location,
+) -> Option<String> {
+    if !class.is_library() {
+        return None;
+    }
+    if let Some(holder) = crate::device::name_taken(state, class, at, entity) {
+        return Some(taken(class, holder));
+    }
+    let label = crate::device::slot_label(&entity.name)?;
+    let other = queue.list.iter().find(|held| {
+        held.id != entity.id
+            && held.class == class
+            && workspace
+                .get(held.id)
+                .and_then(|other| crate::device::slot_label(&other.name))
+                .as_deref()
+                == Some(label.as_str())
+    })?;
+    Some(format!(
+        "Something waiting for {} has the same name, and the instrument keeps one of each \
+         name. Rename one of them.",
+        place(class, other.at)
+    ))
+}
+
+/// Why the instrument refuses a second object of the name `holder` already has.
+fn taken(class: ObjectClass, holder: Location) -> String {
+    format!(
+        "{} already has its name, and the instrument keeps one of each name. Send it \
+         there to replace that one, or rename it.",
+        place(class, holder)
+    )
 }
 
 /// The assets not in the queue whose slot on the attached instrument no longer holds what
@@ -317,7 +358,10 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
         };
         let refusal = match fit(state, entity) {
             Fit::Refuses(why) => Some(why),
-            Fit::Unattached | Fit::Takes | Fit::Warn(_) => None,
+            Fit::Unattached | Fit::Takes | Fit::Warn(_) => {
+                crate::device::name_taken(state, held.class, held.at, entity)
+                    .map(|holder| taken(held.class, holder))
+            }
         };
         // Logged only when the reason changes, so repeated refits stay quiet.
         if let Some(why) = &refusal {

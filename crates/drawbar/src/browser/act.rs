@@ -3364,6 +3364,67 @@ mod tests {
         assert!(!bench.queue.holds(id), "queued for a slot it cannot take");
         let said = bench.log.status().1;
         assert!(said.contains("Samples 1:3 already has its name"), "{said}");
+
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: holder,
+        }]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(holder));
+    }
+
+    /// Two sounds of one name cannot both wait for a library, and a name the instrument
+    /// gains after a sound was queued holds that sound back from the next send.
+    #[test]
+    fn a_library_name_already_waiting_or_newly_taken_holds_a_sample_back() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 1, &["", "", ""]);
+        let ids: Vec<u64> = ["lead.nsmp", "lead.nsmp"]
+            .into_iter()
+            .map(|name| {
+                bench.workspace.ingest(
+                    name.into(),
+                    Origin::File(name.into()),
+                    crate::testing::sample_bytes(),
+                    &mut bench.log,
+                )
+            })
+            .collect();
+        let slot = |n| Location::from_user(1, n);
+
+        bench.act(vec![
+            Act::Send {
+                id: ids[0],
+                class,
+                at: slot(1),
+            },
+            Act::Send {
+                id: ids[1],
+                class,
+                at: slot(2),
+            },
+        ]);
+        assert_eq!(bench.queue.ids(), vec![ids[0]]);
+        let said = bench.log.status().1;
+        assert!(said.contains("Something waiting for Samples 1:1"), "{said}");
+
+        bench.device.pretend_scanned(class, 1, &["", "", "lead"]);
+        crate::queue::refit(
+            &bench.workspace,
+            &bench.device.state,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+        let failure = bench
+            .queue
+            .entry(ids[0])
+            .and_then(|held| held.failure.clone());
+        assert!(
+            failure.is_some_and(|why| why.contains("Samples 1:3 already has its name")),
+            "the entry would be sent into a refusal"
+        );
     }
 
     fn poll(bench: &mut Bench) {

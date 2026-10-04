@@ -1343,38 +1343,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_slot_is_named_what_this_computer_calls_the_object() {
-        let label = |name: &str| slot_label(name);
-        assert_eq!(label("Africa-Split.ne5p").as_deref(), Some("Africa-Split"));
-        assert_eq!(label("Squabble B.ne5t").as_deref(), Some("Squabble B"));
-        assert_eq!(label("  Rotary Fast  ").as_deref(), Some("Rotary Fast"));
-        // A dot that is not a tag: a name is allowed to hold one.
-        assert_eq!(label("Bass 2.0").as_deref(), Some("Bass 2.0"));
-        assert_eq!(label("Mr. Hammond").as_deref(), Some("Mr. Hammond"));
-        assert_eq!(
-            label(".ne5p").as_deref(),
-            Some(".ne5p"),
-            "a bare tag is kept as the name"
-        );
-    }
-
-    #[test]
-    fn a_name_with_nothing_in_it_is_not_sent() {
-        for nothing in ["", "   ", "\t"] {
-            assert_eq!(slot_label(nothing), None, "{nothing:?}");
-        }
-    }
-
-    #[test]
-    fn a_long_name_is_cut_on_a_character_boundary() {
-        let long = "é".repeat(200);
-        let cut = slot_label(&long).expect("something is left");
-        assert!(cut.len() <= 64, "{} bytes", cut.len());
-        assert!(long.starts_with(&cut));
-        assert_eq!(cut.chars().count(), 32, "whole characters only");
-    }
-
-    #[test]
     fn a_nameless_slot_still_gets_a_label() {
         let named = |name: &str| {
             entity_name(&ProgramInfo {

@@ -1370,11 +1370,20 @@ mod tests {
     #[test]
     fn a_header_forgets_a_wrap_once_its_left_group_changes() {
         let mut learned = Learned::default();
-        assert!(learned.frame(1, Stage::Full, 1400.0, true), "a wrap redraws");
+        assert!(
+            learned.frame(1, Stage::Full, 1400.0, true),
+            "a wrap redraws"
+        );
         assert_eq!(staged(1400.0, &learned.least), Stage::Quiet);
-        assert!(!learned.frame(1, Stage::Quiet, 1400.0, false), "then settles");
+        assert!(
+            !learned.frame(1, Stage::Quiet, 1400.0, false),
+            "then settles"
+        );
 
-        assert!(learned.frame(2, Stage::Quiet, 1400.0, false), "a change redraws");
+        assert!(
+            learned.frame(2, Stage::Quiet, 1400.0, false),
+            "a change redraws"
+        );
         assert_eq!(staged(1400.0, &learned.least), Stage::Full);
 
         let mut narrow = Learned::default();

@@ -680,7 +680,7 @@ impl Browser {
         let name = match item {
             Item::Local(id) => workspace.get(id).map(|entity| entity.name.clone()),
             // ⚠️ A partition this app cannot name is only listed.
-            Item::Slot { class, at } if !read_only(class) && class.edits_in_place() => device
+            Item::Slot { class, at } if !read_only(class) && class.renames_and_copies() => device
                 .state
                 .slot(class, at)
                 .flatten()
@@ -1760,7 +1760,7 @@ impl Browser {
             acts,
         );
         ui.separator();
-        let edits = class.edits_in_place();
+        let edits = class.renames_and_copies();
         let fixed = "the instrument keeps the name a sound was sent with, and copies only \
                      what it is sent";
         if ui
