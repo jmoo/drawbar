@@ -27,7 +27,10 @@
 //!
 //! Frame positions are stored as `%f` decimals, counted at [`PROJECT_RATE`]
 //! whatever the audio file's own rate.
+//!
+//! [`build`] turns a project and the WAVs it names into the instrument.
 
+pub mod build;
 pub mod tree;
 
 pub use tree::{Entry, Node};
@@ -133,7 +136,7 @@ pub struct Project {
 pub struct AudioFile {
     pub id: u32,
     /// The path as the editor stored it, relative to the project's directory in
-    /// every specimen.
+    /// every specimen. [`build::AudioPath`] reads it.
     pub path: String,
     pub sample_rate: u32,
 }
