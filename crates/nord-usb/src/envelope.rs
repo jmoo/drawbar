@@ -10,12 +10,6 @@ use nord_format::cbin::{self, Cbin, Generation, Header, RawBody, Verifier};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-/// CRC-32/ISO-HDLC over a wire body. The type-1 container carries the same checksum,
-/// and the device reports it in `0x1e` object info.
-pub fn crc32(data: &[u8]) -> u32 {
-    nord_format::crc::crc32(data)
-}
-
 /// A wire slot as the header's `(bank, slot)` pair. Both are zero-indexed, one below
 /// the display.
 fn slot(at: Location) -> Result<(u16, u16)> {
