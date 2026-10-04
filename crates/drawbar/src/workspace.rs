@@ -3766,9 +3766,6 @@ pub(crate) fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
     wasm_bindgen_futures::spawn_local(future);
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod transitions;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4976,5 +4973,386 @@ mod tests {
         let entity = ingest("tampered.ne5p", bytes);
         assert!(entity.parse_error.is_some());
         assert!(!entity.container.expect("still a CBIN file").checksum_ok);
+    }
+
+    /// One asset restored under id 1, saved as `content` with `unsaved` kept over it.
+    fn restored(content: Content, unsaved: Option<Vec<u8>>) -> (Workspace, Log) {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let saved = Saved {
+            id: 1,
+            name: "asset".into(),
+            path: None,
+            origin: Origin::Fresh,
+            content,
+            unsaved,
+        };
+        assert_eq!(workspace.restore(vec![saved], None, &mut log), 0);
+        (workspace, log)
+    }
+
+    /// The checksum a slot holding `bytes` reports.
+    fn slot_of(bytes: &[u8]) -> Option<u32> {
+        Container::read(bytes).map(|held| held.body_crc32)
+    }
+
+    /// A piano library whose last body byte no longer matches its stored checksum.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn broken_piano() -> Vec<u8> {
+        let mut bytes = crate::testing::piano(4);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        bytes
+    }
+
+    type Then = fn(&mut Workspace, &mut Log, &Summary);
+
+    /// Unread, reading, rests, size, verify badge, slot checksum.
+    type Reads = (bool, bool, bool, u64, &'static str, Option<u32>);
+
+    /// What each content an asset can be saved as reads as, through the accessors that
+    /// draw its row and decide what may act on it.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn each_saved_content_reads_as_what_it_holds() {
+        let dir = crate::testing::Temp::new();
+        let program = Fresh::Program.bytes().unwrap();
+        let sample = crate::testing::sample_bytes();
+        let broken = broken_piano();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
+        let unsound = crate::testing::on_disk(&dir, "Broken.npno", &broken);
+        let summary = Summary::of(&ingest("P.ne5p", program.clone())).unwrap();
+        let len = program.len() as u64;
+        let nothing: Then = |_, _, _| {};
+        let settle: Then = |workspace, log, _| workspace.settle_files(log);
+        let rows: [(&str, Content, Then, Reads); 8] = [
+            (
+                "a file not read",
+                Content::unread(len),
+                nothing,
+                (true, true, false, len, "reading…", None),
+            ),
+            (
+                "a file whose read failed",
+                Content::unread(len),
+                |workspace, log, _| workspace.unreadable(1, "gone".into(), log),
+                (true, false, false, len, "not read", None),
+            ),
+            (
+                "a file remembered",
+                Content::unread(len),
+                |workspace, _, summary| workspace.remember(1, summary.clone()),
+                (true, false, false, len, "ok", slot_of(&program)),
+            ),
+            (
+                "bytes still to be decoded",
+                Content::whole(program.clone()),
+                nothing,
+                (false, true, false, len, "reading…", None),
+            ),
+            (
+                "bytes decoded",
+                Content::whole(program.clone()),
+                settle,
+                (false, false, false, len, "ok", slot_of(&program)),
+            ),
+            (
+                "a file still being checked",
+                Content::resting(file.clone()),
+                nothing,
+                (false, false, true, sample.len() as u64, "checking…", None),
+            ),
+            (
+                "a file checked",
+                Content::resting(file.clone()),
+                settle,
+                (
+                    false,
+                    false,
+                    true,
+                    sample.len() as u64,
+                    "ok",
+                    slot_of(&sample),
+                ),
+            ),
+            (
+                "a file that failed its check",
+                Content::resting(unsound.clone()),
+                settle,
+                (false, false, true, broken.len() as u64, "failed", None),
+            ),
+        ];
+        for (what, content, then, expected) in rows {
+            let (mut workspace, mut log) = restored(content, None);
+            then(&mut workspace, &mut log, &summary);
+            let entity = workspace.get(1).unwrap();
+            let reads = (
+                entity.unread(),
+                entity.reading(),
+                entity.rests().is_some(),
+                entity.size(),
+                entity.verify().badge(),
+                entity.saved.crc32(),
+            );
+            assert_eq!(
+                reads, expected,
+                "{what}: (unread, reading, rests, size, badge, slot)"
+            );
+        }
+    }
+
+    /// Every shape a store hands an asset back in restores as what it holds: the asset's
+    /// bytes, whether they are what it was saved as, how much it holds whole, and the slot
+    /// checksum known of it. Bytes under an edit take their slot checksum from their header
+    /// at once; bytes that are the asset's own wait for their decode.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn every_shape_a_store_hands_back_restores_as_what_it_holds() {
+        let dir = crate::testing::Temp::new();
+        let program = Fresh::Program.bytes().unwrap();
+        let edit = Fresh::Stage3Synth.bytes().unwrap();
+        let sample = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
+        let (len, edit_len) = (program.len() as u64, edit.len() as u64);
+        let slot = slot_of(&program);
+        let rows = [
+            (
+                "bytes",
+                Content::whole(program.clone()),
+                None,
+                (false, false, false, true, len, None, len),
+            ),
+            (
+                "bytes under an edit",
+                Content::whole(program.clone()),
+                Some(edit.clone()),
+                (false, false, true, false, edit_len, slot, edit_len + len),
+            ),
+            (
+                "bytes under the same bytes",
+                Content::whole(program.clone()),
+                Some(program.clone()),
+                (false, false, false, false, len, slot, len),
+            ),
+            (
+                "a file not read",
+                Content::unread(len),
+                None,
+                (true, false, false, true, len, None, 0),
+            ),
+            (
+                "a file not read under an edit",
+                Content::unread(len),
+                Some(edit.clone()),
+                (false, false, true, false, edit_len, None, edit_len),
+            ),
+            (
+                "a file",
+                Content::resting(file.clone()),
+                None,
+                (false, true, false, false, sample.len() as u64, None, 0),
+            ),
+            (
+                "a file under an edit",
+                Content::resting(file.clone()),
+                Some(edit.clone()),
+                (false, false, true, false, edit_len, None, edit_len),
+            ),
+        ];
+        for (what, content, unsaved, expected) in rows {
+            let (workspace, _) = restored(content, unsaved);
+            let entity = workspace.get(1).unwrap();
+            let reads = (
+                entity.unread(),
+                entity.rests().is_some(),
+                entity.is_unsaved(),
+                entity.reading(),
+                entity.size(),
+                entity.saved.crc32(),
+                entity.held_whole(),
+            );
+            assert_eq!(
+                reads, expected,
+                "{what}: (unread, rests, unsaved, reading, size, slot, held whole)"
+            );
+        }
+    }
+
+    /// An asset let go of for room still draws as it did and matches its slot, from what
+    /// its read found, and reads the same once read again.
+    #[test]
+    fn an_asset_let_go_reads_as_it_did_and_the_same_once_read_again() {
+        let program = Fresh::Program.bytes().unwrap();
+        let len = program.len() as u64;
+        let (mut workspace, mut log) = restored(Content::unread(len), None);
+        workspace.took(1, Some(program.clone()), None);
+        workspace.settle_files(&mut log);
+        let read = workspace.get(1).unwrap();
+        let (slot, summary) = (read.saved.crc32(), Summary::of(read));
+        assert!(slot.is_some() && summary.is_some(), "a read program");
+
+        assert!(workspace.evict(1).is_some(), "a clean asset nothing needs");
+        let evicted = workspace.get(1).unwrap();
+        assert!(evicted.unread() && !evicted.reading());
+        assert_eq!((evicted.size(), evicted.held_whole()), (len, 0));
+        assert_eq!(evicted.saved.crc32(), slot, "it still matches its slot");
+        assert_eq!(Summary::of(evicted), summary, "and draws as it did");
+
+        workspace.took(1, Some(program), None);
+        workspace.settle_files(&mut log);
+        let again = workspace.get(1).unwrap();
+        assert!(!again.unread() && !again.reading());
+        assert_eq!(again.saved.crc32(), slot);
+        assert_eq!(Summary::of(again), summary);
+    }
+
+    /// A file whose read fails after a summary of it was remembered says it was not read
+    /// and draws nothing remembered, but still matches its slot by the checksum the
+    /// summary gave, also once it is asked for again.
+    #[test]
+    fn a_failed_read_of_a_remembered_file_keeps_its_slot_checksum() {
+        let program = Fresh::Program.bytes().unwrap();
+        let summary = Summary::of(&ingest("P.ne5p", program.clone())).unwrap();
+        let (mut workspace, mut log) = restored(Content::unread(program.len() as u64), None);
+        workspace.remember(1, summary);
+        workspace.unreadable(1, "gone".into(), &mut log);
+
+        let entity = workspace.get(1).unwrap();
+        assert!(entity.unread());
+        assert_eq!(entity.verify().badge(), "not read");
+        assert!(entity.remembered().is_none() && Summary::of(entity).is_none());
+        assert_eq!(entity.saved.crc32(), slot_of(&program));
+
+        workspace.retry(1);
+        let entity = workspace.get(1).unwrap();
+        assert!(entity.reading(), "asked for again");
+        assert_eq!(entity.saved.crc32(), slot_of(&program));
+    }
+
+    /// A check answers for the file it read. An asset that rests in another file by then
+    /// goes on waiting for that file's check.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_check_answers_only_for_the_file_the_asset_still_rests_in() {
+        let dir = crate::testing::Temp::new();
+        let first = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let piano = crate::testing::piano(5);
+        let second = crate::testing::on_disk(&dir, "Upright.npno", &piano);
+        let (mut workspace, mut log) = restored(Content::resting(first.clone()), None);
+        workspace.adopt_file(1, second.clone());
+
+        let running = workspace.checking.as_ref().expect("the first file's check");
+        assert!(Arc::ptr_eq(&running.file, &first));
+        let answer = running.job.wait();
+        workspace.checked(answer, &mut log);
+        let entity = workspace.get(1).unwrap();
+        assert!(entity
+            .rests()
+            .is_some_and(|file| Arc::ptr_eq(file, &second)));
+        assert_eq!(entity.verify().badge(), "checking…");
+        assert_eq!(
+            entity.saved.crc32(),
+            None,
+            "the first file's checksum is not taken"
+        );
+
+        workspace.settle_files(&mut log);
+        let entity = workspace.get(1).unwrap();
+        assert_eq!(entity.verify().badge(), "ok");
+        assert_eq!(entity.saved.crc32(), slot_of(&piano));
+    }
+
+    /// A write that landed saves the asset as what it sent, and the slot it reached
+    /// becomes its link: bytes held in memory, or the file it rests in once that file's
+    /// check has passed.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_write_that_landed_saves_the_asset_as_what_it_sent() {
+        let at = Location { bank: 6, slot: 3 };
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let opened = workspace.get(id).unwrap().bytes.to_vec();
+        let (_, edited) =
+            crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.landed(id, ObjectClass::Program, at, edited.clone());
+        let entity = workspace.get(id).unwrap();
+        assert!(!entity.is_unsaved());
+        assert_eq!(*entity.saved.bytes(), edited);
+        assert_eq!(entity.saved.crc32(), slot_of(&edited));
+        assert_eq!(entity.link, Some((ObjectClass::Program, at)));
+        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&edited));
+
+        let dir = crate::testing::Temp::new();
+        let sample = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
+        let (mut workspace, mut log) = restored(Content::resting(file.clone()), None);
+        workspace.settle_files(&mut log);
+        workspace.landed(1, ObjectClass::Sample, at, sample.clone());
+        let entity = workspace.get(1).unwrap();
+        assert!(entity.rests().is_some_and(|held| Arc::ptr_eq(held, &file)));
+        assert!(!entity.is_unsaved());
+        assert_eq!(entity.link, Some((ObjectClass::Sample, at)));
+        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&sample));
+    }
+
+    /// A send of a file to a slot saves an asset held in memory as that file, with the
+    /// checksum the slot reports for it. The bytes held stay, now unsaved against it.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_send_of_a_file_that_landed_saves_the_asset_as_that_file() {
+        let dir = crate::testing::Temp::new();
+        let piano = crate::testing::piano(5);
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &piano);
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let held = workspace.get(id).unwrap().bytes.to_vec();
+        let at = Location::from_user(1, 1);
+        let crc32 = slot_of(&piano).expect("a piano library is a container");
+        workspace.landed_file(id, ObjectClass::Piano, at, file.clone(), crc32);
+
+        let entity = workspace.get(id).unwrap();
+        assert!(entity
+            .saved
+            .file()
+            .is_some_and(|saved| Arc::ptr_eq(saved, &file)));
+        assert_eq!(entity.saved.crc32(), Some(crc32));
+        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), Some(crc32));
+        assert_eq!(entity.link, Some((ObjectClass::Piano, at)));
+        assert_eq!(entity.bytes, held);
+        assert!(entity.is_unsaved());
+    }
+
+    /// A revert puts back what the asset was saved as: the bytes, held once with the
+    /// baseline, or the file it rests in, checked again.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_revert_returns_to_what_the_asset_was_saved_as() {
+        let program = Fresh::Program.bytes().unwrap();
+        let edit = Fresh::Stage3Synth.bytes().unwrap();
+        let (mut workspace, mut log) =
+            restored(Content::whole(program.clone()), Some(edit.clone()));
+        workspace.revert(1, &mut log);
+        let entity = workspace.get(1).unwrap();
+        assert!(!entity.is_unsaved());
+        assert_eq!(entity.bytes, program);
+        assert!(entity.bytes.shares(entity.saved.bytes()), "held once");
+        assert_eq!(entity.verify().badge(), "ok");
+
+        let dir = crate::testing::Temp::new();
+        let sample = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
+        let (mut workspace, mut log) = restored(Content::resting(file.clone()), Some(edit));
+        workspace.revert(1, &mut log);
+        let entity = workspace.get(1).unwrap();
+        assert!(entity.rests().is_some_and(|held| Arc::ptr_eq(held, &file)));
+        assert!(!entity.is_unsaved());
+        assert_eq!(entity.verify().badge(), "checking…");
+        workspace.settle_files(&mut log);
+        let entity = workspace.get(1).unwrap();
+        assert_eq!(entity.verify().badge(), "ok");
+        assert_eq!(entity.saved.crc32(), slot_of(&sample));
     }
 }
