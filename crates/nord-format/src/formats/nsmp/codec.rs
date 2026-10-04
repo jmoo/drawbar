@@ -671,23 +671,31 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
     Err(Unsupported::NoTerminator)
 }
 
-/// Decode a stroke at body offset `stroke_at` into [`FIELD_RATE`] audio, at the level
-/// [`shift_against`] reads against `file_peak`, the [`file_peak`] of the file the
-/// stroke belongs to.
-pub fn decode(
+/// A stroke's fields as the stream stores them: integrated, but still at the quantizer
+/// shift, so nothing is clamped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stored {
+    /// One value per field, interleaved by channel like [`Audio::samples`].
+    pub values: Vec<i32>,
+    /// 1 or 2.
+    pub channels: u16,
+    /// Fields reconstructed from differences.
+    pub differenced: usize,
+}
+
+/// The stored fields of a stroke at body offset `stroke_at`, with the walk they came
+/// from.
+///
+/// A record whose integrated values leave `i32` is refused as malformed: no field the
+/// format can store reaches that far.
+pub fn stored(
     stroke: &[u8],
     stroke_at: usize,
     layout: Layout,
-    file_peak: u32,
-) -> Result<Audio, Unsupported> {
+) -> Result<(Stream, Stored), Unsupported> {
     let stream = walk(stroke, stroke_at, layout)?;
     let channels = stream.channels;
-    let shift = shift_against(stroke, file_peak).ok_or(Unsupported::Short)?;
-    if !(-SHIFT_LIMIT..=SHIFT_LIMIT).contains(&shift) {
-        return Err(Unsupported::Shift { bits: shift });
-    }
-    let mut samples = vec![0i16; stream.fields];
-    let mut clipped = 0;
+    let mut values = vec![0i32; stream.fields];
     let mut differenced = 0;
     // Predictor history spans records and skips; stereo channels need independent state.
     let mut history = [[0i64; MAX_ORDER]; 2];
@@ -711,24 +719,151 @@ pub fn decode(
                 (0, k)
             };
             let value = predictor::predict(&mut history[channel], order, i64::from(residual));
+            let value =
+                i32::try_from(value).map_err(|_| Unsupported::Malformed { word: record.at })?;
+            if let Some(slot) = values.get_mut(record.first_field + k * channels + channel) {
+                *slot = value;
+            }
+        }
+    }
+    Ok((
+        stream,
+        Stored {
+            values,
+            channels: channels as u16,
+            differenced,
+        },
+    ))
+}
 
-            let at = record.first_field + k * channels + channel;
-            let Some(slot) = samples.get_mut(at) else {
-                continue;
-            };
+/// Statistic B as a generation stores it: [`Layout::V2`] keeps the magnitude, the wide
+/// generations the signed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peak {
+    Magnitude(u32),
+    Signed(i32),
+}
+
+impl Peak {
+    pub fn magnitude(self) -> u32 {
+        match self {
+            Peak::Magnitude(m) => m,
+            Peak::Signed(s) => s.unsigned_abs(),
+        }
+    }
+}
+
+/// One stroke's audio as its stream carries it: the stored fields at their quantizer
+/// shift, and the landmarks the stream marks on the lattice. This is everything a
+/// stream states about its audio, so a stroke can be laid out again in any generation
+/// without touching a field.
+///
+/// Every position is a stream index: on a stereo stroke each is twice the per-channel
+/// field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lattice {
+    /// One value per field, interleaved by channel. The stream's length is the
+    /// terminator's position.
+    pub fields: Vec<i32>,
+    /// 1 or 2.
+    pub channels: u16,
+    /// Bits each field was shifted right by when it was quantized.
+    pub shift: i32,
+    pub peak: Peak,
+    /// The field the resync record opens at.
+    pub resync_at: usize,
+    /// The field the loop's marked record opens at, when the stroke loops. The stream
+    /// loops from here to its end.
+    pub mark: Option<usize>,
+    /// Whether the opening ramp is already in the fields. Every stream carries it.
+    /// Inferred from specimens; not confirmed on hardware.
+    pub ramped: bool,
+}
+
+/// The stroke at body offset `stroke_at` as a [`Lattice`], its shift read against
+/// `file_peak` as [`shift_against`] reads it.
+///
+/// The resync and the mark are the records the directory names. A chain that sets the
+/// mark bit is taken at its marked record, since a long stream's pointers alias.
+pub fn lattice(
+    stroke: &[u8],
+    stroke_at: usize,
+    layout: Layout,
+    file_peak: u32,
+) -> Result<Lattice, Unsupported> {
+    let shift = shift_against(stroke, file_peak).ok_or(Unsupported::Short)?;
+    if !(-SHIFT_LIMIT..=SHIFT_LIMIT).contains(&shift) {
+        return Err(Unsupported::Shift { bits: shift });
+    }
+    let peak = peak(stroke, layout).ok_or(Unsupported::Short)?;
+    let directory = Directory::read(stroke).ok_or(Unsupported::Short)?;
+    let (stream, stored) = stored(stroke, stroke_at, layout)?;
+    let base = (stroke_at + layout.header_len()) / layout.word() % WRAP;
+    let named = |pointer: u16| {
+        stream
+            .records
+            .iter()
+            .find(|r| (base + r.at) % WRAP == usize::from(pointer))
+            .map(|r| r.first_field)
+    };
+    let resync_at = named(directory.resync).ok_or(Unsupported::Directory {
+        pointer: directory.resync,
+    })?;
+    let terminator = (base + stream.terminator) % WRAP;
+    let mark = match stream.records.iter().find(|r| r.mark) {
+        Some(record) => Some(record.first_field),
+        None if usize::from(directory.mark) == terminator => None,
+        None => Some(named(directory.mark).ok_or(Unsupported::Directory {
+            pointer: directory.mark,
+        })?),
+    };
+    Ok(Lattice {
+        fields: stored.values,
+        channels: stored.channels,
+        shift,
+        peak: match layout.signed_peak() {
+            true => Peak::Signed(peak),
+            false => Peak::Magnitude(peak.unsigned_abs()),
+        },
+        resync_at,
+        mark,
+        ramped: true,
+    })
+}
+
+/// Decode a stroke at body offset `stroke_at` into [`FIELD_RATE`] audio, at the level
+/// [`shift_against`] reads against `file_peak`, the [`file_peak`] of the file the
+/// stroke belongs to.
+pub fn decode(
+    stroke: &[u8],
+    stroke_at: usize,
+    layout: Layout,
+    file_peak: u32,
+) -> Result<Audio, Unsupported> {
+    let shift = shift_against(stroke, file_peak).ok_or(Unsupported::Short)?;
+    let (_, stored) = stored(stroke, stroke_at, layout)?;
+    if !(-SHIFT_LIMIT..=SHIFT_LIMIT).contains(&shift) {
+        return Err(Unsupported::Shift { bits: shift });
+    }
+    let mut clipped = 0;
+    let samples = stored
+        .values
+        .iter()
+        .map(|&value| {
+            let value = i64::from(value);
             let wide = if shift >= 0 {
                 value.saturating_mul(1i64 << shift)
             } else {
                 value >> -shift
             };
-            *slot = predictor::saturate_i16(wide, &mut clipped);
-        }
-    }
+            predictor::saturate_i16(wide, &mut clipped)
+        })
+        .collect();
     Ok(Audio {
         samples,
-        channels: channels as u16,
+        channels: stored.channels,
         clipped,
-        differenced,
+        differenced: stored.differenced,
     })
 }
 

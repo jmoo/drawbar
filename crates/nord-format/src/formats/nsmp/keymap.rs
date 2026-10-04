@@ -123,7 +123,7 @@ impl Level {
         f64::from(self.detune) / f64::from(DETUNE_PER_SEMITONE)
     }
 
-    fn read(record: &[u8]) -> Level {
+    pub(crate) fn read(record: &[u8]) -> Level {
         let gain = u32::from_be_bytes([0, record[0], record[1], record[2]]);
         let raw = u32::from_be_bytes([0, record[3], record[4], record[5]]);
         // Sign-extend the s24.

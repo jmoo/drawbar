@@ -35,6 +35,8 @@
 //!
 //! - [`cbin`] is the container most formats share: header, checksum and body length.
 //! - [`formats`] has one module per file format.
+//! - [`convert`] moves a sample instrument between its generations, reporting what
+//!   does not survive.
 //! - [`fields`] and [`layout`] describe a decoded body's fields at runtime, and
 //!   [`panel`] groups them the way the instrument's panel does.
 //! - [`components`] and [`types`] are the typed values those fields hold.
@@ -55,6 +57,7 @@ pub mod bits;
 pub mod bundle;
 pub mod cbin;
 pub mod components;
+pub mod convert;
 pub mod crc;
 pub mod error;
 pub mod fields;
