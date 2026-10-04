@@ -492,7 +492,7 @@ fn ready(act: &Act, workspace: &mut Workspace, folders: &mut Folders) -> Ready {
         let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) else {
             continue;
         };
-        if let VerifyState::NotRead(why) = &entity.verify {
+        if let VerifyState::NotRead(why) = &entity.verify() {
             return Ready::Never(format!("“{}” could not be read: {why}.", entity.name));
         }
         workspace.hurry(id);
@@ -1580,7 +1580,7 @@ mod tests {
         let file = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(40));
         let id = crate::testing::rest(&mut bench.workspace, "Upright.npno", file.clone());
         bench.workspace.settle_files(&mut bench.log);
-        let crc32 = bench.workspace.get(id).unwrap().saved.crc32;
+        let crc32 = bench.workspace.get(id).unwrap().saved.crc32();
         assert!(crc32.is_some(), "its check answered");
         file.take_reads();
 

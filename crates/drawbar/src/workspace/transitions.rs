@@ -254,8 +254,8 @@ impl At {
             out.push(format!("might={}", might.join(",")));
         }
         out.push(format!("size={}", fixture.length(entity.size())));
-        out.push(format!("badge={}", entity.verify.badge()));
-        out.push(format!("slot={}", fixture.slot(entity.saved.crc32)));
+        out.push(format!("badge={}", entity.verify().badge()));
+        out.push(format!("slot={}", fixture.slot(entity.saved.crc32())));
         out.push(format!("whole={}", fixture.whole(entity.saved.whole_crc())));
         out.push(format!("held={}", fixture.sum(entity.held_whole())));
         out.join(" ")

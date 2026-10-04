@@ -2334,7 +2334,7 @@ mod tests {
             bytes.clone(),
             &mut app.log,
         );
-        let held = app.workspace.get(id).unwrap().saved.crc32.unwrap();
+        let held = app.workspace.get(id).unwrap().saved.crc32().unwrap();
         app.device
             .pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
         app.device.relink(&mut app.workspace);

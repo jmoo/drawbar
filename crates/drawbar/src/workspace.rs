@@ -296,33 +296,47 @@ impl std::fmt::Debug for Bytes {
 /// streams the whole body, and every listed row asks for it while the library is shown.
 #[derive(Clone, Default)]
 pub struct Baseline {
-    pub bytes: Bytes,
+    bytes: Bytes,
+    crc32: Option<u32>,
+    stamp: u64,
+    file: Option<Arc<OnDisk>>,
+    bytes_crc: Option<u32>,
+    unread: Option<u64>,
+    /// Whether the check of `file`'s stored checksum has answered.
+    checked: bool,
+}
+
+impl Baseline {
+    /// The bytes, while they are held whole. Empty while [`Baseline::file`] holds them, or
+    /// while nothing has read the file that does.
+    pub fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+
     /// The checksum a slot holding these bytes would report. [`crate::device::link`] and
     /// [`crate::library::agrees`] both decide on it.
     ///
-    /// `None` for bytes that are not a CBIN container. See [`Container::body_crc32`].
-    pub crc32: Option<u32>,
+    /// `None` for bytes that are not a CBIN container, and for a file whose checksum has
+    /// not been checked. See [`Container::body_crc32`].
+    pub fn crc32(&self) -> Option<u32> {
+        self.crc32
+    }
+
     /// The [`LocalEntity::stamp`] of these bytes: the asset's current stamp while it
     /// still holds them, and a separate stamp once it does not.
     ///
     /// ⚠️ [`LocalEntity::is_unsaved`] compares stamps, not bodies. Comparing two bodies
     /// costs time proportional to the library's size, and the header alone asks twice a
     /// frame.
-    pub stamp: u64,
-    /// The file that holds these bytes, read by range and never held: `bytes` is then
-    /// empty, and `crc32` is `None` until the file's checksum has been checked.
-    pub file: Option<Arc<OnDisk>>,
-    /// CRC-32 over all of `bytes`, where it was taken as they arrived. See
-    /// [`Baseline::whole_crc`].
-    pub(crate) bytes_crc: Option<u32>,
-    /// The length of the file that holds these bytes, while nothing has read it: `bytes`
-    /// is then empty, and `file` is `None`.
-    pub unread: Option<u64>,
-    /// Whether the check of `file`'s stored checksum has answered.
-    checked: bool,
-}
+    pub fn stamp(&self) -> u64 {
+        self.stamp
+    }
 
-impl Baseline {
+    /// The file that holds these bytes, read by range and never held.
+    pub fn file(&self) -> Option<&Arc<OnDisk>> {
+        self.file.as_ref()
+    }
+
     /// The baseline of bytes not yet inspected, stamped with `stamp`.
     pub(crate) fn read(bytes: Bytes, stamp: u64) -> Baseline {
         let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
@@ -477,7 +491,7 @@ pub struct LocalEntity {
     /// ⚠️ Computed when the bytes land and never per frame: deciding it walks every
     /// byte, and every listed row asks for its kind on every frame.
     pub is_text: bool,
-    pub verify: VerifyState,
+    verify: VerifyState,
     /// What this asset was last saved as. The asset is unsaved when its bytes differ
     /// from these or an editor holds an edit not yet applied to them. See
     /// [`LocalEntity::is_unsaved`].
@@ -511,7 +525,7 @@ pub struct LocalEntity {
     pub wrote: Option<Wrote>,
     /// What a read of its file found before, while it is unread: its kind, tag, slot
     /// checksum and what it plays, without its bytes. See [`Workspace::remember`].
-    pub remembered: Option<Box<Summary>>,
+    remembered: Option<Box<Summary>>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
     /// The tag and kind its name says, from [`crate::browser::tagged`], taken whenever
@@ -570,6 +584,17 @@ impl LocalEntity {
             seen: Default::default(),
             by_name,
         }
+    }
+
+    /// Whether re-encoding its decode reproduced its bytes, or how far it is from knowing.
+    pub fn verify(&self) -> VerifyState {
+        self.verify.clone()
+    }
+
+    /// What a read of its file found before, while it is unread: its kind, tag, slot
+    /// checksum and what it plays, without its bytes. See [`Workspace::remember`].
+    pub fn remembered(&self) -> Option<&Summary> {
+        self.remembered.as_deref()
     }
 
     /// Whether what it is waits on its bytes being read or decoded. One whose summary is
@@ -3685,7 +3710,7 @@ mod tests {
         let mut log = Log::default();
         let id = crate::testing::rest(&mut workspace, "Upright.npno", sent.clone());
         workspace.settle_files(&mut log);
-        let crc32 = workspace.get(id).unwrap().saved.crc32.expect("checked");
+        let crc32 = workspace.get(id).unwrap().saved.crc32().expect("checked");
 
         workspace.edit_saved(id, edited.clone());
         workspace.settle_files(&mut log);
@@ -3699,7 +3724,7 @@ mod tests {
         assert!(!entity.is_unsaved(), "the edit is saved");
         assert_eq!(entity.link, Some((class, at)));
         assert!(entity.wrote.is_some_and(|wrote| wrote.crc32 == crc32));
-        assert_ne!(entity.saved.crc32, Some(crc32), "so the slot is behind");
+        assert_ne!(entity.saved.crc32(), Some(crc32), "so the slot is behind");
     }
 
     /// A file an asset is rebased onto keeps the slot checksum its check took, though
@@ -3733,13 +3758,13 @@ mod tests {
             let answer = check.job.wait();
             workspace.checked(answer, &mut log);
         }
-        let checked = workspace.get(1).unwrap().saved.crc32;
+        let checked = workspace.get(1).unwrap().saved.crc32();
         assert!(checked.is_some(), "the check took the file's checksum");
         workspace.settle_files(&mut log);
 
         let entity = workspace.get(1).unwrap();
         assert!(!entity.reading(), "decoded");
-        assert_eq!(entity.saved.crc32, checked);
+        assert_eq!(entity.saved.crc32(), checked);
     }
 
     /// An asset counted unsaved before its file was read holds no bytes, and a decode
@@ -3800,7 +3825,7 @@ mod tests {
             container.body_crc32,
             u32::from_le_bytes(bytes[0x18..0x1c].try_into().unwrap()),
         );
-        assert_eq!(entity.saved.crc32, Some(hashed));
+        assert_eq!(entity.saved.crc32(), Some(hashed));
     }
 
     /// ⚠️ A type-0 container stores no body checksum, only a CRC-16 over the whole file.
@@ -3819,7 +3844,7 @@ mod tests {
         let body = nord_usb::envelope::unwrap(&bytes).expect("a file the wire takes");
         let hashed = nord_format::crc::crc32(&body.body.0);
         assert_eq!(container.body_crc32, hashed);
-        assert_eq!(entity.saved.crc32, Some(hashed));
+        assert_eq!(entity.saved.crc32(), Some(hashed));
     }
 
     /// Each fresh default carries its own tag and round-trips. That is all the New menu
@@ -3830,7 +3855,7 @@ mod tests {
             let entity = ingest("untitled", kind.bytes().unwrap());
             assert!(entity.parse_error.is_none(), "{kind:?}");
             assert_eq!(entity.tag(), kind.tag(), "{kind:?}");
-            assert!(matches!(entity.verify, VerifyState::Ok), "{kind:?}");
+            assert!(matches!(entity.verify(), VerifyState::Ok), "{kind:?}");
             assert!(
                 entity.container.expect("a CBIN file").checksum_ok,
                 "{kind:?}"
@@ -4305,12 +4330,12 @@ mod tests {
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited.clone(), &mut log);
         assert!(unsaved(&workspace));
-        assert_eq!(workspace.get(id).unwrap().saved.bytes, opened);
+        assert_eq!(*workspace.get(id).unwrap().saved.bytes(), opened);
 
         // Saving moves the baseline onto what it holds; the bytes do not move.
         workspace.mark_saved(id);
         assert!(!unsaved(&workspace));
-        assert_eq!(workspace.get(id).unwrap().saved.bytes, edited);
+        assert_eq!(*workspace.get(id).unwrap().saved.bytes(), edited);
         assert_eq!(workspace.get(id).unwrap().bytes, edited);
 
         // Reverting moves the bytes back onto the baseline, which stays where it is.
@@ -4348,7 +4373,11 @@ mod tests {
         assert!(!workspace.mark_pending(id, true), "and is news only once");
         let held = workspace.get(id).unwrap();
         assert!(held.is_unsaved());
-        assert_eq!(held.bytes, held.saved.bytes, "with no body copied for it");
+        assert_eq!(
+            held.bytes,
+            *held.saved.bytes(),
+            "with no body copied for it"
+        );
         assert!(precious(held, &queue));
 
         workspace.revert(id, &mut log);
@@ -4382,7 +4411,7 @@ mod tests {
             workspace.get(id).unwrap().is_unsaved(),
             "the edit made in flight is still owed"
         );
-        assert_eq!(workspace.get(id).unwrap().saved.bytes, sent);
+        assert_eq!(*workspace.get(id).unwrap().saved.bytes(), sent);
 
         workspace.landed(id, ObjectClass::Program, at, edited);
         assert!(
@@ -4422,7 +4451,7 @@ mod tests {
         assert!(entity.entity.is_none());
         assert!(entity.parse_error.is_some());
         assert!(entity.container.is_none());
-        assert!(matches!(entity.verify, VerifyState::NotApplicable(_)));
+        assert!(matches!(entity.verify(), VerifyState::NotApplicable(_)));
         assert_eq!(entity.tag(), "?");
     }
 
@@ -4454,7 +4483,7 @@ mod tests {
         let held = ingest("a long log.txt", words.into_bytes());
         assert!(!held.is_text);
         assert_eq!(crate::browser::Kind::of(&held), crate::browser::Kind::Other);
-        assert!(matches!(held.verify, VerifyState::NotApplicable(_)));
+        assert!(matches!(held.verify(), VerifyState::NotApplicable(_)));
     }
 
     /// The name is this app's metadata and the only record of what an object is called,
@@ -4534,7 +4563,7 @@ mod tests {
         assert!(!entity.is_unsaved());
         workspace.settle_files(&mut log);
         let entity = workspace.get(9).unwrap();
-        assert!(matches!(entity.verify, VerifyState::Ok));
+        assert!(matches!(entity.verify(), VerifyState::Ok));
         assert_eq!(
             crate::browser::Kind::of(entity),
             crate::browser::Kind::Program

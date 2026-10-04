@@ -98,7 +98,7 @@ impl Kind {
     /// [`remembered`](LocalEntity::remembered), and what its name says otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         if entity.reading() || entity.unread() {
-            return match (entity.remembered.as_deref(), entity.by_name()) {
+            return match (entity.remembered(), entity.by_name()) {
                 (Some(known), _) => known.kind,
                 (None, by_name) => by_name.map_or(Kind::Other, |(_, kind)| kind),
             };

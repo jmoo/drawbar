@@ -386,7 +386,7 @@ pub fn ui(
     sets: &mut Sets,
 ) -> Option<Item> {
     let file = song(entity.entity.as_deref()?)?;
-    let saved = nord_format::from_stream(&mut std::io::Cursor::new(&entity.saved.bytes)).ok();
+    let saved = nord_format::from_stream(&mut std::io::Cursor::new(&entity.saved.bytes())).ok();
     let rows = read(file, saved.as_ref().and_then(song), seen);
     let (reading, ink) = health(&rows);
     let tint = ink.color(ui.visuals());

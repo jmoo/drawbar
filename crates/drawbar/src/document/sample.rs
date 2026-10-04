@@ -2313,13 +2313,16 @@ fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
 /// baseline must be the saved bytes, not the working copy. Measured against itself,
 /// nothing would ever read as painted.
 pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
-    let resting = saved.file.as_deref().and_then(|file| match &file.index {
-        ondisk::Index::Sample(index) => Some((file.serial, index)),
-        ondisk::Index::Piano(_) => None,
-    });
+    let resting = saved
+        .file()
+        .map(|file| &**file)
+        .and_then(|file| match &file.index {
+            ondisk::Index::Sample(index) => Some((file.serial, index)),
+            ondisk::Index::Piano(_) => None,
+        });
     let of = match resting {
         Some((serial, _)) => (id, Some(serial), None, 0),
-        None => (id, None, saved.crc32, saved.bytes.len()),
+        None => (id, None, saved.crc32(), saved.bytes().len()),
     };
     if state.baseline.as_ref().is_some_and(|held| held.of == of) {
         return;
@@ -2329,7 +2332,7 @@ pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
             Fields::V2(fields) => fields.key_table().ok(),
             Fields::V3(_) => None,
         },
-        None => nord_format::from_stream(&mut Cursor::new(&saved.bytes))
+        None => nord_format::from_stream(&mut Cursor::new(saved.bytes()))
             .ok()
             .as_ref()
             .and_then(sample)

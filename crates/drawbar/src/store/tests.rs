@@ -354,7 +354,7 @@ fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     let mut second = Session::open(&root);
     let entity = second.bench.workspace.get(id).expect("the same id");
     assert_eq!(entity.bytes, edited, "the edit");
-    assert_eq!(entity.saved.bytes, saved, "and what it is an edit of");
+    assert_eq!(*entity.saved.bytes(), saved, "and what it is an edit of");
     assert!(entity.is_unsaved());
 
     second.bench.workspace.mark_saved(id);
@@ -649,7 +649,7 @@ fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
     let second = Session::open(&root);
     assert_eq!(second.bench.browser.asking(), None, "nothing to ask");
     let entity = second.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.saved.bytes, saved, "the file as saved");
+    assert_eq!(*entity.saved.bytes(), saved, "the file as saved");
     assert_eq!(entity.bytes, edited, "and the edit over it");
 }
 
@@ -904,7 +904,11 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
     assert_eq!(session.bench.browser.expected(), Some("Keep mine"));
     let entity = session.bench.workspace.get(id).unwrap();
     assert_eq!(entity.bytes, mine, "nothing was taken without asking");
-    assert_eq!(entity.saved.bytes, theirs, "a save would write over theirs");
+    assert_eq!(
+        *entity.saved.bytes(),
+        theirs,
+        "a save would write over theirs"
+    );
 
     let acts = session.bench.browser.answer("Keep both");
     session.bench.act(acts);
@@ -1975,7 +1979,7 @@ fn after_the_walk_nothing_is_read_until_something_asks_for_it() {
     workspace.settle_files(log);
     let entity = workspace.get(grand).unwrap();
     assert!(!entity.unread());
-    assert!(matches!(entity.verify, VerifyState::Ok));
+    assert!(matches!(entity.verify(), VerifyState::Ok));
     assert_eq!(Kind::of(entity), Kind::Program);
     assert_eq!(entity.bytes, program);
     assert!(!entity.is_unsaved());
@@ -2069,7 +2073,7 @@ fn an_indexed_row_with_a_working_copy_is_restored_at_open() {
     let entity = second.bench.workspace.get(edited).expect("under its id");
     assert!(!entity.unread());
     assert_eq!(entity.bytes, mine);
-    assert_eq!(entity.saved.bytes, saved, "what its file holds");
+    assert_eq!(*entity.saved.bytes(), saved, "what its file holds");
     assert!(entity.is_unsaved());
     let other = second.bench.workspace.get(second.named(&other)).unwrap();
     assert!(other.unread());
@@ -2553,7 +2557,7 @@ fn acting_on_a_file_not_read_yet_reads_and_decodes_it_first() {
     assert!(session.bench.tabs.holds(grand), "its tab is open");
     let entity = session.bench.workspace.get(grand).unwrap();
     assert_eq!(Kind::of(entity), Kind::Program);
-    assert!(matches!(entity.verify, VerifyState::Ok));
+    assert!(matches!(entity.verify(), VerifyState::Ok));
     assert_eq!(entity.bytes, program);
 }
 
@@ -2647,12 +2651,13 @@ fn a_file_past_the_most_drawbar_reads_is_listed_and_its_read_refused() {
         .unwrap();
     assert!(huge.unread());
     assert_eq!(huge.size(), MOST_BYTES + 1);
-    let VerifyState::NotRead(why) = &huge.verify else {
-        panic!("{}", huge.verify.detail());
+    let verify = huge.verify();
+    let VerifyState::NotRead(why) = &verify else {
+        panic!("{}", verify.detail());
     };
     assert!(why.contains("at most 1 GiB"), "{why}");
     let small = session.bench.workspace.get(session.named("Small.ne5p"));
-    assert!(matches!(small.unwrap().verify, VerifyState::Ok));
+    assert!(matches!(small.unwrap().verify(), VerifyState::Ok));
 }
 
 /// Reads in flight count against what drawbar holds whole, so two asked one after the
@@ -2693,8 +2698,9 @@ fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
         .filter(|id| workspace.get(*id).unwrap().unread())
         .collect();
     assert_eq!(unread, [c]);
-    let VerifyState::NotRead(why) = &workspace.get(c).unwrap().verify else {
-        panic!("{}", workspace.get(c).unwrap().verify.detail());
+    let verify = workspace.get(c).unwrap().verify();
+    let VerifyState::NotRead(why) = &verify else {
+        panic!("{}", verify.detail());
     };
     assert!(why.contains("at most 1 GiB"), "{why}");
 
@@ -2708,7 +2714,7 @@ fn a_read_refused_for_room_waits_for_room_and_reads_in_flight_count() {
     session.answer_reads();
     let entity = session.bench.workspace.get(c).unwrap();
     assert!(!entity.unread(), "read once there is room");
-    assert_eq!(entity.saved.bytes, with_gain(&program, "36"));
+    assert_eq!(*entity.saved.bytes(), with_gain(&program, "36"));
 }
 
 /// Past the budget, a read lets go of the clean assets needed least recently, each unread
@@ -2747,9 +2753,9 @@ fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
     assert_eq!(unread(&session), [a], "the one needed least recently");
     let evicted = session.bench.workspace.get(a).unwrap();
     assert!(evicted.bytes.is_empty() && evicted.entity.is_none());
-    assert_eq!(evicted.verify.note(), None, "it still draws as read");
+    assert_eq!(evicted.verify().note(), None, "it still draws as read");
     assert_eq!(Kind::of(evicted), Kind::Program);
-    assert!(evicted.saved.crc32.is_some(), "it still matches its slot");
+    assert!(evicted.saved.crc32().is_some(), "it still matches its slot");
     assert!(session.bench.workspace.held_whole() <= budget);
 
     let Bench {
@@ -2774,8 +2780,9 @@ fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
     session.read(&[d]);
     let refused = session.bench.workspace.get(d).unwrap();
     assert!(refused.unread(), "nothing else can go");
-    let VerifyState::NotRead(why) = &refused.verify else {
-        panic!("{}", refused.verify.detail());
+    let verify = refused.verify();
+    let VerifyState::NotRead(why) = &verify else {
+        panic!("{}", verify.detail());
     };
     assert!(why.contains("at most 1 GiB"), "{why}");
 
@@ -2844,8 +2851,8 @@ fn after_open_a_tracked_file_is_read_without_being_asked() {
     workspace.settle_files(log);
     let entity = workspace.get(tagged).unwrap();
     assert!(!entity.unread(), "read without being asked");
-    assert!(matches!(entity.verify, VerifyState::Ok));
-    assert!(entity.saved.crc32.is_some(), "it can match its slot");
+    assert!(matches!(entity.verify(), VerifyState::Ok));
+    assert!(entity.saved.crc32().is_some(), "it can match its slot");
     let plain = second.named("Plain.ne5p");
     assert!(second.bench.workspace.get(plain).unwrap().unread());
 }
@@ -2885,7 +2892,11 @@ fn untracked_files_go_before_tracked_ones_at_the_budget() {
     };
     assert_eq!(unread(&second), ["T3.ne5p", "U.ne5p", "V.ne5p"]);
     let t3 = second.bench.workspace.get(second.named("T3.ne5p")).unwrap();
-    assert_eq!(t3.verify.note(), Some("reading…"), "not refused, only left");
+    assert_eq!(
+        t3.verify().note(),
+        Some("reading…"),
+        "not refused, only left"
+    );
 
     let [u, v] = ["U.ne5p", "V.ne5p"].map(|name| second.named(name));
     second.read(&[u]);
@@ -2913,7 +2924,7 @@ fn a_clean_asset_holds_its_bytes_once() {
     let held = |session: &Session| {
         let workspace = &session.bench.workspace;
         let entity = workspace.get(id).unwrap();
-        let shared = entity.bytes.shares(&entity.saved.bytes);
+        let shared = entity.bytes.shares(entity.saved.bytes());
         (shared, workspace.held_whole())
     };
     assert_eq!(held(&session), (true, len));
@@ -3014,9 +3025,9 @@ fn a_large_piano_opens_and_draws_before_its_check_answers() {
     let id = session.only();
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.rests().is_some(), "it rests in its file");
-    assert!(entity.bytes.is_empty() && entity.saved.bytes.is_empty());
+    assert!(entity.bytes.is_empty() && entity.saved.bytes().is_empty());
     assert_eq!(entity.size(), len);
-    assert_eq!(entity.verify.note(), Some("checking…"));
+    assert_eq!(entity.verify().note(), Some("checking…"));
     let file = entity.rests().unwrap().clone();
 
     let words = session.document(id);
@@ -3029,10 +3040,10 @@ fn a_large_piano_opens_and_draws_before_its_check_answers() {
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.settle_files(log);
     let entity = workspace.get(id).unwrap();
-    assert!(matches!(entity.verify, VerifyState::Checked));
-    assert_eq!(entity.verify.note(), None);
+    assert!(matches!(entity.verify(), VerifyState::Checked));
+    assert_eq!(entity.verify().note(), None);
     assert!(
-        entity.saved.crc32.is_some(),
+        entity.saved.crc32().is_some(),
         "a slot holding it can be matched"
     );
     assert!(entity.sendable().is_ok());
@@ -3056,13 +3067,13 @@ fn a_corrupted_piano_opens_and_then_shows_it_failed_verification() {
     let id = session.only();
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.rests().is_some());
-    assert_eq!(entity.verify.note(), Some("checking…"));
+    assert_eq!(entity.verify().note(), Some("checking…"));
     assert_eq!(Kind::of(entity), Kind::Piano);
 
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.settle_files(log);
     let entity = workspace.get(id).unwrap();
-    assert_eq!(entity.verify.note(), Some("failed verification"));
+    assert_eq!(entity.verify().note(), Some("failed verification"));
     assert!(entity.sendable().is_err());
     assert_eq!(Kind::of(entity), Kind::Other);
 }
@@ -3132,7 +3143,7 @@ fn a_file_read_once_draws_as_read_next_time_without_being_read() {
     first.read_all();
     let read = first.bench.workspace.get(first.named(&name)).unwrap();
     assert_eq!(Kind::of(read), Kind::Program);
-    let crc32 = read.saved.crc32.expect("a program is a container");
+    let crc32 = read.saved.crc32().expect("a program is a container");
     let families = first.bench.workspace.families_present();
     first.close();
 
@@ -3148,12 +3159,12 @@ fn a_file_read_once_draws_as_read_next_time_without_being_read() {
     );
     assert_eq!(entity.tag(), "ne5p");
     assert_eq!(
-        entity.verify.note(),
+        entity.verify().note(),
         None,
         "it does not say it is being read"
     );
     assert_eq!(second.bench.workspace.families_present(), families);
-    assert_eq!(entity.saved.crc32, Some(crc32));
+    assert_eq!(entity.saved.crc32(), Some(crc32));
 
     let Bench {
         workspace,
@@ -3278,8 +3289,8 @@ fn a_file_whose_length_or_time_moved_is_read_again() {
     for id in ids {
         let entity = second.bench.workspace.get(id).unwrap();
         assert!(entity.reading(), "{}", entity.name);
-        assert_eq!(entity.verify.note(), Some("reading…"));
-        assert_eq!(entity.saved.crc32, None);
+        assert_eq!(entity.verify().note(), Some("reading…"));
+        assert_eq!(entity.saved.crc32(), None);
     }
     assert_eq!(second.reads(), 0);
 
@@ -3396,7 +3407,7 @@ fn a_read_corrects_what_a_file_rewritten_under_its_old_stat_was_remembered_as() 
     let tag = first.bench.browser.tags.make("Sunday").unwrap();
     first.bench.browser.tags.set(id, tag, true);
     first.read_all();
-    let was = first.bench.workspace.get(id).unwrap().saved.crc32;
+    let was = first.bench.workspace.get(id).unwrap().saved.crc32();
     first.close();
 
     let at = fs::metadata(root.at("Grand.ne5p"))
@@ -3410,9 +3421,9 @@ fn a_read_corrects_what_a_file_rewritten_under_its_old_stat_was_remembered_as() 
         .and_then(|file| file.set_modified(at))
         .unwrap();
     let mut second = Session::remembering(&root, &shelf);
-    assert_eq!(second.bench.workspace.get(id).unwrap().saved.crc32, was);
+    assert_eq!(second.bench.workspace.get(id).unwrap().saved.crc32(), was);
     second.read(&[id]);
-    let now = second.bench.workspace.get(id).unwrap().saved.crc32;
+    let now = second.bench.workspace.get(id).unwrap().saved.crc32();
     assert_ne!(now, was);
     second.close();
     let index = fs::read_to_string(root.at(".drawbar/library.ron")).unwrap();
@@ -3427,7 +3438,7 @@ fn a_read_corrects_what_a_file_rewritten_under_its_old_stat_was_remembered_as() 
     );
 
     let third = Session::remembering(&root, &shelf);
-    assert_eq!(third.bench.workspace.get(id).unwrap().saved.crc32, now);
+    assert_eq!(third.bench.workspace.get(id).unwrap().saved.crc32(), now);
     third.close();
     fs::remove_file(root.at("Grand.ne5p")).unwrap();
     fs::write(root.at("Copy.ne5p"), &old).unwrap();
@@ -3450,7 +3461,13 @@ fn two_libraries_share_no_entries() {
     }
     let mut first = Session::remembering(&a, &shelf);
     first.read_all();
-    let crc32 = first.bench.workspace.get(first.only()).unwrap().saved.crc32;
+    let crc32 = first
+        .bench
+        .workspace
+        .get(first.only())
+        .unwrap()
+        .saved
+        .crc32();
     first.close();
 
     let mut other = Session::remembering(&b, &shelf);
@@ -3465,7 +3482,7 @@ fn two_libraries_share_no_entries() {
     let again = Session::remembering(&a, &shelf);
     let entity = again.bench.workspace.get(again.only()).unwrap();
     assert!(!entity.reading(), "the first library kept its own");
-    assert_eq!(entity.saved.crc32, crc32);
+    assert_eq!(entity.saved.crc32(), crc32);
 }
 
 /// Which projects name a WAV is answered from what was read of them, this session or
@@ -3702,7 +3719,7 @@ fn a_remembered_tracked_file_is_not_read_in_the_background() {
     let entity = second.bench.workspace.get(tagged).unwrap();
     assert!(second.bench.browser.tags.worn(tagged).contains(&tag));
     assert!(entity.unread() && !entity.reading());
-    assert!(entity.saved.crc32.is_some(), "it can match its slot");
+    assert!(entity.saved.crc32().is_some(), "it can match its slot");
     assert_eq!(second.reads(), 0, "not read in the background");
 }
 

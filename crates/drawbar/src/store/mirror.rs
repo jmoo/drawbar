@@ -731,7 +731,7 @@ impl Store {
             .records
             .iter()
             .filter(|(id, record)| {
-                let saved = workspace.get(**id).map(|entity| entity.saved.stamp);
+                let saved = workspace.get(**id).map(|entity| entity.saved.stamp());
                 saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
                     && !queue.holds(**id)
             })
@@ -1123,7 +1123,7 @@ impl Store {
             if std::mem::take(&mut record.saving) {
                 workspace.unsave(*id);
                 if let Some(entity) = workspace.get(*id) {
-                    record.saved = entity.saved.stamp;
+                    record.saved = entity.saved.stamp();
                 }
             }
         }
@@ -1818,7 +1818,7 @@ impl Store {
         let (Some(entity), Some(record)) = (workspace.get(id), self.records.get_mut(&id)) else {
             return;
         };
-        record.saved = entity.saved.stamp;
+        record.saved = entity.saved.stamp();
         let Some(copy) = rows.get(&id).and_then(|row| row.working) else {
             record.working = None;
             return;
@@ -2007,7 +2007,7 @@ impl Store {
             )),
         }
         browser.folders.missing.remove(&id);
-        let saved = workspace.get(id).map(|entity| entity.saved.stamp);
+        let saved = workspace.get(id).map(|entity| entity.saved.stamp());
         if let (Some(record), Some(saved)) = (self.records.get_mut(&id), saved) {
             record.fingerprint = Some(print);
             record.saved = saved;
@@ -2099,7 +2099,7 @@ impl Store {
         };
         workspace.unsave(id);
         if let (Some(record), Some(entity)) = (self.records.get_mut(&id), workspace.get(id)) {
-            record.saved = entity.saved.stamp;
+            record.saved = entity.saved.stamp();
         }
         log.error(format!("saving {path}: {why}"));
         log.trouble(format!(
@@ -2469,7 +2469,7 @@ impl Store {
             return;
         };
         workspace.remember(id, entry.summary.clone());
-        record.summarized = workspace.get(id).map(|entity| entity.saved.stamp);
+        record.summarized = workspace.get(id).map(|entity| entity.saved.stamp());
     }
 
     /// Keep in the cache a summary of each file whose asset holds what the file does and
@@ -2482,7 +2482,7 @@ impl Store {
             let Some(entity) = workspace.get(*id) else {
                 continue;
             };
-            let stamp = entity.saved.stamp;
+            let stamp = entity.saved.stamp();
             let clean = record.saved == stamp && !entity.is_unsaved();
             if record.summarized == Some(stamp) || !clean || record.saving || record.missing {
                 continue;
@@ -2674,7 +2674,7 @@ impl Store {
         if let Some(from) = arriving {
             return self.import(entity, path, from, waiting);
         }
-        let bytes = || entity.saved.bytes.to_vec();
+        let bytes = || entity.saved.bytes().to_vec();
         if !self
             .records
             .get(&entity.id)
@@ -2689,13 +2689,13 @@ impl Store {
                 entity.id,
                 working.as_ref(),
                 Keeps::Bytes,
-                entity.saved.stamp,
+                entity.saved.stamp(),
                 || Some(bytes()),
             );
             self.records.insert(
                 entity.id,
                 Record {
-                    saved: entity.saved.stamp,
+                    saved: entity.saved.stamp(),
                     saving: true,
                     working,
                     ..Record::of_file(path.clone(), None)
@@ -2720,7 +2720,7 @@ impl Store {
             .as_mut()
             .filter(|print| print.crc.is_none())
         {
-            if !record.saving && entity.saved.stamp == record.saved {
+            if !record.saving && entity.saved.stamp() == record.saved {
                 print.crc = entity.saved.whole_crc();
             }
         }
@@ -2731,21 +2731,21 @@ impl Store {
             .flatten()
             .filter(|_| !missing);
         // A baseline resting in its file is what the file holds, and needs no write.
-        if entity.saved.file.is_some() {
-            record.saved = entity.saved.stamp;
+        if entity.saved.file().is_some() {
+            record.saved = entity.saved.stamp();
         }
-        let unsaved = entity.saved.stamp != record.saved;
+        let unsaved = entity.saved.stamp() != record.saved;
         // ⚠️ The file's fingerprint is known only once the save before answers, and a
         // save sent without it would be refused as a write over someone else's file.
         let waits = unsaved && record.saving;
         let save = (unsaved && !record.saving).then(|| {
-            record.saved = entity.saved.stamp;
+            record.saved = entity.saved.stamp();
             record.saving = true;
             let stale = stale(
                 entity.id,
                 record.working.as_ref(),
                 Keeps::Bytes,
-                entity.saved.stamp,
+                entity.saved.stamp(),
                 || Some(bytes()),
             );
             (record.fingerprint.filter(|_| !missing), stale)
@@ -2797,7 +2797,7 @@ impl Store {
             return true;
         }
         record.saving = true;
-        record.saved = entity.saved.stamp;
+        record.saved = entity.saved.stamp();
         let path = record.path.get_or_insert_with(|| path.clone()).clone();
         let expect = record.fingerprint.filter(|_| !record.missing);
         self.write(Cmd::Import {
@@ -2822,7 +2822,7 @@ impl Store {
     ) {
         // A view is kept only while it holds something the slot does not.
         let unsaved = match entity.kept {
-            true => entity.stamp != entity.saved.stamp,
+            true => entity.stamp != entity.saved.stamp(),
             false => self.keeps_views && precious(entity, queue),
         };
         let needs = match edit {
