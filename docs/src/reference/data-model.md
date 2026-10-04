@@ -306,8 +306,9 @@ nothing but the files under working copies (`store/exec.rs`).
    of 256, and sent before the walk begins. A row's file that is gone lends its
    length to a set the walk checks for moved files.
 2. The tree is walked breadth first, one folder at a time, so the top of a large
-   tree arrives first. Entries are sent in `Event::Listed` parts of 256, and the
-   app folds in four parts a frame.
+   tree arrives first. A file a row already found is not looked at again. Entries
+   are sent in `Event::Listed` parts of 256, and the app folds in four parts a
+   frame.
 3. Anything under a name that starts with a dot is left out of the listing, and
    a dot folder is not entered. The `.drawbar-tmp` siblings of interrupted saves
    are gathered on the way, to be swept.
