@@ -259,6 +259,7 @@ pub struct KeyMapPlan {
     pub kind: nsmp::zone::KeyMap,
     pub stored: Vec<u8>,
     pub planned: Vec<u8>,
+    #[cfg(feature = "corpus")]
     pub writes: bool,
 }
 
@@ -285,6 +286,7 @@ pub fn planned_key_map(
         kind,
         stored: map.payload.clone(),
         planned,
+        #[cfg(feature = "corpus")]
         writes: !plan.is_empty(),
     }))
 }
