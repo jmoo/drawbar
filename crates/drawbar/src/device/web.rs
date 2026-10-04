@@ -19,6 +19,7 @@ use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{Usb, UsbConnectionEvent, UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions};
 
+use super::scratch::Scratch;
 use super::worker::{self, Emit, Flow};
 use super::{DeviceCard, DeviceCmd, DeviceEvent};
 use crate::js;
@@ -90,16 +91,18 @@ impl Inner {
 pub struct Link {
     emit: Emit,
     inner: Rc<RefCell<Inner>>,
+    scratch: Scratch,
     /// ⚠️ Held for as long as the link is. A closure handed to JS and then dropped here
     /// leaves the page calling into freed memory the next time the event fires.
     watch: Option<Closure<dyn FnMut(UsbConnectionEvent)>>,
 }
 
 impl Link {
-    pub fn new(ctx: egui::Context, events: Sender<DeviceEvent>) -> Link {
+    pub fn new(ctx: egui::Context, events: Sender<DeviceEvent>, scratch: Scratch) -> Link {
         Link {
             emit: Emit::new(events, ctx),
             inner: Rc::new(RefCell::new(Inner::default())),
+            scratch,
             watch: None,
         }
     }
@@ -132,6 +135,7 @@ impl Link {
 
         let emit = self.emit.clone();
         let inner = self.inner.clone();
+        let scratch = self.scratch.clone();
         spawn_local(async move {
             let chosen = match JsFuture::from(request).await {
                 Ok(chosen) => chosen,
@@ -177,7 +181,7 @@ impl Link {
                 }
                 Err(e) => emit.send(DeviceEvent::ConnectFailed(e.to_string())),
             }
-            pump(&inner, &emit);
+            pump(&inner, &scratch, &emit);
         });
     }
 
@@ -191,12 +195,12 @@ impl Link {
 
     pub fn send(&mut self, cmd: DeviceCmd) {
         self.inner.borrow_mut().queue.push_back(cmd);
-        pump(&self.inner, &self.emit);
+        pump(&self.inner, &self.scratch, &self.emit);
     }
 }
 
 /// Start the next queued command, if the device is free.
-fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
+fn pump(inner: &Rc<RefCell<Inner>>, scratch: &Scratch, emit: &Emit) {
     let (started, generation) = {
         let mut state = inner.borrow_mut();
         let generation = state.generation;
@@ -207,9 +211,10 @@ fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
     };
 
     let inner = inner.clone();
+    let scratch = scratch.clone();
     let emit = emit.clone();
     spawn_local(async move {
-        let flow = worker::run(&mut device, cmd, &emit).await;
+        let flow = worker::run(&mut device, cmd, &scratch, &emit).await;
         let carry_on = {
             let state = inner.borrow();
             flow == Flow::Continue
@@ -218,7 +223,7 @@ fn pump(inner: &Rc<RefCell<Inner>>, emit: &Emit) {
         };
         if carry_on {
             inner.borrow_mut().slot = Slot::Idle(device);
-            return pump(&inner, &emit);
+            return pump(&inner, &scratch, &emit);
         }
         retire(&inner, &emit, device, flow, generation).await;
     });

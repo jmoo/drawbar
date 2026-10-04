@@ -34,6 +34,12 @@ session that can write. Both brackets close the transaction whether the closure
 succeeds or fails. An abandoned transaction would leave the instrument stuck on
 its progress screen until it is power-cycled.
 
+`device.write` sends a file held in memory. `device.write_from` reads it one
+transfer chunk at a time through a `FileSource`, which a caller implements for a
+file on disk or a browser `File`, so a piano or sample library is never loaded
+whole. Reads mirror it: `op::read_program` returns the file in memory, and
+`op::read_into` hands it to a `FileSink` a chunk at a time as it arrives.
+
 ## Learn more
 
 - [docs.rs](https://docs.rs/nord-usb)

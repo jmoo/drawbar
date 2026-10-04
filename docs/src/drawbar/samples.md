@@ -46,6 +46,4 @@ on an instrument.
 
 ## Sending
 
-Queue an instrument from its header like anything else. Samples are usually
-larger than what drawbar keeps between sessions, so export the ones you want to
-keep.
+Queue an instrument from its header like anything else.

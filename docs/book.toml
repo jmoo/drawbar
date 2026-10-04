@@ -5,6 +5,9 @@ title = "drawbar"
 
 [output.html]
 additional-css = ["theme/drawbar.css"]
+# mermaid.min.js is the copy `mdbook-mermaid install` writes, and overlay.nix ships
+# LICENSE-mermaid.txt beside it.
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 default-theme = "light"
 edit-url-template = "https://github.com/jmoo/drawbar/edit/master/docs/{path}"
 git-repository-url = "https://github.com/jmoo/drawbar"
@@ -12,3 +15,7 @@ git-repository-url = "https://github.com/jmoo/drawbar"
 # names would break theme/fonts/fonts.css.
 hash-files = false
 preferred-dark-theme = "coal"
+
+# Turns ```mermaid blocks into <pre class="mermaid">, which mermaid-init.js draws.
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

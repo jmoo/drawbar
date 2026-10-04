@@ -1,25 +1,11 @@
 //! Tags that label the list on this computer.
 //!
-//! Stored the same way as [`crate::folders`], under its own `KEY` and version line. A
-//! folder is exclusive and a tag is not; that is the only difference.
+//! Kept in the library's index by asset id, so a tag follows its asset's file through a
+//! rename. An asset can have any number of tags.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::named::{self, Line, List, Named};
-use crate::workspace::Workspace;
-
-/// Where the tags and their membership are kept between sessions.
-///
-/// ⚠️ Membership is by workspace id, the same id the local list is stored under. The
-/// two files are read back separately into one list, so they must agree about what an id
-/// means. Only a kept asset has an id that survives a session, so a view is kept before
-/// it can be tagged.
-pub(crate) const KEY: &str = "drawbar.tags";
-
-const VERSION: &str = "drawbar tags 1";
-
-/// The marker that starts a tag line.
-const TAG: &str = "t";
+use crate::named::{List, Named};
 
 /// A tag is only a name.
 pub type Tag = Named;
@@ -97,50 +83,24 @@ impl Tags {
         self.of.remove(&asset);
     }
 
-    /// Drop the memberships of assets the list does not hold.
+    /// Take the tags an index held: their names by id, and each asset's tags.
     ///
-    /// The store keeps tags and assets in two files read back separately, and only the
-    /// asset file decides what survived: an asset too big to keep, or dropped for lack of
-    /// room, leaves its membership behind. Left alone, these would accumulate for as long
-    /// as the app is installed.
-    pub(crate) fn forget_missing(&mut self, workspace: &Workspace) {
-        self.of.retain(|asset, _| workspace.get(*asset).is_some());
-    }
-
-    /// The tags and their membership as one string, for the store.
-    ///
-    /// `t` lines are tags and `m` lines are memberships, so an unused tag survives a
-    /// session like any other.
-    pub(crate) fn written(&self) -> String {
-        let mut out = named::written(VERSION, TAG, &self.list);
-        for (asset, worn) in &self.of {
-            for tag in worn {
-                out.push_str(&named::member(*asset, *tag));
+    /// ⚠️ A membership naming a tag the index does not list is dropped: it would leave a
+    /// tag on the asset that nothing can show or remove.
+    pub(crate) fn restore(
+        &mut self,
+        names: BTreeMap<u64, String>,
+        worn: impl Iterator<Item = (u64, impl Iterator<Item = u64>)>,
+    ) {
+        for (id, name) in names {
+            self.list.restore(id, name);
+        }
+        for (asset, tags) in worn {
+            let tags: BTreeSet<u64> = tags.filter(|tag| self.list.holds(*tag)).collect();
+            if !tags.is_empty() {
+                self.of.insert(asset, tags);
             }
         }
-        out
-    }
-
-    /// Read back what [`Tags::written`] wrote. An unknown version reads as no tags; a
-    /// malformed line is dropped and the rest is read.
-    pub(crate) fn read(text: &str) -> Tags {
-        let mut tags = Tags::default();
-        for line in named::read(text, VERSION, TAG) {
-            match line {
-                Line::Named { id, name } => tags.list.restore(id, name),
-                Line::Member { asset, group } => {
-                    tags.of.entry(asset).or_default().insert(group);
-                }
-            }
-        }
-        // A membership naming a tag missing from the file would leave a tag on the asset
-        // that nothing can show or remove.
-        let Tags { list, of } = &mut tags;
-        for worn in of.values_mut() {
-            worn.retain(|tag| list.holds(*tag));
-        }
-        of.retain(|_, worn| !worn.is_empty());
-        tags
     }
 }
 
@@ -195,25 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tags_and_what_wears_them_survive_a_session() {
+    fn a_membership_naming_no_listed_tag_is_dropped() {
         let mut tags = Tags::default();
-        let (sunday, unworn) = (tags.make("Sunday").unwrap(), tags.make("Loud").unwrap());
-        tags.rename(sunday, "Sunday\tmorning".into());
-        tags.set(7, sunday, true);
-        tags.set(8, sunday, true);
-
-        let after = Tags::read(&tags.written());
-        assert_eq!(after.all().len(), 2, "an unused tag is still a tag");
-        assert_eq!(after.name_of(sunday), Some("Sunday\tmorning"));
-        assert_eq!(after.name_of(unworn), Some("Loud"));
-        assert_eq!(after.count(sunday), 2);
-
-        // An empty file or an unknown version reads as no tags.
-        assert!(Tags::read("").all().is_empty());
-        assert!(Tags::read("drawbar tags 99\nt\t1\tSunday\n")
-            .all()
-            .is_empty());
-        let orphaned = Tags::read(&format!("{VERSION}\nm\t7\t3\n"));
-        assert!(orphaned.worn(7).is_empty());
+        tags.restore(
+            BTreeMap::from([(1, "Sunday".to_string())]),
+            [(7, vec![1, 3].into_iter()), (8, vec![3].into_iter())].into_iter(),
+        );
+        assert_eq!(tags.worn(7), &BTreeSet::from([1]));
+        assert!(tags.worn(8).is_empty());
+        assert_eq!(tags.name_of(1), Some("Sunday"));
     }
 }

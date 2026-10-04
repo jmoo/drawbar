@@ -2,11 +2,9 @@
 
 **Help ▸ User guide** opens this guide.
 
-**Help ▸ What's new** lists what changed in the version you are running, grouped
-into breaking changes, new features, fixes and the rest, each line linking to the
-commit behind it. In the browser it opens by itself on the first launch after an
-update, and drawbar remembers which version you have dismissed. On the desktop,
-the item opens the release page instead.
+**Help ▸ What's new** lists what changed in the version you are running. In the
+browser it opens by itself after an update. On the desktop it opens the release
+page.
 
 **Help ▸ Welcome** shows what works today, instrument by instrument, three
 places to start (connect an instrument, open files, or start with a demo) and

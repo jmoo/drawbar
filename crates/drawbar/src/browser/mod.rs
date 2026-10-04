@@ -8,9 +8,10 @@
 //! This file holds the state rows share: the selection, the in-place rename, the
 //! confirmation modal, and which branches are open. The tree is drawn in `tree`, the drag
 //! rules are in `drag`, and a single row is drawn in `row`. Folders and tags for the
-//! local list live outside the browser, in [`crate::folders`] and [`crate::tags`].
+//! local list live outside the browser, in [`crate::folders`] and [`crate::tags`], and
+//! [`crate::store`] keeps both on disk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use eframe::egui;
@@ -18,11 +19,12 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::device::{read_only, Device, DeviceState};
 use crate::filter::Filter;
-use crate::folders::{self, Folders};
+use crate::folders::Folders;
 use crate::icon::Glyph;
 use crate::queue::Queue;
 use crate::sheet;
-use crate::tags::{self, Tags};
+use crate::store::{LibPath, Rescue};
+use crate::tags::Tags;
 use crate::workspace::Workspace;
 
 mod act;
@@ -32,17 +34,20 @@ mod row;
 mod selection;
 mod tree;
 
-pub use act::{apply, bulk, foreign_format, send_warnings, Act, Bulk, LOAD_ON_INSTRUMENT};
+pub use act::{
+    apply, bulk, foreign_format, send_warnings, Act, Bulk, Rescuing, LOAD_ON_INSTRUMENT,
+};
 pub use drag::{
-    kinds_present, landing, qualifier, Carried, Held, Item, Kept, Kind, Onto, Qualifier,
+    kinds_present, landing, qualifier, tagged, Carried, Held, Item, Kept, Kind, Onto, Qualifier,
 };
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
+pub use tree::{library_items, offers_libraries};
 
 use drag::ghost;
 use selection::{gesture, Gesture};
-use tree::{Branch, Sections};
+use tree::{Branch, Rows, Sections};
 
 /// An in-place rename, waiting on Enter or Esc.
 struct Rename {
@@ -66,22 +71,71 @@ struct Ask {
     note: Option<String>,
     verb: Verb,
     acts: Vec<Act>,
+    /// More answers beside the verb, each with the acts it runs, in the order drawn
+    /// from the left.
+    others: Vec<(&'static str, Vec<Act>)>,
+    /// What the answer that runs nothing is called.
+    cancel: &'static str,
+    /// The answer drawn as the one expected.
+    strong: Answer,
+}
+
+impl Ask {
+    fn new(title: String, note: Option<String>, verb: Verb, acts: Vec<Act>) -> Ask {
+        Ask {
+            title,
+            note,
+            verb,
+            acts,
+            others: Vec::new(),
+            cancel: "Cancel",
+            strong: Answer::Verb,
+        }
+    }
+
+    /// The label of each answer, as the dialog lays them out.
+    fn answers(&self) -> Vec<(Answer, &'static str)> {
+        let mut answers = vec![(Answer::Cancel, self.cancel)];
+        let others = self.others.iter().enumerate();
+        answers.extend(others.map(|(at, (label, _))| (Answer::Other(at), *label)));
+        answers.push((Answer::Verb, self.verb.label()));
+        answers
+    }
+}
+
+/// Which answer a question got.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Verb,
+    /// The one of [`Ask::others`] at this index.
+    Other(usize),
+    Cancel,
 }
 
 /// What a yes to an [`Ask`] does, which names and marks its button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verb {
     Save,
+    Keep,
     Replace,
     Delete,
+    Overwrite,
+    KeepBoth,
+    TakeTheirs,
+    Discard,
 }
 
 impl Verb {
     fn label(self) -> &'static str {
         match self {
             Verb::Save => "Save",
+            Verb::Keep => "Keep in library",
             Verb::Replace => "Replace",
             Verb::Delete => "Delete",
+            Verb::Overwrite => "Overwrite",
+            Verb::KeepBoth => "Keep both",
+            Verb::TakeTheirs => "Take theirs",
+            Verb::Discard => "Discard",
         }
     }
 
@@ -89,16 +143,22 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save => sheet::primary(ui, Some(glyph), label),
-            Verb::Replace | Verb::Delete => sheet::destructive(ui, glyph, label),
+            Verb::Save | Verb::Keep | Verb::KeepBoth => sheet::primary(ui, Some(glyph), label),
+            Verb::Replace | Verb::Delete | Verb::Overwrite | Verb::TakeTheirs | Verb::Discard => {
+                sheet::destructive(ui, glyph, label)
+            }
         }
     }
 
     fn glyph(self) -> Glyph {
         match self {
             Verb::Save => Glyph::Save,
+            Verb::Keep => Glyph::LibraryBig,
             Verb::Replace => Glyph::Replace,
-            Verb::Delete => Glyph::Trash2,
+            Verb::Delete | Verb::Discard => Glyph::Trash2,
+            Verb::Overwrite => Glyph::Replace,
+            Verb::KeepBoth => Glyph::Copy,
+            Verb::TakeTheirs => Glyph::RotateCcw,
         }
     }
 }
@@ -143,15 +203,23 @@ pub struct Browser {
     selection: Selection,
     rename: Option<Rename>,
     ask: Option<Ask>,
-    folders: Folders,
-    tags: Tags,
+    /// Questions waiting for the one showing to be answered.
+    later: VecDeque<Ask>,
+    pub(crate) folders: Folders,
+    pub(crate) tags: Tags,
     /// Which of the three sections are showing.
     sections: Sections,
     /// The open branches of the tree. Both places start open, so a new panel shows what
     /// is in them.
     open: BTreeSet<Branch>,
-    /// A slot to scroll to and select, once the branches holding it have been drawn.
+    /// A slot to scroll to and select, once the branches holding it have been laid out.
     jump: Option<(ObjectClass, Location)>,
+    rows: Rows,
+    /// Acts waiting for the assets they read to be read, in the order they were asked.
+    held: Vec<Act>,
+    /// Where this computer's folders were drawn as places a drop lands, in drawing order:
+    /// `None` for the library's own top level.
+    targets: Vec<(egui::Rect, Option<u64>)>,
 }
 
 impl Default for Browser {
@@ -160,40 +228,20 @@ impl Default for Browser {
             selection: Selection::default(),
             rename: None,
             ask: None,
+            later: VecDeque::new(),
             folders: Folders::default(),
             tags: Tags::default(),
             sections: Sections::default(),
             open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
+            rows: Rows::default(),
+            held: Vec::new(),
+            targets: Vec::new(),
         }
     }
 }
 
 impl Browser {
-    /// Restore the folders and tags from storage.
-    pub fn restore(&mut self, storage: &dyn eframe::Storage) {
-        self.folders = storage
-            .get_string(folders::KEY)
-            .map(|text| Folders::read(&text))
-            .unwrap_or_default();
-        self.tags = storage
-            .get_string(tags::KEY)
-            .map(|text| Tags::read(&text))
-            .unwrap_or_default();
-    }
-
-    /// Drop folder and tag memberships of assets the restored list does not hold. Call
-    /// once, after every store has been read.
-    pub fn settle(&mut self, workspace: &Workspace) {
-        self.folders.forget_missing(workspace);
-        self.tags.forget_missing(workspace);
-    }
-
-    pub fn keep(&self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(folders::KEY, self.folders.written());
-        storage.set_string(tags::KEY, self.tags.written());
-    }
-
     /// Draw the tree and collect what the user asked for.
     pub fn ui(
         &mut self,
@@ -207,6 +255,21 @@ impl Browser {
         self.tree(ui, workspace, device, queue, filter, &mut acts);
         ghost(ui.ctx());
         acts
+    }
+
+    /// Forget everything about the library open until now: its folders, its tags, and
+    /// whatever was selected, renamed or asked about in it. Whether all files are shown
+    /// stays, since that is the window's choice.
+    pub(crate) fn leave_library(&mut self) {
+        self.selection.clear();
+        self.rename = None;
+        self.ask = None;
+        self.later.clear();
+        self.held.clear();
+        self.folders.leave();
+        self.tags = Tags::default();
+        self.open
+            .retain(|branch| !matches!(branch, Branch::Folder(_)));
     }
 
     /// The selection, which the library table and the tree share.
@@ -255,11 +318,6 @@ impl Browser {
     fn select(&mut self, item: Item) {
         self.rename = None;
         self.selection.only(item);
-    }
-
-    /// Whether this row is the only one selected, which is what F2 renames.
-    fn sole_is(&self, item: Item) -> bool {
-        self.selection.sole() == Some(item)
     }
 
     /// Cancel an open rename of `what` and drop it from the selection, because its row is
@@ -339,7 +397,7 @@ impl Browser {
                 Some(Held {
                     what: item,
                     kind: Kind::of(entity),
-                    filed: self.folders.holding(id),
+                    filed: self.folders.holding(entity),
                     fits: crate::device::fit(device, entity).allowed(),
                 })
             }
@@ -367,7 +425,11 @@ impl Browser {
             .horizontal(|ui| {
                 ui.set_min_height(row::CHILD);
                 ui.add_space(crate::panel::ROW_INSET + indent);
+                // ⚠️ Named, not numbered: a tree line's widgets are numbered by how many
+                // lines were drawn before it, which scrolling changes, and an editor whose
+                // id changes loses its focus.
                 egui::TextEdit::singleline(&mut rename.text)
+                    .id_salt("rename")
                     .desired_width(ui.available_width() - crate::panel::ROW_INSET)
                     .show(ui)
             })
@@ -409,6 +471,11 @@ impl Browser {
         onto: Onto,
         acts: &mut Vec<Act>,
     ) {
+        match onto {
+            Onto::Computer => self.targets.push((response.rect, None)),
+            Onto::Group(folder) => self.targets.push((response.rect, Some(folder))),
+            Onto::Slot { .. } => {}
+        }
         if let Some(carried) = response.dnd_hover_payload::<Carried>() {
             if landing(&carried.head, onto).is_ok() {
                 ui.painter().rect_stroke(
@@ -423,6 +490,28 @@ impl Browser {
             return;
         };
         self.land(&carried, onto, acts);
+    }
+
+    /// The folder a file dropped from outside at `at` lands in: the one whose row was
+    /// drawn there last frame, and otherwise the library's top level.
+    pub fn landing_dir(&self, at: Option<egui::Pos2>) -> LibPath {
+        let folder = at.and_then(|at| {
+            let (_, folder) = self
+                .targets
+                .iter()
+                .rev()
+                .find(|(rect, _)| rect.contains(at))?;
+            Some(*folder)
+        });
+        folder
+            .flatten()
+            .and_then(|folder| self.folders.path_of(folder).cloned())
+            .unwrap_or_else(LibPath::root)
+    }
+
+    /// Forget where the folders were drawn, before the frame draws them again.
+    pub fn forget_targets(&mut self) {
+        self.targets.clear();
     }
 
     /// Run the drop for the pressed row, and for the rest of what it carries when the
@@ -452,11 +541,15 @@ impl Browser {
         );
     }
 
-    /// The open question, if any, and the acts a yes to it runs.
+    /// The open question, if any, and the acts its answer runs. Questions raised while
+    /// one is showing wait their turn.
     ///
     /// ⚠️ Called whether or not the browser is shown: the top bar, the library and the
     /// document header ask questions too.
     pub fn dialog(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        if self.ask.is_none() {
+            self.ask = self.later.pop_front();
+        }
         let Some(ask) = &self.ask else {
             return;
         };
@@ -480,37 +573,218 @@ impl Browser {
                     ui,
                     |_| {},
                     |ui| {
-                        if ask.verb.button(ui).clicked() {
-                            decision = Some(true);
-                        }
-                        if sheet::secondary(ui, None, "Cancel").clicked() {
-                            decision = Some(false);
+                        // Right to left: the verb at the far right, the cancel at the left.
+                        for (answer, label) in ask.answers().into_iter().rev() {
+                            let clicked = match answer {
+                                Answer::Verb => ask.verb.button(ui),
+                                _ if answer == ask.strong => sheet::primary(ui, None, label),
+                                _ => sheet::secondary(ui, None, label),
+                            }
+                            .clicked();
+                            if clicked {
+                                decision = Some(answer);
+                            }
                         }
                     },
                 );
                 if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                    decision = Some(false);
+                    decision = Some(Answer::Cancel);
                 }
             });
+        let Some(decision) = decision else {
+            return;
+        };
+        let Some(ask) = self.ask.take() else {
+            return;
+        };
         match decision {
-            Some(true) => {
-                if let Some(ask) = self.ask.take() {
-                    acts.extend(ask.acts);
+            Answer::Verb => acts.extend(ask.acts),
+            Answer::Other(at) => {
+                if let Some((_, more)) = ask.others.into_iter().nth(at) {
+                    acts.extend(more);
                 }
             }
-            Some(false) => self.ask = None,
-            None => {}
+            Answer::Cancel => {}
         }
+    }
+
+    /// The title of the question showing or next to show, and its answers.
+    #[cfg(test)]
+    pub(crate) fn asking(&self) -> Option<(String, Vec<&'static str>)> {
+        let ask = self.ask.as_ref().or(self.later.front())?;
+        let answers = ask.answers().into_iter().map(|(_, label)| label).collect();
+        Some((ask.title.clone(), answers))
+    }
+
+    /// The answer that question draws as the one expected.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn expected(&self) -> Option<&'static str> {
+        let ask = self.ask.as_ref().or(self.later.front())?;
+        ask.answers()
+            .into_iter()
+            .find(|(answer, _)| *answer == ask.strong)
+            .map(|(_, label)| label)
+    }
+
+    /// Answer that question as a click on the answer labeled `label` would, and return
+    /// the acts it runs.
+    #[cfg(test)]
+    pub(crate) fn answer(&mut self, label: &str) -> Vec<Act> {
+        let Some(ask) = self.ask.take().or_else(|| self.later.pop_front()) else {
+            return Vec::new();
+        };
+        if ask.verb.label() == label {
+            return ask.acts;
+        }
+        let other = ask.others.into_iter().find(|(other, _)| *other == label);
+        other.map(|(_, acts)| acts).unwrap_or_default()
+    }
+
+    /// Ask once the question showing now, if any, is answered.
+    fn raise(&mut self, ask: Ask) {
+        match self.ask {
+            None => self.ask = Some(ask),
+            Some(_) => self.later.push_back(ask),
+        }
+    }
+
+    /// Ask before an asset is deleted with its file.
+    fn ask_delete(&mut self, id: u64, name: &str) {
+        self.raise(Ask::new(
+            format!("Delete “{name}”?"),
+            Some("It is deleted from this computer, with its file in the library folder.".into()),
+            Verb::Delete,
+            vec![Act::Remove(id)],
+        ));
+    }
+
+    /// Ask what to do about a name already taken in a folder. `over` is what overwriting
+    /// runs, where overwriting is allowed; `both` keeps both under `free`.
+    fn ask_clash(
+        &mut self,
+        name: &str,
+        dir: &crate::store::LibPath,
+        over: Option<Vec<Act>>,
+        both: Vec<Act>,
+        free: &str,
+    ) {
+        let place = match dir.is_root() {
+            true => "the top level of the library".to_string(),
+            false => format!("“{dir}”"),
+        };
+        let title = format!("“{name}” is already in {place}");
+        let both_note = format!("Keep both names the new one “{free}”.");
+        self.raise(match over {
+            Some(over) => Ask {
+                title,
+                note: Some(format!(
+                    "Overwrite puts the new contents in the file that is there, which keeps \
+                     its tags. {both_note}"
+                )),
+                verb: Verb::Overwrite,
+                acts: over,
+                others: vec![("Keep both", both)],
+                cancel: "Cancel",
+                strong: Answer::Verb,
+            },
+            None => Ask::new(
+                title,
+                Some(format!(
+                    "What is there holds changes of its own, or is not a file, so it cannot \
+                     be overwritten. {both_note}"
+                )),
+                Verb::KeepBoth,
+                both,
+            ),
+        });
+    }
+
+    /// Ask what to do about a file changed on disk while this app held an unsaved edit of
+    /// it.
+    pub(crate) fn ask_conflict(&mut self, id: u64, name: &str) {
+        self.raise(Ask {
+            title: format!("“{name}” changed on disk"),
+            note: Some(
+                "Something outside drawbar saved over it while you had unsaved edits. Keep \
+                 mine saves your edits over it at the next save. Take theirs discards your \
+                 edits. Keep both keeps yours as a new file beside it."
+                    .into(),
+            ),
+            verb: Verb::TakeTheirs,
+            acts: vec![Act::Revert(id)],
+            others: vec![("Keep both", vec![Act::KeepBoth(id)])],
+            cancel: "Keep mine",
+            strong: Answer::Cancel,
+        });
+    }
+
+    /// Ask before another library opens in place of one that cannot keep the assets
+    /// named in `unkept`, because nothing may be written to it.
+    pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
+        const SHOWN: usize = 5;
+        let mut names: Vec<String> = unkept
+            .iter()
+            .take(SHOWN)
+            .map(|name| format!("“{name}”"))
+            .collect();
+        if unkept.len() > SHOWN {
+            names.push(format!("and {} more", unkept.len() - SHOWN));
+        }
+        self.raise(Ask::new(
+            "Discard what this library cannot keep?".to_string(),
+            Some(format!(
+                "Nothing can be written to the library open now, so opening another \
+                 discards what is unsaved in it: {}.",
+                names.join(", ")
+            )),
+            Verb::Discard,
+            vec![Act::OpenLibraryDiscarding(root)],
+        ));
+    }
+
+    /// Offer what to do with a slot's former occupant an interrupted write to the
+    /// instrument left on this computer. Show the file is offered where the system can
+    /// show it.
+    pub(crate) fn ask_rescue(&mut self, rescue: Rescue) {
+        let act = |what| vec![Act::Rescue(rescue.clone(), what)];
+        let mut others = Vec::new();
+        if rescue.shows() {
+            others.push(("Show the file", act(Rescuing::Show)));
+        }
+        others.push(("Discard…", act(Rescuing::Confirm)));
+        self.raise(Ask {
+            title: format!("A write to the instrument left “{}”", rescue.name),
+            note: Some(
+                "It may be the only copy of what that slot held. Keep in library puts it \
+                 in the library, where you can send it back."
+                    .into(),
+            ),
+            verb: Verb::Keep,
+            acts: act(Rescuing::Keep),
+            others,
+            cancel: "Later",
+            strong: Answer::Verb,
+        });
+    }
+
+    /// Ask before a slot's former occupant is deleted.
+    pub(crate) fn ask_discard_rescue(&mut self, rescue: Rescue) {
+        self.raise(Ask::new(
+            format!("Discard “{}”?", rescue.name),
+            Some("It may be the only copy of what that slot held.".into()),
+            Verb::Discard,
+            vec![Act::Rescue(rescue, Rescuing::Discard)],
+        ));
     }
 
     /// Ask before a write back to one slot, showing the note that write carries.
     fn ask_write(&mut self, name: &str, at: String, note: String, act: Act) {
-        self.ask = Some(Ask {
-            title: format!("Save “{name}” to {at}?"),
-            note: Some(note),
-            verb: Verb::Save,
-            acts: vec![act],
-        });
+        self.ask = Some(Ask::new(
+            format!("Save “{name}” to {at}?"),
+            Some(note),
+            Verb::Save,
+            vec![act],
+        ));
     }
 
     /// Ask, as Finder does, before a drop replaces what is in the destination.
@@ -524,15 +798,15 @@ impl Browser {
     ) {
         let note =
             format!("“{occupant}” is read back first and put where it was if anything goes wrong.");
-        self.ask = Some(Ask {
-            title: format!("Replace “{occupant}” in {at} with “{incoming}”?"),
-            note: Some(match warning {
+        self.ask = Some(Ask::new(
+            format!("Replace “{occupant}” in {at} with “{incoming}”?"),
+            Some(match warning {
                 Some(warning) => format!("{warning}\n\n{note}"),
                 None => note,
             }),
-            verb: Verb::Replace,
-            acts: vec![act],
-        });
+            Verb::Replace,
+            vec![act],
+        ));
     }
 
     /// One bulk action on the checked set, drawn the same in the inspector's Selection card
@@ -610,21 +884,23 @@ impl Browser {
         match locals {
             0 => {}
             1 => note.push(
-                "1 item leaves the list on this computer. Its file stays where it is.".to_string(),
+                "1 item is deleted from this computer, with its file in the library folder."
+                    .to_string(),
             ),
             n => note.push(format!(
-                "{n} items leave the list on this computer. Their files stay where they are."
+                "{n} items are deleted from this computer, with their files in the library \
+                 folder."
             )),
         }
-        self.ask = Some(Ask {
-            title: format!(
+        self.ask = Some(Ask::new(
+            format!(
                 "Delete {}?",
                 crate::strings::counted(slots + locals, "checked item", "checked items")
             ),
-            note: Some(note.join("\n\n")),
-            verb: Verb::Delete,
+            Some(note.join("\n\n")),
+            Verb::Delete,
             acts,
-        });
+        ));
     }
 }
 
@@ -649,17 +925,21 @@ mod tests {
         for kind in [Fresh::Program, Fresh::Live, Fresh::Settings] {
             workspace.create(kind, log).unwrap();
         }
-        // A folder with something in it, an empty folder, and a view of a slot: row
-        // shapes the list has no other way to reach.
-        let full = browser.folders.make().unwrap();
-        browser.folders.make().unwrap();
+        // A folder with something and a folder in it, an empty folder, and a view of a
+        // slot: row shapes the list has no other way to reach.
+        let root = crate::store::LibPath::root();
+        let full = browser.folders.make(&root, workspace);
+        browser.folders.make(&root, workspace);
         let filed = workspace.create(Fresh::Program, log).unwrap();
-        browser.folders.file(filed, Some(full));
+        browser.folders.file(workspace, filed, Some(full));
+        let inner = browser.folders.path_of(full).unwrap().clone();
+        browser.folders.make(&inner, workspace);
+        browser.open.insert(Branch::Folder(full));
         // A tag on something, and one on nothing: the two shapes the section holds.
         let sunday = browser.tags.make("Sunday").unwrap();
         browser.tags.make("Loud").unwrap();
         browser.tags.set(filed, sunday, true);
-        let bytes = workspace.get(filed).unwrap().bytes.clone();
+        let bytes = workspace.get(filed).unwrap().bytes.to_vec();
         workspace.view(
             "Africa-Split.ne5p".into(),
             Origin::Device {
@@ -707,20 +987,6 @@ mod tests {
                     });
             });
         }
-    }
-
-    /// An in-memory store for the folders and tags the browser keeps.
-    #[derive(Default)]
-    struct Fake(std::collections::HashMap<String, String>);
-
-    impl eframe::Storage for Fake {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-        fn set_string(&mut self, key: &str, value: String) {
-            self.0.insert(key.to_string(), value);
-        }
-        fn flush(&mut self) {}
     }
 
     #[test]
@@ -820,7 +1086,9 @@ mod tests {
         for id in &ids {
             browser.selection.toggle(Item::Local(*id));
         }
-        let folder = browser.folders.make().unwrap();
+        let folder = browser
+            .folders
+            .make(&crate::store::LibPath::root(), &workspace);
         let head = browser
             .held(Item::Local(ids[0]), &workspace, &device.state)
             .unwrap();
@@ -862,9 +1130,11 @@ mod tests {
             mut log,
             ..
         } = Bench::new();
-        let folder = browser.folders.make().unwrap();
+        let folder = browser
+            .folders
+            .make(&crate::store::LibPath::root(), &workspace);
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        browser.folders.file(id, Some(folder));
+        browser.folders.file(&mut workspace, id, Some(folder));
         let head = browser
             .held(Item::Local(id), &workspace, &device.state)
             .expect("a local is dragged");
@@ -887,20 +1157,75 @@ mod tests {
         );
     }
 
+    /// A file dropped from outside lands in the folder whose row it was dropped on, and
+    /// anywhere else, or where the drop point is not known, at the library's top level.
+    #[test]
+    fn a_file_dropped_on_a_folder_row_lands_in_that_folder() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        let folder = browser.folders.make(&LibPath::root(), &workspace);
+        let path = browser.folders.path_of(folder).cloned().unwrap();
+        let input = testing::screen(egui::vec2(400.0, 600.0), Vec::new());
+        let output = testing::run(&ctx, input, |ctx| {
+            egui::SidePanel::left("places").show(ctx, |ui| {
+                browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+            });
+        });
+        let row = testing::where_(&testing::painted(&output), path.leaf());
+        assert_eq!(browser.landing_dir(Some(row.center())), path);
+        let elsewhere = egui::pos2(390.0, 590.0);
+        assert_eq!(browser.landing_dir(Some(elsewhere)), LibPath::root());
+        assert_eq!(browser.landing_dir(None), LibPath::root());
+
+        browser.forget_targets();
+        assert_eq!(
+            browser.landing_dir(Some(row.center())),
+            LibPath::root(),
+            "only where the rows were drawn last"
+        );
+    }
+
     /// ⚠️ F2 renames only a row selected alone. A rename typed while several are selected
     /// would look like it applies to all of them, and only one would change.
     #[test]
     fn f2_renames_only_while_its_row_is_the_only_one_picked() {
-        let Bench { mut browser, .. } = Bench::new();
-        let row = Item::Local(1);
-        browser.selection.only(row);
-        assert!(browser.sole_is(row));
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let one = workspace.create(Fresh::Program, &mut log).unwrap();
+        let two = workspace.create(Fresh::Program, &mut log).unwrap();
+        let press_f2 = |browser: &mut Browser| {
+            let input = egui::RawInput {
+                events: vec![testing::key(egui::Key::F2)],
+                ..Default::default()
+            };
+            testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::left("places").show(ctx, |ui| {
+                    browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                });
+            });
+            browser.rename.as_ref().map(|rename| rename.what)
+        };
 
-        browser.selection.toggle(Item::Local(2));
-        assert!(!browser.sole_is(row), "two rows selected");
-        browser.selection.plain(Item::Local(2));
-        assert!(
-            browser.sole_is(row),
+        browser.selection.only(Item::Local(one));
+        browser.selection.toggle(Item::Local(two));
+        assert_eq!(press_f2(&mut browser), None, "two rows selected");
+        browser.selection.plain(Item::Local(two));
+        assert_eq!(
+            press_f2(&mut browser),
+            Some(Item::Local(one)),
             "a plain click on one of the two leaves the other sole"
         );
     }
@@ -924,12 +1249,12 @@ mod tests {
         );
 
         browser.rename = None;
-        browser.ask = Some(Ask {
-            title: "Delete 1 checked item?".into(),
-            note: None,
-            verb: Verb::Delete,
-            acts: Vec::new(),
-        });
+        browser.ask = Some(Ask::new(
+            "Delete 1 checked item?".into(),
+            None,
+            Verb::Delete,
+            Vec::new(),
+        ));
         testing::run(&ctx, escape.clone(), |ctx| browser.let_go(ctx));
         assert_eq!(
             browser.picked().items().count(),
@@ -1004,34 +1329,9 @@ mod tests {
         );
     }
 
-    /// The folder store is read separately from the asset store, which decides what
-    /// survived. An asset too big to keep, or dropped for lack of room, would otherwise
-    /// leave its membership behind for as long as the app is installed.
+    /// Two assets given a new tag have that tag, and the third does not.
     #[test]
-    fn a_grouping_forgets_the_assets_the_list_came_back_without() {
-        let Bench {
-            mut browser,
-            mut workspace,
-            mut log,
-            ..
-        } = Bench::new();
-        let here = workspace.create(Fresh::Program, &mut log).unwrap();
-        let folder = browser.folders.make().unwrap();
-        browser.folders.file(here, Some(folder));
-        // As a store that could not keep everything reads back: a membership for an
-        // asset the list does not hold.
-        browser.folders.file(here + 99, Some(folder));
-
-        browser.settle(&workspace);
-        assert_eq!(browser.folders.holding(here), Some(folder));
-        assert_eq!(browser.folders.holding(here + 99), None);
-        assert_eq!(browser.folders.all().len(), 1, "the folder itself stays");
-    }
-
-    /// Two assets given a new tag have that tag next session, and the third does not. An
-    /// asset missing from the restored list leaves no membership behind.
-    #[test]
-    fn a_new_tag_on_two_assets_comes_back_next_session() {
+    fn a_tag_put_on_a_multi_selection_is_on_exactly_those_assets() {
         let mut bench = Bench::new();
         let ids: Vec<u64> = (0..3)
             .map(|_| {
@@ -1048,18 +1348,6 @@ mod tests {
         };
         assert!(bench.browser.tags.on_all(&ids[..2], tag));
         assert!(!bench.browser.tags.worn(ids[2]).contains(&tag));
-
-        let mut store = Fake::default();
-        bench.browser.keep(&mut store);
-        let mut after = Browser::default();
-        after.restore(&store);
-        after.settle(&bench.workspace);
-        assert_eq!(after.tags.name_of(tag), Some("New tag"));
-        assert!(after.tags.on_all(&ids[..2], tag));
-
-        bench.workspace.remove(ids[0], &mut bench.log);
-        after.settle(&bench.workspace);
-        assert_eq!(after.tags.count(tag), 1, "the one still on the list");
     }
 
     /// The question's verb runs what was asked, Cancel and Escape run nothing, and each
@@ -1085,12 +1373,12 @@ mod tests {
 
         for (answer, runs) in [("Delete", true), ("Cancel", false), ("Escape", false)] {
             let mut browser = Browser {
-                ask: Some(Ask {
-                    title: "Delete “Africa Split” from Programs 7:4?".into(),
-                    note: Some("It is removed from the instrument. There is no undo.".into()),
-                    verb: Verb::Delete,
-                    acts: vec![delete()],
-                }),
+                ask: Some(Ask::new(
+                    "Delete “Africa Split” from Programs 7:4?".into(),
+                    Some("It is removed from the instrument. There is no undo.".into()),
+                    Verb::Delete,
+                    vec![delete()],
+                )),
                 ..Browser::default()
             };
             // A sheet is laid out unseen on its first frame.
@@ -1118,7 +1406,7 @@ mod tests {
         assert_eq!(ask.title, "Delete 1 checked item?");
         assert_eq!(
             ask.note.as_deref(),
-            Some("1 item leaves the list on this computer. Its file stays where it is.")
+            Some("1 item is deleted from this computer, with its file in the library folder.")
         );
 
         let slot = |slot| Item::Slot {

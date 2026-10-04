@@ -10,7 +10,7 @@ use eframe::egui;
 use muda::accelerator::{Key, KeyAccelerator, Modifiers};
 use muda::{CheckMenuItem, IsMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::menu::{label, menus, shortcut, Command, Entry, Offer};
+use crate::menu::{label, menus, shortcut, Command, Entry, Offer, RECENT};
 use crate::platform::Platform;
 
 /// One native item and what it last showed, so it is only touched when that changes.
@@ -32,7 +32,15 @@ pub struct MenuBar {
     /// ⚠️ Dropping the menu takes it out of the menu bar.
     _menu: Menu,
     lines: Vec<Line>,
+    recent: Recent,
     picked: Receiver<MenuId>,
+}
+
+/// The recent libraries' submenu, whose lines come and go with the list.
+struct Recent {
+    submenu: Option<Submenu>,
+    lines: Vec<(CheckMenuItem, Command)>,
+    shown: Vec<(String, Option<bool>)>,
 }
 
 impl MenuBar {
@@ -41,6 +49,11 @@ impl MenuBar {
     pub fn install(ctx: &egui::Context) -> Result<MenuBar, muda::Error> {
         let menu = Menu::new();
         let mut lines = Vec::new();
+        let mut recent = Recent {
+            submenu: None,
+            lines: Vec::new(),
+            shown: Vec::new(),
+        };
 
         let app = Submenu::new("drawbar", true);
         append(&app, &plain(&mut lines, Command::About, "About drawbar"));
@@ -57,7 +70,7 @@ impl MenuBar {
         let mut help = None;
         for drawn in menus(Platform::Mac) {
             let submenu = Submenu::new(drawn.title, true);
-            fill(&submenu, &drawn.entries, &mut lines);
+            fill(&submenu, &drawn.entries, &mut lines, &mut recent);
             menu.append(&submenu)?;
             if drawn.title == "Help" {
                 help = Some(submenu);
@@ -87,6 +100,7 @@ impl MenuBar {
         Ok(MenuBar {
             _menu: menu,
             lines,
+            recent,
             picked,
         })
     }
@@ -96,16 +110,17 @@ impl MenuBar {
         self.picked
             .try_iter()
             .filter_map(|id| {
-                self.lines
-                    .iter()
-                    .find(|line| line.item.id() == &id)
-                    .map(|line| line.command)
+                let line = self.lines.iter().find(|line| line.item.id() == &id);
+                let recent = self.recent.lines.iter().find(|(item, _)| item.id() == &id);
+                line.map(|line| line.command)
+                    .or(recent.map(|(_, command)| *command))
             })
             .collect()
     }
 
     /// Bring each item's label, enablement, and check up to date with `offer`.
     pub fn refresh(&mut self, offer: impl Fn(Command) -> Option<Offer>) {
+        self.recent.refresh(&offer);
         for line in &mut self.lines {
             let now = match offer(line.command) {
                 Some(offer) => (offer.label, offer.enabled, offer.checked),
@@ -131,6 +146,37 @@ impl MenuBar {
     }
 }
 
+impl Recent {
+    /// Lay the submenu out again when the list or the open library changed.
+    fn refresh(&mut self, offer: &impl Fn(Command) -> Option<Offer>) {
+        let Some(submenu) = &self.submenu else {
+            return;
+        };
+        let now: Vec<(Command, Offer)> = (0..)
+            .map(Command::Recent)
+            .map_while(|command| Some((command, offer(command)?)))
+            .collect();
+        let shown: Vec<(String, Option<bool>)> = now
+            .iter()
+            .map(|(_, offer)| (offer.label.clone(), offer.checked))
+            .collect();
+        if shown == self.shown {
+            return;
+        }
+        for (item, _) in self.lines.drain(..) {
+            let _ = submenu.remove(&item);
+        }
+        for (command, offer) in now {
+            let checked = offer.checked.unwrap_or(false);
+            let item = CheckMenuItem::new(&offer.label, offer.enabled, checked, None);
+            append(submenu, &item);
+            self.lines.push((item, command));
+        }
+        submenu.set_enabled(!self.lines.is_empty());
+        self.shown = shown;
+    }
+}
+
 impl Item {
     fn id(&self) -> &MenuId {
         match self {
@@ -147,14 +193,19 @@ fn append(submenu: &Submenu, item: &dyn IsMenuItem) {
 }
 
 /// Fill a native menu with `entries`.
-fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>) {
+fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>, recent: &mut Recent) {
     for entry in entries {
         match entry {
             Entry::Rule => append(submenu, &PredefinedMenuItem::separator()),
             Entry::Sub(title, inner) => {
                 let child = Submenu::new(*title, true);
-                fill(&child, inner, lines);
+                fill(&child, inner, lines, recent);
                 append(submenu, &child);
+            }
+            Entry::Recent => {
+                let child = Submenu::new(RECENT, false);
+                append(submenu, &child);
+                recent.submenu = Some(child);
             }
             Entry::Do(command) => {
                 let resting = label(*command);
@@ -199,6 +250,8 @@ fn checkable(command: Command) -> bool {
             | Command::Browser
             | Command::Inspector
             | Command::Activity
+            | Command::AllFiles
+            | Command::Recent(_)
             | Command::Theme(_)
             | Command::Listen
     )
@@ -257,7 +310,7 @@ mod tests {
                 match entry {
                     Entry::Do(command) => into.push(*command),
                     Entry::Sub(_, inner) => walk(inner, into),
-                    Entry::Rule => {}
+                    Entry::Rule | Entry::Recent => {}
                 }
             }
         }

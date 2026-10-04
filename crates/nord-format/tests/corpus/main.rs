@@ -8,16 +8,17 @@
 //! Every file the reader recognizes, wherever it sits, is a specimen. Each one
 //! must pass its container checksum, parse, re-encode to the same bytes, decode
 //! no value its components cannot name, and match its `<file>.oracle.json`
-//! sidecar if it has one. On a sample (every fixture, every specimen with a
-//! sidecar, and one of each container shape among the rest), every registry
-//! field must also take a new value without changing another. A sidecar needs
-//! its specimen beside it, unless the tree's `library.json` projects an R2 object
-//! to that path. The fixtures must
-//! hold a file of every type the reader dispatches. In the corpus, each claim
-//! about every specimen of a kind runs once per specimen of that kind, so a tree
-//! without that kind runs none. A file ending `.kernel.tsv` is an oracle for the
-//! sample codec's interpolation kernel. Nothing here names a model, a directory,
-//! or a file in the corpus.
+//! sidecar if it has one. A piano library or sample instrument must also index to
+//! the bytes a whole read gives each stroke or zone, without reading the audio. On
+//! a sample (every fixture, every specimen with a sidecar, and one of each
+//! container shape among the rest), every registry field must also take a new
+//! value without changing another. A sidecar needs its specimen beside it, unless
+//! the tree's `library.json` projects an R2 object to that path. The fixtures must
+//! hold a file of every type the reader dispatches. In the corpus, each claim about
+//! every specimen of a kind runs once per specimen of that kind, so a tree without
+//! that kind runs none. A file ending `.kernel.tsv` is an oracle for the sample
+//! codec's interpolation kernel. Nothing here names a model, a directory, or a file
+//! in the corpus.
 //!
 //! ```sh
 //! cargo test -p nord-format --test corpus                        # the fixtures
@@ -37,6 +38,7 @@ macro_rules! ensure {
     };
 }
 
+mod index;
 #[cfg(feature = "corpus")]
 mod invariants;
 mod kernel;
@@ -97,6 +99,79 @@ fn cbin_body<'a>(bytes: &'a [u8], info: &cbin::Info) -> &'a [u8] {
     }
 }
 
+/// A [`cbin::Verifier`] fed the file in uneven chunks reports what `inspect` reported.
+fn streamed_check_agrees(bytes: &[u8], info: &cbin::Info) -> Result<(), String> {
+    let mut verifier = cbin::Verifier::new();
+    for chunk in bytes.chunks(4093) {
+        verifier.update(chunk).context("a streamed check")?;
+    }
+    let streamed = verifier.finish().context("a streamed check")?;
+    let facts = |i: &cbin::Info| {
+        (
+            i.header.clone(),
+            i.body_len,
+            i.checksum_ok,
+            i.stored_checksum,
+            i.body_crc32,
+        )
+    };
+    ensure!(
+        facts(&streamed) == facts(info),
+        "a streamed check reports {streamed:?} and inspect {info:?}"
+    );
+    Ok(())
+}
+
+/// The format an entity's file carries says, by name, the entity it decoded to. A bundle
+/// is said by no name.
+fn said_by_its_format(entity: &Entity) -> Result<(), String> {
+    #[cfg(feature = "bundle")]
+    if matches!(entity, Entity::Bundle(_)) {
+        return Ok(());
+    }
+    let tag = entity.identity().format;
+    let said = nord_format::formats::by_extension(tag.trim_end_matches('\0'));
+    ensure!(
+        said.map(|format| (format.tag, format.entity)) == Some((tag, entity.kind())),
+        "a {tag:?} file decodes to {:?}, and its name says {said:?}",
+        entity.kind()
+    );
+    Ok(())
+}
+
+/// What a program plays is every piano and sample its registry references, in field
+/// order, a zero id left out.
+fn plays_what_its_registry_references(entity: &Entity) -> Result<(), String> {
+    use nord_format::components::LibraryRef;
+    use nord_format::fields::{ControlKind, Library};
+
+    let Some(plays) = entity.plays() else {
+        return Ok(());
+    };
+    let fields = registry::fields(entity).ok_or("plays, with no registry")?;
+    let mut referenced = Vec::new();
+    for field in fields {
+        let ControlKind::Reference(library @ (Library::Piano | Library::Sample)) =
+            field.spec.control
+        else {
+            continue;
+        };
+        let id = match field.value.strip_prefix("0x") {
+            Some(hex) => u32::from_str_radix(hex, 16),
+            None => field.value.parse(),
+        }
+        .context(format!("{} = {:?}", field.path, field.value))?;
+        if id != 0 {
+            referenced.push(LibraryRef { library, id });
+        }
+    }
+    ensure!(
+        plays == referenced,
+        "plays {plays:?}, and the registry references {referenced:?}"
+    );
+    Ok(())
+}
+
 /// One specimen: checksum, parse, byte-exact round trip, no unnamed decoded
 /// values, the oracle sidecar if there is one, and, if `mutate`, the per-field
 /// mutation check.
@@ -109,6 +184,15 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
         if !info.checksum_ok {
             return Err(format!("container checksum mismatch ({:?})", info.header).into());
         }
+        let body_crc32 = nord_format::crc::crc32(cbin_body(&bytes, &info));
+        if info.body_crc32 != body_crc32 {
+            return Err(format!(
+                "inspect reports a body crc32 of {:#010x}, and the body's is {body_crc32:#010x}",
+                info.body_crc32
+            )
+            .into());
+        }
+        streamed_check_agrees(&bytes, &info).map_err(Failed::from)?;
         Some(info)
     } else {
         None
@@ -116,6 +200,8 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
 
     let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
         .map_err(|e| Failed::from(format!("parse: {e}")))?;
+    said_by_its_format(&entity).map_err(Failed::from)?;
+    plays_what_its_registry_references(&entity).map_err(Failed::from)?;
 
     // The archive layer does not re-encode, so for a bundle the check is the
     // parse, which reads and verifies every member.
@@ -130,6 +216,8 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
             return Err("re-encode changed the bytes".into());
         }
     }
+
+    index::check(&bytes, &entity).map_err(Failed::from)?;
 
     let unwritten = info
         .as_ref()

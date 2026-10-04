@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use nord_format::accept::Family;
 use nord_format::cbin::{self, Generation, Info};
-use nord_format::{Entity, Live, Program};
+use nord_format::Entity;
 use nord_usb::ObjectClass;
 
 use crate::slot::shown;
@@ -178,17 +178,14 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let format = entity.identity().format;
     check(path, format, class)?;
 
-    // The two bodies are byte-identical but live in different slot spaces, so each
-    // variant is matched on its own.
-    let (piano, sample) = match &entity {
-        Entity::Program(Program::Electro5(p)) => (p.piano_panel.id.id(), p.sample_panel.id.id()),
-        Entity::Live(Live::Electro5(l)) => (l.piano_panel.id.id(), l.sample_panel.id.id()),
-        Entity::Song(_) => {
+    let refs = match (entity.plays(), &entity) {
+        (Some(refs), _) => refs,
+        (None, Entity::Song(_)) => {
             return Err("a set list names program slots, not library objects; \
                  `nord setlist deps BANK:SLOT` asks the instrument, which resolves them"
                 .into())
         }
-        _ => {
+        (None, _) => {
             return Err(format!(
                 "{}: a {format} file carries no dependency ids",
                 path.display()
@@ -196,22 +193,16 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
         }
     };
 
-    let refs: Vec<(ObjectClass, u32)> =
-        [(ObjectClass::Piano, piano), (ObjectClass::Sample, sample)]
-            .into_iter()
-            .filter(|&(_, id)| id != 0)
-            .collect();
-
     if refs.is_empty() {
         ui.note(format!("{} references no library objects", path.display()));
         return Ok(());
     }
     ui.out(ui.dim(format!("{:<8} id", "class")));
-    for (class, id) in &refs {
+    for reference in &refs {
         ui.out(format!(
             "{:<8} {}",
-            class.label(),
-            crate::summary::dep_id(*id)
+            ObjectClass::from(reference.library).label(),
+            crate::summary::dep_id(reference.id)
         ));
     }
     ui.note(ui.dim("(ids only: the instrument holds the names, and `deps BANK:SLOT` shows them)"));

@@ -11,6 +11,27 @@ survives a round trip even where its meaning is not fully known. Every fixture
 and every file in the private corpus is checked this way, and every editable
 field is set and read back to prove it moves no other bit.
 
+## Large libraries
+
+A piano library or sample instrument can run to hundreds of megabytes, and a
+whole read holds all of it in memory. `npno::Index` and `nsmp::Index` read only a
+file's headers and stroke directory, through `Read` and `Seek`, and give the byte
+range of each stroke's audio. A caller reads one stroke by its range and decodes
+it. The index does not verify the container checksum, which covers every byte;
+`cbin::inspect` checks it in one streaming pass, and `cbin::Verifier` does the
+same over chunks a caller supplies. Both report the body's CRC-32, the number an
+instrument reports for the slot holding it, whichever checksum the file stores. `Verifier::seal` gives the checksum such
+chunks call for, for a writer that streams a body before its checksum is known.
+
+An edit is saved without a whole read too. A sample instrument's
+`nsmp::Outline`, from its index, answers what a whole read answers outside the
+audio and takes the same edits; `Index::patch` turns it into a `cbin::Patch`, the
+few sections the edit changed and the restated checksum, which `Patch::copy`
+writes while copying the file through. An edited piano library is written by
+`Library::write_from`, which reads one stroke's audio at a time from the source
+file; `npno::Index::still_matches` first says whether the file still holds the
+directory the index read.
+
 ## The support map
 
 The authoritative list is in the `formats` module documentation on
@@ -30,7 +51,9 @@ byte map. There are three tiers:
   bundles behind the `bundle` feature.
 
 Text notes are outside these tiers, because `nord-format` does not read them.
-drawbar treats a file it cannot decode as a note when its bytes are UTF-8 text.
+drawbar treats a file it cannot decode as a note when its bytes are UTF-8 text
+of up to 256 KiB. In a note, Tab types a tab, and pasted control characters
+other than tab and line breaks are dropped.
 A file that begins with the magic of a format `nord-format` decodes is never a
 note, so one that fails to decode keeps its error. See
 [Editing](../drawbar/editing.md#notes).

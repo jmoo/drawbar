@@ -78,6 +78,7 @@
                 gh
                 jq
                 mdbook
+                mdbook-mermaid
                 (python3.withPackages (python: [ python.fonttools ]))
                 rust-analyzer
               ];

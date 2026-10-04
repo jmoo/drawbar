@@ -56,6 +56,8 @@ working directory as a file such as `nord-rescued-7-50.ne5p`, which `put` takes
 straight back. Live slots and settings are the exception: the instrument
 overwrites those in place.
 
+`put` checks that the file is intact before it touches the instrument.
+
 Every command closes its session even when it fails, so an error cannot leave the
 instrument stuck on its progress screen. If a run is interrupted, `nord device
 recover` releases the session.

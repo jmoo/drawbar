@@ -540,11 +540,7 @@ fn container(entity: &LocalEntity) -> Vec<(&str, String, String)> {
             format!("{} bytes", container.body_len()),
             String::new(),
         ),
-        (
-            "File",
-            format!("{} bytes", entity.bytes.len()),
-            String::new(),
-        ),
+        ("File", format!("{} bytes", entity.size()), String::new()),
         (
             container.checksum_label.trim_end_matches(':'),
             container.checksum.clone(),

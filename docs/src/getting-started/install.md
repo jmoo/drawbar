@@ -3,14 +3,15 @@
 ## In the browser
 
 Open [drawbar.app](https://drawbar.app/). Nothing to install, and your files stay
-in the browser's own storage.
+in the browser's own storage. Chrome and Edge can keep them in a folder on your
+computer instead.
 
-Only Chrome and Edge can connect to an instrument, because Firefox and Safari do
-not support WebUSB. Files work in any browser. Which browsers can play the key
-maps from a MIDI controller is on [What is supported](support.md#midi-controllers).
+Only Chrome and Edge can connect to an instrument. Files work in any browser.
+Which browsers can play the key maps from a MIDI controller is on
+[What is supported](support.md#midi-controllers).
 
-Close Nord Sound Manager before connecting. It keeps the USB connection to
-itself, so nothing else can reach the instrument while it is running.
+Close Nord Sound Manager before connecting, since it keeps the instrument to
+itself.
 
 ## On the desktop
 
@@ -42,7 +43,6 @@ The loading page says which step failed and offers to try again. The usual
 causes:
 
 - The connection dropped, or the download stopped partway. Reload the page.
-- The browser has no WebAssembly or WebGL2. drawbar needs both, and every
-  current browser has them.
-- An extension or a content blocker refused the startup script or WebAssembly
-  module. Allow this site and reload.
+- The browser lacks WebAssembly or WebGL2, which drawbar needs. Every current
+  browser has both.
+- An extension or a content blocker stopped drawbar. Allow this site and reload.

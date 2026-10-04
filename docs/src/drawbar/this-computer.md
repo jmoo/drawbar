@@ -1,61 +1,111 @@
 # Your files
 
-**This computer** is drawbar's own list: what you open, what you make, and what
-you copy off an instrument.
+**This computer** is your library: the sounds you open, make, or copy off an
+instrument. Each one is a real file in a folder you can see.
 
-## Opening and making
+> **drawbar is alpha.** Keep your own backups of anything that matters. This
+> version starts with an empty library and does not bring over what an earlier
+> version kept.
 
-Drop files on the window, or use **File ▸ Open…**. Every file is decoded and
-immediately re-encoded to check that its bytes come back identical, and the
-activity log tells you if one does not. A file drawbar cannot read still gets a
-row, so you can see what went wrong.
+## Where your library lives
 
-**New** makes a fresh program, live slot, set list, settings file or preset for
-the instruments drawbar supports, a sample instrument or piano library from WAVs,
-a text note, a Sample Editor project, or a folder. A line across the menu
-separates what an instrument can hold from what only this computer keeps. A fresh
-Stage file has every control at zero. It is not a factory program.
+On the desktop, your library is a folder in drawbar's own data:
+
+- macOS: `~/Library/Application Support/drawbar/library`
+- Linux: `~/.local/share/drawbar/library`
+- Windows: `%LOCALAPPDATA%\drawbar\library`
+
+**File ▸ Show the library folder** opens it. Finder, your backups and Nord
+Sample Editor see the same files and folders drawbar does. drawbar keeps tags
+and unsaved edits in a hidden folder beside them, so back up the whole library
+folder. That folder holds nothing about your other files, so it stays small
+however large the library is.
+
+In the browser, your library is kept in the browser's own storage for
+drawbar.app, where nothing else can see it. Clearing the site's data deletes it,
+so export what you want to keep.
+
+## Opening another folder
+
+**File ▸ Open library folder…** opens any folder as your library: a Sample
+Editor project, a sample pack, a folder on a shared drive. **File ▸ Open recent
+library** switches back. drawbar opens the last library again when it starts,
+and changes nothing in a folder until you change something there. Unsaved edits
+stay with their library and come back when you open it again.
+
+This works on the desktop and in Chrome and Edge. Firefox and Safari cannot open
+a folder. Brave can once you turn on `brave://flags/#file-system-access-api` and
+relaunch it.
+
+The first time you open a folder in the browser, drawbar reminds you not to open
+it in the desktop app at the same time.
+
+In Chrome and Edge, the browser asks whether drawbar may change the folder.
+Unless you allow it on every visit, it forgets when you close drawbar.app.
+Choose **File ▸ Reconnect** and the folder's name to get it back.
+
+## Adding and making sounds
+
+Drop files on the window, or use **File ▸ Open…**. drawbar copies them into your
+library and leaves the originals where they were. A file drawbar cannot read
+still shows up, and the activity log says what went wrong.
+
+**New** makes a fresh sound, note or folder. A fresh Stage program has every
+control at zero; it is not a factory sound.
+
+## Saving
+
+Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
+writes the file, and queues it for sending if the sound came from a slot on the
+connected instrument. **Revert** goes back to the last save.
+It is the only undo. Unsaved edits are kept when you quit. drawbar also keeps
+them every few seconds, so after a crash you may lose the last few seconds.
+
+**Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
+drawbar asks whether to **Overwrite** the file there or **Keep both**.
+
+## Changes made outside drawbar
+
+You can rename, move, edit and delete your files in Finder or any other app.
+drawbar notices when you come back to its window, and a renamed sound keeps its
+tags. drawbar reads a tagged file once in the background; a rename before that
+shows as a new file.
+
+drawbar never writes over a change made outside it without asking. If a file
+changed while you had unsaved edits to it, drawbar asks what to do:
+
+- **Keep mine** keeps your edits. Your next save replaces the file.
+- **Take theirs** drops your edits and uses the file as it is now.
+- **Keep both** saves your edits as a new file beside it.
+
+A sound that changed on disk is not sent to the instrument until you have looked
+at it.
 
 ## Demo sounds
 
-**Start with a demo** on the welcome sheet (**Help ▸ Welcome**) fetches a tine
-electric piano and a looped pad from drawbar.app into a **Demo sounds** folder.
-The pad comes in two sample formats, v2 (`.nsmp`) and v4 (`.nsmp4`).
-[What is supported](../getting-started/support.md) says which has been played on
-an instrument. Asking again brings back any you have removed and leaves the rest
-alone.
+**Start with a demo** on the welcome sheet (**Help ▸ Welcome**) downloads a tine
+electric piano and a looped pad into a **Demo sounds** folder. Ask again to
+bring back any you deleted.
 
-## Views
+## If something goes wrong
 
-Opening a slot on the instrument shows a **view**: the instrument's own copy, in
-place. It is not on this computer until you click **Keep on this computer**. An
-edited view is kept when its tab closes, so the edits are not lost.
+- **Read-only.** Another copy of drawbar has this library open, in another window
+  or browser tab. Close it. Hover the library's name for the reason. A browser
+  tab cannot tell that the desktop app has a folder open, so open a folder in
+  only one of them at a time.
+- **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
+  edits, or came from your keyboard. Save it to bring the file back, or delete it.
+- **A write to the instrument left a file.** If drawbar stopped while it
+  replaced a large sound on your keyboard, the sound that was there may now be
+  only on this computer. drawbar offers it when the library opens: **Keep in
+  library** adds it to your sounds so you can send it back, **Show the file**
+  shows where it is, and **Discard** deletes it.
+- **Not read** or **not all listed.** drawbar could not read that file or
+  folder.
+- **Failed verification.** The sample or piano file is damaged. drawbar will not
+  send it.
+- **No storage in the browser.** Some private windows give drawbar none. drawbar
+  says so, and what you make lasts only until the tab closes.
 
-## Saving and reverting
-
-Every edit lands at once, and the name turns italic with a `*` until you save or
-revert. **Save** (⌘S) marks the current state as saved. If the sound belongs to a
-slot on the connected instrument, Save also queues it for sending. **Revert** goes
-back to the last save, and is the only undo.
-
-## What is kept
-
-The list, with its folders, tags, edits and layout, is stored in the browser, or
-beside the desktop app, and comes back next time. Two limits apply, and the log
-says when they bite: a single sound over about a megabyte is not kept, and the
-whole list is capped at about 3 MB. Samples and piano libraries are usually
-larger, so export them.
-
-Long-term storage is not guaranteed while drawbar is in alpha. Keep your own
-copies.
-
-## Exporting and names
-
-**Export…** writes a copy of the file: a download in the browser, a save dialog
-on the desktop.
-
-A sound's name comes from the slot it was read from, the filename, or the New
-menu, and drawbar shows it without the extension. Rename with F2 or the name box
-in the document header. Where the file stores a name of its own, as samples and
-pianos do, that box edits the stored name. Instruments from the original Sample
-Library store none, so their box renames the file.
+How the library works underneath is in
+[Library data model](../reference/data-model.md).
