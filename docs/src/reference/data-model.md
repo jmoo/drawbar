@@ -302,8 +302,8 @@ nothing but the files under working copies (`store/exec.rs`).
    cannot be read, is reported as not all listed.
 
 A file's kind is decided by its extension alone: `store::opens` matches it,
-ignoring case, against the tags `nord-format` reads and drawbar's other kinds
-(`browser::tagged`). Any other file is listed by name only, as one of the
+ignoring case, against the formats `nord-format` names by extension
+(`formats::by_extension`) and drawbar's notes (`browser::tagged`). Any other file is listed by name only, as one of the
 folder's `others`, and shown with **Show all files**.
 
 ### Lazy reads
@@ -436,8 +436,8 @@ than its audio, and each range is sliced from the `File` and handed to the
 writer; a piano's checksum is taken as the copy streams (`cbin::Verifier::seal`)
 and written last. A sample's copy checks its checksum as it streams, so a file
 changed since its index was read is refused. A piano's copy reads the file's
-prefix and stroke directory again first, and refuses one that is not the
-directory its index read; its audio is not compared. Either kind is refused
+prefix and stroke directory again first (`npno::Index::still_matches`), and
+refuses one that is not the directory its index read; its audio is not compared. Either kind is refused
 where the file's stat moved while the copy was written. Nothing is put over the
 file then. In the browser a file written since its `File` was taken fails to
 read at all. An export or send of an asset holding such an edit waits for it to be
