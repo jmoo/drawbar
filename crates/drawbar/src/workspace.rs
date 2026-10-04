@@ -1234,6 +1234,14 @@ struct Taken<T> {
     value: T,
 }
 
+/// An asset a copy or an overwrite came from, with the stamp of what it held then
+/// ([`Workspace::unchanged`]). It goes once what was made of it has landed.
+#[derive(Clone, Copy, Debug)]
+pub struct Leaving {
+    pub from: u64,
+    edit: u64,
+}
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
@@ -1274,11 +1282,11 @@ pub struct Workspace {
     arriving: std::collections::BTreeMap<u64, CopyOf>,
     /// The asset each arriving copy moves over the file of another comes from, by the
     /// asset it lands on. It goes only once its copy has landed.
-    moving_over: std::collections::BTreeMap<u64, u64>,
+    moving_over: std::collections::BTreeMap<u64, Leaving>,
     /// The asset each overwrite with bytes held whole comes from, by the asset it
     /// overwrites, with the stamp of the save that writes them. It goes only once that
     /// save has landed.
-    saving_over: std::collections::BTreeMap<u64, (u64, u64)>,
+    saving_over: std::collections::BTreeMap<u64, (Leaving, u64)>,
     /// The files File ▸ Open… picked, not yet taken.
     picked: Vec<Outside>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
@@ -2304,15 +2312,36 @@ impl Workspace {
             return false;
         };
         let len = source.size();
+        let leaving = self.leaving(from);
         self.arrive_over(id, copy, len);
-        self.moving_over.insert(id, from);
+        self.moving_over
+            .extend(leaving.map(|leaving| (id, leaving)));
         true
     }
 
     /// The asset a copy that has answered over the file of `id` was moved from, which
     /// goes where the copy landed and stays where it did not.
-    pub fn moved_over(&mut self, id: u64) -> Option<u64> {
+    pub fn moved_over(&mut self, id: u64) -> Option<Leaving> {
         self.moving_over.remove(&id)
+    }
+
+    /// `from` as it is now, about to be copied or saved over another asset.
+    fn leaving(&self, from: u64) -> Option<Leaving> {
+        Some(Leaving {
+            from,
+            edit: self.edited_at(from)?,
+        })
+    }
+
+    /// The stamp of what an asset holds: of the edit held of it, or of its bytes.
+    fn edited_at(&self, id: u64) -> Option<u64> {
+        let entity = self.get(id)?;
+        Some(self.kept_edit(id).map_or(entity.stamp, |(_, stamp)| stamp))
+    }
+
+    /// Whether the asset `leaving` came from still holds what was copied or saved of it.
+    pub fn unchanged(&self, leaving: &Leaving) -> bool {
+        self.edited_at(leaving.from) == Some(leaving.edit)
     }
 
     /// Put `bytes` over `id` as its next save. Bytes that came from the asset `from` leave
@@ -2331,8 +2360,8 @@ impl Workspace {
             return from;
         };
         self.mark_saved(id);
-        if let Some(from) = from {
-            self.saving_over.insert(id, (from, stamp));
+        if let Some(leaving) = from.and_then(|from| self.leaving(from)) {
+            self.saving_over.insert(id, (leaving, stamp));
         }
         None
     }
@@ -2340,13 +2369,13 @@ impl Workspace {
     /// The asset an overwrite of `id` came from, once a save of `id` has answered: a save
     /// of the stamp the overwrite wrote, or a later one, landed with `landed`, or failed
     /// without. `None` while the overwrite's save is still to answer.
-    pub fn saved_over(&mut self, id: u64, saved: u64, landed: bool) -> Option<u64> {
-        let (from, stamp) = *self.saving_over.get(&id)?;
-        if saved < stamp {
+    pub fn saved_over(&mut self, id: u64, saved: u64, landed: bool) -> Option<Leaving> {
+        let (_, stamp) = self.saving_over.get(&id)?;
+        if saved < *stamp {
             return None;
         }
-        self.saving_over.remove(&id);
-        landed.then_some(from)
+        let (leaving, _) = self.saving_over.remove(&id)?;
+        landed.then_some(leaving)
     }
 
     /// Copy `from` in again for an asset whose copy did not land.

@@ -23,7 +23,7 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::rewrite::Edit;
 use crate::summary::Summary;
-use crate::workspace::{precious, LocalEntity, Origin, Saved, Workspace};
+use crate::workspace::{precious, Leaving, LocalEntity, Origin, Saved, Workspace};
 
 /// How far opening has got.
 enum Phase {
@@ -270,6 +270,9 @@ pub struct Store {
     next_generation: u64,
     /// The index as last sent, so an unchanged one is not written again.
     committed: Option<Sidecar>,
+    /// Assets to remove now what was copied or saved of them over another has landed
+    /// ([`Store::take_left`]).
+    left: Vec<u64>,
     /// `.drawbar/` exists, or drawbar has written here. Until then the index is written
     /// only once it holds something no file does, so a folder opened and looked at is
     /// left as it was.
@@ -385,6 +388,7 @@ impl Store {
             keeping: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             shelved: BTreeMap::new(),
+            left: Vec::new(),
         }
     }
 
@@ -457,6 +461,12 @@ impl Store {
 
     fn saving(&self) -> bool {
         self.records.values().any(|record| record.saving)
+    }
+
+    /// The assets whose copy or overwrite over another has landed since the last call, to
+    /// remove as the user would.
+    pub fn take_left(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.left)
     }
 
     /// Whether anything sent to the disk has not landed yet: a command the backend has not
@@ -2032,10 +2042,8 @@ impl Store {
         };
         record.saving = false;
         // ⚠️ The asset an overwrite came from holds its bytes until they are saved here.
-        if let Some(from) = workspace.saved_over(id, record.saved, result.is_ok()) {
-            browser.tags.forget(from);
-            browser.folders.missing.remove(&from);
-            workspace.remove(from, log);
+        if let Some(leaving) = workspace.saved_over(id, record.saved, result.is_ok()) {
+            leave(&mut self.left, leaving, workspace, log);
         }
         let name = workspace
             .get(id)
@@ -2197,10 +2205,8 @@ impl Store {
                 }
                 // The asset the copy was moved from goes now it has landed, and its file
                 // with it at the next pass.
-                if let Some(from) = workspace.moved_over(id) {
-                    browser.tags.forget(from);
-                    browser.folders.missing.remove(&from);
-                    workspace.remove(from, log);
+                if let Some(leaving) = workspace.moved_over(id) {
+                    leave(&mut self.left, leaving, workspace, log);
                 }
                 return log.say(format!("“{name}” is on this computer."));
             }
@@ -2973,6 +2979,20 @@ impl Record {
             holds: found.holds(),
             ..Record::of_file(found.path.clone(), fingerprint)
         }
+    }
+}
+
+/// Let the asset a copy or an overwrite came from go, onto `left`, unless it was edited
+/// since: nothing that landed holds that edit.
+fn leave(left: &mut Vec<u64>, leaving: Leaving, workspace: &Workspace, log: &mut Log) {
+    if workspace.unchanged(&leaving) {
+        return left.push(leaving.from);
+    }
+    if let Some(entity) = workspace.get(leaving.from) {
+        log.say(format!(
+            "“{}” was edited while it was moved, so it stays, with its edit.",
+            entity.name
+        ));
     }
 }
 

@@ -845,7 +845,8 @@ Where a name is taken, `Folders::clash` says by what: an asset, a folder, a lost
 row, or a file drawbar does not hold. The user chooses **Overwrite**, offered
 only where the occupant is an asset with nothing unsaved, which writes the new
 contents into its file and keeps its tags. The asset renamed or moved onto the
-name goes once that save lands, and stays where it does not
+name goes once that save lands, as a removal by hand does (`Store::take_left`),
+and stays where it does not, or where it was edited meanwhile
 (`Workspace::save_over`); **Keep both**, under the free name;
 or **Cancel**. A folder already holding two entries under one key refuses the
 name outright. Such duplicates, found on a disk that tells case apart, are

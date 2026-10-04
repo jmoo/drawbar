@@ -3895,6 +3895,7 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     session.bench.act(acts);
     session.sync();
     assert!(root.at("Moved.nsmp").exists(), "kept until the copy lands");
+    session.let_go();
     session.sync();
 
     assert!(root.read("Kept.nsmp") == ours);
@@ -4011,6 +4012,100 @@ fn an_overwrite_waits_for_its_own_save_and_not_the_one_before() {
     assert_eq!(root.read("Moved.ne5p"), ours, "the file it came from stays");
 }
 
+impl Session {
+    /// Remove what the store let go since the last call, as the app does each frame.
+    fn let_go(&mut self) {
+        let left = self.store.take_left();
+        let acts = left.into_iter().map(crate::browser::Act::Remove).collect();
+        self.bench.act(acts);
+    }
+}
+
+/// The asset an overwrite came from goes, once the overwrite lands, as an asset removed by
+/// hand goes: its tab closes and its place in the send queue goes with it.
+#[test]
+fn an_overwrite_lets_its_source_go_as_a_removal_does() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+    session.bench.tabs.open(moved);
+    let Bench {
+        workspace,
+        device,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    let slot = Location { bank: 0, slot: 2 };
+    crate::queue::enqueue(
+        workspace,
+        device,
+        queue,
+        log,
+        moved,
+        ObjectClass::Program,
+        slot,
+    );
+    assert!(session.bench.queue.holds(moved), "queued");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.let_go();
+    session.sync();
+
+    assert!(session.bench.workspace.get(moved).is_none());
+    assert!(!session.bench.tabs.holds(moved), "its tab closed");
+    assert!(!session.bench.queue.holds(moved), "it left the queue");
+    assert!(
+        !root.at("Moved.ne5p").exists(),
+        "the file it came from is gone"
+    );
+}
+
+/// An edit made to the asset an overwrite came from while the overwrite was in flight is
+/// in nothing the overwrite wrote, so the asset stays, with its edit and its file.
+#[test]
+fn an_overwrite_keeps_its_source_where_it_was_edited_meanwhile() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    let meanwhile = with_gain(&program, "40");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(moved, meanwhile.clone(), log);
+    session.sync();
+    session.let_go();
+    session.sync();
+
+    assert_eq!(root.read("Kept.ne5p"), ours, "the overwrite landed");
+    let entity = session
+        .bench
+        .workspace
+        .get(moved)
+        .expect("the source stays");
+    assert_eq!(entity.bytes, meanwhile, "with its edit");
+    assert_eq!(root.read("Moved.ne5p"), ours, "and its file");
+}
+
 /// An overwrite with bytes held whole removes the asset it was moved from once its save
 /// has landed, and that asset's file with it.
 #[test]
@@ -4030,6 +4125,7 @@ fn an_overwrite_removes_the_file_it_came_from_once_it_lands() {
     let acts = session.bench.browser.answer("Overwrite");
     session.bench.act(acts);
     session.sync();
+    session.let_go();
     session.sync();
 
     assert_eq!(root.read("Kept.ne5p"), ours);

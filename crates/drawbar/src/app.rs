@@ -841,12 +841,15 @@ impl eframe::App for DrawbarApp {
         let released = match &mut self.store {
             Some(store) => {
                 store.focus(ctx.input(|input| input.focused));
-                store.poll(
+                let released = store.poll(
                     &mut self.workspace,
                     &mut self.browser,
                     &self.queue,
                     &mut self.log,
-                )
+                );
+                let left = store.take_left().into_iter();
+                arrived.extend(left.map(browser::Act::Remove));
+                released
             }
             None => false,
         };
