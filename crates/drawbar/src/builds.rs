@@ -1,12 +1,13 @@
 //! Building a Sample Editor project in the library into the sample instrument it
 //! describes, beside it.
 //!
-//! A project's WAVs are files the library lists by name only. [`locate`] finds each one,
-//! [`Builds::start`] asks the store for them, and [`Builds::poll`] encodes what it reads on
-//! a [`Job`], then files the instrument beside the project and opens it.
+//! A project's WAVs are WAV assets of the library. [`locate`] finds each one,
+//! [`Builds::start`] asks for those not read yet, and [`Builds::poll`] waits for them,
+//! encodes their bytes on a [`Job`], then files the instrument beside the project and
+//! opens it.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use nord_format::formats::nsmp::codec::Layout;
 use nord_format::formats::nsmp::encode::Predictor;
@@ -14,12 +15,13 @@ use nord_format::formats::nsmpproj::build::{self, AudioPath, Unavailable, Warnin
 use nord_format::formats::nsmpproj::{AudioFile, Project};
 use nord_format::Entity;
 
+use crate::browser::Kind;
 use crate::folders::Folders;
 use crate::log::Log;
-use crate::store::{names, Contents, Failure, LibPath, Store};
+use crate::store::{names, LibPath};
 use crate::tabs::Tabs;
 use crate::work::{self, Answer, Job};
-use crate::workspace::{Origin, Workspace};
+use crate::workspace::{Bytes, LocalEntity, Origin, VerifyState, Workspace};
 
 /// The generation a build writes.
 pub const LAYOUT: Layout = Layout::V2;
@@ -27,7 +29,8 @@ pub const LAYOUT: Layout = Layout::V2;
 /// Where one of a project's WAVs is in the library.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Wav {
-    Listed(LibPath),
+    /// The WAV asset at this path, by its id.
+    Listed(LibPath, u64),
     /// Absolute, or climbing past the library's root. It is never followed.
     Outside,
     /// Listed files whose paths differ from the stored one only by [`names::key`].
@@ -39,7 +42,7 @@ impl Wav {
     /// Why a build cannot read it, or `None` where it can.
     pub fn trouble(&self) -> Option<String> {
         match self {
-            Wav::Listed(_) => None,
+            Wav::Listed(..) => None,
             Wav::Outside => Some("outside the library".to_string()),
             Wav::Ambiguous(paths) => {
                 let paths: Vec<&str> = paths.iter().map(LibPath::as_str).collect();
@@ -50,35 +53,49 @@ impl Wav {
     }
 }
 
-/// Where a project in `dir` finds the WAV it stores as `stored`, among the files the
-/// library lists by name only: the file at that exact path, or else the one whose path
-/// has the same [`names::key`], which is how the library tells two names apart.
-pub fn locate(dir: &LibPath, stored: &str, others: &[LibPath]) -> Wav {
+/// The library's WAV assets, by path, each with its id.
+pub fn wav_assets(workspace: &Workspace) -> Vec<(LibPath, u64)> {
+    let mut wavs: Vec<(LibPath, u64)> = workspace
+        .listed()
+        .filter(|entity| Kind::of(entity) == Kind::Wav)
+        .filter_map(|entity| Some((entity.path.clone()?, entity.id)))
+        .collect();
+    wavs.sort();
+    wavs
+}
+
+/// Where a project in `dir` finds the WAV it stores as `stored`, among the library's
+/// WAV assets: the one at that exact path, or else the one whose path has the same
+/// [`names::key`], which is how the library tells two names apart.
+pub fn locate(dir: &LibPath, stored: &str, wavs: &[(LibPath, u64)]) -> Wav {
     let Some(parts) = AudioPath::parse(stored).within(dir.components()) else {
         return Wav::Outside;
     };
     let wanted = parts.join("/");
-    if let Some(exact) = others.iter().find(|path| path.as_str() == wanted) {
-        return Wav::Listed(exact.clone());
+    if let Some((path, id)) = wavs.iter().find(|(path, _)| path.as_str() == wanted) {
+        return Wav::Listed(path.clone(), *id);
     }
     let key = names::key(&wanted);
-    let mut alike: Vec<LibPath> = others
+    let alike: Vec<&(LibPath, u64)> = wavs
         .iter()
-        .filter(|path| names::key(path.as_str()) == key)
-        .cloned()
+        .filter(|(path, _)| names::key(path.as_str()) == key)
         .collect();
-    match alike.len() {
-        0 => Wav::Missing,
-        1 => Wav::Listed(alike.remove(0)),
-        _ => Wav::Ambiguous(alike),
+    match alike.as_slice() {
+        [] => Wav::Missing,
+        [(path, id)] => Wav::Listed(path.clone(), *id),
+        _ => Wav::Ambiguous(alike.iter().map(|(path, _)| path.clone()).collect()),
     }
 }
 
 /// Each of a project's audio files by its stored path, with where its WAV is.
-pub fn locate_all(dir: &LibPath, files: &[AudioFile], others: &[LibPath]) -> Vec<(String, Wav)> {
+pub fn locate_all(
+    dir: &LibPath,
+    files: &[AudioFile],
+    wavs: &[(LibPath, u64)],
+) -> Vec<(String, Wav)> {
     files
         .iter()
-        .map(|file| (file.path.clone(), locate(dir, &file.path, others)))
+        .map(|file| (file.path.clone(), locate(dir, &file.path, wavs)))
         .collect()
 }
 
@@ -103,19 +120,14 @@ pub fn instrument_name(project: &str) -> String {
     format!("{stem}.{}", LAYOUT.extension())
 }
 
-/// The project's WAVs as read from the library.
-struct Read {
-    /// The listed file each audio file's WAV is, by its stored path.
-    wavs: BTreeMap<String, LibPath>,
-    bytes: BTreeMap<LibPath, Vec<u8>>,
-}
+/// The bytes of each of a project's WAVs, by its stored path.
+struct Read(BTreeMap<String, Bytes>);
 
 impl build::Source for Read {
     fn wav(&self, file: &AudioFile) -> Result<Cow<'_, [u8]>, Unavailable> {
-        self.wavs
+        self.0
             .get(&file.path)
-            .and_then(|at| self.bytes.get(at))
-            .map(|wav| Cow::Borrowed(wav.as_slice()))
+            .map(|wav| Cow::Borrowed(&wav[..]))
             .ok_or(Unavailable::Missing)
     }
 }
@@ -128,19 +140,16 @@ struct Built {
 }
 
 enum Stage {
-    /// Waiting for the WAVs: the project as it was asked to build, and the listed file
-    /// each audio file's WAV is, by its stored path. `sent` once the store has been asked.
+    /// Waiting for the WAVs to be read: the project as it was asked to build, and the
+    /// WAV asset each audio file's WAV is, by its stored path.
     Reading {
         project: Project,
-        wavs: BTreeMap<String, LibPath>,
-        sent: bool,
+        wavs: BTreeMap<String, (LibPath, u64)>,
     },
     Encoding(Job<Result<Built, String>>),
 }
 
 struct Running {
-    /// What the store's answer to this build's read is tied to.
-    request: u64,
     /// The project file's name, which the log and the instrument's name take.
     name: String,
     stage: Stage,
@@ -149,7 +158,6 @@ struct Running {
 /// The builds in flight, one at most per project.
 #[derive(Default)]
 pub struct Builds {
-    next: u64,
     running: BTreeMap<u64, Running>,
 }
 
@@ -159,10 +167,10 @@ impl Builds {
         self.running.contains_key(&id)
     }
 
-    /// Build the project `id` from what it holds now, its unsaved edits included: look
-    /// for its WAVs again and ask for them. Refuses, in the log, a project that does not
-    /// decode or names a WAV the library does not list.
-    pub fn start(&mut self, id: u64, workspace: &Workspace, folders: &Folders, log: &mut Log) {
+    /// Build the project `id` from what it holds now, its unsaved edits included, and
+    /// look for its WAVs again. Refuses, in the log, a project that does not decode or
+    /// names a WAV the library does not list.
+    pub fn start(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
         let Some(entity) = workspace.get(id) else {
             return;
         };
@@ -177,7 +185,7 @@ impl Builds {
             Ok(files) => files,
             Err(e) => return refuse(log, &name, &e.to_string()),
         };
-        let located = locate_all(&dir_of(entity), &files, &folders.others);
+        let located = locate_all(&dir_of(entity), &files, &wav_assets(workspace));
         let unresolved = unresolved(&located);
         if !unresolved.is_empty() {
             return refuse(log, &name, &unresolved.join("; "));
@@ -185,55 +193,36 @@ impl Builds {
         let wavs = located
             .into_iter()
             .filter_map(|(stored, wav)| match wav {
-                Wav::Listed(at) => Some((stored, at)),
+                Wav::Listed(path, at) => Some((stored, (path, at))),
                 Wav::Outside | Wav::Ambiguous(_) | Wav::Missing => None,
             })
             .collect();
-        self.next += 1;
-        self.running.insert(
-            id,
-            Running {
-                request: self.next,
-                name,
-                stage: Stage::Reading {
-                    project: project.clone(),
-                    wavs,
-                    sent: false,
-                },
-            },
-        );
+        let stage = Stage::Reading {
+            project: project.clone(),
+            wavs,
+        };
+        self.running.insert(id, Running { name, stage });
     }
 
-    /// Move each build along: ask the store for the WAVs, encode what it answered, and
-    /// file each instrument encoded beside its project, open in a tab. A build whose
-    /// project is gone is dropped.
+    /// Move each build along: hurry the WAVs not read yet, encode once all are, and file
+    /// each instrument encoded beside its project, open in a tab. A build whose project
+    /// is gone is dropped.
     pub fn poll(
         &mut self,
-        store: Option<&mut Store>,
         workspace: &mut Workspace,
         folders: &Folders,
         tabs: &mut Tabs,
         log: &mut Log,
     ) {
         self.running.retain(|id, _| workspace.get(*id).is_some());
-        match store {
-            Some(store) => {
-                self.ask(store);
-                for (request, files) in store.take_others() {
-                    self.read(request, files, workspace.ctx(), log);
-                }
-            }
-            None => self.running.retain(|_, running| match running.stage {
-                Stage::Reading { .. } => {
-                    refuse(
-                        log,
-                        &running.name,
-                        "no library is open to read its WAVs from",
-                    );
-                    false
-                }
-                Stage::Encoding(_) => true,
-            }),
+        let reading: Vec<u64> = self
+            .running
+            .iter()
+            .filter(|(_, running)| matches!(running.stage, Stage::Reading { .. }))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in reading {
+            self.read(id, workspace, log);
         }
         let mut answered = Vec::new();
         for (id, running) in &self.running {
@@ -259,60 +248,79 @@ impl Builds {
         }
     }
 
-    /// Ask the store for the WAVs of each build that has not asked yet.
-    fn ask(&mut self, store: &mut Store) {
-        for running in self.running.values_mut() {
-            if let Stage::Reading { wavs, sent, .. } = &mut running.stage {
-                if !*sent {
-                    let paths: BTreeSet<LibPath> = wavs.values().cloned().collect();
-                    store.read_others(running.request, paths.into_iter().collect());
-                    *sent = true;
-                }
-            }
-        }
-    }
-
-    /// Start encoding the build whose read `request` answered, or refuse it where a WAV
-    /// did not read.
-    fn read(&mut self, request: u64, files: Contents, ctx: &eframe::egui::Context, log: &mut Log) {
-        let Some(id) = self
-            .running
-            .iter()
-            .find(|(_, running)| {
-                running.request == request && matches!(running.stage, Stage::Reading { .. })
-            })
-            .map(|(id, _)| *id)
+    /// Start encoding the project `id` once each of its WAVs is read, as its asset holds
+    /// it now; hurry the ones not read yet. Refuses the build where a WAV is gone or could
+    /// not be read.
+    fn read(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+        let Some(Running {
+            stage: Stage::Reading { wavs, .. },
+            ..
+        }) = self.running.get(&id)
         else {
             return;
         };
-        let Some(running) = self.running.remove(&id) else {
-            return;
-        };
-        let Stage::Reading { project, wavs, .. } = running.stage else {
-            return;
-        };
-        let mut bytes = BTreeMap::new();
-        for (path, read) in files {
-            let why = match read {
-                Ok(read) => {
-                    bytes.insert(path, read);
-                    continue;
+        let mut read = BTreeMap::new();
+        let mut waiting = false;
+        let mut refused = None;
+        for (stored, (path, at)) in wavs {
+            match held(workspace.get(*at)) {
+                Held::Read(bytes) => _ = read.insert(stored.clone(), bytes),
+                Held::Unread => {
+                    workspace.hurry(*at);
+                    waiting = true;
                 }
-                Err(Failure::Moved) => "it is gone".to_string(),
-                Err(Failure::Room(len)) => format!("its {len} bytes did not fit"),
-                Err(Failure::Io(why)) => why,
-            };
-            return refuse(log, &running.name, &format!("{path}: {why}"));
+                Held::Not(why) => {
+                    refused = Some(format!("{path}: {why}"));
+                    break;
+                }
+            }
         }
-        let source = Read { wavs, bytes };
-        let job = work::run(ctx, move |_| encode(&project, &source));
-        self.running.insert(
-            id,
-            Running {
-                stage: Stage::Encoding(job),
-                ..running
-            },
-        );
+        if waiting && refused.is_none() {
+            return;
+        }
+        let Some(Running {
+            name,
+            stage: Stage::Reading { project, .. },
+        }) = self.running.remove(&id)
+        else {
+            return;
+        };
+        if let Some(why) = refused {
+            return refuse(log, &name, &why);
+        }
+        let source = Read(read);
+        let job = work::run(workspace.ctx(), move |_| encode(&project, &source));
+        let stage = Stage::Encoding(job);
+        self.running.insert(id, Running { name, stage });
+    }
+}
+
+/// What a build finds of one of its WAVs.
+enum Held {
+    /// Its bytes as the asset holds them now, an unsaved edit included.
+    Read(Bytes),
+    Unread,
+    /// Why a build cannot have them.
+    Not(String),
+}
+
+/// What a build can have of the WAV asset `entity`.
+fn held(entity: Option<&LocalEntity>) -> Held {
+    let Some(entity) = entity else {
+        return Held::Not("it is gone".to_string());
+    };
+    if let VerifyState::NotRead(why) = &entity.verify {
+        return Held::Not(why.clone());
+    }
+    if entity.unread() {
+        return Held::Unread;
+    }
+    match entity.rests() {
+        None => Held::Read(entity.bytes.clone()),
+        Some(file) => match file.whole() {
+            Ok(bytes) => Held::Read(bytes.into()),
+            Err(why) => Held::Not(why.to_string()),
+        },
     }
 }
 
@@ -366,54 +374,59 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
-    fn listed(paths: &[&str]) -> Vec<LibPath> {
-        paths.iter().map(|text| path(text)).collect()
+    /// WAV assets at these paths, numbered from 1 in order.
+    fn listed(paths: &[&str]) -> Vec<(LibPath, u64)> {
+        paths.iter().map(|text| path(text)).zip(1..).collect()
     }
 
-    fn marimba(stored: &str, others: &[&str]) -> Wav {
-        locate(&path("Marimba"), stored, &listed(others))
+    /// The asset at `text` among `wavs`, as [`listed`] numbers them.
+    fn at(wavs: &[&str], text: &str) -> Wav {
+        let id = wavs.iter().position(|held| *held == text).unwrap() as u64 + 1;
+        Wav::Listed(path(text), id)
+    }
+
+    fn marimba(stored: &str, wavs: &[&str]) -> Wav {
+        locate(&path("Marimba"), stored, &listed(wavs))
     }
 
     #[test]
     fn a_wav_is_found_at_the_path_the_project_stores_from_its_folder() {
-        let others = ["Marimba/audio/c3.wav", "Shared/c4.wav"];
-        let found = Wav::Listed(path("Marimba/audio/c3.wav"));
-        assert_eq!(marimba("audio/c3.wav", &others), found);
-        assert_eq!(marimba(r"audio\c3.wav", &others), found);
-        assert_eq!(marimba("./audio/c3.wav", &others), found);
+        let wavs = ["Marimba/audio/c3.wav", "Shared/c4.wav"];
+        let found = at(&wavs, "Marimba/audio/c3.wav");
+        assert_eq!(marimba("audio/c3.wav", &wavs), found);
+        assert_eq!(marimba(r"audio\c3.wav", &wavs), found);
+        assert_eq!(marimba("./audio/c3.wav", &wavs), found);
     }
 
     #[test]
     fn a_climb_that_stays_inside_the_library_is_followed() {
-        let others = ["Marimba/audio/c3.wav", "Shared/c4.wav"];
+        let wavs = ["Marimba/audio/c3.wav", "Shared/c4.wav"];
         assert_eq!(
-            marimba("../Shared/c4.wav", &others),
-            Wav::Listed(path("Shared/c4.wav"))
+            marimba("../Shared/c4.wav", &wavs),
+            at(&wavs, "Shared/c4.wav")
         );
     }
 
     #[test]
     fn a_wav_named_in_another_case_is_found_under_its_listed_name() {
+        let wavs = ["Marimba/Audio/c3.wav"];
         assert_eq!(
-            marimba("audio/C3.wav", &["Marimba/Audio/c3.wav"]),
-            Wav::Listed(path("Marimba/Audio/c3.wav"))
+            marimba("audio/C3.wav", &wavs),
+            at(&wavs, "Marimba/Audio/c3.wav")
         );
     }
 
     #[test]
     fn the_exact_path_wins_over_one_in_another_case() {
-        let others = ["Marimba/C3.wav", "Marimba/c3.wav"];
-        assert_eq!(
-            marimba("c3.wav", &others),
-            Wav::Listed(path("Marimba/c3.wav"))
-        );
+        let wavs = ["Marimba/C3.wav", "Marimba/c3.wav"];
+        assert_eq!(marimba("c3.wav", &wavs), at(&wavs, "Marimba/c3.wav"));
     }
 
     #[test]
     fn two_listed_files_only_a_case_apart_are_ambiguous() {
-        let others = ["Marimba/C3.wav", "Marimba/c3.wav"];
-        let found = marimba("C3.WAV", &others);
-        assert_eq!(found, Wav::Ambiguous(listed(&others)));
+        let wavs = ["Marimba/C3.wav", "Marimba/c3.wav"];
+        let found = marimba("C3.WAV", &wavs);
+        assert_eq!(found, Wav::Ambiguous(wavs.map(path).into()));
         assert_eq!(
             found.trouble().as_deref(),
             Some("ambiguous between Marimba/C3.wav and Marimba/c3.wav")
@@ -422,11 +435,11 @@ mod tests {
 
     #[test]
     fn a_path_outside_the_library_is_never_followed() {
-        let others = ["c4.wav", "Marimba/c4.wav"];
-        assert_eq!(marimba("../../c4.wav", &others), Wav::Outside);
-        assert_eq!(marimba("/Users/jo/c4.wav", &others), Wav::Outside);
-        assert_eq!(marimba(r"C:\Samples\c4.wav", &others), Wav::Outside);
-        assert_eq!(marimba("..", &others), Wav::Outside);
+        let wavs = ["c4.wav", "Marimba/c4.wav"];
+        assert_eq!(marimba("../../c4.wav", &wavs), Wav::Outside);
+        assert_eq!(marimba("/Users/jo/c4.wav", &wavs), Wav::Outside);
+        assert_eq!(marimba(r"C:\Samples\c4.wav", &wavs), Wav::Outside);
+        assert_eq!(marimba("..", &wavs), Wav::Outside);
     }
 
     #[test]
@@ -436,6 +449,28 @@ mod tests {
             Wav::Missing
         );
         assert_eq!(Wav::Missing.trouble().as_deref(), Some("missing"));
+    }
+
+    #[test]
+    fn a_project_looks_for_its_wavs_among_the_placed_wav_assets() {
+        let mut log = Log::default();
+        let mut workspace = Workspace::new(crate::testing::context());
+        let mut placed = |name: &str, bytes: Vec<u8>, at: Option<&str>| {
+            let id = workspace.ingest(name.into(), Origin::Fresh, bytes, &mut log);
+            if let Some(at) = at {
+                workspace.place(id, path(at));
+            }
+            id
+        };
+        let wav = crate::testing::wav_bytes;
+        let c4 = placed("c4.WAV", wav(), Some("Shared/c4.WAV"));
+        let c3 = placed("c3.wav", wav(), Some("Marimba/c3.wav"));
+        placed("c5.wav", wav(), None);
+        placed("notes.txt", b"Set 1\n".to_vec(), Some("Marimba/notes.txt"));
+        assert_eq!(
+            wav_assets(&workspace),
+            [(path("Marimba/c3.wav"), c3), (path("Shared/c4.WAV"), c4)]
+        );
     }
 
     #[test]
