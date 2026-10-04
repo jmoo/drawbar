@@ -212,6 +212,8 @@ pub enum Act {
     ShowClass(ObjectClass),
     /// Turn one of the library's filters on or off.
     Narrow(Narrow),
+    /// Show the browser with this row's branches open, for a rename that types in it.
+    Reveal(Item),
     /// Close the tab the center is showing.
     CloseTab,
     ToggleDock(Dock),
@@ -339,6 +341,7 @@ impl Act {
             | Act::ShowTab(_)
             | Act::ShowClass(_)
             | Act::Narrow(_)
+            | Act::Reveal(_)
             | Act::CloseTab
             | Act::ToggleDock(_)
             | Act::ReviewQueue
@@ -667,7 +670,7 @@ pub fn apply(
                     tag_all(browser, workspace, log, &ids, id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
-                    browser.sections.tags = true;
+                    browser.reveal(Item::Tag(id), workspace);
                     shell.browser_open = true;
                 }
                 None => log.trouble("The tag list is full, so there is no new tag."),
@@ -720,8 +723,19 @@ pub fn apply(
             Act::Retarget { id, class, at } => {
                 retarget(workspace, device, queue, log, id, class, at)
             }
-            Act::Unqueue(id) => queue.forget(id),
-            Act::ClearQueue => queue.clear(),
+            Act::Unqueue(id) => {
+                queue.forget(id);
+                if let Some(entity) = workspace.get(id) {
+                    log.say(format!(
+                        "“{}” is no longer waiting to be sent.",
+                        entity.name
+                    ));
+                }
+            }
+            Act::ClearQueue => {
+                queue.clear();
+                log.say("The send queue is empty. Nothing was sent.");
+            }
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
             // ⚠️ The queue always belongs to an attached instrument; with none there is
@@ -739,7 +753,10 @@ pub fn apply(
             Act::DuplicateSlot { class, from, to } => {
                 device.send(DeviceCmd::Duplicate { class, from, to }, log)
             }
-            Act::DeleteSlot { class, at } => device.send(DeviceCmd::Delete { class, at }, log),
+            Act::DeleteSlot { class, at } => {
+                browser.forget_rename(Item::Slot { class, at });
+                device.send(DeviceCmd::Delete { class, at }, log)
+            }
             Act::Remove(id) => remove(browser, workspace, tabs, queue, log, id),
             Act::Export(id) => workspace.export(id),
             Act::SaveDoc(id) => save_doc(browser, workspace, device, queue, log, id, true),
@@ -751,6 +768,10 @@ pub fn apply(
                 tabs.keyboard_on(class);
             }
             Act::Narrow(narrow) => shell.filter.narrow(narrow),
+            Act::Reveal(item) => {
+                browser.reveal(item, workspace);
+                shell.browser_open = true;
+            }
             Act::CloseTab => {
                 tabs.close(tabs.showing());
             }
@@ -2242,7 +2263,7 @@ mod tests {
     }
 
     /// Neither removing one entry nor clearing the queue deletes anything from this
-    /// computer.
+    /// computer, and the status line stops saying that something is waiting.
     #[test]
     fn an_entry_leaves_the_queue_alone_and_the_queue_empties_without_deleting_anything() {
         let mut bench = Bench::new();
@@ -2271,9 +2292,17 @@ mod tests {
 
         bench.act(vec![Act::Unqueue(ids[1])]);
         assert_eq!(bench.queue.ids(), vec![ids[0], ids[2]]);
+        assert_eq!(
+            bench.log.status().1,
+            "“sound 1.ne5p” is no longer waiting to be sent."
+        );
 
         bench.act(vec![Act::ClearQueue]);
         assert!(bench.queue.is_empty());
+        assert_eq!(
+            bench.log.status().1,
+            "The send queue is empty. Nothing was sent."
+        );
         assert_eq!(
             bench.workspace.listed().count(),
             3,
@@ -3267,5 +3296,199 @@ mod tests {
         crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
             .unwrap()
             .1
+    }
+
+    /// Deleting a slot lets go of its row, and a sound linked to it stops claiming to be
+    /// on the keyboard once the bank is read again.
+    #[test]
+    fn a_deleted_slot_leaves_the_selection_and_its_sound_leaves_the_keyboard() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let crc = bench.workspace.get(id).unwrap().saved.crc32.unwrap();
+        bench
+            .device
+            .pretend_bodies(class, 7, &[Some(("New program", crc))]);
+        bench.device.relink(&mut bench.workspace);
+        let dot = |bench: &Bench| {
+            crate::library::keyboard_mark(
+                bench.workspace.get(id).unwrap(),
+                &bench.device.state,
+                &bench.queue,
+            )
+        };
+        assert_eq!(dot(&bench), Some(crate::library::Mark::Agrees));
+        let slot = Item::Slot { class, at: at(0) };
+        bench.browser.selection.only(slot);
+
+        bench.act(vec![Act::DeleteSlot { class, at: at(0) }]);
+        assert!(!bench.browser.selection.holds(slot), "still selected");
+
+        bench.device.pump();
+        bench.device.pretend(crate::device::DeviceEvent::Finished);
+        poll(&mut bench);
+        bench.device.pump();
+        bench
+            .device
+            .pretend(crate::device::DeviceEvent::BankScanned {
+                class,
+                bank: 7,
+                slots: vec![None],
+            });
+        poll(&mut bench);
+        assert_eq!(dot(&bench), None);
+    }
+
+    /// The instrument keeps one sample of each name, so a sample whose name a slot
+    /// already has stands for that slot and is queued to replace it. Sent to any other
+    /// slot it is refused before it reaches the queue, as the instrument would refuse it.
+    #[test]
+    fn a_sample_whose_name_the_library_has_goes_to_that_slot_and_nowhere_else() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench
+            .device
+            .pretend_scanned(class, 1, &["drawbar-tine", "", "drawbar-pad", ""]);
+        let id = bench.workspace.ingest(
+            "drawbar-pad.nsmp".into(),
+            Origin::File("drawbar-pad.nsmp".into()),
+            crate::testing::sample_bytes(),
+            &mut bench.log,
+        );
+        bench.device.relink(&mut bench.workspace);
+        let holder = Location::from_user(1, 3);
+        assert_eq!(
+            bound_for(
+                bench.workspace.get(id).unwrap(),
+                &bench.device.state,
+                &bench.queue
+            ),
+            Bound::At(class, holder)
+        );
+
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: Location::from_user(1, 2),
+        }]);
+        assert!(!bench.queue.holds(id), "queued for a slot it cannot take");
+        let said = bench.log.status().1;
+        assert!(said.contains("Samples 1:3 already has its name"), "{said}");
+
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: holder,
+        }]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(holder));
+    }
+
+    /// Two sounds of one name cannot both wait for a library, and a name the instrument
+    /// gains after a sound was queued holds that sound back from the next send.
+    #[test]
+    fn a_library_name_already_waiting_or_newly_taken_holds_a_sample_back() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 1, &["", "", ""]);
+        let ids: Vec<u64> = ["lead.nsmp", "lead.nsmp"]
+            .into_iter()
+            .map(|name| {
+                bench.workspace.ingest(
+                    name.into(),
+                    Origin::File(name.into()),
+                    crate::testing::sample_bytes(),
+                    &mut bench.log,
+                )
+            })
+            .collect();
+        let slot = |n| Location::from_user(1, n);
+
+        bench.act(vec![
+            Act::Send {
+                id: ids[0],
+                class,
+                at: slot(1),
+            },
+            Act::Send {
+                id: ids[1],
+                class,
+                at: slot(2),
+            },
+        ]);
+        assert_eq!(bench.queue.ids(), vec![ids[0]]);
+        let said = bench.log.status().1;
+        assert!(said.contains("Something waiting for Samples 1:1"), "{said}");
+
+        bench.device.pretend_scanned(class, 1, &["", "", "lead"]);
+        crate::queue::refit(
+            &bench.workspace,
+            &bench.device.state,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+        let failure = bench
+            .queue
+            .entry(ids[0])
+            .and_then(|held| held.failure.clone());
+        assert!(
+            failure.is_some_and(|why| why.contains("Samples 1:3 already has its name")),
+            "the entry would be sent into a refusal"
+        );
+    }
+
+    /// A second sound of one name may still take the first one's place in the queue, and
+    /// a rename that gives two waiting sounds one name holds the later one back.
+    #[test]
+    fn a_library_name_is_checked_against_the_queue_as_it_stands() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 1, &["", "", ""]);
+        let ids: Vec<u64> = ["lead.nsmp", "lead.nsmp", "pad.nsmp"]
+            .into_iter()
+            .map(|name| {
+                bench.workspace.ingest(
+                    name.into(),
+                    Origin::File(name.into()),
+                    crate::testing::sample_bytes(),
+                    &mut bench.log,
+                )
+            })
+            .collect();
+        let slot = |n| Location::from_user(1, n);
+        let send = |id, at| Act::Send { id, class, at };
+
+        bench.act(vec![send(ids[0], slot(1)), send(ids[1], slot(1))]);
+        assert_eq!(bench.queue.ids(), vec![ids[1]], "the second takes the slot");
+
+        bench.act(vec![send(ids[2], slot(2))]);
+        bench.workspace.rename(ids[2], "lead.nsmp".into());
+        crate::queue::refit(
+            &bench.workspace,
+            &bench.device.state,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+        let failure = |id| bench.queue.entry(id).and_then(|held| held.failure.clone());
+        assert_eq!(failure(ids[1]), None, "the first in the queue goes");
+        assert!(
+            failure(ids[2]).is_some_and(|why| why.contains("Something waiting for Samples 1:1")),
+            "the renamed one would be refused after the first landed"
+        );
+    }
+
+    fn poll(bench: &mut Bench) {
+        bench.device.poll(
+            &mut bench.log,
+            &mut bench.workspace,
+            &mut bench.tabs,
+            &mut bench.queue,
+        );
     }
 }

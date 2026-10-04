@@ -22,7 +22,13 @@ again.
 Right-click a slot to **Open**, **Copy to this computer**, **Load on instrument**,
 **Rename**, **Duplicate** or **Delete…**. Load on instrument makes the panel play
 that slot, and a document from a slot has the same button in its
-[header](editing.md#the-document-header).
+[header](editing.md#the-document-header). The name is typed in the browser, which
+opens at the slot when you rename from the Keyboard tab or the Library.
+
+Samples and pianos keep the name they were sent with, so they cannot be renamed
+or duplicated on the instrument. The instrument also keeps one of each name: a
+sample or piano named like one already there is queued to replace it, and
+cannot go to any other slot until you rename it.
 
 With several slots checked, **Copy to this computer** reads each folder's slots
 in one go. **Export as bundle…**

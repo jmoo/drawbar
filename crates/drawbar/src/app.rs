@@ -964,7 +964,7 @@ impl eframe::App for DrawbarApp {
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
-        let asked = self.splash.show(ctx, self.device.usb());
+        let asked = self.splash.show(ctx, crate::splash::Usb::of(&self.device));
         crate::about::dialog(ctx, &mut self.about, &self.log);
         crate::report::dialog(ctx, &mut self.report, &self.log);
 

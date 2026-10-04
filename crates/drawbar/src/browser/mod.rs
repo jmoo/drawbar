@@ -363,6 +363,35 @@ impl Browser {
         });
     }
 
+    /// Open the section and branches that hold `item`'s row, so a rename asked for
+    /// outside the tree has a row to type in.
+    fn reveal(&mut self, item: Item, workspace: &Workspace) {
+        let branches: Vec<Branch> = match item {
+            Item::Tag(_) => {
+                self.sections.tags = true;
+                return;
+            }
+            Item::Local(id) => {
+                let mut branches = vec![Branch::Computer];
+                let file = workspace.get(id).and_then(|entity| entity.path.as_ref());
+                let mut dir = file.map_or_else(LibPath::root, LibPath::parent);
+                while !dir.is_root() {
+                    branches.extend(self.folders.id_of(&dir).map(Branch::Folder));
+                    dir = dir.parent();
+                }
+                branches
+            }
+            Item::Folder(_) => vec![Branch::Computer],
+            Item::Slot { class, at } => vec![
+                Branch::Instrument,
+                Branch::Class(class.to_raw()),
+                tree::bank_branch(class, at.user_bank()),
+            ],
+        };
+        self.sections.places = true;
+        self.open.extend(branches);
+    }
+
     /// Apply a click on a row to the selection.
     ///
     /// ⚠️ No click opens the rename editor. An editor opened by a second click on a
@@ -1393,6 +1422,84 @@ mod tests {
         }
         assert_eq!(named.as_deref(), Some("LA Grand"));
         assert!(browser.rename.is_none(), "and the editor closes");
+    }
+
+    #[test]
+    fn revealing_a_filed_asset_opens_every_folder_above_it() {
+        let mut bench = Bench::new();
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let outer = bench
+            .browser
+            .folders
+            .make(&LibPath::root(), &bench.workspace);
+        let within = bench.browser.folders.path_of(outer).unwrap().clone();
+        let inner = bench.browser.folders.make(&within, &bench.workspace);
+        bench
+            .browser
+            .folders
+            .file(&mut bench.workspace, id, Some(inner));
+
+        bench.act(vec![Act::Reveal(Item::Local(id))]);
+        for branch in [
+            Branch::Computer,
+            Branch::Folder(outer),
+            Branch::Folder(inner),
+        ] {
+            assert!(bench.browser.open.contains(&branch), "{branch:?} is shut");
+        }
+    }
+
+    /// A slot renamed from outside the tree, with the browser hidden and its folder shut,
+    /// still gets a row to type the name in.
+    #[test]
+    fn renaming_a_slot_from_another_tab_shows_the_row_it_types_in() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 7, &["Africa Split"]);
+        bench.shell.browser_open = false;
+        let slot = Item::Slot {
+            class,
+            at: Location::from_user(7, 1),
+        };
+
+        bench.browser.start_rename(slot, "Africa Split");
+        bench.act(vec![Act::Reveal(slot)]);
+        assert!(bench.shell.browser_open, "the browser is shown");
+
+        let frames: [Vec<egui::Event>; 3] = [
+            Vec::new(),
+            vec![egui::Event::Text("LA Grand".into())],
+            vec![testing::key(egui::Key::Enter)],
+        ];
+        let mut named = None;
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let Bench {
+                ctx,
+                browser,
+                workspace,
+                device,
+                queue,
+                ..
+            } = &mut bench;
+            testing::run(ctx, input, |ctx| {
+                egui::SidePanel::left("places").show(ctx, |ui| {
+                    for act in browser.ui(ui, workspace, device, queue, &Filter::default()) {
+                        if let Act::RenameSlot { name, .. } = act {
+                            named = Some(name);
+                        }
+                    }
+                });
+            });
+        }
+        assert_eq!(named.as_deref(), Some("LA Grand"));
     }
 
     #[test]

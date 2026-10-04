@@ -16,11 +16,11 @@ use nord_usb::envelope;
 use nord_usb::error::ErrKind;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
+use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo, Status};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
+use super::{slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -194,7 +194,7 @@ async fn execute<T: Transport>(
         DeviceCmd::Disconnect => Ok(None),
 
         DeviceCmd::ScanBank { class, bank } => {
-            let slots = scan_bank(device, class, bank)
+            let (status, slots) = scan_bank(device, class, bank)
                 .await
                 .map_err(spoil(fault, None))?;
             let filled = slots.iter().filter(|s| s.is_some()).count();
@@ -202,6 +202,11 @@ async fn execute<T: Transport>(
                 "bank {bank}: {filled} of {} slots hold something",
                 slots.len()
             );
+            emit.send(DeviceEvent::ClassStatus {
+                class,
+                status,
+                banks: None,
+            });
             emit.send(DeviceEvent::BankScanned { class, bank, slots });
             Ok(Some(note))
         }
@@ -662,33 +667,6 @@ fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
     }
 }
 
-/// Strip the format suffix from a local label, preserving the operator's text.
-/// Returns `None` for a blank name.
-fn slot_label(name: &str) -> Option<String> {
-    // Application bound; the instrument's maximum is unknown.
-    const LONGEST: usize = 64;
-
-    let mut label = name.trim();
-    if let Some((stem, tag)) = label.rsplit_once('.') {
-        // A format tag, not a name that happens to hold a dot: `Bass 2.0` keeps its `0`.
-        let is_tag = (2..=5).contains(&tag.len())
-            && tag.chars().all(|c| c.is_ascii_alphanumeric())
-            && tag.chars().any(|c| c.is_ascii_alphabetic());
-        if is_tag && !stem.trim().is_empty() {
-            label = stem;
-        }
-    }
-    let label = label.trim();
-    if label.is_empty() {
-        return None;
-    }
-    // A truncated UTF-8 name must still end on a character boundary.
-    let end = (0..=LONGEST.min(label.len()))
-        .rev()
-        .find(|end| label.is_char_boundary(*end))?;
-    Some(label[..end].trim_end().to_string())
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn put_one<T: Transport>(
     device: &mut Device<T>,
@@ -822,6 +800,11 @@ fn explain(e: Error, at: Location) -> String {
             "{} is occupied, and the instrument does not overwrite in place",
             shown(at)
         ),
+        Error::DeviceStatus(op::NAME_TAKEN) => format!(
+            "something else in the library already has the name this write gave {}, \
+             and the instrument keeps one of each name",
+            shown(at)
+        ),
         other => other.to_string(),
     }
 }
@@ -833,7 +816,8 @@ const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
 /// Scan the slots the instrument declares for this bank, or up to the device boundary
-/// where it declared the unbounded sentinel.
+/// where it declared the unbounded sentinel, with the class's counters read in the same
+/// session, since whatever changed the bank changed them too.
 ///
 /// The capacity comes from the [`Device`]'s geometry, not the UI's cache: a rescan after
 /// a mutation can run before the class has been walked, and walking a bounded bank as if
@@ -842,7 +826,7 @@ async fn scan_bank<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     bank: u32,
-) -> Result<Vec<Option<ProgramInfo>>, Error> {
+) -> Result<(Status, Vec<Option<ProgramInfo>>), Error> {
     let declared = device
         .geometry()
         .await?
@@ -862,7 +846,8 @@ async fn scan_bank<T: Transport>(
     device
         .read(class, async |s| {
             s.set_read_limit(SCAN_READ_LIMIT);
-            walk(s, bank, extent, MOST_OCCUPIED).await
+            let status = op::status(s).await?;
+            Ok((status, walk(s, bank, extent, MOST_OCCUPIED).await?))
         })
         .await
 }
@@ -1328,38 +1313,6 @@ fn entity_name(info: &ProgramInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_slot_is_named_what_this_computer_calls_the_object() {
-        let label = |name: &str| slot_label(name);
-        assert_eq!(label("Africa-Split.ne5p").as_deref(), Some("Africa-Split"));
-        assert_eq!(label("Squabble B.ne5t").as_deref(), Some("Squabble B"));
-        assert_eq!(label("  Rotary Fast  ").as_deref(), Some("Rotary Fast"));
-        // A dot that is not a tag: a name is allowed to hold one.
-        assert_eq!(label("Bass 2.0").as_deref(), Some("Bass 2.0"));
-        assert_eq!(label("Mr. Hammond").as_deref(), Some("Mr. Hammond"));
-        assert_eq!(
-            label(".ne5p").as_deref(),
-            Some(".ne5p"),
-            "a bare tag is kept as the name"
-        );
-    }
-
-    #[test]
-    fn a_name_with_nothing_in_it_is_not_sent() {
-        for nothing in ["", "   ", "\t"] {
-            assert_eq!(slot_label(nothing), None, "{nothing:?}");
-        }
-    }
-
-    #[test]
-    fn a_long_name_is_cut_on_a_character_boundary() {
-        let long = "é".repeat(200);
-        let cut = slot_label(&long).expect("something is left");
-        assert!(cut.len() <= 64, "{} bytes", cut.len());
-        assert!(long.starts_with(&cut));
-        assert_eq!(cut.chars().count(), 32, "whole characters only");
-    }
 
     #[test]
     fn a_nameless_slot_still_gets_a_label() {
@@ -2640,6 +2593,35 @@ mod wire_tests {
             "the declared four slots, not a walk to the host limit"
         );
         assert_eq!(counted(&device, cmd::INFO), 4);
+    }
+
+    #[test]
+    fn a_rescan_recounts_its_class_before_the_bank_lands() {
+        let held = [
+            (Location { bank: 0, slot: 1 }, "Africa Split"),
+            (Location { bank: 1, slot: 0 }, "Bright Grand"),
+        ];
+        let mut device = Puppet::stocked(&[("Bank 1", 4), ("Bank 2", 4)], &held);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::ScanBank {
+                class: ObjectClass::Program,
+                bank: 1,
+            },
+        );
+
+        assert!(flow == Flow::Continue);
+        let said: Vec<String> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::ClassStatus { status, banks, .. } => {
+                    Some(format!("count {} banks {banks:?}", status.count))
+                }
+                DeviceEvent::BankScanned { bank, .. } => Some(format!("bank {bank}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["count 2 banks None", "bank 1"]);
     }
 
     #[test]
