@@ -1888,11 +1888,11 @@ impl Workspace {
 
     /// How many assets something needs that are still being read or decoded.
     pub fn reading(&self) -> usize {
-        let decoding = self.entities.iter().filter(|entity| {
-            let undecoded = entity.reading() && !entity.unread();
-            undecoded || self.asked.contains(&entity.id)
-        });
-        decoding.count() + self.wanted.borrow().len()
+        let undecoded = |entity: &LocalEntity| entity.reading() && !entity.unread();
+        let decoding = self.entities.iter().filter(|entity| undecoded(entity));
+        let asked = self.asked.iter().filter_map(|id| self.get(*id));
+        let asked = asked.filter(|entity| !undecoded(entity));
+        decoding.count() + asked.count() + self.wanted.borrow().len()
     }
 
     /// Something needs `id` whole: it is picked, open, or acted on. One not read yet is
