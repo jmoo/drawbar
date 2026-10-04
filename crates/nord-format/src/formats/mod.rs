@@ -69,6 +69,60 @@ pub mod nw2;
 pub mod sysex;
 
 use crate::error::{Error, ParseError};
+use crate::EntityKind;
+
+/// A format a file's name can say it holds: the tag [`crate::from_stream`] reads it
+/// under, and the [`EntityKind`] it decodes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Format {
+    /// The CBIN tag, NULs preserved, or the carrier's name: what
+    /// [`Identity::format`](crate::Identity::format) gives.
+    pub tag: &'static str,
+    pub entity: EntityKind,
+}
+
+/// The formats outside CBIN, each by its file's extension.
+const CARRIERS: [Format; 4] = [
+    Format {
+        tag: cn3::FORMAT,
+        entity: EntityKind::Cne3,
+    },
+    Format {
+        tag: midi::FORMAT,
+        entity: EntityKind::Midi,
+    },
+    Format {
+        tag: nsmpproj::FORMAT,
+        entity: EntityKind::SampleProject,
+    },
+    Format {
+        tag: sysex::FORMAT,
+        entity: EntityKind::Sysex,
+    },
+];
+
+/// Every format a file's name can say: each CBIN tag [`crate::from_stream`] reads, and
+/// each carrier outside CBIN. A ZIP is a bundle only by its members, so no name says one.
+pub fn all() -> impl Iterator<Item = Format> {
+    crate::cbin_readers()
+        .map(|&(tag, entity, _)| Format { tag, entity })
+        .chain(CARRIERS)
+}
+
+/// The format a file named `*.{extension}` holds, the extension without its dot and in
+/// any case. A CBIN file's extension is its tag without NULs, except a sample
+/// instrument's, which names its generation where its tag does not
+/// ([`nsmp::codec::Layout::extension`]).
+pub fn by_extension(extension: &str) -> Option<Format> {
+    let generation = nsmp::codec::Layout::ALL
+        .iter()
+        .any(|layout| layout.extension().eq_ignore_ascii_case(extension));
+    let tag = match generation {
+        true => nsmp::FORMAT,
+        false => extension,
+    };
+    all().find(|format| format.tag.trim_end_matches('\0').eq_ignore_ascii_case(tag))
+}
 
 /// Refuse a schema version the field offsets have not been validated against;
 /// decoding it could produce plausible but wrong values.
@@ -276,5 +330,56 @@ mod tests {
                 .contains("16 of the 67108864 bytes it declares"),
             "expected a refusal naming the bytes the member yielded, got {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod named_tests {
+    use super::*;
+
+    #[test]
+    fn every_tag_from_stream_reads_is_said_by_its_extension_in_any_case() {
+        for tag in crate::cbin_formats() {
+            let extension = tag.trim_end_matches('\0').to_uppercase();
+            assert_eq!(
+                by_extension(&extension).map(|f| f.tag),
+                Some(tag),
+                "{tag:?}"
+            );
+        }
+        for carrier in CARRIERS {
+            assert_eq!(by_extension(carrier.tag), Some(carrier), "{carrier:?}");
+        }
+    }
+
+    #[test]
+    fn no_two_formats_share_a_tag() {
+        let mut tags: Vec<&str> = all().map(|format| format.tag).collect();
+        let named = tags.len();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(tags.len(), named);
+    }
+
+    #[test]
+    fn a_sample_instruments_extension_names_its_generation() {
+        for extension in ["nsmp", "nsmp3", "NSMP4"] {
+            assert_eq!(
+                by_extension(extension),
+                Some(Format {
+                    tag: nsmp::FORMAT,
+                    entity: EntityKind::Sample
+                }),
+                "{extension}"
+            );
+        }
+        assert_eq!(by_extension("nsmp5"), None, "no generation writes it");
+    }
+
+    #[test]
+    fn an_extension_no_format_carries_says_nothing() {
+        for extension in ["", "pdf", "zip", "txt", "nsp\0"] {
+            assert_eq!(by_extension(extension), None, "{extension:?}");
+        }
     }
 }

@@ -10,6 +10,10 @@ use std::io::{Read, Write};
 
 pub const MAGIC: &[u8; 4] = b"CNE3";
 
+/// The file's extension, which [`Identity::format`](crate::Identity::format) gives in
+/// place of a CBIN tag.
+pub const FORMAT: &str = "cn3";
+
 /// One `.cn3` library, verbatim. ⚠️ Real libraries run to megabytes, and this
 /// allocates the whole file.
 #[derive(Clone, PartialEq, Eq)]

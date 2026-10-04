@@ -122,6 +122,23 @@ fn streamed_check_agrees(bytes: &[u8], info: &cbin::Info) -> Result<(), String> 
     Ok(())
 }
 
+/// The format an entity's file carries says, by name, the entity it decoded to. A bundle
+/// is said by no name.
+fn said_by_its_format(entity: &Entity) -> Result<(), String> {
+    #[cfg(feature = "bundle")]
+    if matches!(entity, Entity::Bundle(_)) {
+        return Ok(());
+    }
+    let tag = entity.identity().format;
+    let said = nord_format::formats::by_extension(tag.trim_end_matches('\0'));
+    ensure!(
+        said.map(|format| (format.tag, format.entity)) == Some((tag, entity.kind())),
+        "a {tag:?} file decodes to {:?}, and its name says {said:?}",
+        entity.kind()
+    );
+    Ok(())
+}
+
 fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
@@ -147,6 +164,7 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
 
     let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
         .map_err(|e| Failed::from(format!("parse: {e}")))?;
+    said_by_its_format(&entity).map_err(Failed::from)?;
 
     // The archive layer does not re-encode, so for a bundle the check is the
     // parse, which reads and verifies every member.

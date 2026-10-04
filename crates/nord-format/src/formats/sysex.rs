@@ -16,6 +16,10 @@
 use crate::error::{Error, ParseError};
 use std::io::{Read, Write};
 
+/// The file's extension, which [`Identity::format`](crate::Identity::format) gives in
+/// place of a CBIN tag.
+pub const FORMAT: &str = "syx";
+
 /// The status byte every dump opens with.
 pub const SYSEX_START: u8 = 0xf0;
 const SYSEX_END: u8 = 0xf7;
