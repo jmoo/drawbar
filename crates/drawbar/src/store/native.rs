@@ -43,6 +43,23 @@ fn beside_store() -> Option<PathBuf> {
     Some(eframe::storage_dir(crate::APP)?.join(LIBRARY))
 }
 
+/// Make `root` ready to open as the library, or say why it cannot be. The default library,
+/// `default`, is made where it is missing, as a first start makes it; any other folder
+/// must already be there.
+pub fn openable(root: &Path, default: Option<&Path>) -> Result<(), String> {
+    if root.is_dir() {
+        return Ok(());
+    }
+    if default == Some(root) && !root.exists() {
+        return fs::create_dir_all(root)
+            .map_err(|e| format!("{} could not be made: {e}", root.display()));
+    }
+    Err(format!(
+        "{} is not a folder drawbar can open as the library.",
+        root.display()
+    ))
+}
+
 const LOCK: &str = ".drawbar/lock";
 
 /// Where [`Fs::stage`] writes before [`Fs::place`] renames: `.drawbar/tmp/` for
@@ -1137,5 +1154,35 @@ mod tests {
     fn the_default_library_is_a_folder_of_the_storage_eframe_keeps() {
         let storage = eframe::storage_dir(crate::APP).expect("the system names one");
         assert_eq!(default_root(), Some(storage.join(LIBRARY)));
+    }
+
+    /// The default library opens even where no first start made its folder, as when an
+    /// earlier session opened only another library.
+    #[test]
+    fn the_default_library_is_made_where_it_is_missing() {
+        let root = Temp::new();
+        let default = root.at("drawbar/library");
+        assert_eq!(openable(&default, Some(&default)), Ok(()));
+        assert!(default.is_dir());
+    }
+
+    /// A library opened before and gone since is not made again, empty, in its place.
+    #[test]
+    fn a_missing_library_other_than_the_default_is_refused() {
+        let root = Temp::new();
+        let gone = root.at("gone");
+        let why = openable(&gone, Some(&root.at("library"))).expect_err("refused");
+        assert!(why.contains("is not a folder drawbar can open"), "{why}");
+        assert!(!gone.exists());
+    }
+
+    /// A file where the default library would be is left alone.
+    #[test]
+    fn a_file_where_the_default_library_would_be_is_refused() {
+        let root = Temp::new();
+        let default = root.at("library");
+        fs::write(&default, b"not a folder").unwrap();
+        assert!(openable(&default, Some(&default)).is_err());
+        assert_eq!(fs::read(&default).unwrap(), b"not a folder");
     }
 }
