@@ -1119,5 +1119,5 @@ written, the records of picked folders no longer on it are deleted
 `Workspace::projects_naming(&LibPath)` answers with `Naming { by, unknown }`:
 the projects whose WAV list, from their decode or their summary, names that
 file, and the projects with neither, which may. A project names a WAV relative
-to its own folder, and a path that is absolute or leaves the library names
-nothing (`summary::resolve`).
+to its own folder, as `nord-format`'s `nsmpproj::build::AudioPath` reads it, and
+a path that is absolute or leaves the library names nothing (`summary::resolve`).
