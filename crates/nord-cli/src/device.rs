@@ -307,6 +307,11 @@ pub(crate) fn explain(e: nord_usb::Error, at: Location) -> String {
                 shown(at)
             )
         }
+        nord_usb::Error::DeviceStatus(usb_op::NAME_TAKEN) => {
+            "something in the library already has this name, and the instrument keeps \
+             one object per name"
+                .to_string()
+        }
         other => other.to_string(),
     }
 }

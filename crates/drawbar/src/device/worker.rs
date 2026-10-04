@@ -20,7 +20,9 @@ use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo, Status};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
+use super::{
+    slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose,
+};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -698,33 +700,6 @@ fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
     }
 }
 
-/// Strip the format suffix from a local label, preserving the operator's text.
-/// Returns `None` for a blank name.
-fn slot_label(name: &str) -> Option<String> {
-    // Application bound; the instrument's maximum is unknown.
-    const LONGEST: usize = 64;
-
-    let mut label = name.trim();
-    if let Some((stem, tag)) = label.rsplit_once('.') {
-        // A format tag, not a name that happens to hold a dot: `Bass 2.0` keeps its `0`.
-        let is_tag = (2..=5).contains(&tag.len())
-            && tag.chars().all(|c| c.is_ascii_alphanumeric())
-            && tag.chars().any(|c| c.is_ascii_alphabetic());
-        if is_tag && !stem.trim().is_empty() {
-            label = stem;
-        }
-    }
-    let label = label.trim();
-    if label.is_empty() {
-        return None;
-    }
-    // A truncated UTF-8 name must still end on a character boundary.
-    let end = (0..=LONGEST.min(label.len()))
-        .rev()
-        .find(|end| label.is_char_boundary(*end))?;
-    Some(label[..end].trim_end().to_string())
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn put_one<T: Transport>(
     device: &mut Device<T>,
@@ -856,6 +831,11 @@ fn explain(e: Error, at: Location) -> String {
         }
         Error::DeviceStatus(op::OCCUPIED) => format!(
             "{} is occupied, and the instrument does not overwrite in place",
+            shown(at)
+        ),
+        Error::DeviceStatus(op::NAME_TAKEN) => format!(
+            "something else in the library already has the name this write gave {}, \
+             and the instrument keeps one of each name",
             shown(at)
         ),
         other => other.to_string(),

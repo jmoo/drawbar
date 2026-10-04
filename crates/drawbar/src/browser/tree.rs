@@ -680,7 +680,7 @@ impl Browser {
         let name = match item {
             Item::Local(id) => workspace.get(id).map(|entity| entity.name.clone()),
             // ⚠️ A partition this app cannot name is only listed.
-            Item::Slot { class, at } if !read_only(class) => device
+            Item::Slot { class, at } if !read_only(class) && class.edits_in_place() => device
                 .state
                 .slot(class, at)
                 .flatten()
@@ -1760,16 +1760,25 @@ impl Browser {
             acts,
         );
         ui.separator();
-        if ui.button("Rename").clicked() {
+        let edits = class.edits_in_place();
+        let fixed = "the instrument keeps the name a sound was sent with, and copies only \
+                     what it is sent";
+        if ui
+            .add_enabled(edits, egui::Button::new("Rename"))
+            .on_disabled_hover_text(fixed)
+            .clicked()
+        {
             self.start_rename(item, &name);
             acts.push(Act::Reveal(item));
             ui.close();
         }
-        if ui
-            .add_enabled(free.is_some(), egui::Button::new("Duplicate"))
-            .on_disabled_hover_text("every slot read so far is taken or already queued")
-            .clicked()
-        {
+        let duplicate = ui
+            .add_enabled(edits && free.is_some(), egui::Button::new("Duplicate"))
+            .on_disabled_hover_text(match edits {
+                true => "every slot read so far is taken or already queued",
+                false => fixed,
+            });
+        if duplicate.clicked() {
             if let Some(to) = free {
                 acts.push(Act::DuplicateSlot {
                     class,

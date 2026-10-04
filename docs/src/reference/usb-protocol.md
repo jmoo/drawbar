@@ -40,7 +40,9 @@ one, with a status word inserted before the echoed arguments. Two things bite.
 Request codes are not reliably even, so direction is recorded at decode time
 rather than inferred. And operations are generic primitives parameterized by
 object class (1 piano, 3 sample, 4 program, 5 set list, 6 live, 7 settings), so
-one `rename` or `move` command serves every class.
+one `delete` command serves every class. The piano and sample libraries refuse
+`rename` and `duplicate`, and refuse a write named like an object they already
+hold, matching case.
 
 The instrument reads a message until a short packet ends it. A frame that is an
 exact multiple of the packet size needs a zero-length packet after it, or the

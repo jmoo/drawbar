@@ -911,6 +911,18 @@ impl ObjectClass {
         matches!(self, ObjectClass::Live | ObjectClass::Settings)
     }
 
+    /// Whether the device renames ([`cmd::RENAME`]) and duplicates ([`cmd::COPY`]) the
+    /// objects of this class.
+    ///
+    /// Confirmed on hardware.
+    ///
+    /// The libraries refuse both with status `0x15`. A library object's name is the one
+    /// its write gave it, and a copy needs a write of its own under another name (see
+    /// [`crate::op::NAME_TAKEN`]).
+    pub fn edits_in_place(self) -> bool {
+        !self.is_library()
+    }
+
     /// Whether the device stores a name for the objects of this class.
     ///
     /// Confirmed on hardware.

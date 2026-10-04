@@ -1039,6 +1039,33 @@ fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
     Some((home(entity)?, entity.saved.crc32?))
 }
 
+/// The name a write gives its slot: an asset's name without its format suffix, and
+/// `None` for a blank name.
+pub(crate) fn slot_label(name: &str) -> Option<String> {
+    // Application bound; the instrument's maximum is unknown.
+    const LONGEST: usize = 64;
+
+    let mut label = name.trim();
+    if let Some((stem, tag)) = label.rsplit_once('.') {
+        // A format tag, not a name that happens to hold a dot: `Bass 2.0` keeps its `0`.
+        let is_tag = (2..=5).contains(&tag.len())
+            && tag.chars().all(|c| c.is_ascii_alphanumeric())
+            && tag.chars().any(|c| c.is_ascii_alphabetic());
+        if is_tag && !stem.trim().is_empty() {
+            label = stem;
+        }
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    // A truncated UTF-8 name must still end on a character boundary.
+    let end = (0..=LONGEST.min(label.len()))
+        .rev()
+        .find(|end| label.is_char_boundary(*end))?;
+    Some(label[..end].trim_end().to_string())
+}
+
 /// The slot a class whose slots report no checksum is matched to.
 ///
 /// ⚠️ Settings, samples and pianos report no body checksum, so no body can be recognized
@@ -1054,13 +1081,34 @@ fn named(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> Optio
             slots.next().is_none().then_some(at)
         }
         ObjectClass::Sample | ObjectClass::Piano => {
-            let name = entity.name.trim();
+            let name = slot_label(&entity.name)?;
             occupied(state, class)
                 .find(|(_, info)| info.name.trim() == name)
                 .map(|(at, _)| at)
         }
         _ => None,
     }
+}
+
+/// The slot of a library, other than `at`, already holding the name a write of this
+/// asset into `at` would give.
+///
+/// ⚠️ The instrument refuses that write with [`nord_usb::op::NAME_TAKEN`], whatever the
+/// slot.
+/// Slot classes take any number of objects of one name.
+pub fn name_taken(
+    state: &DeviceState,
+    class: ObjectClass,
+    at: Location,
+    entity: &LocalEntity,
+) -> Option<Location> {
+    if !class.is_library() {
+        return None;
+    }
+    let name = slot_label(&entity.name)?;
+    occupied(state, class)
+        .find(|(held, info)| *held != at && info.name.trim() == name)
+        .map(|(held, _)| held)
 }
 
 /// Every slot of `class` a walk found holding something, lowest address first.

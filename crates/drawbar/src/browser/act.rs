@@ -3328,6 +3328,44 @@ mod tests {
         assert_eq!(dot(&bench), None);
     }
 
+    /// The instrument keeps one sample of each name, so a sample whose name a slot
+    /// already has stands for that slot and is queued to replace it. Sent to any other
+    /// slot it is refused before it reaches the queue, as the instrument would refuse it.
+    #[test]
+    fn a_sample_whose_name_the_library_has_goes_to_that_slot_and_nowhere_else() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench
+            .device
+            .pretend_scanned(class, 1, &["drawbar-tine", "", "drawbar-pad", ""]);
+        let id = bench.workspace.ingest(
+            "drawbar-pad.nsmp".into(),
+            Origin::File("drawbar-pad.nsmp".into()),
+            crate::testing::sample_bytes(),
+            &mut bench.log,
+        );
+        bench.device.relink(&mut bench.workspace);
+        let holder = Location::from_user(1, 3);
+        assert_eq!(
+            bound_for(
+                bench.workspace.get(id).unwrap(),
+                &bench.device.state,
+                &bench.queue
+            ),
+            Bound::At(class, holder)
+        );
+
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: Location::from_user(1, 2),
+        }]);
+        assert!(!bench.queue.holds(id), "queued for a slot it cannot take");
+        let said = bench.log.status().1;
+        assert!(said.contains("Samples 1:3 already has its name"), "{said}");
+    }
+
     fn poll(bench: &mut Bench) {
         bench.device.poll(
             &mut bench.log,

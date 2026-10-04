@@ -232,6 +232,13 @@ pub fn enqueue(
     if let Fit::Refuses(why) = fit(&device.state, entity) {
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
+    if let Some(holder) = crate::device::name_taken(&device.state, class, at, entity) {
+        return log.trouble(format!(
+            "“{name}” cannot go to {where_}. {} already has its name, and the instrument \
+             keeps one of each name. Send it there to replace that one, or rename it.",
+            place(class, holder)
+        ));
+    }
     let holds = Occupancy::of(&device.state, class, at);
     let displaced = match queue.put(entity, class, at, holds) {
         Put::Standing => return,
