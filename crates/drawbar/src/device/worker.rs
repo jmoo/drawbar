@@ -20,9 +20,7 @@ use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo, Status};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{
-    slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose,
-};
+use super::{slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
