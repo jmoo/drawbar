@@ -6086,6 +6086,17 @@ fn a_listed_wav_is_a_wav_asset_read_when_its_document_opens() {
     let said = session.document(id);
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.bytes == wav, "it holds the file");
+    let problems: Vec<&str> = session
+        .bench
+        .log
+        .iter()
+        .filter(|entry| entry.level != crate::log::Level::Info)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "a WAV is not a failed decode: {problems:?}"
+    );
     assert_eq!(Kind::of(entity), Kind::Wav);
     for offered in ["Play", "Encode"] {
         assert!(
