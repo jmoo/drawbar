@@ -211,6 +211,8 @@ pub enum Act {
     ShowClass(ObjectClass),
     /// Turn one of the library's filters on or off.
     Narrow(Narrow),
+    /// Show the browser with this row's branches open, for a rename that types in it.
+    Reveal(Item),
     /// Close the tab the center is showing.
     CloseTab,
     ToggleDock(Dock),
@@ -660,7 +662,7 @@ pub fn apply(
                     tag_all(browser, workspace, log, &ids, id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
-                    browser.sections.tags = true;
+                    browser.reveal(Item::Tag(id));
                     shell.browser_open = true;
                 }
                 None => log.trouble("The tag list is full, so there is no new tag."),
@@ -747,6 +749,10 @@ pub fn apply(
                 tabs.keyboard_on(class);
             }
             Act::Narrow(narrow) => shell.filter.narrow(narrow),
+            Act::Reveal(item) => {
+                browser.reveal(item);
+                shell.browser_open = true;
+            }
             Act::CloseTab => {
                 tabs.close(tabs.showing());
             }

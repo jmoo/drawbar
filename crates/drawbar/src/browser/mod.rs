@@ -358,6 +358,26 @@ impl Browser {
         });
     }
 
+    /// Open the section and branches that hold `item`'s row, so a rename asked for
+    /// outside the tree has a row to type in.
+    fn reveal(&mut self, item: Item) {
+        let branches = match item {
+            Item::Local(id) => vec![Some(Branch::Computer), self.folders.holding(id).map(Branch::Folder)],
+            Item::Folder(_) => vec![Some(Branch::Computer)],
+            Item::Slot { class, at } => vec![
+                Some(Branch::Instrument),
+                Some(Branch::Class(class.to_raw())),
+                Some(tree::bank_branch(class, at.user_bank())),
+            ],
+            Item::Tag(_) => {
+                self.sections.tags = true;
+                return;
+            }
+        };
+        self.sections.places = true;
+        self.open.extend(branches.into_iter().flatten());
+    }
+
     /// Apply a click on a row to the selection.
     ///
     /// ⚠️ No click opens the rename editor. An editor opened by a second click on a
@@ -1339,6 +1359,56 @@ mod tests {
         }
         assert_eq!(named.as_deref(), Some("LA Grand"));
         assert!(browser.rename.is_none(), "and the editor closes");
+    }
+
+    /// A slot renamed from outside the tree, with the browser hidden and its folder shut,
+    /// still gets a row to type the name in.
+    #[test]
+    fn renaming_a_slot_from_another_tab_shows_the_row_it_types_in() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 7, &["Africa Split"]);
+        bench.shell.browser_open = false;
+        let slot = Item::Slot {
+            class,
+            at: Location::from_user(7, 1),
+        };
+
+        bench.browser.start_rename(slot, "Africa Split");
+        bench.act(vec![Act::Reveal(slot)]);
+        assert!(bench.shell.browser_open, "the browser is shown");
+
+        let frames: [Vec<egui::Event>; 3] = [
+            Vec::new(),
+            vec![egui::Event::Text("LA Grand".into())],
+            vec![testing::key(egui::Key::Enter)],
+        ];
+        let mut named = None;
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let Bench {
+                ctx,
+                browser,
+                workspace,
+                device,
+                queue,
+                ..
+            } = &mut bench;
+            testing::run(ctx, input, |ctx| {
+                egui::SidePanel::left("places").show(ctx, |ui| {
+                    for act in browser.ui(ui, workspace, device, queue, &Filter::default()) {
+                        if let Act::RenameSlot { name, .. } = act {
+                            named = Some(name);
+                        }
+                    }
+                });
+            });
+        }
+        assert_eq!(named.as_deref(), Some("LA Grand"));
     }
 
     #[test]

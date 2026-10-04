@@ -55,7 +55,7 @@ pub(super) enum Branch {
 /// Which of the three sections are showing.
 #[derive(Clone, Copy)]
 pub(super) struct Sections {
-    places: bool,
+    pub(super) places: bool,
     kinds: bool,
     pub(super) tags: bool,
 }
@@ -1382,6 +1382,7 @@ impl Browser {
         offer(ui, "Export…", None, Act::Export(id), acts);
         if ui.button("Rename").clicked() {
             self.start_rename(item, &entity.name);
+            acts.push(Act::Reveal(item));
             ui.close();
         }
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
@@ -1761,6 +1762,7 @@ impl Browser {
         ui.separator();
         if ui.button("Rename").clicked() {
             self.start_rename(item, &name);
+            acts.push(Act::Reveal(item));
             ui.close();
         }
         if ui
