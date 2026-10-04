@@ -119,10 +119,6 @@ pub enum Stage {
 /// The least widths of [`Stage::Full`], [`Stage::Quiet`] and [`Stage::Faces`].
 const BREAKPOINTS: [f32; 3] = [1000.0, 860.0, 720.0];
 
-pub fn stage(width: f32) -> Stage {
-    staged(width, &BREAKPOINTS)
-}
-
 /// The widest stage whose least width in `least` is `width` or under.
 fn staged(width: f32, least: &[f32; 3]) -> Stage {
     [Stage::Full, Stage::Quiet, Stage::Faces]
@@ -1329,6 +1325,7 @@ mod tests {
 
     #[test]
     fn each_breakpoint_belongs_to_the_stage_above_it() {
+        let stage = |width| staged(width, &BREAKPOINTS);
         assert_eq!(stage(1600.0), Stage::Full);
         assert_eq!(stage(1000.0), Stage::Full);
         assert_eq!(stage(999.0), Stage::Quiet);
