@@ -680,7 +680,7 @@ pub fn apply(
                 None => log.say("That folder is gone, so nothing moved."),
             },
             Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
-            Act::Build(id) => builds.start(id, workspace, &browser.folders, log),
+            Act::Build(id) => builds.start(id, workspace, log),
             Act::Forget(id) => browser.tags.forget(id),
             Act::NewFolder => new_folder(browser, workspace, None),
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),

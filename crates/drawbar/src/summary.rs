@@ -64,6 +64,22 @@ impl Summary {
     }
 }
 
+impl Summary {
+    /// What a WAV's name says of it: no slot checksum, nothing it plays, and no check that
+    /// applies.
+    pub fn wav() -> Summary {
+        Summary {
+            kind: Kind::Wav,
+            tag: crate::document::wav::EXTENSION.to_string(),
+            crc32: None,
+            plays: None,
+            verdict: Verdict::NotApplicable,
+            generation: None,
+            wavs: Vec::new(),
+        }
+    }
+}
+
 /// The library a program plays: its class, and the id the instrument knows it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plays {

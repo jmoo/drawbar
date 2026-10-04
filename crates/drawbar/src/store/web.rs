@@ -487,13 +487,7 @@ async fn drive(
             (Cmd::Read { files, room }, Ok(folder), _) => {
                 vec![Event::Read(exec::read_all(folder, files, room).await)]
             }
-            (Cmd::ReadOthers { id, paths }, Ok(folder), _) => {
-                let files = exec::read_others(folder, paths).await;
-                vec![Event::ReadOthers { id, files }]
-            }
-            (cmd @ (Cmd::Read { .. } | Cmd::ReadOthers { .. }), Err(why), _) => {
-                refused(&cmd).answers(why, true)
-            }
+            (cmd @ Cmd::Read { .. }, Err(why), _) => refused(&cmd).answers(why, true),
             (cmd, _, Ok(worker)) => {
                 let refusal = refused(&cmd);
                 if let Some(fault) = heard.borrow_mut().fault.take() {

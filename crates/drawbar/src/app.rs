@@ -1270,7 +1270,6 @@ impl eframe::App for DrawbarApp {
             &mut self.log,
         );
         self.builds.poll(
-            self.store.as_mut(),
             &mut self.workspace,
             &self.browser.folders,
             &mut self.tabs,
@@ -1381,7 +1380,6 @@ impl DrawbarApp {
             queue: &self.queue,
             tags: self.browser.tags(),
             played,
-            folders: &self.browser.folders,
             builds: &self.builds,
         };
         let wants = self.document.ui(
