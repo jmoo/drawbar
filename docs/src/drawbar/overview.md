@@ -32,7 +32,8 @@ went wrong. The copy button puts the whole log on the clipboard for a bug report
 
 Click a row to select it, ⌘-click to add more, ⇧-click to select a run, and
 double-click to open. Right-click for a menu that acts on everything selected.
-F2 renames.
+F2 renames. With more than 64 rows selected, the inspector sums them up: how
+many, how large, and how many of each kind.
 
 ## Reading the Library
 

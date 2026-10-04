@@ -127,6 +127,8 @@ pub struct Shell {
     /// The zoom popover, and where its chip was last drawn, which toggles it.
     pub zoom_open: bool,
     pub zoom_chip: egui::Rect,
+    /// What the inspector's selection cards show, until the selection changes.
+    pub(crate) picked: crate::inspector::Picked,
 }
 
 impl Default for Shell {
@@ -146,6 +148,7 @@ impl Default for Shell {
             status_rect: egui::Rect::NOTHING,
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
+            picked: Default::default(),
         }
     }
 }
@@ -1574,6 +1577,48 @@ mod tests {
         assert!(
             delays[1..].iter().all(|delay| *delay >= least),
             "{delays:?}"
+        );
+    }
+
+    #[test]
+    fn a_large_selection_asks_for_its_first_assets_once_and_not_every_frame() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let saved = (1..=200)
+            .map(|id| crate::workspace::Saved {
+                id,
+                name: format!("Sound {id:03}.ne5p"),
+                path: Some(crate::store::LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
+                origin: crate::workspace::Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(1),
+                unsaved: None,
+            })
+            .collect();
+        app.workspace.restore(saved, None, &mut app.log);
+        for id in 1..=200 {
+            app.browser.check(crate::browser::Item::Local(id));
+        }
+        let mut frame = eframe::Frame::_new_kittest();
+        for _ in 0..3 {
+            testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+                app.update(ctx, &mut frame)
+            });
+        }
+        let many = crate::inspector::MANY as u64;
+        assert_eq!(app.workspace.selections.get(), 1, "taken once");
+        assert!((1..=many).all(|id| app.workspace.wanted(id)));
+        assert!(!(many + 1..=200).any(|id| app.workspace.wanted(id)));
+
+        app.browser.check(crate::browser::Item::Local(1));
+        testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+            app.update(ctx, &mut frame)
+        });
+        assert_eq!(
+            app.workspace.selections.get(),
+            2,
+            "taken again for a new selection"
         );
     }
 

@@ -1310,6 +1310,9 @@ pub struct Workspace {
     /// How many times the list has been searched end to end for an id.
     #[cfg(test)]
     pub(crate) searched: std::cell::Cell<usize>,
+    /// How many times a selection has been taken.
+    #[cfg(test)]
+    pub(crate) selections: std::cell::Cell<usize>,
     ctx: egui::Context,
     tx: Sender<Incoming>,
     rx: Receiver<Incoming>,
@@ -1343,6 +1346,9 @@ pub struct Workspace {
     /// and those asked and not yet answered.
     wanted: std::cell::RefCell<std::collections::BTreeMap<u64, Need>>,
     asked: std::collections::BTreeSet<u64>,
+    /// The selected assets read for the selection, needed whole while they stay
+    /// selected.
+    selected: std::collections::BTreeSet<u64>,
     /// Decodes running off the frame, each of a few assets, and every asset in them.
     decoding: Vec<Decode>,
     flying: std::collections::BTreeSet<u64>,
@@ -1428,6 +1434,8 @@ impl Workspace {
             kinds_taken: Default::default(),
             #[cfg(test)]
             searched: Default::default(),
+            #[cfg(test)]
+            selections: Default::default(),
             next_id: 1,
             revision: 0,
             layout: 1,
@@ -1446,6 +1454,7 @@ impl Workspace {
             hurried: Default::default(),
             wanted: Default::default(),
             asked: Default::default(),
+            selected: Default::default(),
             decoding: Vec::new(),
             flying: Default::default(),
             edits: Default::default(),
@@ -1932,10 +1941,30 @@ impl Workspace {
         self.need(id, Need::Now);
     }
 
-    /// Something needs `id` whole because it is selected: as [`Workspace::hurry`], read
-    /// after what is open or acted on.
-    pub fn selected(&self, id: u64) {
-        self.need(id, Need::Selected);
+    /// These assets are selected, in place of those selected before: as
+    /// [`Workspace::hurry`] while they stay selected, read after what is open or acted
+    /// on. One whose need was let go before its read, as when the cache remembered it or
+    /// a read in the background was refused for room, is asked for again.
+    pub fn select(&mut self, ids: impl IntoIterator<Item = u64>) {
+        #[cfg(test)]
+        self.selections.set(self.selections.get() + 1);
+        self.selected = ids.into_iter().collect();
+        for id in &self.selected {
+            self.need(*id, Need::Selected);
+        }
+    }
+
+    /// Whether a selected asset waits on a read that is neither wanted nor asked for.
+    fn unasked_selected(&self, id: u64) -> bool {
+        let Some(entity) = self.get(id) else {
+            return false;
+        };
+        let remembered = matches!(entity.verify, VerifyState::Remembered(_));
+        let reads = entity.unread() && (entity.reading() || remembered);
+        reads
+            && !self.arriving.contains_key(&id)
+            && !self.asked.contains(&id)
+            && !self.wanted.borrow().contains_key(&id)
     }
 
     /// Each of these assets is a row a list draws. A row draws what a summary remembers,
@@ -1978,6 +2007,15 @@ impl Workspace {
     /// The unread assets the library is now asked for: those needed most, a read's worth
     /// of them. A row no longer drawn is not read for it.
     pub fn take_wanted(&mut self) -> Vec<u64> {
+        let lost: Vec<u64> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|id| self.unasked_selected(*id))
+            .collect();
+        self.wanted
+            .get_mut()
+            .extend(lost.into_iter().map(|id| (id, Need::Selected)));
         let mut wanted = self.wanted.borrow_mut();
         wanted.retain(|id, need| {
             *need != Need::InView || self.get(*id).is_some_and(|entity| self.needed_now(entity))
@@ -2057,7 +2095,8 @@ impl Workspace {
 
     /// Whether something needs an unread asset not yet asked of the library.
     pub fn wants(&self) -> bool {
-        !self.wanted.borrow().is_empty()
+        let lost = self.selected.iter().any(|id| self.unasked_selected(*id));
+        lost || !self.wanted.borrow().is_empty()
     }
 
     /// The listed length of every file asked of the library and not yet answered.
@@ -2114,7 +2153,7 @@ impl Workspace {
     /// [`Workspace::hurry`].
     fn needed_now(&self, entity: &LocalEntity) -> bool {
         let seen = entity.seen.get();
-        seen > 0 && seen + 1 >= self.frame
+        (seen > 0 && seen + 1 >= self.frame) || self.selected.contains(&entity.id)
     }
 
     /// The frame something last needed this asset in, 0 for never, and how many bytes
@@ -2154,15 +2193,18 @@ impl Workspace {
 
     /// Give an unread asset what a read of its file found before, so it draws as it did
     /// once read without being read. Nothing for an asset read since, or one that could
-    /// not be read. A read wanted only for its row is no longer asked for; something
-    /// that needs it whole asks again.
+    /// not be read. A read wanted only for its row is no longer asked for; one needed
+    /// whole stays wanted.
     pub fn remember(&mut self, id: u64, summary: Summary) {
         let Some(entity) = self.get_mut(id) else {
             return;
         };
         if entity.unread() && entity.reading() {
             entity.know(summary);
-            self.wanted.get_mut().remove(&id);
+            let wanted = self.wanted.get_mut();
+            if wanted.get(&id) == Some(&Need::InView) {
+                wanted.remove(&id);
+            }
             self.revision += 1;
         }
     }
@@ -3248,6 +3290,7 @@ impl Workspace {
         self.hurried.get_mut().retain(|id| held(*id));
         self.wanted.get_mut().retain(|id, _| held(*id));
         self.asked.retain(|id| held(*id));
+        self.selected.retain(|id| held(*id));
         if self.checking.as_ref().is_some_and(|check| !held(check.id)) {
             self.checking = None;
         }
@@ -4535,7 +4578,7 @@ mod tests {
         let mut workspace = Workspace::new(egui::Context::default());
         workspace.restore(unread_assets(100, 1), None, &mut Log::default());
         workspace.in_view(1..=60);
-        workspace.selected(70);
+        workspace.select([70]);
         workspace.hurry(80);
         workspace.in_view([80]);
 
@@ -4549,6 +4592,38 @@ mod tests {
         );
         assert_eq!(workspace.take_wanted(), rows[READ.0..]);
         assert!(!workspace.wants());
+    }
+
+    #[test]
+    fn a_selected_asset_stays_wanted_until_it_is_read() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        workspace.restore(unread_assets(3, 1), None, &mut log);
+        let made = workspace.create(Fresh::Program, &mut log).unwrap();
+        let summary = Summary::of(workspace.get(made).unwrap()).unwrap();
+        workspace.select([1, 2]);
+        workspace.in_view([3]);
+
+        workspace.remember(1, summary.clone());
+        workspace.remember(3, summary);
+        assert_eq!(workspace.take_wanted(), [1, 2], "remembered or not");
+        assert!(!workspace.wanted(3), "a row drawn from what is remembered");
+
+        workspace.unasked(2);
+        assert!(workspace.wants(), "a read refused for room");
+        assert_eq!(workspace.take_wanted(), [2]);
+
+        for _ in 0..3 {
+            workspace.poll(&mut log);
+        }
+        let entity = workspace.get(1).unwrap();
+        assert!(
+            workspace.needed_now(entity),
+            "needed while it stays selected"
+        );
+        workspace.select([]);
+        let entity = workspace.get(1).unwrap();
+        assert!(!workspace.needed_now(entity));
     }
 
     #[test]
@@ -4568,7 +4643,7 @@ mod tests {
         let mut log = Log::default();
         workspace.restore(unread_assets(10, 1), None, &mut log);
         workspace.in_view(1..=5);
-        workspace.selected(9);
+        workspace.select([9]);
         workspace.poll(&mut log);
         workspace.in_view(4..=8);
         workspace.poll(&mut log);
