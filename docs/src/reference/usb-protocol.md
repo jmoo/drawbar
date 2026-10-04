@@ -49,7 +49,8 @@ path.
 The instrument does not overwrite an occupied program, set list, sample or piano
 slot in place, so a write there deletes the occupant first. drawbar and `nord`
 both read the occupant back before the delete and write it back if the new write
-fails. `nord` reads an occupant of over 1 MiB of body straight into its rescue
+fails. Both read it straight into a file synced before the delete, so a process
+that dies with the slot empty leaves the occupant on disk. `nord` writes its rescue
 file in the working directory, `nord-rescued-<bank>-<slot>.<tag>`, and deletes
 that file once the slot holds what it should; drawbar's handling is under
 [Reading by range](data-model.md#reading-by-range). Live slots and settings are

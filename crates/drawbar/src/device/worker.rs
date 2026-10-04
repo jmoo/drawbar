@@ -16,7 +16,7 @@ use nord_usb::envelope;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
 use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
-use nord_usb::{op, Error, Location, ObjectClass, Session};
+use nord_usb::{op, Error, FileSink, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
 use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload, Purpose};
@@ -342,19 +342,21 @@ async fn execute<T: Transport>(
 }
 
 /// Occupants whose body is at most this many bytes, such as programs, set lists and the
-/// smaller samples, are held in memory while a write replaces them. A larger one, a piano
-/// or most samples, waits in a file ([`Scratch`]).
+/// smaller samples, are also held in memory while a write replaces them, so one that
+/// cannot be put back goes to the local list at once.
 const HELD_OCCUPANT: u32 = 1 << 20;
 
-/// What a replace keeps of a slot's occupant until the new object has landed.
-enum Backup {
-    Held(Vec<u8>),
-    Kept(Kept),
+/// What a replace keeps of a slot's occupant until the new object has landed: a file
+/// from [`Scratch`], named as its rescue, and the bytes as well where they are held.
+struct Backup {
+    kept: Kept,
+    held: Option<Vec<u8>>,
 }
 
-/// Read the occupant `info` describes so it can be put back: into memory when it is small,
-/// and otherwise into a new file from `scratch`, a transfer chunk at a time. A read that
-/// fails leaves no file behind.
+/// Read the occupant `info` describes into a new file from `scratch`, and close it, so it
+/// is on disk before anything is deleted: a small one through memory, which it is held
+/// in, and a larger one a transfer chunk at a time. A read that fails leaves no file
+/// behind.
 async fn back_up<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     scratch: &Scratch,
@@ -362,27 +364,36 @@ async fn back_up<T: Transport>(
     gone: &mut bool,
 ) -> Result<Backup, String> {
     let at = info.location;
-    if info.body_len <= HELD_OCCUPANT {
-        return op::read_program(s, at)
-            .await
-            .map(Backup::Held)
-            .map_err(spoil(gone, Some(at)));
-    }
     let mut kept = scratch
         .create(&envelope::rescue_name_for(at, &info.format))
         .await
         .map_err(|e| format!("there was nowhere on this computer to keep it: {e}"))?;
-    let read = match op::read_into(s, at, &mut kept).await {
-        Ok(_) => kept.close().await.map_err(Error::Io),
+    let read = match info.body_len <= HELD_OCCUPANT {
+        true => hold(s, at, &mut kept).await.map(Some),
+        false => op::read_into(s, at, &mut kept).await.map(|_| None),
+    };
+    let read = match read {
+        Ok(held) => kept.close().await.map(|()| held).map_err(Error::Io),
         Err(e) => Err(e),
     };
     match read {
-        Ok(()) => Ok(Backup::Kept(kept)),
+        Ok(held) => Ok(Backup { kept, held }),
         Err(e) => {
             let _ = kept.remove().await;
             Err(spoil(gone, Some(at))(e))
         }
     }
+}
+
+/// Read the object at `at` into memory and write it to `kept`.
+async fn hold<T: Transport>(
+    s: &mut Session<'_, T, ReadWrite>,
+    at: Location,
+    kept: &mut Kept,
+) -> Result<Vec<u8>, Error> {
+    let bytes = op::read_program(s, at).await?;
+    kept.write_at(0, &bytes).await?;
+    Ok(bytes)
 }
 
 /// Put a backup back into its slot.
@@ -394,10 +405,10 @@ async fn restore<T: Transport>(
     name: &str,
     timestamp: u32,
 ) -> Result<(), Error> {
-    match backup {
-        Backup::Held(bytes) => op::write(s, unit, at, bytes, name, timestamp).await,
-        Backup::Kept(kept) => {
-            let mut file = kept.source().await?;
+    match &backup.held {
+        Some(bytes) => op::write(s, unit, at, bytes, name, timestamp).await,
+        None => {
+            let mut file = backup.kept.source().await?;
             op::write_from(s, unit, at, &mut file, name, timestamp).await
         }
     }
@@ -406,7 +417,7 @@ async fn restore<T: Transport>(
 /// Let a backup go once the slot holds what it should. A file that cannot be deleted is
 /// said, and left.
 async fn discard(backup: Option<Backup>, emit: &Emit) {
-    if let Some(Backup::Kept(kept)) = backup {
+    if let Some(Backup { kept, .. }) = backup {
         let place = kept.place();
         if let Err(e) = kept.remove().await {
             emit.send(DeviceEvent::Note(format!(
@@ -416,16 +427,18 @@ async fn discard(backup: Option<Backup>, emit: &Emit) {
     }
 }
 
-/// Hand a backup on when the slot may have lost what it held: bytes to the local list, a
-/// file left where it is. Returns where it went, in words for the failure.
+/// Hand a backup on when the slot may have lost what it held: held bytes to the local
+/// list, and the file left where it is either way, offered again on the next open. Returns
+/// where it went, in words for the failure.
 fn rescue(at: Location, backup: Backup, emit: &Emit) -> String {
-    match backup {
-        Backup::Held(bytes) => {
+    let Backup { kept, held } = backup;
+    match held {
+        Some(bytes) => {
             let name = envelope::rescue_name(at, &bytes);
             emit.send(DeviceEvent::Rescued { at, name, bytes });
             "its former contents are in the local list as a rescued entity. Put it back".into()
         }
-        Backup::Kept(kept) => {
+        None => {
             let place = kept.place();
             emit.send(DeviceEvent::Kept {
                 at,
@@ -470,9 +483,9 @@ fn stopped(stop: Stop, undo: &mut Option<Undo>) -> String {
 /// Replace a slot inside the caller's session. The caller checks the address against
 /// the geometry first; this sends frames.
 ///
-/// ⚠️ The occupant is read back first, into memory or into a file from `scratch`
-/// ([`HELD_OCCUPANT`]). If the write then fails, it is handed back in [`Stop::Undo`], to be
-/// put back once this session has closed.
+/// ⚠️ The occupant is read back first, into a file from `scratch` that is on disk before
+/// the delete ([`back_up`]). If the write then fails, it is handed back in [`Stop::Undo`],
+/// to be put back once this session has closed.
 #[allow(clippy::too_many_arguments)]
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
@@ -1277,6 +1290,9 @@ mod wire_tests {
         /// What every occupied slot reports holding: its body's length and format tag.
         /// A read of it answers [`occupant_byte`]s.
         occupant: (u32, &'static str),
+        /// A folder whose files are taken down, by name, when the first delete is heard.
+        watched: Option<std::path::PathBuf>,
+        at_delete: Option<Vec<(String, Vec<u8>)>>,
     }
 
     /// The Electro 5's bank division, which a default Puppet uses.
@@ -1311,7 +1327,16 @@ mod wire_tests {
                 data: nord_format::crc::Crc32Stream::new(),
                 data_len: 0,
                 occupant: (121, "ne5p"),
+                watched: None,
+                at_delete: None,
             }
+        }
+
+        /// Takes down what `dir` holds when it hears the first delete, in
+        /// [`Puppet::at_delete`].
+        fn watching(mut self, dir: &crate::testing::Temp) -> Puppet {
+            self.watched = Some(dir.0.clone());
+            self
         }
 
         /// Every occupied slot holds a body of `len` bytes, as a file tagged `format`.
@@ -1608,9 +1633,20 @@ mod wire_tests {
                     Message::new(msg.service, msg.subsystem, msg.command + 1, args).encode(),
                 );
             }
-            self.deaf |= self.hangs_up_on_delete
-                && matches!(msg.service, Service::Program)
-                && msg.command == cmd::DELETE;
+            let delete = matches!(msg.service, Service::Program) && msg.command == cmd::DELETE;
+            self.deaf |= self.hangs_up_on_delete && delete;
+            if let (true, Some(dir), None) = (delete, &self.watched, &self.at_delete) {
+                let mut held: Vec<_> = std::fs::read_dir(dir)
+                    .expect("the watched folder")
+                    .map(|entry| {
+                        let path = entry.expect("an entry").path();
+                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        (name, std::fs::read(&path).expect("a file reads"))
+                    })
+                    .collect();
+                held.sort();
+                self.at_delete = Some(held);
+            }
             let mut msg = msg;
             if msg.command == cmd::WRITE_DATA && matches!(msg.service, Service::Program) {
                 // The address, the offset and the length, then the chunk.
@@ -1645,11 +1681,13 @@ mod wire_tests {
         workspace.get(id).expect("just made").bytes.to_vec()
     }
 
+    /// [`drive_keeping`], keeping occupants in a folder of the test's own.
     fn drive(puppet: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {
-        drive_keeping(puppet, cmd, &Scratch::default())
+        let dir = crate::testing::Temp::new();
+        drive_keeping(puppet, cmd, &scratch_in(&dir))
     }
 
-    /// [`drive`], keeping an occupant too large to hold in `scratch`.
+    /// Run `cmd`, keeping a replaced occupant in `scratch`.
     fn drive_keeping(
         puppet: &mut Puppet,
         cmd: DeviceCmd,
@@ -1879,6 +1917,37 @@ mod wire_tests {
             "one refusal is one failure: {:?}",
             failures(&said)
         );
+    }
+
+    /// ⚠️ From the delete until the write lands, the slot is empty. A process that dies
+    /// there runs no restore and hands nothing on, so the occupant, however small, must
+    /// already be a whole file on disk when the delete is sent, and gone once the write
+    /// lands.
+    #[test]
+    fn a_program_is_on_disk_before_its_slot_is_emptied() {
+        let at = Location { bank: 0, slot: 3 };
+        let dir = crate::testing::Temp::new();
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).watching(&dir);
+        let (flow, _) = drive_keeping(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                payload: Payload::Bytes(a_program()),
+            },
+            &scratch_in(&dir),
+        );
+        assert!(flow == Flow::Continue);
+
+        let held = device.at_delete.clone().expect("a delete was sent");
+        let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["nord-rescued-1-4.ne5p"]);
+        let (len, format) = device.occupant;
+        let occupant = envelope::wrap(format, at, OCCUPANT_VERSION, &occupant_body(len)).unwrap();
+        assert!(held[0].1 == occupant, "the file is the occupant's");
+        assert_eq!(dir.names(""), Vec::<String>::new(), "let go once written");
     }
 
     #[test]
