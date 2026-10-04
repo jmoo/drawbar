@@ -828,7 +828,10 @@ impl eframe::App for DrawbarApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.room = Room::of(ctx);
         #[cfg(target_arch = "wasm32")]
-        crate::telemetry::visit(!crate::shell::too_small(ctx.screen_rect().size()));
+        crate::telemetry::visit(
+            !crate::shell::too_small(ctx.screen_rect().size()),
+            self.device.usb(),
+        );
         if crate::shell::too_small(ctx.screen_rect().size()) {
             self.gated(ctx, frame);
             return;

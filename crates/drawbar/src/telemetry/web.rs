@@ -174,8 +174,8 @@ pub fn install() {
 }
 
 /// Report this page load, once. `fits` is whether the window is large enough for the
-/// app.
-pub fn visit(fits: bool) {
+/// app, `webusb` whether the browser can reach an instrument.
+pub fn visit(fits: bool, webusb: bool) {
     if VISITED.with(|visited| visited.replace(true)) || sharing() != Sharing::On {
         return;
     }
@@ -193,7 +193,7 @@ pub fn visit(fits: bool) {
         navigation: navigation(&window),
         first_day,
         first_month,
-        webusb: crate::about::web::has_usb(),
+        webusb,
         fits,
         referrer: referrer(&window),
         language: language(navigator.language().as_deref()),

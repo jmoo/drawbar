@@ -18,7 +18,7 @@ use crate::workspace::Workspace;
 mod agent;
 mod crates;
 #[cfg(target_arch = "wasm32")]
-pub(crate) mod web;
+mod web;
 
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";

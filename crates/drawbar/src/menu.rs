@@ -682,7 +682,7 @@ impl DrawbarApp {
             #[cfg(target_arch = "wasm32")]
             Command::ReportProblem => {
                 self.report = Some(crate::report::Report::problem(
-                    &self.device.state,
+                    &self.device,
                     &self.workspace,
                     self.store.as_ref(),
                 ))
@@ -690,7 +690,7 @@ impl DrawbarApp {
             #[cfg(target_arch = "wasm32")]
             Command::SendFeedback => {
                 self.report = Some(crate::report::Report::feedback(
-                    &self.device.state,
+                    &self.device,
                     &self.workspace,
                     self.store.as_ref(),
                 ))

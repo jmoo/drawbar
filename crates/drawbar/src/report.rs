@@ -8,9 +8,10 @@ use std::rc::Rc;
 use eframe::egui;
 
 #[cfg(target_arch = "wasm32")]
-use crate::device::DeviceState;
+use crate::device::Device;
 use crate::log::Log;
 use crate::sheet;
+#[cfg(target_arch = "wasm32")]
 use crate::store::Store;
 use crate::telemetry::{self, Undelivered};
 #[cfg(target_arch = "wasm32")]
@@ -99,17 +100,17 @@ pub struct Report {
 
 #[cfg(target_arch = "wasm32")]
 impl Report {
-    pub fn problem(device: &DeviceState, workspace: &Workspace, store: Option<&Store>) -> Report {
+    pub fn problem(device: &Device, workspace: &Workspace, store: Option<&Store>) -> Report {
         Report::new(Kind::Problem, device, workspace, store)
     }
 
-    pub fn feedback(device: &DeviceState, workspace: &Workspace, store: Option<&Store>) -> Report {
+    pub fn feedback(device: &Device, workspace: &Workspace, store: Option<&Store>) -> Report {
         Report::new(Kind::Feedback, device, workspace, store)
     }
 
     fn new(
         kind: Kind,
-        device: &DeviceState,
+        device: &Device,
         workspace: &Workspace,
         store: Option<&Store>,
     ) -> Report {
