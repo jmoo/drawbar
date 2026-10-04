@@ -3370,7 +3370,7 @@ mod tests {
             .map(|at| crate::store::LibPath::parse(at).unwrap())
             .into();
         let said = open.painted(Vec::new());
-        let build = testing::where_(&said, header::BUILD).center();
+        let build = testing::where_(&said, project::BUILD).center();
         assert!(
             !open.wants(Vec::new()).build,
             "nothing asked before the click"
