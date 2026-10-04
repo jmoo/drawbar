@@ -293,7 +293,7 @@ fn print_json(ui: &Ui, report: &[Status]) {
 }
 
 /// Turn the instrument's bare status code into something actionable.
-fn explain(e: nord_usb::Error, at: Location) -> String {
+pub(crate) fn explain(e: nord_usb::Error, at: Location) -> String {
     match e {
         nord_usb::Error::DeviceStatus(usb_op::VACANT) => {
             format!("{} is empty", shown(at))
@@ -329,7 +329,7 @@ fn explain_pair(e: nord_usb::Error, from: Location, to: Location) -> String {
 /// Turn a refusal from the enumeration walk into something actionable.
 ///
 /// There is no slot to name: the failing command is the walk itself.
-fn explain_walk(e: nord_usb::Error) -> String {
+pub(crate) fn explain_walk(e: nord_usb::Error) -> String {
     match e {
         nord_usb::Error::DeviceStatus(usb_op::ENUMERATION_DISABLED) => {
             "the instrument refused the enumeration request as malformed (status 0x11). \
@@ -355,7 +355,7 @@ pub fn set_recording(path: Option<PathBuf>) {
 ///
 /// A [`UsbTransport`] provides both. This trait lets [`send`], the one path that holds a
 /// slot's only copy, be driven by a script as well as by an instrument.
-trait Recorded {
+pub(crate) trait Recorded {
     fn mark_intent(&mut self, intent: &str);
     fn mark_expect(&mut self, e: &nord_usb::Error);
     fn finish_recording(&mut self) -> nord_usb::Result<()>;
@@ -407,7 +407,7 @@ impl Recorded for UsbTransport {
 /// A recording that lost frames is reported once the transaction has closed, so a script
 /// is never silently short. The transaction's own failure takes precedence, because that
 /// is what the user asked about.
-fn transact<T: Transport + Recorded, R>(
+pub(crate) fn transact<T: Transport + Recorded, R>(
     device: &mut Device<T>,
     intent: impl std::fmt::Display,
     run: impl FnOnce(&mut Device<T>) -> nord_usb::Result<R>,
@@ -437,7 +437,7 @@ fn read_at<T: Transport + Recorded, R>(
     )
 }
 
-fn open_usb() -> Result<Device<UsbTransport>, String> {
+pub(crate) fn open_usb() -> Result<Device<UsbTransport>, String> {
     let transport = UsbTransport::open_first().map_err(|e| e.to_string())?;
     let transport = match RECORDING.get().and_then(Option::as_deref) {
         Some(path) => transport.recording_to(path).map_err(|e| e.to_string())?,
@@ -455,7 +455,7 @@ fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geo
     nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
 }
 
-fn declared_banks(
+pub(crate) fn declared_banks(
     device: &mut Device<UsbTransport>,
     class: ObjectClass,
 ) -> Result<Vec<Bank>, String> {

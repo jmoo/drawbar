@@ -379,3 +379,17 @@ fn a_plan_refuses_two_members_at_one_path() {
     ];
     assert!(Plan::new(twice, 204).is_err());
 }
+
+#[test]
+fn a_unix_time_becomes_the_utc_dos_time() {
+    // 0x5e98c95a is 2020-04-16 21:08:42 UTC.
+    assert_eq!(
+        DosTime::from_unix(0x5e98_c95a),
+        DosTime::new(2020, 4, 16, 21, 8, 42)
+    );
+    assert_eq!(
+        DosTime::from_unix(951_782_400),
+        DosTime::new(2000, 2, 29, 0, 0, 0)
+    );
+    assert_eq!(DosTime::from_unix(0), None, "1970 is before the DOS epoch");
+}
