@@ -269,6 +269,7 @@ impl Session {
             log,
             queue,
             browser,
+            builds,
             ..
         } = &mut self.bench;
         let input = crate::testing::screen(eframe::egui::vec2(1280.0, 720.0), Vec::new());
@@ -284,6 +285,8 @@ impl Session {
                         queue,
                         tags: &browser.tags,
                         played: &crate::midi::Played::default(),
+                        folders: &browser.folders,
+                        builds,
                     },
                 );
             });
@@ -6105,4 +6108,192 @@ fn a_file_listed_by_name_only_is_read_whole_when_asked() {
             "{at} is not listed by name only, and is not read: {refused:?}"
         );
     }
+}
+
+/// Write `stored` WAVs, one second each, under `root`, and a project in `Marimba/`
+/// whose zones play them in that order from C3 up.
+fn project_with_wavs(
+    root: &Temp,
+    stored: &[(&str, &str)],
+) -> nord_format::formats::nsmpproj::Project {
+    use nord_format::formats::nsmp::codec::SOURCE_RATE;
+    use nord_format::formats::nsmpproj::{NewZone, Project};
+
+    let zones: Vec<NewZone> = stored
+        .iter()
+        .zip(48u8..)
+        .map(|((named, on_disk), root_key)| {
+            let pitch = f64::from(root_key);
+            let samples: Vec<i16> = (0..SOURCE_RATE as usize)
+                .map(|i| ((i as f64 / pitch).sin() * 12_000.0) as i16)
+                .collect();
+            let wav = nord_format::wav::mono_pcm16(&samples, SOURCE_RATE).unwrap();
+            let at = root.at(on_disk);
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            fs::write(at, wav).unwrap();
+            NewZone {
+                path: named.to_string(),
+                sample_rate: SOURCE_RATE,
+                frames: u64::from(SOURCE_RATE),
+                root_key,
+            }
+        })
+        .collect();
+    let project = Project::new("Marimba", &zones, 0).unwrap();
+    let entity = nord_format::Entity::SampleProject(project.clone());
+    fs::create_dir_all(root.at("Marimba")).unwrap();
+    fs::write(
+        root.at("Marimba/Marimba.nsmpproj"),
+        nord_format::to_bytes(&entity).unwrap(),
+    )
+    .unwrap();
+    project
+}
+
+impl Session {
+    /// Build the project `id` as the app does, running the store and the builds a frame
+    /// at a time until the build is over.
+    fn build(&mut self, id: u64) {
+        self.bench.act(vec![crate::browser::Act::Build(id)]);
+        let began = std::time::Instant::now();
+        loop {
+            let Bench {
+                workspace,
+                browser,
+                queue,
+                tabs,
+                builds,
+                log,
+                ..
+            } = &mut self.bench;
+            self.store.poll(workspace, browser, queue, log);
+            builds.poll(
+                Some(&mut self.store),
+                workspace,
+                &browser.folders,
+                tabs,
+                log,
+            );
+            if !builds.running(id) {
+                return;
+            }
+            assert!(began.elapsed().as_secs() < 120, "the build never ended");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// The instrument lands beside the project, and holds what `nord sample build` writes
+/// from the same project folder.
+#[test]
+fn a_project_builds_beside_itself_into_what_the_command_line_builds() {
+    use nord_format::formats::nsmp::encode::Predictor;
+    use nord_format::formats::nsmpproj::build::{self, AudioPath, Unavailable};
+    use std::borrow::Cow;
+
+    struct Folder(std::path::PathBuf);
+    impl build::Source for Folder {
+        fn wav(
+            &self,
+            file: &nord_format::formats::nsmpproj::AudioFile,
+        ) -> Result<Cow<'_, [u8]>, Unavailable> {
+            let at = AudioPath::parse(&file.path).on_disk(&self.0);
+            Ok(Cow::Owned(fs::read(at)?))
+        }
+    }
+
+    let root = Temp::new();
+    let project = project_with_wavs(
+        &root,
+        &[
+            ("audio/c3.wav", "Marimba/audio/c3.wav"),
+            ("../Shared/c4.wav", "Shared/c4.wav"),
+        ],
+    );
+    let plan = build::plan(&project, crate::builds::LAYOUT, &Folder(root.at("Marimba"))).unwrap();
+    let expected = plan
+        .encode(&plan.name, Predictor::Minimizing, None)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+
+    let mut session = Session::open(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    let made = session.named("Marimba.nsmp");
+    assert!(
+        session.bench.tabs.holds(made),
+        "the instrument opens in a tab"
+    );
+    assert_eq!(session.said("Built “Marimba.nsmp”"), 1);
+    session.sync();
+    assert_eq!(
+        root.names("Marimba"),
+        ["Marimba.nsmp", "Marimba.nsmpproj", "audio"]
+    );
+    let built = root.read("Marimba/Marimba.nsmp");
+    assert!(
+        built == expected,
+        "the app built {} bytes, and the command line {}, not the same",
+        built.len(),
+        expected.len()
+    );
+}
+
+#[test]
+fn a_build_takes_a_free_name_beside_a_file_of_the_same_name() {
+    let root = Temp::new();
+    project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
+    fs::write(root.at("Marimba/marimba.nsmp"), b"someone else's").unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    session.sync();
+    assert_eq!(root.read("Marimba/marimba.nsmp"), b"someone else's");
+    assert!(
+        root.at("Marimba/Marimba 2.nsmp").exists(),
+        "{:?}",
+        root.names("Marimba")
+    );
+}
+
+#[test]
+fn a_build_whose_wav_went_missing_is_refused_with_its_name() {
+    let root = Temp::new();
+    project_with_wavs(
+        &root,
+        &[("c3.wav", "Marimba/c3.wav"), ("c4.wav", "Marimba/c4.wav")],
+    );
+    let mut session = Session::open(&root);
+    fs::remove_file(root.at("Marimba/c4.wav")).unwrap();
+    session.settle();
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said("“Marimba.nsmpproj” was not built: c4.wav: missing"),
+        1
+    );
+    assert_eq!(root.names("Marimba"), ["Marimba.nsmpproj", "c3.wav"]);
+}
+
+#[test]
+fn a_build_whose_wav_is_gone_by_the_time_it_is_read_is_refused_with_its_path() {
+    let root = Temp::new();
+    project_with_wavs(
+        &root,
+        &[("c3.wav", "Marimba/c3.wav"), ("c4.wav", "Marimba/c4.wav")],
+    );
+    let mut session = Session::open(&root);
+    fs::remove_file(root.at("Marimba/c4.wav")).unwrap();
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said("“Marimba.nsmpproj” was not built: Marimba/c4.wav: it is gone"),
+        1
+    );
+    assert!(session
+        .bench
+        .workspace
+        .listed()
+        .all(|entity| entity.name != "Marimba.nsmp"));
 }

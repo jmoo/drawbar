@@ -39,7 +39,7 @@ mod verbatim;
 use advanced::Advanced;
 use controls::{Ctx, Sets};
 
-pub use header::{Body, Cell, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
+pub use header::{Body, Cell, Click, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
 pub use sample::note_picker;
 
 /// The body's scroll id. See [`crate::tabs::SCROLL`].
@@ -162,6 +162,10 @@ pub struct Around<'a> {
     pub tags: &'a Tags,
     /// Keys played here strike the key map when the current face shows one.
     pub played: &'a Played,
+    /// The library's folders, and the files it lists by name only, where a project's
+    /// WAVs are looked for.
+    pub folders: &'a crate::folders::Folders,
+    pub builds: &'a crate::builds::Builds,
 }
 
 /// What a document's frame asked the app for.
@@ -173,6 +177,8 @@ pub struct Wants {
     pub load: Option<(ObjectClass, Location)>,
     /// The banner's offer to put a view of a slot on this computer.
     pub keep: bool,
+    /// The header's build of this project.
+    pub build: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
@@ -221,6 +227,8 @@ struct Opened {
     list: setlist::State,
     /// What the note editor keeps between frames: the words in its box.
     text: text::State,
+    /// Where a project's WAVs are in the library.
+    wavs: project::Located,
 }
 
 impl Opened {
@@ -256,6 +264,7 @@ impl Opened {
             fields: field::State::default(),
             list: setlist::State::default(),
             text: text::State::default(),
+            wavs: project::Located::default(),
         }
     }
 }
@@ -388,10 +397,20 @@ impl Document {
                 };
                 self.piano.begin(id, entity, &device.state, held)
             }
+            Shape::Project => match self.open.as_mut() {
+                Some(open) => header::Extras {
+                    loud: Some(project::loud(
+                        entity,
+                        open.wavs.of(entity, around.folders),
+                        around.builds.running(id),
+                    )),
+                    ..header::Extras::default()
+                },
+                None => header::Extras::default(),
+            },
             Shape::Fields
             | Shape::SetList
             | Shape::Sample
-            | Shape::Project
             | Shape::Text
             | Shape::Verbatim
             | Shape::Wav
@@ -425,6 +444,7 @@ impl Document {
         let mut wants = Wants {
             send: act.send,
             load: act.load,
+            build: act.build,
             ..Wants::default()
         };
         let mut details = None;
@@ -1603,6 +1623,8 @@ mod tests {
         log: Log,
         queue: Queue,
         tags: Tags,
+        folders: crate::folders::Folders,
+        builds: crate::builds::Builds,
         document: Document,
         id: u64,
         /// The window width, which decides how far the header collapses.
@@ -1641,6 +1663,8 @@ mod tests {
                 log: Log::default(),
                 queue: Queue::default(),
                 tags: Tags::default(),
+                folders: crate::folders::Folders::default(),
+                builds: crate::builds::Builds::default(),
                 document: Document::default(),
                 id: 0,
                 width: SCREEN.x,
@@ -1668,6 +1692,7 @@ mod tests {
                 &mut self.device,
                 &mut crate::tabs::Tabs::default(),
                 &mut self.queue,
+                &mut self.builds,
                 &mut self.log,
             );
         }
@@ -1710,11 +1735,21 @@ mod tests {
 
         /// One frame, and every shape it painted.
         fn output(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.run(events).0
+        }
+
+        /// One frame, and what the document asked the app for.
+        fn wants(&mut self, events: Vec<egui::Event>) -> Wants {
+            self.run(events).1
+        }
+
+        fn run(&mut self, events: Vec<egui::Event>) -> (egui::FullOutput, Wants) {
             let input = testing::screen(egui::vec2(self.width, SCREEN.y), events);
             let ctx = self.ctx.clone();
-            testing::run(&ctx, input, |ctx| {
+            let mut wants = Wants::default();
+            let output = testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    self.document.ui(
+                    wants = self.document.ui(
                         ui,
                         self.id,
                         &mut self.workspace,
@@ -1724,10 +1759,13 @@ mod tests {
                             queue: &self.queue,
                             tags: &self.tags,
                             played: &Played::default(),
+                            folders: &self.folders,
+                            builds: &self.builds,
                         },
                     );
                 });
-            })
+            });
+            (output, wants)
         }
 
         /// Two frames. The second runs with the caches and widget state the first left
@@ -2699,6 +2737,8 @@ mod tests {
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
+                            folders: &crate::folders::Folders::default(),
+                            builds: &crate::builds::Builds::default(),
                         },
                     );
                 });
@@ -2896,6 +2936,8 @@ mod tests {
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
+                            folders: &crate::folders::Folders::default(),
+                            builds: &crate::builds::Builds::default(),
                         },
                     );
                 });
@@ -3320,6 +3362,22 @@ mod tests {
         include_bytes!("../../../nord-format/tests/fixtures/nsmpproj/three-zones.nsmpproj").to_vec()
     }
 
+    #[test]
+    fn a_click_on_a_projects_ready_build_asks_the_app_to_build_it() {
+        let mut open = Open::file("clarinet.nsmpproj", project_bytes());
+        let wavs = ["audio/c3.wav", "audio/c4.wav", "audio/c5.wav"];
+        open.folders.others = wavs
+            .map(|at| crate::store::LibPath::parse(at).unwrap())
+            .into();
+        let said = open.painted(Vec::new());
+        let build = testing::where_(&said, header::BUILD).center();
+        assert!(
+            !open.wants(Vec::new()).build,
+            "nothing asked before the click"
+        );
+        assert!(open.wants(testing::click(build)).build);
+    }
+
     /// Basic shows the panel, and Advanced the record with the format's capability
     /// table.
     #[test]
@@ -3734,6 +3792,7 @@ mod tests {
             &mut open.device,
             &mut crate::tabs::Tabs::default(),
             &mut open.queue,
+            &mut open.builds,
             &mut open.log,
         );
         assert!(

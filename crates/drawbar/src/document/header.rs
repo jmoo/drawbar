@@ -229,8 +229,17 @@ pub struct Loud {
     pub glyph: Glyph,
     pub tone: Tone,
     pub hint: String,
-    /// The slot a click would queue a write for. `None` means a click does nothing.
-    pub send: Option<(ObjectClass, Location)>,
+    pub click: Click,
+}
+
+/// What a click on the loud action asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    Nothing,
+    /// Queue a write of this document to the slot.
+    Send(ObjectClass, Location),
+    /// Build this project into the instrument it describes.
+    Build,
 }
 
 /// What an editor adds to the header that the asset alone does not say.
@@ -291,6 +300,7 @@ pub(super) struct Clicked {
     pub revert: bool,
     pub export: bool,
     pub send: Option<SendBack>,
+    pub build: bool,
     /// The slot the panel is to play, where Load on instrument was clicked.
     pub load: Option<(ObjectClass, Location)>,
     /// The face picked, where one was.
@@ -524,12 +534,16 @@ fn right(
     )
     .on_hover_text(&loud.hint)
     .clicked();
-    if let (true, Some((class, at))) = (clicked, loud.send) {
-        act.send = Some(SendBack {
-            id: entity.id,
-            class,
-            at,
-        });
+    match (clicked, loud.click) {
+        (true, Click::Send(class, at)) => {
+            act.send = Some(SendBack {
+                id: entity.id,
+                class,
+                at,
+            })
+        }
+        (true, Click::Build) => act.build = true,
+        (false, _) | (true, Click::Nothing) => {}
     }
 
     // Right to left: Export is drawn first so that Revert sits to its left.
@@ -1197,6 +1211,9 @@ fn phrase(mark: Mark, waiting: bool) -> StateLine {
     }
 }
 
+/// What the loud action of a project is called.
+pub const BUILD: &str = "Build → .nsmp";
+
 /// The one loud action, and which of its three states it is in.
 ///
 /// ⚠️ The checks are ordered so the label gives the right reason. A project has nothing
@@ -1210,22 +1227,26 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
         glyph: Glyph::Upload,
         tone: Tone::Ready,
         hint,
-        send: entity.spot(),
+        click: entity
+            .spot()
+            .map_or(Click::Nothing, |(class, at)| Click::Send(class, at)),
     };
     let idle = |hint: String| Loud {
-        send: None,
+        click: Click::Nothing,
         tone: Tone::Idle,
         ..send(hint)
     };
 
+    // The project document offers the build once it has looked for the WAVs.
     if Kind::of(entity) == Kind::Project {
         return Loud {
-            label: "Build → .nsmp".to_string(),
+            label: BUILD.to_string(),
             short: "Build".to_string(),
             glyph: Glyph::Hammer,
             tone: Tone::Blocked,
-            hint: "building an nsmp from a project is not implemented yet".to_string(),
-            send: None,
+            hint: "drawbar has not looked for this project's WAVs, so it cannot build it yet"
+                .to_string(),
+            click: Click::Nothing,
         };
     }
     let kind = Kind::of(entity);
@@ -1259,7 +1280,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
                 folder(class),
                 room::measure(entity.size())
             ),
-            send: None,
+            click: Click::Nothing,
         };
     }
     send(format!("replaces {}", place(class, at)))
@@ -1622,7 +1643,7 @@ mod tests {
         );
         let held = action(workspace.get(id).unwrap(), &unattached.state);
         assert_eq!(held.tone, Tone::Idle, "{}", held.hint);
-        assert_eq!(held.send, None, "an idle action queues nothing");
+        assert_eq!(held.click, Click::Nothing, "an idle action queues nothing");
         assert!(
             held.hint.contains("no instrument attached"),
             "{}",
@@ -1633,7 +1654,7 @@ mod tests {
         attached.pretend_scanned(ObjectClass::SetList, 7, &["Blue Room"]);
         let held = action(workspace.get(id).unwrap(), &attached.state);
         assert_eq!(held.tone, Tone::Ready);
-        assert_eq!(held.send, Some((ObjectClass::SetList, at)));
+        assert_eq!(held.click, Click::Send(ObjectClass::SetList, at));
         assert_eq!(held.label, "Queue send");
         assert_eq!(held.short, "Send");
         assert_eq!(held.hint, "replaces Set lists 7:4");
@@ -1652,7 +1673,7 @@ mod tests {
         );
         let held = action(workspace.get(library).unwrap(), &attached.state);
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
-        assert_eq!(held.send, Some((ObjectClass::Piano, in_pianos)));
+        assert_eq!(held.click, Click::Send(ObjectClass::Piano, in_pianos));
         assert_eq!(held.hint, "replaces Pianos 1:4");
 
         // The same library against a Pianos partition with nothing left in it.
@@ -1673,22 +1694,23 @@ mod tests {
             held.label,
             format!("Won't fit · {} over", room::measure(bytes.len() as u64))
         );
-        assert_eq!(held.send, None, "a blocked action queues nothing");
+        assert_eq!(
+            held.click,
+            Click::Nothing,
+            "a blocked action queues nothing"
+        );
         assert!(held.hint.contains("free in Pianos"), "{}", held.hint);
     }
 
-    /// A project lives on this computer, so its loud action is a build. The build is
-    /// blocked because this app cannot yet write an nsmp from a project.
     #[test]
-    fn a_project_offers_a_blocked_build_in_place_of_a_send() {
+    fn the_strip_alone_blocks_a_projects_build_for_want_of_its_wavs() {
         let device = crate::device::Device::new(egui::Context::default());
         let (held, id) = opened("clarinet.nsmpproj", project_bytes());
         let loud = action(held.get(id).unwrap(), &device.state);
         assert_eq!(loud.tone, Tone::Blocked);
-        assert_eq!(loud.label, "Build → .nsmp");
-        assert_eq!(loud.short, "Build");
-        assert_eq!(loud.glyph, Glyph::Hammer);
-        assert_eq!(loud.send, None);
+        assert_eq!(loud.label, BUILD);
+        assert_eq!(loud.click, Click::Nothing);
+        assert!(loud.hint.contains("WAVs"), "{}", loud.hint);
     }
 
     #[test]
@@ -1698,7 +1720,7 @@ mod tests {
         let (held, id) = opened("Set 1.txt", b"Set 1\n".to_vec());
         let loud = action(held.get(id).unwrap(), &device.state);
         assert_eq!(loud.tone, Tone::Idle);
-        assert_eq!(loud.send, None);
+        assert_eq!(loud.click, Click::Nothing);
         assert_eq!(loud.hint, "no instrument has a folder for this note");
     }
 

@@ -166,6 +166,7 @@ pub struct DrawbarApp {
     pub(crate) shell: Shell,
     pub(crate) tabs: Tabs,
     pub(crate) document: Document,
+    pub(crate) builds: crate::builds::Builds,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
     pub(crate) zoom: Zoom,
@@ -281,6 +282,7 @@ impl DrawbarApp {
             shell: Shell::default(),
             tabs: Tabs::default(),
             document: Document::default(),
+            builds: crate::builds::Builds::default(),
             log: Log::default(),
             theme,
             zoom,
@@ -1042,6 +1044,14 @@ impl eframe::App for DrawbarApp {
             &mut self.device,
             &mut self.tabs,
             &mut self.queue,
+            &mut self.builds,
+            &mut self.log,
+        );
+        self.builds.poll(
+            self.store.as_mut(),
+            &mut self.workspace,
+            &self.browser.folders,
+            &mut self.tabs,
             &mut self.log,
         );
         #[cfg(not(target_arch = "wasm32"))]
@@ -1150,6 +1160,8 @@ impl DrawbarApp {
             queue: &self.queue,
             tags: self.browser.tags(),
             played,
+            folders: &self.browser.folders,
+            builds: &self.builds,
         };
         let wants = self.document.ui(
             ui,
@@ -1171,6 +1183,9 @@ impl DrawbarApp {
         }
         if wants.keep {
             acts.push(browser::Act::Keep(id));
+        }
+        if wants.build {
+            acts.push(browser::Act::Build(id));
         }
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));
