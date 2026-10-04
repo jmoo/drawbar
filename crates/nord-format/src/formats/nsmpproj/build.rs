@@ -319,7 +319,7 @@ pub enum Warning {
     MapGainClamped {
         gain: f64,
     },
-    /// A zone gain at or above [`WRAPPING_ZONE_GAIN`].
+    /// A zone gain of 16 or more, which overflows both of the instrument's gain fields.
     GainWraps {
         zone: usize,
         gain: f64,
