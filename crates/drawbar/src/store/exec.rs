@@ -347,6 +347,10 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             .await
             .err()
             .map(|e| Event::Failed(format!("removing the folder {path}: {e}"))),
+        Cmd::DropUnindexed => drop_unindexed(fs)
+            .await
+            .err()
+            .map(|e| Event::Failed(format!("deleting the unsaved edits: {e}"))),
     };
     if let Some(event) = answered {
         answer(event);
@@ -374,10 +378,13 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     let indexed = fs.names(DIR).await.is_ok();
     // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
     // its `.drawbar/` as that drawbar left it.
-    let (sidecar, mut writable) = match index(fs).await {
-        Ok(Some(sidecar)) => (sidecar, Ok(())),
-        Ok(None) => (Sidecar::default(), unindexed(fs).await),
-        Err(why) => (Sidecar::default(), Err(why)),
+    let (sidecar, mut writable, unindexed) = match index(fs).await {
+        Ok(Some(sidecar)) => (sidecar, Ok(()), 0),
+        Ok(None) => {
+            let copies = unindexed(fs).await;
+            (Sidecar::default(), refuse_unindexed(copies), copies)
+        }
+        Err(why) => (Sidecar::default(), Err(why), 0),
     };
     let named: BTreeMap<String, (u64, Keeps)> = sidecar
         .assets
@@ -464,6 +471,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         swept,
         stranded,
         rescued,
+        unindexed,
     })));
     let mut lister = Lister::default();
     lister.list(fs, rows, walk, answer).await;
@@ -580,18 +588,36 @@ async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
     Err(why)
 }
 
-/// Why nothing may be written where there is no index but working copies remain. Copies
-/// are found only through the index, so a sweep would take every one for a leftover, and
-/// an index put back finds them only where they were.
-async fn unindexed(fs: &impl Fs) -> Result<(), String> {
-    match fs.names(WORKING).await {
-        Ok(copies) if !copies.is_empty() => Err(format!(
+/// How many working copies there are.
+async fn unindexed(fs: &impl Fs) -> usize {
+    fs.names(WORKING).await.map_or(0, |names| names.len())
+}
+
+/// Why nothing may be written where there is no index but `copies` working copies
+/// remain. Copies are found only through the index, so a sweep would take every one for
+/// a leftover, and an index put back finds them only where they were.
+fn refuse_unindexed(copies: usize) -> Result<(), String> {
+    match copies {
+        0 => Ok(()),
+        _ => Err(format!(
             "the library's index is missing, but the unsaved edits it named are still in \
-             {WORKING}, so drawbar leaves the library as it is. Put {INDEX} back, or delete \
-             {WORKING} to open the library without them"
+             {WORKING}, so drawbar leaves the library as it is. Put {INDEX} back, or choose \
+             Open without them to delete them"
         )),
-        _ => Ok(()),
     }
+}
+
+/// Delete every working copy, unless an index has appeared to name them since.
+async fn drop_unindexed(fs: &mut impl Fs) -> Result<(), String> {
+    if fs.stat(INDEX).await.map_err(|e| e.to_string())?.is_some() {
+        return Err("the library's index is back, so its unsaved edits stay".to_string());
+    }
+    for name in fs.names(WORKING).await.unwrap_or_default() {
+        fs.remove_file(&format!("{WORKING}/{name}"))
+            .await
+            .map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Make the sidecar where there is none yet, and hold the library's lock, or say why

@@ -219,6 +219,13 @@ pub enum Act {
     /// Do this with a slot's former occupant an interrupted write left. The app runs
     /// it, not [`apply`], since it reaches the library's files.
     Rescue(crate::store::Rescue, Rescuing),
+    /// Delete the `copies` working copies a library with no index keeps, and open it
+    /// again without them: asked again first unless `confirmed`. The app runs the
+    /// confirmed one, not [`apply`], since it reaches the library's files.
+    DropUnindexed {
+        copies: usize,
+        confirmed: bool,
+    },
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -321,6 +328,7 @@ impl Act {
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
             | Act::Rescue(..)
+            | Act::DropUnindexed { .. }
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -698,11 +706,18 @@ pub fn apply(
                 .ctx()
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
+            Act::DropUnindexed {
+                copies,
+                confirmed: false,
+            } => browser.ask_drop_unindexed(copies),
             // The app takes these before the browser's acts run.
             Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
-            | Act::Rescue(..) => {}
+            | Act::Rescue(..)
+            | Act::DropUnindexed {
+                confirmed: true, ..
+            } => {}
         }
     }
 }

@@ -123,6 +123,7 @@ enum Verb {
     KeepBoth,
     TakeTheirs,
     Discard,
+    OpenWithout,
 }
 
 impl Verb {
@@ -136,6 +137,7 @@ impl Verb {
             Verb::KeepBoth => "Keep both",
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
+            Verb::OpenWithout => "Open without them…",
         }
     }
 
@@ -144,9 +146,12 @@ impl Verb {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
             Verb::Save | Verb::Keep | Verb::KeepBoth => sheet::primary(ui, Some(glyph), label),
-            Verb::Replace | Verb::Delete | Verb::Overwrite | Verb::TakeTheirs | Verb::Discard => {
-                sheet::destructive(ui, glyph, label)
-            }
+            Verb::Replace
+            | Verb::Delete
+            | Verb::Overwrite
+            | Verb::TakeTheirs
+            | Verb::Discard
+            | Verb::OpenWithout => sheet::destructive(ui, glyph, label),
         }
     }
 
@@ -155,7 +160,7 @@ impl Verb {
             Verb::Save => Glyph::Save,
             Verb::Keep => Glyph::LibraryBig,
             Verb::Replace => Glyph::Replace,
-            Verb::Delete | Verb::Discard => Glyph::Trash2,
+            Verb::Delete | Verb::Discard | Verb::OpenWithout => Glyph::Trash2,
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
@@ -767,6 +772,47 @@ impl Browser {
         });
     }
 
+    /// Say why a library whose index is missing opened read-only, keeping the `copies`
+    /// working copies it holds, and offer to open it without them. Putting the index back
+    /// is offered in words where the user can reach the library's files.
+    pub(crate) fn ask_unindexed(&mut self, copies: usize, reachable: bool) {
+        let back = match reachable {
+            true => format!(
+                " Put {} back from a backup and open the library again to get them back.",
+                crate::store::INDEX
+            ),
+            false => String::new(),
+        };
+        self.raise(Ask {
+            title: "This library lost the list of its unsaved edits".into(),
+            note: Some(format!(
+                "{} drawbar kept are still here, but the file that says which sounds they                  belong to is missing, so the library stays read-only and keeps them.{back}",
+                edits(copies)
+            )),
+            verb: Verb::OpenWithout,
+            acts: vec![Act::DropUnindexed {
+                copies,
+                confirmed: false,
+            }],
+            others: Vec::new(),
+            cancel: "Keep read-only",
+            strong: Answer::Cancel,
+        });
+    }
+
+    /// Ask before a library's `copies` working copies with no index are deleted.
+    pub(crate) fn ask_drop_unindexed(&mut self, copies: usize) {
+        self.raise(Ask::new(
+            format!("Delete {}?", edits(copies)),
+            Some("They cannot be got back, and the library opens without them.".into()),
+            Verb::Delete,
+            vec![Act::DropUnindexed {
+                copies,
+                confirmed: true,
+            }],
+        ));
+    }
+
     /// Ask before a slot's former occupant is deleted.
     pub(crate) fn ask_discard_rescue(&mut self, rescue: Rescue) {
         self.raise(Ask::new(
@@ -901,6 +947,14 @@ impl Browser {
             Verb::Delete,
             acts,
         ));
+    }
+}
+
+/// `copies` unsaved edits, in words.
+fn edits(copies: usize) -> String {
+    match copies {
+        1 => "1 unsaved edit".to_string(),
+        n => format!("{n} unsaved edits"),
     }
 }
 

@@ -93,6 +93,9 @@ struct Loading {
     /// The slots' former occupants the open found in `.drawbar/tmp/`, offered once the
     /// listing is complete.
     rescued: Vec<(String, Stat)>,
+    /// The working copies the open found with no index, asked about once the listing
+    /// is complete.
+    unindexed: usize,
     /// Each rename sent while the listing is in flight that has not failed. A part the
     /// backend gathered before it ran names what it moved where it was.
     moves: Vec<Rename>,
@@ -1291,6 +1294,7 @@ impl Store {
             swept,
             stranded,
             rescued,
+            unindexed,
         } = opened;
         if !stranded.is_empty() {
             let named: Vec<String> = stranded.iter().map(|dir| format!("“{dir}”")).collect();
@@ -1353,6 +1357,7 @@ impl Store {
             files: 0,
             swept,
             rescued,
+            unindexed,
             moves: Vec::new(),
             held: Default::default(),
         });
@@ -1647,6 +1652,10 @@ impl Store {
                 browser.ask_rescue(rescue);
             }
         }
+        if loading.unindexed > 0 {
+            let reachable = self.backend.reveal().is_some();
+            browser.ask_unindexed(loading.unindexed, reachable);
+        }
     }
 
     /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
@@ -1708,6 +1717,12 @@ impl Store {
             Rescuing::Discard => self.discard_rescue(rescue, log),
         }
         None
+    }
+
+    /// Delete the working copies of a library whose index is missing, to open it again
+    /// without them. The library must be opened again after, since it opened read-only.
+    pub fn drop_unindexed(&mut self) {
+        self.write(Cmd::DropUnindexed);
     }
 
     /// Move a rescue into the library's top level, under its own name or a free one, where

@@ -607,10 +607,18 @@ impl DrawbarApp {
     }
 
     /// Run what the user chose to do with the slots' former occupants interrupted writes
-    /// left, and pass the rest on.
+    /// left, and with the working copies of a library that lost its index, and pass the
+    /// rest on.
     fn rescue(&mut self, ctx: &egui::Context, acts: Vec<browser::Act>) -> Vec<browser::Act> {
         let mut rest = Vec::new();
         for act in acts {
+            if let browser::Act::DropUnindexed {
+                confirmed: true, ..
+            } = act
+            {
+                self.drop_unindexed(ctx);
+                continue;
+            }
             let browser::Act::Rescue(rescue, what) = act else {
                 rest.push(act);
                 continue;
@@ -630,6 +638,17 @@ impl DrawbarApp {
             }
         }
         rest
+    }
+
+    /// Delete the working copies of the open library, whose index is missing, and open it
+    /// again without them. The open library runs the deletion before it lets go.
+    fn drop_unindexed(&mut self, ctx: &egui::Context) {
+        let Some(store) = self.store.as_mut() else {
+            return;
+        };
+        store.drop_unindexed();
+        let root = store.root().to_owned();
+        self.switch_library(ctx, root);
     }
 
     /// Open the library at `root` in place of the one open now.
@@ -671,6 +690,11 @@ impl DrawbarApp {
             self.browser.ask_leave(&unkept, root);
             return;
         }
+        self.switch_library(ctx, root);
+    }
+
+    /// Let the open library go and open the one at `root`, which may be the same one.
+    fn switch_library(&mut self, ctx: &egui::Context, root: crate::store::Root) {
         if let Some(store) = self.store.take() {
             store.hand_over(
                 &mut self.workspace,

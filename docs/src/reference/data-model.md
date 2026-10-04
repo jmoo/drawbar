@@ -664,7 +664,12 @@ held for as long as the backend lives. A library opens read-only when its index
 is newer or does not read, when a working copy the index names does not read,
 when the index is missing but `working/` is not, or when another drawbar holds
 the lock. Working copies are found only through the index, so a sweep without it
-would delete every one, and an index put back finds them only where they were. A write can also find the library closed
+would delete every one, and an index put back finds them only where they were.
+Once listed, such a library asks (`Browser::ask_unindexed`): **Keep read-only**,
+or **Open without them**, which, confirmed with the number of edits it loses,
+sends `Cmd::DropUnindexed` and opens the library again. The command deletes the
+copies only while there is still no index. In the browser's private storage
+that answer is the only way to them short of clearing the site's data. A write can also find the library closed
 to it later: another drawbar took the lock first, or `.drawbar/` could not be
 made. Then the library turns read-only, every save in flight counts as unsaved
 again, and edits stay in memory. An open that fails outright keeps nothing.

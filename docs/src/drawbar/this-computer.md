@@ -96,7 +96,8 @@ bring back any you deleted.
   tab cannot tell that the desktop app has a folder open, so open a folder in
   only one of them at a time. drawbar also opens a library read-only when its
   hidden folder has lost the file that lists your unsaved edits, so they are not
-  deleted. The reason says how to get them back.
+  deleted. On the desktop, put that file back from a backup to get them back.
+  **Open without them** deletes those edits and opens the library as usual.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
 - **A write to the instrument left a file.** If drawbar stopped, or could not

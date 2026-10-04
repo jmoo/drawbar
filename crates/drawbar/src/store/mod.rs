@@ -87,7 +87,7 @@ pub fn outside_len(from: &Outside) -> Option<u64> {
 pub use cache::keep_libraries;
 pub use cache::Cache;
 pub(crate) use exec::TMP;
-pub use exec::{opens, MOST_BYTES, MOST_ENTRIES};
+pub use exec::{opens, INDEX, MOST_BYTES, MOST_ENTRIES};
 pub use mirror::{Pass, Store};
 pub use sidecar::{Keeps, Row, Sidecar, Stored, Working};
 
@@ -394,6 +394,9 @@ pub struct Opened {
     /// The slots' former occupants in `.drawbar/tmp/`, by name, where the library may be
     /// written: see [`Rescue`].
     pub rescued: Vec<(String, Stat)>,
+    /// How many working copies `.drawbar/working/` holds where there is no index, which
+    /// leaves the library read-only.
+    pub unindexed: usize,
 }
 
 /// A slot's former occupant that a write to the instrument left on this computer when
@@ -585,6 +588,9 @@ pub enum Cmd {
     RemoveFile { path: LibPath, expect: Fingerprint },
     /// Delete an empty folder. Answered only on failure.
     RemoveDir(LibPath),
+    /// Delete every working copy, where there is still no index to name any. Answered
+    /// only on failure.
+    DropUnindexed,
 }
 
 /// What a backend answers.

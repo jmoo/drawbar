@@ -515,6 +515,52 @@ fn unsaved_edits_whose_index_is_missing_are_left_for_it() {
     assert!(entity.is_unsaved());
 }
 
+/// A library whose index is missing asks about the working copies it keeps, since in the
+/// browser nothing else can reach them. Opening it without them, confirmed, deletes them,
+/// and the library opens for writing.
+#[test]
+fn a_library_without_its_index_opens_without_its_edits_when_asked() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited, log);
+    first.close();
+    fs::remove_file(root.at(".drawbar/library.ron")).unwrap();
+
+    let mut second = Session::open(&root);
+    assert!(second.store.read_only().is_some());
+    let (_, answers) = second.bench.browser.asking().expect("a question");
+    assert_eq!(answers, ["Keep read-only", "Open without them…"]);
+    let acts = second.bench.browser.answer("Open without them…");
+    second.bench.act(acts);
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Delete 1 unsaved edit?");
+    let acts = second.bench.browser.answer("Delete");
+    assert!(
+        matches!(
+            acts[..],
+            [crate::browser::Act::DropUnindexed {
+                copies: 1,
+                confirmed: true
+            }]
+        ),
+        "{acts:?}"
+    );
+    second.store.drop_unindexed();
+    second.close();
+    assert_eq!(
+        root.names(".drawbar/working"),
+        [""; 0],
+        "the copies are gone"
+    );
+
+    let third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+}
+
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
 /// check, and be refused as a write over someone else's file.
 #[test]
