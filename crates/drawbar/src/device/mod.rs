@@ -647,6 +647,18 @@ impl DeviceState {
         self.named.get(&(class.to_raw(), id)).map(String::as_str)
     }
 
+    /// The id the instrument has given a library object of this name, where it has named
+    /// exactly one so.
+    pub fn library_id(&self, class: ObjectClass, name: &str) -> Option<u32> {
+        let mut ids = self
+            .named
+            .iter()
+            .filter(|((held, _), named)| *held == class.to_raw() && named.trim() == name)
+            .map(|((_, id), _)| *id);
+        let id = ids.next()?;
+        ids.next().is_none().then_some(id)
+    }
+
     /// A scanned bank's slots, or `None` if it has not been scanned.
     pub fn bank(&self, class: ObjectClass, bank: u32) -> Option<&[Option<ProgramInfo>]> {
         self.banks.get(&(class.to_raw(), bank)).map(Vec::as_slice)

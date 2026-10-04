@@ -3,13 +3,20 @@
 
 use std::io;
 use std::ops::Range;
+use std::sync::Arc;
 
-use nord_format::bundle::archive::Directory;
+use nord_format::bundle::archive::{Directory, DosTime, Entry};
 #[cfg(target_arch = "wasm32")]
 use nord_format::bundle::archive::{Tail, TAIL_MAX};
-use nord_format::bundle::manifest;
+use nord_format::bundle::{manifest, Class, Item, Key, Plan};
+use nord_format::cbin::Header;
+use nord_format::{Entity, Program};
+use nord_usb::ObjectClass;
 
+use crate::device::DeviceState;
+use crate::ondisk::OnDisk;
 use crate::store::Outside;
+use crate::workspace::{Bytes, LocalEntity, Workspace};
 
 /// The extensions of the bundles Nord Sound Manager writes for an Electro 5.
 const EXTENSIONS: [&str; 2] = ["ne5pbundle", "ne5tbundle"];
@@ -75,6 +82,308 @@ async fn directory(from: &Outside) -> io::Result<Directory> {
         member.check_header(&header).map_err(invalid)?;
     }
     Ok(directory)
+}
+
+/// Where an exported member's bytes are.
+pub enum Body {
+    Held(Bytes),
+    Resting(Arc<OnDisk>),
+}
+
+/// A bundle laid out from assets on this computer, ready to write.
+pub struct Export {
+    /// The file name it is offered under.
+    pub name: String,
+    pub plan: Plan,
+    /// One per member of the plan, in its order.
+    pub bodies: Vec<Body>,
+    /// Assets left out, each with why.
+    pub left_out: Vec<String>,
+}
+
+/// The firmware an export claims when no instrument has said its own: the only one the
+/// specimens come from. Inferred from specimens; not confirmed on hardware.
+const FIRMWARE: u32 = 204;
+
+/// What laying out a bundle came to.
+pub enum Laid {
+    Ready(Export),
+    /// These assets, the checked ones and what they need, must be read first.
+    Read(Vec<u64>),
+}
+
+/// Lay out a bundle of `ids`, with every piano, sample and program they need that this
+/// computer holds.
+///
+/// A program names a piano or sample by an id its file does not hold, so one is found
+/// by the name the instrument gave that id. A set list names programs by slot, so one is
+/// found where exactly one program on this computer claims that slot.
+pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Result<Laid, String> {
+    let mut chosen: Vec<u64> = Vec::new();
+    let mut members: Vec<(Item, Body)> = Vec::new();
+    let mut left_out = Vec::new();
+    let mut unread = false;
+    let mut adding: Vec<u64> = ids.to_vec();
+    while !adding.is_empty() {
+        for id in adding.drain(..) {
+            if chosen.contains(&id) {
+                continue;
+            }
+            chosen.push(id);
+            let Some(entity) = workspace.get(id) else {
+                continue;
+            };
+            if entity.unread() || entity.reading() {
+                unread = true;
+                continue;
+            }
+            match member(entity, device) {
+                Some(member) => members.push(member),
+                None => left_out.push(format!("“{}” is not a file a bundle carries", entity.name)),
+            }
+        }
+        let provided = |need: &Key| members.iter().any(|(m, _)| m.provides == Some(*need));
+        adding = members
+            .iter()
+            .flat_map(|(m, _)| m.needs.iter())
+            .filter(|need| !provided(need))
+            .filter_map(|need| provider(*need, workspace, device))
+            .filter(|id| !chosen.contains(id))
+            .collect();
+    }
+    if unread {
+        return Ok(Laid::Read(chosen));
+    }
+    let firmware = device
+        .card()
+        .and_then(|card| card.firmware)
+        .map_or(FIRMWARE, u32::from);
+    let items = members.iter().map(|(item, _)| item.clone()).collect();
+    let plan = Plan::new(items, firmware).map_err(|e| e.to_string())?;
+    let mut bodies = Vec::with_capacity(plan.members.len());
+    for item in &plan.members {
+        let at = members
+            .iter()
+            .position(|(m, _)| m.path == item.path)
+            .expect("each planned member was laid out");
+        bodies.push(members.swap_remove(at).1);
+    }
+    let root = plan
+        .members
+        .iter()
+        .rev()
+        .find(|m| matches!(m.class, Class::SetList | Class::Program))
+        .or(plan.members.first())
+        .ok_or("nothing checked is a file a bundle carries")?;
+    let extension = match root.class {
+        Class::SetList => "ne5tbundle",
+        _ => "ne5pbundle",
+    };
+    let stem = root.path.rsplit('/').next().unwrap_or_default();
+    let stem = stem.rsplit_once('.').map_or(stem, |(stem, _)| stem);
+    Ok(Laid::Ready(Export {
+        name: crate::store::names::portable(&format!("{stem}.{extension}")),
+        plan,
+        bodies,
+        left_out,
+    }))
+}
+
+/// The member an asset becomes, or `None` for one an Electro 5 bundle does not carry.
+fn member(entity: &LocalEntity, device: &DeviceState) -> Option<(Item, Body)> {
+    let (header, decoded, body) = match entity.rests() {
+        Some(file) => (
+            file.index.header().clone(),
+            None,
+            Body::Resting(file.clone()),
+        ),
+        None => (
+            Header::from_prefix(&entity.bytes).ok()?,
+            entity.entity.as_deref(),
+            Body::Held(entity.bytes.clone()),
+        ),
+    };
+    let name = stem(entity);
+    let mut item = Item::of(&header, &name, decoded)?;
+    item.provides = item.provides.or_else(|| match item.class {
+        Class::Piano => device.library_id(ObjectClass::Piano, &name).map(Key::Piano),
+        Class::Sample => device
+            .library_id(ObjectClass::Sample, &name)
+            .map(Key::Sample),
+        Class::Program | Class::SetList => None,
+    });
+    Some((item, body))
+}
+
+/// What a need names, in words.
+pub fn needed(need: Key) -> String {
+    match need {
+        Key::Piano(id) => format!("the piano the instrument knows as {id:#010x}"),
+        Key::Sample(id) => format!("the sample the instrument knows as {id:#010x}"),
+        Key::Program(bank, slot) => format!(
+            "the program at {}",
+            crate::strings::shown(nord_usb::Location {
+                bank: bank.into(),
+                slot: slot.into()
+            },)
+        ),
+    }
+}
+
+/// An asset's name without the extension its file carries.
+fn stem(entity: &LocalEntity) -> String {
+    let name = entity.name.trim();
+    match name.rsplit_once('.') {
+        Some((stem, extension))
+            if crate::browser::tagged(name).is_some() && !extension.is_empty() =>
+        {
+            stem.to_string()
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// The asset on this computer that provides `need`, where exactly one does.
+fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Option<u64> {
+    let found: Vec<u64> = match need {
+        Key::Piano(id) | Key::Sample(id) => {
+            let (class, tag) = match need {
+                Key::Piano(_) => (ObjectClass::Piano, "npno"),
+                _ => (ObjectClass::Sample, "nsmp"),
+            };
+            let name = device.dependency_name(class, id)?.trim().to_string();
+            workspace
+                .entities()
+                .iter()
+                .filter(|e| stem(e) == name && e.format_tag() == tag)
+                .map(|e| e.id)
+                .collect()
+        }
+        Key::Program(bank, slot) => workspace
+            .entities()
+            .iter()
+            .filter(|e| match e.entity.as_deref() {
+                Some(Entity::Program(Program::Electro5(file))) => {
+                    file.header.slot() == (bank, slot)
+                }
+                _ => false,
+            })
+            .map(|e| e.id)
+            .collect(),
+    };
+    match found.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// The entries of `export`'s members, then its manifest's, each stamped `modified`.
+async fn entries(export: &Export, manifest: &[u8], modified: DosTime) -> io::Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    for (item, body) in export.plan.members.iter().zip(&export.bodies) {
+        let (len, crc) = match body {
+            Body::Held(bytes) => (bytes.len() as u64, nord_format::crc::crc32(bytes)),
+            Body::Resting(file) => (file.len, file.crc_now().await?),
+        };
+        entries.push(entry(&item.path, len, crc, modified)?);
+    }
+    let crc = nord_format::crc::crc32(manifest);
+    entries.push(entry(manifest::PATH, manifest.len() as u64, crc, modified)?);
+    Ok(entries)
+}
+
+fn entry(path: &str, len: u64, crc: u32, modified: DosTime) -> io::Result<Entry> {
+    let size = u32::try_from(len).map_err(|_| invalid(format!("{path} is over 4 GiB")))?;
+    Ok(Entry::new(path.to_string(), size, crc, modified))
+}
+
+fn now() -> DosTime {
+    crate::work::unix_seconds()
+        .and_then(|seconds| DosTime::from_unix(seconds.into()))
+        .unwrap_or_default()
+}
+
+/// Ask where to save `export`, and write it there. Returns what to say once it is
+/// written.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn write(export: Export) -> io::Result<String> {
+    let Some(handle) = rfd::AsyncFileDialog::new()
+        .set_file_name(&export.name)
+        .save_file()
+        .await
+    else {
+        return Ok(format!("{}: save canceled", export.name));
+    };
+    write_to(&export, handle.path()).await?;
+    Ok(format!("wrote {}", handle.file_name()))
+}
+
+/// Write `export` to `path`, each member streamed from where it is, through a sibling
+/// file renamed over `path` once it is whole.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn write_to(export: &Export, path: &std::path::Path) -> io::Result<()> {
+    use nord_format::bundle::archive::Writer;
+    use std::io::Write as _;
+
+    let manifest = export.plan.manifest.to_bytes();
+    let entries = entries(export, &manifest, now()).await?;
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = std::path::PathBuf::from(temp);
+    let wrote = (|| -> io::Result<()> {
+        let mut writer = Writer::new(io::BufWriter::new(std::fs::File::create(&temp)?));
+        let mut entries = entries.into_iter();
+        for body in &export.bodies {
+            let entry = entries.next().expect("an entry per member");
+            match body {
+                Body::Held(bytes) => writer.member(entry, &mut &bytes[..]),
+                Body::Resting(file) => writer.member(entry, &mut file.reader()),
+            }
+            .map_err(invalid)?;
+        }
+        let entry = entries.next().expect("an entry for the manifest");
+        writer.member(entry, &mut &manifest[..]).map_err(invalid)?;
+        writer.finish(&[]).map_err(invalid)?.flush()?;
+        std::fs::rename(&temp, path)
+    })();
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    wrote
+}
+
+/// Hand `export` to the browser's downloads as one file assembled from parts: each
+/// member a file the library rests in or bytes this tab holds, between the headers and
+/// directory written here, so no member passes through this tab whole.
+#[cfg(target_arch = "wasm32")]
+pub async fn write(export: Export) -> io::Result<String> {
+    use nord_format::bundle::archive::Frame;
+
+    let manifest = export.plan.manifest.to_bytes();
+    let entries = entries(&export, &manifest, now()).await?;
+    let frame = Frame::new(&entries, &[]).map_err(invalid)?;
+    let parts = js_sys::Array::new();
+    let bytes = |bytes: &[u8]| js_sys::Uint8Array::from(bytes);
+    for (header, body) in frame.headers.iter().zip(&export.bodies) {
+        parts.push(&bytes(header));
+        match body {
+            Body::Held(held) => parts.push(&bytes(held)),
+            Body::Resting(file) => {
+                let file = file
+                    .snapshot()
+                    .ok_or_else(|| io::Error::other("drawbar no longer reads a member's file"))?;
+                parts.push(&file)
+            }
+        };
+    }
+    parts.push(&bytes(frame.headers.last().expect("the manifest's header")));
+    parts.push(&bytes(&manifest));
+    parts.push(&bytes(&frame.trailer));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
+        .map_err(|e| io::Error::other(format!("{e:?}")))?;
+    crate::workspace::hand_over(&export.name, &blob)
+        .map_err(|e| io::Error::other(format!("{e:?}")))?;
+    Ok(format!("downloaded {}", export.name))
 }
 
 #[cfg(test)]

@@ -3382,6 +3382,72 @@ fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
     );
 }
 
+/// A set list exports with the one program on this computer that claims a slot it
+/// plays, and a checked sample instrument streams in from the file it rests in. A program
+/// claiming a slot the set list does not play is left out.
+#[test]
+fn a_set_list_exports_with_its_program_and_streams_a_resting_sample() {
+    use nord_format::bundle::archive::{copy_member, Directory};
+    use nord_format::formats::ne5;
+    use nord_format::{Entity, Program, Song};
+
+    let root = Temp::new();
+    let program_at = |slot: u16| {
+        let file = ne5::program::new((0, slot).try_into().unwrap());
+        nord_format::to_bytes(&Entity::Program(Program::Electro5(file))).unwrap()
+    };
+    let one = (0, 1).try_into().unwrap();
+    let song = ne5::song::new((0, 0).try_into().unwrap(), 1, [one; 4]).unwrap();
+    let song = nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).unwrap();
+    let sample = crate::testing::sample_bytes();
+    fs::write(root.at("First.ne5p"), program_at(1)).unwrap();
+    fs::write(root.at("Other.ne5p"), program_at(2)).unwrap();
+    fs::write(root.at("Sunday.ne5t"), &song).unwrap();
+    fs::write(root.at("Marimba.nsmp"), &sample).unwrap();
+    let session = Session::open(&root);
+    let ids = [session.named("Sunday.ne5t"), session.named("Marimba.nsmp")];
+
+    let laid = crate::bundle::lay_out(&ids, &session.bench.workspace, &session.bench.device.state);
+    let Ok(crate::bundle::Laid::Ready(export)) = laid else {
+        panic!("the bundle was not laid out");
+    };
+    assert_eq!(export.name, "Sunday.ne5tbundle");
+    let out = root.at("Sunday.ne5tbundle");
+    nord_usb::block_on(crate::bundle::write_to(&export, &out)).unwrap();
+
+    let mut file = fs::File::open(&out).unwrap();
+    let directory = Directory::read_from(&mut file).unwrap();
+    let members: Vec<(String, Vec<u8>)> = directory
+        .members
+        .iter()
+        .map(|member| {
+            let mut bytes = Vec::new();
+            copy_member(&mut file, member, &mut bytes).unwrap();
+            (member.entry.name.clone(), bytes)
+        })
+        .collect();
+    let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Samp Lib/Samp Lib/Marimba.nsmp",
+            "Program/Bank 1/First.ne5p",
+            "Set List/Set List 1/Sunday.ne5t",
+            "meta.xml",
+        ]
+    );
+    assert_eq!(members[0].1, sample);
+    assert_eq!(members[1].1, program_at(1));
+    assert_eq!(members[2].1, song);
+    let manifest = String::from_utf8(members[3].1.clone()).unwrap();
+    assert!(
+        manifest.contains(
+            r#"<file name="Set List/Set List 1/Sunday.ne5t" depCnt="1" dep0="Program/Bank 1/First.ne5p"/>"#
+        ),
+        "{manifest}"
+    );
+}
+
 /// An object the instrument was read into a file for lands at the top of the library
 /// under its slot's name, past one already there, and the file it was read into goes.
 #[test]

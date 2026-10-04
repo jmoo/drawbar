@@ -183,7 +183,9 @@ fn bulk_label(
 ) -> String {
     match action {
         Bulk::Queue => act::fits(checked, workspace, state).label(),
-        Bulk::Copy | Bulk::Export | Bulk::Tag | Bulk::Delete => action.label().to_string(),
+        Bulk::Copy | Bulk::Export | Bulk::Bundle | Bulk::Tag | Bulk::Delete => {
+            action.label().to_string()
+        }
     }
 }
 
