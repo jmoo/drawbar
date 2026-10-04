@@ -21,6 +21,8 @@ use std::ops::Range;
 /// [`cbin::inspect`] verifies it in one streaming pass.
 #[derive(Debug)]
 pub struct Index {
+    /// Where the file starts in the stream it was read from.
+    start: u64,
     library: Library<'static>,
     audio: Vec<Range<u64>>,
 }
@@ -29,6 +31,7 @@ impl Index {
     /// Read the index of the `npno` file that starts at the reader's position and runs
     /// to the end of the stream.
     pub fn read_from(r: &mut (impl Read + Seek)) -> Result<Index, Error> {
+        let start = r.stream_position()?;
         let (header, body) = cbin::locate_body(r, FORMAT)?;
         let body_len = body
             .end
@@ -53,7 +56,27 @@ impl Index {
         for (stroke, range) in library.strokes.iter_mut().zip(&audio) {
             stroke.from = Some(range.clone());
         }
-        Ok(Index { library, audio })
+        Ok(Index {
+            start,
+            library,
+            audio,
+        })
+    }
+
+    /// Whether the file this index was read from still holds the header, prefix and
+    /// stroke directory it read, read again from the same position of `r`, a few
+    /// kilobytes. Before a stream reads strokes by the index's ranges, this says the
+    /// audio there is the audio the records describe.
+    ///
+    /// A file that no longer reads as a piano library is refused as [`Index::read_from`]
+    /// refuses it.
+    ///
+    /// ⚠️ The audio itself is not compared. A file changed in place with its directory
+    /// and its length kept reads as matching.
+    pub fn still_matches(&self, r: &mut (impl Read + Seek)) -> Result<bool, Error> {
+        r.seek(std::io::SeekFrom::Start(self.start))?;
+        let now = Index::read_from(r)?;
+        Ok(now.library == self.library && now.audio == self.audio)
     }
 
     /// The header, the prefix and every stroke's record, as a parse holds them.
@@ -116,7 +139,8 @@ fn offset(body: &Range<u64>, at: usize) -> Result<u64, Error> {
 mod tests {
     use super::super::synthetic::{take, Build};
     use super::super::{
-        codec, put16, put32, AudioSource, Bank, RECORD, REC_BLOCKS, REC_START, STROKE_COUNT_AT,
+        codec, put16, put32, AudioSource, Bank, GAIN_AT, RECORD, REC_BLOCKS, REC_ID, REC_START,
+        STROKE_COUNT_AT,
     };
     use super::*;
     use crate::cbin::Generation;
@@ -226,6 +250,50 @@ mod tests {
                 "stroke {i}"
             );
         }
+    }
+
+    /// `bytes` after seven bytes of something else.
+    fn led(bytes: &[u8]) -> Cursor<Vec<u8>> {
+        let mut stream = b"leading".to_vec();
+        stream.extend_from_slice(bytes);
+        Cursor::new(stream)
+    }
+
+    #[test]
+    fn an_index_matches_its_file_until_its_prefix_or_directory_changes() {
+        let build = Build::new();
+        let bytes = build.bytes().unwrap();
+        let mut r = led(&bytes);
+        r.set_position(7);
+        let index = Index::read_from(&mut r).unwrap();
+        r.set_position(0);
+        assert!(
+            index.still_matches(&mut r).unwrap(),
+            "the file it was read from"
+        );
+
+        let mut audio = bytes.clone();
+        let last = index.audio_ranges().last().unwrap().start as usize - 7;
+        audio[last] ^= 0xff;
+        assert!(
+            index.still_matches(&mut led(&audio)).unwrap(),
+            "the audio is not compared"
+        );
+
+        let gain = edited(&build, |body| body[GAIN_AT] ^= 0x01);
+        assert!(!index.still_matches(&mut led(&gain)).unwrap(), "the prefix");
+        let id = edited(&build, |body| body[DIRECTORY_AT + REC_ID] ^= 0x01);
+        assert!(
+            !index.still_matches(&mut led(&id)).unwrap(),
+            "the directory"
+        );
+
+        let cut = &bytes[..body_start() + DIRECTORY_AT + 5];
+        let error = index.still_matches(&mut led(cut)).unwrap_err().to_string();
+        assert!(
+            error.contains("ends inside the stroke directory"),
+            "{error}"
+        );
     }
 
     #[test]
