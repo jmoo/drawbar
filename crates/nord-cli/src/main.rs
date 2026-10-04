@@ -19,6 +19,7 @@
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own.
 
+mod bundle;
 mod device;
 mod edit;
 mod editors;
@@ -94,6 +95,13 @@ enum Command {
     /// have no command of their own: Stage programs and presets, and Sample Editor
     /// projects. `--fields` lists what the file offers.
     Edit(file_edit::FileEditArgs),
+
+    /// Nord Sound Manager bundles (`.ne5pbundle`, `.ne5tbundle`): programs or a set list
+    /// in one file with the pianos and samples they play.
+    Bundle {
+        #[command(subcommand)]
+        action: BundleAction,
+    },
 
     /// The connected instrument: what is attached, and what it holds.
     Device {
@@ -414,6 +422,54 @@ enum LiveAction {
     Edit(EditArgs),
 }
 
+#[derive(Subcommand)]
+enum BundleAction {
+    /// Read programs or set lists off the instrument into a bundle, with every program a
+    /// set list plays and every piano and sample those programs play. Read-only.
+    Get {
+        /// What the slots hold.
+        #[arg(value_enum)]
+        root: BundleRoot,
+
+        /// Slots to bundle, e.g. 7:4 (repeatable).
+        #[arg(value_name = "BANK:SLOT", required = true)]
+        slots: Vec<String>,
+
+        /// The bundle to write.
+        #[arg(short, long, value_name = "FILE")]
+        out: PathBuf,
+    },
+
+    /// Write a folder's files into a bundle, each at its path under the folder.
+    ///
+    /// A `meta.xml` at the top of the folder, as `unpack` leaves one, is kept as the
+    /// manifest. Without one, the manifest lists which set lists play which programs.
+    Pack {
+        /// The folder to pack.
+        dir: PathBuf,
+
+        /// The bundle to write.
+        #[arg(short, long, value_name = "FILE")]
+        out: PathBuf,
+    },
+
+    /// Write every member of a bundle into a folder, at its path in the bundle.
+    Unpack {
+        /// The bundle to read.
+        bundle: PathBuf,
+
+        /// The folder to write. Defaults to the bundle's name without its extension.
+        #[arg(short, long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum BundleRoot {
+    Program,
+    Setlist,
+}
+
 /// `nord settings`: read or edit the singleton at 1:1.
 #[derive(Subcommand)]
 enum SettingsAction {
@@ -655,6 +711,17 @@ fn main() -> ExitCode {
         Command::Inspect { files, raw } => inspect(&ui, &files, raw),
         Command::Verify { files } => verify(&ui, &files),
         Command::Edit(args) => file_edit::run(&ui, args),
+        Command::Bundle { action } => match action {
+            BundleAction::Get { root, slots, out } => {
+                let class = match root {
+                    BundleRoot::Program => ObjectClass::Program,
+                    BundleRoot::Setlist => ObjectClass::SetList,
+                };
+                slot::parse_all(&slots).and_then(|slots| bundle::get(&ui, class, slots, &out))
+            }
+            BundleAction::Pack { dir, out } => bundle::pack(&ui, &dir, &out),
+            BundleAction::Unpack { bundle, out } => bundle::unpack(&ui, &bundle, out),
+        },
         Command::Device { action } => match action {
             DeviceAction::Status { replay, json } => {
                 let source = match replay {

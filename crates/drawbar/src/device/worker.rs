@@ -20,7 +20,7 @@ use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload, Purpose};
+use super::{DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -302,6 +302,16 @@ async fn execute<T: Transport>(
             });
             Ok(Some(note))
         }
+
+        DeviceCmd::CopyAll { class, slots } => {
+            copy_all(device, class, &slots, scratch, emit, fault).await
+        }
+
+        DeviceCmd::Gather {
+            roots,
+            also,
+            request,
+        } => gather(device, &roots, &also, request, scratch, emit, fault).await,
 
         DeviceCmd::Put {
             id,
@@ -1146,6 +1156,147 @@ async fn walk<T: Transport, C>(
     }
 }
 
+/// Copy `slots` of `class` to this computer in one session: each small object as bytes,
+/// and each larger one into a file from `scratch`, a transfer chunk at a time.
+async fn copy_all<T: Transport>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+    slots: &[Location],
+    scratch: &Scratch,
+    emit: &Emit,
+    fault: &mut Fault,
+) -> Result<Option<String>, String> {
+    let mut copied = 0;
+    let read = device
+        .read(class, async |s| {
+            for &at in slots {
+                let info = match op::info(s, at).await {
+                    Ok(info) => info,
+                    Err(Error::DeviceStatus(op::VACANT)) => {
+                        let why = Purpose::Copy;
+                        emit.send(DeviceEvent::Vacant { class, at, why });
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let name = entity_name(&info);
+                if info.body_len <= HELD_OCCUPANT {
+                    let bytes = op::read_program(s, at).await?;
+                    let origin = Origin::Device { class, at };
+                    let why = Purpose::Copy;
+                    emit.send(DeviceEvent::Got {
+                        name,
+                        origin,
+                        bytes,
+                        why,
+                    });
+                } else {
+                    let file = fetch(s, class, at, &info, scratch).await?;
+                    emit.send(DeviceEvent::Fetched(file));
+                }
+                copied += 1;
+            }
+            Ok(())
+        })
+        .await;
+    read.map_err(spoil(fault, None))?;
+    Ok(Some(format!(
+        "copied {copied} of {} from {} in one session",
+        slots.len(),
+        class.label()
+    )))
+}
+
+/// Walk `roots` to everything a bundle of them holds, then copy it all to this computer.
+async fn gather<T: Transport>(
+    device: &mut Device<T>,
+    roots: &[(ObjectClass, Location)],
+    also: &[(ObjectClass, Location)],
+    request: u64,
+    scratch: &Scratch,
+    emit: &Emit,
+    fault: &mut Fault,
+) -> Result<Option<String>, String> {
+    let closure = nord_usb::bundle::closure(device, roots)
+        .await
+        .map_err(spoil(fault, None))?;
+    for (class, at, deps) in &closure.objects {
+        let (class, at, deps) = (*class, *at, deps.clone());
+        emit.send(DeviceEvent::Deps { class, at, deps });
+    }
+    let mut slots: Vec<(ObjectClass, Location)> = closure.slots().collect();
+    for slot in also {
+        if !slots.contains(slot) {
+            slots.push(*slot);
+        }
+    }
+    let unfound = closure
+        .unfound
+        .iter()
+        .map(|row| format!("{} “{}”", row.class.label(), row.name.trim_end()))
+        .collect();
+    emit.send(DeviceEvent::Gathered {
+        request,
+        slots: slots.clone(),
+        unfound,
+    });
+    for class in [
+        ObjectClass::SetList,
+        ObjectClass::Program,
+        ObjectClass::Piano,
+        ObjectClass::Sample,
+    ] {
+        let of: Vec<Location> = slots
+            .iter()
+            .filter(|(held, _)| *held == class)
+            .map(|(_, at)| *at)
+            .collect();
+        if !of.is_empty() {
+            copy_all(device, class, &of, scratch, emit, fault).await?;
+        }
+    }
+    Ok(Some(format!(
+        "gathered {} objects for a bundle",
+        slots.len()
+    )))
+}
+
+/// Read the object `info` describes into a new file from `scratch`. A read that fails
+/// leaves no file behind.
+async fn fetch<T: Transport, C>(
+    s: &mut Session<'_, T, C>,
+    class: ObjectClass,
+    at: Location,
+    info: &ProgramInfo,
+    scratch: &Scratch,
+) -> Result<Fetched, Error> {
+    let extension = info.format.trim_end_matches('\0');
+    let name = format!("fetched-{}-{}.{extension}", at.bank, at.slot);
+    let mut kept = scratch.create(&name).await.map_err(Error::Io)?;
+    let read = match op::read_into(s, at, &mut kept).await {
+        Ok(_) => kept.close().await.map_err(Error::Io),
+        Err(e) => Err(e),
+    };
+    let file = match read {
+        Ok(()) => kept.outside().await.map_err(Error::Io),
+        Err(e) => Err(e),
+    };
+    match file {
+        Ok(file) => Ok(Fetched {
+            class,
+            at,
+            name: entity_name(info),
+            tag: extension.to_string(),
+            len: u64::from(info.body_len) + nord_format::cbin::Generation::V1.body_start(),
+            file,
+        }),
+        Err(e) => {
+            let _ = kept.remove().await;
+            Err(e)
+        }
+    }
+}
+
 /// Read a slot's metadata and a complete CBIN file of what it holds.
 async fn read_object<T: Transport>(
     device: &mut Device<T>,
@@ -1245,6 +1396,7 @@ mod tests {
                 format: "ne5p".into(),
                 version: 4,
                 crc32: None,
+                modified: None,
                 name: name.into(),
             })
         };
@@ -1266,6 +1418,7 @@ mod tests {
                 format: "ne5p".into(),
                 version: 4,
                 crc32: None,
+                modified: None,
                 name: "Africa Split".into(),
             },
         )];

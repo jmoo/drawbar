@@ -64,6 +64,24 @@ them every few seconds, so after a crash you may lose the last few seconds.
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.
 
+## Bundles
+
+A bundle (`.ne5pbundle` or `.ne5tbundle`) is the file Nord Sound Manager uses to
+carry programs, or a set list, together with the pianos and samples they play.
+Drop one on the window, or open it with **File ▸ Open…**, and drawbar unpacks it
+into a new folder named after the bundle. The bundle itself is not kept.
+
+To make one, check the sounds to bundle and choose **Export as bundle…**. They
+can be on this computer, on the instrument, or both. drawbar adds what they
+need: the programs a set list plays, and the pianos and samples a program plays.
+Sounds on the instrument are copied to this computer first. In the browser the
+bundle arrives in your downloads.
+
+A program's file names its piano and sample by a number only the instrument can
+put a name to. A piano or sample already on this computer is added when the
+instrument has named it, which happens when drawbar copies the program from its
+slot. The activity log lists anything the bundle had to leave out.
+
 ## Changes made outside drawbar
 
 You can rename, move, edit and delete your files in Finder or any other app.
