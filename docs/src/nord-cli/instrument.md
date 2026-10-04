@@ -57,6 +57,9 @@ write and the put-back both fail, or `nord` is stopped partway, the file stays,
 and `put` takes it straight back. Live slots and settings are the exception: the
 instrument overwrites those in place.
 
+`--rescue-dir <DIR>`, or `NORD_RESCUE_DIR`, saves the old sound in another
+folder. Without a folder it can write to, `nord` leaves the slot alone.
+
 `put` checks that the file is intact before it touches the instrument.
 
 Every command closes its session even when it fails, so an error cannot leave the

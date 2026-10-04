@@ -350,6 +350,29 @@ pub fn set_recording(path: Option<PathBuf>) {
     let _ = RECORDING.set(path);
 }
 
+/// Where `--rescue-dir` points, for the writes this process makes.
+static RESCUE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Set once, from the parsed global flag, before any command runs.
+pub fn set_rescue_dir(dir: Option<PathBuf>) {
+    let _ = RESCUE_DIR.set(dir);
+}
+
+/// Where a write keeps the occupant it replaces: `--rescue-dir`, else the folder
+/// `NORD_RESCUE_DIR` names, else the working directory. Never the system's temporary
+/// folder, which may be emptied under a slot's only copy.
+fn rescue_dir() -> PathBuf {
+    rescue_dir_of(
+        RESCUE_DIR.get().cloned().flatten(),
+        std::env::var_os("NORD_RESCUE_DIR"),
+    )
+}
+
+fn rescue_dir_of(flag: Option<PathBuf>, env: Option<std::ffi::OsString>) -> PathBuf {
+    flag.or_else(|| env.filter(|dir| !dir.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
 /// What a transaction needs from its transport beyond moving frames: the `--record`
 /// bracket, and the product string the acceptance table reads.
 ///
@@ -854,7 +877,7 @@ pub fn send(
     send_with(
         ui,
         &mut open_usb()?,
-        &std::env::current_dir().unwrap_or_default(),
+        &rescue_dir(),
         file,
         at,
         class,
@@ -1123,7 +1146,8 @@ fn back_up<T: Transport + Recorded>(
 ) -> Result<Backup, String> {
     let at = info.location;
     let intent = format!("{} read {}", noun(class), addr(at));
-    let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))?;
+    let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))
+        .map_err(|e| format!("{e}; run from a folder you can write to, or pass --rescue-dir"))?;
     ui.note(format!(
         "reading {} into {} to put back if the write fails",
         shown(at),
@@ -2547,6 +2571,55 @@ mod tests {
             assert!(err.contains("left alone"), "{err}");
             let sent = device.transport().replay.sent();
             assert!(!sent.contains(&delete), "the DELETE was never sent");
+        }
+
+        /// A put that has nowhere to keep the occupant touches nothing, and says how to give
+        /// it somewhere.
+        #[cfg(unix)]
+        #[test]
+        fn a_put_with_nowhere_to_keep_the_occupant_names_the_remedy() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = crate::edit::tests::scratch("send-unwritable");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            if std::fs::write(dir.join("probe"), b"").is_ok() {
+                // Permissions do not bind this user.
+                return;
+            }
+            let put = recorded();
+            let delete = put[4][5].frame().expect("the DELETE").to_vec();
+            let mut device = Device::new(ReplayTransport::new(put.concat()));
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert!(err.contains("left alone"), "{err}");
+            assert!(err.contains("pass --rescue-dir"), "{err}");
+            assert!(!device.transport().sent().contains(&delete));
+        }
+
+        /// `--rescue-dir` wins over `NORD_RESCUE_DIR`, which wins over the working
+        /// directory; an empty one names nothing.
+        #[test]
+        fn the_rescue_folder_is_the_flag_then_the_environment_then_the_working_directory() {
+            let flag = Some(PathBuf::from("/flag"));
+            let env = Some(std::ffi::OsString::from("/env"));
+            assert_eq!(rescue_dir_of(flag, env.clone()), PathBuf::from("/flag"));
+            assert_eq!(rescue_dir_of(None, env), PathBuf::from("/env"));
+            let cwd = std::env::current_dir().unwrap();
+            assert_eq!(rescue_dir_of(None, Some("".into())), cwd);
+            assert_eq!(rescue_dir_of(None, None), cwd);
         }
 
         /// A status from the delete step is the instrument declining before the `DELETE`
