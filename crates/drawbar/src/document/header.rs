@@ -283,7 +283,9 @@ pub(super) fn ui(
 ) -> Clicked {
     let width = ui.available_width();
     let learned = ui.id().with(("least widths", entity.id));
-    let mut least: [f32; 3] = ui.data(|data| data.get_temp(learned)).unwrap_or(BREAKPOINTS);
+    let mut least: [f32; 3] = ui
+        .data(|data| data.get_temp(learned))
+        .unwrap_or(BREAKPOINTS);
     let stage = staged(width, &least);
     let cells = identity(entity, facts.tags);
     let visuals = ui.visuals().clone();

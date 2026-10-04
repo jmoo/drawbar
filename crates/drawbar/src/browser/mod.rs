@@ -361,21 +361,23 @@ impl Browser {
     /// Open the section and branches that hold `item`'s row, so a rename asked for
     /// outside the tree has a row to type in.
     fn reveal(&mut self, item: Item) {
-        let branches = match item {
-            Item::Local(id) => vec![Some(Branch::Computer), self.folders.holding(id).map(Branch::Folder)],
-            Item::Folder(_) => vec![Some(Branch::Computer)],
-            Item::Slot { class, at } => vec![
-                Some(Branch::Instrument),
-                Some(Branch::Class(class.to_raw())),
-                Some(tree::bank_branch(class, at.user_bank())),
-            ],
+        let branches: Vec<Branch> = match item {
             Item::Tag(_) => {
                 self.sections.tags = true;
                 return;
             }
+            Item::Local(id) => std::iter::once(Branch::Computer)
+                .chain(self.folders.holding(id).map(Branch::Folder))
+                .collect(),
+            Item::Folder(_) => vec![Branch::Computer],
+            Item::Slot { class, at } => vec![
+                Branch::Instrument,
+                Branch::Class(class.to_raw()),
+                tree::bank_branch(class, at.user_bank()),
+            ],
         };
         self.sections.places = true;
-        self.open.extend(branches.into_iter().flatten());
+        self.open.extend(branches);
     }
 
     /// Apply a click on a row to the selection.

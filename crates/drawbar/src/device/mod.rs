@@ -2039,7 +2039,11 @@ mod tests {
             Some("397/400")
         );
         assert_eq!(
-            device.state.scan.progress(class).and_then(|walk| walk.total),
+            device
+                .state
+                .scan
+                .progress(class)
+                .and_then(|walk| walk.total),
             Some(8)
         );
     }

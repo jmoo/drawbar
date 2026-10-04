@@ -282,7 +282,9 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::Kind;
     use crate::testing::{self, context};
+    use nord_usb::ObjectClass;
 
     #[test]
     fn an_unsaved_row_writes_its_name_with_a_star() {
@@ -323,7 +325,7 @@ mod tests {
                             false,
                             &Cells {
                                 indent: 36.0,
-                                glyph: Some(super::super::Kind::from_class(nord_usb::ObjectClass::Program).glyph()),
+                                glyph: Some(Kind::from_class(ObjectClass::Program).glyph()),
                                 at: Some(at.into()),
                                 name,
                                 loaded,

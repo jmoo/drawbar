@@ -1276,7 +1276,10 @@ mod tests {
             let _ = frame(Vec::new());
         }
         let (_, said) = frame(Vec::new());
-        assert!(box_of(&said, "Connect an instrument…").is_none(), "{said:?}");
+        assert!(
+            box_of(&said, "Connect an instrument…").is_none(),
+            "{said:?}"
+        );
         let at = ctx
             .read_response(card_id("Nord Electro 5"))
             .expect("a card names the instrument")

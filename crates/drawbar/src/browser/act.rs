@@ -718,7 +718,10 @@ pub fn apply(
             Act::Unqueue(id) => {
                 queue.forget(id);
                 if let Some(entity) = workspace.get(id) {
-                    log.say(format!("“{}” is no longer waiting to be sent.", entity.name));
+                    log.say(format!(
+                        "“{}” is no longer waiting to be sent.",
+                        entity.name
+                    ));
                 }
             }
             Act::ClearQueue => {
@@ -3314,11 +3317,13 @@ mod tests {
         bench.device.pretend(crate::device::DeviceEvent::Finished);
         poll(&mut bench);
         bench.device.pump();
-        bench.device.pretend(crate::device::DeviceEvent::BankScanned {
-            class,
-            bank: 7,
-            slots: vec![None],
-        });
+        bench
+            .device
+            .pretend(crate::device::DeviceEvent::BankScanned {
+                class,
+                bank: 7,
+                slots: vec![None],
+            });
         poll(&mut bench);
         assert_eq!(dot(&bench), None);
     }
