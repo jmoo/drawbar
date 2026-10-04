@@ -956,6 +956,9 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        for kind in event.faults() {
+            crate::telemetry::fault("library", kind);
+        }
         match event {
             Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, log),
             Event::Listed { part, ran } => self.listed(part, ran, workspace, browser, log),

@@ -28,7 +28,7 @@ Every row carries `version`, the drawbar version. The rows are:
 | `visit` | drawbar opens | `navigation` (a new page or a reload), `first_day` and `first_month` (whether this browser has visited today or this month), `webusb` (whether the browser can connect an instrument), `fits` (whether the window is large enough), `referrer` (the website that linked here, without the page), `language` (the browser's language, such as `de`) |
 | `start_failed` | drawbar could not load | `step` (downloading or starting), `error` (the kind of error) |
 | `panic` | drawbar crashed | `location` (the line of drawbar's code that crashed), `model` and `firmware` of the connected instrument |
-| `error` | something went wrong outside an instrument operation | `domain` (such as `usb` or `audio`), `kind` (such as `lost`), `model`, `firmware` |
+| `error` | something went wrong outside an instrument operation | `domain` (such as `usb`, `audio` or `library`), `kind` (such as `lost`), `model`, `firmware` |
 | `op` | an instrument operation failed, or one you asked for finished | `op` (such as `put`), `class` (programs, samples and so on, as a number), `outcome` (`ok` or the kind of failure), `took` (under one second, ten seconds, a minute, or longer), `model`, `firmware` |
 
 The server adds `browser` (such as `chrome 141`) and `os` (such as `macos`), which it
