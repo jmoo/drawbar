@@ -1262,6 +1262,24 @@ impl<const LIBRARY: u8> PartialEq<u32> for LibraryRefOf<LIBRARY> {
     }
 }
 
+/// A [`LibraryRefOf`] with its library as a value: an id, and the library that
+/// resolves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LibraryRef {
+    pub library: Library,
+    /// The stored id. Zero is "nothing referenced", as [`LibraryRefOf::id`] says.
+    pub id: u32,
+}
+
+impl<const LIBRARY: u8> From<LibraryRefOf<LIBRARY>> for LibraryRef {
+    fn from(reference: LibraryRefOf<LIBRARY>) -> LibraryRef {
+        LibraryRef {
+            library: LibraryRefOf::<LIBRARY>::LIBRARY,
+            id: reference.id(),
+        }
+    }
+}
+
 /// An id into the piano library (`.npno`).
 pub type PianoRef = LibraryRefOf<{ Library::Piano.code() }>;
 

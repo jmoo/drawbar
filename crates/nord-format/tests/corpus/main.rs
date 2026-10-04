@@ -139,6 +139,39 @@ fn said_by_its_format(entity: &Entity) -> Result<(), String> {
     Ok(())
 }
 
+/// What a program plays is every piano and sample its registry references, in field
+/// order, a zero id left out.
+fn plays_what_its_registry_references(entity: &Entity) -> Result<(), String> {
+    use nord_format::components::LibraryRef;
+    use nord_format::fields::{ControlKind, Library};
+
+    let Some(plays) = entity.plays() else {
+        return Ok(());
+    };
+    let fields = registry::fields(entity).ok_or("plays, with no registry")?;
+    let mut referenced = Vec::new();
+    for field in fields {
+        let ControlKind::Reference(library @ (Library::Piano | Library::Sample)) =
+            field.spec.control
+        else {
+            continue;
+        };
+        let id = match field.value.strip_prefix("0x") {
+            Some(hex) => u32::from_str_radix(hex, 16),
+            None => field.value.parse(),
+        }
+        .context(format!("{} = {:?}", field.path, field.value))?;
+        if id != 0 {
+            referenced.push(LibraryRef { library, id });
+        }
+    }
+    ensure!(
+        plays == referenced,
+        "plays {plays:?}, and the registry references {referenced:?}"
+    );
+    Ok(())
+}
+
 fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let bytes = fs::read(path).map_err(|e| Failed::from(format!("read: {e}")))?;
 
@@ -165,6 +198,7 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     let entity = nord_format::from_stream(&mut Cursor::new(&bytes))
         .map_err(|e| Failed::from(format!("parse: {e}")))?;
     said_by_its_format(&entity).map_err(Failed::from)?;
+    plays_what_its_registry_references(&entity).map_err(Failed::from)?;
 
     // The archive layer does not re-encode, so for a bundle the check is the
     // parse, which reads and verifies every member.

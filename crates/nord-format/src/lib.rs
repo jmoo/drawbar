@@ -691,6 +691,40 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Entity, Error> {
 mod registry_tests {
     use super::*;
 
+    #[test]
+    fn an_electro_5_program_plays_its_piano_then_its_sample_and_not_a_zero_id() {
+        use crate::bits::Packed;
+        use crate::components::{LibraryRef, PianoRef, SampleRef};
+        use crate::fields::Library;
+
+        let plays = |piano: u32, sample: u32| {
+            let made = || {
+                let mut body = ne5::program::new(Default::default());
+                body.piano_panel.id = PianoRef::from_bits(piano.into()).unwrap();
+                body.sample_panel.id = SampleRef::from_bits(sample.into()).unwrap();
+                body
+            };
+            let program = Entity::Program(Program::Electro5(made())).plays();
+            let live = Entity::Live(Live::Electro5(made())).plays();
+            assert_eq!(live, program, "a live slot is a program");
+            program
+        };
+        let piano = LibraryRef {
+            library: Library::Piano,
+            id: 0xdead_beef,
+        };
+        let sample = LibraryRef {
+            library: Library::Sample,
+            id: 0x5a,
+        };
+        assert_eq!(plays(0, 0), Some(vec![]));
+        assert_eq!(plays(0, 0x5a), Some(vec![sample]));
+        assert_eq!(plays(0xdead_beef, 0x5a), Some(vec![piano, sample]));
+
+        let settings = Entity::Settings(Settings::Electro5(ne5::settings::new()));
+        assert_eq!(settings.plays(), None);
+    }
+
     /// A registry read and written through the entity lands on the same field the
     /// body's own accessors reach, so neither consumer needs to name the body type.
     #[test]
@@ -1000,6 +1034,27 @@ impl Entity {
     /// reading and setting.
     pub fn registry_mut(&mut self) -> Option<&mut dyn fields::Registry> {
         with_registry!(self, &mut)
+    }
+
+    /// The piano and the sample a program plays, piano first, by the ids the instrument
+    /// knows them by: the ids its USB `DEPENDENCIES` reply gives for the program's slot.
+    /// A reference holding zero names nothing, and is left out.
+    ///
+    /// `None` for a body whose dependencies this crate does not read: every body but the
+    /// Electro 5 program and live slot.
+    pub fn plays(&self) -> Option<Vec<components::LibraryRef>> {
+        let (piano, sample) = match self {
+            Entity::Program(Program::Electro5(body)) | Entity::Live(Live::Electro5(body)) => {
+                (body.piano_panel.id.into(), body.sample_panel.id.into())
+            }
+            _ => return None,
+        };
+        Some(
+            [piano, sample]
+                .into_iter()
+                .filter(|reference: &components::LibraryRef| reference.id != 0)
+                .collect(),
+        )
     }
 
     /// Which variant this is.
