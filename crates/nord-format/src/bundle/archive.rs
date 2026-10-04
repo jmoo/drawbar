@@ -147,9 +147,7 @@ impl DosTime {
             date: (year - 1980) << 9 | u16::from(month) << 5 | u16::from(day),
         })
     }
-}
 
-impl DosTime {
     /// The pair for a time in seconds since the Unix epoch, read as UTC, or `None`
     /// outside 1980 to 2107. NSM stamps local time, which this has no zone to give.
     pub fn from_unix(seconds: u64) -> Option<DosTime> {
@@ -271,6 +269,17 @@ impl Entry {
         })
     }
 
+    /// A check of the member's bytes against this entry as they stream past.
+    pub fn check(&self) -> Check {
+        Check {
+            name: self.name.clone(),
+            crc32: self.crc32,
+            size: self.size.into(),
+            seen: 0,
+            stream: Crc32Stream::new(),
+        }
+    }
+
     /// The bytes before the member's own: its local header, name and extra field.
     fn local_bytes(&self) -> Result<Vec<u8>, ParseError> {
         let mut out = self.local()?.to_bytes().to_vec();
@@ -323,13 +332,7 @@ impl Member {
 
     /// A check of the member's bytes as they stream past.
     pub fn check(&self) -> Check {
-        Check {
-            name: self.entry.name.clone(),
-            crc32: self.entry.crc32,
-            size: self.entry.size.into(),
-            seen: 0,
-            stream: Crc32Stream::new(),
-        }
+        self.entry.check()
     }
 }
 
@@ -624,14 +627,7 @@ impl<W: Write> Writer<W> {
             .map_err(|_| refuse(format!("a member at {}", self.at), "a 4 GiB archive"))?;
         let header = entry.local_bytes()?;
         self.put(&header)?;
-        self.open = Some(
-            Member {
-                entry: entry.clone(),
-                header: 0..0,
-                body: 0..0,
-            }
-            .check(),
-        );
+        self.open = Some(entry.check());
         self.written.push((entry, offset));
         Ok(())
     }
