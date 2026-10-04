@@ -241,7 +241,7 @@ pub async fn run(fs: &mut impl Fs, cmd: Cmd, answer: &mut impl FnMut(Event)) {
 }
 
 /// Whether a command writes, and so first takes the library.
-fn writes(cmd: &Cmd) -> bool {
+pub fn writes(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
         Cmd::Open

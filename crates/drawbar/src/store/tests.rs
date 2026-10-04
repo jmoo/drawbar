@@ -436,6 +436,53 @@ fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
     );
 }
 
+/// Reading loses nothing: a library listed, rescanned or read lazily, with no edit, never
+/// has a tab ask to stay open, and an edit then does.
+#[test]
+fn a_library_only_read_is_never_losing() {
+    let root = Temp::new();
+    programs(&root, 300);
+    let mut session = Session::opening(&root);
+    let losing = |session: &Session| session.store.losing(&session.bench.workspace);
+    assert!(!losing(&session), "while listing");
+    session.listed_whole();
+
+    session.store.rescan();
+    assert!(!losing(&session), "while rescanning");
+    while session.store.scanning() {
+        assert!(session.next(), "the rescan answered");
+    }
+
+    let unread: Vec<u64> = session
+        .bench
+        .workspace
+        .listed()
+        .filter(|entity| entity.unread())
+        .map(|entity| entity.id)
+        .take(50)
+        .collect();
+    assert!(!unread.is_empty(), "files are left to read");
+    for id in &unread {
+        session.bench.workspace.hurry(*id);
+    }
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.ask(workspace, browser, queue, log);
+    assert!(!losing(&session), "while reading");
+    session.read(&unread);
+
+    let id = unread[0];
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    assert!(losing(&session), "an unsaved edit");
+}
+
 /// ⚠️ Working copies are found only through the index. One gone missing, deleted or lost
 /// to a sync, leaves copies no index names, which a sweep would take for leftovers: the
 /// library opens read-only and leaves them, and the edit comes back with the index.

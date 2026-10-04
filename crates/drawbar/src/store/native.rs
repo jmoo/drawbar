@@ -81,7 +81,7 @@ pub struct Backend {
     worker: Option<JoinHandle<()>>,
     /// Set once the library is let go, so a listing still running stops.
     stop: Arc<AtomicBool>,
-    /// Commands sent and not yet run through.
+    /// Commands that write ([`exec::writes`]) sent and not yet run through.
     unrun: Arc<AtomicUsize>,
 }
 
@@ -137,14 +137,15 @@ impl Backend {
 
     pub fn send(&mut self, cmd: Cmd) {
         if let Some(tx) = &self.tx {
-            self.unrun.fetch_add(1, Ordering::AcqRel);
+            let writes = usize::from(exec::writes(&cmd));
+            self.unrun.fetch_add(writes, Ordering::AcqRel);
             if tx.send(cmd).is_err() {
-                self.unrun.fetch_sub(1, Ordering::AcqRel);
+                self.unrun.fetch_sub(writes, Ordering::AcqRel);
             }
         }
     }
 
-    /// Whether a command sent has not run through yet.
+    /// Whether a command that writes has been sent and not run through yet.
     pub fn busy(&self) -> bool {
         self.unrun.load(Ordering::Acquire) != 0
     }
@@ -189,8 +190,8 @@ struct Disk {
     commands: Option<Receiver<Cmd>>,
     /// A command a listing took and put back, to run next.
     held: Option<Cmd>,
-    /// Commands taken from `commands` since the last one taken by [`Disk::next`] began.
-    /// They have all run once it returns.
+    /// Commands that write taken from `commands` since the last one taken by
+    /// [`Disk::next`] began. They have all run once it returns.
     taken: usize,
 }
 
@@ -202,7 +203,7 @@ impl Disk {
             .held
             .take()
             .or_else(|| self.commands.as_ref()?.recv().ok());
-        self.taken += usize::from(cmd.is_some());
+        self.taken += usize::from(cmd.as_ref().is_some_and(exec::writes));
         cmd
     }
 
@@ -436,13 +437,13 @@ impl Fs for Disk {
             .held
             .take()
             .or_else(|| self.commands.as_ref()?.try_recv().ok());
-        self.taken += usize::from(cmd.is_some());
+        self.taken += usize::from(cmd.as_ref().is_some_and(exec::writes));
         cmd
     }
 
     fn hold(&mut self, cmd: Cmd) {
         debug_assert!(self.held.is_none(), "one command is put back at a time");
-        self.taken = self.taken.saturating_sub(1);
+        self.taken = self.taken.saturating_sub(usize::from(exec::writes(&cmd)));
         self.held = Some(cmd);
     }
 

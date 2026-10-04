@@ -114,8 +114,8 @@ struct Inbox {
     wake: Option<Function>,
     /// No command follows those queued; the task ends once they have run.
     closed: bool,
-    /// A command taken from `cmds` is running.
-    running: bool,
+    /// A command that writes ([`exec::writes`]) taken from `cmds` is running.
+    writing: bool,
 }
 
 impl Inbox {
@@ -225,10 +225,10 @@ impl Backend {
         self.events.borrow_mut().pop_front()
     }
 
-    /// Whether a command sent has not run through yet.
+    /// Whether a command that writes has been sent and not run through yet.
     pub fn busy(&self) -> bool {
         let inbox = self.inbox.borrow();
-        inbox.running || !inbox.cmds.is_empty()
+        inbox.writing || inbox.cmds.iter().any(exec::writes)
     }
 
     /// The next answer already here. The page cannot wait for one that is not.
@@ -265,7 +265,7 @@ async fn drive(
             events.borrow_mut().push_back(event);
             ctx.request_repaint();
         };
-        inbox.borrow_mut().running = true;
+        inbox.borrow_mut().writing = exec::writes(&cmd);
         match &mut fs {
             Ok(fs) => {
                 exec::run(fs, cmd, &mut answer).await;
@@ -273,7 +273,7 @@ async fn drive(
             }
             Err(why) => answer(refused(cmd, why)),
         }
-        inbox.borrow_mut().running = false;
+        inbox.borrow_mut().writing = false;
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }
@@ -1114,7 +1114,11 @@ impl Fs for Folder {
     }
 
     fn waiting(&mut self) -> Option<Cmd> {
-        self.inbox.borrow_mut().cmds.pop_front()
+        let mut inbox = self.inbox.borrow_mut();
+        let cmd = inbox.cmds.pop_front();
+        // A write run inside the command running counts until that command ends.
+        inbox.writing |= cmd.as_ref().is_some_and(exec::writes);
+        cmd
     }
 
     fn hold(&mut self, cmd: Cmd) {
