@@ -108,7 +108,7 @@ pub async fn read_others(fs: &impl Fs, paths: Vec<LibPath>) -> Contents {
 async fn read_other(fs: &impl Fs, path: &LibPath) -> Result<Vec<u8>, Failure> {
     let dotted = path.components().any(|part| part.starts_with('.'));
     if dotted || opens(path.leaf()) {
-        return Err(Failure::Io(format!("{path} is not a hidden file")));
+        return Err(Failure::Io("not a hidden file".to_string()));
     }
     let io = |e: io::Error| match e.kind() {
         io::ErrorKind::NotFound => Failure::Moved,
