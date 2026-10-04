@@ -318,6 +318,8 @@ pub struct Baseline {
     /// The length of the file that holds these bytes, while nothing has read it: `bytes`
     /// is then empty, and `file` is `None`.
     pub unread: Option<u64>,
+    /// Whether the check of `file`'s stored checksum has answered.
+    checked: bool,
 }
 
 impl Baseline {
@@ -331,6 +333,7 @@ impl Baseline {
             stamp,
             file: None,
             unread: None,
+            checked: false,
         }
     }
 
@@ -342,15 +345,17 @@ impl Baseline {
             file: Some(file),
             bytes_crc: None,
             unread: None,
+            checked: false,
         }
     }
 
     /// CRC-32 over the whole of these bytes, where something has taken it: the file's,
     /// for a baseline resting in it, once its check has read it.
     pub fn whole_crc(&self) -> Option<u32> {
-        match &self.file {
-            Some(file) => file.known_crc(),
-            None => self.bytes_crc,
+        match (&self.file, self.unread) {
+            (Some(file), _) => file.known_crc(),
+            (None, Some(_)) => None,
+            (None, None) => self.bytes_crc,
         }
     }
 
@@ -547,6 +552,7 @@ impl LocalEntity {
                 file: None,
                 bytes_crc: None,
                 unread: None,
+                checked: false,
             },
             bytes,
             entity: None,
@@ -590,8 +596,20 @@ impl LocalEntity {
     /// Take what its bytes decode to. They are what it was saved as, since nothing can
     /// edit an asset still being read.
     fn decoded(&mut self, decoded: Decoded) {
-        self.saved.crc32 = decoded.container.as_ref().map(|held| held.body_crc32);
-        self.saved.bytes_crc = decoded.crc;
+        let slot_crc = decoded.container.as_ref().map(|held| held.body_crc32);
+        match (&self.saved.file, self.saved.unread) {
+            (None, None) => {
+                self.saved.crc32 = slot_crc;
+                self.saved.bytes_crc = decoded.crc;
+            }
+            // ⚠️ Writes the slot checksum of the bytes decoded over the one a send reported
+            // for the file, though the file holds other bytes. A send of the file that lands
+            // while the asset's own bytes wait to be decoded then leaves `wrote.crc32`
+            // naming what the slot took and the baseline naming the decoded bytes, and
+            // `library::wrote` no longer matches the slot.
+            (Some(_), _) if !self.saved.checked => self.saved.crc32 = slot_crc,
+            (Some(_), _) | (None, Some(_)) => {}
+        }
         self.container = decoded.container;
         self.entity = decoded.entity;
         self.plays = decoded.plays;
@@ -776,6 +794,7 @@ impl LocalEntity {
             file: None,
             bytes_crc: None,
             unread: None,
+            checked: false,
         }
     }
 
@@ -1889,6 +1908,7 @@ impl Workspace {
         {
             return;
         }
+        entity.saved.checked = true;
         let verify = match &answer {
             Ok(container) if container.checksum_ok => VerifyState::Checked,
             Ok(_) => VerifyState::Failed("the stored checksum does not match the body".into()),
@@ -3680,6 +3700,62 @@ mod tests {
         assert_eq!(entity.link, Some((class, at)));
         assert!(entity.wrote.is_some_and(|wrote| wrote.crc32 == crc32));
         assert_ne!(entity.saved.crc32, Some(crc32), "so the slot is behind");
+    }
+
+    /// A file an asset is rebased onto keeps the slot checksum its check took, though
+    /// the asset's own bytes are decoded after the check answers.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_decode_after_the_check_leaves_the_checksum_the_check_took() {
+        let dir = crate::testing::Temp::new();
+        let theirs = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(4));
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let bytes = Fresh::Program.bytes().unwrap();
+        workspace.restore(
+            vec![Saved {
+                id: 1,
+                name: "Mine.ne5p".into(),
+                path: None,
+                origin: Origin::Fresh,
+                saved: bytes.clone(),
+                file: None,
+                unread: None,
+                unsaved: None,
+            }],
+            None,
+            &mut log,
+        );
+        assert!(workspace.get(1).unwrap().reading(), "not decoded yet");
+
+        workspace.rebase_file(1, theirs);
+        while let Some(check) = &workspace.checking {
+            let answer = check.job.wait();
+            workspace.checked(answer, &mut log);
+        }
+        let checked = workspace.get(1).unwrap().saved.crc32;
+        assert!(checked.is_some(), "the check took the file's checksum");
+        workspace.settle_files(&mut log);
+
+        let entity = workspace.get(1).unwrap();
+        assert!(!entity.reading(), "decoded");
+        assert_eq!(entity.saved.crc32, checked);
+    }
+
+    /// An asset counted unsaved before its file was read holds no bytes, and a decode
+    /// of them gives its unread file no whole-file CRC.
+    #[test]
+    fn a_decode_gives_a_file_not_read_no_checksum() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        workspace.restore(unread_assets(1, 10), None, &mut log);
+        workspace.unsave(1);
+        workspace.read_now([1], &mut log);
+
+        let entity = workspace.get(1).unwrap();
+        assert!(!entity.reading(), "its empty bytes are decoded");
+        assert_eq!(entity.saved.whole_crc(), None);
+        assert_eq!(entity.saved.size(), 10);
     }
 
     /// Closing a library lets go of the files its assets rested in, checks still waiting
