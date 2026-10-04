@@ -2016,6 +2016,12 @@ impl Store {
             return;
         };
         record.saving = false;
+        // ⚠️ The asset an overwrite came from holds its bytes until they are saved here.
+        if let Some(from) = workspace.saved_over(id, record.saved, result.is_ok()) {
+            browser.tags.forget(from);
+            browser.folders.missing.remove(&from);
+            workspace.remove(from, log);
+        }
         let name = workspace
             .get(id)
             .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());

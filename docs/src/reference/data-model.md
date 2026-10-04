@@ -836,7 +836,9 @@ Sample Library stores none, so its box renames the file.
 Where a name is taken, `Folders::clash` says by what: an asset, a folder, a lost
 row, or a file drawbar does not hold. The user chooses **Overwrite**, offered
 only where the occupant is an asset with nothing unsaved, which writes the new
-contents into its file and keeps its tags; **Keep both**, under the free name;
+contents into its file and keeps its tags. The asset renamed or moved onto the
+name goes once that save lands, and stays where it does not
+(`Workspace::save_over`); **Keep both**, under the free name;
 or **Cancel**. A folder already holding two entries under one key refuses the
 name outright. Such duplicates, found on a disk that tells case apart, are
 flagged and logged and never renamed, since either name may be the one other

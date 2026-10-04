@@ -3870,6 +3870,103 @@ fn a_copy_over_that_does_not_land_keeps_the_file_it_came_from() {
     assert_eq!(session.said("was not overwritten"), 1);
 }
 
+/// ⚠️ An overwrite with bytes held whole whose save is refused leaves the asset it was
+/// moved from, and that asset's file: until a pass keeps a working copy, nothing else
+/// holds what it holds, and a crash before that pass would lose it.
+#[test]
+fn an_overwrite_whose_save_does_not_land_keeps_the_file_it_came_from() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    assert!(
+        matches!(acts[..], [crate::browser::Act::Overwrite { .. }]),
+        "{acts:?}"
+    );
+    session.bench.act(acts);
+    // Saved over outside drawbar before the save runs, so the save is refused.
+    let outside = with_gain(&program, "40");
+    fs::write(root.at("Kept.ne5p"), [&outside[..], b"!"].concat()).unwrap();
+    while !session.settled() {
+        assert!(session.next(), "the save answered");
+    }
+    drop(session);
+
+    assert_eq!(root.read("Moved.ne5p"), ours, "the file it came from stays");
+}
+
+/// A save sent before an overwrite answers for itself: the asset the overwrite came from
+/// waits for the overwrite's own save, and stays where that one does not land.
+#[test]
+fn an_overwrite_waits_for_its_own_save_and_not_the_one_before() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let (kept, moved) = (session.named("Kept.ne5p"), session.named("Moved.ne5p"));
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(kept, with_gain(&program, "40"), log);
+    workspace.mark_saved(kept);
+    assert!(!session.settled(), "the save before is in flight");
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    assert!(session.next(), "the save before answered");
+    assert_eq!(root.read("Kept.ne5p"), with_gain(&program, "40"));
+    fs::write(root.at("Kept.ne5p"), b"saved over outside").unwrap();
+    while !session.settled() {
+        assert!(session.next(), "the overwrite's save answered");
+    }
+    drop(session);
+
+    assert_eq!(root.read("Moved.ne5p"), ours, "the file it came from stays");
+}
+
+/// An overwrite with bytes held whole removes the asset it was moved from once its save
+/// has landed, and that asset's file with it.
+#[test]
+fn an_overwrite_removes_the_file_it_came_from_once_it_lands() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let (kept, moved) = (session.named("Kept.ne5p"), session.named("Moved.ne5p"));
+
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.sync();
+
+    assert_eq!(root.read("Kept.ne5p"), ours);
+    assert!(
+        !root.at("Moved.ne5p").exists(),
+        "the file it came from is gone"
+    );
+    assert!(session.bench.workspace.get(moved).is_none());
+    assert!(!session.bench.workspace.get(kept).unwrap().is_unsaved());
+}
+
 /// A sample instrument holding an unsaved edit over its file, whose file is saved over
 /// outside drawbar, is not read whole to keep the edit apart: it rests in the new file,
 /// which its edit follows where it still applies, and drawbar asks what to do.

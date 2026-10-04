@@ -60,7 +60,8 @@ pub enum Act {
         from: Outside,
     },
     /// Put bytes over an existing asset, which keeps its id, folder and tags. `gone` is an
-    /// asset the overwrite came from and removes: one renamed or moved onto the name.
+    /// asset the overwrite came from, one renamed or moved onto the name, removed once the
+    /// bytes are saved.
     Overwrite {
         id: u64,
         bytes: Vec<u8>,
@@ -557,9 +558,7 @@ pub fn apply(
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
             Act::Overwrite { id, bytes, gone } => {
-                workspace.replace_bytes(id, bytes, log);
-                workspace.mark_saved(id);
-                if let Some(gone) = gone {
+                if let Some(gone) = workspace.save_over(id, bytes, gone, log) {
                     remove(browser, workspace, tabs, queue, log, gone);
                 }
                 if let Some(entity) = workspace.get(id) {
@@ -2942,8 +2941,8 @@ mod tests {
         assert_eq!(bench.workspace.get(kept).unwrap().bytes, incoming);
         assert_eq!(name(&bench, kept), "untitled.ne5p");
         assert!(
-            bench.workspace.get(renamed).is_none(),
-            "the one renamed is gone"
+            bench.workspace.get(renamed).is_some(),
+            "the one renamed stays until the overwrite is saved"
         );
     }
 

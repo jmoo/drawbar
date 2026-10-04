@@ -1275,6 +1275,10 @@ pub struct Workspace {
     /// The asset each arriving copy moves over the file of another comes from, by the
     /// asset it lands on. It goes only once its copy has landed.
     moving_over: std::collections::BTreeMap<u64, u64>,
+    /// The asset each overwrite with bytes held whole comes from, by the asset it
+    /// overwrites, with the stamp of the save that writes them. It goes only once that
+    /// save has landed.
+    saving_over: std::collections::BTreeMap<u64, (u64, u64)>,
     /// The files File ▸ Open… picked, not yet taken.
     picked: Vec<Outside>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
@@ -1367,6 +1371,7 @@ impl Workspace {
             checking: None,
             arriving: Default::default(),
             moving_over: Default::default(),
+            saving_over: Default::default(),
             picked: Vec::new(),
             undecoded: VecDeque::new(),
             hurried: Default::default(),
@@ -2310,6 +2315,40 @@ impl Workspace {
         self.moving_over.remove(&id)
     }
 
+    /// Put `bytes` over `id` as its next save. Bytes that came from the asset `from` leave
+    /// it until that save has landed ([`Workspace::saved_over`]), and are returned to be
+    /// removed now only where `id` already held them and needs no save.
+    pub fn save_over(
+        &mut self,
+        id: u64,
+        bytes: Vec<u8>,
+        from: Option<u64>,
+        log: &mut Log,
+    ) -> Option<u64> {
+        self.replace_bytes(id, bytes, log);
+        let unsaved = self.get(id).filter(|entity| entity.is_unsaved());
+        let Some(stamp) = unsaved.map(|entity| entity.stamp) else {
+            return from;
+        };
+        self.mark_saved(id);
+        if let Some(from) = from {
+            self.saving_over.insert(id, (from, stamp));
+        }
+        None
+    }
+
+    /// The asset an overwrite of `id` came from, once a save of `id` has answered: a save
+    /// of the stamp the overwrite wrote, or a later one, landed with `landed`, or failed
+    /// without. `None` while the overwrite's save is still to answer.
+    pub fn saved_over(&mut self, id: u64, saved: u64, landed: bool) -> Option<u64> {
+        let (from, stamp) = *self.saving_over.get(&id)?;
+        if saved < stamp {
+            return None;
+        }
+        self.saving_over.remove(&id);
+        landed.then_some(from)
+    }
+
     /// Copy `from` in again for an asset whose copy did not land.
     pub fn arrive_again(&mut self, id: u64, from: CopyOf) {
         if self.get(id).is_some() {
@@ -3044,6 +3083,7 @@ impl Workspace {
     pub fn forget(&mut self, id: u64) -> Option<LocalEntity> {
         self.arriving.remove(&id);
         self.moving_over.remove(&id);
+        self.saving_over.remove(&id);
         self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
@@ -3071,6 +3111,7 @@ impl Workspace {
         self.checks.retain(|(id, _)| held(*id));
         self.edits.retain(|id, _| held(*id));
         self.moving_over.retain(|id, _| held(*id));
+        self.saving_over.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));
         self.wanted.get_mut().retain(|id| held(*id));
