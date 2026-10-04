@@ -46,6 +46,9 @@ pub enum Kind {
     Project,
     /// A text note. No instrument holds one, so it has no folder and nothing sends it.
     Text,
+    /// A WAV file: audio a project plays, or an instrument is encoded from. No
+    /// instrument has a folder for it.
+    Wav,
     /// Bytes that did not decode, or a file drawbar does not open.
     Other,
 }
@@ -65,7 +68,7 @@ const HOMES: [(Kind, ObjectClass); 6] = [
 
 impl Kind {
     /// Every kind, in the order any list of kinds uses.
-    pub const ALL: [Kind; 16] = [
+    pub const ALL: [Kind; 17] = [
         Kind::Program,
         Kind::SetList,
         Kind::Sample,
@@ -81,6 +84,7 @@ impl Kind {
         Kind::PipeLibrary,
         Kind::Project,
         Kind::Text,
+        Kind::Wav,
         Kind::Other,
     ];
 
@@ -89,10 +93,11 @@ impl Kind {
     /// ⚠️ Exhaustive over [`EntityKind`], so a family the library adds is a compile error
     /// here and never a nameless row.
     ///
-    /// Bytes that did not decode are a note when [`LocalEntity::is_text`] says so, and
-    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads.
-    /// One not read or decoded yet is what a read before found, where one is
-    /// [`remembered`](LocalEntity::remembered), and what its name says otherwise.
+    /// Bytes that did not decode are a WAV where [`LocalEntity::is_wav`] says so, a note
+    /// when [`LocalEntity::is_text`] says so, and [`Kind::Other`] otherwise. An asset
+    /// resting in its file is what its index reads. One not read or decoded yet is what a
+    /// read before found, where one is [`remembered`](LocalEntity::remembered), and what
+    /// its name says otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         if entity.reading() || entity.unread() {
             return match (entity.remembered.as_deref(), entity.by_name()) {
@@ -106,9 +111,10 @@ impl Kind {
             None => {}
         }
         let Some(decoded) = entity.entity.as_deref() else {
-            return match entity.is_text() {
-                true => Kind::Text,
-                false => Kind::Other,
+            return match (entity.is_wav(), entity.is_text()) {
+                (true, _) => Kind::Wav,
+                (false, true) => Kind::Text,
+                (false, false) => Kind::Other,
             };
         };
         Kind::of_entity(decoded.kind())
@@ -176,6 +182,7 @@ impl Kind {
             Kind::PipeLibrary => "pipe library",
             Kind::Project => "project",
             Kind::Text => "note",
+            Kind::Wav => "WAV",
             Kind::Other => "file",
         }
     }
@@ -194,6 +201,7 @@ impl Kind {
                 Kind::PipeLibrary => "Pipe organ libraries",
                 Kind::Project => "Sample Editor projects",
                 Kind::Text => "Notes",
+                Kind::Wav => "WAVs",
                 _ => "Other",
             },
         }
@@ -217,22 +225,26 @@ impl Kind {
             Kind::PipeLibrary => Glyph::SlidersVertical,
             Kind::Project => Glyph::FolderGit2,
             Kind::Text => Glyph::FileText,
+            Kind::Wav => Glyph::Square,
             Kind::Other => Glyph::HardDrive,
         }
     }
 }
 
 /// The tag a file of this name is kept under, by its extension, and the kind of asset
-/// it holds: a format `nord-format` reads, or a note. `None` for a file drawbar does not
-/// open.
+/// it holds: a format `nord-format` reads, a note, or a WAV. `None` for a file drawbar
+/// does not open.
 pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
-    use crate::document::text;
+    use crate::document::{text, wav};
 
     #[cfg(test)]
     TAGGED.with(|taken| taken.set(taken.get() + 1));
     let (_, extension) = name.rsplit_once('.')?;
     if extension.eq_ignore_ascii_case(text::EXTENSION) {
         return Some((text::EXTENSION, Kind::Text));
+    }
+    if extension.eq_ignore_ascii_case(wav::EXTENSION) {
+        return Some((wav::EXTENSION, Kind::Wav));
     }
     let format = nord_format::formats::by_extension(extension)?;
     Some((format.tag, Kind::of_entity(format.entity)))
@@ -509,8 +521,14 @@ mod tests {
     use crate::strings::folder;
 
     #[test]
-    fn a_note_and_a_file_nothing_reads_are_kinds_of_name() {
+    fn a_note_a_wav_and_a_file_nothing_reads_are_kinds_of_name() {
         assert_eq!(tagged("Set list.TXT"), Some(("txt", Kind::Text)));
+        assert_eq!(tagged("C3.WAV"), Some(("wav", Kind::Wav)));
+        assert_eq!(
+            Kind::Wav.home(),
+            None,
+            "no instrument has a folder for a WAV"
+        );
         assert_eq!(Kind::of_name("no extension"), Kind::Other);
         assert_eq!(Kind::of_name("scan.pdf"), Kind::Other);
     }
@@ -847,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn what_did_not_decode_is_a_note_or_a_file() {
+    fn what_did_not_decode_is_a_wav_a_note_or_a_file() {
         let mut workspace = Workspace::new(egui::Context::default());
         let mut log = crate::log::Log::default();
         let mut held = |name: &str, bytes: Vec<u8>| {
@@ -870,6 +888,12 @@ mod tests {
             held("held", Vec::new()),
             Kind::Other,
             "nothing names it a note"
+        );
+        assert_eq!(held("held", crate::testing::wav_bytes()), Kind::Wav);
+        assert_eq!(
+            held("broken.wav", b"Set 1\n".to_vec()),
+            Kind::Wav,
+            "named a WAV, so its document can say why it does not read"
         );
 
         for kind in Kind::ALL.iter().filter(|kind| **kind != Kind::Other) {

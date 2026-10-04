@@ -12,7 +12,7 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::controls::{self, Sets};
-use super::{encode, piano, project, sample, setlist, text, SendBack, Shape};
+use super::{piano, project, sample, setlist, text, wav, SendBack, Shape};
 use crate::app::{accent, caption, good, warn};
 use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT};
 use crate::device::{loadable, read_only, DeviceState};
@@ -1056,13 +1056,11 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
         Kind::Program => (format!("program v{}", version.unwrap_or(0)), sentence),
         Kind::SetList => ("set list".to_string(), sentence),
         Kind::Settings => ("settings".to_string(), sentence),
-        Kind::Other => match encode::is_wav(&entity.bytes) {
-            true => (
-                "wav".to_string(),
-                "audio this app can make an instrument out of".to_string(),
-            ),
-            false => (tag, "these bytes did not decode".to_string()),
-        },
+        Kind::Wav => (
+            wav::EXTENSION.to_string(),
+            "audio this app can make an instrument out of".to_string(),
+        ),
+        Kind::Other => (tag, "these bytes did not decode".to_string()),
         Kind::Live
         | Kind::Text
         | Kind::Synth

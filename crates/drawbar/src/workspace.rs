@@ -780,6 +780,14 @@ impl LocalEntity {
         self.by_name
     }
 
+    /// Whether these are undecoded bytes of a WAV: named as one, or held in a RIFF/WAVE
+    /// container. One named as a WAV is one whatever it holds, so its document can say
+    /// why it does not read.
+    pub fn is_wav(&self) -> bool {
+        let named = matches!(self.by_name, Some((_, crate::browser::Kind::Wav)));
+        self.entity.is_none() && (named || crate::document::wav::is_wav(&self.bytes))
+    }
+
     /// Name it, and take what the new name says it is.
     fn set_name(&mut self, name: String) {
         self.by_name = crate::browser::tagged(&name);
@@ -846,6 +854,7 @@ impl LocalEntity {
         match (self.entity.as_deref(), &self.container) {
             (Some(entity), _) => Cow::Borrowed(entity.identity().format),
             (None, Some(container)) => Cow::Owned(container.tag()),
+            (None, None) if self.is_wav() => Cow::Borrowed(crate::document::wav::EXTENSION),
             (None, None) if self.is_text() => Cow::Borrowed(crate::document::text::EXTENSION),
             (None, None) => match (self.rests(), self.remembered.as_deref()) {
                 (Some(file), _) => Cow::Borrowed(file.index.tag()),
@@ -1006,6 +1015,9 @@ fn format_tag(bytes: &[u8]) -> String {
     }
     if bytes.starts_with(nsmpproj::MAGIC) {
         return nsmpproj::FORMAT.to_string();
+    }
+    if crate::document::wav::is_wav(bytes) {
+        return crate::document::wav::EXTENSION.to_string();
     }
     if crate::document::text::is_text(bytes) {
         return crate::document::text::EXTENSION.to_string();

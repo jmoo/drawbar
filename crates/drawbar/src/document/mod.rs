@@ -35,6 +35,7 @@ mod setlist;
 mod table;
 pub(crate) mod text;
 mod verbatim;
+pub(crate) mod wav;
 
 use advanced::Advanced;
 use controls::{Ctx, Sets};
@@ -72,7 +73,7 @@ pub(super) enum Shape {
     Text,
     /// A body no registry describes, kept byte for byte.
     Verbatim,
-    /// Undecoded bytes that are a WAV file, which can be encoded into an instrument.
+    /// A WAV, which can be encoded into an instrument.
     Wav,
     /// Bytes that did not decode.
     Undecoded,
@@ -108,14 +109,10 @@ fn shape(entity: &LocalEntity) -> Shape {
         None => {}
     }
     let Some(decoded) = entity.entity.as_deref() else {
-        // ⚠️ Checked before `is_text`, so a WAV always opens in the encode panel and
-        // never as text.
-        if encode::is_wav(&entity.bytes) {
-            return Shape::Wav;
-        }
-        return match entity.is_text() {
-            true => Shape::Text,
-            false => Shape::Undecoded,
+        return match crate::browser::Kind::of(entity) {
+            crate::browser::Kind::Wav => Shape::Wav,
+            crate::browser::Kind::Text => Shape::Text,
+            _ => Shape::Undecoded,
         };
     };
     match decoded {
@@ -162,9 +159,6 @@ pub struct Around<'a> {
     pub tags: &'a Tags,
     /// Keys played here strike the key map when the current face shows one.
     pub played: &'a Played,
-    /// The library's folders, and the files it lists by name only, where a project's
-    /// WAVs are looked for.
-    pub folders: &'a crate::folders::Folders,
     pub builds: &'a crate::builds::Builds,
 }
 
@@ -401,7 +395,7 @@ impl Document {
                 Some(open) => header::Extras {
                     loud: Some(project::loud(
                         entity,
-                        open.wavs.of(entity, around.folders),
+                        open.wavs.of(entity, workspace),
                         around.builds.running(id),
                     )),
                     ..header::Extras::default()
@@ -1623,7 +1617,6 @@ mod tests {
         log: Log,
         queue: Queue,
         tags: Tags,
-        folders: crate::folders::Folders,
         builds: crate::builds::Builds,
         document: Document,
         id: u64,
@@ -1663,7 +1656,6 @@ mod tests {
                 log: Log::default(),
                 queue: Queue::default(),
                 tags: Tags::default(),
-                folders: crate::folders::Folders::default(),
                 builds: crate::builds::Builds::default(),
                 document: Document::default(),
                 id: 0,
@@ -1759,7 +1751,6 @@ mod tests {
                             queue: &self.queue,
                             tags: &self.tags,
                             played: &Played::default(),
-                            folders: &self.folders,
                             builds: &self.builds,
                         },
                     );
@@ -2737,7 +2728,6 @@ mod tests {
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
-                            folders: &crate::folders::Folders::default(),
                             builds: &crate::builds::Builds::default(),
                         },
                     );
@@ -2936,7 +2926,6 @@ mod tests {
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
-                            folders: &crate::folders::Folders::default(),
                             builds: &crate::builds::Builds::default(),
                         },
                     );
@@ -3365,10 +3354,13 @@ mod tests {
     #[test]
     fn a_click_on_a_projects_ready_build_asks_the_app_to_build_it() {
         let mut open = Open::file("clarinet.nsmpproj", project_bytes());
-        let wavs = ["audio/c3.wav", "audio/c4.wav", "audio/c5.wav"];
-        open.folders.others = wavs
-            .map(|at| crate::store::LibPath::parse(at).unwrap())
-            .into();
+        for at in ["audio/c3.wav", "audio/c4.wav", "audio/c5.wav"] {
+            let at = crate::store::LibPath::parse(at).unwrap();
+            let wav =
+                open.workspace
+                    .ingest(at.leaf().into(), Origin::Fresh, wav_bytes(), &mut open.log);
+            open.workspace.place(wav, at);
+        }
         let said = open.painted(Vec::new());
         let build = testing::where_(&said, project::BUILD).center();
         assert!(

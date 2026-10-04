@@ -326,8 +326,9 @@ nothing but the files under working copies (`store/exec.rs`).
 
 A file's kind is decided by its extension alone: `store::opens` matches it,
 ignoring case, against the formats `nord-format` names by extension
-(`formats::by_extension`) and drawbar's notes (`browser::tagged`). Any other file is listed by name only, as one of the
-folder's `others`, and shown with **Show all files**.
+(`formats::by_extension`), drawbar's notes and WAVs (`browser::tagged`). Any
+other file is listed by name only, as one of the folder's `others`, and shown
+with **Show all files**.
 
 ### Lazy reads
 
@@ -550,7 +551,6 @@ asynchronously.
 | `Check` | `Checked`: the named files again, without listing the tree. |
 | `Walk(dir)` | `Walked`, once `dir` is listed whole ahead of the rest of an open. |
 | `Read` | `Read`: each file, held whole or resting, or why not. |
-| `ReadOthers` | `ReadOthers`: files listed by name only, read whole for whoever asked, outside the memory budget; any other path is refused. |
 | `Fingerprint` | `Fingerprinted`: the CRCs of files whose stat has not moved. |
 | `Save` | `Saved`: the new fingerprint, or why not. |
 | `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
@@ -1124,6 +1124,9 @@ to its own folder, as `nord-format`'s `nsmpproj::build::AudioPath` reads it, and
 a path that is absolute or leaves the library names nothing (`summary::resolve`).
 
 A build looks for the files its zones play (`nsmpproj::build::played`) among
-the folders' `others`: the exact path first, then the one path with the same
-`names::key`, refusing two (`builds::locate`). It reads them with
-`Cmd::ReadOthers` and encodes on a `work::Job` (`builds::Builds`).
+the listed WAV assets (`builds::wav_assets`): the exact path first, then the
+one path with the same `names::key`, refusing two (`builds::locate`). It
+hurries those not read yet, as an act's reads are, and encodes their bytes as
+the assets hold them, unsaved edits included, on a `work::Job`
+(`builds::Builds`). A WAV that could not be read, or is gone by then, stops the
+build with its path.
