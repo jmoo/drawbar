@@ -107,14 +107,6 @@ pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
     instrument.to_bytes().map_err(|e| e.to_string())
 }
 
-fn generation_label(layout: Layout) -> &'static str {
-    match layout {
-        Layout::V2 => "v2",
-        Layout::V3 => "v3",
-        Layout::V4 => "v4",
-    }
-}
-
 /// How far each generation has been taken, in the operator's words.
 fn generation_note(layout: Layout) -> &'static str {
     match layout {
@@ -190,8 +182,8 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
         });
         ui.horizontal(|ui| {
             label(ui, "Generation");
-            for layout in [Layout::V2, Layout::V3, Layout::V4] {
-                ui.selectable_value(&mut draft.layout, layout, generation_label(layout))
+            for layout in Layout::ALL {
+                ui.selectable_value(&mut draft.layout, layout, layout.generation())
                     .on_hover_text(generation_note(layout));
             }
         });

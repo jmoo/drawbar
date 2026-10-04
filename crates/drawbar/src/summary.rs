@@ -63,10 +63,6 @@ impl Summary {
     }
 }
 
-/// Every generation [`LocalEntity::generation`] names, so a kept one reads back as the
-/// same word.
-pub const GENERATIONS: [&str; 3] = ["v2", "v3", "v4"];
-
 /// The library a program plays: its class, and the id the instrument knows it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Plays {

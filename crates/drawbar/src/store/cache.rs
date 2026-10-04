@@ -13,12 +13,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nord_format::formats::nsmp::codec::Layout;
 use serde::{Deserialize, Serialize};
 
 use super::{LibPath, Stat};
 use crate::browser::Kind;
 use crate::log::Log;
-use crate::summary::{Plays, Summary, Verdict, GENERATIONS};
+use crate::summary::{Plays, Summary, Verdict};
 
 /// The version of what this build writes. Anything else is discarded unread.
 pub const VERSION: u32 = 3;
@@ -85,8 +86,12 @@ impl From<Packed> for Entry {
                 crc32,
                 plays,
                 verdict,
-                generation: generation
-                    .and_then(|said| GENERATIONS.into_iter().find(|known| *known == said)),
+                generation: generation.and_then(|said| {
+                    Layout::ALL
+                        .into_iter()
+                        .map(Layout::generation)
+                        .find(|known| *known == said)
+                }),
                 wavs,
             },
         }

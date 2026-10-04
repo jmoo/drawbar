@@ -5,7 +5,7 @@
 
 use eframe::egui;
 use nord_format::accept::Family;
-use nord_format::Entity;
+use nord_format::EntityKind;
 use nord_usb::{Location, ObjectClass};
 
 use super::Act;
@@ -16,9 +16,9 @@ use crate::workspace::{LocalEntity, Workspace};
 
 /// What an asset is, which decides the folder it belongs in.
 ///
-/// Every decoded [`Entity`] has a kind of its own, so a decoded file is never called just
-/// a file. Declaration order matches [`Kind::ALL`], the order any set of kinds is listed
-/// in.
+/// Every decoded [`nord_format::Entity`] has a kind of its own, so a decoded file is never
+/// called just a file. Declaration order matches [`Kind::ALL`], the order any set of kinds
+/// is listed in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Program,
@@ -89,7 +89,7 @@ impl Kind {
 
     /// What an asset is.
     ///
-    /// ⚠️ Exhaustive over [`Entity`], so a family the library adds is a compile error
+    /// ⚠️ Exhaustive over [`EntityKind`], so a family the library adds is a compile error
     /// here and never a nameless row.
     ///
     /// Bytes that did not decode are a note when `document::text::is_text` said so on
@@ -114,22 +114,27 @@ impl Kind {
                 false => Kind::Other,
             };
         };
-        match decoded {
-            Entity::Program(_) => Kind::Program,
-            Entity::Song(_) => Kind::SetList,
-            Entity::Sample(_) => Kind::Sample,
-            Entity::Piano(_) | Entity::PianoLibrary(_) => Kind::Piano,
-            Entity::Live(_) => Kind::Live,
-            Entity::Settings(_) => Kind::Settings,
-            Entity::Synth(_) => Kind::Synth,
-            Entity::OrganPreset(_) => Kind::OrganPreset,
-            Entity::PianoPreset(_) => Kind::PianoPreset,
-            Entity::Performance(_) => Kind::Performance,
-            Entity::Midi(_) | Entity::Sysex(_) => Kind::LeadBank,
-            Entity::Cne3(_) => Kind::SampleLibrary,
-            Entity::PipeLibrary(_) => Kind::PipeLibrary,
-            Entity::Bundle(_) => Kind::Bundle,
-            Entity::SampleProject(_) => Kind::Project,
+        Kind::of_entity(decoded.kind())
+    }
+
+    /// The kind of asset a file that decodes to `entity` is.
+    fn of_entity(entity: EntityKind) -> Kind {
+        match entity {
+            EntityKind::Program => Kind::Program,
+            EntityKind::Song => Kind::SetList,
+            EntityKind::Sample => Kind::Sample,
+            EntityKind::Piano | EntityKind::PianoLibrary => Kind::Piano,
+            EntityKind::Live => Kind::Live,
+            EntityKind::Settings => Kind::Settings,
+            EntityKind::Synth => Kind::Synth,
+            EntityKind::OrganPreset => Kind::OrganPreset,
+            EntityKind::PianoPreset => Kind::PianoPreset,
+            EntityKind::Performance => Kind::Performance,
+            EntityKind::Midi | EntityKind::Sysex => Kind::LeadBank,
+            EntityKind::Cne3 => Kind::SampleLibrary,
+            EntityKind::PipeLibrary => Kind::PipeLibrary,
+            EntityKind::Bundle => Kind::Bundle,
+            EntityKind::SampleProject => Kind::Project,
         }
     }
 
@@ -221,137 +226,18 @@ impl Kind {
     }
 }
 
-/// The tag each kind of file drawbar opens is kept under, as `nord-format` reads it,
-/// each with the kind of asset it holds.
-const TAGS: [(&[&str], Kind); 15] = {
-    use crate::document::text;
-    use nord_format::formats::{
-        nc2, nc2d, nd2, nd3, ne3, ne4, ne5, ne6, ne7, ng2, nl4, nla1, no3, np, np2, np3, np4, np5,
-        npip, npno, ns2, ns3, ns4, nsclassic, nsmp, nsmpproj, nw, nw2,
-    };
-    [
-        (
-            &[
-                nc2::program::FORMAT,
-                nc2d::program::FORMAT,
-                nd2::program::FORMAT,
-                nd3::kit::FORMAT,
-                ne3::program::FORMAT,
-                ne4::program::FORMAT,
-                ne5::program::FORMAT,
-                ne6::program::FORMAT,
-                ne7::program::FORMAT,
-                ng2::program::FORMAT,
-                nl4::program::FORMAT,
-                nla1::program::FORMAT,
-                no3::program::FORMAT,
-                np::program::FORMAT,
-                np2::program::FORMAT,
-                np3::program::FORMAT,
-                np4::program::FORMAT,
-                np5::program::FORMAT,
-                ns2::program::FORMAT,
-                ns3::program::FORMAT,
-                ns4::program::FORMAT,
-                nsclassic::program::FORMAT,
-                nw::program::FORMAT,
-                nw2::program::FORMAT,
-            ],
-            Kind::Program,
-        ),
-        (&[ne5::song::FORMAT, ns3::song::FORMAT], Kind::SetList),
-        (&[nsmp::FORMAT], Kind::Sample),
-        (
-            &[npno::FORMAT, nsclassic::piano_library::FORMAT],
-            Kind::Piano,
-        ),
-        (
-            &[
-                ne4::live::FORMAT,
-                ne5::live::FORMAT,
-                ne6::live::FORMAT,
-                ne7::live::FORMAT,
-                ng2::live::FORMAT,
-                np::live::FORMAT,
-                np2::live::FORMAT,
-                np3::live::FORMAT,
-                np4::live::FORMAT,
-                np5::live::FORMAT,
-                ns2::live::FORMAT,
-                ns3::live::FORMAT,
-                ns4::live::FORMAT,
-                nw2::live::FORMAT,
-            ],
-            Kind::Live,
-        ),
-        (
-            &[
-                nc2::settings::FORMAT,
-                nc2d::settings::FORMAT,
-                ne4::settings::FORMAT,
-                ne5::settings::FORMAT,
-                ne6::settings::FORMAT,
-                ne7::settings::FORMAT,
-                ng2::settings::FORMAT,
-                nl4::settings::FORMAT,
-                nla1::settings::FORMAT,
-                no3::settings::FORMAT,
-                np::settings::FORMAT,
-                np2::settings::FORMAT,
-                np3::settings::FORMAT,
-                np4::settings::FORMAT,
-                np5::settings::FORMAT,
-                ns2::settings::FORMAT,
-                ns3::settings::FORMAT,
-                ns4::settings::FORMAT,
-                nw::settings::FORMAT,
-                nw2::settings::FORMAT,
-            ],
-            Kind::Settings,
-        ),
-        (
-            &[
-                ns2::synth::FORMAT,
-                ns3::synth::FORMAT,
-                ns4::synth::FORMAT,
-                nsclassic::synth::FORMAT,
-            ],
-            Kind::Synth,
-        ),
-        (
-            &[ne3::organ_preset::FORMAT, ns4::organ_preset::FORMAT],
-            Kind::OrganPreset,
-        ),
-        (&[ns4::piano_preset::FORMAT], Kind::PianoPreset),
-        (
-            &[nl4::performance::FORMAT, nla1::performance::FORMAT],
-            Kind::Performance,
-        ),
-        (&["mid", "syx"], Kind::LeadBank),
-        (&["cn3"], Kind::SampleLibrary),
-        (&[npip::pipe_library::FORMAT], Kind::PipeLibrary),
-        (&[nsmpproj::FORMAT], Kind::Project),
-        (&[text::EXTENSION], Kind::Text),
-    ]
-};
-
 /// The tag a file of this name is kept under, by its extension, and the kind of asset
-/// it holds. `None` for a file drawbar does not open.
+/// it holds: a format `nord-format` reads, or a note. `None` for a file drawbar does not
+/// open.
 pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
-    use nord_format::formats::nsmp::{self, codec::Layout};
+    use crate::document::text;
 
     let (_, extension) = name.rsplit_once('.')?;
-    // A sample instrument's extension names its generation, and its tag does not.
-    let generation = [Layout::V3, Layout::V4]
-        .iter()
-        .any(|layout| layout.extension().eq_ignore_ascii_case(extension));
-    let extension = match generation {
-        true => nsmp::FORMAT,
-        false => extension,
-    };
-    TAGS.iter()
-        .flat_map(|(tags, kind)| tags.iter().map(move |tag| (*tag, *kind)))
-        .find(|(tag, _)| tag.trim_end_matches('\0').eq_ignore_ascii_case(extension))
+    if extension.eq_ignore_ascii_case(text::EXTENSION) {
+        return Some((text::EXTENSION, Kind::Text));
+    }
+    let format = nord_format::formats::by_extension(extension)?;
+    Some((format.tag, Kind::of_entity(format.entity)))
 }
 
 /// The kinds present: what the list on this computer holds and what the attached
@@ -618,75 +504,28 @@ mod tests {
     use super::*;
     use crate::strings::folder;
 
-    /// Every tag `nord-format` reads a file under is one a name can carry, and the table
-    /// names each tag once.
     #[test]
-    fn every_format_nord_format_reads_is_a_kind_of_name() {
-        for tag in nord_format::cbin_formats() {
-            let name = format!("x.{}", tag.trim_end_matches('\0').to_uppercase());
-            assert!(tagged(&name).is_some(), "{tag:?} has no kind");
-        }
-        let mut tags: Vec<&str> = TAGS
-            .iter()
-            .flat_map(|(tags, _)| tags.iter().copied())
-            .collect();
-        let named = tags.len();
-        tags.sort_unstable();
-        tags.dedup();
-        assert_eq!(tags.len(), named, "a tag is named twice");
+    fn a_note_and_a_file_nothing_reads_are_kinds_of_name() {
+        assert_eq!(tagged("Set list.TXT"), Some(("txt", Kind::Text)));
         assert_eq!(Kind::of_name("no extension"), Kind::Other);
         assert_eq!(Kind::of_name("scan.pdf"), Kind::Other);
     }
 
-    /// A sample instrument's extension names its generation, and each is a sample kept
-    /// under the one tag every generation stores.
+    /// A new file of each kind drawbar makes is the kind its name says.
     #[test]
-    fn every_sample_generations_extension_is_a_sample() {
-        for name in ["Pad.nsmp", "Tone.nsmp3", "Strings.NSMP4"] {
-            assert_eq!(
-                tagged(name),
-                Some((nord_format::formats::nsmp::FORMAT, Kind::Sample)),
-                "{name}"
-            );
-        }
-        assert_eq!(tagged("Pad.nsmp5"), None, "no generation writes it");
-    }
-
-    /// A file's kind by its name is the kind its contents decode to: for every format
-    /// whose bytes are kept as stored, an empty file under its tag, and for the rest, a
-    /// new file of each kind drawbar makes.
-    #[test]
-    fn the_kind_a_name_says_is_the_kind_its_contents_decode_to() {
-        use nord_format::cbin::{Cbin, Header, RawBody};
-
+    fn a_fresh_files_kind_is_the_kind_its_name_says() {
         let mut workspace = Workspace::new(eframe::egui::Context::default());
         let mut log = crate::log::Log::default();
-        let mut decoded = 0;
-        let mut kind_of = |name: String, bytes: Vec<u8>| {
-            let id = workspace.ingest(name, crate::workspace::Origin::Fresh, bytes, &mut log);
-            let entity = workspace.get(id).expect("ingested");
-            entity.entity.is_some().then(|| Kind::of(entity))
-        };
-        for (tags, kind) in TAGS {
-            for tag in tags.iter().filter(|tag| tag.len() == 4) {
-                let mut file = std::io::Cursor::new(Vec::new());
-                let empty = Cbin {
-                    header: Header::new(tag, (0, 0), 0),
-                    body: RawBody(vec![0; 64]),
-                };
-                empty.write_to(&mut file).unwrap();
-                let name = format!("x.{tag}");
-                if let Some(found) = kind_of(name.clone(), file.into_inner()) {
-                    assert_eq!(found, kind, "{name}");
-                    decoded += 1;
-                }
-            }
-        }
-        assert!(decoded > 40, "{decoded} formats decoded empty");
         for fresh in crate::workspace::Fresh::ALL {
             let name = format!("x.{}", fresh.tag());
-            let found = kind_of(name.clone(), fresh.bytes().unwrap());
-            assert_eq!(found.unwrap_or(Kind::Text), Kind::of_name(&name), "{name}");
+            let id = workspace.ingest(
+                name.clone(),
+                crate::workspace::Origin::Fresh,
+                fresh.bytes().unwrap(),
+                &mut log,
+            );
+            let entity = workspace.get(id).expect("ingested");
+            assert_eq!(Kind::of(entity), Kind::of_name(&name), "{name}");
         }
     }
 
