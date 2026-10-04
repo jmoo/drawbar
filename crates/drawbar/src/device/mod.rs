@@ -229,6 +229,13 @@ fn words(verbs: (&str, &str, &str), what: String) -> Words {
     }
 }
 
+/// The library whose open offers a slot's former occupant kept in a file. In the
+/// browser that file is in drawbar's own storage, whatever folder is open.
+#[cfg(not(target_arch = "wasm32"))]
+const OFFERED: &str = "the library";
+#[cfg(target_arch = "wasm32")]
+const OFFERED: &str = "drawbar's own library in this browser";
+
 const READING: (&str, &str, &str) = ("Reading", "Read", "read");
 const COPYING: (&str, &str, &str) = ("Copying", "Copied", "copy");
 
@@ -1634,7 +1641,7 @@ impl Device {
                     ));
                     log.trouble(format!(
                         "{} may be empty. What was in it is kept at {place}, and drawbar \
-                         offers it the next time the library opens.",
+                         offers it the next time {OFFERED} opens.",
                         shown(at)
                     ));
                 }
