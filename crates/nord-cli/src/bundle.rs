@@ -51,7 +51,10 @@ pub fn unpack(ui: &Ui, bundle: &Path, out: Option<PathBuf>) -> Result<(), String
 /// A new, empty sibling of `path` for this process, named for `what` it holds and
 /// refused where one is there.
 fn fresh_dir(path: &Path, what: &str) -> Result<PathBuf, String> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a file or folder to write", path.display()))?
+        .to_os_string();
     name.push(format!(".nord{}.{what}", std::process::id()));
     let dir = path.with_file_name(name);
     std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -63,16 +66,13 @@ fn unpack_member(
     member: &nord_format::bundle::archive::Member,
     out: &Path,
 ) -> Result<(), String> {
-    {
-        let path = out.join(relative(&member.entry.name)?);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-        let mut written = std::fs::File::create_new(&path).map_err(|e| named(&e))?;
-        copy_member(file, member, &mut written).map_err(|e| named(&e))?;
+    let path = out.join(relative(&member.entry.name)?);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    Ok(())
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut written = std::fs::File::create_new(&path).map_err(|e| named(&e))?;
+    copy_member(file, member, &mut written).map_err(|e| named(&e))
 }
 
 /// The path under the output folder for an archive path, or an error for one that could

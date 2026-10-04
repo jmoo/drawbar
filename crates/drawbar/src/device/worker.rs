@@ -307,9 +307,11 @@ async fn execute<T: Transport>(
             copy_all(device, class, &slots, scratch, emit, gone).await
         }
 
-        DeviceCmd::Gather { roots, also } => {
-            gather(device, &roots, &also, scratch, emit, gone).await
-        }
+        DeviceCmd::Gather {
+            roots,
+            also,
+            request,
+        } => gather(device, &roots, &also, request, scratch, emit, gone).await,
 
         DeviceCmd::Put {
             id,
@@ -1210,6 +1212,7 @@ async fn gather<T: Transport>(
     device: &mut Device<T>,
     roots: &[(ObjectClass, Location)],
     also: &[(ObjectClass, Location)],
+    request: u64,
     scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
@@ -1233,6 +1236,7 @@ async fn gather<T: Transport>(
         .map(|row| format!("{} “{}”", row.class.label(), row.name.trim_end()))
         .collect();
     emit.send(DeviceEvent::Gathered {
+        request,
         slots: slots.clone(),
         unfound,
     });

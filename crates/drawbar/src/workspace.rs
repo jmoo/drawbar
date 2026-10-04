@@ -2445,18 +2445,23 @@ impl Workspace {
     /// Write `ids` as a bundle once every slot the gather sent with it reports has been
     /// copied to this computer: see [`Workspace::bundle_ready`]. A later request replaces
     /// this one.
-    pub fn bundle_after(&mut self, ids: Vec<u64>) {
+    /// Returns the request the gather carries, which [`Workspace::bundle_gathered`]
+    /// matches.
+    pub fn bundle_after(&mut self, ids: Vec<u64>) -> u64 {
         let after = self.next_id;
         self.bundling = Some(Bundling {
             ids,
             slots: None,
             after,
         });
+        after
     }
 
-    /// The slots the gather found, which the waiting bundle waits on.
-    pub fn bundle_gathered(&mut self, slots: Vec<(ObjectClass, Location)>) {
-        if let Some(waiting) = self.bundling.as_mut().filter(|w| w.slots.is_none()) {
+    /// The slots a gather found, which the waiting bundle waits on if the gather was its
+    /// own.
+    pub fn bundle_gathered(&mut self, request: u64, slots: Vec<(ObjectClass, Location)>) {
+        let own = |w: &&mut Bundling| w.after == request && w.slots.is_none();
+        if let Some(waiting) = self.bundling.as_mut().filter(own) {
             waiting.slots = Some(slots);
         }
     }

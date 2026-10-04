@@ -113,6 +113,8 @@ pub enum DeviceCmd {
     Gather {
         roots: Vec<(ObjectClass, Location)>,
         also: Vec<(ObjectClass, Location)>,
+        /// Which export this is for, echoed in [`DeviceEvent::Gathered`].
+        request: u64,
     },
     Put {
         /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
@@ -261,7 +263,7 @@ impl DeviceCmd {
             DeviceCmd::CopyAll { class, slots } => {
                 format!("get {} objects <- {}", slots.len(), class.label())
             }
-            DeviceCmd::Gather { roots, also } => {
+            DeviceCmd::Gather { roots, also, .. } => {
                 format!("gather a bundle of {} objects", roots.len() + also.len())
             }
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
@@ -328,7 +330,7 @@ impl DeviceCmd {
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
-            DeviceCmd::Gather { roots, also } => words(
+            DeviceCmd::Gather { roots, also, .. } => words(
                 COPYING,
                 format!(
                     "{} and what they play to this computer",
@@ -463,6 +465,7 @@ pub enum DeviceEvent {
     /// The slots a [`DeviceCmd::Gather`] found and is copying, and each piano or sample
     /// it needed and found in no one slot.
     Gathered {
+        request: u64,
         slots: Vec<(ObjectClass, Location)>,
         unfound: Vec<String>,
     },
@@ -1180,7 +1183,7 @@ pub struct Device {
     /// Objects read into files, waiting to be copied into the library.
     fetched: Vec<Fetched>,
     /// The slots the last [`DeviceCmd::Gather`] found, until taken.
-    gathered: Option<Vec<(ObjectClass, Location)>>,
+    gathered: Option<(u64, Vec<(ObjectClass, Location)>)>,
     /// Whether a command failed, a copied slot was empty, or the instrument went, since
     /// the last [`Device::take_failed`].
     failed: bool,
@@ -1288,8 +1291,8 @@ impl Device {
         std::mem::take(&mut self.failed)
     }
 
-    /// The slots the last gather found, once.
-    pub fn take_gathered(&mut self) -> Option<Vec<(ObjectClass, Location)>> {
+    /// The slots the last gather found, with its request, once.
+    pub fn take_gathered(&mut self) -> Option<(u64, Vec<(ObjectClass, Location)>)> {
         self.gathered.take()
     }
 
@@ -1772,13 +1775,17 @@ impl Device {
                     }
                 },
                 DeviceEvent::Fetched(fetched) => self.fetched.push(fetched),
-                DeviceEvent::Gathered { slots, unfound } => {
+                DeviceEvent::Gathered {
+                    request,
+                    slots,
+                    unfound,
+                } => {
                     for what in unfound {
                         log.trouble(format!(
                             "The bundle leaves out the {what}: no one slot holds it."
                         ));
                     }
-                    self.gathered = Some(slots);
+                    self.gathered = Some((request, slots));
                 }
                 // An empty slot is a failure to a user who asked to copy or open it, and
                 // an answer to the queue: nothing is being replaced.

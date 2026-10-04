@@ -1041,8 +1041,18 @@ fn export_bundle(
         let (roots, also) = slots
             .into_iter()
             .partition(|(class, _)| matches!(class, ObjectClass::SetList | ObjectClass::Program));
-        device.send(DeviceCmd::Gather { roots, also }, log);
-        return workspace.bundle_after(ids);
+        if !device.state.connected() {
+            return log.trouble("No instrument is attached.");
+        }
+        let request = workspace.bundle_after(ids);
+        return device.send(
+            DeviceCmd::Gather {
+                roots,
+                also,
+                request,
+            },
+            log,
+        );
     }
     match crate::bundle::lay_out(&ids, workspace, &device.state) {
         Ok(crate::bundle::Laid::Read(reading)) => browser.held.push(Act::ExportBundle {

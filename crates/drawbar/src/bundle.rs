@@ -16,7 +16,7 @@ use nord_usb::ObjectClass;
 use crate::device::DeviceState;
 use crate::ondisk::OnDisk;
 use crate::store::Outside;
-use crate::workspace::{Bytes, LocalEntity, Workspace};
+use crate::workspace::{Bytes, LocalEntity, VerifyState, Workspace};
 
 /// The extensions of the bundles Nord Sound Manager writes for an Electro 5.
 const EXTENSIONS: [&str; 2] = ["ne5pbundle", "ne5tbundle"];
@@ -301,22 +301,22 @@ fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Provider 
             .map(|e| e.id)
             .collect(),
     };
-    match found.as_slice() {
-        [one] => Provider::One(*one),
-        [] if matches!(need, Key::Program(..)) => {
-            let unread: Vec<u64> = workspace
-                .entities()
-                .iter()
-                .filter(|e| (e.unread() || e.reading()) && e.format_tag() == "ne5p")
-                .map(|e| e.id)
-                .collect();
-            match unread.is_empty() {
-                true => Provider::None,
-                false => Provider::Unread(unread),
-            }
-        }
-        [] => Provider::None,
-        _ => Provider::Many,
+    // A program not read yet may claim the slot too, unless it could not be read.
+    let unread: Vec<u64> = match need {
+        Key::Program(..) => workspace
+            .entities()
+            .iter()
+            .filter(|e| e.unread() || e.reading())
+            .filter(|e| e.format_tag() == "ne5p" && !matches!(e.verify, VerifyState::NotRead(_)))
+            .map(|e| e.id)
+            .collect(),
+        Key::Piano(_) | Key::Sample(_) => Vec::new(),
+    };
+    match (found.as_slice(), unread.is_empty()) {
+        (_, false) => Provider::Unread(unread),
+        ([one], true) => Provider::One(*one),
+        ([], true) => Provider::None,
+        (_, true) => Provider::Many,
     }
 }
 

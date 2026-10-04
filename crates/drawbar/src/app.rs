@@ -891,10 +891,10 @@ impl eframe::App for DrawbarApp {
         arrived.extend(self.take_picked());
         if self.device.take_failed() && self.workspace.give_up_bundle() {
             self.log
-                .trouble("The bundle was not written: copying from the instrument failed.");
+                .trouble("The bundle was not written: the instrument did not finish a read.");
         }
-        if let Some(slots) = self.device.take_gathered() {
-            self.workspace.bundle_gathered(slots);
+        if let Some((request, slots)) = self.device.take_gathered() {
+            self.workspace.bundle_gathered(request, slots);
         }
         if let Some(ids) = self.workspace.bundle_ready() {
             let slots = Vec::new();

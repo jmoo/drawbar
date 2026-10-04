@@ -1297,8 +1297,8 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
             let Bench {
                 workspace, device, ..
             } = &mut rig.bench;
-            if let Some(slots) = device.take_gathered() {
-                workspace.bundle_gathered(slots);
+            if let Some((request, slots)) = device.take_gathered() {
+                workspace.bundle_gathered(request, slots);
             }
             let arriving: Vec<Act> = device.take_fetched().into_iter().map(Act::Arrive).collect();
             if !arriving.is_empty() {
