@@ -106,8 +106,8 @@ impl Face {
 /// How much of the header fits, measured on the header's own width.
 ///
 /// The collapse order, widest first: the quiet actions lose their words, then the faces
-/// lose theirs, then the loud action keeps only its number. The identity row wraps after
-/// all three.
+/// lose theirs, then the loud action keeps only its number. The left group wraps only
+/// at the last stage, and the identity row after all three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Full,
@@ -116,16 +116,34 @@ pub enum Stage {
     Narrow,
 }
 
-/// The three widths the strip changes shape at.
+/// The least widths of [`Stage::Full`], [`Stage::Quiet`] and [`Stage::Faces`].
 const BREAKPOINTS: [f32; 3] = [1000.0, 860.0, 720.0];
 
 pub fn stage(width: f32) -> Stage {
-    match width {
-        width if width >= BREAKPOINTS[0] => Stage::Full,
-        width if width >= BREAKPOINTS[1] => Stage::Quiet,
-        width if width >= BREAKPOINTS[2] => Stage::Faces,
-        _ => Stage::Narrow,
-    }
+    staged(width, &BREAKPOINTS)
+}
+
+/// The widest stage whose least width in `least` is `width` or under.
+fn staged(width: f32, least: &[f32; 3]) -> Stage {
+    [Stage::Full, Stage::Quiet, Stage::Faces]
+        .into_iter()
+        .zip(least)
+        .find(|(_, least)| width >= **least)
+        .map_or(Stage::Narrow, |(stage, _)| stage)
+}
+
+/// Raise `stage`'s least width past `width`, at which its left group wrapped. Whether
+/// that happens depends on what the left group holds, which differs by kind and by
+/// document, so each document learns its own.
+fn wrapped_at(least: &mut [f32; 3], stage: Stage, width: f32) -> bool {
+    let index = match stage {
+        Stage::Full => 0,
+        Stage::Quiet => 1,
+        Stage::Faces => 2,
+        Stage::Narrow => return false,
+    };
+    least[index] = least[index].max(width + 1.0);
+    true
 }
 
 /// The ink a header phrase or stroke may use.
@@ -263,7 +281,10 @@ pub(super) fn ui(
     boxes: (&mut String, &mut String),
     sets: &mut Sets,
 ) -> Clicked {
-    let stage = stage(ui.available_width());
+    let width = ui.available_width();
+    let learned = ui.id().with(("least widths", entity.id));
+    let mut least: [f32; 3] = ui.data(|data| data.get_temp(learned)).unwrap_or(BREAKPOINTS);
+    let stage = staged(width, &least);
     let cells = identity(entity, facts.tags);
     let visuals = ui.visuals().clone();
     let mut act = Clicked::default();
@@ -282,12 +303,16 @@ pub(super) fn ui(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             ui.spacing_mut().interact_size.y = CONTROL;
-            strip(
+            let wrapped = strip(
                 ui,
                 &mut act,
                 |rhs, act| right(rhs, entity, facts, stage, act),
                 |lhs, act| left(lhs, entity, facts, boxes, sets, act),
             );
+            if wrapped && wrapped_at(&mut least, stage, width) {
+                ui.data_mut(|data| data.insert_temp(learned, least));
+                ui.ctx().request_discard("header wrapped");
+            }
             if !cells.is_empty() {
                 row(ui, &cells, stage);
             }
@@ -302,7 +327,7 @@ pub(super) fn ui(
 
 /// One row of the strip. The right-hand group takes the width it needs at the right
 /// edge. The left-hand group gets the rest and wraps onto a second line when it runs
-/// out of room, so it never runs under the controls.
+/// out of room, so it never runs under the controls. Whether it wrapped is returned.
 ///
 /// The right group is laid out first because its width decides the left group's room.
 fn strip<T>(
@@ -310,7 +335,7 @@ fn strip<T>(
     state: &mut T,
     right: impl FnOnce(&mut egui::Ui, &mut T),
     left: impl FnOnce(&mut egui::Ui, &mut T),
-) {
+) -> bool {
     let row = egui::Rect::from_min_size(
         ui.cursor().min,
         egui::vec2(ui.available_width(), HEIGHT - 8.0),
@@ -332,6 +357,7 @@ fn strip<T>(
     lhs.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
     left(&mut lhs, state);
     ui.advance_cursor_after_rect(lhs.min_rect().union(taken).union(row));
+    lhs.min_rect().bottom() > row.bottom()
 }
 
 /// The kind, the name, the format, the place, the size and the state.
