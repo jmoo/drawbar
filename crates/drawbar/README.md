@@ -21,6 +21,8 @@ cargo install drawbar
   listen to either from the screen or a MIDI controller before you send it.
 - Queue your changes and send them in one go, with a review of what each one
   replaces.
+- Unpack a Nord Sound Manager bundle into a folder, or export sounds from either
+  side, with the pianos and samples they play, as one.
 - Keep a text note beside the sounds for the set list and the cues.
 - On the desktop, or in Chrome and Edge, open any folder as the library, such
   as a Sample Editor project. Nothing in it changes until you change something.

@@ -14,7 +14,9 @@
 //! and deletes it. `DRAWBAR_HARDWARE_NORD` names its binary (default `nord`). The sources
 //! are the slots `DRAWBAR_HARDWARE_PIANO` (default `1:6`) and `DRAWBAR_HARDWARE_OTHER_PIANO`
 //! (`6:3`), two piano libraries of a few megabytes, and `DRAWBAR_HARDWARE_SAMPLE` (`1:20`),
-//! a sample instrument of more than a megabyte.
+//! a sample instrument of more than a megabyte. The bundle test reads the program at
+//! `DRAWBAR_HARDWARE_PROGRAM` (`6:9`), one that plays a piano and a sample, and writes
+//! nothing.
 //!
 //! ⚠️ A test writes only to the last vacant slots of bank 1, as drawbar's own walk found
 //! them when it attached, and deletes only a slot holding a name this suite gives
@@ -1253,6 +1255,121 @@ fn s6_the_queue_compares_a_slot_by_checksum_without_reading_the_file() {
     rig.release();
     assert_no_strays(class);
     assert_holds(class, slot, &source, "drawbar-hw-sample");
+}
+
+/// A program on the instrument exports as the bundle nord-cli makes of it: the program
+/// and what it plays, copied in one session per class, a large piano through a file and
+/// never held whole, each member byte for byte and the manifest the same. Reads only.
+#[test]
+#[ignore = "reads an attached instrument; see the module's documentation"]
+fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
+    use nord_format::bundle::archive::{copy_member, Directory};
+
+    if !attached() {
+        return;
+    }
+    let run = run();
+    let program = slot_from("DRAWBAR_HARDWARE_PROGRAM", "6:9");
+    let theirs = run.dir.join("nord-cli.ne5pbundle");
+    run.cli.ok(&[
+        "bundle",
+        "get",
+        "program",
+        &shown(program),
+        "-o",
+        theirs.to_str().unwrap(),
+    ]);
+
+    let mut rig = Rig::open(&[]);
+    rig.connect();
+    let slots = vec![(ObjectClass::Program, program)];
+    let (ids, largest) = largest_allocation_anywhere(|| {
+        let ids = Vec::new();
+        let reading = Vec::new();
+        rig.frame(vec![Act::ExportBundle {
+            ids,
+            slots,
+            reading,
+        }]);
+        let started = Instant::now();
+        loop {
+            rig.frame(Vec::new());
+            let Bench {
+                workspace, device, ..
+            } = &mut rig.bench;
+            if let Some((request, slots)) = device.take_gathered() {
+                workspace.bundle_gathered(request, slots);
+            }
+            let arriving: Vec<Act> = device.take_fetched().into_iter().map(Act::Arrive).collect();
+            if !arriving.is_empty() {
+                rig.frame(arriving);
+            }
+            let Bench {
+                workspace,
+                browser,
+                queue,
+                ..
+            } = &mut rig.bench;
+            rig.store
+                .sync(workspace, browser, queue, crate::store::Pass::Files);
+            if let Some(ids) = rig.bench.workspace.bundle_ready() {
+                return ids;
+            }
+            assert!(
+                started.elapsed() < SEND_LIMIT,
+                "the bundle's objects did not arrive\n{}",
+                rig.bench.log.tail(30)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    eprintln!(
+        "gathered {} objects; largest allocation {largest} bytes",
+        ids.len()
+    );
+    rig.until("every copy is read", ATTACH_LIMIT, |rig| {
+        let laid = crate::bundle::lay_out(&ids, &rig.bench.workspace, &rig.bench.device.state);
+        matches!(laid, Ok(crate::bundle::Laid::Ready(_)))
+    });
+    let Ok(crate::bundle::Laid::Ready(export)) =
+        crate::bundle::lay_out(&ids, &rig.bench.workspace, &rig.bench.device.state)
+    else {
+        panic!("the bundle was not laid out");
+    };
+    assert_eq!(
+        export.plan.unmet,
+        [],
+        "everything the program plays is in it"
+    );
+    let ours = run.dir.join("drawbar.ne5pbundle");
+    nord_usb::block_on(crate::bundle::write_to(&export, &ours)).unwrap();
+
+    let members = |path: &Path| -> Vec<(String, u32, Vec<u8>)> {
+        let mut file = fs::File::open(path).unwrap();
+        let directory = Directory::read_from(&mut file).unwrap();
+        let mut found = Vec::new();
+        for member in &directory.members {
+            let mut bytes = Vec::new();
+            if member.entry.name.ends_with(".ne5p") || member.entry.name == "meta.xml" {
+                copy_member(&mut file, member, &mut bytes).unwrap();
+            }
+            found.push((member.entry.name.clone(), member.entry.crc32, bytes));
+        }
+        found
+    };
+    assert_eq!(members(&ours), members(&theirs));
+    let mut file = fs::File::open(&ours).unwrap();
+    let directory = Directory::read_from(&mut file).unwrap();
+    let biggest = directory
+        .members
+        .iter()
+        .map(|m| m.entry.size)
+        .max()
+        .unwrap();
+    assert!(
+        (largest as u64) < u64::from(biggest),
+        "an allocation of {largest} bytes held the {biggest}-byte member whole"
+    );
 }
 
 /// Every slot this run wrote is empty again, and each class holds what it held when the

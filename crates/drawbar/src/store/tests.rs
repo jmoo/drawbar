@@ -3603,6 +3603,258 @@ fn a_file_from_outside_is_copied_in_and_read_as_the_librarys_own() {
     assert_eq!(session.said("is on this computer"), 2);
 }
 
+/// A stored bundle of `members`, as `(archive path, file)`.
+fn bundle_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+    use nord_format::bundle::archive::{DosTime, Entry, Writer};
+    let mut writer = Writer::new(Vec::new());
+    for (path, bytes) in members {
+        let size = u32::try_from(bytes.len()).unwrap();
+        let crc = nord_format::crc::crc32(bytes);
+        let entry = Entry::new(path.to_string(), size, crc, DosTime::default());
+        writer.member(entry, &mut &bytes[..]).unwrap();
+    }
+    writer.finish(&[]).unwrap()
+}
+
+/// A bundle from outside unpacks into a new folder named after it, beside one that
+/// already has its name, each member copied out under its own name and the manifest
+/// left behind.
+#[test]
+fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::create_dir(root.at("Gig")).unwrap();
+    let (sample, program) = (
+        crate::testing::sample_bytes(),
+        Fresh::Program.bytes().unwrap(),
+    );
+    let bundle = bundle_of(&[
+        ("Samp Lib/Samp Lib/Marimba.nsmp", &sample),
+        ("Program/Bank 1/Grand.ne5p", &program),
+        ("meta.xml", b"<bundle/>"),
+    ]);
+    fs::write(outside.at("Gig.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Gig.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Gig.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+
+    assert_eq!(root.names("Gig 2"), ["Grand.ne5p", "Marimba.nsmp"]);
+    assert_eq!(root.read("Gig 2/Marimba.nsmp"), sample);
+    assert_eq!(root.read("Gig 2/Grand.ne5p"), program);
+    assert!(
+        !root.at("Gig.ne5pbundle").exists(),
+        "the bundle is not kept"
+    );
+}
+
+/// A member whose bytes do not match the bundle's checksum for them is refused, and the
+/// rest of the bundle still arrives.
+#[test]
+fn a_damaged_member_of_a_bundle_is_refused_and_the_rest_arrive() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let (sample, program) = (
+        crate::testing::sample_bytes(),
+        Fresh::Program.bytes().unwrap(),
+    );
+    let mut bundle = bundle_of(&[
+        ("Samp Lib/Samp Lib/Marimba.nsmp", &sample),
+        ("Program/Bank 1/Grand.ne5p", &program),
+    ]);
+    let in_bundle = bundle
+        .windows(sample.len())
+        .position(|w| w == sample.as_slice())
+        .unwrap();
+    bundle[in_bundle + sample.len() / 2] ^= 1;
+    fs::write(outside.at("Gig.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Gig.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Gig.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+
+    assert_eq!(root.names("Gig"), ["Grand.ne5p"]);
+    assert_eq!(
+        session.said("“Marimba.nsmp” was not made, because the bundle's copy of it is damaged"),
+        1
+    );
+}
+
+/// A set list exports with the one program on this computer that claims a slot it
+/// plays, and a checked sample instrument with the bytes of the file it rests in. A program
+/// claiming a slot the set list does not play is left out.
+#[test]
+fn a_set_list_exports_with_its_program_and_a_resting_sample() {
+    use nord_format::bundle::archive::{copy_member, Directory};
+    use nord_format::formats::ne5;
+    use nord_format::{Entity, Program, Song};
+
+    let root = Temp::new();
+    let program_at = |slot: u16| {
+        let file = ne5::program::new((0, slot).try_into().unwrap());
+        nord_format::to_bytes(&Entity::Program(Program::Electro5(file))).unwrap()
+    };
+    let one = (0, 1).try_into().unwrap();
+    let song = ne5::song::new((0, 0).try_into().unwrap(), 1, [one; 4]).unwrap();
+    let song = nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).unwrap();
+    let sample = crate::testing::sample_bytes();
+    fs::write(root.at("First.ne5p"), program_at(1)).unwrap();
+    fs::write(root.at("Other.ne5p"), program_at(2)).unwrap();
+    fs::write(root.at("Sunday.ne5t"), &song).unwrap();
+    fs::write(root.at("Marimba.nsmp"), &sample).unwrap();
+    let session = Session::open(&root);
+    let ids = [session.named("Sunday.ne5t"), session.named("Marimba.nsmp")];
+
+    let laid = crate::bundle::lay_out(&ids, &session.bench.workspace, &session.bench.device.state);
+    let Ok(crate::bundle::Laid::Ready(export)) = laid else {
+        panic!("the bundle was not laid out");
+    };
+    assert_eq!(export.name, "Sunday.ne5tbundle");
+    let out = root.at("Sunday.ne5tbundle");
+    nord_usb::block_on(crate::bundle::write_to(&export, &out)).unwrap();
+
+    let mut file = fs::File::open(&out).unwrap();
+    let directory = Directory::read_from(&mut file).unwrap();
+    let members: Vec<(String, Vec<u8>)> = directory
+        .members
+        .iter()
+        .map(|member| {
+            let mut bytes = Vec::new();
+            copy_member(&mut file, member, &mut bytes).unwrap();
+            (member.entry.name.clone(), bytes)
+        })
+        .collect();
+    let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Samp Lib/Samp Lib/Marimba.nsmp",
+            "Program/Bank 1/First.ne5p",
+            "Set List/Set List 1/Sunday.ne5t",
+            "meta.xml",
+        ]
+    );
+    assert_eq!(members[0].1, sample);
+    assert_eq!(members[1].1, program_at(1));
+    assert_eq!(members[2].1, song);
+    let manifest = String::from_utf8(members[3].1.clone()).unwrap();
+    assert!(
+        manifest.contains(
+            r#"<file name="Set List/Set List 1/Sunday.ne5t" depCnt="1" dep0="Program/Bank 1/First.ne5p"/>"#
+        ),
+        "{manifest}"
+    );
+}
+
+/// A set list's program that is still to be read is read before the bundle is laid out,
+/// and where two programs claim the slot the set list plays, neither is picked and the
+/// bundle says why.
+#[test]
+fn a_set_list_waits_for_unread_programs_and_names_two_that_claim_its_slot() {
+    use crate::bundle::{lay_out, Laid};
+    use nord_format::formats::ne5;
+    use nord_format::{Entity, Program, Song};
+
+    let root = Temp::new();
+    let program_at = |slot: u16| {
+        let file = ne5::program::new((0, slot).try_into().unwrap());
+        nord_format::to_bytes(&Entity::Program(Program::Electro5(file))).unwrap()
+    };
+    let one = (0, 1).try_into().unwrap();
+    let song = ne5::song::new((0, 0).try_into().unwrap(), 1, [one; 4]).unwrap();
+    fs::write(
+        root.at("Sunday.ne5t"),
+        nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.at("First.ne5p"), program_at(1)).unwrap();
+    fs::write(root.at("Again.ne5p"), program_at(1)).unwrap();
+    let mut session = Session::listed(&root);
+    let sunday = session.named("Sunday.ne5t");
+    session.read(&[sunday]);
+
+    let programs = [session.named("Again.ne5p"), session.named("First.ne5p")];
+    let state = &session.bench.device.state;
+    let laid = lay_out(&[sunday], &session.bench.workspace, state);
+    assert!(
+        matches!(&laid, Ok(Laid::Read(ids)) if ids.contains(&programs[0]) && ids.contains(&programs[1])),
+        "the unread programs were not asked for"
+    );
+
+    session.read(&programs);
+    let state = &session.bench.device.state;
+    let Ok(Laid::Ready(export)) = lay_out(&[sunday], &session.bench.workspace, state) else {
+        panic!("the bundle was not laid out once they were read");
+    };
+    let paths: Vec<&str> = export
+        .plan
+        .members
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        ["Set List/Set List 1/Sunday.ne5t"],
+        "neither claimant is picked"
+    );
+    assert_eq!(
+        export.left_out,
+        ["more than one file on this computer is the program at 1:2"]
+    );
+}
+
+/// An object the instrument was read into a file for lands at the top of the library
+/// under its slot's name, past one already there, and the file it was read into goes.
+#[test]
+fn a_fetched_object_lands_under_its_slot_name_and_its_file_goes() {
+    let (root, scratch) = (Temp::new(), Temp::new());
+    let sample = crate::testing::sample_bytes();
+    fs::write(root.at("Marimba.nsmp"), &sample).unwrap();
+    fs::write(scratch.at("fetched-0-4.nsmp"), &sample).unwrap();
+    let mut session = Session::open(&root);
+    session
+        .bench
+        .act(vec![crate::browser::Act::Arrive(crate::device::Fetched {
+            class: ObjectClass::Sample,
+            at: Location::from_user(1, 5),
+            name: "Marimba".into(),
+            tag: "nsmp".into(),
+            file: scratch.at("fetched-0-4.nsmp"),
+            len: sample.len() as u64,
+        })]);
+    session.sync();
+
+    assert_eq!(root.read("Marimba 2.nsmp"), sample);
+    assert!(
+        !scratch.at("fetched-0-4.nsmp").exists(),
+        "the fetched file goes"
+    );
+}
+
 /// A file from outside whose name is taken asks first. Overwrite copies it over the
 /// file there, which keeps its id and tags; Keep both copies it beside under a free name.
 #[test]

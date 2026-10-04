@@ -24,6 +24,11 @@ Right-click a slot to **Open**, **Copy to this computer**, **Load on instrument*
 that slot, and a document from a slot has the same button in its
 [header](editing.md#the-document-header).
 
+With several slots checked, **Copy to this computer** reads each folder's slots
+in one go. **Export as bundle…**
+writes them, with what they play, as one bundle; see
+[Bundles](this-computer.md#bundles).
+
 Drag to move things:
 
 - a slot onto **This computer** copies it;

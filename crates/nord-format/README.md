@@ -2,9 +2,9 @@
 
 **Read and write Nord keyboard files from Rust, byte for byte.**
 
-Programs, live slots, set lists, settings, sample instruments and piano
-libraries, from a library with no I/O of its own beyond `Read`, `Seek` and
-`Write`. It builds anywhere `std` does, including the browser.
+Programs, live slots, set lists, settings, sample instruments, piano libraries
+and the bundles that carry them, from a library with no I/O of its own beyond
+`Read`, `Seek` and `Write`. It builds anywhere `std` does, including the browser.
 
 What you read, you can write back unchanged. Anything the library does not yet
 decode is kept as raw bytes, so a file survives a round trip even where its
@@ -57,7 +57,8 @@ std::fs::write("out.ne5p", to_bytes(&entity)?)?;
 ## Building
 
 `cargo test -p nord-format` from `crates/` in `nix develop`. The `bundle` feature
-adds ZIP backup bundles. The test-only `corpus` feature points the sweep at the
+reads the members of ZIP backups and Drum banks; Nord Sound Manager's bundles need
+no feature. The test-only `corpus` feature points the sweep at the
 private corpus.
 
 ## Disclaimer

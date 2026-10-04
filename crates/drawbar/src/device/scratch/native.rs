@@ -100,6 +100,11 @@ impl Kept {
         self.path.display().to_string()
     }
 
+    /// The file, as one to copy into the library from outside it.
+    pub async fn outside(&self) -> io::Result<crate::store::Outside> {
+        Ok(self.path.clone())
+    }
+
     /// Put what was written on the disk, and the file's entry in its folder with it.
     pub async fn close(&mut self) -> io::Result<()> {
         self.file.sync_all()?;

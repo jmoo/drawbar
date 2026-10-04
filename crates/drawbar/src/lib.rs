@@ -7,6 +7,7 @@ pub mod about;
 pub mod app;
 pub mod audio;
 pub mod browser;
+pub mod bundle;
 #[cfg(target_arch = "wasm32")]
 mod closing;
 pub mod demo;

@@ -462,11 +462,32 @@ pub enum Failure {
     Io(String),
 }
 
+/// Some bytes of a file outside the library, and the CRC-32 they must have: a member of
+/// a bundle. A copy whose bytes do not match fails.
+#[derive(Clone, Debug)]
+pub struct Part {
+    pub from: Outside,
+    pub bytes: std::ops::Range<u64>,
+    pub crc32: u32,
+}
+
+impl Part {
+    /// The error for bytes that are short or do not match.
+    pub fn mismatch(&self) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the bundle's copy of it is damaged",
+        )
+    }
+}
+
 /// What a file copied into the library is a copy of, as the app asks for it.
 #[derive(Clone, Debug)]
 pub enum CopyOf {
     /// A file outside the library.
     Outside(Outside),
+    /// A member of a bundle outside the library.
+    Part(Part),
     /// The file the asset with this id rests in, byte for byte, from wherever it is when
     /// the copy is sent.
     Asset(u64),
@@ -480,6 +501,8 @@ pub enum CopyOf {
 pub enum Source {
     /// A file outside the library.
     Outside(Outside),
+    /// A member of a bundle outside the library.
+    Part(Part),
     /// A file of the library, byte for byte, which must still hold what its fingerprint
     /// says.
     Library(LibPath, Fingerprint),
