@@ -440,8 +440,7 @@ fn builds_from_source(s: &Specimen) -> Result<(), String> {
     let twin = samples::narrow(s.entity)?;
     let (_, entity) = related(s.path, name)?;
     let project = samples::project(&entity)?;
-    let zones = samples::built_zones(project)?;
-    let built = samples::built_v2(project, &zones)?;
+    let (plan, built) = samples::built_v2(project)?;
 
     let ours = built.to_bytes().context("write")?;
     ensure!(ours[..0x18] == s.bytes[..0x18], "container header");
@@ -470,22 +469,24 @@ fn builds_from_source(s: &Specimen) -> Result<(), String> {
         twin.stroke_streams().iter().map(|s| s.1),
         nsmp::codec::Layout::V2,
     );
-    for (index, zone) in zones.iter().enumerate() {
+    for (index, zone) in plan.zones.iter().enumerate() {
         let (at, stream) = twin.zone_stream(index).context(format!("zone {index}"))?;
         let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2, file_peak)
             .context(format!("zone {index}"))?;
-        let plan = nsmp::encode::Plan::new(
-            nsmp::codec::Layout::V2,
-            zone.audio.len(),
-            1,
-            zone.secondary_start,
-        )
+        let frames = zone.samples.len() / usize::from(zone.channels);
+        let channels = usize::from(zone.channels);
+        let layout = nsmp::codec::Layout::V2;
+        let plan = match zone.loops {
+            Some(points) => {
+                nsmp::encode::Plan::looped(layout, frames, channels, points, zone.secondary_start)
+            }
+            None => nsmp::encode::Plan::new(layout, frames, channels, zone.secondary_start),
+        }
         .context(format!("zone {index} plan"))?;
         ensure!(
             plan.fields == editor.samples.len(),
-            "zone {index}: {} fields planned for {} frames, the editor wrote {}",
+            "zone {index}: {} fields planned for {frames} frames, the editor wrote {}",
             plan.fields,
-            zone.audio.len(),
             editor.samples.len()
         );
     }
