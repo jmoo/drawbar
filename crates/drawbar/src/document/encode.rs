@@ -1,9 +1,7 @@
-//! A WAV that landed in the workspace, and the instrument that can be made from it.
+//! The instrument a WAV can be made into, and the panel in its document that makes it.
 //!
-//! A WAV has no document of its own: opened here, it is bytes with an error beside them.
 //! `nord_format`'s sample encoder builds a one-zone instrument from 44.1 kHz mono or
-//! stereo 16-bit PCM in any of the three generations, and this module draws the panel
-//! that runs it.
+//! stereo 16-bit PCM in any of the three generations.
 //!
 //! ⚠️ Only a v2 instrument has been played on hardware. The wide generations reproduce
 //! what Nord Sample Editor renders, but no instrument that plays them has been
@@ -17,14 +15,6 @@ use nord_format::wav::Pcm16;
 
 use super::controls;
 use super::sample::note_picker;
-
-/// Whether these bytes are worth offering an encode panel over.
-///
-/// Tests the container only: a 24-bit WAV still gets the panel, which says why it
-/// cannot be encoded.
-pub fn is_wav(bytes: &[u8]) -> bool {
-    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE"
-}
 
 /// What the operator has typed into the panel, kept between frames.
 pub struct Draft {
@@ -241,14 +231,6 @@ mod tests {
     fn wav(rate: u32, channels: u16, frames: usize) -> Vec<u8> {
         let samples = vec![0i16; frames * usize::from(channels)];
         nord_format::wav::pcm16(&samples, rate, channels).unwrap()
-    }
-
-    #[test]
-    fn only_a_riff_wave_container_offers_the_panel() {
-        assert!(is_wav(&wav(44_100, 1, 8)));
-        assert!(!is_wav(b"RIFF"));
-        assert!(!is_wav(b"not a wav at all"));
-        assert!(!is_wav(&[]));
     }
 
     #[test]

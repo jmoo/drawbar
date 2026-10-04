@@ -343,6 +343,11 @@ After the listing, files with tags or a slot they came off are also read in the
 background, so they match their slots on the instrument before anything shows
 them.
 
+A WAV is known from its name alone: its row needs nothing from its contents,
+and it never matches a slot. So it is read only when it is opened, acted on or
+built from, never for its row, a selection or the background. Its first tag
+still reads it once, for the identity the library knows it by.
+
 A piano library or sample instrument is never held whole. It rests in its file,
 indexed and read by range ([Large libraries](file-formats.md#large-libraries)).
 Its checksum is checked in one streaming pass once something needs the verdict,

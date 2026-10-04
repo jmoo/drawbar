@@ -221,9 +221,7 @@ impl<F: Fs> Keeper<F> {
                 let kept = self.read_slot(&slot).await.map_err(|e| e.to_string());
                 answer(Event::SlotKept { slot, kept });
             }
-            Cmd::Read { .. } | Cmd::ReadOthers { .. } => {
-                unreachable!("the backend reads files itself")
-            }
+            Cmd::Read { .. } => unreachable!("the backend reads files itself"),
             Cmd::Restore(from) => {
                 let restored = match &self.unopened {
                     Some((fs, _)) => super::copy::restore(fs, &from).await,
@@ -3244,7 +3242,7 @@ mod tests {
         );
         fs::create_dir(root.at("More")).unwrap();
         for i in 0..2300 {
-            fs::write(root.at(&format!("More/{i:04}.wav")), b"wave").unwrap();
+            fs::write(root.at(&format!("More/{i:04}.pdf")), b"%PDF").unwrap();
         }
         let listed = keeper.run_one(Cmd::Rescan);
         let [Event::Scanned(Ok(viewed))] = &listed[..] else {
