@@ -1146,6 +1146,12 @@ fn back_up<T: Transport + Recorded>(
 ) -> Result<Backup, String> {
     let at = info.location;
     let intent = format!("{} read {}", noun(class), addr(at));
+    if !dir.exists() {
+        return Err(format!(
+            "the rescue folder {} does not exist",
+            dir.display()
+        ));
+    }
     let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))
         .map_err(|e| format!("{e}; run from a folder you can write to, or pass --rescue-dir"))?;
     ui.note(format!(
@@ -2607,6 +2613,29 @@ mod tests {
             assert!(err.contains("left alone"), "{err}");
             assert!(err.contains("pass --rescue-dir"), "{err}");
             assert!(!device.transport().sent().contains(&delete));
+        }
+
+        /// A rescue folder that is not there is named as such, so a mistyped
+        /// `--rescue-dir` is not taken for a folder that cannot be written.
+        #[test]
+        fn a_rescue_folder_that_does_not_exist_is_named() {
+            let dir = crate::edit::tests::scratch("send-no-folder").join("missing");
+            let mut device = Device::new(ReplayTransport::new(recorded().concat()));
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+            assert!(err.contains("does not exist"), "{err}");
+            assert!(err.contains("left alone"), "{err}");
         }
 
         /// `--rescue-dir` wins over `NORD_RESCUE_DIR`, which wins over the working
