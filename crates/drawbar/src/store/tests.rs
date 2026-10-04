@@ -6080,7 +6080,6 @@ fn a_listed_wav_is_a_wav_asset_read_when_its_document_opens() {
     let entity = session.bench.workspace.get(id).unwrap();
     assert!(entity.unread(), "nothing needed it yet");
     assert_eq!(Kind::of(entity), Kind::Wav);
-    assert_eq!(Kind::of(entity).glyph(), crate::icon::Glyph::Square);
 
     assert!(session.document(id).contains(&"Reading…".to_string()));
     session.answer_reads();

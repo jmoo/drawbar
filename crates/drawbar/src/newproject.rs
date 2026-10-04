@@ -461,8 +461,8 @@ impl Draft {
 
     /// Make what the draft describes, as a new asset: an instrument to be filed like any
     /// new asset, or a project filed at once in a new folder in the library's root, named
-    /// after it and numbered past what is there, with its WAVs beside it under the names
-    /// [`leaves`] gives.
+    /// after it and numbered past what is there, with its WAVs beside it under bare leaf
+    /// names, numbered where two picks collide.
     pub fn make(
         &self,
         workspace: &mut Workspace,
@@ -474,6 +474,18 @@ impl Draft {
         if self.making != Making::Project {
             return Ok(workspace.ingest(name, Origin::Fresh, bytes, log));
         }
+        let mut copies = Vec::new();
+        let mut filed = std::collections::BTreeSet::new();
+        for (take, leaf) in self.takes.iter().zip(leaves(&self.takes)) {
+            if !filed.insert(names::key(&leaf)) {
+                continue;
+            }
+            let bytes = take
+                .file
+                .clone()
+                .ok_or_else(|| format!("{}: its bytes were not kept", take.path))?;
+            copies.push((leaf, bytes));
+        }
         let root = LibPath::root();
         let folder = folders.free(&root, &names::portable(&self.name), workspace);
         folders
@@ -483,14 +495,8 @@ impl Draft {
         let name = names::portable(&name);
         let made = workspace.ingest(name.clone(), Origin::Fresh, bytes, log);
         workspace.place(made, dir.join(&name));
-        let mut filed = std::collections::BTreeSet::new();
-        for (take, leaf) in self.takes.iter().zip(leaves(&self.takes)) {
-            if !filed.insert(names::key(&leaf)) {
-                continue;
-            }
-            let bytes = take.file.clone().unwrap_or_default();
-            let origin = Origin::File(take.path.clone());
-            let wav = workspace.ingest(leaf.clone(), origin, bytes, log);
+        for (leaf, bytes) in copies {
+            let wav = workspace.ingest(leaf.clone(), Origin::Fresh, bytes, log);
             workspace.place(wav, dir.join(&leaf));
         }
         Ok(made)

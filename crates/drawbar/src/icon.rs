@@ -59,6 +59,7 @@ glyphs! {
     Equal => "equal.svg",
     Eye => "eye.svg",
     EyeOff => "eye-off.svg",
+    FileAudio => "file-audio.svg",
     FilePlus2 => "file-plus-2.svg",
     FileText => "file-text.svg",
     Folder => "folder.svg",
