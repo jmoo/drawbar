@@ -128,10 +128,11 @@ pub enum Act {
     /// File an object the instrument read into a file, copying it into the library.
     Arrive(Fetched),
     /// Write these assets, and what they need, as one bundle, once these slots have been
-    /// copied to this computer.
+    /// copied to this computer and the assets `reading` names have been read.
     ExportBundle {
         ids: Vec<u64>,
         slots: Vec<(ObjectClass, Location)>,
+        reading: Vec<u64>,
     },
     LoadOnInstrument {
         class: ObjectClass,
@@ -287,7 +288,7 @@ impl Act {
             | Act::WriteBack(id)
             | Act::Revert(id) => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
-            Act::ExportBundle { ids, .. } => ids.clone(),
+            Act::ExportBundle { ids, reading, .. } => [ids.as_slice(), reading].concat(),
             Act::Connect
             | Act::Disconnect
             | Act::OpenFiles
@@ -490,7 +491,11 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
                 .collect();
             match ids.is_empty() && slots.is_empty() {
                 true => Vec::new(),
-                false => vec![Act::ExportBundle { ids, slots }],
+                false => vec![Act::ExportBundle {
+                    ids,
+                    slots,
+                    reading: Vec::new(),
+                }],
             }
         }
         Bulk::Tag => Vec::new(),
@@ -693,7 +698,7 @@ pub fn apply(
             ),
             Act::CopyAll { class, slots } => device.send(DeviceCmd::CopyAll { class, slots }, log),
             Act::Arrive(fetched) => arrive(browser, workspace, fetched),
-            Act::ExportBundle { ids, slots } => {
+            Act::ExportBundle { ids, slots, .. } => {
                 export_bundle(browser, workspace, device, log, ids, slots)
             }
             Act::LoadOnInstrument { class, at } => {
@@ -1029,33 +1034,21 @@ fn export_bundle(
     slots: Vec<(ObjectClass, Location)>,
 ) {
     if !slots.is_empty() {
-        let (roots, others): (Vec<_>, Vec<_>) = slots
-            .iter()
-            .partition(|(class, _)| matches!(class, ObjectClass::SetList | ObjectClass::Program));
-        let mut by_class: Vec<(ObjectClass, Vec<Location>)> = Vec::new();
-        for &(class, at) in &others {
-            match by_class.iter_mut().find(|(held, _)| *held == class) {
-                Some((_, held)) => held.push(at),
-                None => by_class.push((class, vec![at])),
-            }
-        }
-        for (class, slots) in by_class {
-            device.send(DeviceCmd::CopyAll { class, slots }, log);
-        }
-        let gathering = !roots.is_empty();
-        if gathering {
-            device.send(DeviceCmd::Gather { roots }, log);
-        }
         log.say(format!(
             "Copying {} and what they play from the instrument for the bundle…",
             crate::strings::counted(slots.len(), "sound", "sounds")
         ));
-        return workspace.bundle_after(ids, others, gathering);
+        let (roots, also) = slots
+            .into_iter()
+            .partition(|(class, _)| matches!(class, ObjectClass::SetList | ObjectClass::Program));
+        device.send(DeviceCmd::Gather { roots, also }, log);
+        return workspace.bundle_after(ids);
     }
     match crate::bundle::lay_out(&ids, workspace, &device.state) {
-        Ok(crate::bundle::Laid::Read(ids)) => browser.held.push(Act::ExportBundle {
+        Ok(crate::bundle::Laid::Read(reading)) => browser.held.push(Act::ExportBundle {
             ids,
             slots: Vec::new(),
+            reading,
         }),
         Ok(crate::bundle::Laid::Ready(export)) => {
             for why in &export.left_out {

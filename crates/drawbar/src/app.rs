@@ -889,12 +889,21 @@ impl eframe::App for DrawbarApp {
         let played = self.midi.played(ctx.input(|input| input.time));
         arrived.extend(self.take_dropped_files(ctx));
         arrived.extend(self.take_picked());
+        if self.device.take_failed() && self.workspace.give_up_bundle() {
+            self.log
+                .trouble("The bundle was not written: copying from the instrument failed.");
+        }
         if let Some(slots) = self.device.take_gathered() {
             self.workspace.bundle_gathered(slots);
         }
         if let Some(ids) = self.workspace.bundle_ready() {
             let slots = Vec::new();
-            arrived.push(browser::Act::ExportBundle { ids, slots });
+            let reading = Vec::new();
+            arrived.push(browser::Act::ExportBundle {
+                ids,
+                slots,
+                reading,
+            });
         }
         let fetched = self.device.take_fetched();
         arrived.extend(fetched.into_iter().map(browser::Act::Arrive));

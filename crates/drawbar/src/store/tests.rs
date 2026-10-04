@@ -3383,10 +3383,10 @@ fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
 }
 
 /// A set list exports with the one program on this computer that claims a slot it
-/// plays, and a checked sample instrument streams in from the file it rests in. A program
+/// plays, and a checked sample instrument with the bytes of the file it rests in. A program
 /// claiming a slot the set list does not play is left out.
 #[test]
-fn a_set_list_exports_with_its_program_and_streams_a_resting_sample() {
+fn a_set_list_exports_with_its_program_and_a_resting_sample() {
     use nord_format::bundle::archive::{copy_member, Directory};
     use nord_format::formats::ne5;
     use nord_format::{Entity, Program, Song};
@@ -3445,6 +3445,63 @@ fn a_set_list_exports_with_its_program_and_streams_a_resting_sample() {
             r#"<file name="Set List/Set List 1/Sunday.ne5t" depCnt="1" dep0="Program/Bank 1/First.ne5p"/>"#
         ),
         "{manifest}"
+    );
+}
+
+/// A set list's program that is still to be read is read before the bundle is laid out,
+/// and where two programs claim the slot the set list plays, neither is picked and the
+/// bundle says why.
+#[test]
+fn a_set_list_waits_for_unread_programs_and_names_two_that_claim_its_slot() {
+    use crate::bundle::{lay_out, Laid};
+    use nord_format::formats::ne5;
+    use nord_format::{Entity, Program, Song};
+
+    let root = Temp::new();
+    let program_at = |slot: u16| {
+        let file = ne5::program::new((0, slot).try_into().unwrap());
+        nord_format::to_bytes(&Entity::Program(Program::Electro5(file))).unwrap()
+    };
+    let one = (0, 1).try_into().unwrap();
+    let song = ne5::song::new((0, 0).try_into().unwrap(), 1, [one; 4]).unwrap();
+    fs::write(
+        root.at("Sunday.ne5t"),
+        nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.at("First.ne5p"), program_at(1)).unwrap();
+    fs::write(root.at("Again.ne5p"), program_at(1)).unwrap();
+    let mut session = Session::listed(&root);
+    let sunday = session.named("Sunday.ne5t");
+    session.read(&[sunday]);
+
+    let programs = [session.named("Again.ne5p"), session.named("First.ne5p")];
+    let state = &session.bench.device.state;
+    let laid = lay_out(&[sunday], &session.bench.workspace, state);
+    assert!(
+        matches!(&laid, Ok(Laid::Read(ids)) if ids.contains(&programs[0]) && ids.contains(&programs[1])),
+        "the unread programs were not asked for"
+    );
+
+    session.read(&programs);
+    let state = &session.bench.device.state;
+    let Ok(Laid::Ready(export)) = lay_out(&[sunday], &session.bench.workspace, state) else {
+        panic!("the bundle was not laid out once they were read");
+    };
+    let paths: Vec<&str> = export
+        .plan
+        .members
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        ["Set List/Set List 1/Sunday.ne5t"],
+        "neither claimant is picked"
+    );
+    assert_eq!(
+        export.left_out,
+        ["more than one file on this computer is the program at 1:2"]
     );
 }
 

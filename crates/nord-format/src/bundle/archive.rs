@@ -126,10 +126,20 @@ fn refuse(value: String, bound: &str) -> ParseError {
 
 /// An MS-DOS time and date word pair, the only timestamp a stored ZIP member needs.
 /// Local time, two-second resolution, years 1980 to 2107.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DosTime {
     pub time: u16,
     pub date: u16,
+}
+
+/// 1980-01-01 00:00, the earliest time the words hold.
+impl Default for DosTime {
+    fn default() -> DosTime {
+        DosTime {
+            time: 0,
+            date: 1 << 5 | 1,
+        }
+    }
 }
 
 impl DosTime {
@@ -189,8 +199,9 @@ pub struct Verbatim {
     pub internal: u16,
     pub external: u32,
     pub local_extra: Vec<u8>,
-    /// Unexplained: NSM writes one ASCII `0` or `1` here, which is not a well-formed
-    /// extra field.
+    /// NSM writes one ASCII `0` or `1` here, which is not a well-formed extra field,
+    /// and what decides which is unknown. Inferred from specimens; not confirmed on
+    /// hardware.
     pub central_extra: Vec<u8>,
     pub comment: Vec<u8>,
 }
@@ -422,6 +433,15 @@ impl Tail {
                 "one stored ZIP",
             ));
         }
+        // Each entry is its fixed part and three fields of at most 65535 bytes, so a
+        // longer directory is refused before it is read.
+        let most = u64::from(end.entries) * (Central::LEN as u64 + 3 * u64::from(u16::MAX));
+        if u64::from(end.directory_len) > most {
+            return Err(refuse(
+                format!("a directory of {} bytes", end.directory_len),
+                &format!("the {most} its {} entries can fill", end.entries),
+            ));
+        }
         let record_at = tail_at + at as u64;
         let directory =
             u64::from(end.directory_at)..u64::from(end.directory_at) + u64::from(end.directory_len);
@@ -456,6 +476,9 @@ impl Tail {
                 .ok_or_else(|| refuse(format!("an entry ending at {next}"), "the directory"))?;
             let name = std::str::from_utf8(&tail[..usize::from(central.name_len)])
                 .map_err(|_| refuse("a member name that is not UTF-8".into(), "a UTF-8 name"))?;
+            if name.is_empty() || name.ends_with('/') {
+                return Err(refuse(format!("the entry {name:?}"), "a file's name"));
+            }
             centrals.push((
                 central,
                 name.to_string(),
@@ -498,8 +521,12 @@ impl Tail {
                 .get(i + 1)
                 .map_or(self.directory.start, |(next, ..)| u64::from(next.offset));
             let body = next.checked_sub(central.size.into()).map(|body| body..next);
+            // A local header holds its fixed part, the name, and an extra field of at
+            // most 65535 bytes, so its span is bounded before anything reads it.
             let header_min = offset + Local::LEN as u64 + u64::from(central.name_len);
-            let Some(body) = body.filter(|body| body.start >= header_min) else {
+            let header_max = header_min + u64::from(u16::MAX);
+            let fits = |body: &Range<u64>| (header_min..=header_max).contains(&body.start);
+            let Some(body) = body.filter(fits) else {
                 return Err(refuse(
                     format!("{name} ending at {next}"),
                     "room for its header",
@@ -646,11 +673,6 @@ impl<W: Write> Writer<W> {
         self.put(&trailer)?;
         self.sink.flush()?;
         Ok(self.sink)
-    }
-
-    /// The sink, for draining between members on a target that writes asynchronously.
-    pub fn sink_mut(&mut self) -> &mut W {
-        &mut self.sink
     }
 
     fn end(&mut self) -> Result<(), Error> {

@@ -251,10 +251,6 @@ fn a_manifest_reads_its_dependencies_and_writes_back_the_same() {
         )
     );
     assert_eq!(manifest.to_bytes(), MANIFEST.as_bytes());
-    assert_eq!(
-        manifest.deps("Piano/Grand/A <b> \"c\".npno"),
-        [] as [String; 0]
-    );
 }
 
 #[test]
@@ -392,4 +388,23 @@ fn a_unix_time_becomes_the_utc_dos_time() {
         DosTime::new(2000, 2, 29, 0, 0, 0)
     );
     assert_eq!(DosTime::from_unix(0), None, "1970 is before the DOS epoch");
+}
+
+/// A member that declares fewer bytes than lie between its header and the next would
+/// have the reader take the difference as its header; one longer than a header's fields
+/// can be is refused before any of it is read.
+#[test]
+fn a_header_longer_than_its_fields_can_be_is_refused() {
+    let body = vec![0; 1 << 17];
+    let mut bytes = archive(&[("a", &body)]);
+    let central = bytes.len() - 22 - (46 + 1);
+    bytes[central + 20..central + 28].fill(0);
+    let refused = read(&bytes).unwrap_err();
+    assert!(refused.contains("room for its header"), "{refused}");
+}
+
+#[test]
+fn a_directory_entry_is_not_a_member() {
+    let refused = read(&archive(&[("Program/", b"")])).unwrap_err();
+    assert!(refused.contains("a file's name"), "{refused}");
 }

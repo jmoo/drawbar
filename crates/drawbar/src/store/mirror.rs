@@ -2206,9 +2206,15 @@ impl Store {
             }
             None => {
                 self.records.remove(&id);
+                let fetched = workspace.fetched_copy_failed(id);
+                if fetched && workspace.give_up_bundle() {
+                    log.trouble("The bundle was not written: a copy did not land.");
+                }
                 workspace.forget(id);
                 match from {
-                    Some(CopyOf::Outside(from)) => {
+                    // A file the instrument was read into may be a large piano, which is
+                    // never read whole.
+                    Some(CopyOf::Outside(from)) if !fetched => {
                         log.trouble(format!(
                             "“{name}” was not copied into the library, because {why}. It is \
                              kept in memory instead."

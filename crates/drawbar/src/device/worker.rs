@@ -307,7 +307,9 @@ async fn execute<T: Transport>(
             copy_all(device, class, &slots, scratch, emit, gone).await
         }
 
-        DeviceCmd::Gather { roots } => gather(device, &roots, scratch, emit, gone).await,
+        DeviceCmd::Gather { roots, also } => {
+            gather(device, &roots, &also, scratch, emit, gone).await
+        }
 
         DeviceCmd::Put {
             id,
@@ -1207,6 +1209,7 @@ async fn copy_all<T: Transport>(
 async fn gather<T: Transport>(
     device: &mut Device<T>,
     roots: &[(ObjectClass, Location)],
+    also: &[(ObjectClass, Location)],
     scratch: &Scratch,
     emit: &Emit,
     gone: &mut bool,
@@ -1218,7 +1221,12 @@ async fn gather<T: Transport>(
         let (class, at, deps) = (*class, *at, deps.clone());
         emit.send(DeviceEvent::Deps { class, at, deps });
     }
-    let slots: Vec<(ObjectClass, Location)> = closure.slots().collect();
+    let mut slots: Vec<(ObjectClass, Location)> = closure.slots().collect();
+    for slot in also {
+        if !slots.contains(slot) {
+            slots.push(*slot);
+        }
+    }
     let unfound = closure
         .unfound
         .iter()

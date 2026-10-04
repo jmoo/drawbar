@@ -25,7 +25,7 @@ that slot, and a document from a slot has the same button in its
 [header](editing.md#the-document-header).
 
 With several slots checked, **Copy to this computer** reads each folder's slots
-in one go, and a large piano goes straight to a file. **Export as bundle…**
+in one go. **Export as bundle…**
 writes them, with what they play, as one bundle; see
 [Bundles](this-computer.md#bundles).
 

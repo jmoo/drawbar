@@ -1285,7 +1285,12 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
     let slots = vec![(ObjectClass::Program, program)];
     let (ids, largest) = largest_allocation_anywhere(|| {
         let ids = Vec::new();
-        rig.frame(vec![Act::ExportBundle { ids, slots }]);
+        let reading = Vec::new();
+        rig.frame(vec![Act::ExportBundle {
+            ids,
+            slots,
+            reading,
+        }]);
         let started = Instant::now();
         loop {
             rig.frame(Vec::new());

@@ -82,8 +82,13 @@ pub async fn closure<T: Transport>(
         )));
     }
     let of = |wanted: ObjectClass| -> Vec<Location> {
-        let held = roots.iter().filter(move |(class, _)| *class == wanted);
-        held.map(|(_, at)| *at).collect()
+        let mut held: Vec<Location> = Vec::new();
+        for (_, at) in roots.iter().filter(|(class, _)| *class == wanted) {
+            if !held.contains(at) {
+                held.push(*at);
+            }
+        }
+        held
     };
     let mut closure = Closure::default();
 

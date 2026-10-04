@@ -1289,6 +1289,11 @@ impl Fs for Folder {
                 let part = from
                     .slice_with_f64_and_f64(range.start as f64, range.end as f64)
                     .map_err(failed)?;
+                // A slice past the file's end comes back short, where the desktop's read
+                // fails.
+                if part.size() as u64 != range.end - range.start {
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
                 self.staged(path, Contents::Blob(&part)).await
             }
             Staged::Library(from) => {

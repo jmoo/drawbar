@@ -101,14 +101,10 @@ pub struct Export {
     pub left_out: Vec<String>,
 }
 
-/// The firmware an export claims when no instrument has said its own: the only one the
-/// specimens come from. Inferred from specimens; not confirmed on hardware.
-const FIRMWARE: u32 = 204;
-
 /// What laying out a bundle came to.
 pub enum Laid {
     Ready(Export),
-    /// These assets, the checked ones and what they need, must be read first.
+    /// These assets, checked or perhaps needed, must be read first.
     Read(Vec<u64>),
 }
 
@@ -122,7 +118,7 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
     let mut chosen: Vec<u64> = Vec::new();
     let mut members: Vec<(Item, Body)> = Vec::new();
     let mut left_out = Vec::new();
-    let mut unread = false;
+    let mut to_read: Vec<u64> = Vec::new();
     let mut adding: Vec<u64> = ids.to_vec();
     while !adding.is_empty() {
         for id in adding.drain(..) {
@@ -134,7 +130,7 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
                 continue;
             };
             if entity.unread() || entity.reading() {
-                unread = true;
+                to_read.push(id);
                 continue;
             }
             match member(entity, device) {
@@ -143,21 +139,34 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
             }
         }
         let provided = |need: &Key| members.iter().any(|(m, _)| m.provides == Some(*need));
-        adding = members
+        let unmet: Vec<Key> = members
             .iter()
-            .flat_map(|(m, _)| m.needs.iter())
+            .flat_map(|(m, _)| m.needs.iter().copied())
             .filter(|need| !provided(need))
-            .filter_map(|need| provider(*need, workspace, device))
-            .filter(|id| !chosen.contains(id))
             .collect();
+        for need in unmet {
+            match provider(need, workspace, device) {
+                Provider::One(id) if !chosen.contains(&id) => adding.push(id),
+                Provider::Many => {
+                    let why = format!("more than one file on this computer is {}", needed(need));
+                    if !left_out.contains(&why) {
+                        left_out.push(why);
+                    }
+                }
+                Provider::Unread(ids) => to_read.extend(ids),
+                Provider::One(_) | Provider::None => {}
+            }
+        }
     }
-    if unread {
-        return Ok(Laid::Read(chosen));
+    if !to_read.is_empty() {
+        to_read.sort_unstable();
+        to_read.dedup();
+        return Ok(Laid::Read(to_read));
     }
     let firmware = device
         .card()
         .and_then(|card| card.firmware)
-        .map_or(FIRMWARE, u32::from);
+        .map_or(manifest::ELECTRO5_FIRMWARE, u32::from);
     let items = members.iter().map(|(item, _)| item.clone()).collect();
     let plan = Plan::new(items, firmware).map_err(|e| e.to_string())?;
     let mut bodies = Vec::with_capacity(plan.members.len());
@@ -206,7 +215,8 @@ fn member(entity: &LocalEntity, device: &DeviceState) -> Option<(Item, Body)> {
     let name = stem(entity);
     let mut item = Item::of(&header, &name, decoded)?;
     // The instrument's own list of what the slot an object came from needs counts over
-    // the file's: it can name a piano or sample the file leaves at zero.
+    // the file's: it can name a piano or sample the file leaves at zero. Confirmed on
+    // hardware.
     if let Some((class, at)) = entity.origin.slot() {
         if let Some(needs) = device.needs_of(class, at) {
             item.needs = needs.to_vec();
@@ -250,15 +260,28 @@ fn stem(entity: &LocalEntity) -> String {
     }
 }
 
-/// The asset on this computer that provides `need`, where exactly one does.
-fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Option<u64> {
+/// Who on this computer provides a need.
+enum Provider {
+    One(u64),
+    /// More than one asset does, so none is picked.
+    Many,
+    /// None that has been read does, and these programs are still to be read.
+    Unread(Vec<u64>),
+    None,
+}
+
+/// The asset on this computer that provides `need`.
+fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Provider {
     let found: Vec<u64> = match need {
         Key::Piano(id) | Key::Sample(id) => {
             let (class, tag) = match need {
                 Key::Piano(_) => (ObjectClass::Piano, "npno"),
                 _ => (ObjectClass::Sample, "nsmp"),
             };
-            let name = device.dependency_name(class, id)?.trim().to_string();
+            let Some(name) = device.dependency_name(class, id) else {
+                return Provider::None;
+            };
+            let name = name.trim();
             workspace
                 .entities()
                 .iter()
@@ -279,8 +302,21 @@ fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Option<u6
             .collect(),
     };
     match found.as_slice() {
-        [one] => Some(*one),
-        _ => None,
+        [one] => Provider::One(*one),
+        [] if matches!(need, Key::Program(..)) => {
+            let unread: Vec<u64> = workspace
+                .entities()
+                .iter()
+                .filter(|e| (e.unread() || e.reading()) && e.format_tag() == "ne5p")
+                .map(|e| e.id)
+                .collect();
+            match unread.is_empty() {
+                true => Provider::None,
+                false => Provider::Unread(unread),
+            }
+        }
+        [] => Provider::None,
+        _ => Provider::Many,
     }
 }
 

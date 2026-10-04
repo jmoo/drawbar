@@ -17,32 +17,61 @@ use crate::device::{explain, explain_walk, open_usb, transact};
 use crate::slot::{noun, shown};
 use crate::ui::Ui;
 
-/// Write every member of `bundle` under `out`, at its archive path, with its manifest.
-/// Refuses a member whose path would land outside `out` and a file already there.
+/// Write every member of `bundle` into a new folder `out`, at its archive path, with its
+/// manifest. Refuses an `out` that exists and a member whose path would leave it. The
+/// folder appears whole or not at all.
 pub fn unpack(ui: &Ui, bundle: &Path, out: Option<PathBuf>) -> Result<(), String> {
     let at = |e: &dyn std::fmt::Display| format!("{}: {e}", bundle.display());
     let out = out.unwrap_or_else(|| bundle.with_extension(""));
+    if out.exists() {
+        return Err(format!("{} is already there", out.display()));
+    }
     let mut file = std::fs::File::open(bundle).map_err(|e| at(&e))?;
     let directory = Directory::read_from(&mut file).map_err(|e| at(&e))?;
-    for member in &directory.members {
-        let path = out.join(relative(&member.entry.name)?);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let temp = fresh_dir(&out, "unpacking")?;
+    let written = (|| {
+        for member in &directory.members {
+            unpack_member(&mut file, member, &temp)?;
         }
-        let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-        let mut written = std::fs::File::create_new(&path).map_err(|e| named(&e))?;
-        if let Err(e) = copy_member(&mut file, member, &mut written) {
-            drop(written);
-            let _ = std::fs::remove_file(&path);
-            return Err(named(&e));
-        }
+        std::fs::rename(&temp, &out).map_err(|e| format!("{}: {e}", out.display()))
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_dir_all(&temp);
     }
+    written?;
     ui.note(format!(
         "unpacked {} member(s) of {} into {}",
         directory.members.len(),
         bundle.display(),
         out.display()
     ));
+    Ok(())
+}
+
+/// A new, empty sibling of `path` for this process, named for `what` it holds and
+/// refused where one is there.
+fn fresh_dir(path: &Path, what: &str) -> Result<PathBuf, String> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".nord{}.{what}", std::process::id()));
+    let dir = path.with_file_name(name);
+    std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+fn unpack_member(
+    file: &mut std::fs::File,
+    member: &nord_format::bundle::archive::Member,
+    out: &Path,
+) -> Result<(), String> {
+    {
+        let path = out.join(relative(&member.entry.name)?);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+        let mut written = std::fs::File::create_new(&path).map_err(|e| named(&e))?;
+        copy_member(file, member, &mut written).map_err(|e| named(&e))?;
+    }
     Ok(())
 }
 
@@ -82,7 +111,7 @@ pub fn pack(ui: &Ui, dir: &Path, out: &Path) -> Result<(), String> {
     }
     let plan = Plan::new(
         members.iter().map(|(item, _)| item.clone()).collect(),
-        CURRENT_FIRMWARE,
+        manifest::ELECTRO5_FIRMWARE,
     )
     .map_err(|e| e.to_string())?;
     let manifest = match std::fs::read(&meta) {
@@ -113,10 +142,6 @@ pub fn pack(ui: &Ui, dir: &Path, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The firmware a bundle made without an instrument claims: the only one the specimens
-/// come from. Inferred from specimens; not confirmed on hardware.
-const CURRENT_FIRMWARE: u32 = 204;
-
 fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -125,10 +150,12 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     entries.sort();
     for path in entries {
-        let hidden = path
+        // A dot file is not a member, and a link could lead back up the tree.
+        let linked = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+        let dotted = path
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with('.'));
-        if hidden {
+        if linked || dotted {
             continue;
         }
         if path.is_dir() {
@@ -292,8 +319,7 @@ pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Res
         ));
     }
 
-    let parts = out.with_extension("parts");
-    std::fs::create_dir_all(&parts).map_err(|e| format!("{}: {e}", parts.display()))?;
+    let parts = fresh_dir(out, "parts")?;
     let result = (|| {
         let mut reads = Vec::new();
         for class in [ObjectClass::SetList, ObjectClass::Program] {

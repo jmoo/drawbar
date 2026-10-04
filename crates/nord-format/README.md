@@ -3,8 +3,8 @@
 **Read and write Nord keyboard files from Rust, byte for byte.**
 
 Programs, live slots, set lists, settings, sample instruments, piano libraries
-and the bundles that carry them, from a library with no I/O of its own beyond `Read`, `Seek` and
-`Write`. It builds anywhere `std` does, including the browser.
+and the bundles that carry them, from a library with no I/O of its own beyond
+`Read`, `Seek` and `Write`. It builds anywhere `std` does, including the browser.
 
 What you read, you can write back unchanged. Anything the library does not yet
 decode is kept as raw bytes, so a file survives a round trip even where its

@@ -1211,10 +1211,9 @@ pub struct Saved {
 /// `after`.
 struct Bundling {
     ids: Vec<u64>,
-    slots: Vec<(ObjectClass, Location)>,
+    /// The slots the gather copies, once it has said.
+    slots: Option<Vec<(ObjectClass, Location)>>,
     after: u64,
-    /// Whether a gather has yet to say which slots it copies.
-    gathering: bool,
 }
 
 /// A bundle whose directory has been read, to be unpacked into a new folder in `dir`.
@@ -2320,6 +2319,12 @@ impl Workspace {
         self.fetched.insert(id, from);
     }
 
+    /// The copy of `id` did not land: say whether it was of a file the instrument was read
+    /// into, which then waits for the sweep of `.drawbar/tmp/` at the next open.
+    pub fn fetched_copy_failed(&mut self, id: u64) -> bool {
+        self.fetched.remove(&id).is_some()
+    }
+
     /// The copy of `id` landed: delete the file it was fetched into, where it was. In the
     /// browser the file waits for the sweep of `.drawbar/tmp/` at the next open.
     pub fn landed_copy(&mut self, id: u64) {
@@ -2437,38 +2442,36 @@ impl Workspace {
         });
     }
 
-    /// Write `ids` as a bundle once each of `slots` has been copied to this computer, and
-    /// where `gathering`, the slots a gather reports too: see [`Workspace::bundle_ready`].
-    /// A later request replaces this one.
-    pub fn bundle_after(
-        &mut self,
-        ids: Vec<u64>,
-        slots: Vec<(ObjectClass, Location)>,
-        gathering: bool,
-    ) {
+    /// Write `ids` as a bundle once every slot the gather sent with it reports has been
+    /// copied to this computer: see [`Workspace::bundle_ready`]. A later request replaces
+    /// this one.
+    pub fn bundle_after(&mut self, ids: Vec<u64>) {
         let after = self.next_id;
         self.bundling = Some(Bundling {
             ids,
-            slots,
+            slots: None,
             after,
-            gathering,
         });
     }
 
-    /// The slots a gather found, which the waiting bundle waits on too.
+    /// The slots the gather found, which the waiting bundle waits on.
     pub fn bundle_gathered(&mut self, slots: Vec<(ObjectClass, Location)>) {
-        if let Some(waiting) = self.bundling.as_mut().filter(|w| w.gathering) {
-            waiting.slots.extend(slots);
-            waiting.gathering = false;
+        if let Some(waiting) = self.bundling.as_mut().filter(|w| w.slots.is_none()) {
+            waiting.slots = Some(slots);
         }
+    }
+
+    /// Stop waiting to write a bundle, and say whether one was waiting.
+    pub fn give_up_bundle(&mut self) -> bool {
+        self.bundling.take().is_some()
     }
 
     /// The assets to write as the bundle [`Workspace::bundle_after`] waits on, once every
     /// slot it waits on has become an asset on this computer.
     pub fn bundle_ready(&mut self) -> Option<Vec<u64>> {
-        let waiting = self.bundling.as_ref().filter(|w| !w.gathering)?;
+        let waiting = self.bundling.as_ref()?;
         let mut ids = waiting.ids.clone();
-        for &(class, at) in &waiting.slots {
+        for &(class, at) in waiting.slots.as_ref()? {
             let copied = self.entities.iter().find(|e| {
                 e.id >= waiting.after
                     && e.origin.slot() == Some((class, at))

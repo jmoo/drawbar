@@ -12,6 +12,10 @@ use crate::error::ParseError;
 /// The manifest's archive path.
 pub const PATH: &str = "meta.xml";
 
+/// The firmware a bundle made without an instrument at hand claims: v2.04, the only one
+/// the specimens come from. Inferred from specimens; not confirmed on hardware.
+pub const ELECTRO5_FIRMWARE: u32 = 204;
+
 const DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 
 /// A bundle's manifest.
@@ -100,14 +104,6 @@ impl Manifest {
         out += "</bundle>\n";
         out.into_bytes()
     }
-
-    /// The members `name` depends on, or none when the manifest lists it without any.
-    pub fn deps(&self, name: &str) -> &[String] {
-        self.files
-            .iter()
-            .find(|file| file.name == name)
-            .map_or(&[], |file| &file.deps)
-    }
 }
 
 fn malformed(what: &str) -> ParseError {
@@ -188,8 +184,8 @@ fn file(attributes: Vec<(&str, String)>) -> Result<Dependencies, ParseError> {
     Ok(Dependencies { name, deps })
 }
 
-/// The characters an attribute value escapes. Inferred from specimens' writer, which
-/// leaves `'` as it is; not confirmed against a name that holds one.
+/// The characters an attribute value escapes. `'` is left as it is, which no specimen
+/// tests. Inferred from specimens; not confirmed on hardware.
 const ENTITIES: [(char, &str); 4] = [
     ('&', "&amp;"),
     ('<', "&lt;"),

@@ -108,10 +108,11 @@ pub enum DeviceCmd {
         slots: Vec<Location>,
     },
     /// Walk set lists and programs to everything a bundle of them holds, list each one's
-    /// dependencies, report the slots in [`DeviceEvent::Gathered`], and copy them all to
-    /// this computer, one session per class.
+    /// dependencies, report those slots and `also` in [`DeviceEvent::Gathered`], and copy
+    /// each once to this computer, one session per class.
     Gather {
         roots: Vec<(ObjectClass, Location)>,
+        also: Vec<(ObjectClass, Location)>,
     },
     Put {
         /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
@@ -260,7 +261,9 @@ impl DeviceCmd {
             DeviceCmd::CopyAll { class, slots } => {
                 format!("get {} objects <- {}", slots.len(), class.label())
             }
-            DeviceCmd::Gather { roots } => format!("gather a bundle of {} objects", roots.len()),
+            DeviceCmd::Gather { roots, also } => {
+                format!("gather a bundle of {} objects", roots.len() + also.len())
+            }
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
                 format!("put {} objects -> {}", items.len(), class.label())
@@ -325,11 +328,11 @@ impl DeviceCmd {
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
-            DeviceCmd::Gather { roots } => words(
+            DeviceCmd::Gather { roots, also } => words(
                 COPYING,
                 format!(
                     "{} and what they play to this computer",
-                    counted(roots.len(), "sound", "sounds")
+                    counted(roots.len() + also.len(), "sound", "sounds")
                 ),
             ),
             DeviceCmd::CopyAll { class, slots } => words(
@@ -1178,6 +1181,9 @@ pub struct Device {
     fetched: Vec<Fetched>,
     /// The slots the last [`DeviceCmd::Gather`] found, until taken.
     gathered: Option<Vec<(ObjectClass, Location)>>,
+    /// Whether a command failed, a copied slot was empty, or the instrument went, since
+    /// the last [`Device::take_failed`].
+    failed: bool,
 }
 
 /// The follow-up owed by the command in flight, set when it is dispatched.
@@ -1211,6 +1217,7 @@ impl Device {
             linked: 0,
             fetched: Vec::new(),
             gathered: None,
+            failed: false,
         }
     }
 
@@ -1274,6 +1281,11 @@ impl Device {
             return;
         }
         self.pending.push_back(cmd);
+    }
+
+    /// Whether anything failed since the last call, once.
+    pub fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
     }
 
     /// The slots the last gather found, once.
@@ -1669,6 +1681,7 @@ impl Device {
                         crate::telemetry::fault("usb", "lost");
                     }
                     crate::telemetry::attached(None);
+                    self.failed = true;
                     match lost {
                         true => log.trouble("The instrument went away. Reconnect when it's back."),
                         false => log.say("The instrument was released."),
@@ -1772,6 +1785,7 @@ impl Device {
                 DeviceEvent::Vacant { class, at, why } => match why {
                     Purpose::Compare => queue.vacant(class, at),
                     Purpose::Copy | Purpose::View => {
+                        self.failed = true;
                         log.error(format!("{} holds nothing to read", shown(at)));
                         log.trouble(format!("{} is empty.", place(class, at)));
                     }
@@ -1830,6 +1844,7 @@ impl Device {
                 // A refused write left its slot as it was, or empty after a rescue, so
                 // the panel has nothing new to play there.
                 DeviceEvent::OpFailed(text) => {
+                    self.failed = true;
                     if let Some(running) = self.running.as_mut() {
                         running.reload = None;
                         if let Some(slot) = running.deps.take() {
