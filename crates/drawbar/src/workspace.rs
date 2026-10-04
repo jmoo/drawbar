@@ -1065,6 +1065,12 @@ impl LocalEntity {
         crate::browser::Kind::of(self) != crate::browser::Kind::Wav
     }
 
+    /// Whether these bytes have no format to decode, so a parse error is no failure: a
+    /// note, or a WAV.
+    pub fn has_no_format(&self) -> bool {
+        self.is_text() || self.is_wav()
+    }
+
     /// Name it, and take what the new name says it is.
     fn set_name(&mut self, name: String) {
         self.by_name = crate::browser::tagged(&name);
@@ -2765,8 +2771,11 @@ impl Workspace {
             return;
         }
         entity.decoded(decoded);
-        // A note has no format to decode, so a parse error on text is not a failure.
-        if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text()) {
+        if let Some(e) = entity
+            .parse_error
+            .as_ref()
+            .filter(|_| !entity.has_no_format())
+        {
             log.warn(format!("{}: {e}", entity.name));
         }
         self.revision += 1;
@@ -2827,11 +2836,13 @@ impl Workspace {
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes.into(), self.stamp());
         let arrival = match (&entity.parse_error, entity.verify()) {
-            // A note has no format to decode, so a parse error on text is not a
-            // failure.
-            (Some(_), _) if entity.is_text() => {
+            (Some(_), _) if entity.has_no_format() => {
+                let what = match entity.is_text() {
+                    true => "text",
+                    false => "WAV",
+                };
                 log.info(format!(
-                    "{}: text ({} bytes)",
+                    "{}: {what} ({} bytes)",
                     entity.name,
                     entity.bytes.len()
                 ));
@@ -3748,8 +3759,8 @@ impl Workspace {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
-        let note = self.get(id).is_some_and(|held| held.is_text());
-        if note || matches!(verify, VerifyState::Ok) {
+        let formatless = self.get(id).is_some_and(LocalEntity::has_no_format);
+        if formatless || matches!(verify, VerifyState::Ok) {
             return;
         }
         log.warn(format!(
@@ -3966,7 +3977,11 @@ impl Workspace {
                 }
             };
             let entity = LocalEntity { path, ..entity };
-            if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text()) {
+            if let Some(e) = entity
+                .parse_error
+                .as_ref()
+                .filter(|_| !entity.has_no_format())
+            {
                 log.warn(format!("{}: {e}", entity.name));
             }
             self.next_id = self.next_id.max(next);
