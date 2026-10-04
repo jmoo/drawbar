@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 
 use eframe::egui;
 use nord_format::formats::nsmpproj::{
-    PathError, Project, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
+    build, PathError, Project, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
 };
 use nord_format::note;
 use nord_format::Entity;
@@ -708,8 +708,8 @@ pub struct Located {
     held: Option<(Seen, Found)>,
 }
 
-/// Each of a project's audio files by its stored path, with where its WAV is, or why its
-/// audio files do not read.
+/// Each audio file a zone of the project plays, by its stored path, with where its WAV
+/// is, or why its audio files do not read.
 pub type Found = Result<Vec<(String, Wav)>, String>;
 
 /// What [`Located`] was taken against: the project's stamp and path, and the folders'
@@ -723,7 +723,7 @@ impl Located {
             Some((held, found)) if held == seen => (held, found),
             _ => {
                 let files = match entity.entity.as_deref().and_then(project) {
-                    Some(project) => project.audio_files().map_err(|e| e.to_string()),
+                    Some(project) => build::played(project).map_err(|e| e.to_string()),
                     None => Err("it does not decode".to_string()),
                 };
                 let dir = builds::dir_of(entity);
@@ -833,7 +833,16 @@ mod tests {
                 root_key,
             })
             .collect();
-        let project = Project::new("Marimba", &zones, 0).unwrap();
+        loud_of(
+            Project::new("Marimba", &zones, 0).unwrap(),
+            others,
+            building,
+        )
+    }
+
+    /// The header's loud action for `project` at `Marimba/Marimba.nsmpproj`, in a library
+    /// listing `others` by name only.
+    fn loud_of(project: Project, others: &[&str], building: bool) -> Loud {
         let bytes = nord_format::to_bytes(&Entity::SampleProject(project)).unwrap();
         let mut log = crate::log::Log::default();
         let mut workspace = crate::workspace::Workspace::new(context());
@@ -848,6 +857,34 @@ mod tests {
             .collect();
         let entity = workspace.get(id).unwrap();
         loud(entity, Located::default().of(entity, &folders), building)
+    }
+
+    #[test]
+    fn a_wav_no_zone_plays_need_not_be_listed() {
+        let project = Project::new(
+            "Marimba",
+            &[48, 72].map(|root_key| NewZone {
+                path: format!("{root_key}.wav"),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key,
+            }),
+            0,
+        )
+        .unwrap();
+        let files = project.audio_files().unwrap();
+        let id = |path: &str| files.iter().find(|f| f.path == path).unwrap().id;
+        let text = project.render().replace(
+            &format!("m_fileID = {}\n", id("72.wav")),
+            &format!("m_fileID = {}\n", id("48.wav")),
+        );
+        let held = loud_of(Project::parse(&text).unwrap(), &["Marimba/48.wav"], false);
+        assert_eq!(
+            (held.tone, held.click),
+            (Tone::Ready, Click::Build),
+            "{}",
+            held.hint
+        );
     }
 
     #[test]
