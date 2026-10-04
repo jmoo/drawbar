@@ -330,12 +330,14 @@ remembers. In order of need, these ask:
 - an act that works from an asset's contents, which waits until each asset in
   `Act::reads` has been read (`browser/act.rs`), and the app, every frame, for
   what is open in a tab (`Workspace::hurry`);
-- the app, every frame, for what is selected (`Workspace::selected`);
+- the app, once each time the selection changes, for the first 64 assets
+  selected (`Workspace::select`). Each stays wanted until it is read, for as long
+  as it stays selected. An act on the rest reads what it needs;
 - `Workspace::in_view`, for the rows the library table draws. A row draws what is
   remembered of it, so only a row with nothing remembered is read, and a row not
   drawn this frame or the last is no longer read for it.
 
-An asset needed this frame or the last is not evicted.
+An asset needed this frame or the last, or selected, is not evicted.
 
 ### Background reads
 
@@ -369,7 +371,7 @@ These are never evicted:
 
 - a view, an unsaved asset, or one with a pending edit;
 - one unread already, or resting in its file;
-- one needed this frame or the last;
+- one needed this frame or the last, or selected;
 - one in the send queue;
 - one with a save in flight, a working copy, or a missing file;
 - one whose path is under a rename not yet answered.

@@ -39,6 +39,8 @@ pub fn gesture(how: &egui::Modifiers) -> Gesture {
 pub struct Selection {
     anchor: Option<Item>,
     set: BTreeSet<Item>,
+    /// Counts the changes to which rows are selected.
+    revision: u64,
 }
 
 impl Selection {
@@ -48,6 +50,11 @@ impl Selection {
             1 => self.set.iter().copied().next(),
             _ => None,
         }
+    }
+
+    /// Counts the changes to which rows are selected.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn holds(&self, item: Item) -> bool {
@@ -76,6 +83,7 @@ impl Selection {
 
     /// Select only this row, whatever was selected before.
     pub fn only(&mut self, item: Item) {
+        self.revision += 1;
         self.anchor = Some(item);
         self.set.clear();
         self.set.insert(item);
@@ -83,12 +91,14 @@ impl Selection {
 
     /// Clear the selection and its anchor.
     pub fn clear(&mut self) {
+        self.revision += 1;
         self.set.clear();
         self.anchor = None;
     }
 
     /// ⌘-click: add or remove the row, and move the anchor to it.
     pub fn toggle(&mut self, item: Item) {
+        self.revision += 1;
         if !self.set.remove(&item) {
             self.set.insert(item);
         }
@@ -110,12 +120,14 @@ impl Selection {
             return self.only(item);
         };
         let (first, last) = (from.min(to), from.max(to));
+        self.revision += 1;
         self.set = list[first..=last].iter().copied().collect();
         self.anchor = Some(anchor);
     }
 
     /// Remove a row that is about to go away.
     pub fn forget(&mut self, item: Item) {
+        self.revision += 1;
         self.set.remove(&item);
         if self.anchor == Some(item) {
             self.anchor = None;

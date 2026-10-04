@@ -15,12 +15,12 @@ use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
-use crate::browser::{Act, Browser, Bulk, Item, Kind};
+use crate::browser::{Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, GAP, GUTTER, INNER_RADIUS};
-use crate::queue::Queue;
+use crate::queue::{Diff, Queue};
 use crate::room;
 use crate::shell::Shell;
 use crate::strings::{kind_word, place};
@@ -79,7 +79,8 @@ pub fn ui(
         .show(ui, |ui| {
             egui::Frame::new().inner_margin(GUTTER).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = GUTTER;
-                selection(ui, browser, workspace, device, queue, &mut acts);
+                let picked = &mut shell.picked;
+                selection(ui, picked, browser, workspace, device, queue, &mut acts);
                 if !device.state.connected() {
                     return;
                 }
@@ -208,40 +209,156 @@ fn header(ui: &mut egui::Ui, head: Head) -> bool {
     open.unwrap_or(true)
 }
 
+/// A selection of more than this many rows is summed up rather than described row by
+/// row, and only this many of its assets are read for it.
+pub const MANY: usize = 64;
+
+/// What the selection's cards show, taken again only when the selection or something it
+/// describes changes.
+#[derive(Default)]
+pub struct Picked {
+    shown: Option<Shown>,
+    /// How many times what the cards show has been taken.
+    #[cfg(test)]
+    pub(crate) taken: usize,
+}
+
+/// Everything the selection's cards read.
+#[derive(PartialEq)]
+struct Sources {
+    picked: u64,
+    revision: u64,
+    device: u64,
+    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
+    tags: u64,
+}
+
+struct Shown {
+    sources: Sources,
+    checked: Vec<Item>,
+    locals: Vec<u64>,
+    about: About,
+    /// What sending the selection would do, for one described row by row.
+    going: Option<String>,
+    offers: Vec<(Bulk, Offer)>,
+    /// Each tag on any of the selection, and whether it is on all of it.
+    wearing: Vec<(u64, String, bool)>,
+}
+
+/// What the selection card says about what is picked.
+enum About {
+    Nothing,
+    One(Vec<Fact>),
+    /// Several rows, in a line or two.
+    Several(Vec<String>),
+}
+
+impl Picked {
+    /// What the cards show now, taken again where something it reads has changed.
+    fn now(
+        &mut self,
+        browser: &Browser,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &Queue,
+    ) -> &Shown {
+        let sources = Sources {
+            picked: browser.picked().revision(),
+            revision: workspace.revision(),
+            device: device.revision(),
+            queue: queue.shape(),
+            tags: browser.tags().revision(),
+        };
+        self.shown.take_if(|shown| shown.sources != sources);
+        self.shown.get_or_insert_with(|| {
+            #[cfg(test)]
+            {
+                self.taken += 1;
+            }
+            Shown::of(sources, browser, workspace, device, queue)
+        })
+    }
+}
+
+impl Shown {
+    fn of(
+        sources: Sources,
+        browser: &Browser,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &Queue,
+    ) -> Shown {
+        let checked: Vec<Item> = browser.picked().items().collect();
+        let locals = browser.picked().locals();
+        let (about, going) = match checked.len() {
+            0 => (About::Nothing, None),
+            many if many > MANY => (About::Several(summed(&checked, workspace, device)), None),
+            picked => {
+                let rows: Vec<Row> = checked
+                    .iter()
+                    .filter_map(|item| {
+                        row_of(*item, workspace, &device.state, queue, browser.tags())
+                    })
+                    .collect();
+                let going = crate::library::consequence(
+                    &rows.iter().collect::<Vec<_>>(),
+                    &device.state,
+                    queue,
+                );
+                (about(picked, &rows, workspace, device), going)
+            }
+        };
+        let offers = Bulk::ALL
+            .into_iter()
+            .map(|action| {
+                (
+                    action,
+                    Offer::of(action, &checked, workspace, &device.state),
+                )
+            })
+            .collect();
+        let wearing = wearing(&locals, browser.tags());
+        Shown {
+            sources,
+            checked,
+            locals,
+            about,
+            going,
+            offers,
+            wearing,
+        }
+    }
+}
+
 /// The selection: what it is and what can be asked of it, how it is tagged, and what it
 /// plays, each in its own card.
 fn selection(
     ui: &mut egui::Ui,
+    picked: &mut Picked,
     browser: &mut Browser,
     workspace: &Workspace,
     device: &Device,
     queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
-    let checked: Vec<Item> = browser.picked().items().collect();
-    let picked = checked.len();
-    for id in browser.picked().locals() {
-        workspace.selected(id);
-    }
-    let rows: Vec<Row> = checked
-        .iter()
-        .filter_map(|item| row_of(*item, workspace, &device.state, queue, browser.tags()))
-        .collect();
+    let shown = picked.now(browser, workspace, device, queue);
     card(ui, Head::fixed(Glyph::ScanEye, "Selection"), |ui| {
-        if picked == 0 {
-            return faint(ui, "Nothing is selected.");
+        match &shown.about {
+            About::Nothing => return faint(ui, "Nothing is selected."),
+            About::One(facts) => facts.iter().for_each(|fact| fact_line(ui, fact)),
+            About::Several(lines) => lines.iter().for_each(|line| void(ui, line)),
         }
-        about_selection(ui, picked, &rows, workspace, device);
-        bulk_actions(ui, browser, &checked, &rows, workspace, device, queue, acts);
+        bulk_actions(ui, browser, shown, device, acts);
     });
-    if picked == 0 {
+    if shown.checked.is_empty() {
         return;
     }
-    tags(ui, &browser.picked().locals(), browser.tags(), acts);
+    tags(ui, &shown.locals, &shown.wearing, acts);
     if let Some((slot, deps)) = answered(browser, device) {
         dependencies(ui, slot, deps);
     }
 }
+
 /// One line about a single picked asset: its label, its value, and the full text when
 /// the value is shortened.
 pub struct Fact {
@@ -302,19 +419,13 @@ pub fn tally(picked: usize, rows: &[Row]) -> String {
 }
 
 /// The facts about one picked row, or a summary of several.
-fn about_selection(
-    ui: &mut egui::Ui,
-    picked: usize,
-    rows: &[Row],
-    workspace: &Workspace,
-    device: &Device,
-) {
+fn about(picked: usize, rows: &[Row], workspace: &Workspace, device: &Device) -> About {
     let [row] = rows else {
-        return void(ui, tally(picked, rows));
+        return About::Several(vec![tally(picked, rows)]);
     };
     if picked > 1 {
         // A folder picked beside one asset is still several picked.
-        return void(ui, tally(picked, rows));
+        return About::Several(vec![tally(picked, rows)]);
     }
     let held = row
         .item
@@ -322,27 +433,63 @@ fn about_selection(
         .and_then(|id| workspace.get(id))
         .map(|entity| fit(&device.state, entity))
         .unwrap_or(Fit::Unattached);
-    for fact in facts(row, &held) {
-        fact_line(ui, fact);
+    About::One(facts(row, &held))
+}
+
+/// A selection too large to describe row by row: how many rows, how many bytes, and how
+/// many of each kind.
+fn summed(checked: &[Item], workspace: &Workspace, device: &Device) -> Vec<String> {
+    let mut kinds = [0usize; Kind::ALL.len()];
+    let mut bytes = 0u64;
+    for item in checked {
+        let (kind, len) = match *item {
+            Item::Local(id) => {
+                let Some(entity) = workspace.get(id) else {
+                    continue;
+                };
+                (Kind::of(entity), entity.size())
+            }
+            Item::Slot { class, at } => {
+                let Some(info) = device.state.slot(class, at).flatten() else {
+                    continue;
+                };
+                (Kind::from_class(class), u64::from(info.body_len))
+            }
+            Item::Folder(_) | Item::Tag(_) => continue,
+        };
+        if let Some(at) = Kind::ALL.iter().position(|held| *held == kind) {
+            kinds[at] += 1;
+        }
+        bytes = bytes.saturating_add(len);
     }
+    let each: Vec<String> = Kind::ALL
+        .iter()
+        .zip(kinds)
+        .filter(|(_, count)| *count > 0)
+        .map(|(kind, count)| format!("{} {count}", kind.plural()))
+        .collect();
+    let mut said = vec![format!(
+        "{} selected, {}",
+        checked.len(),
+        room::measure(bytes)
+    )];
+    if !each.is_empty() {
+        said.push(each.join(" · "));
+    }
+    said
 }
 
 /// What sending the selection would do, when there is something to say, then every
 /// action on the whole of it, wrapped to the card's width.
-#[allow(clippy::too_many_arguments)]
 fn bulk_actions(
     ui: &mut egui::Ui,
     browser: &mut Browser,
-    checked: &[Item],
-    rows: &[Row],
-    workspace: &Workspace,
+    shown: &Shown,
     device: &Device,
-    queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
-    let rows: Vec<&Row> = rows.iter().collect();
     ui.add_space(4.0);
-    if let Some(going) = crate::library::consequence(&rows, &device.state, queue) {
+    if let Some(going) = &shown.going {
         ui.add(egui::Label::new(egui::RichText::new(going).text_style(ui_text()).weak()).wrap());
     }
     ui.add_space(4.0);
@@ -352,8 +499,8 @@ fn bulk_actions(
         // folding its label into the room left.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         crate::panel::tonal(ui);
-        for action in Bulk::ALL {
-            browser.bulk_item(ui, action, checked, workspace, &device.state, acts);
+        for (action, offer) in &shown.offers {
+            browser.bulk_button(ui, *action, offer, &shown.checked, &device.state, acts);
         }
     });
 }
@@ -362,7 +509,7 @@ fn bulk_actions(
 ///
 /// ⚠️ The value wraps instead of truncating. A refusal, a location sentence, or a name
 /// can be any length, and a truncated one is misleading.
-fn fact_line(ui: &mut egui::Ui, fact: Fact) {
+fn fact_line(ui: &mut egui::Ui, fact: &Fact) {
     ui.horizontal(|ui| {
         ui.add_sized(
             [FACT, ui.spacing().interact_size.y],
@@ -371,14 +518,14 @@ fn fact_line(ui: &mut egui::Ui, fact: Fact) {
         );
         let said =
             ui.add(egui::Label::new(egui::RichText::new(&fact.said).text_style(ui_text())).wrap());
-        if let Some(hint) = fact.hint {
+        if let Some(hint) = &fact.hint {
             said.on_hover_text(hint);
         }
     });
 }
 
 /// A line about the selection as a whole.
-fn void(ui: &mut egui::Ui, said: String) {
+fn void(ui: &mut egui::Ui, said: &str) {
     ui.label(egui::RichText::new(said).text_style(ui_text()));
 }
 
@@ -506,11 +653,10 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
 ///
 /// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's Tags
 /// section, and added to something new from the row's Tag menu.
-fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
+fn tags(ui: &mut egui::Ui, picked: &[u64], wearing: &[(u64, String, bool)], acts: &mut Vec<Act>) {
     if picked.is_empty() {
         return;
     }
-    let wearing = wearing(picked, worn);
     card(ui, Head::fixed(Glyph::Tags, "Tags"), |ui| {
         let made = tonal_button(ui, Some(Glyph::Plus), "New tag")
             .on_hover_text("a new tag on everything selected, named as you type");
@@ -523,7 +669,7 @@ fn tags(ui: &mut egui::Ui, picked: &[u64], worn: &Tags, acts: &mut Vec<Act>) {
         ui.add_space(GAP);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::splat(5.0);
-            for (id, name, on_all) in wearing {
+            for &(id, ref name, on_all) in wearing {
                 let clicked = tag_chip(ui, id, name, on_all)
                     .on_hover_text(match on_all {
                         true => "on everything selected; click to remove it from all",
@@ -607,11 +753,11 @@ fn tag_chip(ui: &mut egui::Ui, id: u64, name: &str, on_all: bool) -> egui::Respo
 /// ⚠️ Only tags in use, in list order. A tag nothing picked has is not part of this
 /// selection's state: the full list belongs to the tree, and adding a new tag belongs to
 /// the row's Tag menu.
-fn wearing<'a>(picked: &[u64], worn: &'a Tags) -> Vec<(u64, &'a str, bool)> {
+fn wearing(picked: &[u64], worn: &Tags) -> Vec<(u64, String, bool)> {
     worn.all()
         .iter()
         .filter(|tag| picked.iter().any(|id| worn.worn(*id).contains(&tag.id)))
-        .map(|tag| (tag.id, tag.name.as_str(), worn.on_all(picked, tag.id)))
+        .map(|tag| (tag.id, tag.name.clone(), worn.on_all(picked, tag.id)))
         .collect()
 }
 
@@ -701,7 +847,7 @@ mod tests {
                         if let Some((slot, deps)) = answered(&browser, device) {
                             dependencies(panel, slot, deps);
                         }
-                        tags(panel, &[7, 8], &labels, &mut Vec::new());
+                        tags(panel, &[7, 8], &wearing(&[7, 8], &labels), &mut Vec::new());
                     });
             });
             said = testing::words(&output);
@@ -895,7 +1041,7 @@ mod tests {
                     .show(ctx, |ui| {
                         fact_line(
                             ui,
-                            Fact {
+                            &Fact {
                                 what: "refused",
                                 said: said.to_string(),
                                 hint: None,
@@ -991,7 +1137,10 @@ mod tests {
 
         assert_eq!(
             wearing(&[7, 8], &labels),
-            [(both, "Sunday", true), (some, "Loud", false)]
+            [
+                (both, "Sunday".to_string(), true),
+                (some, "Loud".to_string(), false)
+            ]
         );
         assert!(wearing(&[], &labels).is_empty(), "nothing picked");
         assert!(wearing(&[9], &labels).is_empty(), "picked, with no tags");
@@ -1000,7 +1149,9 @@ mod tests {
             let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
-                    .show(ctx, |panel| tags(panel, picked, &labels, &mut Vec::new()));
+                    .show(ctx, |panel| {
+                        tags(panel, picked, &wearing(picked, &labels), &mut Vec::new())
+                    });
             });
             testing::words(&output)
         };
@@ -1083,6 +1234,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_large_selection_is_summed_up_once_and_not_row_by_row() {
+        let Bench {
+            ctx,
+            mut browser,
+            mut workspace,
+            device,
+            queue,
+            mut shell,
+            mut log,
+            ..
+        } = Bench::new();
+        let saved = (1..=200)
+            .map(|id| crate::workspace::Saved {
+                id,
+                name: format!("Sound {id:03}.ne5p"),
+                path: Some(crate::store::LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
+                origin: crate::workspace::Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(100),
+                unsaved: None,
+            })
+            .collect();
+        workspace.restore(saved, None, &mut log);
+        for id in 1..=200 {
+            browser.check(Item::Local(id));
+        }
+        let frame = |browser: &mut Browser, shell: &mut Shell| {
+            let input = testing::screen(egui::vec2(800.0, 900.0), Vec::new());
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(crate::shell::INSPECTOR)
+                    .show(ctx, |panel| {
+                        super::ui(panel, shell, browser, &workspace, &device, &queue);
+                    });
+            });
+            testing::painted(&output)
+        };
+        for _ in 0..3 {
+            frame(&mut browser, &mut shell);
+        }
+        let said = frame(&mut browser, &mut shell);
+        assert_eq!(shell.picked.taken, 1, "taken once for four frames");
+        let has = |text: &str| said.iter().any(|word| word.text == text);
+        let total = format!("200 selected, {}", room::measure(200 * 100));
+        assert!(has(&total), "{total}");
+        assert!(has(&format!("{} 200", Kind::Program.plural())));
+        assert!(
+            !said.iter().any(|word| word.text.contains("unsaved")),
+            "no line counts row by row"
+        );
+
+        browser.check(Item::Local(1));
+        let said = frame(&mut browser, &mut shell);
+        assert_eq!(shell.picked.taken, 2, "taken again for a new selection");
+        let total = format!("199 selected, {}", room::measure(199 * 100));
+        assert!(said.iter().any(|word| word.text == total), "{total}");
+    }
+
     /// New tag in the Tags card puts a new tag on everything selected, and nothing else.
     #[test]
     fn new_tag_in_the_card_tags_the_selection() {
@@ -1098,7 +1309,9 @@ mod tests {
             let output = testing::run(&ctx, input, |ctx| {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
-                    .show(ctx, |panel| tags(panel, &[7, 8], &labels, acts));
+                    .show(ctx, |panel| {
+                        tags(panel, &[7, 8], &wearing(&[7, 8], &labels), acts)
+                    });
             });
             testing::where_(&testing::painted(&output), "New tag").center()
         };
