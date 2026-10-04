@@ -25,7 +25,8 @@ deploys from `master`.
 
 A build served anywhere but drawbar.app sends nothing unless it is pointed at a
 collector, and the collector refuses every origin but drawbar.app's unless it is told
-one more. From this directory, with `WRANGLER_SEND_METRICS=false`:
+one more. From this directory, in the development shell (`nix develop`), with
+`WRANGLER_SEND_METRICS=false`:
 
 1. `wrangler d1 migrations apply drawbar-reports --local`
 2. `wrangler dev --port 8787 --var DEV_ORIGIN:http://127.0.0.1:8090 --test-scheduled`
