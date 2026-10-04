@@ -191,14 +191,14 @@ impl Container {
         Some(Container::of(info, body))
     }
 
-    /// The facts of a file left on disk, from what a checksum pass over it found.
+    /// The facts of a file left on disk, from what a checksum pass over it found. A pass
+    /// that read another header than the index did read another file.
     fn of_file(file: &OnDisk, sums: ondisk::Sums) -> Result<Container, String> {
-        let info = nord_format::cbin::Info {
-            header: file.index.header().clone(),
-            ..sums.info
-        };
-        let body = body_of(&info).ok_or("the body is larger than this machine can address")?;
-        Ok(Container::of(info, body))
+        if sums.info.header != *file.index.header() {
+            return Err("the file changed while it was read".to_string());
+        }
+        let body = body_of(&sums.info).ok_or("the body is larger than this machine can address")?;
+        Ok(Container::of(sums.info, body))
     }
 
     fn of(info: nord_format::cbin::Info, body: std::ops::Range<usize>) -> Container {
@@ -3303,6 +3303,46 @@ pub(crate) fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file swapped, between its index and its check, for one of the same length in
+    /// the other container generation is refused, not described by both.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_check_of_a_file_swapped_for_the_other_generation_is_refused() {
+        use nord_format::cbin::{Cbin, RawBody};
+
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let indexed = file.index.header().clone();
+        assert_eq!(indexed.generation, Generation::V1);
+
+        let mut body = nord_usb::envelope::unwrap(&bytes).unwrap().body.0;
+        body.resize(body.len() + 0x2c - 0x18 - 2, 0);
+        let swapped = Cbin {
+            header: Header {
+                generation: Generation::V0,
+                ..indexed
+            },
+            body: RawBody(body),
+        };
+        let mut other = std::io::Cursor::new(Vec::new());
+        swapped.write_to(&mut other).unwrap();
+        let other = other.into_inner();
+        assert_eq!(other.len(), bytes.len(), "a same-length swap");
+        std::fs::write(dir.at("Marimba.nsmp"), &other).unwrap();
+
+        let ctx = crate::testing::context();
+        let crate::work::Answer::Answered(Ok(sums)) = file.verify(&ctx).wait() else {
+            panic!("the pass reads the swapped file");
+        };
+        assert!(sums.info.checksum_ok, "the swapped file is sound");
+        let refused = Container::of_file(&file, sums).err();
+        assert_eq!(
+            refused.as_deref(),
+            Some("the file changed while it was read")
+        );
+    }
 
     fn ingest(name: &str, bytes: Vec<u8>) -> LocalEntity {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
