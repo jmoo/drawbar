@@ -318,7 +318,7 @@ fn a_pushed_narrow_mark_moves_back_where_the_wide_floor_allows() {
 
 /// The model fields a test can set, how to set one to a value no writer defaults to,
 /// and the report field that names it.
-struct Modelled {
+struct Modeled {
     name: &'static str,
     /// Whether a generation stores the field at all.
     stores: fn(Layout) -> bool,
@@ -331,85 +331,85 @@ fn zone(field: ZoneField) -> impl Fn(&Field) -> bool {
     move |f| matches!(f, Field::Zone { field: z, .. } if *z == field)
 }
 
-const MODELLED: &[Modelled] = &[
-    Modelled {
+const MODELED: &[Modeled] = &[
+    Modeled {
         name: "aux",
         stores: |_| true,
         set: |m| m.aux = 0x0001_0003,
         get: |m| m.aux.to_string(),
         field: |f| *f == Field::Aux,
     },
-    Modelled {
+    Modeled {
         name: "name",
         stores: |_| true,
         set: |m| m.name = "Renamed".into(),
         get: |m| m.name.clone(),
         field: |f| *f == Field::Name,
     },
-    Modelled {
+    Modeled {
         name: "sub_name",
         stores: |l| l != Layout::V2,
         set: |m| m.sub_name = "Sub".into(),
         get: |m| m.sub_name.clone(),
         field: |f| *f == Field::SubName,
     },
-    Modelled {
+    Modeled {
         name: "category",
         stores: |_| true,
         set: |m| m.category = Some(3),
         get: |m| format!("{:?}", m.category),
         field: |f| *f == Field::Category,
     },
-    Modelled {
+    Modeled {
         name: "sub_category",
         stores: |_| true,
         set: |m| m.sub_category = Some(2),
         get: |m| format!("{:?}", m.sub_category),
         field: |f| *f == Field::SubCategory,
     },
-    Modelled {
+    Modeled {
         name: "timbre",
         stores: |l| l == Layout::V2,
         set: |m| m.timbre = Some(4),
         get: |m| format!("{:?}", m.timbre),
         field: |f| *f == Field::Timbre,
     },
-    Modelled {
+    Modeled {
         name: "envelope",
         stores: |l| l == Layout::V2,
         set: |m| m.envelope = Some(2),
         get: |m| format!("{:?}", m.envelope),
         field: |f| *f == Field::Envelope,
     },
-    Modelled {
+    Modeled {
         name: "motion",
         stores: |l| l == Layout::V2,
         set: |m| m.motion = Some(0),
         get: |m| format!("{:?}", m.motion),
         field: |f| *f == Field::Motion,
     },
-    Modelled {
+    Modeled {
         name: "production",
         stores: |l| l == Layout::V2,
         set: |m| m.production = Some("Studio".into()),
         get: |m| format!("{:?}", m.production),
         field: |f| *f == Field::Production,
     },
-    Modelled {
+    Modeled {
         name: "origin",
         stores: |l| l == Layout::V2,
         set: |m| m.origin = Some("Here".into()),
         get: |m| format!("{:?}", m.origin),
         field: |f| *f == Field::Origin,
     },
-    Modelled {
+    Modeled {
         name: "map level",
         stores: |_| true,
         set: |m| m.keys.instrument = Level::new(GAIN_UNITY / 2, -256).unwrap(),
         get: |m| format!("{:?}", m.keys.instrument),
         field: |_| false,
     },
-    Modelled {
+    Modeled {
         name: "per-key table",
         stores: |l| l == Layout::V2,
         set: |m| {
@@ -420,77 +420,77 @@ const MODELLED: &[Modelled] = &[
         get: |m| format!("{:?}", m.keys.key(64).unwrap()),
         field: |f| *f == Field::KeyTable,
     },
-    Modelled {
+    Modeled {
         name: "dynamics_enabled",
         stores: |_| true,
         set: |m| m.dynamics_enabled = true,
         get: |m| m.dynamics_enabled.to_string(),
         field: |_| false,
     },
-    Modelled {
+    Modeled {
         name: "velocity_to_amplitude",
         stores: |l| l == Layout::V2,
         set: |m| m.velocity_to_amplitude = Some(2),
         get: |m| format!("{:?}", m.velocity_to_amplitude),
         field: |f| *f == Field::VelocityToAmplitude,
     },
-    Modelled {
+    Modeled {
         name: "velocity_to_timbre",
         stores: |l| l == Layout::V2,
         set: |m| m.velocity_to_timbre = Some(0),
         get: |m| format!("{:?}", m.velocity_to_timbre),
         field: |f| *f == Field::VelocityToTimbre,
     },
-    Modelled {
+    Modeled {
         name: "root_key",
         stores: |_| true,
         set: |m| m.zones[0].root_key = 74,
         get: |m| m.zones[0].root_key.to_string(),
         field: |_| false,
     },
-    Modelled {
+    Modeled {
         name: "top_note",
         stores: |_| true,
         set: |m| m.zones[0].top_note = 100,
         get: |m| m.zones[0].top_note.to_string(),
         field: zone_top,
     },
-    Modelled {
+    Modeled {
         name: "low_note",
         stores: |l| l != Layout::V2,
         set: |m| m.zones[1].low_note = m.zones[1].low_note.map(|_| 30),
         get: |m| format!("{:?}", m.zones[1].low_note),
         field: zone_low,
     },
-    Modelled {
+    Modeled {
         name: "global_id",
         stores: |_| true,
         set: |m| m.zones[0].global_id = 9,
         get: |m| m.zones[0].global_id.to_string(),
         field: zone_id,
     },
-    Modelled {
+    Modeled {
         name: "gain",
         stores: |_| true,
         set: |m| m.zones[0].gain = 0.5,
         get: |m| format!("{:.6}", m.zones[0].gain),
         field: zone_gain,
     },
-    Modelled {
+    Modeled {
         name: "loop_decay",
         stores: |l| l != Layout::V2,
         set: |m| m.zones[0].loop_decay = m.zones[0].loop_decay.map(|_| 35.5),
         get: |m| format!("{:?}", m.zones[0].loop_decay),
         field: zone_decay,
     },
-    Modelled {
+    Modeled {
         name: "rel_strength",
         stores: |_| true,
         set: |m| m.zones[0].rel_strength = 300,
         get: |m| m.zones[0].rel_strength.to_string(),
         field: |_| false,
     },
-    Modelled {
+    Modeled {
         name: "velocity",
         stores: |l| l != Layout::V2,
         set: |m| {
@@ -522,41 +522,41 @@ fn zone_velocity(f: &Field) -> bool {
     zone(ZoneField::Velocity)(f)
 }
 
-/// Set each modelled field to a value no writer defaults to and convert: the target
+/// Set each modeled field to a value no writer defaults to and convert: the target
 /// reads the value back, or the report names the field.
 #[test]
-fn every_modelled_field_reaches_the_target_or_the_report() {
+fn every_modeled_field_reaches_the_target_or_the_report() {
     for from in Layout::ALL {
         let base = model(&two_zones(from, 1.0));
-        for modelled in MODELLED {
-            if !(modelled.stores)(from) {
+        for modeled in MODELED {
+            if !(modeled.stores)(from) {
                 continue;
             }
             let mut set = base.clone();
-            (modelled.set)(&mut set);
+            (modeled.set)(&mut set);
             assert_ne!(
-                (modelled.get)(&set),
-                (modelled.get)(&base),
+                (modeled.get)(&set),
+                (modeled.get)(&base),
                 "{} is already at the value the test sets",
-                modelled.name
+                modeled.name
             );
             let source = Entity::Sample(hub::write(&set, from).unwrap());
             assert_eq!(
-                (modelled.get)(&model(&source)),
-                (modelled.get)(&set),
+                (modeled.get)(&model(&source)),
+                (modeled.get)(&set),
                 "{} does not read back from its own {from:?}",
-                modelled.name
+                modeled.name
             );
             for to in Layout::ALL {
                 let (report, out) = convert(&source, to, &answered());
                 let lines = [&report.dropped, &report.changed, &report.from_rules];
                 let named = lines
                     .iter()
-                    .any(|lines| lines.iter().any(|l| (modelled.field)(&l.field)));
+                    .any(|lines| lines.iter().any(|l| (modeled.field)(&l.field)));
                 assert!(
-                    (modelled.get)(&model(&out)) == (modelled.get)(&set) || named,
+                    (modeled.get)(&model(&out)) == (modeled.get)(&set) || named,
                     "{} set in {from:?} neither reaches {to:?} nor its report: {report:?}",
-                    modelled.name
+                    modeled.name
                 );
             }
         }
@@ -615,7 +615,7 @@ fn a_byte_no_reader_places_is_reported_by_section_and_range() {
     let line = report.dropped.iter().find(|l| l.field == field).unwrap();
     assert_eq!(
         (line.value.as_str(), &line.reason),
-        ("55", &Reason::Unmodelled)
+        ("55", &Reason::Unmodeled)
     );
 }
 
@@ -716,7 +716,6 @@ fn a_loop_laid_out_over_more_periods_is_reported() {
                 peak: codec::Peak::Signed(-50),
                 resync_at: 400,
                 mark: Some(fields.len() - length),
-                ramped: true,
             };
         }
         let source = Entity::Sample(hub::write(&instrument, Layout::V4).unwrap());

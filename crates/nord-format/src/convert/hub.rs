@@ -17,8 +17,8 @@ use crate::Sample;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instrument {
     /// The container header's `aux` word: the first two categories in the editor's
-    /// renders, all ones in library files. Inferred from specimens; not confirmed on
-    /// hardware.
+    /// renders; all ones in early-chain libraries, which have no `cat`, and in files
+    /// read back over USB. Inferred from specimens; not confirmed on hardware.
     pub aux: u32,
     pub name: String,
     /// The wide chain's sub name; empty where none is stored.

@@ -93,7 +93,7 @@ pub enum Reason {
     /// The target generation has no field for the value.
     NoField(Layout),
     /// No reader in this crate places these bytes.
-    Unmodelled,
+    Unmodeled,
     /// The section's schema version is not the one the target writes.
     Schema {
         version: u32,
@@ -155,11 +155,22 @@ pub enum Reason {
         layout: Layout,
         to: i32,
     },
+    /// The wide header's decibels and statistic A come from the narrow record's
+    /// linear gain, which is coarser than the decibels and wraps past a gain of 16.
+    NarrowGain,
+    /// The narrow record's linear gain comes from the wide header's decibels, which
+    /// do not keep every bit of the gain they were computed from.
+    DecibelGain,
     /// The narrow statistic stores no sign; it is taken from the stream's content.
     SignFromContent,
     /// The source's record coding is not the editor's, so the stream is laid out
     /// again. The fields are unchanged.
     Recoded,
+    /// The writer cannot lay the source out again in its own generation, so whether
+    /// its coding is the editor's is unknown, and the stream is laid out again.
+    NotRebuilt {
+        why: String,
+    },
 }
 
 impl fmt::Display for Field {
@@ -218,7 +229,7 @@ impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Reason::NoField(layout) => write!(f, "{} has no field for it", layout.generation()),
-            Reason::Unmodelled => write!(f, "no reader places these bytes"),
+            Reason::Unmodeled => write!(f, "no reader places these bytes"),
             Reason::Schema { version } => {
                 write!(f, "schema version {version} is not the one written")
             }
@@ -253,8 +264,14 @@ impl fmt::Display for Reason {
             Reason::ShiftRule { layout, to } => {
                 write!(f, "the {} shift rule takes {to}", layout.generation())
             }
+            Reason::NarrowGain => write!(f, "derived from the narrow record's linear gain"),
+            Reason::DecibelGain => write!(f, "derived from the wide header's decibels"),
             Reason::SignFromContent => write!(f, "the sign is taken from the content"),
             Reason::Recoded => write!(f, "laid out again; the fields are unchanged"),
+            Reason::NotRebuilt { why } => write!(
+                f,
+                "laid out again; its own generation cannot be written ({why})"
+            ),
         }
     }
 }
