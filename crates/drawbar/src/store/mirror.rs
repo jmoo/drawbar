@@ -2711,7 +2711,7 @@ impl Store {
     ) -> bool {
         let from = match from {
             CopyOf::Outside(file) => Source::Outside(file.clone()),
-            CopyOf::Part(file, range) => Source::Part(file.clone(), range.clone()),
+            CopyOf::Part(part) => Source::Part(part.clone()),
             CopyOf::Edited(file, edit) => Source::Edited(file.clone(), edit.clone()),
             CopyOf::Asset(source) => {
                 let source = self.records.get(source).filter(|source| !source.saving);

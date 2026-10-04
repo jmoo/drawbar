@@ -508,13 +508,25 @@ impl Fs for Disk {
             Staged::Outside(from) => self.staged(path, |file| {
                 io::copy(&mut File::open(from)?, file).map(|_| ())
             }),
-            Staged::Part(from, range) => self.staged(path, |file| {
-                let mut source = File::open(from)?;
-                source.seek(io::SeekFrom::Start(range.start))?;
-                let len = range.end - range.start;
-                match io::copy(&mut source.take(len), file)? == len {
+            Staged::Part(part) => self.staged(path, |file| {
+                let mut source = File::open(&part.from)?;
+                source.seek(io::SeekFrom::Start(part.bytes.start))?;
+                let len = part.bytes.end - part.bytes.start;
+                let mut source = source.take(len);
+                let mut crc = nord_format::crc::Crc32Stream::new();
+                let (mut copied, mut buf) = (0, vec![0; 1 << 16]);
+                loop {
+                    let n = source.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    crc.update(&buf[..n]);
+                    file.write_all(&buf[..n])?;
+                    copied += n as u64;
+                }
+                match (copied, crc.value()) == (len, part.crc32) {
                     true => Ok(()),
-                    false => Err(io::ErrorKind::UnexpectedEof.into()),
+                    false => Err(part.mismatch()),
                 }
             }),
             Staged::Library(from) => {

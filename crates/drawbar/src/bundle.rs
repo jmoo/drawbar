@@ -30,11 +30,13 @@ pub fn is_bundle(name: &str) -> bool {
     })
 }
 
-/// One file a bundle holds: its archive path and where its bytes lie in the bundle.
+/// One file a bundle holds: its archive path, where its bytes lie in the bundle, and
+/// their CRC-32.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub path: String,
     pub bytes: Range<u64>,
+    pub crc32: u32,
 }
 
 impl Member {
@@ -55,6 +57,7 @@ pub async fn members(from: &Outside) -> io::Result<Vec<Member>> {
         .map(|member| Member {
             path: member.entry.name,
             bytes: member.body,
+            crc32: member.entry.crc32,
         })
         .collect())
 }
@@ -134,8 +137,8 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
                 continue;
             }
             match member(entity, device) {
-                Some(member) => members.push(member),
-                None => left_out.push(format!("“{}” is not a file a bundle carries", entity.name)),
+                Ok(member) => members.push(member),
+                Err(why) => left_out.push(why),
             }
         }
         let provided = |need: &Key| members.iter().any(|(m, _)| m.provides == Some(*need));
@@ -198,22 +201,30 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
     }))
 }
 
-/// The member an asset becomes, or `None` for one an Electro 5 bundle does not carry.
-fn member(entity: &LocalEntity, device: &DeviceState) -> Option<(Item, Body)> {
-    let (header, decoded, body) = match entity.rests() {
-        Some(file) => (
-            file.index.header().clone(),
-            None,
-            Body::Resting(file.clone()),
-        ),
+/// The member an asset becomes, or why it is left out.
+fn member(entity: &LocalEntity, device: &DeviceState) -> Result<(Item, Body), String> {
+    let carried = || format!("“{}” is not a file a bundle carries", entity.name);
+    let (header, body) = match entity.rests() {
+        Some(file) => (file.index.header().clone(), Body::Resting(file.clone())),
         None => (
-            Header::from_prefix(&entity.bytes).ok()?,
-            entity.entity.as_deref(),
+            Header::from_prefix(&entity.bytes).map_err(|_| carried())?,
             Body::Held(entity.bytes.clone()),
         ),
     };
+    // What a program or set list needs is in its body, so one not decoded yet is
+    // decoded here.
+    let owned: Entity;
+    let decoded = match (Class::of(&header), entity.entity.as_deref()) {
+        (Some(Class::Program | Class::SetList), Some(decoded)) => Some(decoded),
+        (Some(Class::Program | Class::SetList), None) => {
+            owned = nord_format::from_stream(&mut io::Cursor::new(&entity.bytes[..]))
+                .map_err(|e| format!("“{}” does not decode: {e}", entity.name))?;
+            Some(&owned)
+        }
+        _ => None,
+    };
     let name = stem(entity);
-    let mut item = Item::of(&header, &name, decoded)?;
+    let mut item = Item::of(&header, &name, decoded).ok_or_else(carried)?;
     // The instrument's own list of what the slot an object came from needs counts over
     // the file's: it can name a piano or sample the file leaves at zero. Confirmed on
     // hardware.
@@ -229,7 +240,7 @@ fn member(entity: &LocalEntity, device: &DeviceState) -> Option<(Item, Body)> {
             .map(Key::Sample),
         Class::Program | Class::SetList => None,
     });
-    Some((item, body))
+    Ok((item, body))
 }
 
 /// What a need names, in words.

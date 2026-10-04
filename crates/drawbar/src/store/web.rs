@@ -1285,16 +1285,29 @@ impl Fs for Folder {
         match what {
             Staged::Bytes(bytes) => self.staged(path, Contents::Bytes(bytes)).await,
             Staged::Outside(from) => self.staged(path, Contents::Blob(from)).await,
-            Staged::Part(from, range) => {
-                let part = from
-                    .slice_with_f64_and_f64(range.start as f64, range.end as f64)
-                    .map_err(failed)?;
-                // A slice past the file's end comes back short, where the desktop's read
-                // fails.
-                if part.size() as u64 != range.end - range.start {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
+            Staged::Part(part) => {
+                let Range { start, end } = part.bytes;
+                // The bytes are checked a slice at a time before the copy, which the
+                // browser makes without passing them through this tab.
+                let mut crc = nord_format::crc::Crc32Stream::new();
+                let mut at = start;
+                while at < end {
+                    let next = end.min(at + CHUNK as u64);
+                    let slice = crate::ondisk::slice(&part.from, at..next).await?;
+                    if slice.len() as u64 != next - at {
+                        return Err(part.mismatch());
+                    }
+                    crc.update(&slice);
+                    at = next;
                 }
-                self.staged(path, Contents::Blob(&part)).await
+                if crc.value() != part.crc32 {
+                    return Err(part.mismatch());
+                }
+                let blob = part
+                    .from
+                    .slice_with_f64_and_f64(start as f64, end as f64)
+                    .map_err(failed)?;
+                self.staged(path, Contents::Blob(&blob)).await
             }
             Staged::Library(from) => {
                 let from = snapshot(&self.file(from).await?).await?;

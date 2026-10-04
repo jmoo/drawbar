@@ -15,7 +15,7 @@ use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Shell};
-use crate::store::{names, outside_len, CopyOf, LibPath, Outside};
+use crate::store::{names, outside_len, CopyOf, LibPath, Outside, Part};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::{Fresh, LocalEntity, Origin, Unbundled, VerifyState, Workspace};
@@ -999,7 +999,11 @@ fn unpack(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, read:
             .folders
             .free(&folder, &names::portable(member.leaf()), workspace);
         let len = member.bytes.end - member.bytes.start;
-        let from = CopyOf::Part(from.clone(), member.bytes.clone());
+        let from = CopyOf::Part(Part {
+            from: from.clone(),
+            bytes: member.bytes.clone(),
+            crc32: member.crc32,
+        });
         workspace.arrive(folder.join(&leaf), Origin::File(leaf.clone()), from, len);
     }
     log.say(format!(

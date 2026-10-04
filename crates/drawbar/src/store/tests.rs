@@ -3382,6 +3382,50 @@ fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
     );
 }
 
+/// A member whose bytes do not match the bundle's checksum for them is refused, and the
+/// rest of the bundle still arrives.
+#[test]
+fn a_damaged_member_of_a_bundle_is_refused_and_the_rest_arrive() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let (sample, program) = (
+        crate::testing::sample_bytes(),
+        Fresh::Program.bytes().unwrap(),
+    );
+    let mut bundle = bundle_of(&[
+        ("Samp Lib/Samp Lib/Marimba.nsmp", &sample),
+        ("Program/Bank 1/Grand.ne5p", &program),
+    ]);
+    let in_bundle = bundle
+        .windows(sample.len())
+        .position(|w| w == sample.as_slice())
+        .unwrap();
+    bundle[in_bundle + sample.len() / 2] ^= 1;
+    fs::write(outside.at("Gig.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Gig.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Gig.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+
+    assert_eq!(root.names("Gig"), ["Grand.ne5p"]);
+    assert_eq!(
+        session.said("“Marimba.nsmp” was not made, because the bundle's copy of it is damaged"),
+        1
+    );
+}
+
 /// A set list exports with the one program on this computer that claims a slot it
 /// plays, and a checked sample instrument with the bytes of the file it rests in. A program
 /// claiming a slot the set list does not play is left out.
