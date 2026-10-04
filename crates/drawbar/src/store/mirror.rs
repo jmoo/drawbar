@@ -2712,10 +2712,11 @@ impl Store {
             }
         }
         let missing = record.missing;
-        let from = record
-            .path
-            .replace(path.clone())
-            .filter(|from| from != path && !missing);
+        let moved = record.path.as_ref() != Some(path);
+        let from = moved
+            .then(|| record.path.replace(path.clone()))
+            .flatten()
+            .filter(|_| !missing);
         // A baseline resting in its file is what the file holds, and needs no write.
         if entity.saved.file.is_some() {
             record.saved = entity.saved.stamp;

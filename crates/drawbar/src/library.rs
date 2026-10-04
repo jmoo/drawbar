@@ -5,7 +5,6 @@
 //! scanned slots without any UI. [`arrange`] filters and orders them. Everything else
 //! here paints.
 
-use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
@@ -281,18 +280,26 @@ pub fn row_of(
     queue: &Queue,
     tags: &Tags,
 ) -> Option<Row> {
+    let instrument = device.product().and_then(Family::from_product);
+    let kept = Kept::of(workspace);
+    row_with(item, workspace, device, queue, tags, &kept, instrument)
+}
+
+/// [`row_of`], with what it reads of the whole list already taken.
+fn row_with(
+    item: Item,
+    workspace: &Workspace,
+    device: &DeviceState,
+    queue: &Queue,
+    tags: &Tags,
+    kept: &Kept,
+    instrument: Option<Family>,
+) -> Option<Row> {
     match item {
         Item::Local(id) => {
             let entity = workspace.get(id)?;
-            let instrument = device.product().and_then(Family::from_product);
-            Some(local(
-                entity,
-                device,
-                queue,
-                tags.worn(id).len(),
-                &Kept::of(workspace),
-                instrument,
-            ))
+            let worn = tags.worn(id).len();
+            Some(local(entity, device, queue, worn, kept, instrument))
         }
         Item::Slot { class, at } => {
             Some(slot(class, at, device.slot(class, at).flatten()?, device))
@@ -615,34 +622,70 @@ pub fn tracks(width: f32, widths: &Widths) -> [Range<f32>; 8] {
 ///
 /// ⚠️ Ties break on the name and then the item, so the order does not depend on the
 /// order the rows were built in.
-pub fn arrange(mut rows: Vec<Row>, query: &str, by: Column, order: Order) -> Vec<Row> {
+pub fn arrange(rows: Vec<Row>, query: &str, by: Column, order: Order) -> Vec<Row> {
     let query = query.trim().to_lowercase();
-    if !query.is_empty() {
-        rows.retain(|row| row.name.to_lowercase().contains(&query));
-    }
-    rows.sort_by(|a, b| {
+    let (keys, mut rows): (Vec<Key>, Vec<Option<Row>>) = rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = row.name.to_lowercase();
+            let shown = query.is_empty() || name.contains(&query);
+            shown.then(|| (Key::of(by, &row, name), Some(row)))
+        })
+        .unzip();
+    // Indices are sorted rather than rows, which are large to move.
+    let mut order_of: Vec<usize> = (0..keys.len()).collect();
+    order_of.sort_unstable_by(|&a, &b| {
+        let (a, b) = (&keys[a], &keys[b]);
         let ranked = match order {
-            Order::Up => compare(by, a, b),
-            Order::Down => compare(by, a, b).reverse(),
+            Order::Up => a.column.cmp(&b.column),
+            Order::Down => a.column.cmp(&b.column).reverse(),
         };
         ranked
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.item.cmp(&b.item))
     });
-    rows
+    order_of
+        .into_iter()
+        .filter_map(|at| rows[at].take())
+        .collect()
 }
 
-fn compare(by: Column, a: &Row, b: &Row) -> Ordering {
-    match by {
-        // The glyph and the word beside it are the same fact, so a click on either
-        // orders the table the same way.
-        Column::Glyph | Column::Kind => word(a).cmp(&word(b)),
-        Column::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        Column::Tags => a.tags.cmp(&b.tags),
-        Column::Where => a.where_.rank().cmp(&b.where_.rank()),
-        Column::At => address(a).cmp(&address(b)),
-        Column::Size => a.size.cmp(&b.size),
-        Column::Needs => a.needs.text().cmp(&b.needs.text()),
+/// What a row sorts by, taken once per row so that no comparison allocates.
+struct Key {
+    column: Ranked,
+    /// The name in lowercase, which breaks ties, and then the item.
+    name: String,
+    item: Item,
+}
+
+/// A row's value in the column the table is sorted by.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Ranked {
+    /// Sorted by the name, which [`Key::name`] already holds.
+    Name,
+    Text(String),
+    Count(u64),
+    Address((bool, u32, u32, u32)),
+}
+
+impl Key {
+    fn of(by: Column, row: &Row, name: String) -> Key {
+        let column = match by {
+            // The glyph and the word beside it are the same fact, so a click on either
+            // orders the table the same way.
+            Column::Glyph | Column::Kind => Ranked::Text(word(row)),
+            Column::Name => Ranked::Name,
+            Column::Tags => Ranked::Count(row.tags as u64),
+            Column::Where => Ranked::Count(u64::from(row.where_.rank())),
+            Column::At => Ranked::Address(address(row)),
+            Column::Size => Ranked::Count(row.size),
+            Column::Needs => Ranked::Text(row.needs.text()),
+        };
+        Key {
+            column,
+            name,
+            item: row.item,
+        }
     }
 }
 
@@ -764,6 +807,13 @@ pub struct Library {
     by: Column,
     order: Order,
     widths: Widths,
+    /// The order of the rows as last taken, kept until something it comes from changes.
+    table: Option<Table>,
+    /// The header's counts, and the revisions they were counted at.
+    counts: Option<(Counted, [usize; 2])>,
+    /// How many times the order of the rows has been taken.
+    #[cfg(test)]
+    pub(crate) built: usize,
 }
 
 impl Default for Library {
@@ -772,8 +822,71 @@ impl Default for Library {
             by: Column::Name,
             order: Order::Up,
             widths: [None; 8],
+            table: None,
+            counts: None,
+            #[cfg(test)]
+            built: 0,
         }
     }
+}
+
+/// Everything the order of the table's rows comes from. The order is taken again only
+/// when this changes; the rows in view are built every frame.
+#[derive(PartialEq)]
+struct Sources {
+    /// The list's revision, but only where the order or the narrowing reads what an asset
+    /// holds (its kind, where it is, its size, what it needs), which any change to the
+    /// list may move. The names, slots, tags and queue they read otherwise are covered by
+    /// the rest.
+    revision: Option<u64>,
+    layout: u64,
+    device: u64,
+    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
+    tags: u64,
+    filter: Filter,
+    query: String,
+    by: Column,
+    order: Order,
+}
+
+impl Sources {
+    fn of(
+        library: &Library,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &Queue,
+        tags: &Tags,
+        shell: &Shell,
+    ) -> Sources {
+        let filter = &shell.filter;
+        let narrows = filter.kind.is_some() || filter.place.is_some() || filter.state.is_some();
+        let names = matches!(library.by, Column::Name | Column::Tags | Column::At);
+        Sources {
+            revision: (narrows || !names).then(|| workspace.revision()),
+            layout: workspace.layout(),
+            device: device.revision(),
+            queue: queue.shape(),
+            tags: tags.revision(),
+            filter: filter.clone(),
+            query: shell.omnibox.clone(),
+            by: library.by,
+            order: library.order,
+        }
+    }
+}
+
+/// The items the table shows, in order, and what that order came from.
+struct Table {
+    sources: Sources,
+    items: Vec<Item>,
+}
+
+/// What the header's counts read: the list, the instrument and the queue.
+#[derive(PartialEq)]
+struct Counted {
+    revision: u64,
+    device: u64,
+    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
 }
 
 impl Library {
@@ -833,29 +946,64 @@ impl Library {
     ) -> Vec<Act> {
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut acts = Vec::new();
-        let held = rows(
-            workspace,
-            &device.state,
-            queue,
-            browser.tags(),
-            &shell.filter,
-        );
-        let held = arrange(held, &shell.omnibox, self.by, self.order);
+        let sources = Sources::of(self, workspace, device, queue, browser.tags(), shell);
+        let table = match self.table.take() {
+            Some(table) if table.sources == sources => table,
+            _ => self.build(sources, workspace, device, queue, browser.tags(), shell),
+        };
+        let counts = self.counts(workspace, device, queue);
+        header(ui, counts, browser.tags(), &shell.filter, &mut acts);
+        self.table(ui, &table, browser, workspace, device, queue, &mut acts);
+        self.table = Some(table);
+        acts
+    }
 
+    /// Take the order of the rows again.
+    fn build(
+        &mut self,
+        sources: Sources,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &Queue,
+        tags: &Tags,
+        shell: &Shell,
+    ) -> Table {
+        #[cfg(test)]
+        {
+            self.built += 1;
+        }
+        let held = rows(workspace, &device.state, queue, tags, &shell.filter);
+        let held = arrange(held, &shell.omnibox, self.by, self.order);
+        Table {
+            sources,
+            items: held.iter().map(|row| row.item).collect(),
+        }
+    }
+
+    /// What is waiting, and what differs from its slot, counted again only when the list,
+    /// the instrument or the queue has changed.
+    fn counts(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> [usize; 2] {
+        let now = Counted {
+            revision: workspace.revision(),
+            device: device.revision(),
+            queue: queue.shape(),
+        };
+        if let Some((_, counts)) = self.counts.as_ref().filter(|(at, _)| *at == now) {
+            return *counts;
+        }
         let counts = [
             queue.len(),
             crate::queue::changed(workspace, &device.state, queue).len(),
         ];
-        header(ui, counts, browser.tags(), &shell.filter, &mut acts);
-        self.table(ui, &held, browser, workspace, device, queue, &mut acts);
-        acts
+        self.counts = Some((now, counts));
+        counts
     }
 
     #[allow(clippy::too_many_arguments)]
     fn table(
         &mut self,
         ui: &mut egui::Ui,
-        rows: &[Row],
+        table: &Table,
         browser: &mut Browser,
         workspace: &Workspace,
         device: &Device,
@@ -871,25 +1019,42 @@ impl Library {
                 ))
                 .layout(*ui.layout()),
         );
-        let width = list_width(ui, rows.len(), ROW + ROW_GAP, HEAD + ABOVE);
+        let items = &table.items;
+        let width = list_width(ui, items.len(), ROW + ROW_GAP, HEAD + ABOVE);
         let tracks = tracks((width - 2.0 * CELL_PAD).max(0.0), &self.widths);
         self.head(ui, width, &tracks);
         ui.add_space(ABOVE);
-        if rows.is_empty() {
+        if items.is_empty() {
             return nothing(ui);
         }
 
-        let list: Vec<Item> = rows.iter().map(|row| row.item).collect();
         ui.spacing_mut().item_spacing.y = ROW_GAP;
         let shown = egui::ScrollArea::vertical()
             .id_salt("library_table")
             .auto_shrink([false; 2])
-            .show_rows(ui, ROW, rows.len(), |ui, shown| {
-                let shown = rows.get(shown).unwrap_or_default();
-                workspace.in_view(shown.iter().filter_map(|row| row.item.local()));
-                for row in shown {
+            .show_rows(ui, ROW, items.len(), |ui, shown| {
+                let shown = items.get(shown).unwrap_or_default();
+                let kept = Kept::of(workspace);
+                let instrument = device.state.product().and_then(Family::from_product);
+                let tags = browser.tags();
+                let rows: Vec<Row> = shown
+                    .iter()
+                    .filter_map(|item| {
+                        row_with(
+                            *item,
+                            workspace,
+                            &device.state,
+                            queue,
+                            tags,
+                            &kept,
+                            instrument,
+                        )
+                    })
+                    .collect();
+                workspace.in_view(rows.iter().filter_map(|row| row.item.local()));
+                for row in &rows {
                     paint(
-                        ui, row, width, &tracks, browser, &list, workspace, device, queue, acts,
+                        ui, row, width, &tracks, browser, items, workspace, device, queue, acts,
                     );
                 }
             });
@@ -2565,6 +2730,154 @@ mod tests {
             workspace.families_present(),
             [Family::Electro5],
             "what it holds"
+        );
+    }
+
+    /// Unread assets in the root of the library, each one byte long.
+    fn unread(names: &[&str]) -> Vec<crate::workspace::Saved> {
+        let ids = 1..;
+        ids.zip(names)
+            .map(|(id, name)| crate::workspace::Saved {
+                id,
+                name: name.to_string(),
+                path: Some(crate::store::LibPath::root().join(name)),
+                origin: Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(1),
+                unsaved: None,
+            })
+            .collect()
+    }
+
+    /// The names the table painted, top to bottom, as it shows them.
+    fn names_painted(words: &[testing::Word], names: &[&str]) -> Vec<String> {
+        let shown: Vec<&str> = names
+            .iter()
+            .map(|name| crate::strings::display_name(name))
+            .collect();
+        let mut found: Vec<&testing::Word> = words
+            .iter()
+            .filter(|word| shown.contains(&word.text.as_str()))
+            .collect();
+        found.sort_by(|a, b| a.rect.top().total_cmp(&b.rect.top()));
+        found.iter().map(|word| word.text.clone()).collect()
+    }
+
+    #[test]
+    fn the_order_is_taken_again_only_when_something_it_reads_changes() {
+        let mut bench = Bench::new();
+        let names = ["Cello.ne5p", "Alto.ne5p", "Bass.ne5p", "Zither.ne5p"];
+        let saved = unread(&names[..3]);
+        bench.workspace.restore(saved, None, &mut bench.log);
+        let mut library = Library::default();
+        let size = egui::vec2(900.0, 540.0);
+        for _ in 0..3 {
+            library_frame(&mut library, &mut bench, size, Vec::new());
+        }
+        assert_eq!(library.built, 1, "frames with nothing new keep the order");
+
+        let bytes = Fresh::Program.bytes().unwrap();
+        let read = crate::room::measure(bytes.len() as u64);
+        bench.workspace.take_wanted();
+        bench.workspace.took(2, Some(bytes), None);
+        bench.workspace.settle_files(&mut bench.log);
+        let words = library_frame(&mut library, &mut bench, size, Vec::new());
+        assert_eq!(
+            library.built, 1,
+            "a read does not move a row sorted by name"
+        );
+        assert!(
+            words.iter().any(|word| word.text == read),
+            "the row in view shows the {read} read"
+        );
+
+        bench.workspace.rename(2, names[3].to_string());
+        let words = library_frame(&mut library, &mut bench, size, Vec::new());
+        assert_eq!(library.built, 2, "a rename moves the order");
+        assert_eq!(names_painted(&words, &names), ["Bass", "Cello", "Zither"]);
+
+        library.by = Column::Size;
+        library_frame(&mut library, &mut bench, size, Vec::new());
+        assert_eq!(library.built, 3, "a new column orders the table again");
+        bench.workspace.take_wanted();
+        bench
+            .workspace
+            .took(1, Some(Fresh::Program.bytes().unwrap()), None);
+        bench.workspace.settle_files(&mut bench.log);
+        let words = library_frame(&mut library, &mut bench, size, Vec::new());
+        assert_eq!(library.built, 4, "sorted by size, a read may move a row");
+        assert_eq!(
+            names_painted(&words, &names),
+            ["Bass", "Cello", "Zither"],
+            "the one-byte row first"
+        );
+    }
+
+    #[test]
+    fn a_bank_dropped_for_a_write_leaves_the_table_at_once() {
+        let mut bench = Bench::new();
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Alto", "Bass"]);
+        let mut library = Library::default();
+        let size = egui::vec2(900.0, 540.0);
+        let slots = ["Alto", "Bass"];
+        let words = library_frame(&mut library, &mut bench, size, Vec::new());
+        assert_eq!(names_painted(&words, &slots), slots);
+
+        let at = Location::from_user(7, 1);
+        let delete = crate::device::DeviceCmd::Delete {
+            class: ObjectClass::Program,
+            at,
+        };
+        bench.device.send(delete, &mut bench.log);
+        bench.device.pump();
+        library_frame(&mut library, &mut bench, size, Vec::new());
+        assert_eq!(
+            library.table.as_ref().map(|table| table.items.len()),
+            Some(0),
+            "the bank being written is read again, not drawn from what it held"
+        );
+    }
+
+    #[test]
+    fn frames_look_up_no_name_in_the_format_table() {
+        let mut bench = Bench::new();
+        let names: Vec<String> = (1..=300).map(|n| format!("Sound {n:03}.ne5p")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let saved = unread(&names);
+        let looked = || crate::browser::TAGGED.with(std::cell::Cell::get);
+        let before = looked();
+        bench.workspace.restore(saved, None, &mut bench.log);
+        let listed = looked() - before;
+        assert!(
+            listed <= names.len(),
+            "{listed} lookups to list {}",
+            names.len()
+        );
+
+        let mut library = Library::default();
+        for _ in 0..3 {
+            library_frame(
+                &mut library,
+                &mut bench,
+                egui::vec2(900.0, 540.0),
+                Vec::new(),
+            );
+        }
+        bench.workspace.rename(7, "Renamed.ne5p".to_string());
+        library_frame(
+            &mut library,
+            &mut bench,
+            egui::vec2(900.0, 540.0),
+            Vec::new(),
+        );
+        assert_eq!(
+            looked() - before,
+            listed + 1,
+            "only the rename looked a name up again"
         );
     }
 

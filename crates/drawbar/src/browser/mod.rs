@@ -37,6 +37,8 @@ mod tree;
 pub use act::{
     apply, bulk, foreign_format, send_warnings, Act, Bulk, Rescuing, LOAD_ON_INSTRUMENT,
 };
+#[cfg(test)]
+pub(crate) use drag::TAGGED;
 pub use drag::{
     kinds_present, landing, qualifier, tagged, Carried, Held, Item, Kept, Kind, Onto, Qualifier,
 };
