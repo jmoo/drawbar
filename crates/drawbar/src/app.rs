@@ -551,9 +551,13 @@ impl DrawbarApp {
             false => Pass::Files,
         };
         let synced = store.sync(&mut self.workspace, &mut self.browser, &self.queue, pass);
+        // A full pass that could not finish, as during a rescan, waits out the cadence too,
+        // since each one summarizes every asset.
+        if pass == Pass::Full {
+            self.synced_at = now;
+        }
         if synced && pass == Pass::Full {
             self.synced = self.workspace.revision();
-            self.synced_at = now;
             return;
         }
         // Nothing else may request a frame, and the index is still to be written.

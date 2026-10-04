@@ -509,6 +509,9 @@ pub struct LocalEntity {
     pub remembered: Option<Box<Summary>>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
+    /// The tag and kind its name says, from [`crate::browser::tagged`], taken whenever
+    /// the name is set so that no frame scans the format table for it.
+    by_name: Option<(&'static str, crate::browser::Kind)>,
 }
 
 impl LocalEntity {
@@ -531,6 +534,7 @@ impl LocalEntity {
     /// [`LocalEntity::decoded`] it has no decode, no container, and the kind its name
     /// says.
     fn undecoded(id: u64, name: String, origin: Origin, bytes: Bytes, stamp: u64) -> LocalEntity {
+        let by_name = crate::browser::tagged(&name);
         LocalEntity {
             id,
             name,
@@ -558,6 +562,7 @@ impl LocalEntity {
             wrote: None,
             remembered: None,
             seen: Default::default(),
+            by_name,
         }
     }
 
@@ -605,6 +610,7 @@ impl LocalEntity {
         file: Arc<OnDisk>,
         stamp: u64,
     ) -> LocalEntity {
+        let by_name = crate::browser::tagged(&name);
         LocalEntity {
             id,
             name,
@@ -625,6 +631,7 @@ impl LocalEntity {
             wrote: None,
             remembered: None,
             seen: Default::default(),
+            by_name,
         }
     }
 
@@ -735,8 +742,19 @@ impl LocalEntity {
     /// The tag its name carries, while its bytes are not decoded.
     fn listed_tag(&self) -> Option<&'static str> {
         let undecoded = self.reading() || self.unread();
-        let (tag, _) = crate::browser::tagged(&self.name).filter(|_| undecoded)?;
+        let (tag, _) = self.by_name.filter(|_| undecoded)?;
         Some(tag)
+    }
+
+    /// The tag and kind its name says, as [`crate::browser::tagged`] gives them.
+    pub fn by_name(&self) -> Option<(&'static str, crate::browser::Kind)> {
+        self.by_name
+    }
+
+    /// Name it, and take what the new name says it is.
+    fn set_name(&mut self, name: String) {
+        self.by_name = crate::browser::tagged(&name);
+        self.name = name;
     }
 
     /// Whether it holds something other than what it was last saved as, an editor's
@@ -791,16 +809,27 @@ impl LocalEntity {
     /// A note has neither, so its tag comes from its bytes being text. See
     /// `document::text::is_text`.
     pub fn tag(&self) -> String {
+        self.held_tag().into_owned()
+    }
+
+    /// [`LocalEntity::tag`], borrowed where it can be.
+    fn held_tag(&self) -> Cow<'_, str> {
         match (self.entity.as_deref(), &self.container) {
-            (Some(entity), _) => entity.identity().format.to_string(),
-            (None, Some(container)) => container.tag(),
-            (None, None) if self.is_text => crate::document::text::EXTENSION.to_string(),
+            (Some(entity), _) => Cow::Borrowed(entity.identity().format),
+            (None, Some(container)) => Cow::Owned(container.tag()),
+            (None, None) if self.is_text => Cow::Borrowed(crate::document::text::EXTENSION),
             (None, None) => match (self.rests(), self.remembered.as_deref()) {
-                (Some(file), _) => file.index.tag().to_string(),
-                (None, Some(known)) => known.tag.clone(),
-                (None, None) => self.listed_tag().unwrap_or("?").to_string(),
+                (Some(file), _) => Cow::Borrowed(file.index.tag()),
+                (None, Some(known)) => Cow::Borrowed(&known.tag),
+                (None, None) => Cow::Borrowed(self.listed_tag().unwrap_or("?")),
             },
         }
+    }
+
+    /// The family whose files carry its [tag](LocalEntity::tag), as
+    /// [`accept::Family::of_tag`] says.
+    pub fn family(&self) -> Option<accept::Family> {
+        family_of(&self.held_tag())
     }
 
     /// The bytes the wire would carry: the file with its container stripped.
@@ -814,6 +843,23 @@ impl LocalEntity {
 
 /// Why an asset not read yet has no bytes to hand over.
 const UNREAD: &str = "it has not been read yet";
+
+/// [`accept::Family::of_tag`], which scans a table, remembered by tag: every listed row
+/// asks it whenever the list changes.
+fn family_of(tag: &str) -> Option<accept::Family> {
+    thread_local! {
+        static FAMILIES: std::cell::RefCell<std::collections::HashMap<String, Option<accept::Family>>> =
+            Default::default();
+    }
+    FAMILIES.with(|known| {
+        if let Some(family) = known.borrow().get(tag) {
+            return *family;
+        }
+        let family = accept::Family::of_tag(tag);
+        known.borrow_mut().insert(tag.to_string(), family);
+        family
+    })
+}
 
 /// A file's body as the wire carries it, without its container, or `None` for bytes no
 /// container this app unwraps.
@@ -1405,10 +1451,8 @@ impl Workspace {
         self.taken(&self.families, || {
             #[cfg(test)]
             self.families_taken.set(self.families_taken.get() + 1);
-            let here: std::collections::HashSet<accept::Family> = self
-                .listed()
-                .filter_map(|entity| accept::Family::of_tag(&entity.tag()))
-                .collect();
+            let here: std::collections::HashSet<accept::Family> =
+                self.listed().filter_map(LocalEntity::family).collect();
             accept::Family::ALL
                 .into_iter()
                 .filter(|family| here.contains(family))
@@ -1611,17 +1655,24 @@ impl Workspace {
     }
 
     /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
-    /// with [`crate::device::link`] as `held_by`.
-    pub fn relink(&mut self, held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>) {
+    /// with [`crate::device::link`] as `held_by`. Returns whether any link moved.
+    pub fn relink(
+        &mut self,
+        held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>,
+    ) -> bool {
+        let mut moved = false;
         for entity in &mut self.entities {
-            entity.link = held_by(entity);
+            let link = held_by(entity);
+            moved |= entity.link != link;
+            entity.link = link;
         }
+        moved
     }
 
     /// Rename an asset held here. Nothing leaves this computer.
     pub fn rename(&mut self, id: u64, name: String) {
         if let Some(entity) = self.get_mut(id) {
-            entity.name = name;
+            entity.set_name(name);
             self.moved();
         }
     }
@@ -1629,7 +1680,7 @@ impl Workspace {
     /// Put an asset's file at `path`, which also names it.
     pub fn place(&mut self, id: u64, path: LibPath) {
         if let Some(entity) = self.get_mut(id) {
-            entity.name = path.leaf().to_string();
+            entity.set_name(path.leaf().to_string());
             entity.path = Some(path);
             self.moved();
         }
@@ -1647,7 +1698,7 @@ impl Workspace {
     pub fn relocate(&mut self, from: &LibPath, to: &LibPath) {
         for entity in &mut self.entities {
             if let Some(moved) = entity.path.as_ref().and_then(|at| at.moved(from, to)) {
-                entity.name = moved.leaf().to_string();
+                entity.set_name(moved.leaf().to_string());
                 entity.path = Some(moved);
             }
         }
