@@ -134,6 +134,25 @@ pub fn source_pcm(wav: &[u8]) -> Result<Pcm16, AudioError> {
     Ok(pcm)
 }
 
+/// The audio files a [`plan`] reads: those a zone's stroke plays, in the project's order.
+/// An entry no zone plays is never read, so its WAV need not exist.
+pub fn played(project: &Project) -> Result<Vec<AudioFile>, ParseError> {
+    let strokes = project.strokes()?;
+    let zones = project.zones()?;
+    let playing = |file: &AudioFile| {
+        zones.iter().flat_map(|zone| &zone.strokes).any(|layer| {
+            strokes
+                .iter()
+                .any(|s| s.global_id == layer.global_id && s.file_id == file.id)
+        })
+    };
+    Ok(project
+        .audio_files()?
+        .into_iter()
+        .filter(|file| playing(file))
+        .collect())
+}
+
 /// A frame position a project states for a zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
@@ -909,6 +928,32 @@ mod tests {
             .map(|z| (z.root_key, z.top_note))
             .collect();
         assert_eq!(built, stated);
+    }
+
+    /// Both zones play `low.wav`, and `high.wav` stays listed with no stroke playing it.
+    fn high_unplayed() -> Project {
+        let project = two_zones();
+        let files = project.audio_files().unwrap();
+        let id = |path: &str| files.iter().find(|f| f.path == path).unwrap().id;
+        let text = project.render().replace(
+            &format!("m_fileID = {}\n", id("high.wav")),
+            &format!("m_fileID = {}\n", id("low.wav")),
+        );
+        Project::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn a_file_no_zone_plays_is_not_read() {
+        let project = high_unplayed();
+        let played: Vec<String> = played(&project)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(played, ["low.wav"]);
+        let source = Memory(vec![("low.wav", wav(codec::SOURCE_RATE, 1))]);
+        let plan = plan(&project, codec::Layout::V2, &source).unwrap();
+        assert_eq!(plan.zones.len(), 2);
     }
 
     #[test]

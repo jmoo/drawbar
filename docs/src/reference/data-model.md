@@ -1123,7 +1123,7 @@ file, and the projects with neither, which may. A project names a WAV relative
 to its own folder, as `nord-format`'s `nsmpproj::build::AudioPath` reads it, and
 a path that is absolute or leaves the library names nothing (`summary::resolve`).
 
-A build looks for the same files among the folders' `others`: the exact path
-first, then the one path with the same `names::key`, refusing two
+A build looks for the files its zones play (`nsmpproj::build::played`) among
+the folders' `others`: the exact path first, then the one path with the same `names::key`, refusing two
 (`builds::locate`). It reads them with `Cmd::ReadOthers` and encodes on a
 `work::Job` (`builds::Builds`).
