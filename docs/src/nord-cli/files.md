@@ -30,4 +30,21 @@ nord program deps patch.ne5p           # the piano and sample ids it refers to
 A file stores ids, not names. `deps` on a slot asks the instrument for the
 names. On a file, it prints the ids.
 
+## Bundles
+
+A bundle is the file Nord Sound Manager carries programs or a set list in, with
+the pianos and samples they play.
+
+```sh
+nord bundle get program 7:4 7:5 -o gig.ne5pbundle   # programs and what they play
+nord bundle get setlist 1:2 -o b3.ne5tbundle        # a set list, its programs, and what they play
+nord bundle unpack gig.ne5pbundle -o gig            # every file at its path, and meta.xml
+nord bundle pack gig -o gig.ne5pbundle              # and back
+```
+
+`get` reads only. It finds each piano and sample by the name the instrument gives
+it, and warns about one it cannot find in exactly one slot. `pack` keeps a
+`meta.xml` it finds at the top of the folder; without one, it lists which set
+lists play which programs. Electro 5 bundles only.
+
 Changing what is inside a file is [Editing](editing.md).
