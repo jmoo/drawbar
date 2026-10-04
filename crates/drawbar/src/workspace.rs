@@ -1207,6 +1207,16 @@ pub struct Saved {
     pub unsaved: Option<Vec<u8>>,
 }
 
+/// A bundle whose directory has been read, to be unpacked into a new folder in `dir`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unbundled {
+    pub from: Outside,
+    pub dir: LibPath,
+    /// The bundle's file name.
+    pub name: String,
+    pub members: Result<Vec<crate::bundle::Member>, String>,
+}
+
 /// What a background task hands back to the UI thread.
 enum Incoming {
     Opened {
@@ -1215,6 +1225,9 @@ enum Incoming {
     },
     /// A file File ▸ Open… picked, to be copied into the library.
     Picked(Outside),
+    /// A bundle to unpack into a new folder in `dir`, and what its directory says it
+    /// holds.
+    Unbundled(Unbundled),
     /// Every file one pick of WAVs returned, together, because the draft asks one
     /// question about the whole set.
     Wavs {
@@ -1277,6 +1290,7 @@ pub struct Workspace {
     moving_over: std::collections::BTreeMap<u64, u64>,
     /// The files File ▸ Open… picked, not yet taken.
     picked: Vec<Outside>,
+    unbundled: Vec<Unbundled>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
     /// asked for first.
     undecoded: VecDeque<u64>,
@@ -1368,6 +1382,7 @@ impl Workspace {
             arriving: Default::default(),
             moving_over: Default::default(),
             picked: Vec::new(),
+            unbundled: Vec::new(),
             undecoded: VecDeque::new(),
             hurried: Default::default(),
             wanted: Default::default(),
@@ -2357,6 +2372,27 @@ impl Workspace {
         });
     }
 
+    /// Read the directory of the bundle at `from`, to be unpacked into a new folder in
+    /// `dir` once it answers; see [`Workspace::take_unbundled`].
+    pub fn unbundle(&self, from: Outside, dir: LibPath, name: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        spawn(async move {
+            let members = crate::bundle::members(&from).await.map_err(|e| e.to_string());
+            let _ = tx.send(Incoming::Unbundled(Unbundled {
+                from,
+                dir,
+                name,
+                members,
+            }));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The bundles whose directories have been read since the last call.
+    pub fn take_unbundled(&mut self) -> Vec<Unbundled> {
+        std::mem::take(&mut self.unbundled)
+    }
+
     /// Read the file outside the library at `from` whole, and open it as a file kept
     /// nowhere yet, as a library that cannot take a copy of it holds it.
     pub fn read_outside(&self, name: String, from: Outside) {
@@ -2418,6 +2454,7 @@ impl Workspace {
             match message {
                 Incoming::Opened { name, bytes } => opened.push((name, bytes)),
                 Incoming::Picked(from) => self.picked.push(from),
+                Incoming::Unbundled(read) => self.unbundled.push(read),
                 Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Demos(files) => self.demos = Some(files),
                 Incoming::Note(text) => log.say(text),

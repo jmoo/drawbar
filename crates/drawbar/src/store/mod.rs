@@ -464,6 +464,8 @@ pub enum Failure {
 pub enum CopyOf {
     /// A file outside the library.
     Outside(Outside),
+    /// The bytes `range` of a file outside the library: a member of a bundle.
+    Part(Outside, std::ops::Range<u64>),
     /// The file the asset with this id rests in, byte for byte, from wherever it is when
     /// the copy is sent.
     Asset(u64),
@@ -477,6 +479,8 @@ pub enum CopyOf {
 pub enum Source {
     /// A file outside the library.
     Outside(Outside),
+    /// The bytes `range` of a file outside the library.
+    Part(Outside, std::ops::Range<u64>),
     /// A file of the library, byte for byte, which must still hold what its fingerprint
     /// says.
     Library(LibPath, Fingerprint),

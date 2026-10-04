@@ -1285,6 +1285,12 @@ impl Fs for Folder {
         match what {
             Staged::Bytes(bytes) => self.staged(path, Contents::Bytes(bytes)).await,
             Staged::Outside(from) => self.staged(path, Contents::Blob(from)).await,
+            Staged::Part(from, range) => {
+                let part = from
+                    .slice_with_f64_and_f64(range.start as f64, range.end as f64)
+                    .map_err(failed)?;
+                self.staged(path, Contents::Blob(&part)).await
+            }
             Staged::Library(from) => {
                 let from = snapshot(&self.file(from).await?).await?;
                 self.staged(path, Contents::Blob(&from)).await

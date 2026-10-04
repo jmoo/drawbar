@@ -3325,6 +3325,60 @@ fn a_file_from_outside_is_copied_in_and_read_as_the_librarys_own() {
     assert_eq!(session.said("is on this computer"), 2);
 }
 
+/// A stored bundle of `members`, as `(archive path, file)`.
+fn bundle_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+    use nord_format::bundle::archive::{DosTime, Entry, Writer};
+    let mut writer = Writer::new(Vec::new());
+    for (path, bytes) in members {
+        let size = u32::try_from(bytes.len()).unwrap();
+        let crc = nord_format::crc::crc32(bytes);
+        let entry = Entry::new(path.to_string(), size, crc, DosTime::default());
+        writer.member(entry, &mut &bytes[..]).unwrap();
+    }
+    writer.finish(&[]).unwrap()
+}
+
+/// A bundle from outside unpacks into a new folder named after it, beside one that
+/// already has its name, each member copied out under its own name and the manifest
+/// left behind.
+#[test]
+fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::create_dir(root.at("Gig")).unwrap();
+    let (sample, program) = (
+        crate::testing::sample_bytes(),
+        Fresh::Program.bytes().unwrap(),
+    );
+    let bundle = bundle_of(&[
+        ("Samp Lib/Samp Lib/Marimba.nsmp", &sample),
+        ("Program/Bank 1/Grand.ne5p", &program),
+        ("meta.xml", b"<bundle/>"),
+    ]);
+    fs::write(outside.at("Gig.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Gig.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Gig.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+
+    assert_eq!(root.names("Gig 2"), ["Grand.ne5p", "Marimba.nsmp"]);
+    assert_eq!(root.read("Gig 2/Marimba.nsmp"), sample);
+    assert_eq!(root.read("Gig 2/Grand.ne5p"), program);
+    assert!(!root.at("Gig.ne5pbundle").exists(), "the bundle is not kept");
+}
+
 /// A file from outside whose name is taken asks first. Overwrite copies it over the
 /// file there, which keeps its id and tags; Keep both copies it beside under a free name.
 #[test]

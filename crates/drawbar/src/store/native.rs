@@ -2,7 +2,7 @@
 //! of their own.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -507,6 +507,15 @@ impl Fs for Disk {
             Staged::Bytes(bytes) => self.staged(path, |file| file.write_all(bytes)),
             Staged::Outside(from) => self.staged(path, |file| {
                 io::copy(&mut File::open(from)?, file).map(|_| ())
+            }),
+            Staged::Part(from, range) => self.staged(path, |file| {
+                let mut source = File::open(from)?;
+                source.seek(io::SeekFrom::Start(range.start))?;
+                let len = range.end - range.start;
+                match io::copy(&mut source.take(len), file)? == len {
+                    true => Ok(()),
+                    false => Err(io::ErrorKind::UnexpectedEof.into()),
+                }
             }),
             Staged::Library(from) => {
                 let mut source = File::open(self.locate(from)?)?;

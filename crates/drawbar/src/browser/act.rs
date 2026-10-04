@@ -17,7 +17,7 @@ use crate::shell::{Dock, Shell};
 use crate::store::{names, outside_len, CopyOf, LibPath, Outside};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
-use crate::workspace::{Fresh, LocalEntity, Origin, VerifyState, Workspace};
+use crate::workspace::{Fresh, LocalEntity, Origin, Unbundled, VerifyState, Workspace};
 
 /// What [`Act::LoadOnInstrument`] is called wherever it is offered.
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
@@ -53,6 +53,8 @@ pub enum Act {
         dir: LibPath,
         name: String,
     },
+    /// Unpack a bundle whose directory has been read into a new folder.
+    Unpack(Unbundled),
     /// Copy a file from outside the library over the file of the asset `id`, which keeps
     /// its id, folder and tags.
     TakeOver {
@@ -281,6 +283,7 @@ impl Act {
             | Act::ReadAgain(_)
             | Act::Import { .. }
             | Act::Take { .. }
+            | Act::Unpack(_)
             | Act::TakeOver { .. }
             | Act::CopyOver { .. }
             | Act::Forget(_)
@@ -555,6 +558,7 @@ pub fn apply(
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
+            Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
             Act::Overwrite { id, bytes, gone } => {
                 workspace.replace_bytes(id, bytes, log);
@@ -864,6 +868,9 @@ fn take(
     dir: LibPath,
     name: String,
 ) {
+    if crate::bundle::is_bundle(&name) {
+        return workspace.unbundle(from, dir, name);
+    }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
             "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
@@ -894,6 +901,43 @@ fn take(
             browser.ask_clash(&name, &dir, over, both, &free);
         }
     }
+}
+
+/// A bundle's members, each copied out of it into a new folder in `dir` named after the
+/// bundle. The folder is flat: the archive's own folders are left behind.
+fn unpack(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, read: Unbundled) {
+    let Unbundled {
+        from,
+        dir,
+        name,
+        members,
+    } = read;
+    let members = match members {
+        Ok(members) => members,
+        Err(why) => return log.trouble(format!("“{name}” was not imported: {why}.")),
+    };
+    let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+    let wanted = browser.folders.free(&dir, &names::portable(stem), workspace);
+    if browser
+        .folders
+        .named_or_made(&dir, &wanted, workspace)
+        .is_none()
+    {
+        return log.trouble(format!("“{name}” was not imported: “{wanted}” is taken."));
+    }
+    let folder = dir.join(&wanted);
+    for member in &members {
+        let leaf = browser
+            .folders
+            .free(&folder, &names::portable(member.leaf()), workspace);
+        let len = member.bytes.end - member.bytes.start;
+        let from = CopyOf::Part(from.clone(), member.bytes.clone());
+        workspace.arrive(folder.join(&leaf), Origin::File(leaf.clone()), from, len);
+    }
+    log.say(format!(
+        "Imported the {} files of “{name}” into “{wanted}”.",
+        members.len()
+    ));
 }
 
 /// A file from outside the library, copied over the file of the asset `id`.
