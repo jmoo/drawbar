@@ -98,9 +98,9 @@ impl Kind {
     /// [`remembered`](LocalEntity::remembered), and what its name says otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         if entity.reading() || entity.unread() {
-            return match entity.remembered.as_deref() {
-                Some(known) => known.kind,
-                None => Kind::of_name(&entity.name),
+            return match (entity.remembered.as_deref(), entity.by_name()) {
+                (Some(known), _) => known.kind,
+                (None, by_name) => by_name.map_or(Kind::Other, |(_, kind)| kind),
             };
         }
         match entity.indexed() {
@@ -232,12 +232,20 @@ impl Kind {
 pub fn tagged(name: &str) -> Option<(&'static str, Kind)> {
     use crate::document::text;
 
+    #[cfg(test)]
+    TAGGED.with(|taken| taken.set(taken.get() + 1));
     let (_, extension) = name.rsplit_once('.')?;
     if extension.eq_ignore_ascii_case(text::EXTENSION) {
         return Some((text::EXTENSION, Kind::Text));
     }
     let format = nord_format::formats::by_extension(extension)?;
     Some((format.tag, Kind::of_entity(format.entity)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many names [`tagged`] has looked up on this thread.
+    pub(crate) static TAGGED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The kinds present: what the list on this computer holds and what the attached
@@ -302,7 +310,7 @@ pub fn qualifier(
     if let Some(generation) = entity.generation() {
         return (kept.generations.len() > 1).then_some(Qualifier::Generation(generation));
     }
-    let family = Family::of_tag(&entity.tag());
+    let family = entity.family();
     qualified(&kept.families, family, instrument)
         .then_some(family)
         .flatten()

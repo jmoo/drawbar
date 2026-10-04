@@ -641,6 +641,14 @@ impl Queue {
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
+
+    /// Which assets wait, in order, and the kind of difference each one's compare found:
+    /// everything the library's rows read of the queue, to tell when they are stale.
+    pub fn shape(&self) -> Vec<(u64, std::mem::Discriminant<Diff>)> {
+        let held = self.list.iter();
+        held.map(|held| (held.id, std::mem::discriminant(&held.diff)))
+            .collect()
+    }
 }
 
 /// [`compare`] against what an asset holds. One resting in its file is compared by the

@@ -1626,7 +1626,7 @@ mod tests {
             &mut log,
         );
 
-        let unattached = Device::new(egui::Context::default());
+        let mut unattached = Device::new(egui::Context::default());
         unattached.relink(&mut workspace);
         assert_eq!(
             loads(workspace.get(copied).unwrap(), &unattached.state),

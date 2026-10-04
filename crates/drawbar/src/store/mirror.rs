@@ -315,6 +315,9 @@ pub struct Store {
     fetched: BTreeSet<u64>,
     /// The assets of the background read in flight.
     fetching: BTreeSet<u64>,
+    /// A read something needs is in flight. The next waits for its answer, so whatever is
+    /// needed most by then goes first.
+    reading: bool,
     /// Each rename sent that has not answered, from and to.
     moving: Vec<(LibPath, LibPath)>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
@@ -375,6 +378,7 @@ impl Store {
             unfetched: Default::default(),
             fetched: BTreeSet::new(),
             fetching: BTreeSet::new(),
+            reading: false,
             moving: Vec::new(),
             budget: MOST_BYTES,
             cache: Cache::memory(),
@@ -667,6 +671,9 @@ impl Store {
             }
         }
         self.roomless.extend(rest.map(|(len, id)| (id, len)));
+        if self.reading {
+            return;
+        }
         let room = self.room(workspace);
         let mut files = Vec::new();
         for id in workspace.take_wanted() {
@@ -683,6 +690,7 @@ impl Store {
         if files.is_empty() {
             return;
         }
+        self.reading = true;
         self.send(Cmd::Read { files, room });
     }
 
@@ -914,8 +922,12 @@ impl Store {
             record.summarized = None;
             workspace.took(id, found.bytes, found.file);
         }
-        if background {
-            self.next_fetches(workspace);
+        match background {
+            true => self.next_fetches(workspace),
+            false => {
+                self.reading = false;
+                self.ask(workspace, browser, queue, log);
+            }
         }
     }
 
@@ -2505,7 +2517,8 @@ impl Store {
 
     /// Ask for the next few tracked files waiting to be read in the background.
     fn next_fetches(&mut self, workspace: &mut Workspace) {
-        if !self.fetching.is_empty() || !self.opened() {
+        let needed = self.reading || workspace.wants();
+        if !self.fetching.is_empty() || !self.opened() || needed {
             return;
         }
         let room = self.room(workspace);
@@ -2578,7 +2591,7 @@ impl Store {
                 record.fingerprint = Some(print);
             }
         }
-        if self.opened() {
+        if self.opened() && !self.reading {
             self.next_prints();
         }
     }
@@ -2715,10 +2728,11 @@ impl Store {
             }
         }
         let missing = record.missing;
-        let from = record
-            .path
-            .replace(path.clone())
-            .filter(|from| from != path && !missing);
+        let moved = record.path.as_ref() != Some(path);
+        let from = moved
+            .then(|| record.path.replace(path.clone()))
+            .flatten()
+            .filter(|_| !missing);
         // A baseline resting in its file is what the file holds, and needs no write.
         if entity.saved.file.is_some() {
             record.saved = entity.saved.stamp;

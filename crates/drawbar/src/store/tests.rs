@@ -1180,6 +1180,48 @@ fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
         .contains(&"nord-rescued-2-1.nsmp".to_string()));
 }
 
+/// Rows in view are read a batch at a time, and an asset opened meanwhile goes in the next
+/// read, ahead of the rows still waiting.
+#[test]
+fn an_asset_opened_while_rows_are_read_is_read_before_the_rest_of_them() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for n in 0..80 {
+        fs::write(root.at(&format!("Row {n:02}.ne5p")), &program).unwrap();
+    }
+    let mut session = Session::listed(&root);
+    let ids: Vec<u64> = session.bench.workspace.listed().map(|e| e.id).collect();
+    let (rows, open) = (&ids[..79], ids[79]);
+    session.bench.workspace.in_view(rows.iter().copied());
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.ask(workspace, browser, queue, log);
+    session.store.ask(workspace, browser, queue, log);
+    assert_eq!(session.store.asked_files, 32, "one read in flight");
+    session.bench.workspace.hurry(open);
+
+    assert!(session.next(), "the first read answered");
+    assert!(session.next(), "the next read answered");
+    let workspace = &session.bench.workspace;
+    assert!(
+        !workspace.get(open).unwrap().unread(),
+        "the open asset is read"
+    );
+    let waiting = rows
+        .iter()
+        .filter(|id| workspace.get(**id).unwrap().unread());
+    assert_eq!(
+        waiting.count(),
+        rows.len() - 32,
+        "the rest of the rows wait"
+    );
+}
+
 #[test]
 fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
     let root = Temp::new();
