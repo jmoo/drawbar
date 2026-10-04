@@ -133,6 +133,7 @@ impl Midi {
             State::Off | State::Asking | State::On { .. } => None,
         };
         if let (Some(why), false) = (&failed, self.reported) {
+            crate::telemetry::fault("midi", "refused");
             log.error(why.clone());
             log.trouble("drawbar could not listen to MIDI controllers.");
         }

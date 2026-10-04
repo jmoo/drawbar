@@ -2804,6 +2804,7 @@ impl Workspace {
         let (id, arrival) = self.add(name.clone(), origin, bytes, log);
         match arrival {
             Arrival::Unreadable => {
+                crate::telemetry::fault("format", "unreadable");
                 log.trouble(format!("“{name}” is not a file this app understands."))
             }
             Arrival::Read => log.say(format!("“{name}” is on this computer.")),

@@ -12,10 +12,13 @@
 #   release: master pushes only, and only after check, build and corpus pass.
 #            scripts/release.bash publishes untagged crate versions and tags
 #            them. Cargo.toml is the only source of truth for versions.
-#   pages: every master push once release has run. The app comes from the newest
-#          `drawbar-v*` tag and the guide from master. It hangs off release
-#          because a tag GITHUB_TOKEN creates fires no workflow event, so
-#          `on: push: tags:` would never deploy one.
+#   telemetry: master pushes only, after check. Applies the D1 migrations and
+#              deploys the collector in js/telemetry/ with the Cloudflare token of the
+#              drawbar-telemetry-deploy environment, which only master can use.
+#   pages: every master push once release and telemetry have run. The app
+#          comes from the newest `drawbar-v*` tag and the guide from master. It
+#          hangs off release because a tag GITHUB_TOKEN creates fires no workflow
+#          event, so `on: push: tags:` would never deploy one.
 #
 # cache-nix-action keeps the store between runs in the GitHub Actions cache
 # (10 GB per repo, LRU-evicted); without it every run rebuilds Wine, QEMU and
@@ -171,7 +174,7 @@ jobs:
   # the build job's.
   pages:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-    needs: [release]
+    needs: [release, telemetry]
     runs-on: ubuntu-latest
     permissions:
       actions: write # cache-nix-action purges superseded caches
@@ -210,3 +213,25 @@ jobs:
           path: site
       - uses: actions/deploy-pages@v4
         id: deployment
+
+  # Pages waits on this, so no app that reports is published before its collector.
+  telemetry:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: [check]
+    runs-on: ubuntu-latest
+    concurrency:
+      cancel-in-progress: false # a migration must not be cut off halfway
+      group: telemetry
+    environment: drawbar-telemetry-deploy
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      WRANGLER_SEND_METRICS: "false"
+    defaults:
+      run:
+        working-directory: js/telemetry
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nixbuild/nix-quick-install-action@v35
+      - run: nix shell --inputs-from ../.. nixpkgs#wrangler -c wrangler d1 migrations apply drawbar-reports --remote
+      - run: nix shell --inputs-from ../.. nixpkgs#wrangler -c wrangler deploy
