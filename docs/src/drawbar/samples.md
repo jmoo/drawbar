@@ -46,12 +46,19 @@ name, numbered if that name is taken. The instrument opens in a tab. Settings th
 are listed in the activity log, and anything the encoder cannot reproduce stops
 the build with the reason.
 
-## From WAVs
+## WAVs
 
-Drop a WAV on the window and its document can **Encode** it into a one-zone
-instrument. **New ▸ Sample instrument…** takes several WAVs, one zone each, with a
-root key for each. **New ▸ Sample Editor project…** makes a project from them
-instead, and the Sample Editor expects the WAVs to stay beside it.
+A WAV in your library opens as a document of its own: the whole file's waveform,
+one lane per channel, with its rate, channels and length in the header.
+**Play** plays it. **Gain** with **Rescale** scales every sample by that many
+dB, and the line beside it first says how many samples would clip. A gain is an
+edit like any other: Save writes it into the file and Revert takes it back.
+**Encode** makes a one-zone instrument from the WAV. A WAV drawbar cannot read,
+such as a 24-bit one, says why and offers none of these.
+
+**New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
+for each. **New ▸ Sample Editor project…** makes a project from them instead, and
+the Sample Editor expects the WAVs to stay beside it.
 
 The WAVs must be 16-bit PCM at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else, such as a 24-bit or 48 kHz file,
