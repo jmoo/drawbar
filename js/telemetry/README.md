@@ -1,18 +1,19 @@
 # telemetry
 
 The collector behind drawbar.app's anonymous usage and error counts and its report
-form, as a Cloudflare Worker on `t.drawbar.app`. [Privacy](../docs/src/privacy.md)
+form, as a Cloudflare Worker on `t.drawbar.app`. [Privacy](../../docs/src/privacy.md)
 says what it takes and keeps, in words for users.
 
 - `POST /e` takes a JSON array of rows. Each row must match a kind in
-  [`crates/drawbar/telemetry.json`](../crates/drawbar/telemetry.json) exactly; anything
+  [`crates/drawbar/telemetry.json`](../../crates/drawbar/telemetry.json) exactly; anything
   else is dropped. Rows are written to the Analytics Engine dataset `drawbar_events`
   with the kind as `index1` and the fields as `blob1…` in the schema's order, followed
   by the kind's `edge` fields.
 - `POST /report` takes one report into the D1 database `drawbar-reports`
-  ([`migrations/`](migrations)), at most 100 in any 24 hours (then `429`). A daily
-  trigger deletes reports older than 90 days. A Cloudflare rate-limiting rule on the
-  zone limits each address on this path as well.
+  ([`migrations/`](migrations)): at most 1000 reports and about 4.5 MB of them in any
+  24 hours (then `429`), so 90 days of reports stay inside the 500 MB a free-plan D1
+  database holds. A daily trigger deletes reports older than 90 days. A Cloudflare
+  rate-limiting rule on the zone limits each address on this path as well.
 
 The collector keeps no request logs and stores no address or user agent.
 [`queries/`](queries) holds the queries used to read both stores.

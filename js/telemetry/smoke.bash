@@ -2,7 +2,7 @@
 # Exercise a running collector over HTTP: what it accepts, what it refuses, and that a
 # report sent twice is kept once.
 #
-#   telemetry/smoke.bash URL ORIGIN
+#   js/telemetry/smoke.bash URL ORIGIN
 #
 # URL is the collector (`http://127.0.0.1:8787` under `wrangler dev`, or
 # `https://t.drawbar.app`); ORIGIN is the origin it accepts (`DEV_ORIGIN` locally,

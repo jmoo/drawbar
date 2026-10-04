@@ -30,7 +30,7 @@ const LONGEST: usize = 5_000;
 const CONTACT: usize = 200;
 
 /// The most of the activity log a report carries, newest kept, in characters. Held under
-/// the collector's limit for the field, `log` in `telemetry/src/check.js`.
+/// the collector's limit for the field, `log` in `js/telemetry/src/check.js`.
 const LOG: usize = 60_000;
 
 /// How long to wait before trying again once a send found no one, in seconds.

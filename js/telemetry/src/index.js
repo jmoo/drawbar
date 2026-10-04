@@ -3,19 +3,23 @@
 // keeps the client's address or user agent.
 
 import { admitted, agent, allowed, report, rows } from "./check.js";
-import schema from "../../crates/drawbar/telemetry.json";
+import schema from "../../../crates/drawbar/telemetry.json";
 
 const ORIGIN = "https://drawbar.app";
 
 // The largest body read, in bytes: a report with its whole log attached fits.
 const LARGEST = 256 * 1024;
 
-// The most reports kept from any 24 hours, so a sender past the edge's per-address
-// rate limit can fill a day rather than the database.
-const MOST_A_DAY = 100;
-
 // How long a report is kept.
 const KEEP_SECONDS = 90 * 24 * 60 * 60;
+
+// The most reports kept from any 24 hours, whoever sends them.
+const MOST_A_DAY = 1000;
+
+// The most bytes of reports kept from any 24 hours: KEEP_SECONDS of full days stays
+// under 400 MB, inside the 500 MB a free-plan D1 database may hold. A sender past the
+// edge's per-address rate limit fills a day, not the database.
+const BYTES_A_DAY = Math.floor((400 * 1024 * 1024) / (KEEP_SECONDS / 86400));
 
 // `origin` is the one the request may be read from: drawbar.app, or a local run's.
 function answer(status, origin = ORIGIN) {
@@ -76,9 +80,14 @@ export default {
           return reply(204);
         }
         const today = await env.REPORTS.prepare(
-          "SELECT COUNT(*) AS n FROM reports WHERE created > unixepoch() - 86400",
-        ).first("n");
-        if (today >= MOST_A_DAY) {
+          `SELECT COUNT(*) AS n, COALESCE(SUM(
+             length(CAST(text AS BLOB)) + length(CAST(contact AS BLOB)) +
+             length(CAST(faults AS BLOB)) + length(CAST(build AS BLOB)) +
+             length(CAST(log AS BLOB))), 0) AS bytes
+           FROM reports WHERE created > unixepoch() - 86400`,
+        ).first();
+        const size = new TextEncoder().encode(body).length;
+        if (today.n >= MOST_A_DAY || today.bytes + size > BYTES_A_DAY) {
           return reply(429);
         }
         await env.REPORTS.prepare(

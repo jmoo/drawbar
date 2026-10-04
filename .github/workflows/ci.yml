@@ -13,7 +13,7 @@
 #            scripts/release.bash publishes untagged crate versions and tags
 #            them. Cargo.toml is the only source of truth for versions.
 #   telemetry: master pushes only, after check. Applies the D1 migrations and
-#              deploys the collector in telemetry/ with the Cloudflare token of the
+#              deploys the collector in js/telemetry/ with the Cloudflare token of the
 #              drawbar-telemetry-deploy environment, which only master can use.
 #   pages: every master push once release and telemetry have run. The app
 #          comes from the newest `drawbar-v*` tag and the guide from master. It
@@ -229,9 +229,9 @@ jobs:
       WRANGLER_SEND_METRICS: "false"
     defaults:
       run:
-        working-directory: telemetry
+        working-directory: js/telemetry
     steps:
       - uses: actions/checkout@v4
       - uses: nixbuild/nix-quick-install-action@v35
-      - run: nix shell --inputs-from .. nixpkgs#wrangler -c wrangler d1 migrations apply drawbar-reports --remote
-      - run: nix shell --inputs-from .. nixpkgs#wrangler -c wrangler deploy
+      - run: nix shell --inputs-from ../.. nixpkgs#wrangler -c wrangler d1 migrations apply drawbar-reports --remote
+      - run: nix shell --inputs-from ../.. nixpkgs#wrangler -c wrangler deploy

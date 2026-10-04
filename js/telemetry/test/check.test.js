@@ -5,7 +5,7 @@ import test from "node:test";
 import { MOST_ROWS, admitted, agent, allowed, report, rows } from "../src/check.js";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
-const schema = JSON.parse(read("../../crates/drawbar/telemetry.json"));
+const schema = JSON.parse(read("../../../crates/drawbar/telemetry.json"));
 const edge = { browser: "chrome 141", os: "macos", country: "DE" };
 
 const visit = {
@@ -135,7 +135,7 @@ test("the user agent is reduced to a family, a major version and an os", () => {
 });
 
 test("the privacy page names every row and field", () => {
-  const page = read("../../docs/src/privacy.md");
+  const page = read("../../../docs/src/privacy.md");
   for (const [kind, { fields, edge: added }] of Object.entries(schema)) {
     for (const name of [kind, ...Object.keys(fields), ...added]) {
       assert.ok(page.includes(`\`${name}\``), `the privacy page does not name \`${name}\` of \`${kind}\``);

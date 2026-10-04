@@ -73,13 +73,13 @@
                       fileset = lib.fileset.unions [
                         ./crates/drawbar/telemetry.json
                         ./docs/src/privacy.md
-                        ./telemetry
+                        ./js/telemetry
                       ];
                       root = ./.;
                     };
                   }
                   ''
-                    node --test "$src/telemetry/test/check.test.js"
+                    node --test "$src/js/telemetry/test/check.test.js"
                     touch "$out"
                   '';
             };

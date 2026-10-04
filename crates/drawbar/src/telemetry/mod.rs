@@ -4,7 +4,7 @@
 //! Each row is one [`Event`] of a kind [`KINDS`] declares. A row carries enums, codes and
 //! versions only: never a name, a file, a byte of sound, or free text. No row carries
 //! anything that ties it to another row, so a visit cannot be joined to a crash. The
-//! collector (`telemetry/` at the repository root) accepts exactly these fields, read
+//! collector (`js/telemetry/` at the repository root) accepts exactly these fields, read
 //! from `telemetry.json` beside this crate's manifest, and adds the `edge` ones itself.
 //! The privacy page lists all of them, and the collector's tests hold it to that.
 
