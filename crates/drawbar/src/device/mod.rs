@@ -1214,6 +1214,9 @@ struct Running {
     writing: Option<ObjectClass>,
     /// The slot a `DEPENDENCIES` read is about, so a refusal is recorded against it.
     deps: Option<(ObjectClass, Location)>,
+    /// A rescan or reload the app queued after a change. Its success stays off the status
+    /// line, which keeps saying what the change did.
+    follow_up: bool,
 }
 
 impl Device {
@@ -1441,6 +1444,7 @@ impl Device {
                 DeviceCmd::Deps { class, at } => Some((*class, *at)),
                 _ => None,
             },
+            follow_up: matches!(cmd, DeviceCmd::ScanBank { .. } | DeviceCmd::Reload { .. }),
         });
         self.state.in_flight = Some(cmd.words());
         self.link.send(cmd);
@@ -1867,7 +1871,8 @@ impl Device {
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
                     log.info(text);
-                    if let Some(words) = &self.state.in_flight {
+                    let follow_up = self.running.as_ref().is_some_and(|run| run.follow_up);
+                    if let Some(words) = self.state.in_flight.as_ref().filter(|_| !follow_up) {
                         log.say(format!("{}.", words.done));
                     }
                 }
@@ -2995,6 +3000,39 @@ mod tests {
             })
             .collect();
         assert_eq!(rescans, vec![(class, 5)]);
+    }
+
+    /// The read of the banks a duplicate touched runs after it, and the status line
+    /// still says where the copy went.
+    #[test]
+    fn the_reread_after_a_duplicate_keeps_where_the_copy_went() {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        device.pretend_attached();
+        let finish = |device: &mut Device, log: &mut Log, workspace: &mut Workspace| {
+            device.pump();
+            device.pretend(DeviceEvent::OpOk("done".into()));
+            device.pretend(DeviceEvent::Finished);
+            device.poll(log, workspace, &mut Tabs::default(), &mut Queue::default());
+        };
+        device.send(
+            DeviceCmd::Duplicate {
+                class: ObjectClass::Program,
+                from: Location::from_user(7, 15),
+                to: Location::from_user(5, 46),
+            },
+            &mut log,
+        );
+        finish(&mut device, &mut log, &mut workspace);
+        let copied = "Copied Programs 7:15 to Programs 5:46.";
+        assert_eq!(log.status().1, copied);
+
+        while !device.queued().is_empty() {
+            finish(&mut device, &mut log, &mut workspace);
+        }
+        assert_eq!(log.status().1, copied);
     }
 
     /// A slot's dependencies are read once however often they are wanted. A refused
