@@ -39,7 +39,7 @@ use web_sys::{
 
 use super::dom::{self, failure, Moves};
 use super::exec::{self, Children, Fs, Kind, Over, Staged, TMP, WORKING};
-use super::{names, Cmd, Event, Failure, Fingerprint, Stat};
+use super::{names, Cmd, Event, Failure, Fingerprint, Keeping, Stat, Unkept};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
 use crate::rewrite::Pieces;
@@ -326,6 +326,11 @@ fn refused(cmd: Cmd, why: &str) -> Event {
             to,
             result: Err(why.to_string()),
         },
+        Cmd::Commit { .. } => Event::Committed(Err(Unkept {
+            step: Keeping::Index,
+            path: exec::INDEX.to_string(),
+            why: why.to_string(),
+        })),
         _ => Event::Failed(why.to_string()),
     }
 }

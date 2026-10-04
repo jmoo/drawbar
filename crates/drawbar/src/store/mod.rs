@@ -533,7 +533,8 @@ pub enum Cmd {
     /// [`Event::Fingerprinted`].
     Fingerprint(Vec<(u64, LibPath, Fingerprint)>),
     /// Write the `working` copies, then the index, then delete the working copies in
-    /// `drop`. Working copies are named `<id>-<generation>`. Answered only on failure.
+    /// `drop`. Working copies are named `<id>-<generation>`. Answered by
+    /// [`Event::Committed`].
     Commit {
         sidecar: Sidecar,
         working: Vec<(String, Vec<u8>)>,
@@ -628,11 +629,53 @@ pub enum Event {
         to: LibPath,
         result: Result<(), String>,
     },
+    /// Whether a [`Cmd::Commit`] wrote everything it was sent to, and why not.
+    Committed(Result<(), Unkept>),
     /// A command other than a save or a move failed: what it was doing, and why.
     Failed(String),
     /// A write found that nothing may be written after all, and why: another drawbar
     /// took the lock first, or the folder refused the sidecar. The write did not run.
     ReadOnly(String),
+}
+
+/// Why a [`Cmd::Commit`] did not write everything it was sent to.
+#[derive(Clone, Debug)]
+pub struct Unkept {
+    pub step: Keeping,
+    /// The file it failed on. A working copy is written under a new name at every
+    /// retry, so this differs between retries that fail the same way.
+    pub path: String,
+    pub why: String,
+}
+
+/// The step of a [`Cmd::Commit`] that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keeping {
+    /// Writing a working copy.
+    Working,
+    /// Writing the index.
+    Index,
+    /// Deleting a working copy the index no longer names.
+    Dropping,
+}
+
+impl Unkept {
+    /// Whether `other` failed at the same step for the same cause, whichever file it
+    /// failed on.
+    pub fn same(&self, other: &Unkept) -> bool {
+        self.step == other.step && self.why == other.why
+    }
+}
+
+impl std::fmt::Display for Unkept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let doing = match self.step {
+            Keeping::Working | Keeping::Index => "writing",
+            Keeping::Dropping => "deleting",
+        };
+        let Unkept { path, why, .. } = self;
+        write!(f, "keeping the library's index: {doing} {path}: {why}")
+    }
 }
 
 /// The keys of eframe's store that held the library before it was a folder. Nothing

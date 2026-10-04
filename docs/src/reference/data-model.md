@@ -530,7 +530,8 @@ asynchronously.
 | `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
 | `Import` | `Imported`: a copy of a file from outside or of the library's own, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
-| `Commit`, `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |
+| `Commit` | `Committed`: whether the working copies and the index were written, or the step that failed, its file and why (`Unkept`). A failure at the same step for the same cause is logged once, though each retry names a new working copy, until a commit lands. |
+| `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |
 
 Every command that writes first makes `.drawbar/` and takes the lock. Where it
 cannot, it runs no further and is answered by `Event::ReadOnly`.

@@ -966,6 +966,95 @@ fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
+/// A commit that fails the same way at every retry is logged once, and logged again
+/// where it fails after one has landed.
+#[test]
+fn a_failure_every_retry_repeats_is_logged_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let tmp = root.at(".drawbar/tmp");
+    let block = || {
+        fs::remove_dir_all(&tmp).unwrap();
+        fs::write(&tmp, b"not a folder").unwrap();
+    };
+    let unblock = || {
+        fs::remove_file(&tmp).unwrap();
+        fs::create_dir(&tmp).unwrap();
+    };
+    let failed = "did not change as asked: keeping the library's index";
+
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    block();
+    session.bench.browser.tags.set(id, tag, true);
+    for _ in 0..3 {
+        session.sync();
+    }
+    assert_eq!(session.said(failed), 1, "logged once");
+
+    unblock();
+    session.sync();
+    assert_eq!(session.said(failed), 1, "the retry landed");
+
+    block();
+    session.bench.browser.tags.set(id, tag, false);
+    session.sync();
+    assert_eq!(session.said(failed), 2, "logged again after a landing");
+}
+
+/// A working copy that cannot be written at any retry is logged once, though each
+/// retry writes it under a new name, and the line names the file.
+#[test]
+fn a_working_copy_that_fails_at_every_retry_is_logged_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    fs::remove_dir_all(root.at(".drawbar/tmp")).unwrap();
+    fs::write(root.at(".drawbar/tmp"), b"not a folder").unwrap();
+    let edited = with_gain(&session.bytes(id), "96");
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, edited, log);
+    for _ in 0..3 {
+        session.sync();
+    }
+    let failed: Vec<&str> = session
+        .bench
+        .log
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .filter(|text| text.contains("did not change as asked"))
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].contains("writing .drawbar/working/"),
+        "{failed:?}"
+    );
+}
+
+/// A delete that fails the same way twice is logged twice: only a commit's retries are
+/// quiet.
+#[test]
+fn a_delete_that_fails_again_is_logged_again() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.create();
+    session.sync();
+    let failed = "did not change as asked: deleting untitled.ne5p";
+    for nth in 1..=2 {
+        let id = session.only();
+        // A file that changed on disk since drawbar read it is left.
+        let mut changed = root.read("untitled.ne5p");
+        changed.push(0);
+        fs::write(root.at("untitled.ne5p"), changed).unwrap();
+        let Bench { workspace, log, .. } = &mut session.bench;
+        workspace.remove(id, log);
+        session.sync();
+        assert_eq!(session.said(failed), nth);
+    }
+}
+
 /// After a write fails, every working copy is written again under a new name, and the
 /// ones they replace go.
 #[test]

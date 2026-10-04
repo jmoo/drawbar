@@ -15,7 +15,7 @@ use super::exec::{too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stat, MOST_BYTES,
+    LibPath, Listing, Opened, Rescue, Source, Stat, Unkept, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -270,6 +270,9 @@ pub struct Store {
     next_generation: u64,
     /// The index as last sent, so an unchanged one is not written again.
     committed: Option<Sidecar>,
+    /// The last commit failure logged, so one every retry repeats is logged once, though
+    /// each retry writes its working copies under new names. Let go once a commit lands.
+    failing: Option<Unkept>,
     /// `.drawbar/` exists, or drawbar has written here. Until then the index is written
     /// only once it holds something no file does, so a folder opened and looked at is
     /// left as it was.
@@ -352,6 +355,7 @@ impl Store {
             records: BTreeMap::new(),
             next_generation: 1,
             committed: None,
+            failing: None,
             indexed: false,
             focused: true,
             scanning: false,
@@ -1032,24 +1036,35 @@ impl Store {
                 self.rewritten(id, path, result, workspace, browser, log)
             }
             Event::ReadOnly(why) => self.refused(why, workspace, log),
-            Event::Failed(why) => {
-                log.error(why.clone());
-                log.trouble(format!(
-                    "The library folder did not change as asked: {why}."
-                ));
-                // Whatever failed may have been the index or a working copy, so both are
-                // written again, whole, at the next full pass, and that pass drops the
-                // copies it replaces.
-                self.committed = None;
-                for (id, record) in &mut self.records {
-                    if let Some(old) = record.working.take() {
-                        self.stale.push(working_name(*id, old.copy.generation));
-                    }
-                }
-                self.rescan();
+            Event::Committed(Ok(())) => self.failing = None,
+            Event::Committed(Err(unkept)) => {
+                let again = self.failing.as_ref().is_some_and(|last| last.same(&unkept));
+                self.unchanged(&unkept.to_string(), again, log);
+                self.failing = Some(unkept);
             }
+            Event::Failed(why) => self.unchanged(&why, false, log),
         }
         false
+    }
+
+    /// Say why the library did not change as asked, unless `quiet`, and write the index
+    /// and every working copy again.
+    fn unchanged(&mut self, why: &str, quiet: bool, log: &mut Log) {
+        if !quiet {
+            log.error(why);
+            log.trouble(format!(
+                "The library folder did not change as asked: {why}."
+            ));
+        }
+        // Whatever failed may have been the index or a working copy, so both are written
+        // again, whole, at the next full pass, and that pass drops the copies it replaces.
+        self.committed = None;
+        for (id, record) in &mut self.records {
+            if let Some(old) = record.working.take() {
+                self.stale.push(working_name(*id, old.copy.generation));
+            }
+        }
+        self.rescan();
     }
 
     /// Hold back an answer of the listing gathered before a rename that has not

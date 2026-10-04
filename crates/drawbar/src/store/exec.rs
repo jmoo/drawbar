@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
-    names, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, LibPath, Listing, Opened,
-    Outside, Source, Stat,
+    names, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, Keeping, LibPath, Listing,
+    Opened, Outside, Source, Stat, Unkept,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -308,10 +308,7 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             sidecar,
             working,
             drop,
-        } => commit(fs, &sidecar, working, drop)
-            .await
-            .err()
-            .map(|e| Event::Failed(format!("keeping the library's index: {e}"))),
+        } => Some(Event::Committed(commit(fs, &sidecar, working, drop).await)),
         Cmd::Save {
             id,
             path,
@@ -826,6 +823,7 @@ fn failed(event: &Event) -> bool {
     matches!(
         event,
         Event::Failed(_)
+            | Event::Committed(Err(_))
             | Event::ReadOnly(_)
             | Event::Saved { result: Err(_), .. }
             | Event::Imported { result: Err(_), .. }
@@ -1404,20 +1402,28 @@ async fn commit(
     sidecar: &Sidecar,
     working: Vec<(String, Vec<u8>)>,
     drop: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), Unkept> {
+    let unkept = |step, path: &str, why: String| Unkept {
+        step,
+        path: path.to_string(),
+        why,
+    };
     for (name, bytes) in working {
         let path = format!("{WORKING}/{name}");
         put(fs, &path, Staged::Bytes(&bytes), Over::Anything)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| unkept(Keeping::Working, &path, e.to_string()))?;
     }
-    let text = sidecar::write(sidecar)?;
+    let text = sidecar::write(sidecar).map_err(|why| unkept(Keeping::Index, INDEX, why))?;
     put(fs, INDEX, Staged::Bytes(text.as_bytes()), Over::Anything)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| unkept(Keeping::Index, INDEX, e.to_string()))?;
     for name in drop {
-        match fs.remove_file(&format!("{WORKING}/{name}")).await {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.to_string()),
+        let path = format!("{WORKING}/{name}");
+        match fs.remove_file(&path).await {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                return Err(unkept(Keeping::Dropping, &path, e.to_string()))
+            }
             _ => {}
         }
     }
