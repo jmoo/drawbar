@@ -173,7 +173,7 @@ impl Builds {
         let Some(Entity::SampleProject(project)) = entity.entity.as_deref() else {
             return refuse(log, &name, "it does not decode as a Sample Editor project");
         };
-        let files = match project.audio_files() {
+        let files = match build::played(project) {
             Ok(files) => files,
             Err(e) => return refuse(log, &name, &e.to_string()),
         };
