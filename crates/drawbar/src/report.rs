@@ -95,6 +95,10 @@ pub struct Report {
     /// What went wrong recently and what this build is, read when the sheet opens.
     faults: Vec<String>,
     build: String,
+    /// The body as Send left it, which every retry sends again unchanged, so the one the
+    /// collector keeps under [`Report::id`] is the one the reader sent. Thawed by a
+    /// refusal, since nothing was kept.
+    frozen: Option<String>,
     state: State,
 }
 
@@ -124,37 +128,15 @@ impl Report {
             with_log: false,
             faults: telemetry::recent(),
             build: crate::about::build_lines(device, workspace, store),
+            frozen: None,
             state: State::Drafting,
         }
     }
 
-    /// The report as the collector reads it.
-    fn body(&self, log: &Log) -> String {
-        let instrument = telemetry::instrument();
-        let faults = self.faults.join("\n");
-        let build = self.build.clone();
-        let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
-        let kept = |on: bool, text: &str| match on {
-            true => text.to_string(),
-            false => String::new(),
-        };
-        telemetry::report_json(&[
-            ("id", &self.id),
-            ("kind", self.kind.wire()),
-            ("text", self.text.trim()),
-            ("contact", self.contact.trim()),
-            ("version", sheet::VERSION),
-            ("model", &instrument.model),
-            ("firmware", &instrument.firmware),
-            ("faults", &kept(self.with_faults, &faults)),
-            ("build", &kept(self.with_build, &build)),
-            ("log", &kept(self.with_log, &tail)),
-        ])
-    }
-
     fn send(&mut self, ctx: &egui::Context, log: &Log) {
         let slot = Rc::new(RefCell::new(None));
-        let body = self.body(log);
+        let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
+        let body = self.freeze(&telemetry::instrument(), &tail);
         let (done, ctx) = (slot.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             *done.borrow_mut() = Some(telemetry::submit(body).await);
@@ -179,6 +161,38 @@ impl Report {
 }
 
 impl Report {
+    /// The report as the collector reads it. The instrument goes with the build lines:
+    /// unchecking one leaves out both.
+    fn body(&self, instrument: &telemetry::Instrument, tail: &str) -> String {
+        let attached = |on: bool, text: &str| match on {
+            true => text.to_string(),
+            false => String::new(),
+        };
+        telemetry::report_json(&[
+            ("id", &self.id),
+            ("kind", self.kind.wire()),
+            ("text", self.text.trim()),
+            ("contact", self.contact.trim()),
+            ("version", sheet::VERSION),
+            ("model", &attached(self.with_build, &instrument.model)),
+            ("firmware", &attached(self.with_build, &instrument.firmware)),
+            (
+                "faults",
+                &attached(self.with_faults, &self.faults.join("\n")),
+            ),
+            ("build", &attached(self.with_build, &self.build)),
+            ("log", &attached(self.with_log, tail)),
+        ])
+    }
+
+    /// The body to send: the one already frozen, or this one, frozen now.
+    fn freeze(&mut self, instrument: &telemetry::Instrument, tail: &str) -> String {
+        if self.frozen.is_none() {
+            self.frozen = Some(self.body(instrument, tail));
+        }
+        self.frozen.clone().unwrap_or_default()
+    }
+
     /// Take the collector's answer, if it has come, at `now`. A server error is waited
     /// out like no answer at all.
     fn collect(&mut self, now: f64) {
@@ -192,7 +206,10 @@ impl Report {
             Ok(()) => State::Sent,
             Err(Undelivered::Unreachable) => State::Waiting { since: now },
             Err(Undelivered::Refused(status)) if status >= 500 => State::Waiting { since: now },
-            Err(Undelivered::Refused(status)) => State::Refused(status),
+            Err(Undelivered::Refused(status)) => {
+                self.frozen = None;
+                State::Refused(status)
+            }
         };
     }
 
@@ -242,9 +259,11 @@ impl Report {
     }
 
     fn form(&mut self, ui: &mut egui::Ui, log: &Log) {
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.kind, Kind::Problem, "Report a problem");
-            ui.radio_value(&mut self.kind, Kind::Feedback, "Send feedback");
+        ui.add_enabled_ui(!self.busy(), |ui| {
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.kind, Kind::Problem, "Report a problem");
+                ui.radio_value(&mut self.kind, Kind::Feedback, "Send feedback");
+            });
         });
         ui.add_space(sheet::GAP * 2.0);
         ui.add_enabled_ui(!self.busy(), |ui| {
@@ -318,14 +337,11 @@ impl Report {
 
     /// Everything that goes, as the operator reads it.
     fn preview(&self, log: &Log) -> String {
-        let instrument = telemetry::instrument();
         let mut out = format!(
-            "report: {} ({})\nversion: {}\nmodel: {}\nfirmware: {}\n",
+            "report: {} ({})\nversion: {}\n",
             self.id,
             self.kind.wire(),
             sheet::VERSION,
-            none(&instrument.model),
-            none(&instrument.firmware)
         );
         if !self.contact.trim().is_empty() {
             out.push_str(&format!("contact: {}\n", self.contact.trim()));
@@ -337,7 +353,13 @@ impl Report {
             ));
         }
         if self.with_build {
-            out.push_str(&format!("\n{}", self.build));
+            let instrument = telemetry::instrument();
+            out.push_str(&format!(
+                "\nmodel: {}\nfirmware: {}\n{}",
+                none(&instrument.model),
+                none(&instrument.firmware),
+                self.build
+            ));
         }
         if self.with_log {
             out.push_str(&format!(
@@ -358,6 +380,9 @@ impl Report {
                     .to_string()
             }
             State::Refused(403) => "Only drawbar.app can send reports.".to_string(),
+            State::Refused(429) => {
+                "drawbar has had too many reports today. Please try again tomorrow.".to_string()
+            }
             State::Refused(status) => format!("The report was not accepted (error {status})."),
         }
     }
@@ -432,6 +457,42 @@ mod tests {
         ));
     }
 
+    fn electro() -> telemetry::Instrument {
+        telemetry::Instrument {
+            model: "Nord Electro 5D".to_string(),
+            firmware: "2.04".to_string(),
+        }
+    }
+
+    #[test]
+    fn unchecking_the_build_leaves_out_the_instrument_too() {
+        let mut report = report(State::Drafting);
+        report.with_build = false;
+        let body = report.body(&electro(), "");
+        assert!(!body.contains("Nord Electro 5D"), "{body}");
+        assert!(!body.contains("2.04"), "{body}");
+        assert!(body.contains("\"model\":\"\""), "{body}");
+    }
+
+    #[test]
+    fn a_retry_sends_what_send_froze_whatever_changed_since() {
+        let mut report = report(State::Drafting);
+        let first = report.freeze(&electro(), "connected");
+        report.kind = Kind::Feedback;
+        report.with_build = false;
+        assert_eq!(report.freeze(&electro(), "connected\nlost"), first);
+    }
+
+    #[test]
+    fn a_refusal_thaws_the_body_since_nothing_was_kept() {
+        let mut report = report(State::Sending(Rc::new(RefCell::new(Some(Err(
+            Undelivered::Refused(413),
+        ))))));
+        report.frozen = Some("the old body".to_string());
+        report.collect(1.0);
+        assert_eq!(report.frozen, None);
+    }
+
     #[test]
     fn a_send_still_out_stays_sending() {
         let mut report = report(State::Sending(Rc::default()));
@@ -450,6 +511,7 @@ mod tests {
             with_log: true,
             faults: vec!["put: transport".to_string()],
             build: "Version: 0.10.0\n".to_string(),
+            frozen: None,
             state,
         }
     }

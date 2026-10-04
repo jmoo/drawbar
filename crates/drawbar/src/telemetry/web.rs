@@ -27,6 +27,8 @@ const EVERY: i32 = 30_000;
 thread_local! {
     static QUEUE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
     static VISITED: Cell<bool> = const { Cell::new(false) };
+    /// Turned off in this page, which holds even where storage refused to keep it.
+    static TURNED_OFF: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether this page reports, and if not, why.
@@ -51,6 +53,9 @@ pub fn sharing() -> Sharing {
     if refused(&window.navigator()) {
         return Sharing::Refused;
     }
+    if TURNED_OFF.with(Cell::get) {
+        return Sharing::Off;
+    }
     // ⚠️ Off when storage is blocked: the switch could not be kept, so it could not be
     // turned off.
     let Some(storage) = storage() else {
@@ -74,6 +79,10 @@ fn storage() -> Option<Storage> {
 
 /// Turn sharing on or off. Off drops what is held and forgets the last visit.
 pub fn share(on: bool) {
+    TURNED_OFF.with(|off| off.set(!on));
+    if !on {
+        QUEUE.with(|queue| queue.borrow_mut().clear());
+    }
     let Some(storage) = storage() else {
         return;
     };
@@ -84,7 +93,6 @@ pub fn share(on: bool) {
         false => {
             let _ = storage.set_item(SWITCH, "off");
             let _ = storage.remove_item(LAST_VISIT);
-            QUEUE.with(|queue| queue.borrow_mut().clear());
         }
     }
 }
@@ -107,11 +115,20 @@ pub(super) fn queue(event: &Event) {
 }
 
 /// Send what is held in one beacon. Offline, rows stay held; a beacon the browser refuses
-/// is dropped, never retried.
+/// is dropped, never retried. Rows held when sharing went off, here or in another tab,
+/// are dropped unsent.
 fn flush() {
     let Some(window) = web_sys::window() else {
         return;
     };
+    if sharing() != Sharing::On {
+        QUEUE.with(|queue| {
+            if let Ok(mut queue) = queue.try_borrow_mut() {
+                queue.clear();
+            }
+        });
+        return;
+    }
     let navigator = window.navigator();
     if !navigator.on_line() {
         return;

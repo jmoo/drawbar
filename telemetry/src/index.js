@@ -10,6 +10,11 @@ const ORIGIN = "https://drawbar.app";
 // The largest body read, in bytes: a report with its whole log attached fits.
 const LARGEST = 256 * 1024;
 
+// The most reports kept from one day, whoever sends them. A sender that gets past the
+// per-address rate limit at the edge can fill a day, not the database: 100 a day for the
+// 90 days they are kept, at the largest body, stays inside D1's free 5 GB.
+const MOST_A_DAY = 100;
+
 // How long a report is kept.
 const KEEP_SECONDS = 90 * 24 * 60 * 60;
 
@@ -56,6 +61,12 @@ export default {
         const sent = report(body, edge);
         if (!sent) {
           return answer(400);
+        }
+        const today = await env.REPORTS.prepare(
+          "SELECT COUNT(*) AS n FROM reports WHERE created > unixepoch() - 86400",
+        ).first("n");
+        if (today >= MOST_A_DAY) {
+          return answer(429);
         }
         await env.REPORTS.prepare(
           `INSERT OR IGNORE INTO reports

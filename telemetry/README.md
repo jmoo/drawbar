@@ -10,7 +10,9 @@ says what it takes and keeps, in words for users.
   with the kind as `index1` and the fields as `blob1…` in the schema's order, followed
   by the kind's `edge` fields.
 - `POST /report` takes one report into the D1 database `drawbar-reports`
-  ([`migrations/`](migrations)). A daily trigger deletes reports older than 90 days.
+  ([`migrations/`](migrations)), at most 100 in any 24 hours (then `429`). A daily
+  trigger deletes reports older than 90 days. A Cloudflare rate-limiting rule on the
+  zone limits each address on this path as well.
 
 The collector keeps no request logs and stores no address or user agent.
 [`queries/`](queries) holds the queries used to read both stores.
