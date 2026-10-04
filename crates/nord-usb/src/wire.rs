@@ -270,6 +270,11 @@ pub struct ProgramInfo {
     /// report `0xffffffff`, which is mapped to `None` so callers cannot verify against
     /// it.
     pub crc32: Option<u32>,
+    /// When a piano or sample was last changed, in seconds since the Unix epoch.
+    ///
+    /// Confirmed on hardware: two pianos report the times Nord Sound Manager stamps on
+    /// them in a bundle. `None` for the other classes, which report `0xffffffff`.
+    pub modified: Option<u32>,
     /// Slot name as shown on the instrument. The file does not store it.
     pub name: String,
 }
@@ -289,7 +294,7 @@ impl ProgramInfo {
         }
         let word = |i: usize| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
 
-        // Words 20 and 24 vary for libraries, so they are skipped without being checked.
+        // Word 24 varies for samples, so it is skipped without being checked.
         let name_len = word(Self::NAME_LEN_AT) as usize;
         let name_start = Self::NAME_LEN_AT + 4;
         let name_end = checked_end(p, name_start, name_len)?;
@@ -312,6 +317,7 @@ impl ProgramInfo {
             format: String::from_utf8_lossy(&p[12..16]).into_owned(),
             version: word(16),
             crc32,
+            modified: Some(word(20)).filter(|&time| time != u32::MAX),
             name,
         })
     }
@@ -531,6 +537,7 @@ impl Bank {
 ///
 /// The library `id` is the id the object carries in its own file (a `PianoPanel`'s
 /// piano id, a sample's sample id), which links content on the wire to bytes on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     /// Whether this reference is live: `1` when the section owning it (piano or sample)
     /// is routed to a keyboard part in that program, `0` otherwise.
@@ -1294,6 +1301,18 @@ mod tests {
             assert_eq!(info.crc32, *crc32, "{format}");
             assert_eq!(&info.name, name);
         }
+    }
+
+    /// A piano's info carries the time it was last changed, and a program's carries none.
+    /// 0x5e98c95a is 2020-04-16 21:08:42 UTC, the time an NSM bundle of the same piano
+    /// stamps on it in local time.
+    #[test]
+    fn object_info_gives_a_library_its_modified_time() {
+        let decode = |raw| ProgramInfo::decode(&Message::decode_response(&hex(raw)).unwrap());
+        let piano = decode("0000005c0000000c0000000a0000001f0000000000000000000000000c7db5446e706e6f0000021c5e98c95affffffff0000001a526f79616c204772616e64203344205961533620584c20352e340000000500000000ffffffffc30b");
+        assert_eq!(piano.unwrap().modified, Some(0x5e98_c95a));
+        let program = decode("000000450000000c0000000a0000001f00000000000000050000000c000000796e65357000000004ffffffffffffffff00000003666f6f000000000000000021ab3d01a1ee");
+        assert_eq!(program.unwrap().modified, None);
     }
 
     /// `256 as u8` is 0, so a truncated length would claim an empty string and carry

@@ -23,8 +23,10 @@
 //!
 //! Every supported file reads and writes however much of its body decodes. Decoded
 //! values are views over the stored body, bits that no field claims survive untouched,
-//! and `to_bytes(from_stream(x)) == x` byte for byte. Archives are read-only. This
-//! invariant is tested against a private corpus of real files.
+//! and `to_bytes(from_stream(x)) == x` byte for byte. Archives read as entities are
+//! read-only; [`bundle`] reads and writes Nord Sound Manager's bundles, container and
+//! manifest, under the same invariant. It is tested against a private corpus of real
+//! files.
 //!
 //! [`Entity::registry`] and [`Entity::registry_mut`] list and set the named fields of a
 //! decoded body by dotted path, such as `center_panel.transpose`.
@@ -50,6 +52,7 @@
 pub mod accept;
 pub mod bank;
 pub mod bits;
+pub mod bundle;
 pub mod cbin;
 pub mod components;
 pub mod crc;

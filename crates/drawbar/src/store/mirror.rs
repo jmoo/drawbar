@@ -2233,6 +2233,7 @@ impl Store {
                         ));
                     }
                 }
+                workspace.landed_copy(id);
                 // The asset the copy was moved from goes now it has landed, and its file
                 // with it at the next pass.
                 if let Some(leaving) = workspace.moved_over(id) {
@@ -2264,9 +2265,15 @@ impl Store {
             }
             None => {
                 self.records.remove(&id);
+                let fetched = workspace.fetched_copy_failed(id);
+                if fetched && workspace.give_up_bundle() {
+                    log.trouble("The bundle was not written: a copy did not land.");
+                }
                 workspace.forget(id);
                 match from {
-                    Some(CopyOf::Outside(from)) => {
+                    // A file the instrument was read into may be a large piano, which is
+                    // never read whole.
+                    Some(CopyOf::Outside(from)) if !fetched => {
                         log.trouble(format!(
                             "“{name}” was not copied into the library, because {why}. It is \
                              kept in memory instead."
@@ -2781,6 +2788,7 @@ impl Store {
     ) -> bool {
         let from = match from {
             CopyOf::Outside(file) => Source::Outside(file.clone()),
+            CopyOf::Part(part) => Source::Part(part.clone()),
             CopyOf::Edited(file, edit) => Source::Edited(file.clone(), edit.clone()),
             CopyOf::Asset(source) => {
                 let source = self.records.get(source).filter(|source| !source.saving);

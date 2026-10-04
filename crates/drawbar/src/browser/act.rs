@@ -6,7 +6,8 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::{Item, Kind};
 use super::Browser;
 use crate::device::{
-    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Payload, Purpose,
+    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fetched, Fit, Outgoing, Payload,
+    Purpose,
 };
 use crate::filter::Narrow;
 use crate::folders::{Clash, Folders, Occupant};
@@ -14,10 +15,10 @@ use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
 use crate::shell::{Dock, Shell};
-use crate::store::{names, outside_len, CopyOf, LibPath, Outside};
+use crate::store::{names, outside_len, CopyOf, LibPath, Outside, Part};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
-use crate::workspace::{Fresh, LocalEntity, Origin, VerifyState, Workspace};
+use crate::workspace::{Fresh, LocalEntity, Origin, Unbundled, VerifyState, Workspace};
 
 /// What [`Act::LoadOnInstrument`] is called wherever it is offered.
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
@@ -53,6 +54,8 @@ pub enum Act {
         dir: LibPath,
         name: String,
     },
+    /// Unpack a bundle whose directory has been read into a new folder.
+    Unpack(Unbundled),
     /// Copy a file from outside the library over the file of the asset `id`, which keeps
     /// its id, folder and tags.
     TakeOver {
@@ -117,6 +120,20 @@ pub enum Act {
     Copy {
         class: ObjectClass,
         at: Location,
+    },
+    /// Copy these slots of one class to this computer, in one session.
+    CopyAll {
+        class: ObjectClass,
+        slots: Vec<Location>,
+    },
+    /// File an object the instrument read into a file, copying it into the library.
+    Arrive(Fetched),
+    /// Write these assets, and what they need, as one bundle, once these slots have been
+    /// copied to this computer and the assets `reading` names have been read.
+    ExportBundle {
+        ids: Vec<u64>,
+        slots: Vec<(ObjectClass, Location)>,
+        reading: Vec<u64>,
     },
     LoadOnInstrument {
         class: ObjectClass,
@@ -254,6 +271,7 @@ impl Act {
             | Act::Retarget { id, .. }
             | Act::Replace { id, .. } => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
+            Act::ExportBundle { ids, .. } => ids.clone(),
             Act::SendAll => will_write(queue).map(|held| held.id).collect(),
             _ => Vec::new(),
         }
@@ -278,6 +296,7 @@ impl Act {
             | Act::WriteBack(id)
             | Act::Revert(id) => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
+            Act::ExportBundle { ids, reading, .. } => [ids.as_slice(), reading].concat(),
             Act::Connect
             | Act::Disconnect
             | Act::OpenFiles
@@ -289,6 +308,7 @@ impl Act {
             | Act::ReadAgain(_)
             | Act::Import { .. }
             | Act::Take { .. }
+            | Act::Unpack(_)
             | Act::TakeOver { .. }
             | Act::CopyOver { .. }
             | Act::Forget(_)
@@ -301,6 +321,8 @@ impl Act {
             | Act::RenameTag { .. }
             | Act::RemoveTag(_)
             | Act::Copy { .. }
+            | Act::CopyAll { .. }
+            | Act::Arrive(_)
             | Act::LoadOnInstrument { .. }
             | Act::Unqueue(_)
             | Act::ClearQueue
@@ -341,15 +363,18 @@ pub enum Bulk {
     Queue,
     Copy,
     Export,
+    /// Write the checked set, and what it needs, as one bundle.
+    Bundle,
     Tag,
     Delete,
 }
 
 impl Bulk {
-    pub const ALL: [Bulk; 5] = [
+    pub const ALL: [Bulk; 6] = [
         Bulk::Queue,
         Bulk::Copy,
         Bulk::Export,
+        Bulk::Bundle,
         Bulk::Tag,
         Bulk::Delete,
     ];
@@ -359,6 +384,7 @@ impl Bulk {
             Bulk::Queue => "Queue for sending",
             Bulk::Copy => "Copy to this computer",
             Bulk::Export => "Export…",
+            Bulk::Bundle => "Export as bundle…",
             Bulk::Tag => "Tag…",
             Bulk::Delete => "Delete…",
         }
@@ -369,6 +395,7 @@ impl Bulk {
         match self {
             Bulk::Queue | Bulk::Export | Bulk::Tag => "nothing checked is on this computer",
             Bulk::Copy => "nothing checked is on the instrument",
+            Bulk::Bundle => "nothing is checked",
             Bulk::Delete => "nothing is checked",
         }
     }
@@ -434,23 +461,52 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
             ids if ids.is_empty() => Vec::new(),
             ids => vec![Act::SendChecked(ids)],
         },
-        Bulk::Copy => checked
-            .iter()
-            .filter_map(|item| match item {
+        Bulk::Copy => {
+            let mut by_class: Vec<(ObjectClass, Vec<Location>)> = Vec::new();
+            for item in checked {
                 // A slot the scan found empty holds nothing to ask the instrument for.
-                Item::Slot { class, at } => state.slot(*class, *at).flatten().map(|_| Act::Copy {
-                    class: *class,
-                    at: *at,
-                }),
-                _ => None,
-            })
-            .collect(),
+                let Item::Slot { class, at } = *item else {
+                    continue;
+                };
+                if state.slot(class, at).flatten().is_none() {
+                    continue;
+                }
+                match by_class.iter_mut().find(|(held, _)| *held == class) {
+                    Some((_, slots)) => slots.push(at),
+                    None => by_class.push((class, vec![at])),
+                }
+            }
+            by_class
+                .into_iter()
+                .map(|(class, slots)| Act::CopyAll { class, slots })
+                .collect()
+        }
         Bulk::Export => checked
             .iter()
             .copied()
             .filter_map(Item::local)
             .map(Act::Export)
             .collect(),
+        Bulk::Bundle => {
+            let ids: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
+            let slots: Vec<(ObjectClass, Location)> = checked
+                .iter()
+                .filter_map(|item| match *item {
+                    Item::Slot { class, at } => {
+                        state.slot(class, at).flatten().map(|_| (class, at))
+                    }
+                    _ => None,
+                })
+                .collect();
+            match ids.is_empty() && slots.is_empty() {
+                true => Vec::new(),
+                false => vec![Act::ExportBundle {
+                    ids,
+                    slots,
+                    reading: Vec::new(),
+                }],
+            }
+        }
         Bulk::Tag => Vec::new(),
         Bulk::Delete => checked
             .iter()
@@ -564,6 +620,7 @@ pub fn apply(
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
+            Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
             Act::Overwrite { id, bytes, gone } => {
                 if let Some(gone) = workspace.save_over(id, bytes, gone, log) {
@@ -646,6 +703,11 @@ pub fn apply(
                 },
                 log,
             ),
+            Act::CopyAll { class, slots } => device.send(DeviceCmd::CopyAll { class, slots }, log),
+            Act::Arrive(fetched) => arrive(browser, workspace, fetched),
+            Act::ExportBundle { ids, slots, .. } => {
+                export_bundle(browser, workspace, device, log, ids, slots)
+            }
             Act::LoadOnInstrument { class, at } => {
                 device.send(DeviceCmd::Select { class, at }, log)
             }
@@ -844,6 +906,12 @@ fn import(
     name: String,
     bytes: Vec<u8>,
 ) {
+    if crate::bundle::is_bundle(&name) {
+        return log.trouble(format!(
+            "“{name}” was not imported: a bundle unpacks into the library, which cannot \
+             take files now."
+        ));
+    }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
             "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
@@ -878,6 +946,9 @@ fn take(
     dir: LibPath,
     name: String,
 ) {
+    if crate::bundle::is_bundle(&name) {
+        return workspace.unbundle(from, dir, name);
+    }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
             "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
@@ -907,6 +978,119 @@ fn take(
             }];
             browser.ask_clash(&name, &dir, over, both, &free);
         }
+    }
+}
+
+/// A bundle's members, each copied out of it into a new folder in `dir` named after the
+/// bundle. The folder is flat: the archive's own folders are left behind.
+fn unpack(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, read: Unbundled) {
+    let Unbundled {
+        from,
+        dir,
+        name,
+        members,
+    } = read;
+    let members = match members {
+        Ok(members) => members,
+        Err(why) => return log.trouble(format!("“{name}” was not imported: {why}.")),
+    };
+    let stem = name
+        .rsplit_once('.')
+        .map_or(name.as_str(), |(stem, _)| stem);
+    let wanted = browser
+        .folders
+        .free(&dir, &names::portable(stem), workspace);
+    if browser
+        .folders
+        .named_or_made(&dir, &wanted, workspace)
+        .is_none()
+    {
+        return log.trouble(format!("“{name}” was not imported: “{wanted}” is taken."));
+    }
+    let folder = dir.join(&wanted);
+    for member in &members {
+        let leaf = browser
+            .folders
+            .free(&folder, &names::portable(member.leaf()), workspace);
+        let len = member.bytes.end - member.bytes.start;
+        let from = CopyOf::Part(Part {
+            from: from.clone(),
+            bytes: member.bytes.clone(),
+            crc32: member.crc32,
+        });
+        workspace.arrive(folder.join(&leaf), Origin::File(leaf.clone()), from, len);
+    }
+    log.say(format!(
+        "Imported the {} files of “{name}” into “{wanted}”.",
+        members.len()
+    ));
+}
+
+/// An object read off the instrument into a file, copied into the top level of the
+/// library under its slot's name, numbered past any name taken there. The file goes once
+/// the copy has answered.
+fn arrive(browser: &Browser, workspace: &mut Workspace, fetched: Fetched) {
+    let root = LibPath::root();
+    let wanted = names::portable(&format!("{}.{}", fetched.name, fetched.tag));
+    let name = browser.folders.free(&root, &wanted, workspace);
+    let origin = Origin::Device {
+        class: fetched.class,
+        at: fetched.at,
+    };
+    workspace.arrive_fetched(root.join(&name), origin, fetched.file, fetched.len);
+}
+
+/// Write `ids` and what they need as one bundle. Slots are copied to this computer first,
+/// in one session per class, and the bundle waits for them; see
+/// [`Workspace::bundle_after`].
+fn export_bundle(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    device: &mut Device,
+    log: &mut Log,
+    ids: Vec<u64>,
+    slots: Vec<(ObjectClass, Location)>,
+) {
+    if !slots.is_empty() {
+        log.say(format!(
+            "Copying {} and what they play from the instrument for the bundle…",
+            crate::strings::counted(slots.len(), "sound", "sounds")
+        ));
+        let (roots, also) = slots
+            .into_iter()
+            .partition(|(class, _)| matches!(class, ObjectClass::SetList | ObjectClass::Program));
+        if !device.state.connected() {
+            return log.trouble("No instrument is attached.");
+        }
+        let request = workspace.bundle_after(ids);
+        return device.send(
+            DeviceCmd::Gather {
+                roots,
+                also,
+                request,
+            },
+            log,
+        );
+    }
+    match crate::bundle::lay_out(&ids, workspace, &device.state) {
+        Ok(crate::bundle::Laid::Read(reading)) => browser.held.push(Act::ExportBundle {
+            ids,
+            slots: Vec::new(),
+            reading,
+        }),
+        Ok(crate::bundle::Laid::Ready(export)) => {
+            for why in &export.left_out {
+                log.trouble(format!("Left out of the bundle: {why}."));
+            }
+            for (path, need) in &export.plan.unmet {
+                log.trouble(format!(
+                    "{path} needs {}, which is not on this computer.",
+                    crate::bundle::needed(*need)
+                ));
+            }
+            workspace.export_bundle(export);
+        }
+        Err(why) => log.trouble(format!("No bundle was written: {why}.")),
     }
 }
 
@@ -1710,10 +1894,16 @@ mod tests {
             matches!(queued.as_slice(), [Act::SendChecked(ids)] if *ids == vec![1, 2]),
             "one queue act, for this computer's rows"
         );
-        assert_eq!(bulk(Bulk::Copy, &checked, state).len(), 2, "one per slot");
-        assert!(bulk(Bulk::Copy, &checked, state)
-            .iter()
-            .all(|act| matches!(act, Act::Copy { .. })));
+        assert!(
+            matches!(
+                bulk(Bulk::Copy, &checked, state).as_slice(),
+                [
+                    Act::CopyAll { class: ObjectClass::Program, slots: programs },
+                    Act::CopyAll { class: ObjectClass::SetList, slots: set_lists },
+                ] if programs.len() == 1 && set_lists.len() == 1
+            ),
+            "one copy per class, of its slots"
+        );
         assert!(
             matches!(
                 bulk(Bulk::Export, &checked, state).as_slice(),

@@ -94,6 +94,13 @@ impl Kept {
         })
     }
 
+    /// The file, as one to copy into the library from outside it. It must be closed
+    /// first.
+    pub async fn outside(&self) -> io::Result<crate::store::Outside> {
+        let handle: FileSystemFileHandle = settle(self.dir.get_file_handle(&self.leaf)).await?;
+        settle(handle.get_file()).await
+    }
+
     /// Let the file go, if it is held, and delete it.
     pub async fn remove(self) -> io::Result<()> {
         self.writer

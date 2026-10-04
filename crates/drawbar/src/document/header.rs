@@ -992,8 +992,7 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
         | Kind::Performance
         | Kind::LeadBank
         | Kind::SampleLibrary
-        | Kind::PipeLibrary
-        | Kind::Bundle => (tag, sentence),
+        | Kind::PipeLibrary => (tag, sentence),
     }
 }
 

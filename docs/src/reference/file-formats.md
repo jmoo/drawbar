@@ -50,6 +50,11 @@ byte map. There are three tiers:
   other CBIN tag, the Lead SysEx banks, the `.cn3` library, and ZIP backup
   bundles behind the `bundle` feature.
 
+Nord Sound Manager's bundles are a stored ZIP and a `meta.xml` manifest.
+`nord_format::bundle` reads and writes both a member at a time, never holding the
+archive, and refuses any archive laid out otherwise, so a bundle it reads writes
+back byte for byte. It needs no feature.
+
 Text notes are outside these tiers, because `nord-format` does not read them.
 drawbar treats a file it cannot decode as a note when its bytes are UTF-8 text
 of up to 256 KiB. In a note, Tab types a tab, and pasted control characters
@@ -84,7 +89,8 @@ if let Some(panel) = nord_format::panel::of(&entity) {
 
 ## Features
 
-`bundle` enables ZIP backup bundles and is off by default. `corpus` is for tests
+`bundle` reads the members of ZIP archives as entities, backups and Drum banks
+among them, and is off by default. `corpus` is for tests
 only and points the sweep at the private corpus. See [Testing](testing.md).
 
 To build the API documentation locally:

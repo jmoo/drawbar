@@ -22,6 +22,7 @@
 //! shape of the API: see [`transport::Transport`] for why there are no `Send` bounds.
 //! Device discovery is left to each backend.
 
+pub mod bundle;
 #[cfg(feature = "nusb")]
 pub mod deadline;
 pub mod device;
