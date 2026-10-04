@@ -889,6 +889,8 @@ impl eframe::App for DrawbarApp {
         let played = self.midi.played(ctx.input(|input| input.time));
         arrived.extend(self.take_dropped_files(ctx));
         arrived.extend(self.take_picked());
+        let fetched = self.device.take_fetched();
+        arrived.extend(fetched.into_iter().map(browser::Act::Arrive));
         let unbundled = self.workspace.take_unbundled();
         arrived.extend(unbundled.into_iter().map(browser::Act::Unpack));
         self.browser.forget_targets();

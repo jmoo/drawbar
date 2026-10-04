@@ -20,7 +20,7 @@ use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{DeviceCmd, DeviceEvent, Outgoing, Partition, Payload, Purpose};
+use super::{DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -301,6 +301,10 @@ async fn execute<T: Transport>(
                 why,
             });
             Ok(Some(note))
+        }
+
+        DeviceCmd::CopyAll { class, slots } => {
+            copy_all(device, class, &slots, scratch, emit, gone).await
         }
 
         DeviceCmd::Put {
@@ -1143,6 +1147,93 @@ async fn walk<T: Transport, C>(
     match extent {
         Extent::Known(_) => Ok(out),
         Extent::Open => Err(scan_limit(bank.saturating_sub(1))),
+    }
+}
+
+/// Copy `slots` of `class` to this computer in one session: each small object as bytes,
+/// and each larger one into a file from `scratch`, a transfer chunk at a time.
+async fn copy_all<T: Transport>(
+    device: &mut Device<T>,
+    class: ObjectClass,
+    slots: &[Location],
+    scratch: &Scratch,
+    emit: &Emit,
+    gone: &mut bool,
+) -> Result<Option<String>, String> {
+    let mut copied = 0;
+    let read = device
+        .read(class, async |s| {
+            for &at in slots {
+                let info = match op::info(s, at).await {
+                    Ok(info) => info,
+                    Err(Error::DeviceStatus(op::VACANT)) => {
+                        let why = Purpose::Copy;
+                        emit.send(DeviceEvent::Vacant { class, at, why });
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let name = entity_name(&info);
+                if info.body_len <= HELD_OCCUPANT {
+                    let bytes = op::read_program(s, at).await?;
+                    let origin = Origin::Device { class, at };
+                    let why = Purpose::Copy;
+                    emit.send(DeviceEvent::Got {
+                        name,
+                        origin,
+                        bytes,
+                        why,
+                    });
+                } else {
+                    let file = fetch(s, class, at, &info, scratch).await?;
+                    emit.send(DeviceEvent::Fetched(file));
+                }
+                copied += 1;
+            }
+            Ok(())
+        })
+        .await;
+    read.map_err(spoil(gone, None))?;
+    Ok(Some(format!(
+        "copied {copied} of {} from {} in one session",
+        slots.len(),
+        class.label()
+    )))
+}
+
+/// Read the object `info` describes into a new file from `scratch`. A read that fails
+/// leaves no file behind.
+async fn fetch<T: Transport, C>(
+    s: &mut Session<'_, T, C>,
+    class: ObjectClass,
+    at: Location,
+    info: &ProgramInfo,
+    scratch: &Scratch,
+) -> Result<Fetched, Error> {
+    let extension = info.format.trim_end_matches('\0');
+    let name = format!("fetched-{}-{}.{extension}", at.bank, at.slot);
+    let mut kept = scratch.create(&name).await.map_err(Error::Io)?;
+    let read = match op::read_into(s, at, &mut kept).await {
+        Ok(_) => kept.close().await.map_err(Error::Io),
+        Err(e) => Err(e),
+    };
+    let file = match read {
+        Ok(()) => kept.outside().await.map_err(Error::Io),
+        Err(e) => Err(e),
+    };
+    match file {
+        Ok(file) => Ok(Fetched {
+            class,
+            at,
+            name: entity_name(info),
+            tag: extension.to_string(),
+            len: u64::from(info.body_len) + nord_format::cbin::Generation::V1.body_start(),
+            file,
+        }),
+        Err(e) => {
+            let _ = kept.remove().await;
+            Err(e)
+        }
     }
 }
 

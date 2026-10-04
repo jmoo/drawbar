@@ -2172,6 +2172,7 @@ impl Store {
                         ));
                     }
                 }
+                workspace.landed_copy(id);
                 // The asset the copy was moved from goes now it has landed, and its file
                 // with it at the next pass.
                 if let Some(from) = workspace.moved_over(id) {

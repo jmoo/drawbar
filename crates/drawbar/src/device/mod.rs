@@ -100,6 +100,13 @@ pub enum DeviceCmd {
         at: Location,
         why: Purpose,
     },
+    /// Copy every one of `slots` to this computer inside a single session. An object too
+    /// large to hold streams to a file, reported as [`DeviceEvent::Fetched`]; the rest
+    /// come back as [`DeviceEvent::Got`]. A failure stops the batch there.
+    CopyAll {
+        class: ObjectClass,
+        slots: Vec<Location>,
+    },
     Put {
         /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
         /// raises names it, so a lone put settles the queue as a batch does.
@@ -244,6 +251,9 @@ impl DeviceCmd {
                 Purpose::Compare => format!("get {} (to compare)", shown(*at)),
                 Purpose::Copy | Purpose::View => format!("get {}", shown(*at)),
             },
+            DeviceCmd::CopyAll { class, slots } => {
+                format!("get {} objects <- {}", slots.len(), class.label())
+            }
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
                 format!("put {} objects -> {}", items.len(), class.label())
@@ -308,6 +318,14 @@ impl DeviceCmd {
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
+            DeviceCmd::CopyAll { class, slots } => words(
+                COPYING,
+                format!(
+                    "{} from {} to this computer",
+                    counted(slots.len(), "sound", "sounds"),
+                    folder(*class)
+                ),
+            ),
             DeviceCmd::Put {
                 class, at, name, ..
             } => words(
@@ -351,6 +369,20 @@ impl DeviceCmd {
             ),
         }
     }
+}
+
+/// An object read off the instrument into a file of drawbar's own, to be copied into the
+/// library, after which the file goes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fetched {
+    pub class: ObjectClass,
+    pub at: Location,
+    /// The name its slot reports.
+    pub name: String,
+    /// Its format's tag, which names its file's extension.
+    pub tag: String,
+    pub file: crate::store::Outside,
+    pub len: u64,
 }
 
 /// What the worker reports back.
@@ -409,6 +441,8 @@ pub enum DeviceEvent {
         bytes: Vec<u8>,
         why: Purpose,
     },
+    /// An object of a [`DeviceCmd::CopyAll`] too large to hold, read into a file.
+    Fetched(Fetched),
     /// A read found the slot empty. This is the instrument's answer, not a fault, and it
     /// settles a slot no walk has reached.
     Vacant {
@@ -1092,6 +1126,8 @@ pub struct Device {
     /// The list revision every link was last derived from. A link depends on both sides,
     /// so it is recomputed when either changes, and not every frame.
     linked: u64,
+    /// Objects read into files, waiting to be copied into the library.
+    fetched: Vec<Fetched>,
 }
 
 /// The follow-up owed by the command in flight, set when it is dispatched.
@@ -1123,6 +1159,7 @@ impl Device {
             running: None,
             asked_deps: None,
             linked: 0,
+            fetched: Vec::new(),
         }
     }
 
@@ -1186,6 +1223,11 @@ impl Device {
             return;
         }
         self.pending.push_back(cmd);
+    }
+
+    /// The objects read into files since the last call, to be copied into the library.
+    pub fn take_fetched(&mut self) -> Vec<Fetched> {
+        std::mem::take(&mut self.fetched)
     }
 
     /// Ask what a slot depends on, unless it is the slot last asked about.
@@ -1660,6 +1702,7 @@ impl Device {
                         }
                     }
                 },
+                DeviceEvent::Fetched(fetched) => self.fetched.push(fetched),
                 // An empty slot is a failure to a user who asked to copy or open it, and
                 // an answer to the queue: nothing is being replaced.
                 DeviceEvent::Vacant { class, at, why } => match why {

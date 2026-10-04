@@ -3376,7 +3376,38 @@ fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
     assert_eq!(root.names("Gig 2"), ["Grand.ne5p", "Marimba.nsmp"]);
     assert_eq!(root.read("Gig 2/Marimba.nsmp"), sample);
     assert_eq!(root.read("Gig 2/Grand.ne5p"), program);
-    assert!(!root.at("Gig.ne5pbundle").exists(), "the bundle is not kept");
+    assert!(
+        !root.at("Gig.ne5pbundle").exists(),
+        "the bundle is not kept"
+    );
+}
+
+/// An object the instrument was read into a file for lands at the top of the library
+/// under its slot's name, past one already there, and the file it was read into goes.
+#[test]
+fn a_fetched_object_lands_under_its_slot_name_and_its_file_goes() {
+    let (root, scratch) = (Temp::new(), Temp::new());
+    let sample = crate::testing::sample_bytes();
+    fs::write(root.at("Marimba.nsmp"), &sample).unwrap();
+    fs::write(scratch.at("fetched-0-4.nsmp"), &sample).unwrap();
+    let mut session = Session::open(&root);
+    session
+        .bench
+        .act(vec![crate::browser::Act::Arrive(crate::device::Fetched {
+            class: ObjectClass::Sample,
+            at: Location::from_user(1, 5),
+            name: "Marimba".into(),
+            tag: "nsmp".into(),
+            file: scratch.at("fetched-0-4.nsmp"),
+            len: sample.len() as u64,
+        })]);
+    session.sync();
+
+    assert_eq!(root.read("Marimba 2.nsmp"), sample);
+    assert!(
+        !scratch.at("fetched-0-4.nsmp").exists(),
+        "the fetched file goes"
+    );
 }
 
 /// A file from outside whose name is taken asks first. Overwrite copies it over the

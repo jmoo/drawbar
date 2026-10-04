@@ -1285,6 +1285,9 @@ pub struct Workspace {
     /// Assets whose file is being copied in, each with what it is a copy of. Each is
     /// unread until its copy lands.
     arriving: std::collections::BTreeMap<u64, CopyOf>,
+    /// The files of drawbar's own an arriving asset is copied from, deleted once it has
+    /// landed.
+    fetched: std::collections::BTreeMap<u64, Outside>,
     /// The asset each arriving copy moves over the file of another comes from, by the
     /// asset it lands on. It goes only once its copy has landed.
     moving_over: std::collections::BTreeMap<u64, u64>,
@@ -1380,6 +1383,7 @@ impl Workspace {
             checks: VecDeque::new(),
             checking: None,
             arriving: Default::default(),
+            fetched: Default::default(),
             moving_over: Default::default(),
             picked: Vec::new(),
             unbundled: Vec::new(),
@@ -2296,6 +2300,23 @@ impl Workspace {
         id
     }
 
+    /// [`Workspace::arrive`] from a file the instrument was read into, which is deleted
+    /// once the copy has landed.
+    pub fn arrive_fetched(&mut self, path: LibPath, origin: Origin, from: Outside, len: u64) {
+        let id = self.arrive(path, origin, CopyOf::Outside(from.clone()), len);
+        self.fetched.insert(id, from);
+    }
+
+    /// The copy of `id` landed: delete the file it was fetched into, where it was. In the
+    /// browser the file waits for the sweep of `.drawbar/tmp/` at the next open.
+    pub fn landed_copy(&mut self, id: u64) {
+        let Some(_file) = self.fetched.remove(&id) else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = std::fs::remove_file(_file);
+    }
+
     /// Copy `from`, about `len` bytes, over the file of the asset `id`, which is unread
     /// until the copy lands. Its tags and its place stay.
     pub fn arrive_over(&mut self, id: u64, from: CopyOf, len: u64) {
@@ -2377,7 +2398,9 @@ impl Workspace {
     pub fn unbundle(&self, from: Outside, dir: LibPath, name: String) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         spawn(async move {
-            let members = crate::bundle::members(&from).await.map_err(|e| e.to_string());
+            let members = crate::bundle::members(&from)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(Incoming::Unbundled(Unbundled {
                 from,
                 dir,

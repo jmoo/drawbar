@@ -6,7 +6,8 @@ use nord_usb::{Location, ObjectClass};
 use super::drag::{Item, Kind};
 use super::Browser;
 use crate::device::{
-    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fit, Outgoing, Payload, Purpose,
+    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fetched, Fit, Outgoing, Payload,
+    Purpose,
 };
 use crate::filter::Narrow;
 use crate::folders::{Clash, Folders, Occupant};
@@ -119,6 +120,13 @@ pub enum Act {
         class: ObjectClass,
         at: Location,
     },
+    /// Copy these slots of one class to this computer, in one session.
+    CopyAll {
+        class: ObjectClass,
+        slots: Vec<Location>,
+    },
+    /// File an object the instrument read into a file, copying it into the library.
+    Arrive(Fetched),
     LoadOnInstrument {
         class: ObjectClass,
         at: Location,
@@ -296,6 +304,8 @@ impl Act {
             | Act::RenameTag { .. }
             | Act::RemoveTag(_)
             | Act::Copy { .. }
+            | Act::CopyAll { .. }
+            | Act::Arrive(_)
             | Act::LoadOnInstrument { .. }
             | Act::Unqueue(_)
             | Act::ClearQueue
@@ -428,17 +438,26 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
             ids if ids.is_empty() => Vec::new(),
             ids => vec![Act::SendChecked(ids)],
         },
-        Bulk::Copy => checked
-            .iter()
-            .filter_map(|item| match item {
+        Bulk::Copy => {
+            let mut by_class: Vec<(ObjectClass, Vec<Location>)> = Vec::new();
+            for item in checked {
                 // A slot the scan found empty holds nothing to ask the instrument for.
-                Item::Slot { class, at } => state.slot(*class, *at).flatten().map(|_| Act::Copy {
-                    class: *class,
-                    at: *at,
-                }),
-                _ => None,
-            })
-            .collect(),
+                let Item::Slot { class, at } = *item else {
+                    continue;
+                };
+                if state.slot(class, at).flatten().is_none() {
+                    continue;
+                }
+                match by_class.iter_mut().find(|(held, _)| *held == class) {
+                    Some((_, slots)) => slots.push(at),
+                    None => by_class.push((class, vec![at])),
+                }
+            }
+            by_class
+                .into_iter()
+                .map(|(class, slots)| Act::CopyAll { class, slots })
+                .collect()
+        }
         Bulk::Export => checked
             .iter()
             .copied()
@@ -643,6 +662,8 @@ pub fn apply(
                 },
                 log,
             ),
+            Act::CopyAll { class, slots } => device.send(DeviceCmd::CopyAll { class, slots }, log),
+            Act::Arrive(fetched) => arrive(browser, workspace, fetched),
             Act::LoadOnInstrument { class, at } => {
                 device.send(DeviceCmd::Select { class, at }, log)
             }
@@ -834,6 +855,12 @@ fn import(
     name: String,
     bytes: Vec<u8>,
 ) {
+    if crate::bundle::is_bundle(&name) {
+        return log.trouble(format!(
+            "“{name}” was not imported: a bundle unpacks into the library, which cannot \
+             take files now."
+        ));
+    }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
             "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
@@ -916,8 +943,12 @@ fn unpack(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, read:
         Ok(members) => members,
         Err(why) => return log.trouble(format!("“{name}” was not imported: {why}.")),
     };
-    let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
-    let wanted = browser.folders.free(&dir, &names::portable(stem), workspace);
+    let stem = name
+        .rsplit_once('.')
+        .map_or(name.as_str(), |(stem, _)| stem);
+    let wanted = browser
+        .folders
+        .free(&dir, &names::portable(stem), workspace);
     if browser
         .folders
         .named_or_made(&dir, &wanted, workspace)
@@ -938,6 +969,20 @@ fn unpack(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, read:
         "Imported the {} files of “{name}” into “{wanted}”.",
         members.len()
     ));
+}
+
+/// An object read off the instrument into a file, copied into the top level of the
+/// library under its slot's name, numbered past any name taken there. The file goes once
+/// the copy has answered.
+fn arrive(browser: &Browser, workspace: &mut Workspace, fetched: Fetched) {
+    let root = LibPath::root();
+    let wanted = names::portable(&format!("{}.{}", fetched.name, fetched.tag));
+    let name = browser.folders.free(&root, &wanted, workspace);
+    let origin = Origin::Device {
+        class: fetched.class,
+        at: fetched.at,
+    };
+    workspace.arrive_fetched(root.join(&name), origin, fetched.file, fetched.len);
 }
 
 /// A file from outside the library, copied over the file of the asset `id`.
@@ -1740,10 +1785,16 @@ mod tests {
             matches!(queued.as_slice(), [Act::SendChecked(ids)] if *ids == vec![1, 2]),
             "one queue act, for this computer's rows"
         );
-        assert_eq!(bulk(Bulk::Copy, &checked, state).len(), 2, "one per slot");
-        assert!(bulk(Bulk::Copy, &checked, state)
-            .iter()
-            .all(|act| matches!(act, Act::Copy { .. })));
+        assert!(
+            matches!(
+                bulk(Bulk::Copy, &checked, state).as_slice(),
+                [
+                    Act::CopyAll { class: ObjectClass::Program, slots: programs },
+                    Act::CopyAll { class: ObjectClass::SetList, slots: set_lists },
+                ] if programs.len() == 1 && set_lists.len() == 1
+            ),
+            "one copy per class, of its slots"
+        );
         assert!(
             matches!(
                 bulk(Bulk::Export, &checked, state).as_slice(),
