@@ -30,8 +30,21 @@ them as two lanes you paint across, or as a table for one key at a time.
 
 A project opens in the same editor with everything editable: both ends of each
 zone, velocity windows, trims, loops, crossfades, source files and the sound
-parameters. It is saved back as the text file the Sample Editor reads. drawbar
-cannot build a project into an instrument yet.
+parameters. It is saved back as the text file the Sample Editor reads.
+
+**Build → .nsmp** in the header builds the instrument a project describes. It
+is offered once every WAV the project plays is in the library, at the path the
+project gives from its own folder. A name that differs only in case counts.
+Otherwise the header reads **N WAVs missing**, and hovering over it lists each
+one and why: not in the library, outside it (an absolute path, or one that
+climbs above the library's folder), or matching two files whose names differ
+only in case.
+
+A build reads the project as the editor shows it, unsaved edits included, and
+writes a v2 instrument beside it under the project file's name, numbered if that
+name is taken. The instrument opens in a tab. Settings the instrument cannot hold
+are listed in the activity log, and anything the encoder cannot reproduce stops
+the build with the reason.
 
 ## From WAVs
 

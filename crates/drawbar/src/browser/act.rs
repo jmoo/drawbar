@@ -5,6 +5,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::drag::{Item, Kind};
 use super::Browser;
+use crate::builds::Builds;
 use crate::device::{
     fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fetched, Fit, Outgoing, Payload,
     Purpose,
@@ -92,6 +93,9 @@ pub enum Act {
         id: u64,
         bytes: Vec<u8>,
     },
+    /// Build the Sample Editor project `id`, as it is now, into the instrument it
+    /// describes, filed beside it; see [`crate::builds`].
+    Build(u64),
     /// Let go of an asset whose file is gone, with the tags the library kept for it.
     Forget(u64),
     NewFolder,
@@ -310,6 +314,7 @@ impl Act {
             | Act::Restore { id, .. } => vec![*id],
             Act::Keep(id)
             | Act::KeepBoth(id)
+            | Act::Build(id)
             | Act::Send { id, .. }
             | Act::Retarget { id, .. }
             | Act::Replace { id, .. }
@@ -615,6 +620,7 @@ pub fn apply(
     device: &mut Device,
     tabs: &mut Tabs,
     queue: &mut Queue,
+    builds: &mut Builds,
     log: &mut Log,
 ) {
     let mut held = std::mem::take(&mut browser.held);
@@ -674,6 +680,7 @@ pub fn apply(
                 None => log.say("That folder is gone, so nothing moved."),
             },
             Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
+            Act::Build(id) => builds.start(id, workspace, &browser.folders, log),
             Act::Forget(id) => browser.tags.forget(id),
             Act::NewFolder => new_folder(browser, workspace, None),
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),

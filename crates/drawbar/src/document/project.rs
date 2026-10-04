@@ -23,11 +23,17 @@ use nord_format::Entity;
 
 use super::capability::{Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
+use super::header::{self, Click, Loud, Tone};
 use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
 use crate::app;
+use crate::builds::{self, Wav};
+use crate::folders::Folders;
+use crate::icon::Glyph;
 use crate::midi::Played;
+use crate::store::LibPath;
+use crate::workspace::LocalEntity;
 
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {
@@ -695,6 +701,96 @@ pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
     ]
 }
 
+/// Where an open project's WAVs are in the library, looked for again only when the
+/// project's bytes, its place or the library's listing change.
+#[derive(Default)]
+pub struct Located {
+    held: Option<(Seen, Found)>,
+}
+
+/// Each of a project's audio files by its stored path, with where its WAV is, or why its
+/// audio files do not read.
+pub type Found = Result<Vec<(String, Wav)>, String>;
+
+/// What [`Located`] was taken against: the project's stamp and path, and the folders'
+/// [`Folders::shape`].
+type Seen = (u64, Option<LibPath>, crate::folders::Shape);
+
+impl Located {
+    pub fn of(&mut self, entity: &LocalEntity, folders: &Folders) -> &Found {
+        let seen = (entity.stamp, entity.path.clone(), folders.shape());
+        let held = match self.held.take() {
+            Some((held, found)) if held == seen => (held, found),
+            _ => {
+                let files = match entity.entity.as_deref().and_then(project) {
+                    Some(project) => project.audio_files().map_err(|e| e.to_string()),
+                    None => Err("it does not decode".to_string()),
+                };
+                let dir = builds::dir_of(entity);
+                let found = files.map(|files| builds::locate_all(&dir, &files, &folders.others));
+                (seen, found)
+            }
+        };
+        &self.held.insert(held).1
+    }
+}
+
+/// The header's loud action for a project: its build, ready once the library lists
+/// every WAV it plays.
+pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
+    let build = Loud {
+        label: header::BUILD.to_string(),
+        short: "Build".to_string(),
+        glyph: Glyph::Hammer,
+        tone: Tone::Blocked,
+        hint: String::new(),
+        click: Click::Nothing,
+    };
+    if building {
+        return Loud {
+            label: "Building…".to_string(),
+            short: "Building…".to_string(),
+            tone: Tone::Idle,
+            hint: "the instrument opens in a tab once it is built".to_string(),
+            ..build
+        };
+    }
+    let wavs = match found {
+        Ok(wavs) => wavs,
+        Err(why) => {
+            return Loud {
+                hint: format!("its audio files do not read: {why}"),
+                ..build
+            }
+        }
+    };
+    let unresolved = builds::unresolved(wavs);
+    if unresolved.is_empty() {
+        let lands = builds::dir_of(entity).join(&builds::instrument_name(&entity.name));
+        return Loud {
+            tone: Tone::Ready,
+            hint: format!(
+                "writes a {} instrument to {lands}, numbered if that name is taken",
+                builds::LAYOUT.generation()
+            ),
+            click: Click::Build,
+            ..build
+        };
+    }
+    let count = unresolved.len();
+    let wavs = match count {
+        1 => "WAV",
+        _ => "WAVs",
+    };
+    Loud {
+        label: format!("{count} {wavs} missing"),
+        short: format!("{count} missing"),
+        glyph: Glyph::CircleAlert,
+        hint: unresolved.join("\n"),
+        ..build
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +815,87 @@ mod tests {
             .collect();
         let project = Project::new("Marimba", &zones, 0).unwrap();
         nord_format::to_bytes(&Entity::SampleProject(project)).unwrap()
+    }
+
+    /// The header's loud action for a project at `Marimba/Marimba.nsmpproj` whose zones
+    /// play `stored`, in a library listing `others` by name only.
+    fn loud_over(stored: &[&str], others: &[&str], building: bool) -> Loud {
+        let zones: Vec<NewZone> = stored
+            .iter()
+            .zip(48..)
+            .map(|(path, root_key)| NewZone {
+                path: path.to_string(),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key,
+            })
+            .collect();
+        let project = Project::new("Marimba", &zones, 0).unwrap();
+        let bytes = nord_format::to_bytes(&Entity::SampleProject(project)).unwrap();
+        let mut log = crate::log::Log::default();
+        let mut workspace = crate::workspace::Workspace::new(context());
+        let origin = crate::workspace::Origin::File("Marimba.nsmpproj".into());
+        let id = workspace.ingest("Marimba.nsmpproj".into(), origin, bytes, &mut log);
+        workspace.place(id, LibPath::parse("Marimba/Marimba.nsmpproj").unwrap());
+        workspace.read_now([id], &mut log);
+        let mut folders = Folders::default();
+        folders.others = others
+            .iter()
+            .map(|at| LibPath::parse(at).unwrap())
+            .collect();
+        let entity = workspace.get(id).unwrap();
+        loud(entity, Located::default().of(entity, &folders), building)
+    }
+
+    #[test]
+    fn a_project_whose_wavs_are_all_listed_offers_its_build() {
+        let others = ["Marimba/c3.wav", "Shared/c4.wav"];
+        let held = loud_over(&["c3.wav", "../Shared/c4.wav"], &others, false);
+        assert_eq!(
+            (held.label.as_str(), held.tone, held.click),
+            (header::BUILD, Tone::Ready, Click::Build)
+        );
+        assert_eq!(held.glyph, Glyph::Hammer);
+        assert!(held.hint.contains("v2"), "{}", held.hint);
+        assert!(held.hint.contains("Marimba/Marimba.nsmp"), "{}", held.hint);
+    }
+
+    #[test]
+    fn a_project_missing_two_wavs_says_so_and_names_them() {
+        let held = loud_over(&["c3.wav", "c4.wav", "c5.wav"], &["Marimba/c4.wav"], false);
+        assert_eq!(held.label, "2 WAVs missing");
+        assert_eq!((held.tone, held.click), (Tone::Blocked, Click::Nothing));
+        assert_eq!(held.hint, "c3.wav: missing\nc5.wav: missing");
+    }
+
+    #[test]
+    fn a_wav_outside_the_library_counts_as_missing() {
+        let held = loud_over(
+            &["../../c3.wav", "c4.wav"],
+            &["c3.wav", "Marimba/c4.wav"],
+            false,
+        );
+        assert_eq!(held.label, "1 WAV missing");
+        assert_eq!(held.click, Click::Nothing);
+        assert_eq!(held.hint, "../../c3.wav: outside the library");
+    }
+
+    #[test]
+    fn a_wav_two_listed_files_could_be_is_refused_naming_both() {
+        let held = loud_over(&["C3.WAV"], &["Marimba/C3.wav", "Marimba/c3.wav"], false);
+        assert_eq!(held.label, "1 WAV missing");
+        assert_eq!(held.click, Click::Nothing);
+        assert_eq!(
+            held.hint,
+            "C3.WAV: ambiguous between Marimba/C3.wav and Marimba/c3.wav"
+        );
+    }
+
+    #[test]
+    fn a_project_building_offers_nothing_until_it_is_built() {
+        let held = loud_over(&["c3.wav"], &["Marimba/c3.wav"], true);
+        assert_eq!(held.label, "Building…");
+        assert_eq!((held.tone, held.click), (Tone::Idle, Click::Nothing));
     }
 
     fn read_back(bytes: &[u8]) -> Snapshot {

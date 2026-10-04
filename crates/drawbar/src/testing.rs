@@ -14,6 +14,7 @@ use toshokan::io::Capabilities;
 use eframe::egui;
 
 use crate::browser::{apply, Act, Browser};
+use crate::builds::Builds;
 use crate::device::Device;
 use crate::log::Log;
 use crate::queue::Queue;
@@ -516,6 +517,7 @@ pub(crate) struct Bench {
     pub device: Device,
     pub tabs: Tabs,
     pub queue: Queue,
+    pub builds: Builds,
     pub log: Log,
 }
 
@@ -529,6 +531,7 @@ impl Bench {
             device: Device::new(ctx.clone()),
             tabs: Tabs::default(),
             queue: Queue::default(),
+            builds: Builds::default(),
             log: Log::default(),
             ctx,
         }
@@ -544,6 +547,7 @@ impl Bench {
             &mut self.device,
             &mut self.tabs,
             &mut self.queue,
+            &mut self.builds,
             &mut self.log,
         );
     }
