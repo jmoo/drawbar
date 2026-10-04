@@ -135,8 +135,9 @@ pub(crate) const fn version(layout: Layout) -> u32 {
 }
 
 /// The container header's `aux` word as the editor writes it: the category in bits
-/// 16..24 and the sub category in the low byte, in every generation. Library files
-/// hold all ones there instead. Inferred from specimens; not confirmed on hardware.
+/// 16..24 and the sub category in the low byte, in every generation. Early-chain
+/// libraries, which have no `cat`, and files read back over USB hold all ones there
+/// instead. Inferred from specimens; not confirmed on hardware.
 fn aux(categories: &NarrowCat) -> u32 {
     u32::from(categories.category) << 16 | u32::from(categories.sub_category)
 }
@@ -765,7 +766,7 @@ impl Plan {
             None => None,
             Some(at) => {
                 let units = Units { layout, channels };
-                let (cell, chunk) = (units.cell(), units.chunk());
+                let cell = units.cell();
                 let floor = resync_at
                     .checked_add(min_resync_gap(layout) * channels)
                     .ok_or_else(too_long)?;
@@ -780,18 +781,15 @@ impl Plan {
                     }
                     .into());
                 }
-                let length = fields.checked_sub(at).ok_or_else(too_long)?;
-                let warmup = band(length, cell, chunk);
-                if length < warmup.saturating_add(cell) {
+                if at >= fields {
                     return Err(ParseError::OutOfBounds {
-                        value: format!("a {length}-field loop"),
-                        bound: format!(
-                            "a loop long enough for the {warmup}-field 1:1 run it opens \
-                             with and one {cell}-field cell after it"
-                        ),
+                        value: format!("a loop mark at field {at}"),
+                        bound: format!("a field before the stream ends at {fields}"),
                     }
                     .into());
                 }
+                let length = fields - at;
+                let warmup = loop_warmup(units, length)?;
                 Some(Looped {
                     at,
                     lead: 0,
@@ -892,6 +890,24 @@ impl Plan {
     }
 }
 
+/// The 1:1 run a `length`-field loop opens with, refusing a loop too short for that run
+/// and one cell after it.
+fn loop_warmup(units: Units, length: usize) -> Result<usize, Error> {
+    let (cell, chunk) = (units.cell(), units.chunk());
+    let warmup = band(length, cell, chunk);
+    if length >= warmup.saturating_add(cell) {
+        return Ok(warmup);
+    }
+    Err(ParseError::OutOfBounds {
+        value: format!("a {length}-field loop"),
+        bound: format!(
+            "a loop long enough for the {warmup}-field 1:1 run it opens with and one \
+             {cell}-field cell after it"
+        ),
+    }
+    .into())
+}
+
 /// Where a fresh project would put the resync in `frames` untrimmed source frames: the
 /// `m_startSecondary` [`nsmpproj::default_secondary_start`] states, repaired around
 /// `loops` the way the editor repairs a project it loads.
@@ -988,15 +1004,12 @@ struct Quantized {
 /// is the source's own 16-bit unit taken at a shift of two, so nothing reaches it.
 const MAX_PEAK: i64 = (1 << 23) - 1;
 
-/// The opening ramp: the first [`RAMP_IN`] fields of each of `channels` interleaved
-/// channels rise as the cube of their position, toward zero like everything else the
-/// encoder quantizes.
-fn ramp_in(fields: &mut [i64], channels: usize) {
+/// The opening ramp: the first [`RAMP_IN`] fields of a channel rise as the cube of
+/// their position, toward zero like everything else the encoder quantizes.
+fn ramp_in(fields: &mut [i64]) {
     let cube = |n: usize| (n * n * n) as i64;
-    for (f, frame) in fields.chunks_mut(channels).enumerate().take(RAMP_IN) {
-        for value in frame {
-            *value = *value * cube(f) / cube(RAMP_IN);
-        }
+    for (f, value) in fields.iter_mut().enumerate().take(RAMP_IN) {
+        *value = *value * cube(f) / cube(RAMP_IN);
     }
 }
 
@@ -1066,7 +1079,7 @@ fn quantize(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantized {
         lane.extend(source.iter().skip(channel).step_by(channels).copied());
         let accumulated: Vec<f64> = (0..per).map(|f| kernel.accumulate(&lane, f)).collect();
         let mut fields: Vec<i64> = accumulated.iter().map(|sum| sum.trunc() as i64).collect();
-        ramp_in(&mut fields, 1);
+        ramp_in(&mut fields);
         match &plan.looped {
             Some(points) => bake_loop(
                 &mut fields,
@@ -1120,25 +1133,12 @@ fn quantize(source: &[i16], plan: &Plan, forced: Option<u8>) -> Quantized {
     }
 }
 
-/// Fields already on the lattice, at the shift this generation's rule takes for them:
-/// the peak term and the extra bit, read from the fields at the shift they were stored
-/// at. The result is never finer than that shift, because the bits it dropped are not
-/// in the fields.
-///
-/// Where the stored shift already spent the extra bit, every field fits one bit under
-/// [`PEAK_WIDTH`], so the rule adds nothing and the shift stays where it was.
-///
-/// Statistic B is the stored one. It was taken before the shift, which the fields
-/// cannot undo, so it carries over as stated, except that a narrow statistic stores no
-/// sign and a wide target takes the one [`negative_extreme`] infers.
-///
-/// Fields without the opening ramp have it applied here at their stored shift, which is
-/// exact only at a shift of zero.
+/// Fields already on the lattice, at the shift this generation's rule takes for them.
+/// The rule reads the fields at their stored shift, so the result is never finer: the
+/// bits that shift dropped are gone. Statistic B was taken before any shift, so it
+/// carries over, signed by [`negative_extreme`] where a narrow source stored none.
 fn requantize(lattice: &codec::Lattice, plan: &Plan) -> Result<Quantized, Error> {
-    let mut values: Vec<i64> = lattice.fields.iter().map(|&v| i64::from(v)).collect();
-    if !lattice.ramped {
-        ramp_in(&mut values, plan.channels);
-    }
+    let values: Vec<i64> = lattice.fields.iter().map(|&v| i64::from(v)).collect();
     let rise = peak_shift(&values, PEAK_WIDTH) + i32::from(spends_extra_bit(&values, plan));
     // A stream may sit at a negative shift, which keeps fractional bits of a source
     // wider than 16 bits; the editor renders 24-bit audio that way.
@@ -1172,16 +1172,10 @@ fn requantize(lattice: &codec::Lattice, plan: &Plan) -> Result<Quantized, Error>
 }
 
 /// Whether statistic B was negative, given only its magnitude and the content fields
-/// at their stored `shift`.
-///
-/// The statistic is a field at a shift of two, rounded down, so a positive `m` comes
-/// from `4m` to `4m + 3` and a negative one from `-4m` to `-4m + 3`: where content
-/// holds a positive candidate, it is at least as far from zero as any negative one and
-/// wins. The two tie only at exactly `±4m`, where what truncation discarded decides and
-/// is lost. Only a shift of zero or less keeps those bits, and there a tie reads
-/// negative, as it does in this encoder's renders of a sine. A statistic no positive
-/// candidate explains reads negative too, as near-silent strokes whose content
-/// truncates to zero read −1 in the editor's wide renders.
+/// at their stored `shift`. B rounds down from a field at a shift of two, so a positive
+/// candidate is never nearer zero than a negative one and wins, except in an exact tie
+/// at `±4m`, which only a shift of zero or less can see and which reads negative. With
+/// no positive candidate, B reads negative, as near-silent wide renders do.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn negative_extreme(values: &[i64], shift: i32, magnitude: i64, plan: &Plan) -> bool {
@@ -1307,6 +1301,20 @@ fn choose_order(widths: &[u8], extending: Option<(u8, u8)>) -> (u8, u8) {
 /// A loop appends a third regime (its own marked 1:1 run and the content after it),
 /// padded to a whole number of packets by [`pad_to_packet`].
 fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spec>, usize), Error> {
+    let (mut specs, resync_record, opening) = unpadded(values, plan, predictor)?;
+    if let Some(opening) = opening {
+        pad_to_packet(&mut specs, opening, plan.units())?;
+    }
+    Ok((specs, resync_record))
+}
+
+/// [`records`] before the loop region is padded, with the index of the record the loop
+/// opens at.
+fn unpadded(
+    values: &[i32],
+    plan: &Plan,
+    predictor: Predictor,
+) -> Result<(Vec<Spec>, usize, Option<usize>), Error> {
     let mut out = Vec::new();
     let mut at = 0usize;
     let (cell, chunk, stride) = (plan.cell(), plan.chunk(), plan.channels);
@@ -1359,6 +1367,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spe
         *at += cells * cell;
     };
 
+    let mut loop_opening = None;
     one_to_one(&mut out, &mut at, plan.warmup);
     content(&mut out, &mut at, plan.cells_before);
     let resync_record = out.len();
@@ -1369,7 +1378,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spe
         one_to_one(&mut out, &mut at, points.warmup);
         out[opening].mark = true;
         content(&mut out, &mut at, points.cells);
-        pad_to_packet(&mut out, opening, plan.units())?;
+        loop_opening = Some(opening);
     }
     if at != plan.fields {
         return Err(ParseError::AssertFail(format!(
@@ -1378,7 +1387,7 @@ fn records(values: &[i32], plan: &Plan, predictor: Predictor) -> Result<(Vec<Spe
         ))
         .into());
     }
-    Ok((out, resync_record))
+    Ok((out, resync_record, loop_opening))
 }
 
 /// Pad the loop region out to whole packets: sweep its content records front to back,
@@ -1757,25 +1766,12 @@ fn encode_stroke(
     let mut repeated = Cow::Borrowed(lattice);
     let mut first = None;
     for _ in 0..MAX_LOOP_PERIODS {
-        let attempt = Plan::on_lattice(
-            layout,
-            repeated.fields.len(),
-            channels,
-            repeated.resync_at,
-            repeated.mark,
-        )
-        .and_then(|plan| {
-            let q = requantize(&repeated, &plan)?;
-            laid_out(q, &plan, preamble, predictor)
-        });
-        let error = match attempt {
-            Ok(encoded) => return Ok(encoded),
-            Err(error) => error,
+        let short = match relaid(layout, &repeated, preamble, predictor)? {
+            Relaid::Laid(encoded) => return Ok(encoded),
+            Relaid::Short(error) => error,
         };
-        let Some(mark) = lattice.mark else {
-            return Err(error);
-        };
-        first.get_or_insert(error);
+        first.get_or_insert(short);
+        let mark = lattice.mark.expect("only a loop is short");
         let period = lattice.fields[mark..].to_vec();
         repeated.to_mut().fields.extend(period);
     }
@@ -1785,28 +1781,66 @@ fn encode_stroke(
 /// The most periods a loop laid out from the lattice is repeated over to fit.
 const MAX_LOOP_PERIODS: usize = 16;
 
-/// Records and packing for quantized fields on `plan`, once they fit the stream's
-/// widest field.
+/// A stream laid out from the lattice, or the refusal of a loop too short for its
+/// generation, which more periods of the same loop cure.
+enum Relaid {
+    Laid(Encoded),
+    Short(Error),
+}
+
+fn relaid(
+    layout: Layout,
+    lattice: &codec::Lattice,
+    preamble: usize,
+    predictor: Predictor,
+) -> Result<Relaid, Error> {
+    let channels = usize::from(lattice.channels);
+    let units = Units { layout, channels };
+    let fields = lattice.fields.len();
+    if let Some(mark) = lattice.mark.filter(|&mark| mark < fields) {
+        if let Err(short) = loop_warmup(units, fields - mark) {
+            return Ok(Relaid::Short(short));
+        }
+    }
+    let plan = Plan::on_lattice(layout, fields, channels, lattice.resync_at, lattice.mark)?;
+    let q = checked_width(requantize(lattice, &plan)?)?;
+    let (mut specs, resync_record, opening) = unpadded(&q.values, &plan, predictor)?;
+    if let Some(opening) = opening {
+        if let Err(short) = pad_to_packet(&mut specs, opening, units) {
+            return Ok(Relaid::Short(short));
+        }
+    }
+    let stream = pack(&specs, &q.values, resync_record, preamble, &plan)?;
+    Ok(Relaid::Laid(Encoded { q, stream }))
+}
+
+/// Records and packing for quantized fields on `plan`.
 fn laid_out(
     q: Quantized,
     plan: &Plan,
     preamble: usize,
     predictor: Predictor,
 ) -> Result<Encoded, Error> {
-    let (low, high) = extent(&q.values);
-    if width_of(low, high) > MAX_STORED_WIDTH {
-        return Err(ParseError::OutOfBounds {
-            value: format!(
-                "a quantizer shift of {} bits for fields spanning {low}..={high}",
-                q.shift
-            ),
-            bound: format!("values that fit the stream's {MAX_STORED_WIDTH}-bit fields"),
-        }
-        .into());
-    }
+    let q = checked_width(q)?;
     let (specs, resync_record) = records(&q.values, plan, predictor)?;
     let stream = pack(&specs, &q.values, resync_record, preamble, plan)?;
     Ok(Encoded { q, stream })
+}
+
+/// Quantized fields, once they fit the stream's widest field.
+fn checked_width(q: Quantized) -> Result<Quantized, Error> {
+    let (low, high) = extent(&q.values);
+    if width_of(low, high) <= MAX_STORED_WIDTH {
+        return Ok(q);
+    }
+    Err(ParseError::OutOfBounds {
+        value: format!(
+            "a quantizer shift of {} bits for fields spanning {low}..={high}",
+            q.shift
+        ),
+        bound: format!("values that fit the stream's {MAX_STORED_WIDTH}-bit fields"),
+    }
+    .into())
 }
 
 /// Every zone's stream in order, and the file peak every header's statistic A divides
@@ -1943,6 +1977,11 @@ fn map(keys: &KeyTable, zones: &[ZoneRecord]) -> Result<Section, Error> {
     })
 }
 
+/// The narrow `sty` preset a project that sets nothing renders as.
+/// Unexplained: real programs hold this, and the panel cannot produce it.
+pub(crate) const STY_V2_PAYLOAD: [u8; super::sty::V2_LEN] =
+    [0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00];
+
 /// The narrow `sty` preset, including every project value its schema stores.
 fn sty(preset: Preset) -> Result<Section, Error> {
     if preset.velocity_to_amplitude >= super::sty::VELOCITY_LEVELS
@@ -1957,7 +1996,7 @@ fn sty(preset: Preset) -> Result<Section, Error> {
         }
         .into());
     }
-    let mut payload = vec![0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00];
+    let mut payload = STY_V2_PAYLOAD.to_vec();
     payload[super::sty::V2_DYNAMICS_ENABLE] = u8::from(preset.dynamics_enabled);
     payload[super::sty::V2_VELOCITY_TO_AMPLITUDE] = preset.velocity_to_amplitude;
     payload[super::sty::V2_VELOCITY_TO_TIMBRE] = preset.velocity_to_timbre;
@@ -3061,7 +3100,7 @@ mod tests {
     #[test]
     fn the_stream_opens_on_a_cubic_ramp() {
         let mut fields = vec![-4_000i64; 40];
-        ramp_in(&mut fields, 1);
+        ramp_in(&mut fields);
         assert_eq!(fields[0], 0);
         assert_eq!(fields[7], -4_000 * 343 / 42_875);
         assert_eq!(fields[34], -4_000 * 39_304 / 42_875);
@@ -5055,6 +5094,14 @@ mod tests {
             let near = Plan::on_lattice(layout, fields, 1, resync_at, Some(resync_at + gap - 1));
             assert!(near.is_err(), "{layout:?}");
             assert!(Plan::on_lattice(layout, fields, 2, resync_at, Some(resync_at + gap)).is_err());
+            for mark in [fields, fields + 1] {
+                let past = Plan::on_lattice(layout, fields, 1, resync_at, Some(mark));
+                let error = past.unwrap_err().to_string();
+                assert!(
+                    error.contains("before the stream ends"),
+                    "{layout:?}: {error}"
+                );
+            }
         }
     }
 
@@ -5070,7 +5117,6 @@ mod tests {
             peak: codec::Peak::Signed(-50),
             resync_at: 400,
             mark: Some(mark),
-            ramped: true,
         };
         for layout in Layout::ALL {
             let file = from_lattice(
@@ -5103,7 +5149,6 @@ mod tests {
             peak: codec::Peak::Signed(1),
             resync_at: 400,
             mark: None,
-            ramped: true,
         };
         let file = from_lattice(
             &lattice_instrument(Layout::V3),

@@ -745,9 +745,9 @@ impl Peak {
 }
 
 /// One stroke's audio as its stream carries it: the stored fields at their quantizer
-/// shift, and the landmarks the stream marks on the lattice. This is everything a
-/// stream states about its audio, so a stroke can be laid out again in any generation
-/// without touching a field.
+/// shift, opening ramp and loop crossfade included, and the landmarks the stream marks
+/// on the lattice. This is everything a stream states about its audio, so a stroke can
+/// be laid out again in any generation without touching a field.
 ///
 /// Every position is a stream index: on a stereo stroke each is twice the per-channel
 /// field.
@@ -766,9 +766,6 @@ pub struct Lattice {
     /// The field the loop's marked record opens at, when the stroke loops. The stream
     /// loops from here to its end.
     pub mark: Option<usize>,
-    /// Whether the opening ramp is already in the fields. Every stream carries it.
-    /// Inferred from specimens; not confirmed on hardware.
-    pub ramped: bool,
 }
 
 /// The stroke at body offset `stroke_at` as a [`Lattice`], its shift read against
@@ -818,11 +815,14 @@ pub fn lattice(
         },
         resync_at,
         mark,
-        ramped: true,
     })
 }
 
 /// Decode a stroke at body offset `stroke_at` into [`FIELD_RATE`] audio.
+///
+/// ⚠️ The level comes from [`shift`], which reads the stroke's shift against its own
+/// statistic B. On a multi-zone instrument a stroke whose statistic B is narrower than
+/// the file's largest decodes at the wrong power of two.
 pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, Unsupported> {
     let shift = shift(stroke, layout).ok_or(Unsupported::Short)?;
     let (_, stored) = stored(stroke, stroke_at, layout)?;

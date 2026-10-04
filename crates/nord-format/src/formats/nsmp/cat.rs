@@ -117,7 +117,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_editor_default_is_the_payload_the_encoder_has_always_written() {
+    fn the_editor_default_writes_category_15_and_the_production_and_origin_labels() {
         let payload = NarrowCat::editor_default().payload().unwrap();
         let mut want = vec![0x0f, 0, 0, 0, 1, 10];
         want.extend_from_slice(b"Production");
