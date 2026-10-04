@@ -4281,6 +4281,36 @@ fn a_folder_left_mid_rename_beside_one_of_its_name_stays_and_is_named() {
     assert_eq!(second.said("interrupted rename"), 1);
 }
 
+/// A file an interrupted case-only rename left under the name it moved through is put
+/// back at open: under its row's spelling, keeping its tag, and, with no row, under its
+/// own name at the top level.
+#[test]
+fn a_file_left_mid_rename_is_put_back() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Gigs")).unwrap();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Gigs/Grand.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.only();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(grand, tag, true);
+    first.autosave();
+    first.close();
+    fs::rename(
+        root.at("Gigs/Grand.ne5p"),
+        root.at("Gigs/grand.ne5p.1.drawbar-move"),
+    )
+    .unwrap();
+    fs::write(root.at("solo.ne5p.1.drawbar-move"), &program).unwrap();
+
+    let second = Session::open(&root);
+    assert_eq!(root.names("Gigs"), ["Grand.ne5p"]);
+    assert!(root.names("").contains(&"solo.ne5p".to_string()));
+    assert_eq!(second.path(grand).as_deref(), Some("Gigs/Grand.ne5p"));
+    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
+    assert_eq!(second.said("interrupted rename"), 0);
+}
+
 #[test]
 fn the_demo_sounds_land_as_files_in_their_folder_and_are_not_filed_twice() {
     use crate::demo::{self, published, FOLDER};

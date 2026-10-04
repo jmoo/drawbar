@@ -1270,8 +1270,8 @@ impl Store {
         if !stranded.is_empty() {
             let named: Vec<String> = stranded.iter().map(|dir| format!("“{dir}”")).collect();
             log.trouble(format!(
-                "An interrupted rename left {} under the name it moved through, and another \
-                 folder has its name, so it was left as it is.",
+                "An interrupted rename left {} under the name it moved through, and something \
+                 else has its name, so it was left as it is.",
                 named.join(", ")
             ));
         }

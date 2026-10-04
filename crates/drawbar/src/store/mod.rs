@@ -27,6 +27,8 @@
 
 mod cache;
 mod diff;
+#[cfg(any(target_arch = "wasm32", test))]
+mod dom;
 mod exec;
 mod mirror;
 pub mod names;

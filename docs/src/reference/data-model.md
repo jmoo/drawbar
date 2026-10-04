@@ -392,7 +392,8 @@ stat moved is told to hold what drawbar knew by its CRC, taken in one streaming
 pass (`Fs::crc`). A save, a copy over a file and a rewrite look at the file
 again once the new contents are staged, just before the rename, and refuse one
 whose stat moved (`exec::put`); a window of one stat and one rename remains,
-since no portable rename checks what it replaces. A resting file changed on disk under an unsaved edit is not
+since no portable rename checks what it replaces. Where the browser copies
+instead of moving, the copy looks again just before it lands. A resting file changed on disk under an unsaved edit is not
 read whole to keep the edit apart: the asset rests in the new file, and the
 workspace makes the edit again over it (`rewrite::Edit::over`). An edit the new
 file already holds is let go. One that no longer applies is kept as it was,
@@ -701,6 +702,25 @@ file already there. In a picked folder the page writes through
 Web Lock named for the folder, taken with `ifAvailable`, keeps a second tab to
 reading. Reads go through `File` snapshots in 4 MiB slices.
 
+Brave refuses `move()` everywhere but the private file system. The first
+`NotSupportedError` in a picked folder is remembered for the library, and from
+then on nothing is moved there (`store::dom::Moves`). A save writes its target
+in place through `createWritable`: Chromium writes the stream to a swap file
+beside it, `<name>.crswap`, and moves that over the file as the stream closes,
+so a file already there still changes all at once, and the staged copy is then
+removed. A save over a file looks at it again just before the stream closes,
+and aborts where its stat moved. A new file is made empty first, so a crash
+before its stream closes leaves it empty; one found already holding bytes is
+another program's, refused as taken, and a failed write removes only an empty
+file it made, untouched since. A rename copies the file to its new name and
+then removes the old one, so one interrupted between the two leaves the file at
+both names, none lost. The old file is looked at again before it is removed,
+and one that changed while it was copied is kept and fails the rename. A folder
+moves this way file by file, and stops at the first file that changed. A
+rename that changes only a file's case goes through `<name>.<n>.drawbar-move`
+as well, and the next open puts a file it left there back, as it does a
+folder.
+
 Two things differ from the desktop. A new file's write checks the name and then
 moves, in two steps, so in a picked folder another program can write between
 them. Chrome cannot move a folder whole, so a folder moves file by file, and an
@@ -708,10 +728,10 @@ interrupted move leaves its files split between the two names, none lost. A
 rename that changes only case moves through a free name beside the folder,
 `<name>.<n>.drawbar-move`, since on a disk that ignores case the new name reaches
 the folder itself, and a folder is never removed where it is the one moved into.
-A folder such a rename left under that name when the tab closed is put back at
-the next open, under the spelling the index's rows use, before the listing
-looks for them; where another folder has the name it stays, and the log says
-so. The
+A folder or file such a rename left under that name when the tab closed is put
+back at the next open, under the spelling the index's rows use, before the
+listing looks for them; where something else has the name it stays, and the log
+says so. Only the top level and the folders that hold a row are looked in. The
 first write to the private file system also asks the browser to keep it through
 a shortage of space. A tab opens a new library only once the one before it has
 run its last command and let go of its lock.

@@ -4,7 +4,8 @@
 //! The crash-safety of every write rests on [`Fs::stage`] and [`Fs::place`]: a file is
 //! written somewhere else first and appears at its path whole. Everything written in
 //! flight is either under `.drawbar/tmp/` or a hidden `.<name>.drawbar-tmp` sibling, and
-//! opening the library sweeps both.
+//! opening the library sweeps both. A browser folder that cannot move files is the one
+//! exception: there a new file is made empty at its path before its contents land.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
@@ -117,11 +118,14 @@ pub trait Fs {
     /// already at the temporary's name. Nothing is left where it fails. A source that
     /// changed since it was read is refused with [`crate::rewrite::changed`].
     async fn stage(&mut self, path: &str, what: Staged<'_>) -> io::Result<Self::Temp>;
-    /// Put a staged temporary at `path`: over whatever is there where `over` is set, and
-    /// otherwise only where nothing is, refused as [`io::ErrorKind::AlreadyExists`].
-    /// Afterwards, or after a crash at any point, the path holds the old contents or the
-    /// new, never part of either. A temporary not put is let go.
-    async fn place(&mut self, temp: Self::Temp, path: &str, over: bool) -> io::Result<()>;
+    /// Put a staged temporary at `path`, over what `over` allows: where it is
+    /// [`Over::Nothing`], only where nothing is, refused as
+    /// [`io::ErrorKind::AlreadyExists`]. A backend that copies the temporary rather than
+    /// renaming it looks at an [`Over::Held`] file again just before the copy lands, and
+    /// refuses one whose stat moved with [`moved`]. Afterwards, or after a crash at any
+    /// point, the path holds the old contents or the new, never part of either, except
+    /// that a copy to a new path leaves it empty. A temporary not put is let go.
+    async fn place(&mut self, temp: Self::Temp, path: &str, over: Over) -> io::Result<()>;
     /// Let go of a staged temporary that is not to be put anywhere.
     async fn discard(&mut self, temp: Self::Temp);
     /// Rename a file or folder. Refused when another entry is at `to`.
@@ -156,8 +160,8 @@ pub enum Staged<'a> {
 }
 
 /// What a write may put its file over.
-#[derive(Clone, Copy)]
-enum Over {
+#[derive(Clone, Copy, Debug)]
+pub enum Over {
     /// Nothing: the path must be free.
     Nothing,
     /// Whatever is there.
@@ -166,13 +170,22 @@ enum Over {
     Held(Stat),
 }
 
+impl Over {
+    /// Whether anything may be at the path already.
+    pub fn replaces(self) -> bool {
+        !matches!(self, Over::Nothing)
+    }
+}
+
 /// Write `what` to `path` through a temporary, over what `over` allows. A held file whose
 /// stat moved by the time the temporary is written is refused with [`moved`], and nothing
 /// is put over it.
 ///
 /// ⚠️ A window remains between that last look and the rename, since no portable call
 /// renames only over a file that is still the one looked at. It is one stat and one
-/// rename long, after the whole write rather than before it.
+/// rename long, after the whole write rather than before it. A backend that copies
+/// instead looks again itself, just before the copy lands, which leaves a window as
+/// long as that look.
 async fn put(fs: &mut impl Fs, path: &str, what: Staged<'_>, over: Over) -> io::Result<()> {
     let temp = fs.stage(path, what).await?;
     if let Over::Held(held) = over {
@@ -181,7 +194,7 @@ async fn put(fs: &mut impl Fs, path: &str, what: Staged<'_>, over: Over) -> io::
             return Err(moved());
         }
     }
-    fs.place(temp, path, !matches!(over, Over::Nothing)).await
+    fs.place(temp, path, over).await
 }
 
 /// What a write may put its file over, where the file at `path` must still hold what
@@ -207,7 +220,7 @@ impl std::fmt::Display for Moved {
 
 impl std::error::Error for Moved {}
 
-fn moved() -> io::Error {
+pub fn moved() -> io::Error {
     io::Error::other(Moved)
 }
 
@@ -481,39 +494,37 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
 
 /// The whole tree again, in one listing. The reads sent while it runs are answered
 /// between its folders.
-/// Put back each folder an interrupted rename left under the name it moved it through
-/// ([`names::aside`]), in the folders where the index's rows lie: under the spelling of
-/// its name the rows use, so they match it, or under its own. Returns those left where
-/// they are, because another entry already has the name.
+/// Put back each folder or file an interrupted rename left under the name it moved it
+/// through ([`names::aside`]), in the folders where the index's rows lie: under the
+/// spelling of its name the rows use, so they match it, or under its own. Returns those
+/// left where they are, because another entry already has the name.
 ///
-/// ⚠️ Only the folders above a row are looked in. One no row lies under is listed under
-/// the name it moved through, which loses nothing, since no row is to match it.
+/// ⚠️ Only the library's top level and the folders above a row are looked in. A folder
+/// elsewhere is listed under the name it moved through, which loses nothing, since no
+/// row is to match it; a file there is listed under that name too, and not opened.
 async fn unstrand(fs: &mut impl Fs, rows: &[Row]) -> Vec<LibPath> {
     let mut named: BTreeMap<String, BTreeSet<String>> =
         BTreeMap::from([(String::new(), BTreeSet::new())]);
     for row in rows {
         let parts: Vec<&str> = row.path.components().collect();
-        for at in 0..parts.len().saturating_sub(1) {
+        for at in 0..parts.len() {
             let dir = parts[..at].join("/");
             named.entry(dir).or_default().insert(parts[at].to_string());
         }
     }
     let mut stranded = Vec::new();
-    for (dir, folders) in named {
+    for (dir, rowed) in named {
         let Ok(held) = fs.names(&dir).await else {
             continue;
         };
         for name in &held {
-            let Some(folder) = names::moved_through(name) else {
+            let Some(was) = names::moved_through(name) else {
                 continue;
             };
             let from = joined(&dir, name);
-            if fs.stat(&from).await.ok().flatten().is_some() {
-                continue;
-            }
-            let key = names::key(folder);
-            let wanted = folders.iter().find(|row| names::key(row) == key);
-            let wanted = wanted.map_or(folder, String::as_str);
+            let key = names::key(was);
+            let wanted = rowed.iter().find(|row| names::key(row) == key);
+            let wanted = wanted.map_or(was, String::as_str);
             let taken = held
                 .iter()
                 .any(|other| other != name && names::key(other) == key);
@@ -1667,9 +1678,9 @@ mod tests {
             &mut self,
             (_, len): (String, u64),
             path: &str,
-            over: bool,
+            over: Over,
         ) -> io::Result<()> {
-            if !over && self.files.contains_key(path) {
+            if !over.replaces() && self.files.contains_key(path) {
                 return Err(io::ErrorKind::AlreadyExists.into());
             }
             self.files.insert(path.to_string(), len);
