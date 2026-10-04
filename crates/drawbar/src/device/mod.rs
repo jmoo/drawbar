@@ -427,11 +427,12 @@ pub enum DeviceEvent {
     /// The instrument's partition table, in table order: the classes it has, which nothing
     /// else knows before it arrives. Read once per connection.
     Partitions(Vec<Partition>),
-    /// A class's counters, read at the start of its walk.
+    /// A class's counters, read at the start of its walk and with each bank rescan.
     ClassStatus {
         class: ObjectClass,
         status: Status,
-        /// Banks to expect, as the instrument's own bank list divides the class.
+        /// Banks a starting walk will deliver, as the instrument's own bank list divides
+        /// the class; `None` from a rescan, which starts no walk.
         banks: Option<u32>,
     },
     /// The device's division of a class into banks, read at the start of its walk.
@@ -1739,7 +1740,9 @@ impl Device {
                 } => {
                     self.state.inventory.retain(|held| held.class != class);
                     self.state.inventory.push(status);
-                    self.state.scan.expect(class, banks);
+                    if banks.is_some() {
+                        self.state.scan.expect(class, banks);
+                    }
                 }
                 // Only the partition table says which classes exist, so the walk starts
                 // here. Each class reads its counters, banks and focus in one session.
@@ -1993,6 +1996,47 @@ mod tests {
         device.pretend(DeviceEvent::Disconnected { lost: false });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
         assert!(device.state.classes().is_empty());
+    }
+
+    /// A write or delete rescans its bank, and the rescan's counters replace the folder's
+    /// total without restarting its walk.
+    #[test]
+    fn a_rescan_moves_the_folder_total_and_leaves_the_walk_alone() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let mut tabs = Tabs::default();
+        let class = ObjectClass::Program;
+        let counted = |count| Status {
+            class,
+            count,
+            free: 400 - count,
+            used: count,
+            dirty: 0,
+            spare: 0,
+        };
+
+        device.pretend(DeviceEvent::ClassStatus {
+            class,
+            status: counted(396),
+            banks: Some(8),
+        });
+        device.pretend(DeviceEvent::ClassStatus {
+            class,
+            status: counted(397),
+            banks: None,
+        });
+        device.poll(&mut log, &mut workspace, &mut tabs, &mut Queue::default());
+
+        assert_eq!(
+            occupancy(class, &device.state.inventory, None).as_deref(),
+            Some("397/400")
+        );
+        assert_eq!(
+            device.state.scan.progress(class).and_then(|walk| walk.total),
+            Some(8)
+        );
     }
 
     #[test]

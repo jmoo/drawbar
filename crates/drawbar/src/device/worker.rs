@@ -16,7 +16,7 @@ use nord_usb::envelope;
 use nord_usb::error::ErrKind;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
+use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo, Status};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
@@ -194,7 +194,7 @@ async fn execute<T: Transport>(
         DeviceCmd::Disconnect => Ok(None),
 
         DeviceCmd::ScanBank { class, bank } => {
-            let slots = scan_bank(device, class, bank)
+            let (status, slots) = scan_bank(device, class, bank)
                 .await
                 .map_err(spoil(fault, None))?;
             let filled = slots.iter().filter(|s| s.is_some()).count();
@@ -202,6 +202,11 @@ async fn execute<T: Transport>(
                 "bank {bank}: {filled} of {} slots hold something",
                 slots.len()
             );
+            emit.send(DeviceEvent::ClassStatus {
+                class,
+                status,
+                banks: None,
+            });
             emit.send(DeviceEvent::BankScanned { class, bank, slots });
             Ok(Some(note))
         }
@@ -864,7 +869,8 @@ const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
 /// Scan the slots the instrument declares for this bank, or up to the device boundary
-/// where it declared the unbounded sentinel.
+/// where it declared the unbounded sentinel, with the class's counters read in the same
+/// session, since whatever changed the bank changed them too.
 ///
 /// The capacity comes from the [`Device`]'s geometry, not the UI's cache: a rescan after
 /// a mutation can run before the class has been walked, and walking a bounded bank as if
@@ -873,7 +879,7 @@ async fn scan_bank<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     bank: u32,
-) -> Result<Vec<Option<ProgramInfo>>, Error> {
+) -> Result<(Status, Vec<Option<ProgramInfo>>), Error> {
     let declared = device
         .geometry()
         .await?
@@ -893,7 +899,8 @@ async fn scan_bank<T: Transport>(
     device
         .read(class, async |s| {
             s.set_read_limit(SCAN_READ_LIMIT);
-            walk(s, bank, extent, MOST_OCCUPIED).await
+            let status = op::status(s).await?;
+            Ok((status, walk(s, bank, extent, MOST_OCCUPIED).await?))
         })
         .await
 }
@@ -2564,6 +2571,35 @@ mod wire_tests {
             "the declared four slots, not a walk to the host limit"
         );
         assert_eq!(counted(&device, cmd::INFO), 4);
+    }
+
+    #[test]
+    fn a_rescan_recounts_its_class_before_the_bank_lands() {
+        let held = [
+            (Location { bank: 0, slot: 1 }, "Africa Split"),
+            (Location { bank: 1, slot: 0 }, "Bright Grand"),
+        ];
+        let mut device = Puppet::stocked(&[("Bank 1", 4), ("Bank 2", 4)], &held);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::ScanBank {
+                class: ObjectClass::Program,
+                bank: 1,
+            },
+        );
+
+        assert!(flow == Flow::Continue);
+        let said: Vec<String> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::ClassStatus { status, banks, .. } => {
+                    Some(format!("count {} banks {banks:?}", status.count))
+                }
+                DeviceEvent::BankScanned { bank, .. } => Some(format!("bank {bank}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["count 2 banks None", "bank 1"]);
     }
 
     #[test]
