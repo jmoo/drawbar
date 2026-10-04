@@ -684,11 +684,8 @@ impl DrawbarApp {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !root.is_dir() {
-            self.log.trouble(format!(
-                "{} is not a folder drawbar can open as the library.",
-                root.display()
-            ));
+        if let Err(why) = crate::store::openable(&root, crate::store::default_root().as_deref()) {
+            self.log.trouble(why);
             return;
         }
         let unkept = self
