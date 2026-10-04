@@ -34,6 +34,7 @@ pub(super) const GROUPS: &[Group] = &[
             "glutin_wgl_sys 0.6.1",
             "owned_ttf_parser 0.25.1",
             "profiling 1.0.18",
+            "ring 0.17.14",
             "siphasher 1.0.3",
             "winapi-x86_64-pc-windows-gnu 0.4.0",
             "winit 0.30.13",
@@ -59,6 +60,12 @@ pub(super) const GROUPS: &[Group] = &[
         license: "BSD-3-Clause",
         text: include_str!("../../licenses/BSD-3-Clause.txt"),
         holders: &[
+            Holder {
+                notice: "Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved.\nCopyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved.",
+                crates: &[
+                    "subtle 2.6.1",
+                ],
+            },
             Holder {
                 notice: "Copyright (c) Radzivon Bartoshyk. All rights reserved.",
                 crates: &[
@@ -120,7 +127,71 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
             },
         ],
         unattributed: &[],
-        variants: &[],
+        variants: &[
+            Text {
+                crates: &[
+                    "ring 0.17.14",
+                ],
+                text: r#"Copyright 2015-2025 Brian Smith.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+"#,
+            },
+            Text {
+                crates: &[
+                    "rustls-webpki 0.103.15",
+                ],
+                text: r#"Except as otherwise noted, this project is licensed under the following
+(ISC-style) terms:
+
+Copyright 2015 Brian Smith.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+The files under third-party/chromium are licensed as described in
+third-party/chromium/LICENSE.
+"#,
+            },
+            Text {
+                crates: &[
+                    "untrusted 0.9.0",
+                ],
+                text: r#"// Copyright 2015-2016 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+"#,
+            },
+        ],
     },
     Group {
         license: "MIT",
@@ -163,6 +234,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 crates: &[
                     "cfg-if 1.0.4",
                     "js-sys 0.3.98",
+                    "openssl-probe 0.2.1",
                     "scoped-tls 1.0.1",
                     "wasm-bindgen 0.2.121",
                     "wasm-bindgen-futures 0.4.71",
@@ -260,6 +332,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2015 Steven Fackler",
+                crates: &[
+                    "security-framework 3.7.0",
+                    "security-framework-sys 2.17.0",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2015 The Rust Project Developers",
                 crates: &[
                     "unicode-segmentation 1.13.3",
@@ -285,6 +364,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2015 steffengy",
+                crates: &[
+                    "schannel 0.1.29",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2015-2018 The winapi-rs Developers",
                 crates: &[
                     "winapi 0.3.9",
@@ -300,6 +385,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 notice: "Copyright (c) 2015-2022 Amod Malviya",
                 crates: &[
                     "webbrowser 1.2.4",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2015-2025 Sean McArthur",
+                crates: &[
+                    "httparse 1.10.1",
                 ],
             },
             Holder {
@@ -329,6 +420,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 notice: "Copyright (c) 2016 Johann Tuffe",
                 crates: &[
                     "quick-xml 0.41.0",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>",
+                crates: &[
+                    "rustls 0.23.45",
+                    "rustls-native-certs 0.8.4",
                 ],
             },
             Holder {
@@ -408,6 +506,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2017 http-rs authors",
+                crates: &[
+                    "http 1.5.0",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2017 tokio-jsonrpc developers",
                 crates: &[
                     "signal-hook-registry 1.4.8",
@@ -423,6 +527,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 notice: "Copyright (c) 2017-2023 Maik Klein, Maja Kądziołka",
                 crates: &[
                     "enumflags2 0.7.12",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2018 Carl Lerche",
+                crates: &[
+                    "bytes 1.12.1",
                 ],
             },
             Holder {
@@ -491,9 +601,21 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2018-2024 The rust-random Project Developers\nCopyright (c) 2014 The Rust Project Developers",
+                crates: &[
+                    "getrandom 0.2.17",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2018-2025 The rust-random Project Developers\nCopyright (c) 2014 The Rust Project Developers",
                 crates: &[
                     "getrandom 0.3.4",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2018-2026 The RustCrypto Project Developers",
+                crates: &[
+                    "zeroize 1.9.0",
                 ],
             },
             Holder {
@@ -512,6 +634,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 notice: "Copyright (c) 2019 Kornel",
                 crates: &[
                     "rgb 0.8.53",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2019 Martin Algesten",
+                crates: &[
+                    "ureq 3.4.2",
                 ],
             },
             Holder {
@@ -633,6 +761,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>",
+                crates: &[
+                    "rustls-pki-types 1.15.1",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2023 Kirill Chibisov",
                 crates: &[
                     "calloop-wayland-source 0.3.0",
@@ -655,6 +789,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                     "zbus_names 4.3.4",
                     "zvariant 5.14.0",
                     "zvariant_derive 5.14.0",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2025 Alice Maz, Marshall Pierce",
+                crates: &[
+                    "base64 0.23.1",
                 ],
             },
             Holder {
@@ -793,6 +933,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
                 ],
             },
             Holder {
+                notice: "Copyright 2022 Martin Algesten",
+                crates: &[
+                    "ureq-proto 0.6.4",
+                ],
+            },
+            Holder {
                 notice: "Copyright 2023 The Fuchsia Authors",
                 crates: &[
                     "zerocopy 0.8.56",
@@ -849,6 +995,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
             "half 2.7.1",
             "home 0.5.12",
             "image 0.25.10",
+            "itoa 1.0.18",
             "linux-raw-sys 0.4.15",
             "linux-raw-sys 0.12.1",
             "nusb 0.1.14",
@@ -877,6 +1024,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
             "thiserror-impl 1.0.69",
             "thiserror-impl 2.0.20",
             "unicode-ident 1.0.24",
+            "utf8-zero 0.8.1",
             "winnow 1.0.4",
             "x11-dl 2.21.0",
             "zvariant_utils 4.0.0",
@@ -1094,6 +1242,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("atomic-waker", "1.1.2"),
     ("autocfg", "1.5.1"),
     ("base64", "0.22.1"),
+    ("base64", "0.23.1"),
     ("bit-set", "0.8.0"),
     ("bit-vec", "0.8.0"),
     ("bitflags", "1.3.2"),
@@ -1192,6 +1341,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("futures-task", "0.3.33"),
     ("futures-util", "0.3.33"),
     ("gethostname", "1.1.0"),
+    ("getrandom", "0.2.17"),
     ("getrandom", "0.3.4"),
     ("getrandom", "0.4.3"),
     ("gl_generator", "0.14.0"),
@@ -1210,6 +1360,8 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("hex", "0.4.3"),
     ("hexf-parse", "0.2.1"),
     ("home", "0.5.12"),
+    ("http", "1.5.0"),
+    ("httparse", "1.10.1"),
     ("icu_collections", "2.2.0"),
     ("icu_locale_core", "2.2.0"),
     ("icu_normalizer", "2.2.0"),
@@ -1301,6 +1453,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("objc2-user-notifications", "0.2.2"),
     ("once_cell", "1.21.4"),
     ("once_cell_polyfill", "1.70.2"),
+    ("openssl-probe", "0.2.1"),
     ("orbclient", "0.3.55"),
     ("ordered-stream", "0.2.0"),
     ("owned_ttf_parser", "0.25.1"),
@@ -1343,6 +1496,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("resvg", "0.45.1"),
     ("rfd", "0.15.4"),
     ("rgb", "0.8.53"),
+    ("ring", "0.17.14"),
     ("rodio", "0.22.2"),
     ("ron", "0.10.1"),
     ("roxmltree", "0.20.0"),
@@ -1351,10 +1505,17 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("rustc_version", "0.4.1"),
     ("rustix", "0.38.44"),
     ("rustix", "1.1.4"),
+    ("rustls", "0.23.45"),
+    ("rustls-native-certs", "0.8.4"),
+    ("rustls-pki-types", "1.15.1"),
+    ("rustls-webpki", "0.103.15"),
     ("rustversion", "1.0.23"),
     ("same-file", "1.0.6"),
+    ("schannel", "0.1.29"),
     ("scoped-tls", "1.0.1"),
     ("scopeguard", "1.2.0"),
+    ("security-framework", "3.7.0"),
+    ("security-framework-sys", "2.17.0"),
     ("semver", "1.0.28"),
     ("serde", "1.0.229"),
     ("serde_core", "1.0.229"),
@@ -1381,6 +1542,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("strsim", "0.11.1"),
     ("strum", "0.26.3"),
     ("strum_macros", "0.26.4"),
+    ("subtle", "2.6.1"),
     ("svgtypes", "0.15.3"),
     ("syn", "2.0.119"),
     ("syn", "3.0.3"),
@@ -1407,14 +1569,19 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("unicode-ident", "1.0.24"),
     ("unicode-segmentation", "1.13.3"),
     ("unicode-width", "0.2.2"),
+    ("untrusted", "0.9.0"),
+    ("ureq", "3.4.2"),
+    ("ureq-proto", "0.6.4"),
     ("url", "2.5.8"),
     ("urlencoding", "2.1.3"),
     ("usvg", "0.45.1"),
+    ("utf8-zero", "0.8.1"),
     ("utf8_iter", "1.0.4"),
     ("utf8parse", "0.2.2"),
     ("uuid", "1.24.0"),
     ("version_check", "0.9.5"),
     ("walkdir", "2.5.0"),
+    ("wasi", "0.11.1+wasi-snapshot-preview1"),
     ("wasip2", "1.0.4+wasi-0.2.12"),
     ("wasm-bindgen", "0.2.121"),
     ("wasm-bindgen-futures", "0.4.71"),
@@ -1508,6 +1675,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("zerocopy-derive", "0.8.56"),
     ("zerofrom", "0.1.8"),
     ("zerofrom-derive", "0.1.7"),
+    ("zeroize", "1.9.0"),
     ("zerotrie", "0.2.4"),
     ("zerovec", "0.11.6"),
     ("zerovec-derive", "0.11.3"),
