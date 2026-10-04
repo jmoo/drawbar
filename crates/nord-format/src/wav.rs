@@ -1,5 +1,7 @@
 //! A minimal RIFF/WAVE reader and writer, for moving audio in and out of the codec.
 
+use std::ops::Range;
+
 use crate::error::{Error, ParseError};
 
 /// Write mono 16-bit PCM at `rate` without resampling.
@@ -192,8 +194,40 @@ fn guid(stored: &[u8; 16]) -> String {
     )
 }
 
+/// Where a 16-bit PCM file keeps its samples, and how they are laid out, found without
+/// copying them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pcm16Layout {
+    pub rate: u32,
+    pub channels: u16,
+    /// The data chunk's body: frames interleaved by channel, each sample little-endian.
+    /// Every byte outside it belongs to the container.
+    pub data: Range<usize>,
+}
+
+impl Pcm16Layout {
+    /// Frames, whatever the channel count.
+    pub fn frames(&self) -> usize {
+        self.data.len() / (2 * usize::from(self.channels).max(1))
+    }
+}
+
 /// Read uncompressed 16-bit PCM, preserving its stored channel count and rate.
 pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
+    let layout = pcm16_layout(bytes)?;
+    let samples = bytes[layout.data]
+        .chunks_exact(2)
+        .map(|s| i16::from_le_bytes([s[0], s[1]]))
+        .collect();
+    Ok(Pcm16 {
+        rate: layout.rate,
+        channels: layout.channels,
+        samples,
+    })
+}
+
+/// Check a file as [`read_pcm16`] does, and say where its samples are.
+pub fn pcm16_layout(bytes: &[u8]) -> Result<Pcm16Layout, Error> {
     let u32_at =
         |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
 
@@ -291,14 +325,10 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
         .into());
     }
 
-    let samples = bytes[data]
-        .chunks_exact(2)
-        .map(|s| i16::from_le_bytes([s[0], s[1]]))
-        .collect();
-    Ok(Pcm16 {
+    Ok(Pcm16Layout {
         rate,
         channels,
-        samples,
+        data,
     })
 }
 
@@ -319,6 +349,26 @@ mod tests {
         let read = read_pcm16(&pcm16(&stereo, 35_002, 2).unwrap()).unwrap();
         assert_eq!((read.rate, read.channels, read.frames()), (35_002, 2, 2));
         assert_eq!(read.samples, stereo);
+    }
+
+    #[test]
+    fn the_layout_points_at_the_samples_past_any_chunk_before_them() {
+        let mut wav = pcm16(&[7i16, 8, -7, -8], 44_100, 2).unwrap();
+        let extra: Vec<u8> = b"LIST\x03\x00\x00\x00abc\x00".to_vec();
+        wav.splice(36..36, extra.iter().copied());
+        let size = u32::from_le_bytes(wav[4..8].try_into().unwrap()) + extra.len() as u32;
+        wav[4..8].copy_from_slice(&size.to_le_bytes());
+
+        let layout = pcm16_layout(&wav).unwrap();
+        assert_eq!(
+            (layout.rate, layout.channels, layout.frames()),
+            (44_100, 2, 2)
+        );
+        assert_eq!(layout.data, 44 + extra.len()..wav.len());
+        assert_eq!(
+            &wav[layout.data.start..layout.data.start + 2],
+            &7i16.to_le_bytes()
+        );
     }
 
     #[test]
