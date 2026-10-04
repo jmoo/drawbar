@@ -154,6 +154,8 @@ pub enum Staged<'a> {
     Bytes(&'a [u8]),
     /// A copy of a file outside the library, never held whole.
     Outside(&'a Outside),
+    /// A copy of the bytes `range` of a file outside the library, never held whole.
+    Part(&'a super::Part),
     /// A copy of the library's own file at this path, never held whole.
     Library(&'a str),
     /// The file an edit makes of a piano or sample instrument resting in the library,
@@ -1557,6 +1559,7 @@ async fn import(
     };
     let what = match from {
         Source::Outside(file) => Staged::Outside(file),
+        Source::Part(part) => Staged::Part(part),
         Source::Library(source, _) => Staged::Library(source.as_str()),
         Source::Edited(file, edit) => Staged::Edited(file, edit),
     };

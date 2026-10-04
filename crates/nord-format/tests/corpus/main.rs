@@ -203,12 +203,16 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     said_by_its_format(&entity).map_err(Failed::from)?;
     plays_what_its_registry_references(&entity).map_err(Failed::from)?;
 
-    // The archive layer does not re-encode, so for a bundle the check is the
-    // parse, which reads and verifies every member.
+    // An entity of the archive layer does not re-encode: an Electro 5 bundle's container
+    // writes back instead, and the parse reads and verifies every member of any other.
     #[cfg(feature = "bundle")]
     let is_bundle = matches!(entity, Entity::Bundle(_));
     #[cfg(not(feature = "bundle"))]
     let is_bundle = false;
+    #[cfg(feature = "bundle")]
+    if matches!(entity, Entity::Bundle(nord_format::Bundle::Electro5(_))) {
+        bundle_writes_back(&bytes).map_err(Failed::from)?;
+    }
     if !is_bundle {
         let back =
             nord_format::to_bytes(&entity).map_err(|e| Failed::from(format!("re-encode: {e}")))?;
@@ -255,6 +259,54 @@ fn specimen(path: &Path, mutate: bool) -> Result<(), Failed> {
     }
 
     oracle::check_specimen(path, &bytes, &entity).map_err(Failed::from)
+}
+
+/// A bundle's container writes back byte for byte from its directory and members, and
+/// its manifest writes back too and names only members the archive holds.
+#[cfg(feature = "bundle")]
+fn bundle_writes_back(bytes: &[u8]) -> Result<(), String> {
+    use nord_format::bundle::archive::{Directory, Writer};
+    use nord_format::bundle::manifest::{self, Manifest};
+    use std::io::Write;
+
+    let directory = Directory::read_from(&mut Cursor::new(bytes)).context("its directory")?;
+    let body = |range: &std::ops::Range<u64>| &bytes[range.start as usize..range.end as usize];
+    let mut writer = Writer::new(Vec::new());
+    for member in &directory.members {
+        writer
+            .begin(member.entry.clone())
+            .context(&member.entry.name)?;
+        writer
+            .write_all(body(&member.body))
+            .context(&member.entry.name)?;
+    }
+    let back = writer.finish(&directory.comment).context("the directory")?;
+    if let Some(at) = back.iter().zip(bytes).position(|(a, b)| a != b) {
+        return Err(format!("the archive writes back differing at byte {at}"));
+    }
+    ensure!(
+        back.len() == bytes.len(),
+        "the archive writes back {} bytes of {}",
+        back.len(),
+        bytes.len()
+    );
+
+    let meta = directory.get(manifest::PATH).ok_or("no meta.xml")?;
+    let text = body(&meta.body);
+    let parsed = Manifest::parse(text).context("meta.xml")?;
+    ensure!(
+        parsed.to_bytes() == text,
+        "meta.xml writes back differently"
+    );
+    for file in &parsed.files {
+        for name in std::iter::once(&file.name).chain(&file.deps) {
+            ensure!(
+                directory.get(name).is_some(),
+                "meta.xml names {name}, which it does not hold"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Out-of-table values the corpus is known to hold, exempted by field and

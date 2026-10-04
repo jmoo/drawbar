@@ -100,6 +100,22 @@ pub enum DeviceCmd {
         at: Location,
         why: Purpose,
     },
+    /// Copy every one of `slots` to this computer inside a single session. An object too
+    /// large to hold streams to a file, reported as [`DeviceEvent::Fetched`]; the rest
+    /// come back as [`DeviceEvent::Got`]. A failure stops the batch there.
+    CopyAll {
+        class: ObjectClass,
+        slots: Vec<Location>,
+    },
+    /// Walk set lists and programs to everything a bundle of them holds, list each one's
+    /// dependencies, report those slots and `also` in [`DeviceEvent::Gathered`], and copy
+    /// each once to this computer, one session per class.
+    Gather {
+        roots: Vec<(ObjectClass, Location)>,
+        also: Vec<(ObjectClass, Location)>,
+        /// Which export this is for, echoed in [`DeviceEvent::Gathered`].
+        request: u64,
+    },
     Put {
         /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
         /// raises names it, so a lone put settles the queue as a batch does.
@@ -244,6 +260,12 @@ impl DeviceCmd {
                 Purpose::Compare => format!("get {} (to compare)", shown(*at)),
                 Purpose::Copy | Purpose::View => format!("get {}", shown(*at)),
             },
+            DeviceCmd::CopyAll { class, slots } => {
+                format!("get {} objects <- {}", slots.len(), class.label())
+            }
+            DeviceCmd::Gather { roots, also, .. } => {
+                format!("gather a bundle of {} objects", roots.len() + also.len())
+            }
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
                 format!("put {} objects -> {}", items.len(), class.label())
@@ -279,6 +301,15 @@ impl DeviceCmd {
             DeviceCmd::Rename { class, .. } => ("rename", class, true),
             DeviceCmd::Select { class, .. } => ("select", class, false),
             DeviceCmd::Reload { class, .. } => ("reload", class, false),
+            DeviceCmd::CopyAll { class, .. } => ("copy-all", class, true),
+            // A bundle's closure crosses classes, so the row names none.
+            DeviceCmd::Gather { .. } => {
+                return Some(crate::telemetry::Op {
+                    name: "gather",
+                    class: None,
+                    asked: true,
+                })
+            }
             DeviceCmd::Disconnect => return None,
         };
         Some(crate::telemetry::Op {
@@ -308,6 +339,21 @@ impl DeviceCmd {
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
+            DeviceCmd::Gather { roots, also, .. } => words(
+                COPYING,
+                format!(
+                    "{} and what they play to this computer",
+                    counted(roots.len() + also.len(), "sound", "sounds")
+                ),
+            ),
+            DeviceCmd::CopyAll { class, slots } => words(
+                COPYING,
+                format!(
+                    "{} from {} to this computer",
+                    counted(slots.len(), "sound", "sounds"),
+                    folder(*class)
+                ),
+            ),
             DeviceCmd::Put {
                 class, at, name, ..
             } => words(
@@ -351,6 +397,20 @@ impl DeviceCmd {
             ),
         }
     }
+}
+
+/// An object read off the instrument into a file of drawbar's own, to be copied into the
+/// library, after which the file goes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fetched {
+    pub class: ObjectClass,
+    pub at: Location,
+    /// The name its slot reports.
+    pub name: String,
+    /// Its format's tag, which names its file's extension.
+    pub tag: String,
+    pub file: crate::store::Outside,
+    pub len: u64,
 }
 
 /// What the worker reports back.
@@ -408,6 +468,15 @@ pub enum DeviceEvent {
         origin: Origin,
         bytes: Vec<u8>,
         why: Purpose,
+    },
+    /// An object of a [`DeviceCmd::CopyAll`] too large to hold, read into a file.
+    Fetched(Fetched),
+    /// The slots a [`DeviceCmd::Gather`] found and is copying, and each piano or sample
+    /// it needed and found in no one slot.
+    Gathered {
+        request: u64,
+        slots: Vec<(ObjectClass, Location)>,
+        unfound: Vec<String>,
     },
     /// A read found the slot empty. This is the instrument's answer, not a fault, and it
     /// settles a slot no walk has reached.
@@ -528,6 +597,9 @@ pub struct DeviceState {
     /// ⚠️ An id names an object only in the library as it is now, so this is cleared when
     /// the instrument reports a change or disconnects.
     named: HashMap<(u32, u32), String>,
+    /// What each set list or program the instrument has listed dependencies for needs,
+    /// by class and slot. Cleared with [`DeviceState::named`].
+    needs: HashMap<(u32, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
 }
 
@@ -601,7 +673,19 @@ impl DeviceState {
                     .insert((dep.class.to_raw(), dep.id), name.to_string());
             }
         }
+        let key = (class.to_raw(), at.bank, at.slot);
+        self.needs.insert(key, nord_usb::bundle::needs(&deps));
         self.detail.deps = Some(deps);
+    }
+
+    /// What the set list or program in a slot needs, as the instrument last listed it.
+    pub fn needs_of(
+        &self,
+        class: ObjectClass,
+        at: Location,
+    ) -> Option<&[nord_format::bundle::Key]> {
+        let key = (class.to_raw(), at.bank, at.slot);
+        self.needs.get(&key).map(Vec::as_slice)
     }
 
     /// What the instrument called a library object, by class and id.
@@ -611,6 +695,18 @@ impl DeviceState {
     /// name.
     pub fn dependency_name(&self, class: ObjectClass, id: u32) -> Option<&str> {
         self.named.get(&(class.to_raw(), id)).map(String::as_str)
+    }
+
+    /// The id the instrument has given a library object of this name, where it has named
+    /// exactly one so.
+    pub fn library_id(&self, class: ObjectClass, name: &str) -> Option<u32> {
+        let mut ids = self
+            .named
+            .iter()
+            .filter(|((held, _), named)| *held == class.to_raw() && named.trim() == name)
+            .map(|((_, id), _)| *id);
+        let id = ids.next()?;
+        ids.next().is_none().then_some(id)
     }
 
     /// A scanned bank's slots, or `None` if it has not been scanned.
@@ -761,6 +857,7 @@ impl DeviceState {
         self.partitions.clear();
         self.inventory.clear();
         self.named.clear();
+        self.needs.clear();
         self.detail = Detail::default();
         self.scan.clear();
     }
@@ -1092,6 +1189,13 @@ pub struct Device {
     /// The list revision every link was last derived from. A link depends on both sides,
     /// so it is recomputed when either changes, and not every frame.
     linked: u64,
+    /// Objects read into files, waiting to be copied into the library.
+    fetched: Vec<Fetched>,
+    /// The slots the last [`DeviceCmd::Gather`] found, until taken.
+    gathered: Option<(u64, Vec<(ObjectClass, Location)>)>,
+    /// Whether a command failed, a copied slot was empty, or the instrument went, since
+    /// the last [`Device::take_failed`].
+    failed: bool,
     /// Counts what the instrument has reported and the links that moved since.
     revision: u64,
 }
@@ -1125,6 +1229,9 @@ impl Device {
             running: None,
             asked_deps: None,
             linked: 0,
+            fetched: Vec::new(),
+            gathered: None,
+            failed: false,
             revision: 0,
         }
     }
@@ -1194,6 +1301,21 @@ impl Device {
             return;
         }
         self.pending.push_back(cmd);
+    }
+
+    /// Whether anything failed since the last call, once.
+    pub fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+
+    /// The slots the last gather found, with its request, once.
+    pub fn take_gathered(&mut self) -> Option<(u64, Vec<(ObjectClass, Location)>)> {
+        self.gathered.take()
+    }
+
+    /// The objects read into files since the last call, to be copied into the library.
+    pub fn take_fetched(&mut self) -> Vec<Fetched> {
+        std::mem::take(&mut self.fetched)
     }
 
     /// Ask what a slot depends on, unless it is the slot last asked about.
@@ -1384,6 +1506,7 @@ impl Device {
                     format: "ne5p".into(),
                     version: 4,
                     crc32: None,
+                    modified: None,
                     name: (*name).to_string(),
                 })
             })
@@ -1423,6 +1546,7 @@ impl Device {
                     format: "ne5p".into(),
                     version: 4,
                     crc32: Some(crc),
+                    modified: None,
                     name: name.to_string(),
                 })
             })
@@ -1450,6 +1574,7 @@ impl Device {
                     format: "npno".into(),
                     version: 540,
                     crc32: None,
+                    modified: None,
                     name: name.to_string(),
                 })
             })
@@ -1579,6 +1704,7 @@ impl Device {
                         crate::telemetry::fault("usb", "lost");
                     }
                     crate::telemetry::attached(None);
+                    self.failed = true;
                     match lost {
                         true => log.trouble("The instrument went away. Reconnect when it's back."),
                         false => log.say("The instrument was released."),
@@ -1668,11 +1794,25 @@ impl Device {
                         }
                     }
                 },
+                DeviceEvent::Fetched(fetched) => self.fetched.push(fetched),
+                DeviceEvent::Gathered {
+                    request,
+                    slots,
+                    unfound,
+                } => {
+                    for what in unfound {
+                        log.trouble(format!(
+                            "The bundle leaves out the {what}: no one slot holds it."
+                        ));
+                    }
+                    self.gathered = Some((request, slots));
+                }
                 // An empty slot is a failure to a user who asked to copy or open it, and
                 // an answer to the queue: nothing is being replaced.
                 DeviceEvent::Vacant { class, at, why } => match why {
                     Purpose::Compare => queue.vacant(class, at),
                     Purpose::Copy | Purpose::View => {
+                        self.failed = true;
                         log.error(format!("{} holds nothing to read", shown(at)));
                         log.trouble(format!("{} is empty.", place(class, at)));
                     }
@@ -1731,6 +1871,7 @@ impl Device {
                 // A refused write left its slot as it was, or empty after a rescue, so
                 // the panel has nothing new to play there.
                 DeviceEvent::OpFailed(text) => {
+                    self.failed = true;
                     if let Some(running) = self.running.as_mut() {
                         running.reload = None;
                         if let Some(slot) = running.deps.take() {
@@ -1755,6 +1896,7 @@ impl Device {
                 DeviceEvent::InstrumentChanged => {
                     log.warn("the instrument changed; every cached name is dropped");
                     self.state.named.clear();
+                    self.state.needs.clear();
                     self.asked_deps = None;
                     log.say("Something changed on the instrument. Reading it again…");
                     self.resync();
@@ -2558,6 +2700,7 @@ mod tests {
                 format: "ne5p".into(),
                 version: 4,
                 crc32: Some(crc),
+                modified: None,
                 name: "Africa Split".into(),
             })],
         });
@@ -2629,6 +2772,7 @@ mod tests {
                             format: "ne5p".into(),
                             version: 4,
                             crc32,
+                            modified: None,
                             name: "Africa Split".into(),
                         }),
                     ],

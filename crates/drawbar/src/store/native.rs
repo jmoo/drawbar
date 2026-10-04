@@ -2,7 +2,7 @@
 //! of their own.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -515,6 +515,27 @@ impl Fs for Disk {
             Staged::Bytes(bytes) => self.staged(path, |file| file.write_all(bytes)),
             Staged::Outside(from) => self.staged(path, |file| {
                 io::copy(&mut File::open(from)?, file).map(|_| ())
+            }),
+            Staged::Part(part) => self.staged(path, |file| {
+                let mut source = File::open(&part.from)?;
+                source.seek(io::SeekFrom::Start(part.bytes.start))?;
+                let len = part.bytes.end - part.bytes.start;
+                let mut source = source.take(len);
+                let mut crc = nord_format::crc::Crc32Stream::new();
+                let (mut copied, mut buf) = (0, vec![0; 1 << 16]);
+                loop {
+                    let n = source.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    crc.update(&buf[..n]);
+                    file.write_all(&buf[..n])?;
+                    copied += n as u64;
+                }
+                match (copied, crc.value()) == (len, part.crc32) {
+                    true => Ok(()),
+                    false => Err(part.mismatch()),
+                }
             }),
             Staged::Library(from) => {
                 let mut source = File::open(self.locate(from)?)?;

@@ -15,7 +15,14 @@ verified, and every recorded request is byte-identical to its macOS counterpart.
 The WebUSB backend is verified for reads and writes from Chrome. Windows passes
 the replay tests but has not been run against an instrument.
 
-Not implemented: backup bundles, firmware updates, and relink.
+A bundle is read with these primitives alone (`nord_usb::bundle`): a set list's
+dependency rows name its programs by slot, a program's name its pianos and
+samples, and each of those is found by name, since an object's info does not
+carry the id programs know it by. A piano's or sample's info does carry when it
+was last changed.
+
+Not implemented: writing a bundle to the instrument, firmware updates, and
+relink.
 
 ## The wire
 

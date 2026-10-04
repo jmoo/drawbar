@@ -1253,6 +1253,25 @@ pub struct Saved {
     pub unsaved: Option<Vec<u8>>,
 }
 
+/// Assets to write as one bundle once slots have been copied in, as assets numbered from
+/// `after`.
+struct Bundling {
+    ids: Vec<u64>,
+    /// The slots the gather copies, once it has said.
+    slots: Option<Vec<(ObjectClass, Location)>>,
+    after: u64,
+}
+
+/// A bundle whose directory has been read, to be unpacked into a new folder in `dir`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unbundled {
+    pub from: Outside,
+    pub dir: LibPath,
+    /// The bundle's file name.
+    pub name: String,
+    pub members: Result<Vec<crate::bundle::Member>, String>,
+}
+
 /// What a background task hands back to the UI thread.
 enum Incoming {
     Opened {
@@ -1261,6 +1280,9 @@ enum Incoming {
     },
     /// A file File ▸ Open… picked, to be copied into the library.
     Picked(Outside),
+    /// A bundle to unpack into a new folder in `dir`, and what its directory says it
+    /// holds.
+    Unbundled(Unbundled),
     /// Every file one pick of WAVs returned, together, because the draft asks one
     /// question about the whole set.
     Wavs {
@@ -1321,11 +1343,17 @@ pub struct Workspace {
     /// Assets whose file is being copied in, each with what it is a copy of. Each is
     /// unread until its copy lands.
     arriving: std::collections::BTreeMap<u64, CopyOf>,
+    /// A bundle waiting on slots being copied to this computer.
+    bundling: Option<Bundling>,
+    /// The files of drawbar's own an arriving asset is copied from, deleted once it has
+    /// landed.
+    fetched: std::collections::BTreeMap<u64, Outside>,
     /// The asset each arriving copy moves over the file of another comes from, by the
     /// asset it lands on. It goes only once its copy has landed.
     moving_over: std::collections::BTreeMap<u64, u64>,
     /// The files File ▸ Open… picked, not yet taken.
     picked: Vec<Outside>,
+    unbundled: Vec<Unbundled>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
     /// asked for first.
     undecoded: VecDeque<u64>,
@@ -1435,8 +1463,11 @@ impl Workspace {
             checks: VecDeque::new(),
             checking: None,
             arriving: Default::default(),
+            fetched: Default::default(),
+            bundling: None,
             moving_over: Default::default(),
             picked: Vec::new(),
+            unbundled: Vec::new(),
             undecoded: VecDeque::new(),
             hurried: Default::default(),
             wanted: Default::default(),
@@ -2426,6 +2457,29 @@ impl Workspace {
         id
     }
 
+    /// [`Workspace::arrive`] from a file the instrument was read into, which is deleted
+    /// once the copy has landed.
+    pub fn arrive_fetched(&mut self, path: LibPath, origin: Origin, from: Outside, len: u64) {
+        let id = self.arrive(path, origin, CopyOf::Outside(from.clone()), len);
+        self.fetched.insert(id, from);
+    }
+
+    /// The copy of `id` did not land: say whether it was of a file the instrument was read
+    /// into, which then waits for the sweep of `.drawbar/tmp/` at the next open.
+    pub fn fetched_copy_failed(&mut self, id: u64) -> bool {
+        self.fetched.remove(&id).is_some()
+    }
+
+    /// The copy of `id` landed: delete the file it was fetched into, where it was. In the
+    /// browser the file waits for the sweep of `.drawbar/tmp/` at the next open.
+    pub fn landed_copy(&mut self, id: u64) {
+        let Some(_file) = self.fetched.remove(&id) else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = std::fs::remove_file(_file);
+    }
+
     /// Copy `from`, about `len` bytes, over the file of the asset `id`, which is unread
     /// until the copy lands. Its tags and its place stay.
     pub fn arrive_over(&mut self, id: u64, from: CopyOf, len: u64) {
@@ -2502,6 +2556,88 @@ impl Workspace {
         });
     }
 
+    /// Read the directory of the bundle at `from`, to be unpacked into a new folder in
+    /// `dir` once it answers; see [`Workspace::take_unbundled`].
+    pub fn unbundle(&self, from: Outside, dir: LibPath, name: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        spawn(async move {
+            let members = crate::bundle::members(&from)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Incoming::Unbundled(Unbundled {
+                from,
+                dir,
+                name,
+                members,
+            }));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Write `export` wherever the user picks, each member streamed from where it is.
+    pub fn export_bundle(&self, export: crate::bundle::Export) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let name = export.name.clone();
+        spawn(async move {
+            let _ = tx.send(match crate::bundle::write(export).await {
+                Ok(note) => Incoming::Note(note),
+                Err(e) => Incoming::Failed(format!("{name}: {e}")),
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Write `ids` as a bundle once every slot the gather sent with it reports has been
+    /// copied to this computer: see [`Workspace::bundle_ready`]. A later request replaces
+    /// this one.
+    /// Returns the request the gather carries, which [`Workspace::bundle_gathered`]
+    /// matches.
+    pub fn bundle_after(&mut self, ids: Vec<u64>) -> u64 {
+        let after = self.next_id;
+        self.bundling = Some(Bundling {
+            ids,
+            slots: None,
+            after,
+        });
+        after
+    }
+
+    /// The slots a gather found, which the waiting bundle waits on if the gather was its
+    /// own.
+    pub fn bundle_gathered(&mut self, request: u64, slots: Vec<(ObjectClass, Location)>) {
+        let own = |w: &&mut Bundling| w.after == request && w.slots.is_none();
+        if let Some(waiting) = self.bundling.as_mut().filter(own) {
+            waiting.slots = Some(slots);
+        }
+    }
+
+    /// Stop waiting to write a bundle, and say whether one was waiting.
+    pub fn give_up_bundle(&mut self) -> bool {
+        self.bundling.take().is_some()
+    }
+
+    /// The assets to write as the bundle [`Workspace::bundle_after`] waits on, once every
+    /// slot it waits on has become an asset on this computer.
+    pub fn bundle_ready(&mut self) -> Option<Vec<u64>> {
+        let waiting = self.bundling.as_ref()?;
+        let mut ids = waiting.ids.clone();
+        for &(class, at) in waiting.slots.as_ref()? {
+            let copied = self.entities.iter().find(|e| {
+                e.id >= waiting.after
+                    && e.origin.slot() == Some((class, at))
+                    && !self.arriving.contains_key(&e.id)
+            })?;
+            ids.push(copied.id);
+        }
+        self.bundling = None;
+        Some(ids)
+    }
+
+    /// The bundles whose directories have been read since the last call.
+    pub fn take_unbundled(&mut self) -> Vec<Unbundled> {
+        std::mem::take(&mut self.unbundled)
+    }
+
     /// Read the file outside the library at `from` whole, and open it as a file kept
     /// nowhere yet, as a library that cannot take a copy of it holds it.
     pub fn read_outside(&self, name: String, from: Outside) {
@@ -2563,6 +2699,7 @@ impl Workspace {
             match message {
                 Incoming::Opened { name, bytes } => opened.push((name, bytes)),
                 Incoming::Picked(from) => self.picked.push(from),
+                Incoming::Unbundled(read) => self.unbundled.push(read),
                 Incoming::Wavs { making, files } => self.draft = Draft::plan(making, files),
                 Incoming::Demos(files) => self.demos = Some(files),
                 Incoming::Note(text) => log.say(text),
@@ -3457,7 +3594,7 @@ fn download(name: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
 
 /// Hand `blob` to the downloader under `name`.
 #[cfg(target_arch = "wasm32")]
-fn hand_over(name: &str, blob: &web_sys::Blob) -> Result<(), wasm_bindgen::JsValue> {
+pub(crate) fn hand_over(name: &str, blob: &web_sys::Blob) -> Result<(), wasm_bindgen::JsValue> {
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen::JsValue;
 

@@ -10,7 +10,7 @@ use nord_format::formats::npno::encode::{self as piano, Donor, Kind, Recording, 
 use nord_format::formats::npno::Bank;
 use nord_format::formats::nsmp::codec::Layout;
 use nord_format::formats::nsmp::encode as sample;
-use nord_format::formats::{cn3, midi, sysex};
+use nord_format::formats::{cn3, midi, ne5, sysex};
 use nord_format::Entity;
 use std::fs;
 use std::io::{Cursor, Write};
@@ -85,6 +85,57 @@ fn archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+/// A default Electro 5 program in a slot the song fixture plays.
+fn program_at(bank: u16, slot: u16) -> Vec<u8> {
+    let file = ne5::program::new((bank, slot).try_into().unwrap());
+    nord_format::to_bytes(&Entity::Program(nord_format::Program::Electro5(file))).unwrap()
+}
+
+/// An Electro 5 bundle of `(name, file)` members as this crate lays one out and writes
+/// it, with a fixed timestamp so the bytes depend only on the members.
+fn bundle(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    use nord_format::bundle::archive::{DosTime, Entry, Writer};
+    use nord_format::bundle::{manifest, Item, Plan};
+
+    let mut files = Vec::new();
+    for (name, bytes) in members {
+        let header = nord_format::cbin::inspect(&mut Cursor::new(bytes))
+            .unwrap()
+            .header;
+        let entity = nord_format::from_stream(&mut Cursor::new(bytes)).unwrap();
+        files.push((
+            Item::of(&header, name, Some(&entity)).unwrap(),
+            bytes.as_slice(),
+        ));
+    }
+    let plan = Plan::new(files.iter().map(|(item, _)| item.clone()).collect(), 204).unwrap();
+    let modified = DosTime::new(2026, 1, 1, 0, 0, 0).unwrap();
+    let entry = |path: &str, bytes: &[u8]| {
+        let size = u32::try_from(bytes.len()).unwrap();
+        Entry::new(
+            path.to_string(),
+            size,
+            nord_format::crc::crc32(bytes),
+            modified,
+        )
+    };
+    let manifest = plan.manifest.to_bytes();
+    let mut writer = Writer::new(Vec::new());
+    for item in &plan.members {
+        let (_, bytes) = files
+            .iter()
+            .find(|(file, _)| file.path == item.path)
+            .unwrap();
+        writer
+            .member(entry(&item.path, bytes), &mut &bytes[..])
+            .unwrap();
+    }
+    writer
+        .member(entry(manifest::PATH, &manifest), &mut &manifest[..])
+        .unwrap();
+    writer.finish(&[]).unwrap()
+}
+
 fn carried(
     write_to: impl FnOnce(&mut Vec<u8>) -> Result<(), nord_format::error::Error>,
 ) -> Vec<u8> {
@@ -122,12 +173,12 @@ fn write_encoded_and_carried_fixtures() {
     write("npno/tone.npno", &piano_bytes());
 
     write(
-        "zip/electro5-bundle.zip",
-        &archive(&[
-            ("Bank A/default.ne5p", read("ne5/default.ne5p")),
-            ("song.ne5t", read("ne5/song.ne5t")),
-            ("tone.nsmp", sample_bytes(Layout::V2)),
-            ("tone.npno", piano_bytes()),
+        "zip/electro5.ne5tbundle",
+        &bundle(&[
+            ("First", program_at(0, 1)),
+            ("song", read("ne5/song.ne5t")),
+            ("Tone", sample_bytes(Layout::V2)),
+            ("Tone", piano_bytes()),
         ]),
     );
     write(

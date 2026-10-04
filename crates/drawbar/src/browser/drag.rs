@@ -41,8 +41,6 @@ pub enum Kind {
     SampleLibrary,
     /// A C2 pipe-organ library.
     PipeLibrary,
-    /// An archive of objects: a bundle, a backup, or a Drum-family bank.
-    Bundle,
     /// A Nord Sample Editor project (`.nsmpproj`): a text file that generates a sample.
     /// No instrument has a folder for it.
     Project,
@@ -67,7 +65,7 @@ const HOMES: [(Kind, ObjectClass); 6] = [
 
 impl Kind {
     /// Every kind, in the order any list of kinds uses.
-    pub const ALL: [Kind; 17] = [
+    pub const ALL: [Kind; 16] = [
         Kind::Program,
         Kind::SetList,
         Kind::Sample,
@@ -81,7 +79,6 @@ impl Kind {
         Kind::LeadBank,
         Kind::SampleLibrary,
         Kind::PipeLibrary,
-        Kind::Bundle,
         Kind::Project,
         Kind::Text,
         Kind::Other,
@@ -133,7 +130,9 @@ impl Kind {
             EntityKind::Midi | EntityKind::Sysex => Kind::LeadBank,
             EntityKind::Cne3 => Kind::SampleLibrary,
             EntityKind::PipeLibrary => Kind::PipeLibrary,
-            EntityKind::Bundle => Kind::Bundle,
+            // A bundle is unpacked as it arrives, so one in the library is a file it
+            // does not open.
+            EntityKind::Bundle => Kind::Other,
             EntityKind::SampleProject => Kind::Project,
         }
     }
@@ -175,7 +174,6 @@ impl Kind {
             Kind::LeadBank => "lead bank",
             Kind::SampleLibrary => "sample library",
             Kind::PipeLibrary => "pipe library",
-            Kind::Bundle => "bundle",
             Kind::Project => "project",
             Kind::Text => "note",
             Kind::Other => "file",
@@ -194,7 +192,6 @@ impl Kind {
                 Kind::LeadBank => "Lead banks",
                 Kind::SampleLibrary => "Sample libraries",
                 Kind::PipeLibrary => "Pipe organ libraries",
-                Kind::Bundle => "Bundles",
                 Kind::Project => "Sample Editor projects",
                 Kind::Text => "Notes",
                 _ => "Other",
@@ -218,7 +215,6 @@ impl Kind {
             Kind::LeadBank => Glyph::Save,
             Kind::SampleLibrary => Glyph::LibraryBig,
             Kind::PipeLibrary => Glyph::SlidersVertical,
-            Kind::Bundle => Glyph::Folder,
             Kind::Project => Glyph::FolderGit2,
             Kind::Text => Glyph::FileText,
             Kind::Other => Glyph::HardDrive,
