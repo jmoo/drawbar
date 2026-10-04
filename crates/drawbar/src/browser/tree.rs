@@ -2116,9 +2116,7 @@ mod tests {
             name: "Grand.ne5p".into(),
             path: Some(LibPath::root().join("Grand.ne5p")),
             origin: crate::workspace::Origin::Fresh,
-            saved: Vec::new(),
-            file: None,
-            unread: Some(1),
+            content: crate::workspace::Content::unread(1),
             unsaved: None,
         };
         workspace.restore(vec![saved], None, &mut log);
@@ -2232,9 +2230,7 @@ mod tests {
                 name: format!("Sound {id:04}.ne5p"),
                 path: Some(LibPath::root().join(&format!("Sound {id:04}.ne5p"))),
                 origin: crate::workspace::Origin::Fresh,
-                saved: Vec::new(),
-                file: None,
-                unread: Some(1),
+                content: crate::workspace::Content::unread(1),
                 unsaved: None,
             })
             .collect();
@@ -2254,9 +2250,7 @@ mod tests {
             name: "Grand.ne5p".into(),
             path: Some(LibPath::root().join("Grand.ne5p")),
             origin: crate::workspace::Origin::Fresh,
-            saved: Vec::new(),
-            file: None,
-            unread: Some(1),
+            content: crate::workspace::Content::unread(1),
             unsaved: None,
         };
         bench.workspace.restore(vec![saved], None, &mut bench.log);
@@ -2542,9 +2536,7 @@ mod tests {
             name: "Grand.ns4p".into(),
             path: Some(crate::store::LibPath::root().join("Grand.ns4p")),
             origin: crate::workspace::Origin::Fresh,
-            saved: Vec::new(),
-            file: None,
-            unread: Some(1),
+            content: crate::workspace::Content::unread(1),
             unsaved: None,
         };
         workspace.restore(vec![saved], None, &mut log);

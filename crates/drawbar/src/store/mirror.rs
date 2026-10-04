@@ -23,7 +23,7 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::rewrite::Edit;
 use crate::summary::Summary;
-use crate::workspace::{precious, Leaving, LocalEntity, Origin, Saved, Workspace};
+use crate::workspace::{precious, Content, Leaving, LocalEntity, Origin, Saved, Workspace};
 
 /// How far opening has got.
 enum Phase {
@@ -1479,11 +1479,9 @@ impl Store {
         let saved = Saved {
             id,
             name: found.path.leaf().to_string(),
-            unread: (!found.read()).then_some(found.stat.len),
+            content: Content::found(found.bytes, found.file, found.stat.len),
             path: Some(found.path),
             origin: row.origin(),
-            saved: found.bytes.unwrap_or_default(),
-            file: found.file,
             unsaved: mine,
         };
         Some((saved, edit, conflicted))
@@ -3198,10 +3196,8 @@ fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Saved
         id,
         name: found.path.leaf().to_string(),
         origin: Origin::File(found.path.leaf().to_string()),
-        unread: (!found.read()).then_some(found.stat.len),
+        content: Content::found(found.bytes, found.file, found.stat.len),
         path: Some(found.path),
-        saved: found.bytes.unwrap_or_default(),
-        file: found.file,
         unsaved: None,
     }
 }
@@ -3218,9 +3214,7 @@ fn saved_from(id: u64, row: &Row, bytes: Vec<u8>) -> Saved {
         name,
         path: row.path.clone(),
         origin: row.origin(),
-        saved: bytes,
-        file: None,
-        unread: None,
+        content: Content::whole(bytes),
         unsaved: None,
     }
 }

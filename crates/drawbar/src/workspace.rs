@@ -289,28 +289,122 @@ impl std::fmt::Debug for Bytes {
     }
 }
 
-/// What an asset was last saved as: the bytes, and the checksum a slot holding them
-/// would report.
+/// What an asset was last saved as, and the stamp of those bytes.
 ///
-/// ⚠️ The checksum is computed when the baseline moves and never per frame. Computing one
+/// ⚠️ The slot checksum is taken when the baseline moves and never per frame. Taking one
 /// streams the whole body, and every listed row asks for it while the library is shown.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Baseline {
-    bytes: Bytes,
-    crc32: Option<u32>,
+    content: Content,
     stamp: u64,
-    file: Option<Arc<OnDisk>>,
-    bytes_crc: Option<u32>,
-    unread: Option<u64>,
-    /// Whether the check of `file`'s stored checksum has answered.
-    checked: bool,
+}
+
+/// What the library, or the slot, holds of an asset as it was last saved.
+#[derive(Clone)]
+pub enum Content {
+    /// A file nothing has read this session, `len` bytes long, as its listing gave it.
+    /// `failed` is why the last read of it failed.
+    ///
+    /// ⚠️ `slot_crc` is a slot checksum a former read or summary left behind, which
+    /// nothing vouches for any longer. It still matches the asset to a slot.
+    Unread {
+        len: u64,
+        failed: Option<String>,
+        slot_crc: Option<u32>,
+    },
+    /// A file nothing has read this session, `len` bytes long, and what a read of it
+    /// found before, which it draws as until something needs its bytes.
+    Remembered { len: u64, summary: Box<Summary> },
+    /// Held whole in memory.
+    Resident { bytes: Bytes, facts: Facts },
+    /// Left in its file and read by range, never held. `check` is how far the check of
+    /// the file's stored checksum has got.
+    Resting { file: Arc<OnDisk>, check: Check },
+}
+
+/// What is known of bytes held whole, each taken once.
+#[derive(Clone, Copy, Default)]
+pub struct Facts {
+    /// CRC-32 over all the bytes, where it was taken as they arrived.
+    whole_crc: Option<u32>,
+    /// The checksum a slot holding them reports, where it has been taken.
+    ///
+    /// ⚠️ `Baseline::read` takes it from the header at once. A baseline that is the
+    /// asset's own bytes, still to be decoded, has none until `decoded()` takes it from
+    /// the decode.
+    slot_crc: Option<u32>,
+}
+
+/// How far the check of a resting file's stored checksum has got.
+#[derive(Clone)]
+pub enum Check {
+    /// Not answered yet. `reported` is the checksum a slot that a send of the file just
+    /// landed in reports, which stands until the check answers.
+    Checking { reported: Option<u32> },
+    /// The stored checksum matches the body.
+    Checked(Container),
+    /// The check found the file unsound, or could not read it, and why.
+    Failed(String),
+}
+
+impl Content {
+    /// Bytes a store holds whole, not yet inspected.
+    pub fn whole(bytes: Vec<u8>) -> Content {
+        Content::Resident {
+            bytes: bytes.into(),
+            facts: Facts::default(),
+        }
+    }
+
+    /// A listed file nothing has read, `len` bytes long.
+    pub fn unread(len: u64) -> Content {
+        Content::Unread {
+            len,
+            failed: None,
+            slot_crc: None,
+        }
+    }
+
+    /// A file left on disk, its checksum still to be checked.
+    pub fn resting(file: Arc<OnDisk>) -> Content {
+        Content::Resting {
+            file,
+            check: Check::Checking { reported: None },
+        }
+    }
+
+    /// What a listing found of a file `len` bytes long: the file left on disk where the
+    /// store indexed it, its bytes where it read them, or nothing read. Given both, the
+    /// file is taken and the bytes dropped.
+    pub fn found(bytes: Option<Vec<u8>>, file: Option<Arc<OnDisk>>, len: u64) -> Content {
+        match (file, bytes) {
+            (Some(file), _) => Content::resting(file),
+            (None, Some(bytes)) => Content::whole(bytes),
+            (None, None) => Content::unread(len),
+        }
+    }
+}
+
+/// The bytes a baseline holds when it holds none in memory.
+fn no_bytes() -> &'static Bytes {
+    static NONE: std::sync::OnceLock<Bytes> = std::sync::OnceLock::new();
+    NONE.get_or_init(Bytes::default)
 }
 
 impl Baseline {
-    /// The bytes, while they are held whole. Empty while [`Baseline::file`] holds them, or
-    /// while nothing has read the file that does.
+    fn new(content: Content, stamp: u64) -> Baseline {
+        Baseline { content, stamp }
+    }
+
+    /// The bytes, while they are held whole. Empty while a file holds them, or while
+    /// nothing has read the file that does.
     pub fn bytes(&self) -> &Bytes {
-        &self.bytes
+        match &self.content {
+            Content::Resident { bytes, .. } => bytes,
+            Content::Unread { .. } | Content::Remembered { .. } | Content::Resting { .. } => {
+                no_bytes()
+            }
+        }
     }
 
     /// The checksum a slot holding these bytes would report. [`crate::device::link`] and
@@ -319,7 +413,16 @@ impl Baseline {
     /// `None` for bytes that are not a CBIN container, and for a file whose checksum has
     /// not been checked. See [`Container::body_crc32`].
     pub fn crc32(&self) -> Option<u32> {
-        self.crc32
+        match &self.content {
+            Content::Unread { slot_crc, .. } => *slot_crc,
+            Content::Remembered { summary, .. } => summary.crc32,
+            Content::Resident { facts, .. } => facts.slot_crc,
+            Content::Resting { check, .. } => match check {
+                Check::Checking { reported } => *reported,
+                Check::Checked(container) => Some(container.body_crc32),
+                Check::Failed(_) => None,
+            },
+        }
     }
 
     /// The [`LocalEntity::stamp`] of these bytes: the asset's current stamp while it
@@ -334,68 +437,114 @@ impl Baseline {
 
     /// The file that holds these bytes, read by range and never held.
     pub fn file(&self) -> Option<&Arc<OnDisk>> {
-        self.file.as_ref()
+        match &self.content {
+            Content::Resting { file, .. } => Some(file),
+            Content::Unread { .. } | Content::Remembered { .. } | Content::Resident { .. } => None,
+        }
     }
 
     /// The baseline of bytes not yet inspected, stamped with `stamp`.
     pub(crate) fn read(bytes: Bytes, stamp: u64) -> Baseline {
-        let crc32 = Container::read(&bytes).map(|held| held.body_crc32);
-        Baseline {
-            bytes_crc: Some(nord_format::crc::crc32(&bytes)),
-            bytes,
-            crc32,
-            stamp,
-            file: None,
-            unread: None,
-            checked: false,
-        }
+        let facts = Facts {
+            whole_crc: Some(nord_format::crc::crc32(&bytes)),
+            slot_crc: Container::read(&bytes).map(|held| held.body_crc32),
+        };
+        Baseline::new(Content::Resident { bytes, facts }, stamp)
     }
 
     fn on_disk(file: Arc<OnDisk>, stamp: u64) -> Baseline {
-        Baseline {
-            bytes: Bytes::default(),
-            crc32: None,
-            stamp,
-            file: Some(file),
-            bytes_crc: None,
-            unread: None,
-            checked: false,
-        }
+        Baseline::new(Content::resting(file), stamp)
     }
 
     /// CRC-32 over the whole of these bytes, where something has taken it: the file's,
     /// for a baseline resting in it, once its check has read it.
     pub fn whole_crc(&self) -> Option<u32> {
-        match (&self.file, self.unread) {
-            (Some(file), _) => file.known_crc(),
-            (None, Some(_)) => None,
-            (None, None) => self.bytes_crc,
+        match &self.content {
+            Content::Resting { file, .. } => file.known_crc(),
+            Content::Resident { facts, .. } => facts.whole_crc,
+            Content::Unread { .. } | Content::Remembered { .. } => None,
         }
     }
 
     /// How many bytes these are.
     pub fn size(&self) -> u64 {
-        match (&self.file, self.unread) {
-            (Some(file), _) => file.len,
-            (None, Some(len)) => len,
-            (None, None) => self.bytes.len() as u64,
+        match &self.content {
+            Content::Unread { len, .. } | Content::Remembered { len, .. } => *len,
+            Content::Resident { bytes, .. } => bytes.len() as u64,
+            Content::Resting { file, .. } => file.len,
         }
+    }
+
+    /// Whether these are in a file nothing has read this session.
+    fn unread(&self) -> bool {
+        matches!(
+            self.content,
+            Content::Unread { .. } | Content::Remembered { .. }
+        )
+    }
+
+    /// What a read of the file found before, while nothing has read it this session.
+    fn remembered(&self) -> Option<&Summary> {
+        match &self.content {
+            Content::Remembered { summary, .. } => Some(summary),
+            Content::Unread { .. } | Content::Resident { .. } | Content::Resting { .. } => None,
+        }
+    }
+
+    /// What these say of themselves while the asset holds no decode of its own.
+    fn verify(&self) -> VerifyState {
+        match &self.content {
+            Content::Unread { failed: None, .. } | Content::Resident { .. } => VerifyState::Reading,
+            Content::Unread {
+                failed: Some(why), ..
+            } => VerifyState::NotRead(why.clone()),
+            Content::Remembered { summary, .. } => VerifyState::Remembered(summary.verdict),
+            Content::Resting { check, .. } => match check {
+                Check::Checking { .. } => VerifyState::Checking,
+                Check::Checked(_) => VerifyState::Checked,
+                Check::Failed(why) => VerifyState::Failed(why.clone()),
+            },
+        }
+    }
+
+    /// [`Baseline::verify`] is [`VerifyState::Reading`], without building it.
+    fn reading(&self) -> bool {
+        matches!(
+            self.content,
+            Content::Unread { failed: None, .. } | Content::Resident { .. }
+        )
+    }
+
+    /// The baseline an edit is measured against: of a file nothing has read, only its
+    /// length and the slot checksum it had.
+    fn under_edit(&mut self) {
+        let (len, slot_crc) = match &self.content {
+            Content::Unread { len, slot_crc, .. } => (*len, *slot_crc),
+            Content::Remembered { len, summary } => (*len, summary.crc32),
+            Content::Resident { .. } | Content::Resting { .. } => return,
+        };
+        self.content = Content::Unread {
+            len,
+            failed: None,
+            slot_crc,
+        };
     }
 
     /// Whether a slot holding `bytes` reports what a slot holding these does: the same
     /// length and the same checksum. Nothing is read.
     fn reports(&self, bytes: &[u8]) -> bool {
+        let crc32 = self.crc32();
         self.size() == bytes.len() as u64
-            && self.crc32.is_some()
-            && self.crc32 == Container::read(bytes).map(|held| held.body_crc32)
+            && crc32.is_some()
+            && crc32 == Container::read(bytes).map(|held| held.body_crc32)
     }
 
     /// Whether these are `bytes`. Never, for bytes not read yet.
     fn holds(&self, bytes: &[u8]) -> bool {
-        match (&self.file, self.unread) {
-            (Some(file), _) => file.holds(bytes),
-            (None, Some(_)) => false,
-            (None, None) => self.bytes == bytes,
+        match &self.content {
+            Content::Resting { file, .. } => file.holds(bytes),
+            Content::Unread { .. } | Content::Remembered { .. } => false,
+            Content::Resident { bytes: held, .. } => held == bytes,
         }
     }
 }
@@ -491,6 +640,12 @@ pub struct LocalEntity {
     /// ⚠️ Computed when the bytes land and never per frame: deciding it walks every
     /// byte, and every listed row asks for its kind on every frame.
     pub is_text: bool,
+    /// What a decode of `bytes` found, [`VerifyState::Reading`] while they have none, or
+    /// what the saved content said of them when it stopped being theirs.
+    ///
+    /// ⚠️ Read it through [`LocalEntity::verify`]: while it is `Reading` and the bytes are
+    /// the saved ones, what the saved content says of itself stands in for it. Move the
+    /// baseline through [`LocalEntity::resave`], which keeps what it said.
     verify: VerifyState,
     /// What this asset was last saved as. The asset is unsaved when its bytes differ
     /// from these or an editor holds an edit not yet applied to them. See
@@ -523,9 +678,6 @@ pub struct LocalEntity {
     ///
     /// [`Workspace::forget_writes`] clears it when the instrument goes.
     pub wrote: Option<Wrote>,
-    /// What a read of its file found before, while it is unread: its kind, tag, slot
-    /// checksum and what it plays, without its bytes. See [`Workspace::remember`].
-    remembered: Option<Box<Summary>>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
     /// The tag and kind its name says, from [`crate::browser::tagged`], taken whenever
@@ -544,9 +696,21 @@ impl LocalEntity {
     /// An asset whose file nothing has read yet, `len` bytes long. It is
     /// [`VerifyState::Reading`], and its kind is what its name says.
     fn listed(id: u64, name: String, origin: Origin, len: u64, stamp: u64) -> LocalEntity {
-        let mut held = LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp);
-        held.saved.unread = Some(len);
-        held
+        LocalEntity::listed_as(id, name, origin, Content::unread(len), stamp)
+    }
+
+    /// [`LocalEntity::listed`], saved as `content`, a file nothing has read.
+    fn listed_as(
+        id: u64,
+        name: String,
+        origin: Origin,
+        content: Content,
+        stamp: u64,
+    ) -> LocalEntity {
+        LocalEntity {
+            saved: Baseline::new(content, stamp),
+            ..LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp)
+        }
     }
 
     /// An asset whose bytes are not decoded yet, as [`VerifyState::Reading`] says. Until
@@ -559,15 +723,13 @@ impl LocalEntity {
             name,
             path: None,
             origin,
-            saved: Baseline {
-                bytes: bytes.clone(),
-                crc32: None,
+            saved: Baseline::new(
+                Content::Resident {
+                    bytes: bytes.clone(),
+                    facts: Facts::default(),
+                },
                 stamp,
-                file: None,
-                bytes_crc: None,
-                unread: None,
-                checked: false,
-            },
+            ),
             bytes,
             entity: None,
             plays: None,
@@ -580,60 +742,84 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
-            remembered: None,
             seen: Default::default(),
             by_name,
         }
     }
 
-    /// Whether re-encoding its decode reproduced its bytes, or how far it is from knowing.
+    /// Whether re-encoding its decode reproduced its bytes, or, while it holds no decode,
+    /// what its saved content says: being read, not read, remembered, or how far the
+    /// check of the file it rests in has got.
     pub fn verify(&self) -> VerifyState {
-        self.verify.clone()
+        match self.speaks_for_saved() {
+            true => self.saved.verify(),
+            false => self.verify.clone(),
+        }
     }
 
-    /// What a read of its file found before, while it is unread: its kind, tag, slot
-    /// checksum and what it plays, without its bytes. See [`Workspace::remember`].
+    /// Whether what its saved content says of itself is what it says: it holds no decode,
+    /// and its bytes are the saved ones.
+    fn speaks_for_saved(&self) -> bool {
+        matches!(self.verify, VerifyState::Reading) && self.stamp == self.saved.stamp
+    }
+
+    /// Count it saved as `saved` from now on, keeping what it says of its own bytes.
+    fn resave(&mut self, saved: Baseline) {
+        self.verify = self.verify();
+        self.saved = saved;
+    }
+
+    /// What a read of its file found before, while nothing has read it this session: its
+    /// kind, tag, slot checksum and what it plays, without its bytes. See
+    /// [`Workspace::remember`].
     pub fn remembered(&self) -> Option<&Summary> {
-        self.remembered.as_deref()
+        self.saved.remembered()
     }
 
     /// Whether what it is waits on its bytes being read or decoded. One whose summary is
     /// [`remembered`](LocalEntity::remembered) does not, though it is still
     /// [`unread`](LocalEntity::unread).
     pub fn reading(&self) -> bool {
-        matches!(self.verify, VerifyState::Reading)
+        match self.speaks_for_saved() {
+            true => self.saved.reading(),
+            false => matches!(self.verify, VerifyState::Reading),
+        }
     }
 
     /// Whether it holds nothing but a file nothing has read this session: no bytes, no
     /// decode, the length its listing gave, and the kind its name or its summary gives.
     /// Anything that acts on it reads it first.
     pub fn unread(&self) -> bool {
-        self.saved.unread.is_some() && self.stamp == self.saved.stamp
+        self.saved.unread() && self.stamp == self.saved.stamp
     }
 
     /// Draw as `known` says, and match its slot by the checksum it gives.
     fn know(&mut self, known: Summary) {
-        self.saved.crc32 = known.crc32;
-        self.verify = VerifyState::Remembered(known.verdict);
-        self.remembered = Some(Box::new(known));
+        self.saved.content = Content::Remembered {
+            len: self.saved.size(),
+            summary: Box::new(known),
+        };
     }
 
     /// Take what its bytes decode to. They are what it was saved as, since nothing can
     /// edit an asset still being read.
     fn decoded(&mut self, decoded: Decoded) {
         let slot_crc = decoded.container.as_ref().map(|held| held.body_crc32);
-        match (&self.saved.file, self.saved.unread) {
-            (None, None) => {
-                self.saved.crc32 = slot_crc;
-                self.saved.bytes_crc = decoded.crc;
+        match &mut self.saved.content {
+            Content::Resident { facts, .. } => {
+                facts.slot_crc = slot_crc;
+                facts.whole_crc = decoded.crc;
             }
             // ⚠️ Writes the slot checksum of the bytes decoded over the one a send reported
             // for the file, though the file holds other bytes. A send of the file that lands
             // while the asset's own bytes wait to be decoded then leaves `wrote.crc32`
             // naming what the slot took and the baseline naming the decoded bytes, and
             // `library::wrote` no longer matches the slot.
-            (Some(_), _) if !self.saved.checked => self.saved.crc32 = slot_crc,
-            (Some(_), _) | (None, Some(_)) => {}
+            Content::Resting {
+                check: Check::Checking { reported },
+                ..
+            } => *reported = slot_crc,
+            Content::Resting { .. } | Content::Unread { .. } | Content::Remembered { .. } => {}
         }
         self.container = decoded.container;
         self.entity = decoded.entity;
@@ -665,14 +851,13 @@ impl LocalEntity {
             parse_error: None,
             container: None,
             is_text: false,
-            verify: VerifyState::Checking,
+            verify: VerifyState::Reading,
             saved: Baseline::on_disk(file, stamp),
             pending: false,
             kept: true,
             stamp,
             link: None,
             wrote: None,
-            remembered: None,
             seen: Default::default(),
             by_name,
         }
@@ -681,10 +866,7 @@ impl LocalEntity {
     /// The file holding this asset's bytes, while they are the saved ones and are left
     /// there: [`LocalEntity::bytes`] is then empty.
     pub fn rests(&self) -> Option<&Arc<OnDisk>> {
-        self.saved
-            .file
-            .as_ref()
-            .filter(|_| self.stamp == self.saved.stamp)
+        self.saved.file().filter(|_| self.stamp == self.saved.stamp)
     }
 
     /// Whether this is as long as `bytes` but not read far enough to tell whether it holds
@@ -695,16 +877,16 @@ impl LocalEntity {
         }
         match self.rests() {
             Some(file) => {
-                file.known_crc().is_none() && matches!(self.verify, VerifyState::Checking)
+                file.known_crc().is_none() && matches!(self.verify(), VerifyState::Checking)
             }
-            None => self.unread() && !matches!(self.verify, VerifyState::NotRead(_)),
+            None => self.unread() && !matches!(self.verify(), VerifyState::NotRead(_)),
         }
     }
 
     /// The index of the file this asset rests in, unless its check failed.
     pub fn indexed(&self) -> Option<&ondisk::Index> {
         let file = self.rests()?;
-        (!matches!(self.verify, VerifyState::Failed(_))).then_some(&file.index)
+        (!matches!(self.verify(), VerifyState::Failed(_))).then_some(&file.index)
     }
 
     /// How many bytes the asset is.
@@ -742,7 +924,7 @@ impl LocalEntity {
                 .map(|_| ())
                 .map_err(|e| e.to_string());
         };
-        match (&self.verify, &self.container) {
+        match (self.verify(), &self.container) {
             (VerifyState::Checked, Some(container)) if container.body_len() > 0 => Ok(()),
             (VerifyState::Checked, _) => {
                 Err("the file is a bare CBIN header with no body to send".into())
@@ -757,9 +939,9 @@ impl LocalEntity {
     /// How many bytes it holds whole in memory: its bytes, and its baseline's where they
     /// are not the same allocation.
     pub fn held_whole(&self) -> u64 {
-        let saved = match self.saved.bytes.shares(&self.bytes) {
+        let saved = match self.saved.bytes().shares(&self.bytes) {
             true => 0,
-            false => self.saved.bytes.len(),
+            false => self.saved.bytes().len(),
         };
         (self.bytes.len() + saved) as u64
     }
@@ -812,15 +994,12 @@ impl LocalEntity {
 
     /// The current bytes as a baseline, which saving adopts.
     fn baseline(&self) -> Baseline {
-        Baseline {
-            bytes: self.bytes.clone(),
-            crc32: self.container.as_ref().map(|held| held.body_crc32),
-            stamp: self.stamp,
-            file: None,
-            bytes_crc: None,
-            unread: None,
-            checked: false,
-        }
+        let facts = Facts {
+            whole_crc: None,
+            slot_crc: self.container.as_ref().map(|held| held.body_crc32),
+        };
+        let bytes = self.bytes.clone();
+        Baseline::new(Content::Resident { bytes, facts }, self.stamp)
     }
 
     /// The slot this asset stands for: its link, or else the slot it came off.
@@ -832,11 +1011,7 @@ impl LocalEntity {
     /// [`nord_format::Sample::generation`] spells it, from its decode, the index of the
     /// file it rests in, or what a read of it found.
     pub fn generation(&self) -> Option<&'static str> {
-        match (
-            self.entity.as_deref(),
-            self.rests(),
-            self.remembered.as_deref(),
-        ) {
+        match (self.entity.as_deref(), self.rests(), self.remembered()) {
             (Some(Entity::Sample(sample)), _, _) => Some(sample.generation()),
             (Some(_), _, _) => None,
             (None, Some(file), _) => match &file.index {
@@ -862,7 +1037,7 @@ impl LocalEntity {
             (Some(entity), _) => Cow::Borrowed(entity.identity().format),
             (None, Some(container)) => Cow::Owned(container.tag()),
             (None, None) if self.is_text => Cow::Borrowed(crate::document::text::EXTENSION),
-            (None, None) => match (self.rests(), self.remembered.as_deref()) {
+            (None, None) => match (self.rests(), self.remembered()) {
                 (Some(file), _) => Cow::Borrowed(file.index.tag()),
                 (None, Some(known)) => Cow::Borrowed(&known.tag),
                 (None, None) => Cow::Borrowed(self.listed_tag().unwrap_or("?")),
@@ -1286,13 +1461,8 @@ pub struct Saved {
     pub name: String,
     pub path: Option<LibPath>,
     pub origin: Origin,
-    /// What it was last saved as. Empty where `file` holds it, or where it is unread.
-    pub saved: Vec<u8>,
-    /// The file holding what it was last saved as, left there and read by range.
-    pub file: Option<Arc<OnDisk>>,
-    /// The length of the file holding what it was last saved as, where nothing has read
-    /// that file yet.
-    pub unread: Option<u64>,
+    /// What it was last saved as.
+    pub content: Content,
     /// What it holds now, if that differs from what it was saved as.
     pub unsaved: Option<Vec<u8>>,
 }
@@ -1369,7 +1539,7 @@ pub struct Workspace {
     /// Assets resting in their files whose checksums are still to be checked, one at a
     /// time, in the order they arrived.
     checks: VecDeque<(u64, Arc<OnDisk>)>,
-    checking: Option<Check>,
+    checking: Option<Checking>,
     /// Assets whose file is being copied in, each with what it is a copy of. Each is
     /// unread until its copy lands.
     arriving: std::collections::BTreeMap<u64, CopyOf>,
@@ -1457,7 +1627,7 @@ enum Need {
 const READ: (usize, u64) = (32, 8 << 20);
 
 /// A file's checksum being checked off the frame.
-struct Check {
+struct Checking {
     id: u64,
     file: Arc<OnDisk>,
     job: work::Job<Result<ondisk::Sums, String>>,
@@ -1811,7 +1981,7 @@ impl Workspace {
         }
         let stamp = self.stamp_for(id, &theirs);
         if let Some(entity) = self.get_mut(id) {
-            entity.saved = Baseline::read(theirs.into(), stamp);
+            entity.resave(Baseline::read(theirs.into(), stamp));
         }
     }
 
@@ -1822,7 +1992,7 @@ impl Workspace {
         }
         let stamp = self.stamp();
         if let Some(entity) = self.get_mut(id) {
-            entity.saved = Baseline::on_disk(theirs.clone(), stamp);
+            entity.resave(Baseline::on_disk(theirs.clone(), stamp));
         }
         self.check(id, theirs);
     }
@@ -1838,7 +2008,7 @@ impl Workspace {
         let stamp = self.stamp();
         if let Some(entity) = self.get_mut(id) {
             if !entity.is_unsaved() {
-                entity.saved.stamp = stamp;
+                entity.resave(Baseline::new(entity.saved.content.clone(), stamp));
             }
         }
     }
@@ -1853,7 +2023,7 @@ impl Workspace {
     /// Leave an asset's bytes in `file`, which holds them, under `stamp`, and check the
     /// file's checksum off the frame.
     fn rest(&mut self, id: u64, file: Arc<OnDisk>, stamp: u64) {
-        self.swap(id, false, |held| {
+        self.swap(id, |held| {
             LocalEntity::resting(
                 id,
                 held.name.clone(),
@@ -1868,16 +2038,12 @@ impl Workspace {
 
     /// Put `made` in place of an asset, keeping what an asset keeps whatever bytes it
     /// holds: where its file is, whether it is kept, its link, its last write and its
-    /// pending edit, and its saved baseline where `keep_saved` says so.
-    fn swap(&mut self, id: u64, keep_saved: bool, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
+    /// pending edit.
+    fn swap(&mut self, id: u64, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
         let Some(entity) = self.get_mut(id) else {
             return;
         };
         let made = made(entity);
-        let saved = match keep_saved {
-            true => std::mem::take(&mut entity.saved),
-            false => made.saved,
-        };
         *entity = LocalEntity {
             path: entity.path.take(),
             kept: entity.kept,
@@ -1885,7 +2051,6 @@ impl Workspace {
             wrote: entity.wrote,
             pending: entity.pending,
             seen: entity.seen.clone(),
-            saved,
             ..made
         };
         self.revision += 1;
@@ -1906,7 +2071,7 @@ impl Workspace {
             return;
         };
         let job = file.verify(&self.ctx);
-        self.checking = Some(Check { id, file, job });
+        self.checking = Some(Checking { id, file, job });
     }
 
     /// Fold in the check that has answered, where one has, and start the next.
@@ -1916,7 +2081,7 @@ impl Workspace {
             work::Answer::Answered(answer) => answer,
             work::Answer::Died => Err("the check stopped without an answer".to_string()),
         };
-        let Some(Check { id, file, .. }) = self.checking.take() else {
+        let Some(Checking { id, file, .. }) = self.checking.take() else {
             return;
         };
         let answer = answer.and_then(|sums| Container::of_file(&file, sums));
@@ -1925,24 +2090,18 @@ impl Workspace {
             return;
         };
         // An answer about a file the asset no longer stands on is dropped.
-        if !entity
-            .saved
-            .file
-            .as_ref()
-            .is_some_and(|held| Arc::ptr_eq(held, &file))
-        {
+        let Content::Resting { file: held, check } = &mut entity.saved.content else {
+            return;
+        };
+        if !Arc::ptr_eq(held, &file) {
             return;
         }
-        entity.saved.checked = true;
-        let verify = match &answer {
-            Ok(container) if container.checksum_ok => VerifyState::Checked,
-            Ok(_) => VerifyState::Failed("the stored checksum does not match the body".into()),
-            Err(why) => VerifyState::Failed(why.clone()),
+        *check = match &answer {
+            Ok(container) if container.checksum_ok => Check::Checked(container.clone()),
+            Ok(_) => Check::Failed("the stored checksum does not match the body".into()),
+            Err(why) => Check::Failed(why.clone()),
         };
-        entity.saved.crc32 = match &verify {
-            VerifyState::Checked => answer.as_ref().ok().map(|held| held.body_crc32),
-            _ => None,
-        };
+        let verify = entity.saved.verify();
         let name = entity.name.clone();
         match &verify {
             VerifyState::Checked => log.info(format!(
@@ -1963,7 +2122,7 @@ impl Workspace {
                 _ => None,
             };
             entity.container = answer.ok();
-            entity.verify = verify;
+            entity.verify = VerifyState::Reading;
         }
         self.revision += 1;
     }
@@ -2004,7 +2163,7 @@ impl Workspace {
         let Some(entity) = self.get(id) else {
             return false;
         };
-        let remembered = matches!(entity.verify, VerifyState::Remembered(_));
+        let remembered = matches!(entity.verify(), VerifyState::Remembered(_));
         let reads = entity.unread() && (entity.reading() || remembered);
         reads
             && !self.arriving.contains_key(&id)
@@ -2030,7 +2189,7 @@ impl Workspace {
         }
         entity.seen.set(self.frame);
         let whole = need != Need::InView;
-        let remembered = matches!(entity.verify, VerifyState::Remembered(_));
+        let remembered = matches!(entity.verify(), VerifyState::Remembered(_));
         if !entity.reading() && !(whole && remembered) {
             return;
         }
@@ -2110,7 +2269,7 @@ impl Workspace {
         let (stamp, needed) = (entity.stamp, self.needed_now(entity));
         match (bytes, file) {
             (Some(bytes), _) => {
-                self.swap(id, false, |held| {
+                self.swap(id, |held| {
                     let (name, origin) = (held.name.clone(), held.origin.clone());
                     LocalEntity::undecoded(id, name, origin, bytes.into(), stamp)
                 });
@@ -2133,8 +2292,11 @@ impl Workspace {
         };
         log.warn(format!("{}: {why}", entity.name));
         entity.parse_error = Some(why.clone());
-        entity.verify = VerifyState::NotRead(why);
-        entity.remembered = None;
+        entity.saved.content = Content::Unread {
+            len: entity.saved.size(),
+            failed: Some(why),
+            slot_crc: entity.saved.crc32(),
+        };
         self.revision += 1;
     }
 
@@ -2158,11 +2320,13 @@ impl Workspace {
         let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
             return;
         };
-        if !matches!(entity.verify, VerifyState::NotRead(_)) {
+        let Content::Unread { failed, .. } = &mut entity.saved.content else {
+            return;
+        };
+        if failed.take().is_none() {
             return;
         }
         entity.parse_error = None;
-        entity.verify = VerifyState::Reading;
         self.revision += 1;
         self.wanted.get_mut().insert(id, Need::Now);
     }
@@ -2222,12 +2386,16 @@ impl Workspace {
     pub fn evict(&mut self, id: u64) -> Option<u64> {
         self.evictable(id)?;
         let entity = self.get(id)?;
-        let (len, crc32, known) = (entity.size(), entity.saved.crc32, Summary::of(entity));
+        let (len, crc32, known) = (entity.size(), entity.saved.crc32(), Summary::of(entity));
         let stamp = self.stamp();
-        self.swap(id, false, |held| {
+        self.swap(id, |held| {
             let (name, origin) = (held.name.clone(), held.origin.clone());
-            let mut listed = LocalEntity::listed(id, name, origin, len, stamp);
-            listed.saved.crc32 = crc32;
+            let unread = Content::Unread {
+                len,
+                failed: None,
+                slot_crc: crc32,
+            };
+            let mut listed = LocalEntity::listed_as(id, name, origin, unread, stamp);
             if let Some(known) = known {
                 listed.know(known);
             }
@@ -2260,12 +2428,15 @@ impl Workspace {
         let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) else {
             return;
         };
-        let crc32 = entity.saved.crc32.take();
-        let known = entity.remembered.take();
-        if matches!(entity.verify, VerifyState::Remembered(_)) {
-            entity.verify = VerifyState::Reading;
-        }
-        if crc32.is_some() || known.is_some() {
+        let forgot = match &mut entity.saved.content {
+            Content::Remembered { len, .. } => {
+                entity.saved.content = Content::unread(*len);
+                true
+            }
+            Content::Unread { slot_crc, .. } => slot_crc.take().is_some(),
+            Content::Resident { .. } | Content::Resting { .. } => false,
+        };
+        if forgot {
             self.revision += 1;
         }
     }
@@ -2427,7 +2598,7 @@ impl Workspace {
         let id = self.next_id;
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes.into(), self.stamp());
-        let arrival = match (&entity.parse_error, &entity.verify) {
+        let arrival = match (&entity.parse_error, entity.verify()) {
             // A note has no format to decode, so a parse error on text is not a
             // failure.
             (Some(_), _) if entity.is_text => {
@@ -2609,7 +2780,7 @@ impl Workspace {
     /// stamp, for a file that holds something else now.
     pub fn relist(&mut self, id: u64, len: u64) {
         let stamp = self.stamp();
-        self.swap(id, false, |held| {
+        self.swap(id, |held| {
             let (name, origin) = (held.name.clone(), held.origin.clone());
             LocalEntity::listed(id, name, origin, len, stamp)
         });
@@ -2847,11 +3018,13 @@ impl Workspace {
         };
         let (resting, file, stamp) = (
             entity.rests().is_some(),
-            entity.saved.file.clone(),
+            entity.saved.file().cloned(),
             entity.saved.stamp,
         );
-        let in_memory = !resting && file.is_none() && entity.saved.unread.is_none();
-        let saved = in_memory.then(|| entity.saved.bytes.clone());
+        let saved = match &entity.saved.content {
+            Content::Resident { bytes, .. } => Some(bytes.clone()),
+            Content::Unread { .. } | Content::Remembered { .. } | Content::Resting { .. } => None,
+        };
         let let_go = self.let_go_edit(id);
         let dropped = self.mark_pending(id, false) || let_go;
         let restored = match (resting, file, saved) {
@@ -3095,7 +3268,8 @@ impl Workspace {
         if !entity.is_unsaved() || entity.rests().is_some() {
             return;
         }
-        entity.saved = entity.baseline();
+        let saved = entity.baseline();
+        entity.resave(saved);
         self.revision += 1;
     }
 
@@ -3119,7 +3293,7 @@ impl Workspace {
             Some(true) => {
                 if let Some(entity) = self.get_mut(id) {
                     entity.link = Some((class, at));
-                    entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
+                    entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
                 }
                 self.revision += 1;
                 return;
@@ -3139,9 +3313,12 @@ impl Workspace {
             true => entity.bytes.clone(),
             false => sent.into(),
         };
-        entity.saved = Baseline::read(sent, stamp);
+        // ⚠️ Where the asset rests in a file that already holds `sent` and its check has
+        // not answered, its bytes are empty, so this saves it as empty bytes: its size
+        // reads 0, and the file it rests in is dropped.
+        entity.resave(Baseline::read(sent, stamp));
         entity.link = Some((class, at));
-        entity.wrote = entity.saved.crc32.map(|crc32| Wrote { class, at, crc32 });
+        entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
         self.revision += 1;
     }
 
@@ -3163,7 +3340,7 @@ impl Workspace {
     ) {
         let moved = self.get(id).is_some_and(|entity| {
             let saved = &entity.saved;
-            let other = saved.size() != file.len || saved.crc32 != Some(crc32);
+            let other = saved.size() != file.len || saved.crc32() != Some(crc32);
             entity.rests().is_none() && other
         });
         let stamp = match moved {
@@ -3174,10 +3351,10 @@ impl Workspace {
             return;
         };
         if let Some(stamp) = stamp {
-            entity.saved = Baseline {
-                crc32: Some(crc32),
-                ..Baseline::on_disk(file, stamp)
+            let check = Check::Checking {
+                reported: Some(crc32),
             };
+            entity.resave(Baseline::new(Content::Resting { file, check }, stamp));
         }
         entity.link = Some((class, at));
         entity.wrote = Some(Wrote { class, at, crc32 });
@@ -3230,8 +3407,8 @@ impl Workspace {
             .get_mut(id)
             .filter(|entity| entity.reading() && !entity.unread())
         {
-            let saved = std::mem::take(&mut entity.saved.bytes);
-            entity.saved = Baseline::read(saved, entity.saved.stamp);
+            let saved = entity.saved.bytes().clone();
+            entity.resave(Baseline::read(saved, entity.saved.stamp));
         }
         let stamp = self.stamp();
         // The baseline stays, but whether the asset holds it may change. A revert, or an
@@ -3242,21 +3419,18 @@ impl Workspace {
         let entity = self.get_mut(id)?;
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
         let path = entity.path.take();
-        let saved = std::mem::take(&mut entity.saved);
-        let saved = Baseline {
-            stamp: match held {
-                true => stamp,
-                false => saved.stamp,
-            },
-            ..saved
-        };
+        let mut saved = entity.saved.clone();
+        saved.under_edit();
+        if held {
+            saved.stamp = stamp;
+        }
         let bytes = match held {
-            true => saved.bytes.clone(),
+            true => saved.bytes().clone(),
             false => bytes,
         };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
-        let verify = replaced.verify.clone();
+        let verify = replaced.verify();
         *entity = LocalEntity {
             kept,
             link,
@@ -3371,9 +3545,7 @@ impl Workspace {
             name,
             path,
             origin,
-            saved,
-            file,
-            unread,
+            content,
             unsaved,
         } in saved
         {
@@ -3387,61 +3559,43 @@ impl Workspace {
                 continue;
             }
             let stamp = self.stamp();
-            let entity = match (file, unsaved, unread) {
-                (None, None, Some(len)) => LocalEntity {
-                    path,
-                    ..LocalEntity::listed(id, name, origin, len, stamp)
-                },
-                (Some(file), None, _) => {
-                    self.checks.push_back((id, file.clone()));
-                    LocalEntity {
-                        path,
-                        ..LocalEntity::resting(id, name, origin, file, stamp)
-                    }
-                }
-                (Some(file), Some(bytes), _) => {
-                    let held = self.stamp();
-                    self.checks.push_back((id, file.clone()));
-                    LocalEntity {
-                        saved: Baseline::on_disk(file, held),
-                        path,
-                        ..LocalEntity::new(id, name, origin, bytes.into(), stamp)
-                    }
-                }
-                (None, None, None) => {
+            let entity = match (content, unsaved) {
+                (Content::Resident { bytes, .. }, None) => {
                     self.undecoded.push_back(id);
-                    LocalEntity {
-                        path,
-                        ..LocalEntity::undecoded(id, name, origin, saved.into(), stamp)
-                    }
+                    LocalEntity::undecoded(id, name, origin, bytes, stamp)
                 }
-                (None, Some(bytes), Some(len)) => {
-                    let saved = Baseline {
-                        stamp: self.stamp(),
-                        unread: Some(len),
-                        ..Baseline::default()
-                    };
-                    LocalEntity {
-                        saved,
-                        path,
-                        ..LocalEntity::new(id, name, origin, bytes.into(), stamp)
-                    }
+                (Content::Resting { file, .. }, None) => {
+                    self.checks.push_back((id, file.clone()));
+                    LocalEntity::resting(id, name, origin, file, stamp)
                 }
-                (None, Some(bytes), None) => {
+                (content, None) => LocalEntity::listed_as(id, name, origin, content, stamp),
+                (content, Some(edit)) => {
+                    let edit = Bytes::from(edit);
                     // The saved and held bytes share a stamp, and are held once, only when
                     // they are the same bytes.
-                    let saved = Bytes::from(saved);
-                    let (held, bytes) = match saved == bytes {
-                        true => (stamp, saved.clone()),
-                        false => (self.stamp(), bytes.into()),
+                    let (saved, bytes) = match content {
+                        Content::Resident { bytes, .. } if bytes == edit => {
+                            (Baseline::read(bytes.clone(), stamp), bytes)
+                        }
+                        Content::Resident { bytes, .. } => {
+                            (Baseline::read(bytes, self.stamp()), edit)
+                        }
+                        content => {
+                            let mut saved = Baseline::new(content, self.stamp());
+                            saved.under_edit();
+                            (saved, edit)
+                        }
                     };
+                    if let Some(file) = saved.file() {
+                        self.checks.push_back((id, file.clone()));
+                    }
                     LocalEntity {
-                        saved: Baseline::read(saved, held),
-                        path,
+                        saved,
                         ..LocalEntity::new(id, name, origin, bytes, stamp)
                     }
                 }
             };
+            let entity = LocalEntity { path, ..entity };
             if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text) {
                 log.warn(format!("{}: {e}", entity.name));
             }
@@ -3743,9 +3897,7 @@ mod tests {
                 name: "Mine.ne5p".into(),
                 path: None,
                 origin: Origin::Fresh,
-                saved: bytes.clone(),
-                file: None,
-                unread: None,
+                content: Content::whole(bytes.clone()),
                 unsaved: None,
             }],
             None,
@@ -4544,9 +4696,7 @@ mod tests {
                 name: "Africa-Split.ne5p".into(),
                 path: None,
                 origin: Origin::Fresh,
-                saved: Fresh::Program.bytes().unwrap(),
-                file: None,
-                unread: None,
+                content: Content::whole(Fresh::Program.bytes().unwrap()),
                 unsaved: None,
             }],
             Some(10),
@@ -4585,9 +4735,7 @@ mod tests {
             name: format!("{id}.ne5p"),
             path: None,
             origin: Origin::Fresh,
-            saved: Fresh::Program.bytes().unwrap(),
-            file: None,
-            unread: None,
+            content: Content::whole(Fresh::Program.bytes().unwrap()),
             unsaved: None,
         };
         assert_eq!(
@@ -4615,9 +4763,7 @@ mod tests {
             name: format!("{id}.ne5p"),
             path: None,
             origin: Origin::Fresh,
-            saved: Vec::new(),
-            file: None,
-            unread: Some(10),
+            content: Content::unread(10),
             unsaved: None,
         };
         // Ids arrive out of order, each below the next id the listing has given out.
@@ -4644,9 +4790,7 @@ mod tests {
             name: format!("{id}.ne5p"),
             path: None,
             origin: Origin::Fresh,
-            saved: bytes.clone(),
-            file: None,
-            unread: None,
+            content: Content::whole(bytes.clone()),
             unsaved: None,
         });
         workspace.restore(saved.collect(), None, &mut log);
@@ -4673,9 +4817,7 @@ mod tests {
                 name: format!("Sound {id:03}.ne5p"),
                 path: Some(LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
                 origin: Origin::Fresh,
-                saved: Vec::new(),
-                file: None,
-                unread: Some(len),
+                content: Content::unread(len),
                 unsaved: None,
             })
             .collect()
@@ -4734,6 +4876,24 @@ mod tests {
         assert!(!workspace.needed_now(entity));
     }
 
+    /// A selected asset drawn from what is remembered of it, whose read was refused for
+    /// room, is asked for again, as one with nothing remembered is.
+    #[test]
+    fn a_remembered_selected_asset_refused_for_room_is_wanted_again() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        workspace.restore(unread_assets(1, 1), None, &mut log);
+        let made = workspace.create(Fresh::Program, &mut log).unwrap();
+        let summary = Summary::of(workspace.get(made).unwrap()).unwrap();
+        workspace.select([1]);
+        workspace.remember(1, summary);
+        assert_eq!(workspace.take_wanted(), [1]);
+
+        workspace.unasked(1);
+        assert!(workspace.wants(), "a read refused for room");
+        assert_eq!(workspace.take_wanted(), [1]);
+    }
+
     #[test]
     fn a_read_of_large_files_in_view_stops_at_its_bytes() {
         let mut workspace = Workspace::new(egui::Context::default());
@@ -4782,12 +4942,10 @@ mod tests {
             name: format!("Note {id}.txt"),
             path: Some(LibPath::root().join(&format!("Note {id}.txt"))),
             origin: Origin::Fresh,
-            saved: match unread {
-                Some(_) => Vec::new(),
-                None => words.clone(),
+            content: match unread {
+                Some(len) => Content::unread(len),
+                None => Content::whole(words.clone()),
             },
-            file: None,
-            unread,
             unsaved,
         };
         let edited = b"Smoke note 1, edited\n".to_vec();

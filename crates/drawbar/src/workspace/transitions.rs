@@ -151,24 +151,20 @@ enum Held {
     Whole(Vec<u8>),
     Unread(u64),
     File(Arc<OnDisk>),
-    FileAndUnread(Arc<OnDisk>, u64),
 }
 
 fn restored(id: u64, held: Held, unsaved: Option<Vec<u8>>) -> Saved {
-    let (saved, file, unread) = match held {
-        Held::Whole(bytes) => (bytes, None, None),
-        Held::Unread(len) => (Vec::new(), None, Some(len)),
-        Held::File(file) => (Vec::new(), Some(file), None),
-        Held::FileAndUnread(file, len) => (Vec::new(), Some(file), Some(len)),
+    let content = match held {
+        Held::Whole(bytes) => Content::whole(bytes),
+        Held::Unread(len) => Content::unread(len),
+        Held::File(file) => Content::resting(file),
     };
     Saved {
         id,
         name: format!("asset {id}"),
         path: None,
         origin: Origin::Fresh,
-        saved,
-        file,
-        unread,
+        content,
         unsaved,
     }
 }
@@ -312,14 +308,6 @@ const STARTS: &[(&str, Step)] = &[
     }),
     ("file, unsaved", |x, at| {
         at.restore(Held::File(at.f.clone()), Some(x.e.clone()));
-    }),
-    ("file and unread", |x, at| {
-        let held = Held::FileAndUnread(at.f.clone(), x.p.len() as u64);
-        at.restore(held, None);
-    }),
-    ("file and unread, unsaved", |x, at| {
-        let held = Held::FileAndUnread(at.f.clone(), x.p.len() as u64);
-        at.restore(held, Some(x.e.clone()));
     }),
     ("file, edit held", |_, at| {
         at.restore(Held::File(at.f.clone()), None);
@@ -1818,208 +1806,6 @@ const EXPECTED: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "file and unread",
-        &[
-            (
-                "as restored",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "took bytes",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "took file",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "took nothing",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "unreadable",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "retry",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "remember",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "stale",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "evict",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "rest",
-                "rests might=G size=G badge=checking… slot=- whole=- held=0 → rests sendable summary size=G badge=ok slot=G whole=G held=0",
-            ),
-            (
-                "settle",
-                "rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "edit",
-                "unsaved sendable summary size=T badge=ok slot=- whole=F held=T → unsaved sendable summary size=T badge=ok slot=F whole=F held=T",
-            ),
-            (
-                "edit back to P",
-                "unsaved sendable summary size=P badge=ok slot=- whole=F held=P → unsaved sendable summary size=P badge=ok slot=F whole=F held=P",
-            ),
-            (
-                "edit back to F",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "revert",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "rebase",
-                "sendable summary size=R badge=ok slot=R whole=- held=R",
-            ),
-            (
-                "rebase file",
-                "rests might=G size=G badge=checking… slot=- whole=- held=0 → rests sendable summary size=G badge=ok slot=G whole=G held=0",
-            ),
-            (
-                "landed P",
-                "sendable summary size=P badge=ok slot=P whole=P held=P",
-            ),
-            (
-                "landed F",
-                "size=0 badge=checking… slot=- whole=0x00000000 held=0",
-            ),
-            (
-                "landed file",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "mark saved",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "unsave",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "hold edit",
-                "rests unsaved edit-held size=F badge=checking… slot=- whole=F held=0 → rests unsaved sendable summary edit-held size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "edit saved",
-                "rests might=G size=G badge=checking… slot=- whole=- held=0 → rests sendable summary size=G badge=ok slot=G whole=G held=0",
-            ),
-        ],
-    ),
-    (
-        "file and unread, unsaved",
-        &[
-            (
-                "as restored",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "took bytes",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "took file",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "took nothing",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "unreadable",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "retry",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "remember",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "stale",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "evict",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "rest",
-                "rests might=G size=G badge=checking… slot=- whole=- held=0 → rests sendable summary size=G badge=ok slot=G whole=G held=0",
-            ),
-            (
-                "settle",
-                "unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "edit",
-                "unsaved sendable summary size=T badge=ok slot=- whole=F held=T → unsaved sendable summary size=T badge=ok slot=F whole=F held=T",
-            ),
-            (
-                "edit back to P",
-                "unsaved sendable summary size=P badge=ok slot=- whole=F held=P → unsaved sendable summary size=P badge=ok slot=F whole=F held=P",
-            ),
-            (
-                "edit back to F",
-                "rests summary size=F badge=n/a slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "revert",
-                "rests size=F badge=checking… slot=- whole=F held=0 → rests sendable summary size=F badge=ok slot=F whole=F held=0",
-            ),
-            (
-                "rebase",
-                "unsaved sendable summary size=E badge=ok slot=R whole=R held=E+R",
-            ),
-            (
-                "rebase file",
-                "unsaved sendable summary size=E badge=ok slot=- whole=- held=E → unsaved sendable summary size=E badge=ok slot=G whole=G held=E",
-            ),
-            (
-                "landed P",
-                "unsaved sendable summary size=E badge=ok slot=P whole=P held=E+P",
-            ),
-            (
-                "landed F",
-                "unsaved sendable summary size=E badge=ok slot=F whole=F held=E+F",
-            ),
-            (
-                "landed file",
-                "unsaved sendable summary size=E badge=ok slot=G whole=- held=E",
-            ),
-            (
-                "mark saved",
-                "sendable summary size=E badge=ok slot=E whole=- held=E",
-            ),
-            (
-                "unsave",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "hold edit",
-                "unsaved sendable summary size=E badge=ok slot=- whole=F held=E → unsaved sendable summary size=E badge=ok slot=F whole=F held=E",
-            ),
-            (
-                "edit saved",
-                "rests might=G size=G badge=checking… slot=- whole=- held=0 → rests sendable summary size=G badge=ok slot=G whole=G held=0",
-            ),
-        ],
-    ),
-    (
         "file, edit held",
         &[
             (
@@ -2272,7 +2058,7 @@ fn every_transition_reads_as_the_table_says_from_every_restored_asset() {
 #[test]
 fn a_baseline_under_an_edit_has_its_slot_checksum_before_a_decode_and_a_held_one_after() {
     let fixture = Fixture::new();
-    let slot = |at: &At| at.workspace.get(ID).unwrap().saved.crc32;
+    let slot = |at: &At| at.workspace.get(ID).unwrap().saved.crc32();
     let p = Container::read(&fixture.p).map(|held| held.body_crc32);
     assert!(p.is_some());
 

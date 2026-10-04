@@ -1252,9 +1252,7 @@ mod tests {
                 name: format!("Sound {id:03}.ne5p"),
                 path: Some(crate::store::LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
                 origin: crate::workspace::Origin::Fresh,
-                saved: Vec::new(),
-                file: None,
-                unread: Some(100),
+                content: crate::workspace::Content::unread(100),
                 unsaved: None,
             })
             .collect();
