@@ -3567,6 +3567,9 @@ pub(crate) fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
     wasm_bindgen_futures::spawn_local(future);
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod transitions;
+
 #[cfg(test)]
 mod tests {
     use super::*;
