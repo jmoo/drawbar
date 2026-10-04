@@ -663,8 +663,10 @@ holds nothing to sweep, and its lock is taken at the first write.
 
 On the desktop the lock is an exclusive `File::try_lock` on `.drawbar/lock`,
 held for as long as the backend lives. A library opens read-only when its index
-is newer or does not read, when a working copy the index names does not read, or
-when another drawbar holds the lock. A write can also find the library closed
+is newer or does not read, when a working copy the index names does not read,
+when the index is missing but `working/` is not, or when another drawbar holds
+the lock. Working copies are found only through the index, so a sweep without it
+would delete every one, and an index put back finds them only where they were. A write can also find the library closed
 to it later: another drawbar took the lock first, or `.drawbar/` could not be
 made. Then the library turns read-only, every save in flight counts as unsaved
 again, and edits stay in memory. An open that fails outright keeps nothing.

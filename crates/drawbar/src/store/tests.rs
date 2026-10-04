@@ -409,6 +409,38 @@ fn an_unsaved_edit_that_does_not_read_is_left_for_the_next_open() {
     assert!(entity.is_unsaved());
 }
 
+/// ⚠️ Working copies are found only through the index. One gone missing, deleted or lost
+/// to a sync, leaves copies no index names, which a sweep would take for leftovers: the
+/// library opens read-only and leaves them, and the edit comes back with the index.
+#[test]
+fn unsaved_edits_whose_index_is_missing_are_left_for_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 1, "{working:?}");
+    let index = root.read(".drawbar/library.ron");
+    fs::remove_file(root.at(".drawbar/library.ron")).unwrap();
+
+    let second = Session::open(&root);
+    let why = second.store.read_only().expect("read-only");
+    assert!(why.contains("index is missing"), "{why}");
+    second.close();
+    assert_eq!(root.names(".drawbar/working"), working, "the copy is left");
+
+    fs::write(root.at(".drawbar/library.ron"), index).unwrap();
+    let third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+    let entity = third.bench.workspace.get(id).expect("the same id");
+    assert_eq!(entity.bytes, edited, "the edit came back");
+    assert!(entity.is_unsaved());
+}
+
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
 /// check, and be refused as a write over someone else's file.
 #[test]

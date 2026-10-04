@@ -374,7 +374,11 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     let indexed = fs.names(DIR).await.is_ok();
     // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
     // its `.drawbar/` as that drawbar left it.
-    let (sidecar, mut writable) = index(fs).await;
+    let (sidecar, mut writable) = match index(fs).await {
+        Ok(Some(sidecar)) => (sidecar, Ok(())),
+        Ok(None) => (Sidecar::default(), unindexed(fs).await),
+        Err(why) => (Sidecar::default(), Err(why)),
+    };
     let named: BTreeMap<String, (u64, Keeps)> = sidecar
         .assets
         .iter()
@@ -555,12 +559,12 @@ async fn scan(
     Ok(listing)
 }
 
-/// The index, or an empty one and why nothing may be written where the index is one this
-/// build must not read or rewrite.
-async fn index(fs: &impl Fs) -> (Sidecar, Result<(), String>) {
+/// The index, `None` where there is none, or why nothing may be written where the index
+/// is one this build must not read or rewrite.
+async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
     let why = match fs.read(INDEX).await {
         Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
-            Read::Known(sidecar) => return (sidecar, Ok(())),
+            Read::Known(sidecar) => return Ok(Some(sidecar)),
             Read::Newer(version) => format!(
                 "a newer drawbar wrote this library's index (version {version}), so this one \
                  only reads the library"
@@ -570,10 +574,24 @@ async fn index(fs: &impl Fs) -> (Sidecar, Result<(), String>) {
                  it is"
             ),
         },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return (Sidecar::default(), Ok(())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => format!("the library's index could not be read: {e}"),
     };
-    (Sidecar::default(), Err(why))
+    Err(why)
+}
+
+/// Why nothing may be written where there is no index but working copies remain. Copies
+/// are found only through the index, so a sweep would take every one for a leftover, and
+/// an index put back finds them only where they were.
+async fn unindexed(fs: &impl Fs) -> Result<(), String> {
+    match fs.names(WORKING).await {
+        Ok(copies) if !copies.is_empty() => Err(format!(
+            "the library's index is missing, but the unsaved edits it named are still in \
+             {WORKING}, so drawbar leaves the library as it is. Put {INDEX} back, or delete \
+             {WORKING} to open the library without them"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Make the sidecar where there is none yet, and hold the library's lock, or say why
