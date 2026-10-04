@@ -6183,10 +6183,10 @@ impl Session {
     }
 }
 
-/// The instrument lands beside the project, and holds what `nord sample build` writes
-/// from the same project folder.
+/// The instrument lands beside the project, and holds what nord-format's build makes of
+/// the same project folder read from disk.
 #[test]
-fn a_project_builds_beside_itself_into_what_the_command_line_builds() {
+fn a_project_builds_beside_itself_into_what_its_folder_on_disk_builds() {
     use nord_format::formats::nsmp::encode::Predictor;
     use nord_format::formats::nsmpproj::build::{self, AudioPath, Unavailable};
     use std::borrow::Cow;
@@ -6270,7 +6270,7 @@ fn a_build_whose_wav_went_missing_is_refused_with_its_name() {
     let id = session.named("Marimba.nsmpproj");
     session.build(id);
     assert_eq!(
-        session.said("“Marimba.nsmpproj” was not built: c4.wav: missing"),
+        session.said("building Marimba.nsmpproj: c4.wav: missing"),
         1
     );
     assert_eq!(root.names("Marimba"), ["Marimba.nsmpproj", "c3.wav"]);
@@ -6288,7 +6288,7 @@ fn a_build_whose_wav_is_gone_by_the_time_it_is_read_is_refused_with_its_path() {
     let id = session.named("Marimba.nsmpproj");
     session.build(id);
     assert_eq!(
-        session.said("“Marimba.nsmpproj” was not built: Marimba/c4.wav: it is gone"),
+        session.said("building Marimba.nsmpproj: Marimba/c4.wav: it is gone"),
         1
     );
     assert!(session

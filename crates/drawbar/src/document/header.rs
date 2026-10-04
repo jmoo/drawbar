@@ -1211,15 +1211,14 @@ fn phrase(mark: Mark, waiting: bool) -> StateLine {
     }
 }
 
-/// What the loud action of a project is called.
-pub const BUILD: &str = "Build → .nsmp";
-
 /// The one loud action, and which of its three states it is in.
 ///
-/// ⚠️ The checks are ordered so the label gives the right reason. A project has nothing
-/// to send whatever is attached, and neither does a kind with no folder and no slot. An
-/// unattached instrument cannot be written to whatever the asset is. A class this app
-/// does not write into is never a question of room.
+/// A project's is its build, which [`project::loud`] gives.
+///
+/// ⚠️ The checks are ordered so the label gives the right reason. A kind with no folder
+/// and no slot has nothing to send whatever is attached. An unattached instrument cannot
+/// be written to whatever the asset is. A class this app does not write into is never a
+/// question of room.
 pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
     let send = |hint: String| Loud {
         label: "Queue send".to_string(),
@@ -1237,18 +1236,6 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Loud {
         ..send(hint)
     };
 
-    // The project document offers the build once it has looked for the WAVs.
-    if Kind::of(entity) == Kind::Project {
-        return Loud {
-            label: BUILD.to_string(),
-            short: "Build".to_string(),
-            glyph: Glyph::Hammer,
-            tone: Tone::Blocked,
-            hint: "drawbar has not looked for this project's WAVs, so it cannot build it yet"
-                .to_string(),
-            click: Click::Nothing,
-        };
-    }
     let kind = Kind::of(entity);
     if entity.spot().is_none() && kind.home().is_none() {
         return idle(format!(
@@ -1700,17 +1687,6 @@ mod tests {
             "a blocked action queues nothing"
         );
         assert!(held.hint.contains("free in Pianos"), "{}", held.hint);
-    }
-
-    #[test]
-    fn the_strip_alone_blocks_a_projects_build_for_want_of_its_wavs() {
-        let device = crate::device::Device::new(egui::Context::default());
-        let (held, id) = opened("clarinet.nsmpproj", project_bytes());
-        let loud = action(held.get(id).unwrap(), &device.state);
-        assert_eq!(loud.tone, Tone::Blocked);
-        assert_eq!(loud.label, BUILD);
-        assert_eq!(loud.click, Click::Nothing);
-        assert!(loud.hint.contains("WAVs"), "{}", loud.hint);
     }
 
     #[test]
