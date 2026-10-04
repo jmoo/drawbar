@@ -4,6 +4,7 @@
 //! kind, its family, the slot it matches and the library it plays come from its
 //! [`Summary`]. [`crate::store`] keeps summaries between sessions; see its cache.
 
+use nord_format::fields::Library;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 use serde::{Deserialize, Serialize};
@@ -73,18 +74,14 @@ pub enum Plays {
 impl Plays {
     /// The first library a program names, piano before sample.
     pub fn of(entity: &Entity) -> Option<Plays> {
-        let fields = crate::fields::fields_of(entity)?;
-        let named = |path: &str| {
-            fields
-                .iter()
-                .find(|field| field.path == path)
-                .and_then(|field| crate::document::library_id(&field.value))
-                // Zero is "this program references no library", not an id to look for.
-                .filter(|id| *id != 0)
-        };
-        named("piano_panel.id")
-            .map(Plays::Piano)
-            .or_else(|| named("sample_panel.id").map(Plays::Sample))
+        entity
+            .plays()?
+            .into_iter()
+            .find_map(|reference| match reference.library {
+                Library::Piano => Some(Plays::Piano(reference.id)),
+                Library::Sample => Some(Plays::Sample(reference.id)),
+                Library::Program | Library::SetList => None,
+            })
     }
 
     pub fn class(self) -> ObjectClass {
