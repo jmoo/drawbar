@@ -50,6 +50,7 @@
 pub mod accept;
 pub mod bank;
 pub mod bits;
+pub mod bundle;
 pub mod cbin;
 pub mod components;
 pub mod crc;
