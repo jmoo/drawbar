@@ -9,11 +9,11 @@ use nord_format::bundle::manifest::{self, Manifest};
 use nord_format::bundle::{Class, Item, Key, Plan};
 use nord_format::cbin::Header;
 use nord_format::crc::Crc32Stream;
+use nord_usb::bundle::Library;
 use nord_usb::op as usb_op;
-use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::{declared_banks, explain, explain_walk, open_usb, transact};
+use crate::device::{explain, explain_walk, open_usb, transact};
 use crate::slot::{noun, shown};
 use crate::ui::Ui;
 
@@ -269,9 +269,6 @@ struct Fetched {
 
 /// Read `roots` of `class`, every program a root set list plays, and every piano and
 /// sample those programs play, into a bundle at `out`. Read-only.
-///
-/// A library object is found by the name its referrer's dependency row gives, since an
-/// object's info does not carry the id programs know it by.
 pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Result<(), String> {
     let mut device = open_usb()?;
     let firmware = device
@@ -279,45 +276,48 @@ pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Res
         .identity()
         .map(|id| u32::from(id.firmware))
         .map_err(|e| e.to_string())?;
+    let roots: Vec<(ObjectClass, Location)> = roots.into_iter().map(|at| (class, at)).collect();
+    let closure = transact(
+        &mut device,
+        format!("{} bundle closure", noun(class)),
+        |d| nord_usb::block_on(nord_usb::bundle::closure(d, &roots)),
+    )
+    .map_err(explain_walk)?;
+    for row in &closure.unfound {
+        ui.warn(format!(
+            "no single {} is named {:?} ({:#010x}); left out",
+            row.class.label(),
+            row.name.trim_end(),
+            row.id
+        ));
+    }
+
     let parts = out.with_extension("parts");
     std::fs::create_dir_all(&parts).map_err(|e| format!("{}: {e}", parts.display()))?;
     let result = (|| {
         let mut reads = Vec::new();
-        let mut programs = Vec::new();
-        if class == ObjectClass::SetList {
-            for (read, deps) in read_small(&mut device, ObjectClass::SetList, &roots)? {
+        for class in [ObjectClass::SetList, ObjectClass::Program] {
+            let objects: Vec<_> = closure
+                .objects
+                .iter()
+                .filter(|(held, ..)| *held == class)
+                .collect();
+            let slots: Vec<Location> = objects.iter().map(|(_, at, _)| *at).collect();
+            for (mut read, (_, _, deps)) in read_small(&mut device, class, &slots)?
+                .into_iter()
+                .zip(objects)
+            {
+                read.item.needs = needs(deps);
                 reads.push(read);
-                for at in deps
-                    .iter()
-                    .filter(|d| d.is_required())
-                    .filter_map(|d| d.location)
-                {
-                    if !programs.contains(&at) {
-                        programs.push(at);
-                    }
-                }
-            }
-        } else {
-            programs = roots.clone();
-        }
-        let mut wanted: Vec<(ObjectClass, u32, String)> = Vec::new();
-        for (read, deps) in read_small(&mut device, ObjectClass::Program, &programs)? {
-            reads.push(read);
-            for dep in deps.into_iter().filter(Dependency::is_required) {
-                let row = (dep.class, dep.id, dep.name.trim_end().to_string());
-                if matches!(dep.class, ObjectClass::Piano | ObjectClass::Sample)
-                    && !wanted.contains(&row)
-                {
-                    wanted.push(row);
-                }
             }
         }
-        for library in [ObjectClass::Piano, ObjectClass::Sample] {
-            let rows: Vec<_> = wanted.iter().filter(|(c, ..)| *c == library).collect();
-            if rows.is_empty() {
-                continue;
-            }
-            reads.extend(read_libraries(ui, &mut device, library, &rows, &parts)?);
+        for (n, library) in closure.libraries.iter().enumerate() {
+            reads.push(read_library(
+                ui,
+                &mut device,
+                library,
+                &parts.join(n.to_string()),
+            )?);
         }
         let plan = Plan::new(reads.iter().map(|r| r.item.clone()).collect(), firmware)
             .map_err(|e| e.to_string())?;
@@ -343,12 +343,29 @@ pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Res
     result
 }
 
-/// Programs or set lists, each with its dependency rows, in one session.
+/// What an object needs, as the instrument's dependency rows for it say: the instrument
+/// can report a piano or sample a program's file leaves at zero, and it plays that one.
+fn needs(deps: &[nord_usb::wire::Dependency]) -> Vec<Key> {
+    let required = deps.iter().filter(|row| row.is_required());
+    required
+        .filter_map(|row| match (row.class, row.location) {
+            (ObjectClass::Piano, _) => Some(Key::Piano(row.id)),
+            (ObjectClass::Sample, _) => Some(Key::Sample(row.id)),
+            (ObjectClass::Program, Some(at)) => Some(Key::Program(
+                u16::try_from(at.bank).ok()?,
+                u16::try_from(at.slot).ok()?,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Programs or set lists, in one session.
 fn read_small(
     device: &mut nord_usb::Device<nord_usb::transport::UsbTransport>,
     class: ObjectClass,
     slots: &[Location],
-) -> Result<Vec<(Fetched, Vec<Dependency>)>, String> {
+) -> Result<Vec<Fetched>, String> {
     if slots.is_empty() {
         return Ok(Vec::new());
     }
@@ -357,106 +374,65 @@ fn read_small(
             let mut out = Vec::new();
             for &at in slots {
                 let info = usb_op::info(s, at).await?;
-                let bytes = usb_op::read_program(s, at).await?;
-                let deps = usb_op::dependencies(s, at).await?;
-                out.push((at, info, bytes, deps));
+                out.push((at, info, usb_op::read_program(s, at).await?));
             }
             Ok(out)
         }))
     })
     .map_err(explain_walk)?;
     read.into_iter()
-        .map(|(at, info, bytes, deps)| {
+        .map(|(at, info, bytes)| {
             let shown = shown(at);
             let header = Header::from_prefix(&bytes).map_err(|e| format!("{shown}: {e}"))?;
             let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes))
                 .map_err(|e| format!("{shown}: {e}"))?;
             let item = Item::of(&header, info.name.trim_end(), Some(&entity))
                 .ok_or_else(|| format!("{shown}: not an object an Electro 5 bundle carries"))?;
-            Ok((
-                Fetched {
-                    item,
-                    source: Source::Bytes(bytes),
-                },
-                deps,
-            ))
+            Ok(Fetched {
+                item,
+                source: Source::Bytes(bytes),
+            })
         })
         .collect()
 }
 
-/// The pianos or samples `rows` name, found by name and streamed to files in `parts`.
-fn read_libraries(
+/// A piano or sample, streamed to `path`.
+fn read_library(
     ui: &Ui,
     device: &mut nord_usb::Device<nord_usb::transport::UsbTransport>,
-    class: ObjectClass,
-    rows: &[&(ObjectClass, u32, String)],
-    parts: &Path,
-) -> Result<Vec<Fetched>, String> {
-    let banks = declared_banks(device, class)?;
-    let held = transact(device, format!("{} walk", noun(class)), |d| {
-        nord_usb::block_on(d.read(class, async |s| {
-            let mut held = Vec::new();
-            for at in usb_op::occupied_slots(s, &banks).await? {
-                match usb_op::info(s, at).await {
-                    Ok(info) => held.push((at, info)),
-                    Err(nord_usb::Error::DeviceStatus(usb_op::VACANT)) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(held)
-        }))
+    library: &Library,
+    path: &Path,
+) -> Result<Fetched, String> {
+    let (class, at) = (library.class, library.at);
+    let mut file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    ui.note(format!(
+        "reading {} {:?} from {}",
+        class.label(),
+        library.name,
+        shown(at)
+    ));
+    let received = transact(
+        device,
+        format!("{} get {}", noun(class), crate::slot::addr(at)),
+        |d| nord_usb::block_on(d.read(class, async |s| usb_op::read_into(s, at, &mut file).await)),
+    )
+    .map_err(|e| explain(e, at))?;
+    let header = header_of(path)?;
+    let mut item = Item::of(&header, &library.name, None)
+        .ok_or_else(|| format!("{}: not an object an Electro 5 bundle carries", shown(at)))?;
+    item.provides = Some(match class {
+        ObjectClass::Piano => Key::Piano(library.id),
+        _ => Key::Sample(library.id),
+    });
+    let modified = received
+        .info
+        .modified
+        .and_then(|time| DosTime::from_unix(time.into()))
+        .unwrap_or_default();
+    Ok(Fetched {
+        item,
+        source: Source::File(path.to_path_buf(), modified),
     })
-    .map_err(explain_walk)?;
-
-    let mut reads = Vec::new();
-    for (_, id, name) in rows {
-        let found: Vec<_> = held
-            .iter()
-            .filter(|(_, info)| info.name.trim_end() == name)
-            .collect();
-        let &[(at, info)] = found.as_slice() else {
-            ui.warn(format!(
-                "{} {name:?} ({id:#010x}) is held {} times; left out",
-                class.label(),
-                found.len()
-            ));
-            continue;
-        };
-        let path = parts.join(format!("{}-{}", noun(class), reads.len()));
-        let mut file =
-            std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        ui.note(format!(
-            "reading {} {name:?} from {}",
-            class.label(),
-            shown(*at)
-        ));
-        transact(
-            device,
-            format!("{} get {}", noun(class), crate::slot::addr(*at)),
-            |d| {
-                nord_usb::block_on(
-                    d.read(class, async |s| usb_op::read_into(s, *at, &mut file).await),
-                )
-            },
-        )
-        .map_err(|e| explain(e, *at))?;
-        let header = header_of(&path)?;
-        let mut item = Item::of(&header, name, None)
-            .ok_or_else(|| format!("{}: not an object an Electro 5 bundle carries", shown(*at)))?;
-        item.provides = Some(match class {
-            ObjectClass::Piano => Key::Piano(*id),
-            _ => Key::Sample(*id),
-        });
-        let modified = info
-            .modified
-            .and_then(|t| DosTime::from_unix(t.into()))
-            .unwrap_or_default();
-        reads.push(Fetched {
-            item,
-            source: Source::File(path, modified),
-        });
-    }
-    Ok(reads)
 }
 
 #[cfg(test)]

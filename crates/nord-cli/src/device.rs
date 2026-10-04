@@ -455,7 +455,7 @@ fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geo
     nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
 }
 
-pub(crate) fn declared_banks(
+fn declared_banks(
     device: &mut Device<UsbTransport>,
     class: ObjectClass,
 ) -> Result<Vec<Bank>, String> {

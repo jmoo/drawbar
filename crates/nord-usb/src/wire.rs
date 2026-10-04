@@ -537,6 +537,7 @@ impl Bank {
 ///
 /// The library `id` is the id the object carries in its own file (a `PianoPanel`'s
 /// piano id, a sample's sample id), which links content on the wire to bytes on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     /// Whether this reference is live: `1` when the section owning it (piano or sample)
     /// is routed to a keyboard part in that program, `0` otherwise.
