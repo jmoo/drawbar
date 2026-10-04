@@ -37,6 +37,8 @@ mod tree;
 pub use act::{
     apply, bulk, foreign_format, send_warnings, Act, Bulk, Rescuing, LOAD_ON_INSTRUMENT,
 };
+#[cfg(test)]
+pub(crate) use drag::TAGGED;
 pub use drag::{
     kinds_present, landing, qualifier, tagged, Carried, Held, Item, Kept, Kind, Onto, Qualifier,
 };
@@ -173,17 +175,35 @@ const ASK_AROUND: f32 = 160.0;
 /// The shortest the note gets, however short the window.
 const ASK_FEWEST: f32 = 80.0;
 
-/// The words on a bulk action's button for the checked set: Queue counts what the
-/// attached instrument would take.
-fn bulk_label(
-    action: Bulk,
-    checked: &[Item],
-    workspace: &Workspace,
-    state: &DeviceState,
-) -> String {
-    match action {
-        Bulk::Queue => act::fits(checked, workspace, state).label(),
-        Bulk::Copy | Bulk::Export | Bulk::Tag | Bulk::Delete => action.label().to_string(),
+/// What a bulk action's control says over a checked set, and whether it can run.
+pub struct Offer {
+    /// The words on its button: Queue counts what the attached instrument would take.
+    pub label: String,
+    pub live: bool,
+    /// Why it cannot run, shown on hover while it cannot.
+    pub dead: String,
+}
+
+impl Offer {
+    pub fn of(action: Bulk, checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Offer {
+        let wanted = match action {
+            Bulk::Tag => !checked.iter().all(|item| item.local().is_none()),
+            _ => !bulk(action, checked, state).is_empty(),
+        };
+        // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
+        // this computer, where another instrument's file is still a file.
+        let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
+        let live = wanted && fits.as_ref().is_none_or(|fits| fits.takes > 0);
+        Offer {
+            label: match &fits {
+                Some(fits) => fits.label(),
+                None => action.label().to_string(),
+            },
+            live,
+            dead: fits
+                .and_then(|fits| fits.why)
+                .unwrap_or_else(|| action.nothing().to_string()),
+        }
     }
 }
 
@@ -824,33 +844,41 @@ impl Browser {
         state: &DeviceState,
         acts: &mut Vec<Act>,
     ) {
+        let offer = Offer::of(action, checked, workspace, state);
+        self.bulk_button(ui, action, &offer, checked, state, acts);
+    }
+
+    /// The control for one bulk action over the checked set, as `offer` describes it.
+    pub(crate) fn bulk_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: Bulk,
+        offer: &Offer,
+        checked: &[Item],
+        state: &DeviceState,
+        acts: &mut Vec<Act>,
+    ) {
         if action == Bulk::Tag {
-            let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
             // ⚠️ Drawn in `ui` itself, not a scope: a scope is a region of its own, and a
             // button in it cannot move to the next row of a wrapping layout.
-            match locals.is_empty() {
-                true => {
+            match offer.live {
+                false => {
                     ui.add_enabled(false, egui::Button::new(action.label()))
                         .on_disabled_hover_text(action.nothing());
                 }
-                false => {
-                    crate::menu::button(ui, action.label(), |ui| self.tag_items(ui, &locals, acts));
+                true => {
+                    crate::menu::button(ui, action.label(), |ui| {
+                        let locals: Vec<u64> =
+                            checked.iter().copied().filter_map(Item::local).collect();
+                        self.tag_items(ui, &locals, acts)
+                    });
                 }
             }
             return;
         }
-        let wanted = bulk(action, checked, state);
-        // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
-        // this computer, where another instrument's file is still a file.
-        let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
-        let label = bulk_label(action, checked, workspace, state);
-        let live = !wanted.is_empty() && fits.as_ref().is_none_or(|fits| fits.takes > 0);
-        let dead = fits
-            .and_then(|fits| fits.why)
-            .unwrap_or_else(|| action.nothing().to_string());
         let mut button = ui
-            .add_enabled(live, egui::Button::new(label))
-            .on_disabled_hover_text(dead);
+            .add_enabled(offer.live, egui::Button::new(&offer.label))
+            .on_disabled_hover_text(&offer.dead);
         if action == Bulk::Queue {
             button = button
                 .on_hover_text("to the slot it is linked to, or the first free one in its folder");
@@ -858,6 +886,7 @@ impl Browser {
         if !button.clicked() {
             return;
         }
+        let wanted = bulk(action, checked, state);
         match action {
             Bulk::Delete => self.ask_discard(checked, wanted),
             _ => acts.extend(wanted),

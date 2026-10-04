@@ -16,6 +16,8 @@ pub struct Tags {
     list: List,
     /// The tags on each asset, by workspace id. An asset with no entry is untagged.
     of: BTreeMap<u64, BTreeSet<u64>>,
+    /// Counts changes to the names and to which asset wears which tag.
+    revision: u64,
 }
 
 /// The tags of an untagged asset, so a caller need not tell absent from empty.
@@ -30,18 +32,26 @@ impl Tags {
         self.list.name_of(id)
     }
 
+    /// Counts changes to the names and to which asset wears which tag.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// A new tag with a name no other tag uses, or `None` when the list has no id left
     /// ([`List::make`]).
     pub(crate) fn make(&mut self, wanted: &str) -> Option<u64> {
+        self.revision += 1;
         self.list.make(wanted)
     }
 
     pub(crate) fn rename(&mut self, id: u64, name: String) {
+        self.revision += 1;
         self.list.rename(id, name);
     }
 
     /// Remove a tag from the list and from every asset. Their other tags stay.
     pub(crate) fn remove(&mut self, id: u64) {
+        self.revision += 1;
         self.list.remove(id);
         for worn in self.of.values_mut() {
             worn.remove(&id);
@@ -52,14 +62,19 @@ impl Tags {
     /// Add a tag to an asset, or remove it. A tag not in the list cannot be added.
     pub(crate) fn set(&mut self, asset: u64, tag: u64, on: bool) {
         if on && self.list.holds(tag) {
-            self.of.entry(asset).or_default().insert(tag);
+            if self.of.entry(asset).or_default().insert(tag) {
+                self.revision += 1;
+            }
             return;
         }
-        if let Some(worn) = self.of.get_mut(&asset) {
-            worn.remove(&tag);
-            if worn.is_empty() {
-                self.of.remove(&asset);
-            }
+        let Some(worn) = self.of.get_mut(&asset) else {
+            return;
+        };
+        if worn.remove(&tag) {
+            self.revision += 1;
+        }
+        if worn.is_empty() {
+            self.of.remove(&asset);
         }
     }
 
@@ -80,6 +95,7 @@ impl Tags {
     }
 
     pub(crate) fn forget(&mut self, asset: u64) {
+        self.revision += 1;
         self.of.remove(&asset);
     }
 
@@ -92,6 +108,7 @@ impl Tags {
         names: BTreeMap<u64, String>,
         worn: impl Iterator<Item = (u64, impl Iterator<Item = u64>)>,
     ) {
+        self.revision += 1;
         for (id, name) in names {
             self.list.restore(id, name);
         }
@@ -107,6 +124,20 @@ impl Tags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_a_tag_that_is_already_so_changes_nothing() {
+        let mut tags = Tags::default();
+        let sunday = tags.make("Sunday").unwrap();
+        let made = tags.revision();
+        tags.set(7, sunday, true);
+        assert_eq!(tags.revision(), made + 1);
+        tags.set(7, sunday, true);
+        tags.set(8, sunday, false);
+        assert_eq!(tags.revision(), made + 1, "nothing changed");
+        tags.set(7, sunday, false);
+        assert_eq!(tags.revision(), made + 2);
+    }
 
     /// Unlike a folder, an asset can have any number of tags.
     #[test]

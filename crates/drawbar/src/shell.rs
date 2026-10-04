@@ -127,6 +127,8 @@ pub struct Shell {
     /// The zoom popover, and where its chip was last drawn, which toggles it.
     pub zoom_open: bool,
     pub zoom_chip: egui::Rect,
+    /// What the inspector's selection cards show, until the selection changes.
+    pub(crate) picked: crate::inspector::Picked,
 }
 
 impl Default for Shell {
@@ -146,6 +148,7 @@ impl Default for Shell {
             status_rect: egui::Rect::NOTHING,
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
+            picked: Default::default(),
         }
     }
 }
@@ -1241,9 +1244,7 @@ impl DrawbarApp {
         );
         match glyph {
             Some(glyph) => painted(ui, glyph, mark, tint_),
-            None => {
-                ui.put(mark, egui::Spinner::new().size(12.0));
-            }
+            None => turning(ui, mark),
         }
         crate::panel::cut(
             ui.painter(),
@@ -1496,6 +1497,33 @@ pub fn too_small_notice(ctx: &egui::Context, smaller: Option<Zoom>) -> Option<Zo
     picked
 }
 
+/// How often the status line's busy mark turns.
+const TURN: std::time::Duration = std::time::Duration::from_millis(125);
+
+/// The status line's busy mark: an arc that turns an eighth of the way round every
+/// [`TURN`].
+///
+/// ⚠️ Not an [`egui::Spinner`], which asks for the next frame from every frame, so a long
+/// read keeps the page drawing flat out. This asks for one frame a turn, and whatever the
+/// wait is for wakes the window itself when it lands.
+fn turning(ui: &egui::Ui, mark: egui::Rect) {
+    const STEPS: u64 = 8;
+    const POINTS: usize = 16;
+    let turned = (ui.input(|input| input.time) / TURN.as_secs_f64()) as u64 % STEPS;
+    let start = turned as f32 / STEPS as f32 * std::f32::consts::TAU;
+    let radius = mark.height() / 2.0 - 2.5;
+    let arc = (0..=POINTS).map(|at| {
+        let angle = start + at as f32 / POINTS as f32 * std::f32::consts::TAU * 0.75;
+        mark.center() + radius * egui::vec2(angle.cos(), angle.sin())
+    });
+    let ink = ui.visuals().strong_text_color();
+    ui.painter().add(egui::Shape::line(
+        arc.collect(),
+        egui::Stroke::new(2.5_f32, ink),
+    ));
+    ui.ctx().request_repaint_after(TURN);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1514,6 +1542,84 @@ mod tests {
         let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
         cc.storage = storage;
         DrawbarApp::with_library(&cc, None)
+    }
+
+    /// While the library reads in the background, the status line's busy mark asks for a
+    /// frame each turn and no sooner: the read wakes the window when it lands.
+    #[test]
+    fn a_read_in_the_background_asks_for_a_frame_only_as_the_mark_turns() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let saved = crate::workspace::Saved {
+            id: 1,
+            name: "Grand.ne5p".into(),
+            path: Some(crate::store::LibPath::root().join("Grand.ne5p")),
+            origin: crate::workspace::Origin::Fresh,
+            saved: Vec::new(),
+            file: None,
+            unread: Some(1),
+            unsaved: None,
+        };
+        app.workspace.restore(vec![saved], None, &mut app.log);
+        app.workspace.hurry(1);
+        assert_eq!(app.workspace.take_wanted(), [1], "asked of the library");
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut delays = Vec::new();
+        for _ in 0..3 {
+            let output = testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+                app.update(ctx, &mut frame)
+            });
+            delays.push(output.viewport_output[&egui::ViewportId::ROOT].repaint_delay);
+        }
+        assert_eq!(app.workspace.reading(), 1, "the read is still out");
+        // egui brings a requested frame forward by the length of one frame.
+        let least = TURN - std::time::Duration::from_secs_f64(1.0 / 30.0);
+        assert!(
+            delays[1..].iter().all(|delay| *delay >= least),
+            "{delays:?}"
+        );
+    }
+
+    #[test]
+    fn a_large_selection_asks_for_its_first_assets_once_and_not_every_frame() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let saved = (1..=200)
+            .map(|id| crate::workspace::Saved {
+                id,
+                name: format!("Sound {id:03}.ne5p"),
+                path: Some(crate::store::LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
+                origin: crate::workspace::Origin::Fresh,
+                saved: Vec::new(),
+                file: None,
+                unread: Some(1),
+                unsaved: None,
+            })
+            .collect();
+        app.workspace.restore(saved, None, &mut app.log);
+        for id in 1..=200 {
+            app.browser.check(crate::browser::Item::Local(id));
+        }
+        let mut frame = eframe::Frame::_new_kittest();
+        for _ in 0..3 {
+            testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+                app.update(ctx, &mut frame)
+            });
+        }
+        let many = crate::inspector::MANY as u64;
+        assert_eq!(app.workspace.selections.get(), 1, "taken once");
+        assert!((1..=many).all(|id| app.workspace.wanted(id)));
+        assert!(!(many + 1..=200).any(|id| app.workspace.wanted(id)));
+
+        app.browser.check(crate::browser::Item::Local(1));
+        testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+            app.update(ctx, &mut frame)
+        });
+        assert_eq!(
+            app.workspace.selections.get(),
+            2,
+            "taken again for a new selection"
+        );
     }
 
     /// Attach an instrument, which the full layout needs.
