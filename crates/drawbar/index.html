@@ -548,16 +548,25 @@
         version.remove();
       }
 
-      /* The one row this page sends, under the app's rules: only from drawbar.app, never
-         under Do Not Track or Global Privacy Control, never once sharing is off. */
+      /* The one row this page sends, under the app's rules: from drawbar.app to its
+         collector, or from elsewhere to a developer's `drawbar.telemetry.collector`;
+         never under Do Not Track or Global Privacy Control, never once sharing is off. */
       function beacon(step, error) {
+        const ours = location.origin === "https://drawbar.app";
+        let collector = ours ? "https://t.drawbar.app" : null;
         let off = true;
         try {
-          off = localStorage.getItem("drawbar.telemetry") === "off";
+          /* A switch that storage cannot keep could not have been turned off. */
+          localStorage.setItem("drawbar.telemetry.probe", "1");
+          localStorage.removeItem("drawbar.telemetry.probe");
+          off = localStorage.getItem("drawbar.telemetry") !== null;
+          if (!ours) {
+            collector = localStorage.getItem("drawbar.telemetry.collector");
+          }
         } catch {}
         const refused =
           navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true;
-        if (location.origin !== "https://drawbar.app" || refused || off) {
+        if (!collector || refused || off) {
           return;
         }
         const row = {
@@ -566,7 +575,7 @@
           step: step,
           error: error.name || "Error",
         };
-        navigator.sendBeacon("https://t.drawbar.app/e", JSON.stringify([row]));
+        navigator.sendBeacon(`${collector}/e`, JSON.stringify([row]));
       }
 
       const bars = FOOTAGE.map((footage, i) => {

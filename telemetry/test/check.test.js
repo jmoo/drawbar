@@ -89,15 +89,15 @@ const sent = {
   log: "",
 };
 
-test("a report keeps its fields and gains the browser and os", () => {
-  assert.deepEqual(report(JSON.stringify(sent), edge), { ...sent, browser: "chrome 141", os: "macos" });
+test("a report is kept exactly as sent, with nothing added", () => {
+  assert.deepEqual(report(JSON.stringify(sent)), sent);
 });
 
 test("a report is refused without text, with a bad id, or with an extra field", () => {
-  assert.equal(report(JSON.stringify({ ...sent, text: "" }), edge), null);
-  assert.equal(report(JSON.stringify({ ...sent, id: "ABCDEFGH23" }), edge), null);
-  assert.equal(report(JSON.stringify({ ...sent, id: "abcdefghi1" }), edge), null);
-  assert.equal(report(JSON.stringify({ ...sent, ip: "1.2.3.4" }), edge), null);
+  assert.equal(report(JSON.stringify({ ...sent, text: "" })), null);
+  assert.equal(report(JSON.stringify({ ...sent, id: "ABCDEFGH23" })), null);
+  assert.equal(report(JSON.stringify({ ...sent, id: "abcdefghi1" })), null);
+  assert.equal(report(JSON.stringify({ ...sent, ip: "1.2.3.4" })), null);
   assert.equal(report(JSON.stringify({ ...sent, text: "x".repeat(5_001) }), edge), null);
 });
 
@@ -143,9 +143,13 @@ test("the privacy page names every row and field", () => {
   }
 });
 
-test("only drawbar.app is accepted", () => {
+test("only drawbar.app is accepted, and a local run's own origin when it names one", () => {
   assert.ok(allowed("https://drawbar.app"));
   assert.ok(!allowed(null));
-  assert.ok(!allowed("http://127.0.0.1:8765"));
+  assert.ok(!allowed("http://127.0.0.1:8080"));
   assert.ok(!allowed("https://fork.example"));
+  assert.ok(allowed("http://127.0.0.1:8080", "http://127.0.0.1:8080"));
+  assert.ok(!allowed("https://fork.example", "http://127.0.0.1:8080"));
+  assert.ok(!allowed(null, null));
+  assert.ok(!allowed("", ""));
 });

@@ -1,7 +1,7 @@
 # The collector behind drawbar.app's anonymous reports. See README.md.
 name = "drawbar-telemetry"
 main = "src/index.js"
-compatibility_date = "2026-09-01"
+compatibility_date = "2026-05-25"
 routes = [{ pattern = "t.drawbar.app", custom_domain = true }]
 workers_dev = false
 

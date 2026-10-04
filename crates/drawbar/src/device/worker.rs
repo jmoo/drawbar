@@ -110,8 +110,8 @@ impl Fault {
         self.named(e);
     }
 
-    /// Record `e`'s kind alone: a failure the instrument answered after, so it is still
-    /// there whatever `e` says.
+    /// Record `e`'s kind without deciding whether the instrument is gone; the caller
+    /// leaves that to the attempt that follows.
     fn named(&mut self, e: &Error) {
         self.kind.get_or_insert(e.expect_kind());
     }

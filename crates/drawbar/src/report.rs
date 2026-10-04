@@ -76,6 +76,15 @@ enum State {
     Sent,
 }
 
+/// A report as Send took it: the body, and the parts of it read from outside the sheet,
+/// which the preview shows from here until the send is settled.
+#[derive(Clone, PartialEq, Debug)]
+struct Frozen {
+    instrument: telemetry::Instrument,
+    tail: String,
+    body: String,
+}
+
 /// What the reader pressed.
 enum Pressed {
     Send,
@@ -95,10 +104,10 @@ pub struct Report {
     /// What went wrong recently and what this build is, read when the sheet opens.
     faults: Vec<String>,
     build: String,
-    /// The body as Send left it, which every retry sends again unchanged, so the one the
+    /// What Send took, which every retry sends again unchanged, so the report the
     /// collector keeps under [`Report::id`] is the one the reader sent. Thawed by a
     /// refusal, since nothing was kept.
-    frozen: Option<String>,
+    frozen: Option<Frozen>,
     state: State,
 }
 
@@ -136,7 +145,7 @@ impl Report {
     fn send(&mut self, ctx: &egui::Context, log: &Log) {
         let slot = Rc::new(RefCell::new(None));
         let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
-        let body = self.freeze(&telemetry::instrument(), &tail);
+        let body = self.freeze(telemetry::instrument(), tail);
         let (done, ctx) = (slot.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             *done.borrow_mut() = Some(telemetry::submit(body).await);
@@ -162,7 +171,7 @@ impl Report {
 
 impl Report {
     /// The report as the collector reads it. The instrument goes with the build lines:
-    /// unchecking one leaves out both.
+    /// unchecking it leaves out both.
     fn body(&self, instrument: &telemetry::Instrument, tail: &str) -> String {
         let attached = |on: bool, text: &str| match on {
             true => text.to_string(),
@@ -186,11 +195,17 @@ impl Report {
     }
 
     /// The body to send: the one already frozen, or this one, frozen now.
-    fn freeze(&mut self, instrument: &telemetry::Instrument, tail: &str) -> String {
-        if self.frozen.is_none() {
-            self.frozen = Some(self.body(instrument, tail));
+    fn freeze(&mut self, instrument: telemetry::Instrument, tail: String) -> String {
+        if let Some(frozen) = &self.frozen {
+            return frozen.body.clone();
         }
-        self.frozen.clone().unwrap_or_default()
+        let body = self.body(&instrument, &tail);
+        self.frozen = Some(Frozen {
+            instrument,
+            tail,
+            body: body.clone(),
+        });
+        body
     }
 
     /// Take the collector's answer, if it has come, at `now`. A server error is waited
@@ -328,15 +343,23 @@ impl Report {
     fn thanks(&self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Thank you. Your report was sent.").strong());
         ui.add_space(sheet::GAP * 2.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Its number is");
+        ui.horizontal(|ui| {
+            ui.label("Its number:");
             ui.label(egui::RichText::new(&self.id).monospace());
-            ui.label(". To have it deleted, write to contact@drawbar.app with that number.");
         });
+        ui.label("To have it deleted, write to contact@drawbar.app with that number.");
     }
 
-    /// Everything that goes, as the operator reads it.
+    /// Everything that goes, as the operator reads it: what Send froze while a send is
+    /// out, else what Send would take now.
     fn preview(&self, log: &Log) -> String {
+        let (instrument, tail) = match &self.frozen {
+            Some(frozen) => (frozen.instrument.clone(), frozen.tail.clone()),
+            None => (
+                telemetry::instrument(),
+                newest(&log.tail(crate::about::ENTRIES), LOG),
+            ),
+        };
         let mut out = format!(
             "report: {} ({})\nversion: {}\n",
             self.id,
@@ -353,7 +376,6 @@ impl Report {
             ));
         }
         if self.with_build {
-            let instrument = telemetry::instrument();
             out.push_str(&format!(
                 "\nmodel: {}\nfirmware: {}\n{}",
                 none(&instrument.model),
@@ -362,10 +384,7 @@ impl Report {
             ));
         }
         if self.with_log {
-            out.push_str(&format!(
-                "\n{}",
-                newest(&log.tail(crate::about::ENTRIES), LOG)
-            ));
+            out.push_str(&format!("\n{tail}"));
         }
         out
     }
@@ -477,10 +496,26 @@ mod tests {
     #[test]
     fn a_retry_sends_what_send_froze_whatever_changed_since() {
         let mut report = report(State::Drafting);
-        let first = report.freeze(&electro(), "connected");
+        let first = report.freeze(electro(), "connected".to_string());
         report.kind = Kind::Feedback;
         report.with_build = false;
-        assert_eq!(report.freeze(&electro(), "connected\nlost"), first);
+        let later = report.freeze(
+            telemetry::Instrument::default(),
+            "connected\nlost".to_string(),
+        );
+        assert_eq!(later, first);
+    }
+
+    #[test]
+    fn while_a_send_is_out_the_preview_shows_what_send_took() {
+        let mut report = report(State::Waiting { since: 0.0 });
+        report.freeze(electro(), "connected: Nord Electro 5D".to_string());
+        let mut log = Log::default();
+        log.info("a line logged after Send");
+        let preview = report.preview(&log);
+        assert!(preview.contains("model: Nord Electro 5D"), "{preview}");
+        assert!(preview.contains("connected: Nord Electro 5D"), "{preview}");
+        assert!(!preview.contains("after Send"), "{preview}");
     }
 
     #[test]
@@ -488,7 +523,11 @@ mod tests {
         let mut report = report(State::Sending(Rc::new(RefCell::new(Some(Err(
             Undelivered::Refused(413),
         ))))));
-        report.frozen = Some("the old body".to_string());
+        report.frozen = Some(Frozen {
+            instrument: electro(),
+            tail: String::new(),
+            body: "the old body".to_string(),
+        });
         report.collect(1.0);
         assert_eq!(report.frozen, None);
     }

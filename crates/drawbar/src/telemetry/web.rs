@@ -18,6 +18,15 @@ const SWITCH: &str = "drawbar.telemetry";
 /// for counting visitors. It is not an identifier, and it is gone once sharing is off.
 const LAST_VISIT: &str = "drawbar.last-visit";
 
+/// A collector to report to from a page not on [`ORIGIN`], for testing a local build:
+/// `localStorage.setItem("drawbar.telemetry.collector", "http://127.0.0.1:8787")`.
+///
+/// ⚠️ Ignored on [`ORIGIN`], which reports to [`ENDPOINT`] and nowhere else.
+const DEV_COLLECTOR: &str = "drawbar.telemetry.collector";
+
+/// Written and removed once a page, to learn whether storage keeps a write.
+const PROBE: &str = "drawbar.telemetry.probe";
+
 /// Rows held while the page is offline or between flushes. The oldest go first.
 const HELD: usize = 50;
 
@@ -29,6 +38,8 @@ thread_local! {
     static VISITED: Cell<bool> = const { Cell::new(false) };
     /// Turned off in this page, which holds even where storage refused to keep it.
     static TURNED_OFF: Cell<bool> = const { Cell::new(false) };
+    /// Whether storage took the [`PROBE`], once asked.
+    static WRITABLE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 /// Whether this page reports, and if not, why.
@@ -39,15 +50,26 @@ pub enum Sharing {
     Off,
     /// The browser sends Do Not Track or Global Privacy Control.
     Refused,
-    /// Not served from [`ORIGIN`]: a local or forked build.
+    /// Not served from [`ORIGIN`], and no [`DEV_COLLECTOR`] named: a local or forked
+    /// build.
     Elsewhere,
+}
+
+/// Where this page reports: [`ENDPOINT`] on [`ORIGIN`], else the [`DEV_COLLECTOR`] if one
+/// is named.
+fn collector() -> Option<String> {
+    let origin = web_sys::window()?.location().origin().ok()?;
+    match origin == ORIGIN {
+        true => Some(ENDPOINT.to_string()),
+        false => storage()?.get_item(DEV_COLLECTOR).ok().flatten(),
+    }
 }
 
 pub fn sharing() -> Sharing {
     let Some(window) = web_sys::window() else {
         return Sharing::Elsewhere;
     };
-    if window.location().origin().ok().as_deref() != Some(ORIGIN) {
+    if collector().is_none() {
         return Sharing::Elsewhere;
     }
     if refused(&window.navigator()) {
@@ -56,21 +78,39 @@ pub fn sharing() -> Sharing {
     if TURNED_OFF.with(Cell::get) {
         return Sharing::Off;
     }
-    // ⚠️ Off when storage is blocked: the switch could not be kept, so it could not be
-    // turned off.
+    // ⚠️ Off when storage is blocked or will not take a write: a switch turned off there
+    // could not be kept, and the next load would read it as on.
     let Some(storage) = storage() else {
         return Sharing::Off;
     };
+    if !writable(&storage) {
+        return Sharing::Off;
+    }
     match storage.get_item(SWITCH) {
         Ok(None) => Sharing::On,
         Ok(Some(_)) | Err(_) => Sharing::Off,
     }
 }
 
+/// Whether `storage` keeps a write, asked once a page and again after a write fails.
+fn writable(storage: &Storage) -> bool {
+    if let Some(known) = WRITABLE.with(Cell::get) {
+        return known;
+    }
+    let took = storage.set_item(PROBE, "1").is_ok() && storage.remove_item(PROBE).is_ok();
+    WRITABLE.with(|writable| writable.set(Some(took)));
+    took
+}
+
 /// Do Not Track or Global Privacy Control.
+///
+/// ⚠️ Both are read as properties. Chrome's `doNotTrack` is `null` when unset, and
+/// `Navigator::do_not_track` then throws through the wasm frames of whatever called it,
+/// eframe's frame among them, which leaves its runner borrowed and the page frozen.
 fn refused(navigator: &web_sys::Navigator) -> bool {
+    let dnt = field(navigator, "doNotTrack").and_then(|value| value.as_string());
     let gpc = field(navigator, "globalPrivacyControl").and_then(|value| value.as_bool());
-    navigator.do_not_track() == "1" || gpc == Some(true)
+    dnt.as_deref() == Some("1") || gpc == Some(true)
 }
 
 fn storage() -> Option<Storage> {
@@ -81,7 +121,11 @@ fn storage() -> Option<Storage> {
 pub fn share(on: bool) {
     TURNED_OFF.with(|off| off.set(!on));
     if !on {
-        QUEUE.with(|queue| queue.borrow_mut().clear());
+        QUEUE.with(|queue| {
+            if let Ok(mut queue) = queue.try_borrow_mut() {
+                queue.clear();
+            }
+        });
     }
     let Some(storage) = storage() else {
         return;
@@ -91,7 +135,9 @@ pub fn share(on: bool) {
             let _ = storage.remove_item(SWITCH);
         }
         false => {
-            let _ = storage.set_item(SWITCH, "off");
+            if storage.set_item(SWITCH, "off").is_err() {
+                WRITABLE.with(|writable| writable.set(Some(false)));
+            }
             let _ = storage.remove_item(LAST_VISIT);
         }
     }
@@ -143,7 +189,10 @@ fn flush() {
         return;
     }
     let body = format!("[{}]", Vec::from(rows).join(","));
-    let _ = navigator.send_beacon_with_opt_str(&format!("{ENDPOINT}/e"), Some(&body));
+    let Some(collector) = collector() else {
+        return;
+    };
+    let _ = navigator.send_beacon_with_opt_str(&format!("{collector}/e"), Some(&body));
 }
 
 /// Start reporting: the panic hook, and the flushes on a timer and when the page is
@@ -261,7 +310,8 @@ pub async fn submit(body: String) -> Result<(), Undelivered> {
     init.set_method("POST");
     // `text/plain` is a simple request, so the browser sends no preflight.
     init.set_body(&JsValue::from_str(&body));
-    let request = web_sys::Request::new_with_str_and_init(&format!("{ENDPOINT}/report"), &init)
+    let collector = collector().unwrap_or_else(|| ENDPOINT.to_string());
+    let request = web_sys::Request::new_with_str_and_init(&format!("{collector}/report"), &init)
         .map_err(|_| Undelivered::Unreachable)?;
     let _ = request.headers().set("content-type", "text/plain");
     let answer = JsFuture::from(window.fetch_with_request(&request))

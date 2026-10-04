@@ -2,9 +2,10 @@
 // anyone can post to a public endpoint.
 
 // Whether a request's `Origin` header allows it. Browsers send one with every
-// cross-origin POST, beacons included; only drawbar.app's is accepted.
-export function allowed(origin) {
-  return origin === "https://drawbar.app";
+// cross-origin POST, beacons included. drawbar.app's is accepted, and `dev`'s when a
+// local run names one (the `DEV_ORIGIN` variable, which production never sets).
+export function allowed(origin, dev) {
+  return origin === "https://drawbar.app" || (Boolean(dev) && origin === dev);
 }
 
 // Rows in one beacon.
@@ -87,8 +88,9 @@ const REPORT = {
 
 const ID = /^[2-9a-hjkmnp-z]{10}$/;
 
-// A report's fields, or `null` if it is not one. `edge` supplies `browser` and `os`.
-export function report(body, edge) {
+// A report's fields exactly as sent, or `null` if it is not one. Nothing is added: the
+// sender saw everything a report holds before sending it.
+export function report(body) {
   let parsed;
   try {
     parsed = JSON.parse(body);
@@ -112,7 +114,7 @@ export function report(body, edge) {
   if (!ID.test(parsed.id) || !["problem", "feedback"].includes(parsed.kind) || !parsed.text) {
     return null;
   }
-  return { ...parsed, browser: edge.browser ?? "", os: edge.os ?? "" };
+  return parsed;
 }
 
 // The browser family and major version, and the operating system family, from a user

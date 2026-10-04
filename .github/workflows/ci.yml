@@ -15,10 +15,10 @@
 #   telemetry: master pushes only, after check. Applies the D1 migrations and
 #              deploys the collector in telemetry/ with the Cloudflare token of the
 #              drawbar-telemetry-deploy environment, which only master can use.
-#   pages: every master push once release and telemetry have run. The app comes from the newest
-#          `drawbar-v*` tag and the guide from master. It hangs off release
-#          because a tag GITHUB_TOKEN creates fires no workflow event, so
-#          `on: push: tags:` would never deploy one.
+#   pages: every master push once release and telemetry have run. The app
+#          comes from the newest `drawbar-v*` tag and the guide from master. It
+#          hangs off release because a tag GITHUB_TOKEN creates fires no workflow
+#          event, so `on: push: tags:` would never deploy one.
 #
 # cache-nix-action keeps the store between runs in the GitHub Actions cache
 # (10 GB per repo, LRU-evicted); without it every run rebuilds Wine, QEMU and

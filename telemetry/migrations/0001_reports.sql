@@ -8,8 +8,6 @@ CREATE TABLE reports (
   version TEXT NOT NULL,
   model TEXT NOT NULL,
   firmware TEXT NOT NULL,
-  browser TEXT NOT NULL,
-  os TEXT NOT NULL,
   faults TEXT NOT NULL,
   build TEXT NOT NULL,
   log TEXT NOT NULL

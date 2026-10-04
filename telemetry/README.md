@@ -19,3 +19,26 @@ The collector keeps no request logs and stores no address or user agent.
 
 `node --test test/check.test.js` runs the tests; `nix flake check` runs them too. CI
 deploys from `master`.
+
+## Testing against a running collector
+
+A build served anywhere but drawbar.app sends nothing unless it is pointed at a
+collector, and the collector refuses every origin but drawbar.app's unless it is told
+one more. From this directory, with `WRANGLER_SEND_METRICS=false`:
+
+1. `wrangler d1 migrations apply drawbar-reports --local`
+2. `wrangler dev --port 8787 --var DEV_ORIGIN:http://127.0.0.1:8090 --test-scheduled`
+   runs the collector on this machine against a local D1. Analytics Engine writes go
+   nowhere locally. With `--remote` it runs on Cloudflare against the real
+   `drawbar-reports` and `drawbar_events` instead, which needs `wrangler login`.
+3. `./smoke.bash http://127.0.0.1:8787 http://127.0.0.1:8090` checks what it accepts and
+   refuses. `curl 'http://127.0.0.1:8787/__scheduled?cron=17+4+*+*+*'` runs the daily
+   delete.
+4. Serve a site build on that origin (`nix build .#site`, then any static server on port
+   8090), and in its console run
+   `localStorage.setItem("drawbar.telemetry.collector", "http://127.0.0.1:8787")`.
+   Reload: the page reports there, and the report form sends there. drawbar.app ignores
+   that key.
+
+Test rows and reports carry version `0.0.0-test` or the id `smoke.bash` prints, for
+deleting afterward.

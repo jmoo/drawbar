@@ -1,6 +1,6 @@
 // The collector. `POST /e` takes a beacon of anonymous rows into Analytics Engine;
-// `POST /report` takes one report an operator sent into D1. Neither keeps the client's
-// address or user agent.
+// `POST /report` takes one report an operator sent into D1, exactly as sent. Neither
+// keeps the client's address or user agent.
 
 import { agent, allowed, report, rows } from "./check.js";
 import schema from "../../crates/drawbar/telemetry.json";
@@ -10,42 +10,46 @@ const ORIGIN = "https://drawbar.app";
 // The largest body read, in bytes: a report with its whole log attached fits.
 const LARGEST = 256 * 1024;
 
-// The most reports kept from one day, whoever sends them. A sender that gets past the
-// per-address rate limit at the edge can fill a day, not the database: 100 a day for the
-// 90 days they are kept, at the largest body, stays inside D1's free 5 GB.
+// The most reports kept from any 24 hours, so a sender past the edge's per-address
+// rate limit can fill a day rather than the database.
 const MOST_A_DAY = 100;
 
 // How long a report is kept.
 const KEEP_SECONDS = 90 * 24 * 60 * 60;
 
-const HEADERS = {
-  "access-control-allow-origin": ORIGIN,
-  "access-control-allow-methods": "POST",
-  "access-control-allow-headers": "content-type",
-};
-
-function answer(status) {
-  return new Response(null, { status, headers: HEADERS });
+// `origin` is the one the request may be read from: drawbar.app, or a local run's.
+function answer(status, origin = ORIGIN) {
+  return new Response(null, {
+    status,
+    headers: {
+      "access-control-allow-origin": origin,
+      "access-control-allow-methods": "POST",
+      "access-control-allow-headers": "content-type",
+    },
+  });
 }
 
 export default {
   async fetch(request, env) {
+    const origin = request.headers.get("origin");
+    const reader = allowed(origin, env.DEV_ORIGIN) ? origin : ORIGIN;
+    const reply = (status) => answer(status, reader);
     if (request.method === "OPTIONS") {
-      return answer(204);
+      return reply(204);
     }
     if (request.method !== "POST") {
-      return answer(405);
+      return reply(405);
     }
-    if (!allowed(request.headers.get("origin"))) {
-      return answer(403);
+    if (!allowed(origin, env.DEV_ORIGIN)) {
+      return reply(403);
     }
     const declared = Number(request.headers.get("content-length") ?? 0);
     if (declared > LARGEST) {
-      return answer(413);
+      return reply(413);
     }
     const body = await request.text();
     if (body.length > LARGEST) {
-      return answer(413);
+      return reply(413);
     }
     const edge = {
       ...agent(request.headers.get("user-agent") ?? ""),
@@ -56,22 +60,30 @@ export default {
         for (const point of rows(body, schema, edge)) {
           env.EVENTS.writeDataPoint(point);
         }
-        return answer(204);
+        return reply(204);
       case "/report": {
-        const sent = report(body, edge);
+        const sent = report(body);
         if (!sent) {
-          return answer(400);
+          return reply(400);
+        }
+        // A retry of a report already kept is answered as kept, before the daily cap
+        // can refuse it.
+        const kept = await env.REPORTS.prepare("SELECT 1 AS kept FROM reports WHERE id = ?")
+          .bind(sent.id)
+          .first("kept");
+        if (kept) {
+          return reply(204);
         }
         const today = await env.REPORTS.prepare(
           "SELECT COUNT(*) AS n FROM reports WHERE created > unixepoch() - 86400",
         ).first("n");
         if (today >= MOST_A_DAY) {
-          return answer(429);
+          return reply(429);
         }
         await env.REPORTS.prepare(
           `INSERT OR IGNORE INTO reports
-             (id, kind, text, contact, version, model, firmware, browser, os, faults, build, log)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, kind, text, contact, version, model, firmware, faults, build, log)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             sent.id,
@@ -81,17 +93,15 @@ export default {
             sent.version,
             sent.model,
             sent.firmware,
-            sent.browser,
-            sent.os,
             sent.faults,
             sent.build,
             sent.log,
           )
           .run();
-        return answer(204);
+        return reply(204);
       }
       default:
-        return answer(404);
+        return reply(404);
     }
   },
 
