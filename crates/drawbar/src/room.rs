@@ -6,7 +6,7 @@
 
 use eframe::egui;
 use nord_usb::wire::{AllocationUnit, Status};
-use nord_usb::ObjectClass;
+use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, canvas, warn};
 use crate::device::DeviceState;
@@ -153,32 +153,46 @@ fn counted(class: ObjectClass, device: &DeviceState) -> Option<&Status> {
     device.inventory.iter().find(|status| status.class == class)
 }
 
-/// The item in the queue that needs the most room, and whether it has it.
+/// The bytes a write into a library slot has: the partition's free space and the blocks
+/// the slot's occupant frees, since a library write deletes what it replaces first.
 ///
-/// ⚠️ An entry's room is the free space plus what its slot holds now, since the write
-/// frees what it replaces.
+/// ⚠️ `None` for a slot-addressed class. Its counters count fixed-size records, so a
+/// replace needs no room and an empty slot is the room. `None` also until the partition
+/// has reported its allocation unit.
+pub fn room_for(class: ObjectClass, at: Location, device: &DeviceState) -> Option<u64> {
+    if !class.is_library() {
+        return None;
+    }
+    let unit = device.allocation_unit(class)?;
+    let freed = match device.slot(class, at).flatten() {
+        Some(info) => unit.blocks_for(usize::try_from(info.body_len).ok()?).ok()?,
+        None => 0,
+    };
+    let blocks = counted(class, device)?
+        .available()
+        .saturating_add(u64::from(freed));
+    Some(blocks.saturating_mul(u64::from(unit.get())))
+}
+
+/// The queued item with the least room to spare, and whether it fits.
 pub fn constraint(queue: &Queue, workspace: &Workspace, device: &DeviceState) -> Option<String> {
-    let (name, bytes, class, freed) = queue
+    let (name, bytes, room) = queue
         .entries()
         .iter()
         .filter_map(|held| {
             let entity = workspace.get(held.id)?;
-            let freed = held
-                .replaces
-                .occupant()
-                .map_or(0, |occupant| u64::from(occupant.body_len));
-            Some((entity.name.clone(), entity.size(), held.class, freed))
+            let room = room_for(held.class, held.at, device)?;
+            Some((entity.name.clone(), entity.size(), room))
         })
-        .max_by_key(|(_, bytes, _, freed)| bytes.saturating_sub(*freed))?;
-    let free = free_bytes(class, device)?.saturating_add(freed);
-    let verdict = match bytes <= free {
+        .max_by_key(|(_, bytes, room)| i128::from(*bytes) - i128::from(*room))?;
+    let verdict = match bytes <= room {
         true => "it fits",
         false => "it does not fit",
     };
     Some(format!(
         "{name} is {} and {} is free for it, so {verdict}.",
         measure(bytes),
-        measure(free)
+        measure(room)
     ))
 }
 
@@ -535,19 +549,19 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_replace_has_the_room_its_occupant_frees() {
+    fn a_queued_library_replace_has_the_blocks_its_occupant_frees() {
         let Bench {
             mut workspace,
             mut device,
             mut log,
             ..
         } = Bench::new();
-        let class = ObjectClass::SetList;
+        let class = ObjectClass::Sample;
         let mut queue = Queue::default();
         device.pretend_scanned(class, 1, &["Old"]);
         device.pretend_partitions(&crate::device::ELECTRO5);
-        device.state.inventory.push(status(class, 1, 0, 121));
-        let id = workspace.ingest("New".into(), Origin::Fresh, vec![0; 121], &mut log);
+        device.state.inventory.push(status(class, 1, 0, 1));
+        let id = workspace.ingest("New".into(), Origin::Fresh, vec![0; 4096], &mut log);
         enqueue(
             &workspace,
             &mut device,
@@ -559,8 +573,35 @@ mod tests {
         );
         assert_eq!(
             constraint(&queue, &workspace, &device.state).as_deref(),
-            Some("New is 121 B and 121 B is free for it, so it fits.")
+            Some("New is 4.0 kB and 128.0 kB is free for it, so it fits.")
         );
+    }
+
+    #[test]
+    fn a_slot_class_has_no_room_to_run_out_of_in_bytes() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let class = ObjectClass::SetList;
+        let mut queue = Queue::default();
+        device.pretend_scanned(class, 1, &["Old"]);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.state.inventory.push(status(class, 1, 0, 121));
+        let id = workspace.ingest("New".into(), Origin::Fresh, vec![0; 4096], &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        assert_eq!(room_for(class, at(0), &device.state), None);
+        assert_eq!(constraint(&queue, &workspace, &device.state), None);
     }
 
     #[test]

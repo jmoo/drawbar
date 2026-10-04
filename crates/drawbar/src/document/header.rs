@@ -1211,26 +1211,19 @@ pub(super) fn loads(entity: &LocalEntity, device: &DeviceState) -> Option<(Objec
 }
 
 /// How far the document exceeds the room it would have in its slot, and that room.
-/// `None` where the folder does not count in bytes or the document fits.
-///
-/// ⚠️ The room is the folder's free space plus what the slot holds now, since the write
-/// frees what it replaces.
+/// `None` where the slot's room is not a question of bytes or the document fits.
 fn over(
     entity: &LocalEntity,
     class: ObjectClass,
     at: Location,
     device: &DeviceState,
 ) -> Option<(u64, u64)> {
-    let held = device
-        .slot(class, at)
-        .flatten()
-        .map_or(0, |info| u64::from(info.body_len));
-    let free = room::free_bytes(class, device)?.saturating_add(held);
-    let bytes = entity.size();
-    bytes
-        .checked_sub(free)
+    let room = room::room_for(class, at, device)?;
+    entity
+        .size()
+        .checked_sub(room)
         .filter(|over| *over > 0)
-        .map(|over| (over, free))
+        .map(|over| (over, room))
 }
 
 /// The identity cells this kind has: the header-level fields the strip cannot carry.
@@ -1594,36 +1587,32 @@ mod tests {
         assert!(held.hint.contains("free for Pianos 1:4"), "{}", held.hint);
     }
 
-    /// A send replaces what its slot holds, so a full folder still takes a document no
-    /// larger than that occupant.
+    /// A library send deletes what its slot holds first, so a full library still takes a
+    /// document no larger than the blocks that occupant frees.
     #[test]
-    fn a_send_counts_the_occupant_it_replaces_as_room() {
+    fn a_library_send_counts_the_blocks_its_occupant_frees_as_room() {
         use crate::device::Device;
         use nord_usb::wire::Status;
 
         let (mut workspace, mut log) = workspace();
         let bytes = Fresh::SetList.bytes().unwrap();
         let mut device = Device::new(egui::Context::default());
-        device.pretend_scanned(ObjectClass::SetList, 7, &["Old", ""]);
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Old", ""]);
         device.pretend_partitions(&crate::device::ELECTRO5);
-        assert!(
-            bytes.len() <= 121,
-            "the occupant pretend_scanned makes is 121 bytes"
-        );
         device.state.inventory.push(Status {
-            class: ObjectClass::SetList,
+            class: ObjectClass::Piano,
             count: 1,
             free: 0,
-            used: 121,
+            used: 1,
             dirty: 0,
             spare: 0,
         });
         let sent_to = |slot: u32, workspace: &mut Workspace, log: &mut Log| {
-            let at = Location::from_user(7, slot);
+            let at = Location::from_user(1, slot);
             let id = workspace.ingest(
-                "Blue Room.ne5t".into(),
+                "Grand.npno".into(),
                 Origin::Device {
-                    class: ObjectClass::SetList,
+                    class: ObjectClass::Piano,
                     at,
                 },
                 bytes.clone(),
@@ -1634,7 +1623,7 @@ mod tests {
 
         let held = sent_to(1, &mut workspace, &mut log);
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
-        assert_eq!(held.hint, "replaces Set lists 7:1");
+        assert_eq!(held.hint, "replaces Pianos 1:1");
 
         let held = sent_to(2, &mut workspace, &mut log);
         assert_eq!(held.tone, Tone::Blocked, "an empty slot frees nothing");
@@ -1642,6 +1631,41 @@ mod tests {
             held.label,
             format!("Won't fit · {} over", room::measure(bytes.len() as u64))
         );
+    }
+
+    /// Settings is one fixed buffer written in place, so a send to it is never a question
+    /// of room.
+    #[test]
+    fn a_settings_send_is_never_refused_for_room() {
+        use crate::device::Device;
+        use nord_usb::wire::Status;
+
+        let (mut workspace, mut log) = workspace();
+        let at = Location { bank: 0, slot: 0 };
+        let mut device = Device::new(egui::Context::default());
+        device.pretend_scanned(ObjectClass::Settings, 1, &["Settings"]);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        // The counters an Electro 5 reports for Settings. Confirmed on hardware.
+        device.state.inventory.push(Status {
+            class: ObjectClass::Settings,
+            count: 0,
+            free: 34,
+            used: 0,
+            dirty: 0,
+            spare: 0,
+        });
+        let id = workspace.ingest(
+            "Settings.ne5s".into(),
+            Origin::Device {
+                class: ObjectClass::Settings,
+                at,
+            },
+            Fresh::Settings.bytes().unwrap(),
+            &mut log,
+        );
+        let held = action(workspace.get(id).unwrap(), &device.state);
+        assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
+        assert_eq!(held.send, Some((ObjectClass::Settings, at)));
     }
 
     /// A project lives on this computer, so its loud action is a build. The build is
