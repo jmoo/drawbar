@@ -1213,6 +1213,8 @@ struct Bundling {
     ids: Vec<u64>,
     slots: Vec<(ObjectClass, Location)>,
     after: u64,
+    /// Whether a gather has yet to say which slots it copies.
+    gathering: bool,
 }
 
 /// A bundle whose directory has been read, to be unpacked into a new folder in `dir`.
@@ -2435,17 +2437,36 @@ impl Workspace {
         });
     }
 
-    /// Write `ids` as a bundle once each of `slots` has been copied to this computer: see
-    /// [`Workspace::bundle_ready`]. A later request replaces this one.
-    pub fn bundle_after(&mut self, ids: Vec<u64>, slots: Vec<(ObjectClass, Location)>) {
+    /// Write `ids` as a bundle once each of `slots` has been copied to this computer, and
+    /// where `gathering`, the slots a gather reports too: see [`Workspace::bundle_ready`].
+    /// A later request replaces this one.
+    pub fn bundle_after(
+        &mut self,
+        ids: Vec<u64>,
+        slots: Vec<(ObjectClass, Location)>,
+        gathering: bool,
+    ) {
         let after = self.next_id;
-        self.bundling = Some(Bundling { ids, slots, after });
+        self.bundling = Some(Bundling {
+            ids,
+            slots,
+            after,
+            gathering,
+        });
+    }
+
+    /// The slots a gather found, which the waiting bundle waits on too.
+    pub fn bundle_gathered(&mut self, slots: Vec<(ObjectClass, Location)>) {
+        if let Some(waiting) = self.bundling.as_mut().filter(|w| w.gathering) {
+            waiting.slots.extend(slots);
+            waiting.gathering = false;
+        }
     }
 
     /// The assets to write as the bundle [`Workspace::bundle_after`] waits on, once every
     /// slot it waits on has become an asset on this computer.
     pub fn bundle_ready(&mut self) -> Option<Vec<u64>> {
-        let waiting = self.bundling.as_ref()?;
+        let waiting = self.bundling.as_ref().filter(|w| !w.gathering)?;
         let mut ids = waiting.ids.clone();
         for &(class, at) in &waiting.slots {
             let copied = self.entities.iter().find(|e| {

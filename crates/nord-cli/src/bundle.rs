@@ -307,7 +307,7 @@ pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Res
                 .into_iter()
                 .zip(objects)
             {
-                read.item.needs = needs(deps);
+                read.item.needs = nord_usb::bundle::needs(deps);
                 reads.push(read);
             }
         }
@@ -341,23 +341,6 @@ pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Res
     })();
     let _ = std::fs::remove_dir_all(&parts);
     result
-}
-
-/// What an object needs, as the instrument's dependency rows for it say: the instrument
-/// can report a piano or sample a program's file leaves at zero, and it plays that one.
-fn needs(deps: &[nord_usb::wire::Dependency]) -> Vec<Key> {
-    let required = deps.iter().filter(|row| row.is_required());
-    required
-        .filter_map(|row| match (row.class, row.location) {
-            (ObjectClass::Piano, _) => Some(Key::Piano(row.id)),
-            (ObjectClass::Sample, _) => Some(Key::Sample(row.id)),
-            (ObjectClass::Program, Some(at)) => Some(Key::Program(
-                u16::try_from(at.bank).ok()?,
-                u16::try_from(at.slot).ok()?,
-            )),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Programs or set lists, in one session.

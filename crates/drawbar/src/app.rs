@@ -889,6 +889,9 @@ impl eframe::App for DrawbarApp {
         let played = self.midi.played(ctx.input(|input| input.time));
         arrived.extend(self.take_dropped_files(ctx));
         arrived.extend(self.take_picked());
+        if let Some(slots) = self.device.take_gathered() {
+            self.workspace.bundle_gathered(slots);
+        }
         if let Some(ids) = self.workspace.bundle_ready() {
             let slots = Vec::new();
             arrived.push(browser::Act::ExportBundle { ids, slots });

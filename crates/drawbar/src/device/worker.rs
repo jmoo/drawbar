@@ -307,6 +307,8 @@ async fn execute<T: Transport>(
             copy_all(device, class, &slots, scratch, emit, gone).await
         }
 
+        DeviceCmd::Gather { roots } => gather(device, &roots, scratch, emit, gone).await,
+
         DeviceCmd::Put {
             id,
             class,
@@ -1198,6 +1200,52 @@ async fn copy_all<T: Transport>(
         "copied {copied} of {} from {} in one session",
         slots.len(),
         class.label()
+    )))
+}
+
+/// Walk `roots` to everything a bundle of them holds, then copy it all to this computer.
+async fn gather<T: Transport>(
+    device: &mut Device<T>,
+    roots: &[(ObjectClass, Location)],
+    scratch: &Scratch,
+    emit: &Emit,
+    gone: &mut bool,
+) -> Result<Option<String>, String> {
+    let closure = nord_usb::bundle::closure(device, roots)
+        .await
+        .map_err(spoil(gone, None))?;
+    for (class, at, deps) in &closure.objects {
+        let (class, at, deps) = (*class, *at, deps.clone());
+        emit.send(DeviceEvent::Deps { class, at, deps });
+    }
+    let slots: Vec<(ObjectClass, Location)> = closure.slots().collect();
+    let unfound = closure
+        .unfound
+        .iter()
+        .map(|row| format!("{} “{}”", row.class.label(), row.name.trim_end()))
+        .collect();
+    emit.send(DeviceEvent::Gathered {
+        slots: slots.clone(),
+        unfound,
+    });
+    for class in [
+        ObjectClass::SetList,
+        ObjectClass::Program,
+        ObjectClass::Piano,
+        ObjectClass::Sample,
+    ] {
+        let of: Vec<Location> = slots
+            .iter()
+            .filter(|(held, _)| *held == class)
+            .map(|(_, at)| *at)
+            .collect();
+        if !of.is_empty() {
+            copy_all(device, class, &of, scratch, emit, gone).await?;
+        }
+    }
+    Ok(Some(format!(
+        "gathered {} objects for a bundle",
+        slots.len()
     )))
 }
 

@@ -205,6 +205,13 @@ fn member(entity: &LocalEntity, device: &DeviceState) -> Option<(Item, Body)> {
     };
     let name = stem(entity);
     let mut item = Item::of(&header, &name, decoded)?;
+    // The instrument's own list of what the slot an object came from needs counts over
+    // the file's: it can name a piano or sample the file leaves at zero.
+    if let Some((class, at)) = entity.origin.slot() {
+        if let Some(needs) = device.needs_of(class, at) {
+            item.needs = needs.to_vec();
+        }
+    }
     item.provides = item.provides.or_else(|| match item.class {
         Class::Piano => device.library_id(ObjectClass::Piano, &name).map(Key::Piano),
         Class::Sample => device

@@ -2,6 +2,8 @@
 //! every program a set list among them plays, and every piano and sample those programs
 //! play.
 
+use nord_format::bundle::Key;
+
 use crate::device::Device;
 use crate::op;
 use crate::transport::Transport;
@@ -40,6 +42,25 @@ impl Closure {
                 .map(|library| (library.class, library.at)),
         )
     }
+}
+
+/// What an object needs, as the instrument's dependency rows for it say.
+///
+/// The rows, not the object's file, are what it plays: the instrument can report a
+/// piano or sample the file leaves at zero. Confirmed on hardware.
+pub fn needs(rows: &[Dependency]) -> Vec<Key> {
+    let required = rows.iter().filter(|row| row.is_required());
+    required
+        .filter_map(|row| match (row.class, row.location) {
+            (ObjectClass::Piano, _) => Some(Key::Piano(row.id)),
+            (ObjectClass::Sample, _) => Some(Key::Sample(row.id)),
+            (ObjectClass::Program, Some(at)) => Some(Key::Program(
+                u16::try_from(at.bank).ok()?,
+                u16::try_from(at.slot).ok()?,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Walk `roots`, set lists and programs, to everything a bundle of them holds. Read-only:

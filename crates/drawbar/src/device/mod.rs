@@ -107,6 +107,12 @@ pub enum DeviceCmd {
         class: ObjectClass,
         slots: Vec<Location>,
     },
+    /// Walk set lists and programs to everything a bundle of them holds, list each one's
+    /// dependencies, report the slots in [`DeviceEvent::Gathered`], and copy them all to
+    /// this computer, one session per class.
+    Gather {
+        roots: Vec<(ObjectClass, Location)>,
+    },
     Put {
         /// The asset on this computer this came from. The [`DeviceEvent::Sent`] this
         /// raises names it, so a lone put settles the queue as a batch does.
@@ -254,6 +260,7 @@ impl DeviceCmd {
             DeviceCmd::CopyAll { class, slots } => {
                 format!("get {} objects <- {}", slots.len(), class.label())
             }
+            DeviceCmd::Gather { roots } => format!("gather a bundle of {} objects", roots.len()),
             DeviceCmd::Put { at, name, .. } => format!("put {name} -> {}", shown(*at)),
             DeviceCmd::SendAll { class, items } => {
                 format!("put {} objects -> {}", items.len(), class.label())
@@ -318,6 +325,13 @@ impl DeviceCmd {
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
+            DeviceCmd::Gather { roots } => words(
+                COPYING,
+                format!(
+                    "{} and what they play to this computer",
+                    counted(roots.len(), "sound", "sounds")
+                ),
+            ),
             DeviceCmd::CopyAll { class, slots } => words(
                 COPYING,
                 format!(
@@ -443,6 +457,12 @@ pub enum DeviceEvent {
     },
     /// An object of a [`DeviceCmd::CopyAll`] too large to hold, read into a file.
     Fetched(Fetched),
+    /// The slots a [`DeviceCmd::Gather`] found and is copying, and each piano or sample
+    /// it needed and found in no one slot.
+    Gathered {
+        slots: Vec<(ObjectClass, Location)>,
+        unfound: Vec<String>,
+    },
     /// A read found the slot empty. This is the instrument's answer, not a fault, and it
     /// settles a slot no walk has reached.
     Vacant {
@@ -562,6 +582,9 @@ pub struct DeviceState {
     /// ⚠️ An id names an object only in the library as it is now, so this is cleared when
     /// the instrument reports a change or disconnects.
     named: HashMap<(u32, u32), String>,
+    /// What each set list or program the instrument has listed dependencies for needs,
+    /// by class and slot. Cleared with [`DeviceState::named`].
+    needs: HashMap<(u32, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
 }
 
@@ -635,7 +658,19 @@ impl DeviceState {
                     .insert((dep.class.to_raw(), dep.id), name.to_string());
             }
         }
+        let key = (class.to_raw(), at.bank, at.slot);
+        self.needs.insert(key, nord_usb::bundle::needs(&deps));
         self.detail.deps = Some(deps);
+    }
+
+    /// What the set list or program in a slot needs, as the instrument last listed it.
+    pub fn needs_of(
+        &self,
+        class: ObjectClass,
+        at: Location,
+    ) -> Option<&[nord_format::bundle::Key]> {
+        let key = (class.to_raw(), at.bank, at.slot);
+        self.needs.get(&key).map(Vec::as_slice)
     }
 
     /// What the instrument called a library object, by class and id.
@@ -807,6 +842,7 @@ impl DeviceState {
         self.partitions.clear();
         self.inventory.clear();
         self.named.clear();
+        self.needs.clear();
         self.detail = Detail::default();
         self.scan.clear();
     }
@@ -1140,6 +1176,8 @@ pub struct Device {
     linked: u64,
     /// Objects read into files, waiting to be copied into the library.
     fetched: Vec<Fetched>,
+    /// The slots the last [`DeviceCmd::Gather`] found, until taken.
+    gathered: Option<Vec<(ObjectClass, Location)>>,
 }
 
 /// The follow-up owed by the command in flight, set when it is dispatched.
@@ -1172,6 +1210,7 @@ impl Device {
             asked_deps: None,
             linked: 0,
             fetched: Vec::new(),
+            gathered: None,
         }
     }
 
@@ -1235,6 +1274,11 @@ impl Device {
             return;
         }
         self.pending.push_back(cmd);
+    }
+
+    /// The slots the last gather found, once.
+    pub fn take_gathered(&mut self) -> Option<Vec<(ObjectClass, Location)>> {
+        self.gathered.take()
     }
 
     /// The objects read into files since the last call, to be copied into the library.
@@ -1715,6 +1759,14 @@ impl Device {
                     }
                 },
                 DeviceEvent::Fetched(fetched) => self.fetched.push(fetched),
+                DeviceEvent::Gathered { slots, unfound } => {
+                    for what in unfound {
+                        log.trouble(format!(
+                            "The bundle leaves out the {what}: no one slot holds it."
+                        ));
+                    }
+                    self.gathered = Some(slots);
+                }
                 // An empty slot is a failure to a user who asked to copy or open it, and
                 // an answer to the queue: nothing is being replaced.
                 DeviceEvent::Vacant { class, at, why } => match why {
@@ -1802,6 +1854,7 @@ impl Device {
                 DeviceEvent::InstrumentChanged => {
                     log.warn("the instrument changed; every cached name is dropped");
                     self.state.named.clear();
+                    self.state.needs.clear();
                     self.asked_deps = None;
                     log.say("Something changed on the instrument. Reading it again…");
                     self.resync();

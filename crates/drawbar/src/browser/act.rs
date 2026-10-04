@@ -1029,8 +1029,11 @@ fn export_bundle(
     slots: Vec<(ObjectClass, Location)>,
 ) {
     if !slots.is_empty() {
+        let (roots, others): (Vec<_>, Vec<_>) = slots
+            .iter()
+            .partition(|(class, _)| matches!(class, ObjectClass::SetList | ObjectClass::Program));
         let mut by_class: Vec<(ObjectClass, Vec<Location>)> = Vec::new();
-        for &(class, at) in &slots {
+        for &(class, at) in &others {
             match by_class.iter_mut().find(|(held, _)| *held == class) {
                 Some((_, held)) => held.push(at),
                 None => by_class.push((class, vec![at])),
@@ -1039,11 +1042,15 @@ fn export_bundle(
         for (class, slots) in by_class {
             device.send(DeviceCmd::CopyAll { class, slots }, log);
         }
+        let gathering = !roots.is_empty();
+        if gathering {
+            device.send(DeviceCmd::Gather { roots }, log);
+        }
         log.say(format!(
-            "Copying {} from the instrument for the bundle…",
+            "Copying {} and what they play from the instrument for the bundle…",
             crate::strings::counted(slots.len(), "sound", "sounds")
         ));
-        return workspace.bundle_after(ids, slots);
+        return workspace.bundle_after(ids, others, gathering);
     }
     match crate::bundle::lay_out(&ids, workspace, &device.state) {
         Ok(crate::bundle::Laid::Read(ids)) => browser.held.push(Act::ExportBundle {
