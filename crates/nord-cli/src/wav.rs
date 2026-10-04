@@ -1,8 +1,8 @@
-//! Reading the WAVs the encoders take, and refusing a bad one by name.
+//! Reading the WAVs `piano build` takes, and refusing a bad one by name.
 //!
-//! `sample encode`, `sample build` and `piano build` all turn recordings into encoded
-//! strokes, and the formats set what a stroke can hold. Checking each file as it is read
-//! names the one that is wrong.
+//! The format sets what a stroke can hold, so checking each file as it is read names the
+//! one that is wrong. The sample encoders check theirs with
+//! [`nord_format::formats::nsmpproj::build::source_pcm`].
 
 use std::path::Path;
 
