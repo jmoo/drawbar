@@ -279,6 +279,9 @@ async fn drive(
         }
         ctx.request_repaint();
     }
+    if let Ok(fs) = &mut fs {
+        fs.let_go().await;
+    }
 }
 
 /// The next command, waiting for one while there is none, or `None` once the backend
@@ -703,6 +706,19 @@ struct Folder {
 type Spot = (FileSystemDirectoryHandle, String);
 
 impl Folder {
+    /// Let go of the library's lock before the next library opens, which may be this one
+    /// again. A worker stopped by dropping it closes its handles only when the browser
+    /// gets to it.
+    async fn let_go(&mut self) {
+        match &mut self.writes {
+            Writes::Worker(Some(writer)) => {
+                let _ = writer.ask("unlock", LOCK, &[]).await;
+            }
+            Writes::Worker(None) => {}
+            Writes::Streams { held, .. } => drop(held.take()),
+        }
+    }
+
     /// The folder at `root`, or why this browser gives the page no storage. Some private
     /// windows refuse it.
     async fn open(

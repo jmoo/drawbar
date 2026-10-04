@@ -688,6 +688,7 @@ request at a time, each answered once:
 | `write` | Write a transferred `ArrayBuffer` at an offset. |
 | `end` | Flush the file and let it go. |
 | `abandon` | Let a file go, if it is held, and delete it. |
+| `unlock` | Let go of the lock and every file held, as the library is let go, so the next library's lock, which may be this library's again, never finds them still held. |
 
 ```mermaid
 sequenceDiagram
