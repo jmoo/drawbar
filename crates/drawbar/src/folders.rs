@@ -106,7 +106,7 @@ struct Census {
     /// How many files drawbar opens each folder holds, everywhere below it. The root's
     /// count, under `None`, is the whole library's.
     counts: BTreeMap<Option<u64>, usize>,
-    /// The ids of the assets directly in each folder, in list order.
+    /// The ids of the assets directly in each folder, in path order.
     members: BTreeMap<Option<u64>, Vec<u64>>,
 }
 
@@ -120,7 +120,12 @@ impl Census {
             taken,
             ..Census::default()
         };
-        for entity in workspace.listed() {
+        let mut listed: Vec<&LocalEntity> = workspace.listed().collect();
+        listed.sort_by(|a, b| {
+            let unplaced = a.path.is_none().cmp(&b.path.is_none());
+            unplaced.then_with(|| a.path.cmp(&b.path))
+        });
+        for entity in listed {
             let parent = entity.path.as_ref().map(LibPath::parent);
             let holder = parent.as_ref().and_then(|dir| ids.get(dir).copied());
             census.members.entry(holder).or_default().push(entity.id);
@@ -233,8 +238,8 @@ impl Folders {
             .collect()
     }
 
-    /// The assets directly in `folder`, in list order. An asset with no file yet is in
-    /// the root.
+    /// The assets directly in `folder`, in path order. An asset with no file yet is in
+    /// the root, after those with one.
     pub(crate) fn members<'a>(
         &self,
         folder: Option<u64>,

@@ -370,6 +370,34 @@ fn the_badge_and_the_status_count_the_same_files() {
     );
 }
 
+/// The tree lists a folder's files by name, whether or not the index holds a row for one.
+#[test]
+fn a_file_with_an_index_row_sorts_by_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut first = Session::open(&root);
+    let keys = first.named("Keys.ne5p");
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(keys, tag, true);
+    first.close();
+    assert_eq!(rows(&root).len(), 1, "only the tagged file has a row");
+
+    let second = Session::open(&root);
+    let Bench {
+        browser, workspace, ..
+    } = &second.bench;
+    let names: Vec<&str> = browser
+        .folders
+        .members(None, workspace)
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"]);
+}
+
 #[test]
 fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     let root = Temp::new();
