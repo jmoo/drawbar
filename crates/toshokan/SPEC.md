@@ -366,7 +366,7 @@ its end from whatever state they are in:
 
 | Step       | Finished when                                    | Otherwise |
 | ---------- | ------------------------------------------------ | --------- |
-| save       | `path` holds `new`                               | With the staged file present: rename it into place if `path` is empty, or move `old` into blobs first if `path` holds `old`; anything else at `path` conflicts. With the staged file absent, it conflicts. |
+| save       | `path` holds `new`, and blobs holds `old` unless `old` is null or `new` | With the staged file present: rename it into place if `path` is empty and blobs holds `old` as above, or move `old` into blobs first if `path` holds `old`; anything else at `path` conflicts. With the staged file absent, it conflicts. |
 | delete     | `path` is empty and blobs holds `old`            | Move the file into blobs if it holds `old`; anything else conflicts. |
 | move       | only `to` exists                                 | Rename if only `from` exists; remove `from` if both are files with the same bytes; anything else conflicts. |
 | move_files | every file has arrived                           | A file arrives when only its destination exists, by a rename when only its source exists, or by removing its source when both hold the same bytes. A file whose destination holds other bytes, or that is at neither place, stays and conflicts. |

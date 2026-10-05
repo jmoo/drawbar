@@ -765,8 +765,15 @@ async fn save<F: Fs>(
 ) -> Result<Ran> {
     let staged = blobs::staged(layout, log.writer(), new.blob);
     let has_staged = exists(fs, &staged).await?;
+    let displaced = old.filter(|old| old.blob != new.blob);
+    // Without the old bytes in the store, an empty path or one holding the new bytes is
+    // another program's doing, not this step's.
+    let old_stored = match displaced {
+        Some(old) => exists(fs, &layout.blob(old.blob)).await?,
+        None => true,
+    };
     let finished = match at(fs, path).await? {
-        At::File(blob) if blob == new.blob => {
+        At::File(blob) if blob == new.blob && old_stored => {
             if has_staged {
                 fs.remove_file(&staged).await?;
                 sync_parent(fs, &staged).await?;
@@ -774,7 +781,7 @@ async fn save<F: Fs>(
             true
         }
         _ if !has_staged => false,
-        At::Nothing => {
+        At::Nothing if old_stored => {
             place(fs, &staged, path).await?;
             true
         }
@@ -784,10 +791,9 @@ async fn save<F: Fs>(
             place(fs, &staged, path).await?;
             true
         }
-        At::File(_) | At::Directory => false,
+        At::Nothing | At::File(_) | At::Directory => false,
     };
     if finished {
-        let displaced = old.filter(|old| old.blob != new.blob);
         return Ok(Ran::Finished(Report {
             displaced: displaced
                 .map(|old| (path.clone(), old.blob))
@@ -802,7 +808,7 @@ async fn save<F: Fs>(
         sync_parent(fs, &staged).await?;
     }
     let mut kept = vec![new];
-    kept.extend(old.filter(|old| old.blob != new.blob));
+    kept.extend(displaced);
     Ok(Ran::Conflict {
         error,
         kept: in_store(fs, layout, kept).await?,
@@ -822,6 +828,7 @@ async fn delete<F: Fs>(
             sync_parent(fs, path).await?;
             true
         }
+        // The step's end, whoever emptied the path: the bytes it held are in the store.
         At::Nothing => exists(fs, &layout.blob(old.blob)).await?,
         At::File(_) | At::Directory => false,
     };

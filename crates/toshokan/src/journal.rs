@@ -603,6 +603,31 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_save_whose_old_bytes_another_program_removed_is_rolled_back() {
+        let layout = Layout::default();
+        for now in [None, Some(&b"new"[..])] {
+            let fs = library(&[("song", b"old")]);
+            let record = save_record(&layout, &fs, b"new", b"old");
+            block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+            block_on(fs.remove_file(&path("song"))).unwrap();
+            if let Some(bytes) = now {
+                block_on(fs.create(&path("song"), bytes)).unwrap();
+            }
+
+            let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+            assert_eq!(
+                recovered[0].outcome,
+                Outcome::RolledBack,
+                "song held {now:?}"
+            );
+            assert_eq!(fs.files().get(&path("song")).map(Vec::as_slice), now);
+            let kinds: Vec<Kind> = logged(&fs, WRITER).into_iter().map(|e| e.kind).collect();
+            let new = Stored::of(b"new").added();
+            assert_eq!(kinds, [Kind::INTENT, new], "song held {now:?}");
+        }
+    }
+
+    #[test]
     fn recovery_stamps_its_entries_past_every_version_the_record_holds() {
         let layout = Layout::default();
         let fs = library(&[("a", b"a"), ("song", b"theirs")]);
