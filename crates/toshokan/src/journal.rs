@@ -6,7 +6,7 @@
 //! stamped before the first step, so recovery appends the same entries the intent
 //! would have.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::fs::{ensure_dir, hash_file, FileKind, Fs, RelPath};
 use crate::ids::{canonical_u64, IntentId, Version, WriterId};
 use crate::layout::Layout;
-use crate::log::{json_texts, read_log, Entry, Kind, LogWriter};
+use crate::log::{json_texts, read_log, Entry, Kind, LogWriter, WriterLog};
 use crate::value::{BlobId, Value};
 use crate::PATH_FIELD;
 
@@ -71,13 +71,9 @@ pub async fn recover<F: Fs>(
         .map(|(_, record)| record)
         .collect::<Result<_>>()?;
     remove_unfinished(fs, layout, log.writer()).await?;
-    let logged: BTreeSet<Version> = match records.is_empty() {
-        true => BTreeSet::new(),
-        false => read_log(fs, layout, log.writer())
-            .await?
-            .all_entries()
-            .map(|entry| entry.version)
-            .collect(),
+    let logged = match records.is_empty() {
+        true => Logged::default(),
+        false => Logged::of(&read_log(fs, layout, log.writer()).await?, &records),
     };
     let mut recovered = Vec::new();
     for record in records {
@@ -105,6 +101,43 @@ fn pending((intent, record): (IntentId, Result<Record>)) -> Recovered {
         outcome,
         kept: Vec::new(),
         stayed: Vec::new(),
+    }
+}
+
+/// What this writer's log held before recovery appended to it.
+#[derive(Default)]
+pub(crate) struct Logged {
+    versions: BTreeSet<Version>,
+    /// The kinds of the entries of each intent a record names.
+    kinds: BTreeMap<IntentId, Vec<Kind>>,
+}
+
+impl Logged {
+    fn of(own: &WriterLog, records: &[Record]) -> Self {
+        let mut logged = Self::default();
+        for entry in own.all_entries() {
+            logged.versions.insert(entry.version);
+            if records.iter().any(|record| record.intent == entry.intent) {
+                let kinds = logged.kinds.entry(entry.intent).or_default();
+                kinds.push(entry.kind.clone());
+            }
+        }
+        logged
+    }
+
+    /// Whether the log holds `entry`: an entry of its version, or, as an earlier
+    /// recovery of its record stamped it, one of its intent and kind. Any `Intent`
+    /// entry of its intent stands for its `Intent` entry.
+    fn holds(&self, entry: &Entry) -> bool {
+        let same = |kind: &Kind| match (kind, &entry.kind) {
+            (Kind::Intent { .. }, Kind::Intent { .. }) => true,
+            (kind, other) => kind == other,
+        };
+        self.versions.contains(&entry.version)
+            || self
+                .kinds
+                .get(&entry.intent)
+                .is_some_and(|kinds| kinds.iter().any(same))
     }
 }
 
@@ -155,7 +188,7 @@ pub(crate) async fn settle<F: Fs>(
     layout: &Layout,
     log: &mut LogWriter,
     record: &Record,
-    logged: &BTreeSet<Version>,
+    logged: &Logged,
 ) -> Result<Settled> {
     let writer = log.writer();
     if let Some(latest) = record.versions().max() {
@@ -218,7 +251,7 @@ pub(crate) async fn settle<F: Fs>(
     };
     let entries: Vec<Entry> = entries
         .into_iter()
-        .filter(|entry| !logged.contains(&entry.version))
+        .filter(|entry| !logged.holds(entry))
         .collect();
     log.append(fs, layout, &entries).await?;
     clear(fs, layout, writer, record.intent).await?;
@@ -575,6 +608,23 @@ mod tests {
         let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
         assert_eq!(recovered[0].outcome, Outcome::Partial);
         well_formed(&logged(&fs, WRITER)).unwrap();
+    }
+
+    #[test]
+    fn a_recovery_repeated_before_its_record_is_cleared_logs_nothing_again() {
+        let layout = Layout::default();
+        let fs = library(&[("song", b"theirs")]);
+        let record = save_record(&layout, &fs, b"new", b"old");
+        block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+        block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        let once = logged(&fs, WRITER);
+        block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+
+        let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        assert_eq!(recovered[0].outcome, Outcome::RolledBack);
+        assert_eq!(recovered[0].kept, [BlobId::of(b"new")]);
+        assert_eq!(logged(&fs, WRITER), once);
+        well_formed(&once).unwrap();
     }
 
     #[test]

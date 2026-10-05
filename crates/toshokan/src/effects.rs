@@ -157,7 +157,7 @@ pub(crate) async fn perform<F: Fs>(
 ) -> Result<Report> {
     let record = stamped(log, intent, entries, planned);
     journal::write(fs, layout, log.writer(), &record).await?;
-    journal::settle(fs, layout, log, &record, &BTreeSet::new())
+    journal::settle(fs, layout, log, &record, &journal::Logged::default())
         .await?
         .into_result()
 }
@@ -791,12 +791,7 @@ async fn save<F: Fs>(
             moved: Vec::new(),
         }));
     }
-    let error = match has_staged {
-        true => changed(fs, path, old).await?,
-        false => Error::NotFound {
-            path: staged.clone(),
-        },
-    };
+    let error = changed(fs, path, old).await?;
     if has_staged {
         displace(fs, layout, &staged, new.blob).await?;
         sync_parent(fs, &staged).await?;
