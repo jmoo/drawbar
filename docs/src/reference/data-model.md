@@ -580,7 +580,7 @@ sequenceDiagram
     participant Backend
     participant Disk
     Store->>Backend: Open
-    Backend->>Disk: read the index and working copies, lock, sweep
+    Backend->>Disk: lock, read the index and working copies, sweep
     Backend-->>Store: Opened
     Backend-->>Store: Listed (the index's rows, ran 0)
     Note over Store: the user renames Kits to Drums
@@ -663,9 +663,11 @@ library. An unchanged index is not written again.
 
 ### Opening, the lock and read-only
 
-Opening reads the index before anything is written. Where `.drawbar/` exists and
-the library may be written, the open takes the lock and sweeps: everything in
-`tmp/` but the rescues, every working copy the index does not name, and, once the walk has
+Where `.drawbar/` exists, opening takes the lock first, then reads the index and
+the working copies it names, so no other drawbar changes them in between. Nothing
+else is written before the index is read. A library that opens read-only lets
+the lock go. One that may be written is swept: everything in `tmp/` but the
+rescues, every working copy the index does not name, and, once the walk has
 found them, the `.drawbar-tmp` siblings. A library drawbar has never written
 holds nothing to sweep, and its lock is taken at the first write.
 

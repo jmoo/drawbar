@@ -496,6 +496,10 @@ impl Fs for Disk {
         }
     }
 
+    async fn unlock(&mut self) {
+        self.lock = None;
+    }
+
     async fn children(
         &self,
         dir: &str,

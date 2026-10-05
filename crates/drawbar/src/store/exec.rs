@@ -87,6 +87,8 @@ pub trait Fs {
     /// Hold the one-writer lock for as long as this lives. `Ok(false)` when another
     /// drawbar holds it. Taking a lock already held here answers `Ok(true)`.
     async fn lock(&mut self) -> io::Result<bool>;
+    /// Let go of the lock, where it is held, for another drawbar to take.
+    async fn unlock(&mut self);
     /// Whether a file could be written at the root, found out without leaving anything
     /// there. A backend that cannot tell answers `Ok(())`, and the first write finds out.
     async fn probe(&mut self) -> io::Result<()> {
@@ -394,8 +396,14 @@ async fn reads_between(fs: &mut impl Fs, ran: &mut u64, answer: &mut impl FnMut(
 /// answered.
 async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), String> {
     let indexed = fs.names(DIR).await.is_ok();
-    // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
-    // its `.drawbar/` as that drawbar left it.
+    // ⚠️ drawbar has written here before, so the lock is taken before the index and its
+    // working copies are read, and no other drawbar changes them in between. Nothing but
+    // the lock is written before the index is read: one a newer drawbar wrote keeps its
+    // `.drawbar/` as that drawbar left it.
+    let locked = match indexed {
+        true => Some(lock(fs).await),
+        false => None,
+    };
     let (sidecar, mut writable, unindexed) = match index(fs).await {
         Ok(Some(sidecar)) => (sidecar, Ok(()), 0),
         Ok(None) => match unindexed(fs).await {
@@ -437,16 +445,19 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
             }
         }
     }
-    if writable.is_ok() {
-        writable = match indexed {
-            // drawbar has written here before, so it takes the lock now and a second
-            // drawbar finds it taken.
-            true => take(fs).await,
-            false => fs
-                .probe()
-                .await
-                .map_err(|e| format!("drawbar cannot write here: {e}")),
-        };
+    let held = locked == Some(Ok(()));
+    if let Some(locked) = locked {
+        writable = writable.and(locked);
+    }
+    if writable.is_ok() && !indexed {
+        writable = fs
+            .probe()
+            .await
+            .map_err(|e| format!("drawbar cannot write here: {e}"));
+    }
+    // A library opened read-only leaves its lock to a drawbar that may write it.
+    if held && writable.is_err() {
+        fs.unlock().await;
     }
     // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
     // must not write keeps what a newer drawbar left.
@@ -655,6 +666,11 @@ async fn take(fs: &mut impl Fs) -> Result<(), String> {
     fs.prepare()
         .await
         .map_err(|e| format!("drawbar cannot write here: {e}"))?;
+    lock(fs).await
+}
+
+/// Hold the library's lock, or say why it cannot be held.
+async fn lock(fs: &mut impl Fs) -> Result<(), String> {
     match fs.lock().await {
         Ok(true) => Ok(()),
         Ok(false) => Err("another drawbar has this library open".to_string()),
@@ -1711,6 +1727,8 @@ mod tests {
         reads: Rc<Cell<usize>>,
         /// How many times a file has been looked at, by a stat or a listing.
         looked: Cell<usize>,
+        /// Each file read and each lock taken, in order.
+        trace: std::cell::RefCell<Vec<String>>,
         waiting: VecDeque<Cmd>,
         later: Option<(usize, Cmd)>,
     }
@@ -1725,6 +1743,7 @@ mod tests {
                 vanished: BTreeSet::new(),
                 reads: Rc::default(),
                 looked: Cell::default(),
+                trace: Default::default(),
                 waiting: VecDeque::new(),
                 later: None,
             }
@@ -1760,8 +1779,10 @@ mod tests {
             Ok(())
         }
         async fn lock(&mut self) -> io::Result<bool> {
+            self.trace.borrow_mut().push("lock".to_string());
             Ok(true)
         }
+        async fn unlock(&mut self) {}
         async fn children(
             &self,
             dir: &str,
@@ -1804,6 +1825,7 @@ mod tests {
 
         async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             self.reads.set(self.reads.get() + 1);
+            self.trace.borrow_mut().push(path.to_string());
             Ok(path.as_bytes().to_vec())
         }
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
@@ -1934,6 +1956,22 @@ mod tests {
             .iter()
             .map(|found| found.path.as_str())
             .collect()
+    }
+
+    /// A library drawbar has written before is locked before its index is read, so no
+    /// other drawbar changes the index between the read and the lock.
+    #[test]
+    fn the_lock_is_taken_before_the_index_is_read() {
+        let mut fs = Claimed::of([]);
+        now(run(&mut fs, Cmd::Open, &mut |_| {}));
+        let trace = fs.trace.borrow();
+        let at = |what: &str| trace.iter().position(|done| done == what);
+        assert!(
+            at("lock")
+                .zip(at(INDEX))
+                .is_some_and(|(lock, read)| lock < read),
+            "{trace:?}"
+        );
     }
 
     /// An open lists every file by name, length and time, and reads none of them, the

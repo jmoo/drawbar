@@ -1322,6 +1322,10 @@ impl Fs for Folder {
         }
     }
 
+    async fn unlock(&mut self) {
+        self.let_go().await;
+    }
+
     /// A picked folder is written only while the browser lets the page write it.
     async fn probe(&mut self) -> io::Result<()> {
         if matches!(self.writes, Writes::Worker(_)) {

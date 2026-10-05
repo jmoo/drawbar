@@ -531,10 +531,11 @@ pub struct Stale {
 pub enum Cmd {
     /// Read the index, and list every file by its name, length and time. Nothing is read
     /// but the file under each working copy the index names. Where `.drawbar/` exists,
-    /// take the lock and sweep interrupted writes first; where it does not, write
-    /// nothing. Answered by [`Event::Opened`], then the files the index names in
-    /// [`Event::Listed`] parts, then the rest of the listing in parts, breadth first,
-    /// then [`Event::Complete`]. Only [`Event::Opened`] answers an open that failed.
+    /// take the lock before the index is read, and sweep interrupted writes before the
+    /// listing; where it does not, write nothing. Answered by [`Event::Opened`], then
+    /// the files the index names in [`Event::Listed`] parts, then the rest of the
+    /// listing in parts, breadth first, then [`Event::Complete`]. Only
+    /// [`Event::Opened`] answers an open that failed.
     ///
     /// Every command sent while the listing is in flight runs between two of its folders,
     /// in the order sent, and the rest of the listing follows what it moved, made or

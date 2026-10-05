@@ -1408,10 +1408,29 @@ fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
     );
     assert_eq!(
         root.names(".drawbar"),
-        ["library.ron", "tmp"],
-        "no lock taken"
+        ["library.ron", "lock", "tmp"],
+        "nothing but the lock"
     );
     assert_eq!(root.names(exec::TMP), ["theirs"], "nothing swept");
+}
+
+/// A drawbar that opens a library read-only, here for an index it must not read, holds
+/// no lock, so a drawbar that may write the library still can.
+#[test]
+fn a_library_opened_read_only_leaves_its_lock_to_a_drawbar_that_may_write_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let index = root.read(exec::INDEX);
+    fs::write(root.at(exec::INDEX), "(version: 99, next_id: 3)").unwrap();
+    let reading = Session::open(&root);
+    assert!(reading.store.read_only().is_some());
+
+    fs::write(root.at(exec::INDEX), index).unwrap();
+    let writing = Session::open(&root);
+    assert_eq!(writing.store.read_only(), None);
+    drop(reading);
 }
 
 #[test]
