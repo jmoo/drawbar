@@ -337,6 +337,58 @@ fn undo_of_a_file_delete_puts_the_file_back<F: Fs>(disk: impl Fn() -> F) {
     );
 }
 
+fn undo_of_a_save_over_a_file_no_entity_held_puts_that_file_back<F: Fs>(disk: impl Fn() -> F) {
+    let fs = disk();
+    let at = path("song");
+    block_on(fs.create(&at, b"theirs")).unwrap();
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(song, &at, b"mine".to_vec(), holds(b"theirs"))).unwrap();
+
+    block_on(a.undo()).unwrap();
+    assert_eq!(
+        library_files(&fs),
+        [(at.clone(), b"theirs".to_vec())].into()
+    );
+    assert_eq!(a.state().field(song, "path"), None);
+    assert_eq!(
+        block_on(a.rescan()).unwrap().arrivals,
+        std::slice::from_ref(&at)
+    );
+
+    block_on(a.redo()).unwrap();
+    assert_eq!(library_files(&fs), [(at.clone(), b"mine".to_vec())].into());
+    assert_eq!(block_on(a.rescan()).unwrap().bound, [(at, song)].into());
+}
+
+fn undo_of_a_save_over_a_file_changed_outside_puts_that_version_back<F: Fs>(disk: impl Fn() -> F) {
+    let fs = disk();
+    let at = path("song");
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(song, &at, b"saved".to_vec(), Precondition::Absent)).unwrap();
+    block_on(fs.remove_file(&at)).unwrap();
+    block_on(fs.create(&at, b"edited outside")).unwrap();
+    let scan = block_on(a.rescan()).unwrap();
+    assert_eq!(scan.changed, [song]);
+    let read = Precondition::Matches(scan.files[&at]);
+    block_on(a.save(song, &at, b"saved again".to_vec(), read)).unwrap();
+
+    block_on(a.undo()).unwrap();
+    assert_eq!(
+        library_files(&fs),
+        [(at.clone(), b"edited outside".to_vec())].into()
+    );
+    assert_eq!(block_on(a.rescan()).unwrap().changed, [song]);
+
+    block_on(a.redo()).unwrap();
+    assert_eq!(
+        library_files(&fs),
+        [(at.clone(), b"saved again".to_vec())].into()
+    );
+    assert_eq!(block_on(a.rescan()).unwrap().changed, []);
+}
+
 fn undoing_a_bind_leaves_the_file_where_it_is<F: Fs>(disk: impl Fn() -> F) {
     let fs = disk();
     block_on(fs.create(&path("user.txt"), b"theirs")).unwrap();
@@ -576,6 +628,8 @@ on_every_backend!(
     undo_of_a_save_restores_the_displaced_bytes,
     saving_an_entity_away_from_its_file_is_refused,
     undo_of_a_file_delete_puts_the_file_back,
+    undo_of_a_save_over_a_file_no_entity_held_puts_that_file_back,
+    undo_of_a_save_over_a_file_changed_outside_puts_that_version_back,
     undoing_a_bind_leaves_the_file_where_it_is,
     undo_is_refused_where_another_writer_changed_the_field_since,
     compaction_never_turns_an_undo_into_a_redo,
@@ -1248,6 +1302,25 @@ fn every_crash_while_undoing_a_save_recovers() {
         setup: |library| {
             let song = save_new(library, "song", b"old");
             block_on(library.save(song, &path("song"), b"new".to_vec(), holds(b"old"))).unwrap();
+            vec![song]
+        },
+        act: |library, _| block_on(library.undo()).map(drop),
+    };
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
+    }
+}
+
+#[test]
+fn every_crash_while_undoing_a_save_over_a_file_no_entity_held_recovers() {
+    let case = Case {
+        setup: |library| {
+            let at = path("song");
+            block_on(library.fs().create(&at, b"theirs")).unwrap();
+            block_on(library.fs().sync(&at)).unwrap();
+            block_on(library.fs().sync(&RelPath::ROOT)).unwrap();
+            let (song, _) = block_on(library.create()).unwrap();
+            block_on(library.save(song, &at, b"mine".to_vec(), holds(b"theirs"))).unwrap();
             vec![song]
         },
         act: |library, _| block_on(library.undo()).map(drop),

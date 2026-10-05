@@ -186,6 +186,11 @@ impl State {
                 );
                 self.window.blobs.insert(*blob);
             }
+            Kind::File { before, after, .. } => {
+                self.window
+                    .blobs
+                    .extend([*before, *after].into_iter().flatten());
+            }
             Kind::BlobRemoved { blob } => self.record_blob(
                 *blob,
                 BlobAdd {

@@ -111,6 +111,7 @@ reader accepts any order. A member marked `?` is omitted when absent.
 | `field`        | `entity` entity id, `name` string, `value?` value, `prior?` value |
 | `set_add`      | `entity` entity id, `name` string, `value` value         |
 | `set_remove`   | `entity` entity id, `name` string, `value` value, `observed` array of versions, in increasing order without repeats |
+| `file`         | `path` library path, `before?` blob id, `after?` blob id |
 | `blob_added`   | `blob` blob id, `len` number of bytes                    |
 | `blob_removed` | `blob` blob id                                           |
 
@@ -125,8 +126,11 @@ Every intent has one `intent` entry, appended before its other entries, and ever
 entry of an intent carries its intent id. `reverses` names the intent an undo or
 redo reverses. `files` is present, and `true`, on an intent whose file effects ran.
 A `field` entry's `prior` is what the writer's merged state held when it wrote;
-undo restores it. A `blob_added` entry records that its writer put a blob in the
-store, and a `blob_removed` entry that its writer's garbage collection removed it.
+undo restores it. A `file` entry records that a step of its intent changed the file
+at `path` from holding the blob `before` to holding the blob `after`, where an absent
+member is no file; undo puts `before` back. A `blob_added` entry records that its
+writer put a blob in the store, and a `blob_removed` entry that its writer's garbage
+collection removed it.
 
 A JSON object without a version, an intent id or a string `kind` is unreadable
 and ends the segment, as a failed checksum does. An entry whose kind a reader does
@@ -215,18 +219,22 @@ its `delete`, a `set_remove` observing only its own tag for its `set_add`, a
 `set_add` for its `set_remove`, and for each field it wrote, the prior of its
 first write to that field. A field's undo is refused when the field's deciding
 write is neither the intent's last write to it nor an undo or redo that restored
-that write. An intent of only `blob_added` and `blob_removed` entries is not
-undone.
+that write. A `file` entry is reversed by a file effect, below, not by an entry. An
+intent of only `blob_added` and `blob_removed` entries is not undone.
 
 Reversing an intent whose `intent` entry has `files` also reverses its files, and
 the reversing intent's `intent` entry has `files` too. Reversing any other intent,
-such as a bind, changes only entries. For each entity whose `content` the intent
-changed, the file at the entity's `path`, or at the path the intent cleared, is
-restored: a save of the earlier blob when there was one, otherwise a delete. Either
-expects the file to hold exactly the intent's blob, or no file where the intent
-cleared `content`. Then each `path` the intent changed from one path to another is
-renamed back. The reversal is refused when the earlier blob has no `blob_added`
-that its writer has not since removed.
+such as a bind, changes only entries. Each of the intent's `file` entries, newest
+first, is reversed by a restore of `before` at its `path`, expecting the file there
+to hold exactly `after`, or no file where `after` is absent. Then each `path` the
+intent changed from one path to another is renamed back. The reversal is refused
+when a `before` has no `blob_added` that its writer has not since removed.
+
+A restore binds no entity. The reversing entries restore the fields, and the
+restores the files, so each returns to what it was before the intent, even where
+`content` did not name the bytes the file held: an entity unbound before a save is
+unbound again and the file it saved over is back, and a file changed outside the
+app is back as it was changed.
 
 ## Intents
 
@@ -288,8 +296,9 @@ file. Garbage collection is per writer: writer `w` may remove a blob only when
 - `w`'s latest `blob_added` or `blob_removed` entry for it is an add,
 - no field or set member of an existing entity holds it,
 - no entry a reader applies one by one (a snapshot's retained entries and the
-  segments after it) holds it as a value, prior or `blob_added`, nor names an
-  entity with a field or set member that holds it, and
+  segments after it) holds it as a value, prior or `blob_added`, or as a `file`
+  entry's `before` or `after`, nor names an entity with a field or set member that
+  holds it, and
 - no other writer's latest entry for it is an add.
 
 It reads every writer's log and chooses such blobs oldest first, by the version of
@@ -311,16 +320,19 @@ intent's own entries:
 
 | Effect     | Library                                         | Entries |
 | ---------- | ----------------------------------------------- | ------- |
-| save       | new bytes at the path; the old file into blobs  | `blob_added` for the old file; `field` `path`, `content`, `length` and `modified` where they change |
-| delete     | the file into blobs                             | `blob_added`; `field` `path`, `content`, `length` and `modified` cleared |
+| save       | new bytes at the path; the old file into blobs  | `blob_added` for the old file and `file`, where the bytes change; `field` `path`, `content`, `length` and `modified` where they change |
+| delete     | the file into blobs                             | `blob_added`; `file`; `field` `path`, `content`, `length` and `modified` cleared |
+| restore    | a blob's bytes at the path, or no file; the old file into blobs | `blob_added` for the old file and `file`, where the bytes change |
 | rename     | the file renamed                                | `field` `path` |
 | move tree  | the directory and everything in it renamed      | `field` `path` for each entity bound under it |
 
 Each `field` entry's `prior` is the value the writer's merged state held before the
 intent. A save's `length` and `modified` are those of the file it leaves at the
 path: the staged file's, which the rename keeps, or the file's already there when it
-holds the new bytes. Before any step of an intent, each of its effects checks its
-precondition. A save or delete expects one of: no file at the path; the fingerprint
+holds the new bytes. Undo and redo restore; a restore writes no `field` entry, and
+runs as a save step, or as a delete step where it leaves no file. Before any step of
+an intent, each of its effects checks its precondition. A save, delete or restore
+expects one of: no file at the path; the fingerprint
 the writer last read, compared by length, then by hash when both sides have one,
 then by an equal modification time; or a file whose bytes hash to a given blob id. A
 rename or move refuses a destination that exists. A save of an entity whose `path`

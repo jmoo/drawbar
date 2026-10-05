@@ -15,14 +15,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::effects::{Effect, Precondition, Source};
+use crate::effects::{Effect, Precondition};
 use crate::error::{Error, Result};
 use crate::fs::RelPath;
 use crate::ids::{EntityId, IntentId, Version};
 use crate::log::{Entry, Kind, WriterLog};
 use crate::merge::State;
 use crate::value::{BlobId, Value};
-use crate::{CONTENT_FIELD, PATH_FIELD};
+use crate::PATH_FIELD;
 
 /// Why an undo or redo was refused. Nothing was changed.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -181,7 +181,8 @@ pub(crate) fn reversible(kind: &Kind) -> bool {
         | Kind::Delete { .. }
         | Kind::Field { .. }
         | Kind::SetAdd { .. }
-        | Kind::SetRemove { .. } => true,
+        | Kind::SetRemove { .. }
+        | Kind::File { .. } => true,
         Kind::Intent { .. }
         | Kind::BlobAdded { .. }
         | Kind::BlobRemoved { .. }
@@ -267,7 +268,7 @@ fn plan(history: &History, intent: Option<IntentId>, state: &State) -> Result<Pl
         })
         .unwrap_or_default();
     let effects = match files {
-        true => file_effects(&changes, state)?,
+        true => file_effects(entries, &changes, state)?,
         false => Vec::new(),
     };
     let mut kinds = vec![Kind::Intent {
@@ -323,48 +324,37 @@ fn compensate<'a>(
             value: value.clone(),
         }),
         Kind::Intent { .. }
+        | Kind::File { .. }
         | Kind::BlobAdded { .. }
         | Kind::BlobRemoved { .. }
         | Kind::Unknown { .. } => None,
     }
 }
 
-/// The file changes that reverse the `content` and `path` writes of an intent that
-/// changed files: its contents restored from the blob store where the file is, or was
-/// before the intent unbound it, then its renames reversed.
+/// The file changes that reverse an intent that changed files: each file it changed
+/// put back as it was, newest first, from the blob store, then its renames reversed.
 fn file_effects(
+    entries: &[Entry],
     changes: &BTreeMap<(EntityId, &str), FieldChange>,
     state: &State,
 ) -> Result<Vec<Effect>> {
     let mut effects = Vec::new();
-    for (&(entity, _), change) in changes
-        .iter()
-        .filter(|((_, name), _)| *name == CONTENT_FIELD)
-    {
-        let unbound = changes
-            .get(&(entity, PATH_FIELD))
-            .and_then(|change| change.before.as_ref());
-        let Some(Value::Text(path)) = state.field(entity, PATH_FIELD).or(unbound) else {
+    for entry in entries.iter().rev() {
+        let Kind::File {
+            path,
+            before,
+            after,
+        } = &entry.kind
+        else {
             continue;
         };
-        let path = RelPath::new(path)?;
-        let before = change.before.as_ref().and_then(Value::as_blob);
-        let after = change.after.as_ref().and_then(Value::as_blob);
-        let expect = after.map_or(Precondition::Absent, Precondition::Holds);
-        effects.push(match before {
-            Some(blob) if !kept(blob, state) => return Err(refuse(Refusal::BlobGone { blob })),
-            Some(blob) => Effect::Save {
-                entity,
-                path,
-                contents: Source::Blob(blob),
-                expect,
-            },
-            None if after.is_none() => continue,
-            None => Effect::Delete {
-                entity,
-                path,
-                expect,
-            },
+        if let Some(blob) = before.filter(|blob| !kept(*blob, state)) {
+            return Err(refuse(Refusal::BlobGone { blob }));
+        }
+        effects.push(Effect::Restore {
+            path: path.clone(),
+            contents: *before,
+            expect: after.map_or(Precondition::Absent, Precondition::Holds),
         });
     }
     for (&(entity, _), change) in changes.iter().filter(|((_, name), _)| *name == PATH_FIELD) {
@@ -395,6 +385,7 @@ mod tests {
     use crate::ids::WriterId;
     use crate::log::testing::{field, text, writer, Session};
     use crate::MemFs;
+    use crate::CONTENT_FIELD;
 
     fn reverse(session: &mut Session, redo: bool) -> Result<Plan> {
         let history = History::new(&session.own());
@@ -572,39 +563,80 @@ mod tests {
         (blob, added)
     }
 
+    fn file(at: &str, before: Option<BlobId>, after: Option<BlobId>) -> Kind {
+        Kind::File {
+            path: RelPath::new(at).unwrap(),
+            before,
+            after,
+        }
+    }
+
+    fn content(entity: EntityId, blob: BlobId) -> Kind {
+        field(entity, CONTENT_FIELD, Some(Value::Blob(blob)))
+    }
+
     #[test]
-    fn undoing_a_save_restores_the_displaced_bytes_from_the_blob_store() {
+    fn undoing_a_save_restores_the_bytes_it_displaced() {
         let (_, mut session, e) = setup(1);
         let (old, added_old) = saved(b"old");
-        let (new, added_new) = saved(b"newer");
+        let new = BlobId::of(b"newer");
         session.act_as(
             FILES,
             vec![
+                file("a/b.txt", None, Some(old)),
                 field(e, PATH_FIELD, Some(text("a/b.txt"))),
-                added_old,
-                field(e, CONTENT_FIELD, Some(Value::Blob(old))),
+                content(e, old),
             ],
         );
         session.act_as(
             FILES,
-            vec![added_new, field(e, CONTENT_FIELD, Some(Value::Blob(new)))],
+            vec![
+                added_old,
+                file("a/b.txt", Some(old), Some(new)),
+                content(e, new),
+            ],
         );
         let plan = reverse(&mut session, false).unwrap();
-        let expect = Precondition::Holds(new);
-        let path = RelPath::new("a/b.txt").unwrap();
         assert_eq!(
             plan.effects,
-            [Effect::Save {
-                entity: e,
-                path: path.clone(),
-                contents: Source::Blob(old),
-                expect
+            [Effect::Restore {
+                path: RelPath::new("a/b.txt").unwrap(),
+                contents: Some(old),
+                expect: Precondition::Holds(new),
             }]
         );
-        let plan = reverse(&mut session, true).unwrap();
-        assert!(
-            matches!(&plan.effects[..], [Effect::Save { contents: Source::Blob(blob), .. }] if *blob == new),
-            "{plan:?}"
+    }
+
+    #[test]
+    fn undoing_a_save_over_a_file_changed_outside_restores_that_file_and_not_the_content() {
+        let (_, mut session, e) = setup(1);
+        let (bound, theirs, mine) = (BlobId::of(b"bound"), b"theirs", BlobId::of(b"mine"));
+        session.act(vec![
+            field(e, PATH_FIELD, Some(text("f"))),
+            content(e, bound),
+        ]);
+        let (theirs, added_theirs) = saved(theirs);
+        session.act_as(
+            FILES,
+            vec![
+                added_theirs,
+                file("f", Some(theirs), Some(mine)),
+                content(e, mine),
+            ],
+        );
+        let plan = reverse(&mut session, false).unwrap();
+        assert_eq!(
+            plan.effects,
+            [Effect::Restore {
+                path: RelPath::new("f").unwrap(),
+                contents: Some(theirs),
+                expect: Precondition::Holds(mine),
+            }]
+        );
+        assert_eq!(
+            session.state().field(e, CONTENT_FIELD),
+            Some(&Value::Blob(bound)),
+            "the content register is restored apart from the file"
         );
     }
 
@@ -612,18 +644,18 @@ mod tests {
     fn undo_is_refused_when_the_displaced_bytes_were_collected() {
         let (_, mut session, e) = setup(1);
         let (old, added_old) = saved(b"old");
-        let (new, added_new) = saved(b"newer");
+        let new = BlobId::of(b"newer");
         session.act_as(
             FILES,
             vec![
+                file("f", None, Some(old)),
                 field(e, PATH_FIELD, Some(text("f"))),
-                added_old,
-                field(e, CONTENT_FIELD, Some(Value::Blob(old))),
+                content(e, old),
             ],
         );
         session.act_as(
             FILES,
-            vec![added_new, field(e, CONTENT_FIELD, Some(Value::Blob(new)))],
+            vec![added_old, file("f", Some(old), Some(new)), content(e, new)],
         );
         session.act(vec![Kind::BlobRemoved { blob: old }]);
         assert_eq!(
@@ -635,13 +667,13 @@ mod tests {
     #[test]
     fn undoing_a_new_file_deletes_it_and_undoing_a_rename_moves_it_back() {
         let (_, mut session, e) = setup(1);
-        let (blob, added) = saved(b"bytes");
+        let blob = BlobId::of(b"bytes");
         session.act_as(
             FILES,
             vec![
+                file("a", None, Some(blob)),
                 field(e, PATH_FIELD, Some(text("a"))),
-                added,
-                field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
+                content(e, blob),
             ],
         );
         session.act_as(FILES, vec![field(e, PATH_FIELD, Some(text("b")))]);
@@ -656,13 +688,12 @@ mod tests {
             }]
         );
         let plan = reverse(&mut session, false).unwrap();
-        let expect = Precondition::Holds(blob);
         assert_eq!(
             plan.effects,
-            [Effect::Delete {
-                entity: e,
+            [Effect::Restore {
                 path: path("a"),
-                expect
+                contents: None,
+                expect: Precondition::Holds(blob),
             }]
         );
     }
@@ -693,14 +724,16 @@ mod tests {
         session.act_as(
             FILES,
             vec![
+                file("a", None, Some(blob)),
                 field(e, PATH_FIELD, Some(text("a"))),
-                field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
+                content(e, blob),
             ],
         );
         session.act_as(
             FILES,
             vec![
                 added,
+                file("a", Some(blob), None),
                 field(e, PATH_FIELD, None),
                 field(e, CONTENT_FIELD, None),
             ],
@@ -708,10 +741,9 @@ mod tests {
         let plan = reverse(&mut session, false).unwrap();
         assert_eq!(
             plan.effects,
-            [Effect::Save {
-                entity: e,
+            [Effect::Restore {
                 path: RelPath::new("a").unwrap(),
-                contents: Source::Blob(blob),
+                contents: Some(blob),
                 expect: Precondition::Absent,
             }]
         );

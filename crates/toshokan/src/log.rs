@@ -75,6 +75,15 @@ pub enum Kind {
         value: Value,
         observed: BTreeSet<Version>,
     },
+    /// A step of the intent changed the file at `path` from holding `before` to
+    /// holding `after`, where `None` is no file. Undo puts `before` back.
+    File {
+        path: RelPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<BlobId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<BlobId>,
+    },
     /// This writer put `blob`, of `len` bytes, in the blob store.
     BlobAdded { blob: BlobId, len: u64 },
     /// This writer's garbage collection removed `blob` from the blob store.
@@ -617,6 +626,7 @@ impl Kind {
                 (Some(entity), [Some(value), None])
             }
             Self::Intent { .. }
+            | Self::File { .. }
             | Self::BlobAdded { .. }
             | Self::BlobRemoved { .. }
             | Self::Unknown { .. } => (None, [None, None]),
@@ -821,6 +831,11 @@ mod tests {
                 name: "tags".into(),
                 value: Value::Bool(true),
                 observed: [Version::new(1, writer(1)), Version::new(2, writer(7))].into(),
+            },
+            Kind::File {
+                path: RelPath::new("a/b c").unwrap(),
+                before: Some(blob),
+                after: None,
             },
             Kind::BlobAdded {
                 blob,

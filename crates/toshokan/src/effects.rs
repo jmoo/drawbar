@@ -77,6 +77,13 @@ pub enum Effect {
     },
     /// Move a directory and everything in it to `to`, where nothing may be.
     MoveTree { from: RelPath, to: RelPath },
+    /// Put a blob's bytes at `path`, or leave no file there when `contents` is
+    /// `None`, displacing what is there into the blob store and binding no entity.
+    Restore {
+        path: RelPath,
+        contents: Option<BlobId>,
+        expect: Precondition,
+    },
 }
 
 /// What an effect did to the files.
@@ -136,11 +143,16 @@ impl Effect {
             Self::Save {
                 contents: Source::Blob(blob),
                 ..
+            }
+            | Self::Restore {
+                contents: Some(blob),
+                ..
             } => Some(*blob),
             Self::Save { .. }
             | Self::Delete { .. }
             | Self::Rename { .. }
-            | Self::MoveTree { .. } => None,
+            | Self::MoveTree { .. }
+            | Self::Restore { .. } => None,
         }
     }
 }
@@ -221,6 +233,7 @@ impl Known {
                             .is_some_and(|p| p.starts_with(from))
                     }));
                 }
+                Effect::Restore { .. } => {}
             }
         }
         let fields = |entity| Fields {
@@ -368,6 +381,19 @@ impl<F: Fs> Planner<'_, F> {
             } => self.delete(*entity, path, expect).await,
             Effect::Rename { entity, from, to } => self.rename(*entity, from, to).await,
             Effect::MoveTree { from, to } => self.move_tree(from, to).await,
+            Effect::Restore {
+                path,
+                contents: Some(blob),
+                expect,
+            } => {
+                let bytes = blobs::get(self.fs, self.layout, *blob).await?;
+                Ok(self.write(path, Cow::Owned(bytes), expect).await?.0)
+            }
+            Effect::Restore {
+                path,
+                contents: None,
+                expect,
+            } => self.remove(path, expect).await,
         }
     }
 
@@ -378,37 +404,49 @@ impl<F: Fs> Planner<'_, F> {
         contents: &'e Source,
         expect: &Precondition,
     ) -> Result<Checked<'e>> {
-        self.library_path(path)?;
-        let found = fingerprint(self.fs, path, true).await?;
-        let old = check(path, expect, found)?;
         let bytes = match contents {
             Source::Bytes(bytes) => Cow::Borrowed(bytes.as_slice()),
             Source::Blob(blob) => Cow::Owned(blobs::get(self.fs, self.layout, *blob).await?),
         };
-        let new = Stored::of(&bytes);
-        let displaced = old.filter(|old| old.blob != new.blob);
+        let (mut checked, new, found) = self.write(path, bytes, expect).await?;
         let fields = self.known.fields(entity);
-        let facts = displaced
-            .map(Stored::added)
-            .into_iter()
-            .chain(field(entity, PATH_FIELD, Some(text(path)), fields.path))
-            .chain(field(
-                entity,
-                CONTENT_FIELD,
-                Some(Value::Blob(new.blob)),
-                fields.content,
-            ))
-            .collect();
-        Ok(Checked {
+        checked.facts.extend(
+            field(entity, PATH_FIELD, Some(text(path)), fields.path)
+                .into_iter()
+                .chain(field(
+                    entity,
+                    CONTENT_FIELD,
+                    Some(Value::Blob(new.blob)),
+                    fields.content,
+                )),
+        );
+        checked.describes = Some((entity, found));
+        Ok(checked)
+    }
+
+    /// Check a write of `bytes` at `path`, and return it with the bytes it writes and
+    /// the hashed fingerprint of the file there now.
+    async fn write<'e>(
+        &self,
+        path: &RelPath,
+        bytes: Cow<'e, [u8]>,
+        expect: &Precondition,
+    ) -> Result<(Checked<'e>, Stored, Option<Fingerprint>)> {
+        self.library_path(path)?;
+        let found = fingerprint(self.fs, path, true).await?;
+        let old = check(path, expect, found)?;
+        let new = Stored::of(&bytes);
+        let checked = Checked {
             step: Step::Save {
                 path: path.clone(),
                 new,
                 old,
             },
-            facts,
+            facts: file_change(path, old, Some(new)),
             stage: (old != Some(new)).then_some(bytes),
-            describes: Some((entity, found)),
-        })
+            describes: None,
+        };
+        Ok((checked, new, found))
     }
 
     async fn delete(
@@ -417,23 +455,31 @@ impl<F: Fs> Planner<'_, F> {
         path: &RelPath,
         expect: &Precondition,
     ) -> Result<Checked<'static>> {
+        let mut checked = self.remove(path, expect).await?;
+        let fields = self.known.fields(entity);
+        checked.facts.extend(
+            field(entity, PATH_FIELD, None, fields.path)
+                .into_iter()
+                .chain(field(entity, CONTENT_FIELD, None, fields.content)),
+        );
+        checked.describes = Some((entity, None));
+        Ok(checked)
+    }
+
+    /// Check the removal of the file at `path` into the blob store.
+    async fn remove(&self, path: &RelPath, expect: &Precondition) -> Result<Checked<'static>> {
         self.library_path(path)?;
         let found = fingerprint(self.fs, path, true).await?;
         let old =
             check(path, expect, found)?.ok_or_else(|| Error::NotFound { path: path.clone() })?;
-        let fields = self.known.fields(entity);
-        let facts = std::iter::once(old.added())
-            .chain(field(entity, PATH_FIELD, None, fields.path))
-            .chain(field(entity, CONTENT_FIELD, None, fields.content))
-            .collect();
         Ok(Checked {
             step: Step::Delete {
                 path: path.clone(),
                 old,
             },
-            facts,
+            facts: file_change(path, Some(old), None),
             stage: None,
-            describes: Some((entity, None)),
+            describes: None,
         })
     }
 
@@ -545,6 +591,26 @@ fn check(
         blob: found.hash.expect("the file was hashed"),
         len: found.len,
     }))
+}
+
+/// The entries of a step that leaves `after` at `path` where `before` was: the add of
+/// the bytes it displaces, and the change of the file. None when the bytes are the
+/// same.
+fn file_change(path: &RelPath, before: Option<Stored>, after: Option<Stored>) -> Vec<Kind> {
+    let blob = |stored: Option<Stored>| stored.map(|stored| stored.blob);
+    if blob(before) == blob(after) {
+        return Vec::new();
+    }
+    let file = Kind::File {
+        path: path.clone(),
+        before: blob(before),
+        after: blob(after),
+    };
+    before
+        .map(Stored::added)
+        .into_iter()
+        .chain([file])
+        .collect()
 }
 
 fn field(entity: EntityId, name: &str, value: Option<Value>, prior: Option<Value>) -> Option<Kind> {
@@ -1048,6 +1114,14 @@ mod tests {
         }
     }
 
+    fn file(at: &str, before: Option<&[u8]>, after: Option<&[u8]>) -> Kind {
+        Kind::File {
+            path: path(at),
+            before: before.map(BlobId::of),
+            after: after.map(BlobId::of),
+        }
+    }
+
     /// A library folder whose files are all durable, with a log and what the merged
     /// state says about its entities.
     struct Library {
@@ -1210,6 +1284,7 @@ mod tests {
         assert_eq!(
             library.kinds(),
             [
+                file("Organ/new.npno", None, Some(b"new")),
                 set_field(1, PATH_FIELD, text_value("Organ/new.npno"), None),
                 set_field(1, CONTENT_FIELD, blob_value(b"new"), None),
             ]
@@ -1235,6 +1310,7 @@ mod tests {
             library.kinds(),
             [
                 added(b"old"),
+                file("song", Some(b"old"), Some(b"new")),
                 set_field(1, CONTENT_FIELD, blob_value(b"new"), blob_value(b"old")),
             ]
         );
@@ -1412,6 +1488,7 @@ mod tests {
             library.kinds(),
             [
                 added(b"old"),
+                file("song", Some(b"old"), None),
                 set_field(1, PATH_FIELD, None, text_value("song")),
                 set_field(1, CONTENT_FIELD, None, blob_value(b"old")),
             ]
