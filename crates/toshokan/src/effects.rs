@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::blobs::{self, displace};
-use crate::error::{Error, Mismatch, Result};
+use crate::error::{Conflict, Error, Mismatch, Result};
 use crate::fs::{
     ensure_dir, fingerprint, hash_file, sync_parent, Capability, FileKind, Fingerprint, Fs,
     RelPath, Sameness,
@@ -648,12 +648,12 @@ pub(crate) enum Ran {
     Partly {
         report: Report,
         stayed: Vec<(RelPath, RelPath)>,
-        error: Error,
+        error: Conflict,
     },
     /// The files no longer allow the step, for the reason in `error`, and it changed
     /// nothing. `kept` are the step's bytes now in the store, which the log must name.
     Conflict {
-        error: Error,
+        error: Conflict,
         kept: Vec<Stored>,
     },
 }
@@ -840,11 +840,11 @@ async fn move_entry<F: Fs>(fs: &F, from: &RelPath, to: &RelPath) -> Result<Ran> 
                     sync_parent(fs, from).await?;
                     None
                 }
-                false => Some(Error::AlreadyExists { path: to.clone() }),
+                false => Some(Conflict::AlreadyExists { path: to.clone() }),
             }
         }
-        (Some(_), Some(_)) => Some(Error::AlreadyExists { path: to.clone() }),
-        (None, None) => Some(Error::NotFound { path: from.clone() }),
+        (Some(_), Some(_)) => Some(Conflict::AlreadyExists { path: to.clone() }),
+        (None, None) => Some(Conflict::NotFound { path: from.clone() }),
     };
     Ok(match error {
         Some(error) => Ran::Conflict {
@@ -885,11 +885,11 @@ async fn move_files<F: Fs>(
                 fs.remove_file(&source).await?;
                 None
             }
-            (true, true) => Some(Error::AlreadyExists {
+            (true, true) => Some(Conflict::AlreadyExists {
                 path: target.clone(),
             }),
             (false, true) => None,
-            (false, false) => Some(Error::NotFound {
+            (false, false) => Some(Conflict::NotFound {
                 path: source.clone(),
             }),
         };
@@ -928,18 +928,18 @@ async fn move_files<F: Fs>(
     })
 }
 
-async fn changed<F: Fs>(fs: &F, path: &RelPath, expected: Option<Stored>) -> Result<Error> {
+async fn changed<F: Fs>(fs: &F, path: &RelPath, expected: Option<Stored>) -> Result<Conflict> {
     let expected = match expected {
         Some(stored) => Precondition::Holds(stored.blob),
         None => Precondition::Absent,
     };
     match fingerprint(fs, path, false).await {
-        Ok(found) => Ok(Error::Changed(Box::new(Mismatch {
+        Ok(found) => Ok(Conflict::Changed(Box::new(Mismatch {
             path: path.clone(),
             expected,
             found,
         }))),
-        Err(Error::IsDirectory { path }) => Ok(Error::IsDirectory { path }),
+        Err(Error::IsDirectory { path }) => Ok(Conflict::IsDirectory { path }),
         Err(error) => Err(error),
     }
 }
@@ -1547,6 +1547,9 @@ mod tests {
                 outcome: Outcome::Partial,
                 kept: vec![],
                 stayed: vec![path("a/x/y/2")],
+                conflict: Some(Conflict::AlreadyExists {
+                    path: path("b/x/y/2")
+                }),
             }]
         );
         assert_eq!(

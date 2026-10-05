@@ -9,8 +9,8 @@ use toshokan::fs::{Capabilities, FileKind};
 use toshokan::journal::Outcome;
 use toshokan::undo::Refusal;
 use toshokan::{
-    BlobId, EntityId, Error, Fs, IntentId, Kind, Layout, Library, MemFs, Precondition, RelPath,
-    Value, WriterId,
+    BlobId, Conflict, EntityId, Error, Fs, IntentId, Kind, Layout, Library, MemFs, Precondition,
+    RelPath, Value, WriterId,
 };
 
 const A: WriterId = WriterId::from_u128(0xa);
@@ -236,9 +236,7 @@ fn a_read_only_library_refuses_every_intent_before_anything_changes<F: Fs>(disk:
     assert_eq!(tree(a.fs()), before, "a refused intent wrote");
 }
 
-fn a_journal_record_this_build_cannot_read_opens_the_writer_read_only<F: Fs>(
-    disk: impl Fn() -> F,
-) {
+fn a_journal_record_this_build_cannot_read_opens_the_writer_read_only<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
     let fs = disk();
@@ -252,7 +250,11 @@ fn a_journal_record_this_build_cannot_read_opens_the_writer_read_only<F: Fs>(
 
     let mut a = open(disk(), A);
     assert!(a.read_only().is_some());
-    let reports: Vec<_> = a.recovered().iter().map(|r| (r.intent, r.outcome)).collect();
+    let reports: Vec<_> = a
+        .recovered()
+        .iter()
+        .map(|r| (r.intent, r.outcome))
+        .collect();
     assert_eq!(reports, [(IntentId::new(A, 50), Outcome::Unreadable)]);
     let refused = block_on(a.set(song, "name", Some(text("name"))));
     assert!(
@@ -1047,6 +1049,47 @@ fn a_read_only_writer_reports_the_effect_a_crash_interrupted_and_writes_nothing(
         };
         assert_eq!(reports, expected, "crash {crash}");
         reported += usize::from(journaled);
+    }
+    assert!(reported > 0, "no crash left the save journaled");
+}
+
+#[test]
+fn recovery_says_which_file_kept_an_interrupted_save_from_finishing() {
+    let case = Case {
+        setup: |library| vec![save_new(library, "song", b"old")],
+        act: |library, entities| {
+            let bytes = b"new".to_vec();
+            block_on(library.save(entities[0], &path("song"), bytes, holds(b"old"))).map(drop)
+        },
+    };
+    let (mut clean, entities) = case.prepared(ALL);
+    let start = clean.fs().mutations();
+    (case.act)(&mut clean, &entities).unwrap();
+    let mut reported = 0;
+    for crash in 0..clean.fs().mutations() - start {
+        let disk = case.crashed(ALL, crash);
+        let journal = Layout::default().journal(A);
+        if !disk.files().keys().any(|at| at.starts_with(&journal)) {
+            continue;
+        }
+        block_on(disk.remove_file(&path("song"))).unwrap();
+        block_on(disk.create(&path("song"), b"theirs")).unwrap();
+
+        let library = open(disk.clone(), A);
+        let [recovered] = library.recovered() else {
+            panic!("crash {crash}: {:?}", library.recovered());
+        };
+        assert_eq!(recovered.outcome, Outcome::RolledBack, "crash {crash}");
+        let Some(Conflict::Changed(mismatch)) = &recovered.conflict else {
+            panic!("crash {crash}: {:?}", recovered.conflict);
+        };
+        let found = mismatch.found.map(|found| found.len);
+        assert_eq!(
+            (&mismatch.path, found),
+            (&path("song"), Some(6)),
+            "crash {crash}"
+        );
+        reported += 1;
     }
     assert!(reported > 0, "no crash left the save journaled");
 }

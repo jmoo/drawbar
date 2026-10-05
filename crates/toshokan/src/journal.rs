@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::blobs;
 use crate::effects::{Ran, Report, Step, Stored};
-use crate::error::{Error, Result};
+use crate::error::{Conflict, Error, Result};
 use crate::fs::{ensure_dir, hash_file, FileKind, Fs, RelPath};
 use crate::ids::{canonical_u64, IntentId, Version, WriterId};
 use crate::layout::Layout;
@@ -49,6 +49,8 @@ pub struct Recovered {
     pub kept: Vec<BlobId>,
     /// Files the intent meant to change or move that were left where and as they were.
     pub stayed: Vec<RelPath>,
+    /// Why the intent did not finish: the first file that was not as it expected.
+    pub conflict: Option<Conflict>,
 }
 
 /// Finish or roll back each of this writer's journaled intents, then clear the
@@ -88,6 +90,7 @@ pub async fn recover<F: Fs>(
             outcome: settled.outcome(),
             kept: settled.kept.iter().map(|stored| stored.blob).collect(),
             stayed: settled.stayed,
+            conflict: settled.error,
         });
     }
     recovered.extend(keep_staged(fs, layout, log).await?);
@@ -105,6 +108,7 @@ fn pending((intent, record): (IntentId, Result<Record>)) -> Recovered {
         outcome,
         kept: Vec::new(),
         stayed: Vec::new(),
+        conflict: None,
     }
 }
 
@@ -154,7 +158,7 @@ pub(crate) struct Settled {
     pub kept: Vec<Stored>,
     pub stayed: Vec<RelPath>,
     /// Why a step did not finish.
-    pub error: Option<Error>,
+    pub error: Option<Conflict>,
     /// Whether any step changed a file.
     pub changed: bool,
 }
@@ -173,10 +177,10 @@ impl Settled {
         match (self.error, self.changed) {
             (None, _) => Ok(self.report),
             (Some(error), true) => Err(Error::Partial {
-                error: Box::new(error),
+                error: Box::new(error.into()),
                 stayed: self.stayed,
             }),
-            (Some(error), false) => Err(error),
+            (Some(error), false) => Err(error.into()),
         }
     }
 }
@@ -323,6 +327,7 @@ async fn keep_staged<F: Fs>(
         outcome: Outcome::RolledBack,
         kept: staged.into_iter().map(|(_, blob, _)| blob).collect(),
         stayed: Vec::new(),
+        conflict: None,
     }))
 }
 
@@ -455,8 +460,9 @@ mod tests {
     use pollster::block_on;
 
     use super::*;
-    use crate::effects::Stored;
-    use crate::fs::MemFs;
+    use crate::effects::{Precondition, Stored};
+    use crate::error::Mismatch;
+    use crate::fs::{fingerprint, MemFs};
     use crate::ids::{EntityId, Version};
     use crate::log::testing::{append_unknown, logged, reopen, well_formed, Session};
     use crate::value::Value;
@@ -531,6 +537,7 @@ mod tests {
                 outcome: Outcome::Finished,
                 kept: vec![],
                 stayed: vec![],
+                conflict: None,
             }]
         );
         assert_eq!(contents(&fs, &path("song")), b"new");
@@ -548,8 +555,14 @@ mod tests {
         block_on(fs.remove_file(&path("song"))).unwrap();
         block_on(fs.create(&path("song"), b"theirs")).unwrap();
         let mut log = reopen(&fs, WRITER);
+        let found = block_on(fingerprint(&fs, &path("song"), false)).unwrap();
         let recovered = block_on(recover(&fs, &layout, &mut log)).unwrap();
         let new = BlobId::of(b"new");
+        let mismatch = Mismatch {
+            path: path("song"),
+            expected: Precondition::Holds(BlobId::of(b"old")),
+            found,
+        };
         assert_eq!(
             recovered,
             [Recovered {
@@ -558,6 +571,7 @@ mod tests {
                 outcome: Outcome::RolledBack,
                 kept: vec![new],
                 stayed: vec![path("song")],
+                conflict: Some(Conflict::Changed(Box::new(mismatch))),
             }]
         );
         assert_eq!(contents(&fs, &path("song")), b"theirs");
@@ -626,6 +640,11 @@ mod tests {
         let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
         assert_eq!(recovered[0].outcome, Outcome::RolledBack);
         assert_eq!(recovered[0].kept, [BlobId::of(b"new")]);
+        assert!(
+            matches!(&recovered[0].conflict, Some(Conflict::Changed(m)) if m.path == path("song")),
+            "{:?}",
+            recovered[0].conflict
+        );
         assert_eq!(logged(&fs, WRITER), once);
         well_formed(&once).unwrap();
     }
@@ -710,6 +729,7 @@ mod tests {
             outcome,
             kept: vec![],
             stayed: vec![],
+            conflict: None,
         };
         assert_eq!(
             block_on(recover(&fs, &layout, &mut log)).unwrap(),

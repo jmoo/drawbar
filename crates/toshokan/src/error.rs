@@ -92,6 +92,31 @@ pub enum Error {
     },
 }
 
+/// Why a journaled file effect could not run: the files no longer allowed it, and it
+/// changed nothing.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Conflict {
+    /// The file at the path is not as the effect expected.
+    Changed(Box<Mismatch>),
+    /// A directory is where the effect expected a file.
+    IsDirectory { path: RelPath },
+    /// Something is at the destination of a move.
+    AlreadyExists { path: RelPath },
+    /// Nothing is at the source of a move.
+    NotFound { path: RelPath },
+}
+
+impl From<Conflict> for Error {
+    fn from(conflict: Conflict) -> Self {
+        match conflict {
+            Conflict::Changed(mismatch) => Self::Changed(mismatch),
+            Conflict::IsDirectory { path } => Self::IsDirectory { path },
+            Conflict::AlreadyExists { path } => Self::AlreadyExists { path },
+            Conflict::NotFound { path } => Self::NotFound { path },
+        }
+    }
+}
+
 /// What the writer expected at a path, and the file found there; `None` is no file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Mismatch {

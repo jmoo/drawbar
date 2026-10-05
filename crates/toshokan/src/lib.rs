@@ -32,7 +32,7 @@ pub mod undo;
 pub mod value;
 
 pub use effects::Precondition;
-pub use error::{Error, Mismatch, Result};
+pub use error::{Conflict, Error, Mismatch, Result};
 pub use fs::{Capabilities, Fingerprint, Fs, MemFs, RelPath};
 pub use ids::{EntityId, IntentId, Version, WriterId};
 pub use layout::Layout;
