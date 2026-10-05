@@ -1,0 +1,680 @@
+//! A library as an app uses it, through [`Library`]: each behavior runs on the
+//! in-memory file system and on the native one, and every file effect is crashed at
+//! each of its operations.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use pollster::block_on;
+use toshokan::fs::{Capabilities, FileKind};
+use toshokan::journal::Outcome;
+use toshokan::undo::Refusal;
+use toshokan::{
+    BlobId, EntityId, Error, Fs, Kind, Layout, Library, MemFs, Precondition, RelPath, Value,
+    WriterId,
+};
+
+const A: WriterId = WriterId::from_u128(0xa);
+const B: WriterId = WriterId::from_u128(0xb);
+const C: WriterId = WriterId::from_u128(0xc);
+
+fn path(text: &str) -> RelPath {
+    RelPath::new(text).unwrap()
+}
+
+fn text(text: &str) -> Value {
+    Value::Text(text.to_owned())
+}
+
+fn holds(bytes: &[u8]) -> Precondition {
+    Precondition::Holds(BlobId::of(bytes))
+}
+
+fn open<F: Fs>(fs: F, writer: WriterId) -> Library<F> {
+    block_on(Library::open(fs, Layout::default(), writer)).unwrap()
+}
+
+/// Every directory and file in the folder: a file with its bytes and time.
+type Tree = BTreeMap<RelPath, Option<(Vec<u8>, Option<u64>)>>;
+
+fn tree<F: Fs>(fs: &F) -> Tree {
+    let mut tree = BTreeMap::new();
+    let mut dirs = vec![RelPath::ROOT];
+    while let Some(dir) = dirs.pop() {
+        for entry in block_on(fs.list(&dir)).unwrap() {
+            let child = dir.join(&entry.name).unwrap();
+            let node = match entry.kind {
+                FileKind::Directory => {
+                    dirs.push(child.clone());
+                    None
+                }
+                FileKind::File => {
+                    let bytes = block_on(fs.read(&child)).unwrap();
+                    let modified = block_on(fs.metadata(&child)).unwrap().unwrap().modified;
+                    Some((bytes, modified))
+                }
+            };
+            tree.insert(child, node);
+        }
+    }
+    tree
+}
+
+/// The library's own files, outside toshokan's root, with their bytes.
+fn library_files<F: Fs>(fs: &F) -> BTreeMap<RelPath, Vec<u8>> {
+    let layout = Layout::default();
+    tree(fs)
+        .into_iter()
+        .filter(|(path, _)| !layout.owns(path))
+        .filter_map(|(path, node)| Some((path, node?.0)))
+        .collect()
+}
+
+fn stored<F: Fs>(fs: &F, bytes: &[u8]) -> bool {
+    let blob = Layout::default().blob(BlobId::of(bytes));
+    block_on(fs.metadata(&blob)).unwrap().is_some()
+}
+
+/// CRC-32/ISO-HDLC computed bit by bit, as the line format specifies it.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = match crc & 1 {
+                1 => (crc >> 1) ^ 0xedb8_8320,
+                _ => crc >> 1,
+            };
+        }
+    }
+    !crc
+}
+
+/// Append to `writer`'s first segment a well-formed line of a kind no build knows.
+fn append_unknown<F: Fs>(fs: &F, writer: WriterId) -> String {
+    let json = format!(
+        r#"{{"version":"900@{writer}","intent":"{writer}:900","kind":"comment","text":"hi"}}"#
+    );
+    let line = format!("{json}\t{:08x}\n", crc32(json.as_bytes()));
+    let segment = Layout::default().segment(writer, 1);
+    block_on(fs.append(&segment, line.as_bytes())).unwrap();
+    json
+}
+
+fn two_writers_tag_one_library_and_both_tags_survive<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    let mut b = open(disk(), B);
+    block_on(a.add(song, "tags", text("brass"))).unwrap();
+    block_on(b.add(song, "tags", text("warm"))).unwrap();
+    block_on(b.add(song, "tags", text("brass"))).unwrap();
+    block_on(a.remove(song, "tags", &text("brass"))).unwrap();
+
+    let reader = open(disk(), C);
+    let tags: BTreeSet<&Value> = reader.state().members(song, "tags");
+    assert_eq!(
+        tags,
+        [&text("brass"), &text("warm")].into(),
+        "a remove spares the add it did not see"
+    );
+}
+
+fn two_writers_never_allocate_the_same_id<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let mut b = open(disk(), B);
+    let mut created = Vec::new();
+    for _ in 0..3 {
+        created.push(block_on(a.create()).unwrap().0);
+        created.push(block_on(b.create()).unwrap().0);
+    }
+    drop(a);
+    let mut again = open(disk(), A);
+    created.push(block_on(again.create()).unwrap().0);
+
+    let distinct: BTreeSet<EntityId> = created.iter().copied().collect();
+    assert_eq!(distinct.len(), created.len(), "{created:?}");
+    assert_eq!(open(disk(), C).state().entities(), Vec::from_iter(distinct));
+}
+
+fn a_writer_never_drops_another_writers_unknown_entries<F: Fs>(disk: impl Fn() -> F) {
+    let mut b = open(disk(), B);
+    block_on(b.create()).unwrap();
+    let unknown = append_unknown(b.fs(), B);
+    let theirs = |fs: &F| {
+        let dir = Layout::default().writer(B);
+        tree(fs)
+            .into_iter()
+            .filter(|(path, _)| path.starts_with(&dir))
+            .collect::<Tree>()
+    };
+    let before = theirs(b.fs());
+
+    let mut a = open(disk(), A);
+    assert_eq!(a.read_only(), None);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.set(song, "name", Some(text("one")))).unwrap();
+    block_on(a.compact(0)).unwrap();
+    block_on(a.collect(0)).unwrap();
+    assert_eq!(theirs(a.fs()), before, "writer B's files changed");
+
+    let b = open(disk(), B);
+    assert!(b.read_only().is_some(), "B's own log has an unknown entry");
+    let kept = block_on(toshokan::log::read_log(b.fs(), b.layout(), B)).unwrap();
+    let kept: Vec<&Kind> = kept.entries.iter().map(|entry| &entry.kind).collect();
+    assert!(
+        kept.iter()
+            .any(|kind| matches!(kind, Kind::Unknown { json, .. } if *json == unknown)),
+        "{kept:?}"
+    );
+}
+
+fn a_torn_log_tail_costs_one_entry<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.set(song, "name", Some(text("one")))).unwrap();
+    block_on(a.set(song, "name", Some(text("two")))).unwrap();
+    drop(a);
+
+    let fs = disk();
+    let segment = Layout::default().segment(A, 1);
+    let mut bytes = block_on(fs.read(&segment)).unwrap();
+    assert_eq!(bytes.pop(), Some(b'\n'));
+    block_on(fs.remove_file(&segment)).unwrap();
+    block_on(fs.create(&segment, &bytes)).unwrap();
+    let offset = bytes.iter().rposition(|&b| b == b'\n').unwrap() as u64 + 1;
+
+    let mut a = open(disk(), A);
+    assert_eq!(a.state().field(song, "name"), Some(&text("one")));
+    let torn: Vec<_> = a
+        .torn()
+        .iter()
+        .map(|t| (t.writer, t.segment, t.torn.offset))
+        .collect();
+    assert_eq!(torn, [(A, 1, offset)]);
+
+    block_on(a.set(song, "name", Some(text("three")))).unwrap();
+    let reopened = open(disk(), A);
+    assert_eq!(reopened.state().field(song, "name"), Some(&text("three")));
+    assert_eq!(
+        reopened.torn().len(),
+        1,
+        "the torn segment is left as it was"
+    );
+}
+
+fn a_read_only_library_refuses_every_intent_before_anything_changes<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.add(song, "tags", text("brass"))).unwrap();
+    block_on(a.save(song, &path("d/song"), b"old".to_vec(), Precondition::Absent)).unwrap();
+    append_unknown(a.fs(), A);
+    let before = tree(a.fs());
+
+    let mut a = open(disk(), A);
+    assert!(a.read_only().is_some());
+    let results = [
+        block_on(a.create()).map(drop),
+        block_on(a.set(song, "name", None)).map(drop),
+        block_on(a.add(song, "tags", text("warm"))).map(drop),
+        block_on(a.remove(song, "tags", &text("brass"))).map(drop),
+        block_on(a.delete(song)).map(drop),
+        block_on(a.bind(song, &path("d/song"))).map(drop),
+        block_on(a.save(song, &path("d/song"), b"new".to_vec(), holds(b"old"))).map(drop),
+        block_on(a.rename(song, &path("d/renamed"))).map(drop),
+        block_on(a.move_tree(&path("d"), &path("e"))).map(drop),
+        block_on(a.delete_file(song, holds(b"old"))).map(drop),
+        block_on(a.undo()).map(drop),
+        block_on(a.redo()).map(drop),
+        block_on(a.compact(0)).map(drop),
+        block_on(a.collect(0)).map(drop),
+    ];
+    for (index, result) in results.into_iter().enumerate() {
+        assert!(
+            matches!(result, Err(Error::ReadOnly { writer: A, .. })),
+            "intent {index}: {result:?}"
+        );
+    }
+    assert_eq!(tree(a.fs()), before, "a refused intent wrote");
+}
+
+fn undo_of_a_save_restores_the_displaced_bytes<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    let at = path("Organ/song");
+    block_on(a.save(song, &at, b"first".to_vec(), Precondition::Absent)).unwrap();
+    let saved = block_on(a.save(song, &at, b"second".to_vec(), holds(b"first"))).unwrap();
+    assert_eq!(saved.files.displaced, [(at.clone(), BlobId::of(b"first"))]);
+
+    let undone = block_on(a.undo()).unwrap();
+    assert_eq!(
+        library_files(a.fs()),
+        [(at.clone(), b"first".to_vec())].into()
+    );
+    assert!(stored(a.fs(), b"second"), "the undone bytes are kept");
+    assert_eq!(
+        undone.files.displaced,
+        [(at.clone(), BlobId::of(b"second"))]
+    );
+
+    block_on(a.redo()).unwrap();
+    assert_eq!(
+        library_files(a.fs()),
+        [(at.clone(), b"second".to_vec())].into()
+    );
+
+    block_on(a.undo()).unwrap();
+    block_on(a.undo()).unwrap();
+    assert_eq!(
+        library_files(a.fs()),
+        BTreeMap::new(),
+        "undoing the first save"
+    );
+    assert!(stored(a.fs(), b"first") && stored(a.fs(), b"second"));
+    let reopened = open(disk(), A);
+    assert_eq!(reopened.state().field(song, "path"), None);
+}
+
+fn undo_of_a_file_delete_puts_the_file_back<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(song, &path("song"), b"bytes".to_vec(), Precondition::Absent)).unwrap();
+    block_on(a.delete_file(song, holds(b"bytes"))).unwrap();
+    assert_eq!(library_files(a.fs()), BTreeMap::new());
+
+    block_on(a.undo()).unwrap();
+    assert_eq!(
+        library_files(a.fs()),
+        [(path("song"), b"bytes".to_vec())].into()
+    );
+    assert_eq!(a.state().field(song, "path"), Some(&text("song")));
+    assert_eq!(
+        block_on(a.rescan()).unwrap().bound,
+        [(path("song"), song)].into()
+    );
+}
+
+fn undo_is_refused_where_another_writer_changed_the_field_since<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.set(song, "name", Some(text("mine")))).unwrap();
+    let mut b = open(disk(), B);
+    block_on(b.set(song, "name", Some(text("theirs")))).unwrap();
+
+    block_on(a.refresh()).unwrap();
+    let before = tree(a.fs());
+    let refused = block_on(a.undo());
+    assert!(
+        matches!(&refused, Err(Error::Refused(refusal))
+            if matches!(**refusal, Refusal::FieldChanged { entity, .. } if entity == song)),
+        "{refused:?}"
+    );
+    assert_eq!(tree(a.fs()), before, "a refused undo wrote");
+    assert_eq!(a.state().field(song, "name"), Some(&text("theirs")));
+}
+
+fn collection_never_removes_a_blob_a_live_value_names<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(song, &path("song"), b"first".to_vec(), Precondition::Absent)).unwrap();
+    block_on(a.save(song, &path("song"), b"second".to_vec(), holds(b"first"))).unwrap();
+    let (keeper, _) = block_on(a.create()).unwrap();
+    let first = Value::Blob(BlobId::of(b"first"));
+    block_on(a.set(keeper, "previous", Some(first))).unwrap();
+
+    block_on(a.compact(0)).unwrap();
+    let collection = block_on(a.collect(0)).unwrap();
+    assert_eq!(collection.removed, []);
+    assert!(stored(a.fs(), b"first"));
+
+    block_on(a.set(keeper, "previous", None)).unwrap();
+    block_on(a.compact(0)).unwrap();
+    let collection = block_on(a.collect(0)).unwrap();
+    assert_eq!(collection.removed, [BlobId::of(b"first")]);
+    assert!(!stored(a.fs(), b"first"));
+}
+
+fn opening_writes_nothing<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(song, &path("d/song"), b"old".to_vec(), Precondition::Absent)).unwrap();
+    block_on(a.save(song, &path("d/song"), b"new".to_vec(), holds(b"old"))).unwrap();
+    block_on(a.add(song, "tags", text("brass"))).unwrap();
+    block_on(a.compact(1)).unwrap();
+    let mut b = open(disk(), B);
+    block_on(b.set(song, "name", Some(text("theirs")))).unwrap();
+    let fs = disk();
+    block_on(fs.create(&path("arrived"), b"outside")).unwrap();
+    let before = tree(&fs);
+
+    for writer in [A, B, C] {
+        let library = open(disk(), writer);
+        assert_eq!(library.scan().arrivals, [path("arrived")]);
+        assert_eq!(tree(&fs), before, "opening as {writer} wrote");
+    }
+}
+
+fn an_intent_the_entity_does_not_allow_is_refused_before_anything_changes<F: Fs>(
+    disk: impl Fn() -> F,
+) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    let (gone, _) = block_on(a.create()).unwrap();
+    block_on(a.delete(gone)).unwrap();
+    let before = tree(a.fs());
+    let results = [
+        block_on(a.set(gone, "name", None)).map(drop),
+        block_on(a.set(song, "path", Some(text("elsewhere")))).map(drop),
+        block_on(a.set(song, "content", None)).map(drop),
+        block_on(a.remove(song, "tags", &text("never added"))).map(drop),
+        block_on(a.rename(song, &path("to"))).map(drop),
+        block_on(a.delete_file(song, Precondition::Absent)).map(drop),
+    ];
+    for (index, result) in results.into_iter().enumerate() {
+        assert!(
+            matches!(result, Err(Error::Entity { .. })),
+            "intent {index}: {result:?}"
+        );
+    }
+    assert_eq!(tree(a.fs()), before, "a refused intent wrote");
+}
+
+fn binding_follows_a_file_renamed_outside_the_app<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(
+        song,
+        &path("a/song"),
+        b"bytes".to_vec(),
+        Precondition::Absent,
+    ))
+    .unwrap();
+    let fs = disk();
+    block_on(fs.create_dir_all(&path("b"))).unwrap();
+    block_on(fs.rename(&path("a/song"), &path("b/song"))).unwrap();
+
+    let moves = block_on(a.rescan()).unwrap().moves.clone();
+    let [moved] = moves.as_slice() else {
+        panic!("{moves:?}");
+    };
+    assert_eq!((moved.entity, &moved.to), (song, &path("b/song")));
+    block_on(a.bind(song, &moved.to)).unwrap();
+    let scan = block_on(a.rescan()).unwrap();
+    assert_eq!(scan.bound, [(path("b/song"), song)].into());
+    assert!(scan.moves.is_empty() && scan.changed.is_empty(), "{scan:?}");
+}
+
+macro_rules! on_every_backend {
+    ($($behavior:ident,)+) => {
+        mod mem {
+            use super::*;
+            $(
+                #[test]
+                fn $behavior() {
+                    let fs = MemFs::new();
+                    super::$behavior(|| fs.clone());
+                }
+            )+
+        }
+
+        mod native {
+            $(
+                #[test]
+                fn $behavior() {
+                    let dir = tempfile::tempdir().unwrap();
+                    super::$behavior(|| toshokan::native::NativeFs::new(dir.path()));
+                }
+            )+
+        }
+    };
+}
+
+on_every_backend!(
+    two_writers_tag_one_library_and_both_tags_survive,
+    two_writers_never_allocate_the_same_id,
+    a_writer_never_drops_another_writers_unknown_entries,
+    a_torn_log_tail_costs_one_entry,
+    a_read_only_library_refuses_every_intent_before_anything_changes,
+    undo_of_a_save_restores_the_displaced_bytes,
+    undo_of_a_file_delete_puts_the_file_back,
+    undo_is_refused_where_another_writer_changed_the_field_since,
+    collection_never_removes_a_blob_a_live_value_names,
+    opening_writes_nothing,
+    an_intent_the_entity_does_not_allow_is_refused_before_anything_changes,
+    binding_follows_a_file_renamed_outside_the_app,
+);
+
+/// The facts and files a crash may leave: those before the intent, or those after.
+#[derive(PartialEq, Debug)]
+struct Observed {
+    files: BTreeMap<RelPath, Vec<u8>>,
+    facts: BTreeMap<EntityId, BTreeMap<String, Value>>,
+}
+
+impl Observed {
+    fn of(library: &Library<MemFs>) -> Self {
+        let state = library.state();
+        let facts = state
+            .entities()
+            .into_iter()
+            .map(|entity| {
+                let fields = state.fields(entity);
+                let fields = fields.into_iter().map(|(n, v)| (n.to_owned(), v.clone()));
+                (entity, fields.collect())
+            })
+            .collect();
+        Self {
+            files: library_files(library.fs()),
+            facts,
+        }
+    }
+}
+
+/// One intent with file effects, crashed at each of its operations and at each
+/// operation of the recovery that follows.
+struct Case {
+    setup: fn(&mut Library<MemFs>) -> Vec<EntityId>,
+    act: fn(&mut Library<MemFs>, &[EntityId]) -> toshokan::Result<toshokan::Change>,
+}
+
+impl Case {
+    fn prepared(&self, capabilities: Capabilities) -> (Library<MemFs>, Vec<EntityId>) {
+        let mut library = open(MemFs::with_capabilities(capabilities), A);
+        let entities = (self.setup)(&mut library);
+        (library, entities)
+    }
+
+    /// The disk as a crash `crash` operations into the intent leaves it.
+    fn crashed(&self, capabilities: Capabilities, crash: u64) -> MemFs {
+        let (mut library, entities) = self.prepared(capabilities);
+        library.fs().crash_after(crash);
+        let result = (self.act)(&mut library, &entities);
+        assert!(
+            matches!(result, Err(Error::Crashed)),
+            "crash {crash}: {result:?}"
+        );
+        library.fs().restart()
+    }
+
+    fn run(&self, capabilities: Capabilities) {
+        let (mut clean, entities) = self.prepared(capabilities);
+        let before = Observed::of(&clean);
+        let start = clean.fs().mutations();
+        (self.act)(&mut clean, &entities).unwrap();
+        let operations = clean.fs().mutations() - start;
+        let after = Observed::of(&clean);
+        let durable = Observed::of(&open(clean.fs().restart(), A));
+        assert_eq!(durable, after, "the clean intent is durable");
+        assert_ne!(after, before, "the intent changes something");
+
+        for crash in 0..operations {
+            let disk = self.crashed(capabilities, crash);
+            let start = disk.mutations();
+            open(disk.clone(), A);
+            let recovery = disk.mutations() - start;
+            for interrupt in (0..recovery).map(Some).chain([None]) {
+                let mut disk = self.crashed(capabilities, crash);
+                if let Some(interrupt) = interrupt {
+                    disk.crash_after(interrupt);
+                    let result = block_on(Library::open(disk.clone(), Layout::default(), A));
+                    assert!(matches!(result, Err(Error::Crashed)), "{:?}", result.err());
+                    disk = disk.restart();
+                }
+                let at = format!("{capabilities:?}, crash {crash}, recovery crash {interrupt:?}");
+                check(&disk, &before, &after).unwrap_or_else(|failure| panic!("{at}: {failure}"));
+            }
+        }
+    }
+}
+
+/// Recover `disk` as a restarted app does, and check what the brief promises.
+fn check(disk: &MemFs, before: &Observed, after: &Observed) -> Result<(), String> {
+    let library = open(disk.clone(), A);
+    let outcome = Observed::of(&library);
+    if outcome != *before && outcome != *after && !kept_both(&library, &outcome, before, after) {
+        return Err(format!("partial state {outcome:?}"));
+    }
+    let layout = Layout::default();
+    let leftovers: Vec<RelPath> = disk
+        .files()
+        .into_keys()
+        .filter(|path| path.starts_with(&layout.journal(A)) || path.starts_with(&layout.tmp(A)))
+        .collect();
+    if !leftovers.is_empty() {
+        return Err(format!("recovery left {leftovers:?}"));
+    }
+    let adds = library.state().blob_adds();
+    for (path, bytes) in disk.files() {
+        if path.parent() != Some(layout.blobs()) {
+            continue;
+        }
+        let blob = BlobId::of(&bytes);
+        if path != layout.blob(blob) {
+            return Err(format!("{path} holds other bytes"));
+        }
+        if !adds
+            .get(&blob)
+            .is_some_and(|by| by.values().any(|add| !add.removed))
+        {
+            return Err(format!("blob {blob} is stored but not logged"));
+        }
+    }
+    let kept: BTreeSet<Vec<u8>> = disk.files().into_values().collect();
+    if let Some(lost) = before.files.values().find(|bytes| !kept.contains(*bytes)) {
+        return Err(format!("{:?} were lost", String::from_utf8_lossy(lost)));
+    }
+    let restarted = disk.restart();
+    let mutations = restarted.mutations();
+    open(restarted.clone(), A);
+    if restarted.mutations() != mutations {
+        return Err("recovery was not finished and durable".to_owned());
+    }
+    Ok(())
+}
+
+/// Whether recovery rolled the intent back and reported it, keeping the files both
+/// before and after it. A directory renamed across parents, with a crash between
+/// syncing the two, has both names, and neither can be removed without the other.
+fn kept_both(
+    library: &Library<MemFs>,
+    outcome: &Observed,
+    before: &Observed,
+    after: &Observed,
+) -> bool {
+    let both: BTreeMap<RelPath, Vec<u8>> = before
+        .files
+        .iter()
+        .chain(&after.files)
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect();
+    let reported = library
+        .recovered()
+        .iter()
+        .any(|recovered| recovered.outcome == Outcome::RolledBack && !recovered.paths.is_empty());
+    reported && outcome.facts == before.facts && outcome.files == both
+}
+
+const WITHOUT_FSYNC: Capabilities = Capabilities {
+    fsync: false,
+    ..Capabilities::ALL
+};
+
+const WITHOUT_DIRECTORY_RENAME: Capabilities = Capabilities {
+    rename_dir: false,
+    ..Capabilities::ALL
+};
+
+fn save_new(library: &mut Library<MemFs>, at: &str, bytes: &[u8]) -> EntityId {
+    let (entity, _) = block_on(library.create()).unwrap();
+    block_on(library.save(entity, &path(at), bytes.to_vec(), Precondition::Absent)).unwrap();
+    entity
+}
+
+#[test]
+fn every_crash_while_saving_a_new_file_recovers() {
+    let case = Case {
+        setup: |library| {
+            save_new(library, "keep", b"k");
+            vec![block_on(library.create()).unwrap().0]
+        },
+        act: |library, entities| {
+            let bytes = b"new".to_vec();
+            block_on(library.save(entities[0], &path("d/new"), bytes, Precondition::Absent))
+        },
+    };
+    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC] {
+        case.run(capabilities);
+    }
+}
+
+#[test]
+fn every_crash_while_saving_over_a_file_recovers() {
+    let case = Case {
+        setup: |library| vec![save_new(library, "d/song", b"old")],
+        act: |library, entities| {
+            let bytes = b"new".to_vec();
+            block_on(library.save(entities[0], &path("d/song"), bytes, holds(b"old")))
+        },
+    };
+    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC] {
+        case.run(capabilities);
+    }
+}
+
+#[test]
+fn every_crash_while_deleting_a_file_recovers() {
+    let case = Case {
+        setup: |library| {
+            save_new(library, "other", b"o");
+            vec![save_new(library, "song", b"old")]
+        },
+        act: |library, entities| block_on(library.delete_file(entities[0], holds(b"old"))),
+    };
+    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC] {
+        case.run(capabilities);
+    }
+}
+
+#[test]
+fn every_crash_while_moving_a_tree_recovers() {
+    let case = Case {
+        setup: |library| {
+            save_new(library, "a/xy", b"3");
+            vec![
+                save_new(library, "a/x/1", b"1"),
+                save_new(library, "a/x/y/2", b"2"),
+            ]
+        },
+        act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
+    };
+    let without_both = Capabilities {
+        fsync: false,
+        ..WITHOUT_DIRECTORY_RENAME
+    };
+    for capabilities in [
+        Capabilities::ALL,
+        WITHOUT_FSYNC,
+        WITHOUT_DIRECTORY_RENAME,
+        without_both,
+    ] {
+        case.run(capabilities);
+    }
+}

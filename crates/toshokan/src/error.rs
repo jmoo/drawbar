@@ -2,7 +2,7 @@ use thiserror::Error as ThisError;
 
 use crate::effects::Precondition;
 use crate::fs::{Capability, Fingerprint, RelPath};
-use crate::ids::WriterId;
+use crate::ids::{EntityId, WriterId};
 use crate::undo::Refusal;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -73,6 +73,13 @@ pub enum Error {
 
     #[error("cannot undo or redo: {0}")]
     Refused(Box<Refusal>),
+
+    /// An intent the merged state does not allow on this entity. Nothing was written.
+    #[error("{entity} {reason}")]
+    Entity {
+        entity: EntityId,
+        reason: &'static str,
+    },
 }
 
 /// A file as the writer expected it and as it was found; `None` is no file.

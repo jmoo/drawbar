@@ -378,15 +378,8 @@ impl<F: Fs> Planner<'_, F> {
         }
     }
 
-    /// Refuse toshokan's root, anything inside it, and any directory holding it.
     fn library_path(&self, path: &RelPath) -> Result<()> {
-        match self.layout.owns(path) || self.layout.root().starts_with(path) {
-            true => Err(Error::InvalidPath {
-                path: path.as_str().to_owned(),
-                reason: "toshokan's own files are not library files",
-            }),
-            false => Ok(()),
-        }
+        self.layout.check_library_path(path)
     }
 }
 

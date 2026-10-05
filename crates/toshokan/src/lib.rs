@@ -5,6 +5,10 @@
 //! change it offline without coordinating: each appends to its own log, and the logs
 //! merge to the same [`State`] in any order. Every change can be undone.
 //!
+//! An app opens a [`Library`] as one writer and changes it by intents: entities and
+//! their fields and sets, and saves, renames, moves and deletions of their files, each
+//! of which undo reverses.
+//!
 //! The crate knows nothing about any file format. It runs over the [`Fs`] trait:
 //! [`MemFs`] for tests, with injected crashes, and `native::NativeFs` off the web.
 //!
@@ -18,6 +22,7 @@ pub mod fs;
 pub mod ids;
 pub mod journal;
 pub mod layout;
+pub mod library;
 pub mod log;
 pub mod merge;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,10 +31,12 @@ pub mod scan;
 pub mod undo;
 pub mod value;
 
+pub use effects::Precondition;
 pub use error::{Error, Mismatch, Result};
 pub use fs::{Capabilities, Fingerprint, Fs, MemFs, RelPath};
 pub use ids::{EntityId, IntentId, Version, WriterId};
 pub use layout::Layout;
+pub use library::{Change, Library, TornSegment};
 pub use log::{Entry, Kind};
 pub use merge::State;
 pub use value::{BlobId, Value};

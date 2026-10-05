@@ -50,6 +50,18 @@ impl Layout {
         path.starts_with(&self.root)
     }
 
+    /// Refuse toshokan's root, anything inside it, and any directory holding it,
+    /// none of which is a library file.
+    pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
+        match self.owns(path) || self.root.starts_with(path) {
+            true => Err(Error::InvalidPath {
+                path: path.as_str().to_owned(),
+                reason: "toshokan's own files are not library files",
+            }),
+            false => Ok(()),
+        }
+    }
+
     pub fn writers(&self) -> RelPath {
         child(&self.root, "writers")
     }
