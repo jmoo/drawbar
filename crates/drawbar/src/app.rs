@@ -889,7 +889,11 @@ impl eframe::App for DrawbarApp {
         }
         let released = match &mut self.store {
             Some(store) => {
-                store.focus(ctx.input(|input| input.focused));
+                #[cfg(target_arch = "wasm32")]
+                let here = crate::presence::here(ctx);
+                #[cfg(not(target_arch = "wasm32"))]
+                let here = ctx.input(|input| input.focused);
+                store.focus(here);
                 let released = store.poll(
                     &mut self.workspace,
                     &mut self.browser,

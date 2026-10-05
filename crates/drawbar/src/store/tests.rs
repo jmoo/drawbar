@@ -1018,6 +1018,37 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     assert_eq!(again.bench.workspace.listed().count(), 1);
 }
 
+/// A browser can hear the user leave and come back between two frames, as when a frame
+/// is not drawn while the tab is hidden. The library still rescans on the return.
+#[test]
+fn coming_back_to_a_picked_folder_rescans_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let mut presence = crate::presence::Presence::default();
+    session.store.focus(presence.read());
+
+    presence.heard(false);
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    presence.heard(true);
+    session.store.focus(presence.read());
+    assert!(
+        !session.store.scanning(),
+        "away for the frame that read the return"
+    );
+    session.store.focus(presence.read());
+    assert!(session.store.scanning(), "back at the next frame");
+    while session.store.scanning() {
+        assert!(session.next(), "the rescan answered");
+    }
+    let names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Grand.ne5p"]);
+}
+
 /// A file with a tag that nothing has read is read in the background once the library is
 /// listed, and the index keeps its CRC, so the file keeps its tag through a rename outside
 /// drawbar, while drawbar runs and while it does not.

@@ -91,9 +91,9 @@ slot. The activity log lists anything the bundle had to leave out.
 ## Changes made outside drawbar
 
 You can rename, move, edit and delete your files in Finder or any other app.
-drawbar notices when you come back to its window, and a renamed sound keeps its
-tags. drawbar reads a tagged file once in the background; a rename before that
-shows as a new file.
+drawbar notices when you come back to its window or tab, and a renamed sound
+keeps its tags. drawbar reads a tagged file once in the background; a rename
+before that shows as a new file.
 
 drawbar never writes over a change made outside it without asking. If a file
 changed while you had unsaved edits to it, drawbar asks what to do:
