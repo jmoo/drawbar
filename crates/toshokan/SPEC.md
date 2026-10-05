@@ -80,34 +80,122 @@ CRC-32 (ISO-HDLC: polynomial `0x04C11DB7`, reflected, initial and final XOR
 A line whose checksum does not match, or a final line without its LF, ends the
 readable segment. Every line before it counts; nothing from it on does.
 
-When the backend can append, a writer appends to its newest segment. Otherwise it
-writes a new segment.
+A writer's segments are numbered from 1. Each session of a writer starts a new
+segment, numbered past every segment and snapshot the writer has had. Where the
+backend can append, the session appends its later entries to that segment;
+otherwise it writes each batch as the next segment. A writer never appends to a
+segment an earlier session wrote, so readable lines never follow a torn tail.
 
 ## Entries
 
-Every entry carries its version, its intent id and its kind. An entry whose kind
-or fields a reader does not know is kept verbatim and ignored by the merge; a
-writer that finds one in its own log opens read-only.
+An entry is one JSON object: `version` holds its version and `intent` its intent
+id, both in their text forms, `kind` names its kind, and the kind's members
+follow. A writer writes the members in the order below, with no whitespace; a
+reader accepts any order. A member marked `?` is omitted when absent.
 
-The kinds are listed here with their fields. Their JSON encoding is to be
-completed.
+| `kind`         | Members                                                  |
+| -------------- | -------------------------------------------------------- |
+| `intent`       | `label?` string, `reverses?` intent id                   |
+| `create`       | `entity` entity id                                       |
+| `delete`       | `entity` entity id                                       |
+| `field`        | `entity` entity id, `name` string, `value?` value, `prior?` value |
+| `set_add`      | `entity` entity id, `name` string, `value` value         |
+| `set_remove`   | `entity` entity id, `name` string, `value` value, `observed` array of versions |
+| `blob_added`   | `blob` blob id, `len` number of bytes                    |
+| `blob_removed` | `blob` blob id                                           |
 
-| Kind          | Fields                                  | Effect on the merged state |
-| ------------- | --------------------------------------- | -------------------------- |
-| `intent`      | label?, reverses?                       | Starts an intent; `reverses` names the intent it undoes or redoes |
-| `create`      | entity                                  | Sets the entity's `exists` register to true |
-| `delete`      | entity                                  | Sets the entity's `exists` register to false |
-| `field`       | entity, name, value?, prior?            | Writes a last-writer-wins field; no value clears it |
-| `set_add`     | entity, name, value                     | Adds a value to an add-wins set, tagged with this entry's version |
-| `set_remove`  | entity, name, value, observed           | Removes the adds whose tags are in `observed` |
-| `blob_added`  | blob, len                               | This writer added a blob |
-| `blob_removed`| blob                                    | This writer's garbage collection removed a blob |
+For example, with writer `0000000000000000000000000000000a`, this line sets field
+`tag` of entity `…0a:0` to the text `Brass`:
+
+```text
+{"version":"3@0000000000000000000000000000000a","intent":"0000000000000000000000000000000a:1","kind":"field","entity":"0000000000000000000000000000000a:0","name":"tag","value":{"text":"Brass"}}	c8b0f391
+```
+
+Every intent starts with an `intent` entry, and every entry of an intent carries
+its intent id. `reverses` names the intent an undo or redo reverses. A `field`
+entry's `prior` is what the writer's merged state held when it wrote; undo
+restores it. A `blob_added` entry records that its writer put a blob in the store,
+and a `blob_removed` entry that its writer's garbage collection removed it.
+
+A JSON object without a version, an intent id or a string `kind` is unreadable
+and ends the segment, as a failed checksum does. An entry whose kind a reader does
+not know, or whose kind has a member or a value type the reader does not know, is
+kept verbatim and ignored by the merge. A writer that finds one in its own log is
+read-only: it neither appends nor compacts.
+
+## Merging
+
+The merged state depends only on the set of entries and snapshots read. The order
+of reading does not matter, and reading an entry twice changes nothing.
+
+- **Existence.** Each entity has a register: `create` writes true and `delete`
+  writes false, and the entry with the highest version decides. An entity exists
+  only while its register is true. A `field` entry does not touch the register,
+  so a write concurrent with a delete leaves the entity deleted.
+- **Fields.** A field, named by entity and name, holds the value of the `field`
+  entry with the highest version. An entry without `value` clears it.
+- **Sets.** A `set_add` tags `value` in the set, named by entity and name, with
+  the entry's version. A `set_remove` removes the tags in `observed`. A value is a
+  member while one of its tags is not removed, so an add the remover had not
+  observed survives.
+- **Blobs.** For each blob and writer, that writer's `blob_added` or
+  `blob_removed` with the highest version says whether the writer still holds
+  the blob.
+- **Clock.** A writer's next Lamport time is one more than the highest in any log
+  it has read.
+
+Two entries share a version only if one is forged. A tie between them goes to the
+greater value: absent before present, then values in their order above, `false`
+before `true`.
 
 ## Snapshots
 
-A snapshot folds one writer's entries up to a named segment, keeping tombstones,
-the set-remove observations needed for correctness, and the entries of the
-writer's undo window. Its encoding is to be completed.
+A snapshot folds one writer's entries up to a segment, keeping tombstones and
+set-remove observations, and keeping the entries of the writer's undo window
+whole. `writers/<writer>/snapshot-<hash>.json` holds one JSON object and a LF:
+
+| Member     | Contents                                                       |
+| ---------- | -------------------------------------------------------------- |
+| `through`  | The number of the last segment folded in                       |
+| `state`    | The folded state, below                                        |
+| `retained` | The undo window: each entry's JSON as a string, in version order |
+
+| `state` member | Records                                                       |
+| -------------- | ------------------------------------------------------------- |
+| `lamport`      | The highest Lamport time folded                               |
+| `exists`       | `{"entity","version","exists"}` for each existence register   |
+| `fields`       | `{"entity","name","version","value"?}` for each field          |
+| `sets`         | `{"entity","name","value","added","removed"}`, with the value's add tags and removed tags as arrays of versions |
+| `blobs`        | `{"blob","len","version","removed"}`, one per blob and writer; the writer is the version's |
+| `allocated`    | `{"writer","entity"?,"intent"?}`: the highest entity and intent counters seen of each writer |
+
+Records are sorted by their key, and a reader joins repeated records. A reader
+skips the writer's segments numbered `through` or less, applies the state, and
+then applies the retained entries and the later segments as it would any entries.
+A snapshot whose bytes do not hash to its name is corrupt.
+
+A writer compacts by writing a snapshot of its own snapshots and segments, then
+removing its segments numbered `through` or less and its other snapshots. Where
+the backend renames files, it writes the snapshot under `tmp/<writer>/` and
+renames it into place. A reader that finds more than one snapshot of a writer
+joins them: the highest `through`, the join of their states, and the union of
+their retained entries. A read-only writer does not compact.
+
+## Undo and redo
+
+A writer undoes and redoes only its own intents, by appending a new intent whose
+`intent` entry names the reversed intent in `reverses`. Replaying the writer's
+intents in version order gives two stacks. An intent that reverses the top of the
+undo stack is an undo and moves to the redo stack; one that reverses the top of
+the redo stack is a redo and moves back. Any other intent that writes a fact goes
+on the undo stack and empties the redo stack.
+
+Reversing an intent writes, newest first: `delete` for its `create`, `create` for
+its `delete`, a `set_remove` observing only its own tag for its `set_add`, a
+`set_add` for its `set_remove`, and for each field it wrote, the prior of its
+first write to that field. A field's undo is refused when the field's deciding
+write is neither the intent's last write to it nor an undo or redo that restored
+that write.
 
 ## Blobs
 
