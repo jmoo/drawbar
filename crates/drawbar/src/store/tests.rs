@@ -269,6 +269,7 @@ impl Session {
             log,
             queue,
             browser,
+            builds,
             ..
         } = &mut self.bench;
         let input = crate::testing::screen(eframe::egui::vec2(1280.0, 720.0), Vec::new());
@@ -284,6 +285,7 @@ impl Session {
                         queue,
                         tags: &browser.tags,
                         played: &crate::midi::Played::default(),
+                        builds,
                     },
                 );
             });
@@ -6062,4 +6064,294 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     };
     assert_eq!(moved.faults(), ["move"].into());
     assert!(Event::Fingerprinted(Vec::new()).faults().is_empty());
+}
+
+/// A `.wav` is an asset like any file drawbar opens: listed unread, of its kind by its
+/// name, and read once its document needs it.
+#[test]
+fn a_listed_wav_is_a_wav_asset_read_when_its_document_opens() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Kit")).unwrap();
+    let wav = crate::testing::wav_bytes();
+    fs::write(root.at("Kit/C3.WAV"), &wav).unwrap();
+    let mut session = Session::listed(&root);
+    assert!(session.bench.browser.folders.others.is_empty());
+    let id = session.named("C3.WAV");
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(entity.unread(), "nothing needed it yet");
+    assert_eq!(Kind::of(entity), Kind::Wav);
+
+    assert!(session.document(id).contains(&"Reading…".to_string()));
+    session.answer_reads();
+    let said = session.document(id);
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(entity.bytes == wav, "it holds the file");
+    let problems: Vec<&str> = session
+        .bench
+        .log
+        .iter()
+        .filter(|entry| entry.level != crate::log::Level::Info)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "a WAV is not a failed decode: {problems:?}"
+    );
+    assert_eq!(Kind::of(entity), Kind::Wav);
+    for offered in ["Play", "Encode"] {
+        assert!(
+            said.iter().any(|word| word == offered),
+            "{offered}: {said:?}"
+        );
+    }
+}
+
+/// A gain is an edit like any other: it leaves the WAV unsaved until it is reverted or
+/// saved into its file.
+#[test]
+fn a_gain_edit_reverts_and_saves_like_any_edit() {
+    let root = Temp::new();
+    let wav = crate::testing::wav_bytes();
+    fs::write(root.at("hit.wav"), &wav).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("hit.wav");
+    let gain = |session: &mut Session| {
+        let sets = [(crate::document::wav::GAIN.to_string(), "6.0".to_string())];
+        let (gained, _) = crate::document::wav::apply(&wav, &sets).unwrap();
+        let Bench { workspace, log, .. } = &mut session.bench;
+        workspace.replace_bytes(id, gained.clone(), log);
+        assert!(workspace.get(id).unwrap().is_unsaved());
+        gained
+    };
+
+    gain(&mut session);
+    session.bench.act(vec![crate::browser::Act::Revert(id)]);
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert!(!entity.is_unsaved());
+    assert!(entity.bytes == wav, "reverted to the file");
+
+    let gained = gain(&mut session);
+    session.bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+    session.sync();
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(root.read("hit.wav") == gained, "the file holds the gain");
+}
+
+/// Write `stored` WAVs, one second each, under `root`, and a project in `Marimba/`
+/// whose zones play them in that order from C3 up.
+fn project_with_wavs(
+    root: &Temp,
+    stored: &[(&str, &str)],
+) -> nord_format::formats::nsmpproj::Project {
+    use nord_format::formats::nsmp::codec::SOURCE_RATE;
+    use nord_format::formats::nsmpproj::{NewZone, Project};
+
+    let zones: Vec<NewZone> = stored
+        .iter()
+        .zip(48u8..)
+        .map(|((named, on_disk), root_key)| {
+            let pitch = f64::from(root_key);
+            let samples: Vec<i16> = (0..SOURCE_RATE as usize)
+                .map(|i| ((i as f64 / pitch).sin() * 12_000.0) as i16)
+                .collect();
+            let wav = nord_format::wav::mono_pcm16(&samples, SOURCE_RATE).unwrap();
+            let at = root.at(on_disk);
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            fs::write(at, wav).unwrap();
+            NewZone {
+                path: named.to_string(),
+                sample_rate: SOURCE_RATE,
+                frames: u64::from(SOURCE_RATE),
+                root_key,
+            }
+        })
+        .collect();
+    let project = Project::new("Marimba", &zones, 0).unwrap();
+    let entity = nord_format::Entity::SampleProject(project.clone());
+    fs::create_dir_all(root.at("Marimba")).unwrap();
+    fs::write(
+        root.at("Marimba/Marimba.nsmpproj"),
+        nord_format::to_bytes(&entity).unwrap(),
+    )
+    .unwrap();
+    project
+}
+
+impl Session {
+    /// Read the project `id`, and build it as the app does, running the store and the
+    /// builds a frame at a time until the build is over.
+    fn build(&mut self, id: u64) {
+        self.read(&[id]);
+        self.bench.act(vec![crate::browser::Act::Build(id)]);
+        let began = std::time::Instant::now();
+        loop {
+            let Bench {
+                workspace,
+                browser,
+                queue,
+                tabs,
+                builds,
+                log,
+                ..
+            } = &mut self.bench;
+            self.store.poll(workspace, browser, queue, log);
+            workspace.poll(log);
+            builds.poll(workspace, &browser.folders, tabs, log);
+            if !builds.running(id) {
+                return;
+            }
+            assert!(began.elapsed().as_secs() < 120, "the build never ended");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// What nord-format's build makes of `project` with WAVs whose bytes `wav` gives by the
+/// path the project stores.
+fn built_from(
+    project: &nord_format::formats::nsmpproj::Project,
+    wav: impl Fn(&str) -> Vec<u8>,
+) -> Vec<u8> {
+    use nord_format::formats::nsmp::encode::Predictor;
+    use nord_format::formats::nsmpproj::build::{self, Unavailable};
+    use nord_format::formats::nsmpproj::AudioFile;
+    use std::borrow::Cow;
+
+    struct Given<F>(F);
+    impl<F: Fn(&str) -> Vec<u8>> build::Source for Given<F> {
+        fn wav(&self, file: &AudioFile) -> Result<Cow<'_, [u8]>, Unavailable> {
+            Ok(Cow::Owned((self.0)(&file.path)))
+        }
+    }
+
+    let plan = build::plan(project, crate::builds::LAYOUT, &Given(wav)).unwrap();
+    plan.encode(&plan.name, Predictor::Minimizing, None)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+}
+
+/// The instrument lands beside the project, and holds what nord-format's build makes of
+/// the same project folder read from disk.
+#[test]
+fn a_project_builds_beside_itself_into_what_its_folder_on_disk_builds() {
+    use nord_format::formats::nsmpproj::build::AudioPath;
+
+    let root = Temp::new();
+    let project = project_with_wavs(
+        &root,
+        &[
+            ("audio/c3.wav", "Marimba/audio/c3.wav"),
+            ("../Shared/c4.wav", "Shared/c4.wav"),
+        ],
+    );
+    let folder = root.at("Marimba");
+    let expected = built_from(&project, |stored| {
+        fs::read(AudioPath::parse(stored).on_disk(&folder)).unwrap()
+    });
+
+    let mut session = Session::listed(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    let made = session.named("Marimba.nsmp");
+    assert!(
+        session.bench.tabs.holds(made),
+        "the instrument opens in a tab"
+    );
+    assert_eq!(session.said("Built “Marimba.nsmp”"), 1);
+    session.sync();
+    assert_eq!(
+        root.names("Marimba"),
+        ["Marimba.nsmp", "Marimba.nsmpproj", "audio"]
+    );
+    let built = root.read("Marimba/Marimba.nsmp");
+    assert!(
+        built == expected,
+        "the app built {} bytes, and the command line {}, not the same",
+        built.len(),
+        expected.len()
+    );
+}
+
+/// A build takes a WAV as its asset holds it, an unsaved gain included.
+#[test]
+fn a_build_encodes_a_wavs_unsaved_gain() {
+    let root = Temp::new();
+    let project = project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
+    let saved = root.read("Marimba/c3.wav");
+    let sets = [(crate::document::wav::GAIN.to_string(), "-6.0".to_string())];
+    let (gained, _) = crate::document::wav::apply(&saved, &sets).unwrap();
+    let expected = built_from(&project, |_| gained.clone());
+    assert!(expected != built_from(&project, |_| saved.clone()));
+
+    let mut session = Session::open(&root);
+    let wav = session.named("c3.wav");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(wav, gained.clone(), log);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    let made = session.named("Marimba.nsmp");
+    assert!(session.bytes(made) == expected, "the gain was built in");
+    assert!(
+        root.read("Marimba/c3.wav") == saved,
+        "the WAV is still unsaved"
+    );
+}
+
+#[test]
+fn a_build_takes_a_free_name_beside_a_file_of_the_same_name() {
+    let root = Temp::new();
+    project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
+    fs::write(root.at("Marimba/marimba.nsmp"), b"someone else's").unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    session.sync();
+    assert_eq!(root.read("Marimba/marimba.nsmp"), b"someone else's");
+    assert!(
+        root.at("Marimba/Marimba 2.nsmp").exists(),
+        "{:?}",
+        root.names("Marimba")
+    );
+}
+
+#[test]
+fn a_build_whose_wav_went_missing_is_refused_with_its_name() {
+    let root = Temp::new();
+    project_with_wavs(
+        &root,
+        &[("c3.wav", "Marimba/c3.wav"), ("c4.wav", "Marimba/c4.wav")],
+    );
+    let mut session = Session::open(&root);
+    fs::remove_file(root.at("Marimba/c4.wav")).unwrap();
+    session.settle();
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said("building Marimba.nsmpproj: c4.wav: missing"),
+        1
+    );
+    assert_eq!(root.names("Marimba"), ["Marimba.nsmpproj", "c3.wav"]);
+}
+
+#[test]
+fn a_build_whose_wav_is_gone_by_the_time_it_is_read_is_refused_with_its_path() {
+    let root = Temp::new();
+    project_with_wavs(
+        &root,
+        &[("c3.wav", "Marimba/c3.wav"), ("c4.wav", "Marimba/c4.wav")],
+    );
+    let mut session = Session::listed(&root);
+    fs::remove_file(root.at("Marimba/c4.wav")).unwrap();
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said("building Marimba.nsmpproj: Marimba/c4.wav: it is gone"),
+        1
+    );
+    assert!(session
+        .bench
+        .workspace
+        .listed()
+        .all(|entity| entity.name != "Marimba.nsmp"));
 }

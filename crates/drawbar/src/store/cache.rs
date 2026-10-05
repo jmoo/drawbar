@@ -22,7 +22,7 @@ use crate::log::Log;
 use crate::summary::{Plays, Summary, Verdict};
 
 /// The version of what this build writes. Anything else is discarded unread.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// What one file held when it was read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

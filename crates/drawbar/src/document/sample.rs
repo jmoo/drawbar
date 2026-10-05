@@ -1010,12 +1010,26 @@ fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
 /// Sliced by frame, so a stereo zone draws one envelope over both channels. With more
 /// columns than frames, each column still takes at least one frame.
 pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32)> {
+    channel_envelope(samples, channels, None, columns)
+}
+
+/// [`envelope`] of one channel, counted from 0, or of every channel for `None`.
+pub fn channel_envelope(
+    samples: &[i16],
+    channels: u16,
+    channel: Option<usize>,
+    columns: usize,
+) -> Vec<(f32, f32)> {
     let channels = usize::from(channels).max(1);
     let frames = samples.len() / channels;
     if columns == 0 || frames == 0 {
         return Vec::new();
     }
     let scale = |v: i16| f32::from(v) / 32768.0;
+    let (skip, step) = match channel {
+        Some(channel) => (channel.min(channels - 1), channels),
+        None => (0, 1),
+    };
     // ⚠️ In 64-bit: a long zone times the column count overflows a 32-bit `usize`, and
     // wasm is a 32-bit target. Every result is at most `frames`, so the cast back is safe.
     let edge = |column: usize| (column as u64 * frames as u64 / columns as u64) as usize;
@@ -1023,9 +1037,12 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
         .map(|column| {
             let from = edge(column);
             let to = edge(column + 1).max(from + 1).min(frames);
-            let span = &samples[from * channels..to * channels];
-            let low = span.iter().copied().min().unwrap_or(0);
-            let high = span.iter().copied().max().unwrap_or(0);
+            let span = samples[from * channels..to * channels]
+                .iter()
+                .skip(skip)
+                .step_by(step);
+            let low = span.clone().min().copied().unwrap_or(0);
+            let high = span.max().copied().unwrap_or(0);
             (scale(low), scale(high))
         })
         .collect()

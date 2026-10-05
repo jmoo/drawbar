@@ -30,7 +30,7 @@ use super::capability::{self, Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
 use super::keys::{self, Audition, Scale, SizeCell, Span, Struck};
 use super::{sample, table};
-use super::{Extras, Ink, Loud, SizeLine, StateLine, Tone};
+use super::{Click, Extras, Ink, Loud, SizeLine, StateLine, Tone};
 use crate::app;
 use crate::audio::Finger;
 use crate::browser::Act;
@@ -1667,7 +1667,7 @@ fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Ex
                 glyph: Glyph::Clock,
                 tone: Tone::Blocked,
                 hint: "wait for the apply".to_string(),
-                send: None,
+                click: Click::Nothing,
             }),
             Standing::Laid | Standing::Pending => over.map(|over| Loud {
                 label: format!("No room · {} over", room::measure(over)),
@@ -1675,7 +1675,7 @@ fn extras(facts: &Facts, kept: u64, free: Option<u64>, standing: Standing) -> Ex
                 glyph: Glyph::CircleAlert,
                 tone: Tone::Blocked,
                 hint: format!("trim {} before this can be queued", room::measure(over)),
-                send: None,
+                click: Click::Nothing,
             }),
         },
         ..Extras::default()
@@ -4318,7 +4318,11 @@ mod tests {
         let held = extras(&facts, kept, Some(free), Standing::Laid);
         let loud = held.loud.expect("it will not fit");
         assert_eq!(loud.tone, Tone::Blocked);
-        assert_eq!(loud.send, None, "a blocked action queues nothing");
+        assert_eq!(
+            loud.click,
+            Click::Nothing,
+            "a blocked action queues nothing"
+        );
         assert_eq!(
             loud.label,
             format!("No room · {} over", room::measure(kept - free))
@@ -4382,7 +4386,7 @@ mod tests {
         let loud = applying.loud.expect("the write waits for the apply");
         assert_eq!(loud.tone, Tone::Blocked);
         assert_eq!(loud.hint, "wait for the apply");
-        assert_eq!(loud.send, None);
+        assert_eq!(loud.click, Click::Nothing);
     }
 
     /// The sentence under the meter says whether it fits, what to switch off when it

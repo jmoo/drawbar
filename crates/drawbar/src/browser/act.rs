@@ -5,6 +5,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::drag::{Item, Kind};
 use super::Browser;
+use crate::builds::Builds;
 use crate::device::{
     fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fetched, Fit, Outgoing, Payload,
     Purpose,
@@ -87,6 +88,9 @@ pub enum Act {
     /// Keep an unsaved edit as a new asset beside its file, and take the file as it is on
     /// disk.
     KeepBoth(u64),
+    /// Build the Sample Editor project `id`, as it is now, into the instrument it
+    /// describes, filed beside it; see [`crate::builds`].
+    Build(u64),
     /// Let go of an index row whose file is gone, with the tags it kept.
     Forget(u64),
     NewFolder,
@@ -295,6 +299,7 @@ impl Act {
             }
             Act::Keep(id)
             | Act::KeepBoth(id)
+            | Act::Build(id)
             | Act::Send { id, .. }
             | Act::Retarget { id, .. }
             | Act::Replace { id, .. }
@@ -606,6 +611,7 @@ pub fn apply(
     device: &mut Device,
     tabs: &mut Tabs,
     queue: &mut Queue,
+    builds: &mut Builds,
     log: &mut Log,
 ) {
     let mut held = std::mem::take(&mut browser.held);
@@ -664,6 +670,7 @@ pub fn apply(
                 None => log.say("That folder is gone, so nothing moved."),
             },
             Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
+            Act::Build(id) => builds.start(id, workspace, log),
             Act::Forget(id) => {
                 browser.folders.forget(id);
                 browser.tags.forget(id);

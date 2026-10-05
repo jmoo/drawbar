@@ -58,17 +58,23 @@ impl Player {
         self.voices.held.iter().map(|held| held.zone)
     }
 
-    /// Stop `zone` where it sounds, or start it on the pointer's voice. `samples` are
-    /// interleaved by channel, at whatever rate the backend was built for.
+    /// Stop `zone` where it sounds, or start it on the pointer's voice at `rate` times
+    /// the rate the backend was built for. `samples` are interleaved by channel.
     ///
     /// ⚠️ Nothing is marked as sounding until the backend accepts it: a device that
     /// refuses must not leave a Stop button over silence.
-    pub fn toggle(&mut self, zone: Zone, samples: &[i16], channels: u16) -> Result<(), String> {
+    pub fn toggle(
+        &mut self,
+        zone: Zone,
+        samples: &[i16],
+        channels: u16,
+        rate: f32,
+    ) -> Result<(), String> {
         if self.voices.sounds(zone) {
             self.silence(zone);
             return Ok(());
         }
-        self.strike(Finger::Pointer, zone, samples, channels, 1.0)
+        self.strike(Finger::Pointer, zone, samples, channels, rate)
     }
 
     /// Sound `zone` at `rate` times its recorded pitch on `finger`'s voice, replacing
