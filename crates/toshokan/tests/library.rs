@@ -783,7 +783,7 @@ impl Case {
     }
 }
 
-/// Recover `disk` as a restarted app does, and check what the brief promises.
+/// Recover `disk` as a restarted app does, and check the invariants SPEC.md states.
 fn check(disk: &MemFs, before: &Observed, after: &Observed) -> Result<(), String> {
     let library = open(disk.clone(), A);
     let outcome = Observed::of(&library);
