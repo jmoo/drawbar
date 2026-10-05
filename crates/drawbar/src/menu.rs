@@ -444,7 +444,7 @@ const SECTION: f32 = 24.0;
 
 /// The room a drop-down keeps under its last line: its frame and a gap above the window's
 /// bottom edge.
-const MENU_FOOT: f32 = 16.0;
+pub(crate) const MENU_FOOT: f32 = 16.0;
 
 /// The padding at each end of a title in Windows' menu bar.
 const TITLE_PAD: f32 = 9.0;
