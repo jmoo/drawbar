@@ -1667,14 +1667,12 @@ impl Store {
         }
         browser.folders.sync(&loading.dirs);
         flag_duplicates(workspace, browser, log);
-        let count = self.records.values().filter(|record| record.path.is_some());
-        let count = count.count();
-        if count > 0 {
-            log.say(match count {
-                1 => "1 file on this computer.".to_string(),
-                n => format!("{n} files on this computer."),
-            });
-        }
+        // The count This computer's badge shows, said even at 0 to replace the last library's.
+        log.say(match browser.folders.count(None, workspace) {
+            0 => "No files on this computer.".to_string(),
+            1 => "1 file on this computer.".to_string(),
+            n => format!("{n} files on this computer."),
+        });
         self.prune(browser);
         self.fetch_tracked(workspace, browser);
         if self.open() {

@@ -335,6 +335,41 @@ fn a_new_asset_is_a_file_that_comes_back_with_its_id_and_tags() {
     assert_eq!(second.bench.browser.tags.name_of(tag), Some("Sunday"));
 }
 
+/// A program kept under a name drawbar does not open is held through its index row, and
+/// counts toward neither the badge nor the status line.
+#[test]
+fn the_badge_and_the_status_count_the_same_files() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["Grand", "Organ.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut index = Sidecar {
+        next_id: 2,
+        tags: [(7, "Sunday".to_string())].into(),
+        ..Sidecar::default()
+    };
+    let origin = Origin::File("Grand".into());
+    let row = Row::of(LibPath::parse("Grand"), "", None, [7].into(), &origin, None);
+    index.assets.insert(1, row);
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    fs::write(root.at(exec::INDEX), sidecar::write(&index).unwrap()).unwrap();
+
+    let session = Session::open(&root);
+    assert_eq!(session.bench.workspace.listed().count(), 2, "both are held");
+    let badge = session
+        .bench
+        .browser
+        .folders
+        .count(None, &session.bench.workspace);
+    assert_eq!(badge, 1);
+    assert_eq!(
+        session.bench.log.status().1,
+        "1 file on this computer.",
+        "the status line counts what the badge counts"
+    );
+}
+
 #[test]
 fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     let root = Temp::new();
