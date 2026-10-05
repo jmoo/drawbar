@@ -43,6 +43,20 @@ pub struct Queued {
     pub failure: Option<String>,
 }
 
+impl Queued {
+    /// The name the slot holds and the one a send of `name` gives it, where the two
+    /// differ. The name goes with the sound, so a send renames the slot even when the
+    /// bytes are the same.
+    pub fn renames(&self, name: &str) -> Option<(&str, String)> {
+        let Occupancy::Held(occupant) = &self.replaces else {
+            return None;
+        };
+        let given = crate::device::slot_label(name)?;
+        let renamed = self.class.names_its_slots() && given != occupant.name;
+        renamed.then_some((occupant.name.as_str(), given))
+    }
+}
+
 /// How far the compare read of the slot an entry is waiting for has progressed.
 enum Read {
     /// No read has been asked for, or the read found the slot empty.
@@ -1121,7 +1135,7 @@ fn review_body(
             .get(held.id)
             .map_or("", |entity| entity.name.as_str());
         diff_title(&mut diff, held, name);
-        table(&mut diff, held);
+        table(&mut diff, held, name);
     }
     if let Some(id) = clicked {
         queue.picked = Some(id);
@@ -1170,27 +1184,40 @@ fn title_words(ui: &mut egui::Ui, held: &Queued, name: &str) {
     );
 }
 
-/// The four column heads, and under them either the fields that differ or a single line
-/// describing any other kind of difference.
-pub fn table(ui: &mut egui::Ui, held: &Queued) {
+/// The four column heads, and under them the slot's new name if a send of `name`
+/// renames it, then either the fields that differ or a single line describing any other
+/// kind of difference.
+pub fn table(ui: &mut egui::Ui, held: &Queued, name: &str) {
     let width = ui.available_width();
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
     diff_head(ui, width, &tracks);
 
+    let renamed = held.renames(name);
     let Diff::Fields(fields) = &held.diff else {
         let (glyph, tint, said) = summarize(held, ui.visuals());
-        return one_row(ui, width, &tracks, glyph, tint, &said);
+        one_row(ui, width, &tracks, glyph, tint, &said);
+        if let Some((was, given)) = renamed {
+            field_row(ui, width, &tracks, NAME_ROW, was, &given);
+        }
+        return;
     };
     egui::ScrollArea::vertical()
         .id_salt("queue_diff")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
+            if let Some((was, given)) = &renamed {
+                field_row(ui, width, &tracks, NAME_ROW, was, given);
+            }
             for field in fields {
-                field_row(ui, width, &tracks, field);
+                let label = label(&field.path);
+                field_row(ui, width, &tracks, &label, &field.there, &field.here);
             }
         });
 }
+
+/// The diff row for the slot's name.
+const NAME_ROW: &str = "Name";
 
 /// The single line for a diff that is not a field list.
 ///
@@ -1274,7 +1301,7 @@ fn item(
     if unqueue.on_hover_text("remove from the queue").clicked() {
         acts.push(Act::Unqueue(held.id));
     }
-    let (glyph, tint, why) = state(held, &visuals);
+    let (glyph, tint, why) = state(held, &entity.name, &visuals);
     painted(
         ui,
         glyph,
@@ -1529,8 +1556,8 @@ fn flat_chip(
     response
 }
 
-/// The diff's four columns: the field, what is here, the sign between them, and what
-/// the instrument holds. Any of them may shrink to nothing.
+/// The diff's four columns: the field, what the instrument holds, the sign between them,
+/// and what it holds after the send. Any of them may shrink to nothing.
 const DIFF_TRACKS: [Track; 4] = [
     Track::Share(1.4),
     Track::Share(1.0),
@@ -1542,7 +1569,7 @@ const DIFF_TRACKS: [Track; 4] = [
 fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let ink = crate::app::caption(ui.visuals());
-    for (head, track) in ["Field", "On this computer", "", "On the keyboard"]
+    for (head, track) in ["Field", "On the keyboard", "", "After sending"]
         .iter()
         .zip(tracks)
     {
@@ -1557,27 +1584,34 @@ fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
     }
 }
 
-/// One field the two bodies do not agree on.
-fn field_row(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], field: &FieldDiff) {
+/// One value a send changes: `name` is what the instrument holds as `there`, and holds
+/// as `here` after the send.
+fn field_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    tracks: &[Range<f32>],
+    name: &str,
+    there: &str,
+    here: &str,
+) {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
     let visuals = ui.visuals().clone();
     let mono = egui::FontId::monospace(DIFF_MONO);
-    let name = label(&field.path);
     let cells = [
         (
-            &name,
+            name,
             egui::FontId::proportional(DIFF_MONO),
             visuals.text_color(),
             &tracks[0],
         ),
+        (there, mono.clone(), visuals.weak_text_color(), &tracks[1]),
         (
-            &field.here,
-            mono.clone(),
+            here,
+            mono,
             visuals.widgets.active.fg_stroke.color,
-            &tracks[1],
+            &tracks[3],
         ),
-        (&field.there, mono, visuals.weak_text_color(), &tracks[3]),
     ];
     for (text, font, ink, track) in cells {
         cut(
@@ -1595,7 +1629,7 @@ fn field_row(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], field: &Field
         Glyph::ArrowRight,
         warn(&visuals),
     );
-    let _ = response.on_hover_text(format!("{name}: {} → {}", field.there, field.here));
+    let _ = response.on_hover_text(format!("{name}: {there} → {here}"));
 }
 
 /// The single row for a diff that is not a field list.
@@ -1632,12 +1666,22 @@ fn sign(ui: &egui::Ui, box_: egui::Rect, glyph: Glyph, tint: egui::Color32) {
     );
 }
 
-/// The state glyph of an item, its tint, and the sentence explaining it.
-fn state(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
+/// The state glyph of an item named `name`, its tint, and the sentence explaining it.
+fn state(held: &Queued, name: &str, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
     if let Some(why) = &held.failure {
         return (Glyph::CircleAlert, bad(visuals), why.clone());
     }
     let where_ = place(held.class, held.at);
+    if let (Diff::Identical, Some((was, given))) = (&held.diff, held.renames(name)) {
+        return (
+            Glyph::Replace,
+            warn(visuals),
+            format!(
+                "{where_} already holds these bytes, under the name “{was}”, which this \
+                 renames “{given}”"
+            ),
+        );
+    }
     let said = || held.replaces.said(held.class, held.at);
     match (&held.diff, &held.replaces) {
         (Diff::Pending, _) => (
@@ -2948,6 +2992,110 @@ mod tests {
             });
             assert_eq!(picked, Some(Location::from_user(bank, slots)), "{top}");
         }
+    }
+
+    /// The review's diff table for `held`, sent under `name`, as painted.
+    fn table_words(held: &Queued, name: &str) -> Vec<testing::Word> {
+        let ctx = testing::context();
+        let input = testing::screen(egui::vec2(620.0, 300.0), Vec::new());
+        let output = testing::run(&ctx, input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| table(ui, held, name));
+        });
+        testing::painted(&output)
+    }
+
+    /// The name goes with the sound, so a send of the same bytes under another name
+    /// renames the slot. The review says so, from the name the keyboard holds to the one
+    /// it will hold, and says nothing of a name that stays.
+    #[test]
+    fn a_send_that_renames_its_slot_shows_the_name_it_gives() {
+        let (mut workspace, mut log, bytes) = bench();
+        let mut device = Device::new(workspace.ctx().clone());
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Incense"]);
+        let visuals = egui::Visuals::dark();
+
+        for (name, renamed) in [("qa-c.ne5p", true), ("Incense.ne5p", false)] {
+            let mut queue = Queue::default();
+            let id = workspace.ingest(
+                name.into(),
+                Origin::Device { class, at: at(0) },
+                bytes.clone(),
+                &mut log,
+            );
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                id,
+                class,
+                at(0),
+            );
+            queue.arrived(class, at(0), "Incense", &bytes, &workspace);
+            let held = queue.entry(id).unwrap();
+            assert!(matches!(held.diff, Diff::Identical), "{name}");
+
+            let said = table_words(held, name);
+            let (_, _, why) = state(held, name, &visuals);
+            assert_eq!(
+                said.iter().any(|word| word.text == NAME_ROW),
+                renamed,
+                "{name}"
+            );
+            assert_eq!(why.contains("renames"), renamed, "{name}: {why}");
+            if renamed {
+                let was = testing::where_(&said, "Incense");
+                let given = testing::where_(&said, "qa-c");
+                assert_eq!(was.left(), testing::where_(&said, "On the keyboard").left());
+                assert_eq!(given.left(), testing::where_(&said, "After sending").left());
+            }
+        }
+    }
+
+    /// Each row of the diff reads from what the keyboard holds now to what it will hold
+    /// after the send, in the columns as in the hover text.
+    #[test]
+    fn the_diff_reads_from_what_the_keyboard_holds_to_what_it_will_hold() {
+        let (mut workspace, mut log, bytes) = bench();
+        let mut device = Device::new(workspace.ctx().clone());
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split"]);
+        let mut queue = Queue::default();
+        let id = workspace.ingest(
+            "Africa Split.ne5p".into(),
+            Origin::Device { class, at: at(0) },
+            bytes.clone(),
+            &mut log,
+        );
+        edit(&mut workspace, id, &mut log);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(0),
+        );
+        queue.arrived(class, at(0), "Africa Split", &bytes, &workspace);
+        let held = queue.entry(id).unwrap();
+        let Diff::Fields(fields) = &held.diff else {
+            panic!("a program against a program is a field list");
+        };
+        let field = &fields[0];
+        assert_ne!(field.there, field.here);
+
+        let said = table_words(held, "Africa Split.ne5p");
+        let keyboard = testing::where_(&said, "On the keyboard");
+        let after = testing::where_(&said, "After sending");
+        assert!(keyboard.left() < after.left(), "{keyboard:?} {after:?}");
+        assert_eq!(testing::where_(&said, &field.there).left(), keyboard.left());
+        assert_eq!(testing::where_(&said, &field.here).left(), after.left());
+        assert!(
+            !said.iter().any(|word| word.text == NAME_ROW),
+            "the name stays"
+        );
     }
 
     /// Paints the review headlessly with each kind of diff, to catch a layout that panics
