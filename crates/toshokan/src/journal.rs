@@ -56,13 +56,17 @@ pub struct Recovered {
 /// moved into the blob store and reported under a new intent, and any other file
 /// there is removed. Recovery is itself safe to interrupt and repeat.
 ///
-/// A read-only writer changes nothing and reports each journaled intent as pending.
+/// A read-only writer changes nothing and reports each journaled intent as pending. A
+/// record this build cannot read makes the writer read-only.
 pub async fn recover<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
 ) -> Result<Vec<Recovered>> {
     let records = read(fs, layout, log.writer()).await?;
+    if records.iter().any(|(_, record)| record.is_err()) {
+        log.unreadable("its journal holds a record this build cannot read");
+    }
     if log.read_only().is_some() {
         return Ok(records.into_iter().map(pending).collect());
     }
@@ -418,9 +422,8 @@ async fn clear<F: Fs>(fs: &F, layout: &Layout, writer: WriterId, intent: IntentI
     fs.sync(&layout.journal(writer)).await
 }
 
-/// The writer's records by intent, in the order of their intents, each with whether
-/// it decodes. A record that does not decode is corrupt, and one from a newer build
-/// is refused the same way.
+/// The writer's records by intent, in the order of their intents, each decoded or
+/// why it does not decode.
 async fn read<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -719,23 +722,28 @@ mod tests {
     }
 
     #[test]
-    fn a_record_that_does_not_decode_is_corrupt() {
+    fn a_record_that_does_not_decode_makes_the_writer_read_only() {
         let layout = Layout::default();
-        let fs = library(&[]);
-        let dir = layout.journal(WRITER);
-        block_on(ensure_dir(&fs, &dir)).unwrap();
-        let record = dir.join("1.json").unwrap();
+        let fs = library(&[("song", b"old")]);
+        let record = save_record(&layout, &fs, b"new", b"old");
+        block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+        let unreadable = layout.journal(WRITER).join("9.json").unwrap();
         let unknown_step = format!(
             r#"{{"intent":"{INTENT}","entries":[],"steps":[{{"step":{{"copy":{{}}}},"entries":[]}}]}}"#
         );
         for bytes in [&b"{\"intent\""[..], unknown_step.as_bytes()] {
-            block_on(fs.create(&record, bytes)).unwrap();
-            let result = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER)));
-            assert!(
-                matches!(&result, Err(Error::Corrupt { path, .. }) if *path == record),
-                "{result:?}"
-            );
-            block_on(fs.remove_file(&record)).unwrap();
+            block_on(fs.create(&unreadable, bytes)).unwrap();
+            let (files, mutations) = (fs.files(), fs.mutations());
+            let mut log = reopen(&fs, WRITER);
+            let outcomes: Vec<Outcome> = block_on(recover(&fs, &layout, &mut log))
+                .unwrap()
+                .into_iter()
+                .map(|recovered| recovered.outcome)
+                .collect();
+            assert_eq!(outcomes, [Outcome::Pending, Outcome::Unreadable]);
+            assert!(log.read_only().is_some());
+            assert_eq!((fs.files(), fs.mutations()), (files, mutations));
+            block_on(fs.remove_file(&unreadable)).unwrap();
         }
     }
 

@@ -236,6 +236,32 @@ fn a_read_only_library_refuses_every_intent_before_anything_changes<F: Fs>(disk:
     assert_eq!(tree(a.fs()), before, "a refused intent wrote");
 }
 
+fn a_journal_record_this_build_cannot_read_opens_the_writer_read_only<F: Fs>(
+    disk: impl Fn() -> F,
+) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    let fs = disk();
+    let journal = Layout::default().journal(A);
+    block_on(fs.create_dir_all(&journal)).unwrap();
+    let record = format!(
+        r#"{{"intent":"{A}:50","entries":[],"steps":[{{"step":{{"copy":{{}}}},"entries":[]}}]}}"#
+    );
+    block_on(fs.create(&journal.join("50.json").unwrap(), record.as_bytes())).unwrap();
+    let before = tree(&fs);
+
+    let mut a = open(disk(), A);
+    assert!(a.read_only().is_some());
+    let reports: Vec<_> = a.recovered().iter().map(|r| (r.intent, r.outcome)).collect();
+    assert_eq!(reports, [(IntentId::new(A, 50), Outcome::Unreadable)]);
+    let refused = block_on(a.set(song, "name", Some(text("name"))));
+    assert!(
+        matches!(refused, Err(Error::ReadOnly { writer: A, .. })),
+        "{refused:?}"
+    );
+    assert_eq!(tree(&fs), before, "a read-only writer wrote");
+}
+
 fn undo_of_a_save_restores_the_displaced_bytes<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
@@ -501,6 +527,7 @@ on_every_backend!(
     a_writer_never_drops_another_writers_unknown_entries,
     a_torn_log_tail_costs_one_entry,
     a_read_only_library_refuses_every_intent_before_anything_changes,
+    a_journal_record_this_build_cannot_read_opens_the_writer_read_only,
     undo_of_a_save_restores_the_displaced_bytes,
     saving_an_entity_away_from_its_file_is_refused,
     undo_of_a_file_delete_puts_the_file_back,

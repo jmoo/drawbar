@@ -57,10 +57,10 @@ impl<F: Fs> Library<F> {
     /// Open the library in `fs` as `writer`: read every writer's log, finish or roll
     /// back this writer's interrupted effects, merge, and scan the files.
     ///
-    /// With nothing to recover, opening writes nothing. A writer whose own log holds
-    /// entries this build does not understand opens read-only: it writes nothing, and
-    /// reports each intent a crash interrupted as pending, for a build that can finish
-    /// it.
+    /// With nothing to recover, opening writes nothing. A writer whose own log or
+    /// journal holds what this build does not understand opens read-only: it writes
+    /// nothing, and reports each intent a crash interrupted as pending, for a build
+    /// that can finish it.
     pub async fn open(fs: F, layout: Layout, writer: WriterId) -> Result<Self> {
         let mut logs = read_logs(&fs, &layout).await?;
         let mut log = LogWriter::open(writer, &logs);

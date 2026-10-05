@@ -56,8 +56,9 @@ pub enum Error {
     #[error("{path} is corrupt: {reason}")]
     Corrupt { path: RelPath, reason: String },
 
-    /// This writer's own log holds entries this build does not understand, so it
-    /// cannot append without misrepresenting its history.
+    /// This writer's own log or journal holds what this build does not understand,
+    /// so it cannot append without misrepresenting its history, or its clock or
+    /// counters are exhausted.
     #[error("writer {writer} is read-only: {reason}")]
     ReadOnly { writer: WriterId, reason: String },
 

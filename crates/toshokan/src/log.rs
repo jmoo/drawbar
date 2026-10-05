@@ -373,7 +373,8 @@ pub struct LogWriter {
     /// The next counter for each kind of id; `None` once exhausted.
     entities: Option<u64>,
     intents: Option<u64>,
-    unknown: bool,
+    /// Why the writer's history holds what this build cannot represent.
+    unreadable: Option<&'static str>,
     next_segment: Option<u64>,
     /// The segment this handle created and may append to.
     open_segment: Option<u64>,
@@ -392,7 +393,7 @@ impl LogWriter {
             lamport: 0,
             entities: Some(0),
             intents: Some(0),
-            unknown: false,
+            unreadable: None,
             next_segment: Some(1),
             open_segment: None,
             appended: None,
@@ -412,7 +413,9 @@ impl LogWriter {
                 handle.past_ids(entry);
             }
             if log.writer == writer {
-                handle.unknown = log.has_unknown();
+                handle.unreadable = log
+                    .has_unknown()
+                    .then_some("its log holds entries this build does not understand");
                 handle.next_segment = log.next_segment();
             }
         }
@@ -444,14 +447,20 @@ impl LogWriter {
 
     /// Why this writer cannot append, if it cannot.
     pub fn read_only(&self) -> Option<&str> {
-        if self.unknown {
-            return Some("its log holds entries this build does not understand");
+        if let Some(reason) = self.unreadable {
+            return Some(reason);
         }
         let exhausted = self.lamport == u64::MAX
             || self.entities.is_none()
             || self.intents.is_none()
             || self.next_segment.is_none();
         exhausted.then_some("its clock, counters or segment numbers are exhausted")
+    }
+
+    /// Make the handle read-only because the writer's history holds what this build
+    /// cannot represent.
+    pub(crate) fn unreadable(&mut self, reason: &'static str) {
+        self.unreadable.get_or_insert(reason);
     }
 
     /// Refuse with [`Error::ReadOnly`] when [`Self::read_only`] says so.

@@ -334,9 +334,8 @@ A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 At open, writer `w` first removes every file in `tmp/<w>/` that is not staged
 bytes: a record or snapshot not yet renamed into place, or a file named by a blob id
 whose bytes do not hash to it. No record names any of them. Then it settles each
-record in order of `<n>`, refusing to open when one does not decode. It runs the
-steps in order, bringing each one's files to its end from whatever state they are
-in:
+record in order of `<n>`. It runs the steps in order, bringing each one's files to
+its end from whatever state they are in:
 
 | Step       | Finished when                                    | Otherwise |
 | ---------- | ------------------------------------------------ | --------- |
@@ -371,6 +370,7 @@ applied in part.
 Last, `w` moves every file left in `tmp/<w>/` into blobs, logging `blob_added` for
 each first, under a new intent. Recovery may itself be interrupted and repeated.
 
-A writer that is read-only changes nothing: it leaves its journal and `tmp/<w>/` as
-they are, and reports each record as an intent still pending, with the record's
-paths when it can read the record.
+A writer with a record that does not decode, as one a newer build wrote, is
+read-only. A writer that is read-only changes nothing: it leaves its journal and
+`tmp/<w>/` as they are, and reports each record as an intent still pending, with the
+record's paths when it can read the record.
