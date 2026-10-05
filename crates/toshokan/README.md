@@ -32,8 +32,8 @@ and every change can be undone.
    from that, never from errors.
 10. **Plain text on disk,** specified in [SPEC.md](SPEC.md) precisely enough for a
     second implementation.
-11. **Small.** The standard library, serde, BLAKE3 and thiserror. No async
-    runtime.
+11. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
+    Linux and Apple systems for a rename that never replaces. No async runtime.
 
 ## Scope
 
