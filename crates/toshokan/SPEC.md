@@ -353,8 +353,9 @@ its end from whatever state they are in:
 A save that conflicts moves its staged file, if any, into blobs. The first conflict
 ends the run: each later step is given up, and a given-up save moves its staged file
 into blobs. Then `w` appends, keeping each entry's recorded version. Before it
-stamps a new entry, its clock passes every version the record holds, so no new
-entry shares a version with a recorded one. It leaves out each entry its log
+settles the first record, its clock and counters pass every version, intent id and
+entity id that any of its records holds, so no new entry shares a version or an
+intent with a recorded one. It leaves out each entry its log
 already holds: one of the same version, or one of the same intent and kind, where
 any `intent` entry of the intent counts as the same. A recovery repeated after a
 crash before the record's removal thus appends nothing again. It appends:

@@ -483,6 +483,13 @@ impl LogWriter {
         self.lamport = self.lamport.max(version.lamport);
     }
 
+    /// Move the clock and counters past an entry stamped before a crash and not yet
+    /// appended.
+    pub(crate) fn pass(&mut self, entry: &Entry) {
+        self.observe(entry.version);
+        self.past_ids(entry);
+    }
+
     /// A new entity id. Once the counter is exhausted the handle is read-only, and
     /// the id it returns is never appended.
     pub fn new_entity(&mut self) -> EntityId {

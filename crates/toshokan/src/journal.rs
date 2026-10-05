@@ -77,6 +77,10 @@ pub async fn recover<F: Fs>(
         .map(|(_, record)| record)
         .collect::<Result<_>>()?;
     remove_unfinished(fs, layout, log.writer()).await?;
+    records
+        .iter()
+        .flat_map(Record::all_entries)
+        .for_each(|entry| log.pass(entry));
     let logged = match records.is_empty() {
         true => Logged::default(),
         false => Logged::of(&read_log(fs, layout, log.writer()).await?, &records),
@@ -189,9 +193,10 @@ impl Settled {
 /// not hold, and clear the record. When every step finishes the log gains all the
 /// record's entries. A step the files no longer allow ends the run: the steps after
 /// it are given up, and the log gains only the entries of the steps that changed
-/// files, and the bytes kept, under a new `Intent` entry that reverses nothing. The
-/// clock first passes every version the record holds, so no entry stamped here
-/// shares one with a recorded entry.
+/// files, and the bytes kept, under a new `Intent` entry that reverses nothing.
+///
+/// ⚠️ The log's clock and counters must already be past every pending record's
+/// entries, or an entry stamped here can share a version with a recorded one.
 pub(crate) async fn settle<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -200,9 +205,6 @@ pub(crate) async fn settle<F: Fs>(
     logged: &Logged,
 ) -> Result<Settled> {
     let writer = log.writer();
-    if let Some(latest) = record.versions().max() {
-        log.observe(latest);
-    }
     let mut settled = Settled::default();
     let mut facts = Vec::new();
     for StepRecord { step, entries } in &record.steps {
@@ -373,9 +375,9 @@ impl Record {
         self.steps.iter().flat_map(|s| s.step.paths()).collect()
     }
 
-    fn versions(&self) -> impl Iterator<Item = Version> + '_ {
+    fn all_entries(&self) -> impl Iterator<Item = &Entry> {
         let steps = self.steps.iter().flat_map(|step| &step.entries);
-        self.entries.iter().chain(steps).map(|entry| entry.version)
+        self.entries.iter().chain(steps)
     }
 
     fn label(&self) -> Option<String> {
@@ -518,11 +520,6 @@ mod tests {
         }
     }
 
-    fn all_entries(record: &Record) -> Vec<Entry> {
-        let steps = record.steps.iter().flat_map(|step| &step.entries);
-        record.entries.iter().chain(steps).cloned().collect()
-    }
-
     #[test]
     fn an_interrupted_save_whose_file_is_unchanged_is_finished() {
         let layout = Layout::default();
@@ -544,7 +541,10 @@ mod tests {
         );
         assert_eq!(contents(&fs, &path("song")), b"new");
         assert_eq!(contents(&fs, &layout.blob(BlobId::of(b"old"))), b"old");
-        assert_eq!(logged(&fs, WRITER), all_entries(&record));
+        assert_eq!(
+            logged(&fs, WRITER),
+            record.all_entries().cloned().collect::<Vec<_>>()
+        );
         assert!(block_on(read(&fs, &layout, WRITER)).unwrap().is_empty());
     }
 
@@ -626,6 +626,62 @@ mod tests {
 
         let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
         assert_eq!(recovered[0].outcome, Outcome::Partial);
+        well_formed(&logged(&fs, WRITER)).unwrap();
+    }
+
+    #[test]
+    fn recovering_two_records_stamps_past_the_versions_of_both() {
+        let layout = Layout::default();
+        let fs = library(&[("a", b"a"), ("song", b"theirs")]);
+        let entity = EntityId::new(WRITER, 1);
+        let entry = |intent, lamport, kind| Entry {
+            version: Version::new(lamport, WRITER),
+            intent,
+            kind,
+        };
+        block_on(blobs::stage(&fs, &layout, WRITER, b"new")).unwrap();
+        let content = Kind::Field {
+            entity,
+            name: "content".into(),
+            value: Some(Value::Blob(BlobId::of(b"new"))),
+            prior: None,
+        };
+        let save = Record {
+            intent: INTENT,
+            entries: vec![entry(INTENT, 3, Kind::INTENT)],
+            steps: vec![StepRecord {
+                step: Step::Save {
+                    path: path("song"),
+                    new: Stored::of(b"new"),
+                    old: Some(Stored::of(b"old")),
+                },
+                entries: vec![entry(INTENT, 4, content)],
+            }],
+        };
+        let later = IntentId::new(WRITER, INTENT.counter + 1);
+        let moved = Kind::Field {
+            entity,
+            name: "path".into(),
+            value: Some(Value::Text("b".into())),
+            prior: None,
+        };
+        let rename = Record {
+            intent: later,
+            entries: vec![entry(later, 5, Kind::INTENT)],
+            steps: vec![StepRecord {
+                step: Step::Move {
+                    from: path("a"),
+                    to: path("b"),
+                },
+                entries: vec![entry(later, 6, moved)],
+            }],
+        };
+        block_on(write(&fs, &layout, WRITER, &save)).unwrap();
+        block_on(write(&fs, &layout, WRITER, &rename)).unwrap();
+
+        let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        let outcomes: Vec<Outcome> = recovered.iter().map(|r| r.outcome).collect();
+        assert_eq!(outcomes, [Outcome::RolledBack, Outcome::Finished]);
         well_formed(&logged(&fs, WRITER)).unwrap();
     }
 
