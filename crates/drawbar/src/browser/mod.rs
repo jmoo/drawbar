@@ -842,7 +842,8 @@ impl Browser {
         self.raise(Ask {
             title: "This library lost the list of its unsaved edits".into(),
             note: Some(format!(
-                "{} drawbar kept are still here, but the file that says which sounds they                  belong to is missing, so the library stays read-only and keeps them.{back}",
+                "{} drawbar kept are still here, but the file that says which sounds they \
+                 belong to is missing, so the library stays read-only and keeps them.{back}",
                 edits(copies)
             )),
             verb: Verb::OpenWithout,
