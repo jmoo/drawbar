@@ -632,8 +632,9 @@ pub(crate) enum Step {
     Delete { path: RelPath, old: Stored },
     /// Rename a file, or a directory with everything in it.
     Move { from: RelPath, to: RelPath },
-    /// Move a directory's files one at a time: create `dirs` under `to`, move `files`,
-    /// then remove `dirs` under `from`. Both lists are relative to the directory.
+    /// Move a directory's files one at a time, then, unless none arrived, create `dirs`
+    /// under `to` and remove `dirs` under `from`. Both lists are relative to the
+    /// directory.
     MoveFiles {
         from: RelPath,
         to: RelPath,
@@ -862,7 +863,7 @@ async fn move_entry<F: Fs>(fs: &F, from: &RelPath, to: &RelPath) -> Result<Ran> 
 }
 
 /// Moves every file whose destination is free or already holds its bytes, and leaves
-/// any other where it is.
+/// any other where it is. When no file arrives, no directory changes.
 async fn move_files<F: Fs>(
     fs: &F,
     from: &RelPath,
@@ -870,10 +871,6 @@ async fn move_files<F: Fs>(
     files: &[RelPath],
     dirs: &[RelPath],
 ) -> Result<Ran> {
-    ensure_dir(fs, &parent(to)).await?;
-    for dir in dirs {
-        fs.create_dir_all(&under(to, dir)).await?;
-    }
     let mut report = Report::default();
     let mut stayed = Vec::new();
     let mut error = None;
@@ -881,6 +878,7 @@ async fn move_files<F: Fs>(
         let (source, target) = (under(from, file), under(to, file));
         let refused = match (exists(fs, &source).await?, exists(fs, &target).await?) {
             (true, false) => {
+                ensure_dir(fs, &parent(&target)).await?;
                 fs.rename(&source, &target).await?;
                 None
             }
@@ -904,6 +902,26 @@ async fn move_files<F: Fs>(
             }
         }
     }
+    if error.is_none() || !report.moved.is_empty() {
+        move_dirs(fs, from, to, dirs).await?;
+    }
+    Ok(match error {
+        None => Ran::Finished(report),
+        Some(error) => Ran::Partly {
+            report,
+            stayed,
+            error,
+        },
+    })
+}
+
+/// Create `dirs` under `to` and remove those under `from` that are empty, once files
+/// have moved from one to the other.
+async fn move_dirs<F: Fs>(fs: &F, from: &RelPath, to: &RelPath, dirs: &[RelPath]) -> Result<()> {
+    ensure_dir(fs, &parent(to)).await?;
+    for dir in dirs {
+        fs.create_dir_all(&under(to, dir)).await?;
+    }
     sync_parent(fs, to).await?;
     for dir in dirs {
         fs.sync(&under(to, dir)).await?;
@@ -920,15 +938,7 @@ async fn move_files<F: Fs>(
             Err(error) => return Err(error),
         }
     }
-    sync_parent(fs, from).await?;
-    Ok(match error {
-        None => Ran::Finished(report),
-        Some(error) => Ran::Partly {
-            report,
-            stayed,
-            error,
-        },
-    })
+    sync_parent(fs, from).await
 }
 
 async fn changed<F: Fs>(fs: &F, path: &RelPath, expected: Option<Stored>) -> Result<Conflict> {
@@ -1573,6 +1583,30 @@ mod tests {
                 text_value("a/x/1")
             )]
         );
+    }
+
+    #[test]
+    fn recovering_a_tree_move_none_of_whose_files_can_move_changes_no_directory() {
+        let mut library = tree_library(NO_DIRECTORY_RENAME);
+        let move_tree = Effect::MoveTree {
+            from: path("a/x"),
+            to: path("b/x"),
+        };
+        let planned = library.plan(std::slice::from_ref(&move_tree)).unwrap();
+        let record = stamped(&mut library.log, INTENT, vec![Kind::INTENT], planned);
+        let (fs, layout) = (&library.fs, &library.layout);
+        block_on(journal::write(fs, layout, WRITER, &record)).unwrap();
+        block_on(fs.remove_file(&path("a/x/1"))).unwrap();
+        block_on(fs.remove_file(&path("a/x/y/2"))).unwrap();
+        let directories = || -> BTreeSet<RelPath> {
+            let library = fs.directories().into_iter();
+            library.filter(|dir| !layout.owns(dir)).collect()
+        };
+        let before = directories();
+
+        let recovered = block_on(recover(fs, layout, &mut reopen(fs, WRITER))).unwrap();
+        assert_eq!(recovered[0].outcome, Outcome::RolledBack);
+        assert_eq!(directories(), before);
     }
 
     #[test]

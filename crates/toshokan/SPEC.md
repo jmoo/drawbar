@@ -332,7 +332,7 @@ A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 | `{"save":{"path":..,"new":<stored>,"old":<stored or null>}}` | Put the bytes staged as `tmp/<w>/<new blob>` at `path`, which held `old` or no file |
 | `{"delete":{"path":..,"old":<stored>}}`                  | Move the file at `path`, holding `old`, into blobs |
 | `{"move":{"from":..,"to":..}}`                           | Rename a file, or a directory where the backend renames directories |
-| `{"move_files":{"from":..,"to":..,"files":[..],"dirs":[..]}}` | Create `dirs` under `to`, move each of `files`, then remove the empty `dirs` under `from`; both lists are relative and sorted, and `dirs` holds `""` for the directory itself |
+| `{"move_files":{"from":..,"to":..,"files":[..],"dirs":[..]}}` | Move each of `files`, creating the directories it needs; then, unless no file arrived, create `dirs` under `to` and remove the empty `dirs` under `from`. Both lists are relative and sorted, and `dirs` holds `""` for the directory itself |
 
 ### Recovery
 
