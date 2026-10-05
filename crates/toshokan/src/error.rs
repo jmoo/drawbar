@@ -66,9 +66,9 @@ pub enum Error {
     #[error("the log of writer {writer} was read before its latest append")]
     StaleLog { writer: WriterId },
 
-    /// A file effect found the file no longer matching what the writer last read.
-    /// Nothing was changed.
-    #[error("{} changed since it was last read", .0.path)]
+    /// A file effect found the file other than the writer expected. Nothing was
+    /// changed.
+    #[error("{} is not as expected", .0.path)]
     Changed(Box<Mismatch>),
 
     #[error("cannot undo or redo: {0}")]
@@ -82,7 +82,7 @@ pub enum Error {
     },
 }
 
-/// A file as the writer expected it and as it was found; `None` is no file.
+/// What the writer expected at a path, and the file found there; `None` is no file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Mismatch {
     pub path: RelPath,
