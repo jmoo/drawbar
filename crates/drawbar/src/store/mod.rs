@@ -42,7 +42,7 @@ pub use native::{default_root, openable, sync_dir, Backend};
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{buffer, private_root, settle, Writer};
+pub(crate) use web::{buffer, move_to, private_root, settle, Writer};
 #[cfg(target_arch = "wasm32")]
 pub use web::{default_root, permission, Backend, Picked, Root};
 
@@ -399,9 +399,9 @@ pub struct Opened {
     /// Folders an interrupted rename left under the name it moved them through, that
     /// could not be put back because another entry has their name.
     pub stranded: Vec<LibPath>,
-    /// The slots' former occupants in `.drawbar/tmp/`, by name, where the library may be
-    /// written: see [`Rescue`].
-    pub rescued: Vec<(String, Stat)>,
+    /// The slots' former occupants in `.drawbar/tmp/`, where the library may be written:
+    /// see [`Rescue`].
+    pub rescued: Vec<Rescue>,
     /// How many working copies `.drawbar/working/` holds where there is no index, which
     /// leaves the library read-only.
     pub unindexed: usize,
@@ -415,6 +415,18 @@ pub struct Rescue {
     /// Its file's name: [`nord_usb::envelope::rescue_name`], numbered where taken.
     pub name: String,
     pub at: Left,
+    /// Why it does not read as one whole Nord file, where it does not. It is then no copy
+    /// of what the slot held, and is offered only to be discarded.
+    pub broken: Option<String>,
+}
+
+/// Why `file` does not read as one whole Nord file, where it does not.
+async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<String> {
+    let verified = match file {
+        Ok(mut file) => nord_usb::envelope::verify(&mut file).await.map(drop),
+        Err(e) => Err(e.into()),
+    };
+    verified.err().map(|e| e.to_string())
 }
 
 /// Where a [`Rescue`] was left.

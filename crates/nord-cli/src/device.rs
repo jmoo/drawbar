@@ -1166,8 +1166,12 @@ impl Backup {
     }
 }
 
-/// A new file in `dir` for the rescue copy of the occupant `info` describes.
-fn rescue_file(dir: &Path, info: &ProgramInfo) -> Result<(PathBuf, std::fs::File), String> {
+/// A new file in `dir` for the rescue copy of the occupant `info` describes, under its
+/// [partial](envelope::PARTIAL) name until it is whole.
+fn rescue_file(
+    dir: &Path,
+    info: &ProgramInfo,
+) -> Result<(PathBuf, PathBuf, std::fs::File), String> {
     if !dir.exists() {
         return Err("the folder does not exist".into());
     }
@@ -1175,15 +1179,16 @@ fn rescue_file(dir: &Path, info: &ProgramInfo) -> Result<(PathBuf, std::fs::File
 }
 
 /// Read the occupant of `info.location` so it can be put back, into `rescue`, a new file
-/// in `dir`, a transfer chunk at a time, synced with its entry in `dir` before this
-/// returns. A read that fails leaves no file behind.
+/// in `dir`, a transfer chunk at a time. It is written under its partial name, synced,
+/// and checked whole before it takes its own, and that name is synced in `dir` before
+/// this returns. A read that fails leaves no file behind.
 fn back_up<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
     dir: &Path,
     class: ObjectClass,
     info: &ProgramInfo,
-    (path, mut file): (PathBuf, std::fs::File),
+    (path, partial, mut file): (PathBuf, PathBuf, std::fs::File),
 ) -> Result<Backup, String> {
     let at = info.location;
     let intent = format!("{} read {}", noun(class), addr(at));
@@ -1194,16 +1199,24 @@ fn back_up<T: Transport + Recorded>(
     ));
     let read = transact(device, intent, |d| {
         nord_usb::block_on(d.read(class, async |s| {
-            usb_op::read_into(s, at, &mut file).await?;
+            let received = usb_op::read_into(s, at, &mut file).await?;
             file.sync_all()?;
-            Ok(sync_dir(dir)?)
+            usb_op::verify_read(&mut Positional::new(&file)?, &received).await
         }))
     });
-    match read {
+    if let Err(e) = read {
+        let _ = std::fs::remove_file(&partial);
+        return Err(explain(e, at));
+    }
+    if let Err(e) = std::fs::rename(&partial, &path) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!("{}: {e}", path.display()));
+    }
+    match sync_dir(dir) {
         Ok(()) => Ok(Backup(path)),
         Err(e) => {
             let _ = std::fs::remove_file(&path);
-            Err(explain(e, at))
+            Err(format!("{}: {e}", dir.display()))
         }
     }
 }
@@ -1218,22 +1231,32 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A new file in `dir` named `name`, or `name` with a number before its extension where a
-/// file already has that name, so an earlier rescue is never written over.
-fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, std::fs::File), String> {
+/// A free name for a rescue in `dir`: `name`, or `name` with a number before its extension
+/// where a file already has that name, so an earlier rescue is never written over. It
+/// comes with a new file at its [partial](envelope::PARTIAL) name, to be renamed to it
+/// once whole.
+fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, std::fs::File), String> {
     let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
     for n in 1..=100 {
         let path = match n {
             1 => dir.join(name),
             n => dir.join(format!("{stem}-{n}.{extension}")),
         };
+        match path.try_exists() {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+        let mut partial = path.clone().into_os_string();
+        partial.push(envelope::PARTIAL);
+        let partial = PathBuf::from(partial);
         match std::fs::File::options()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&path)
+            .open(&partial)
         {
-            Ok(file) => return Ok((path, file)),
+            Ok(file) => return Ok((path, partial, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e.to_string()),
         }
@@ -2594,6 +2617,44 @@ mod tests {
             assert_eq!(rescued(&dir), Vec::<String>::new(), "let go once written");
         }
 
+        /// A process that dies while the occupant is read back leaves a file that is not
+        /// whole, and the slot as it was. That file must not look like a rescue.
+        #[test]
+        fn the_occupant_is_read_under_a_partial_name() {
+            let dir = crate::edit::tests::scratch("send-partial");
+            let put = recorded();
+            let begin_read = put[2][7].frame().expect("the BEGIN_READ").to_vec();
+            let mut device = Device::new(Watched {
+                replay: ReplayTransport::new(put.concat()),
+                watch: begin_read,
+                dir: dir.clone(),
+                pulls: false,
+                seen: None,
+            });
+            send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap();
+
+            let seen = device
+                .transport()
+                .seen
+                .clone()
+                .expect("the BEGIN_READ was sent");
+            let names: Vec<_> = seen.iter().map(|(name, _)| name.as_str()).collect();
+            assert_eq!(names, ["nord-rescued-7-10.ne5p.partial"]);
+            assert!(!envelope::is_rescue(names[0]));
+        }
+
         /// ⚠️ The backup's entry in its folder must reach the disk before the `DELETE`, or
         /// a power cut loses the file with it. A folder that cannot be synced leaves the
         /// slot alone.
@@ -3078,8 +3139,9 @@ mod tests {
         fn a_backup_never_takes_an_earlier_rescues_name() {
             let dir = crate::edit::tests::scratch("put-kept-beside");
             std::fs::write(dir.join("nord-rescued-7-10.ne5p"), b"earlier").unwrap();
-            let (path, _) = fresh(&dir, "nord-rescued-7-10.ne5p").unwrap();
+            let (path, partial, _) = fresh(&dir, "nord-rescued-7-10.ne5p").unwrap();
             assert_eq!(path, dir.join("nord-rescued-7-10-2.ne5p"));
+            assert_eq!(partial, dir.join("nord-rescued-7-10-2.ne5p.partial"));
             assert_eq!(
                 std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap(),
                 b"earlier"

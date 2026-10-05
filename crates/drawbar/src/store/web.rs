@@ -1038,7 +1038,11 @@ impl Folder {
 ///
 /// ⚠️ `move(folder, name)` with both arguments: Safari has no one-argument form.
 /// Chrome, Firefox and Safari all replace a file already at the name.
-async fn move_to(handle: &JsValue, dir: &FileSystemDirectoryHandle, name: &str) -> io::Result<()> {
+pub(crate) async fn move_to(
+    handle: &JsValue,
+    dir: &FileSystemDirectoryHandle,
+    name: &str,
+) -> io::Result<()> {
     let cannot = || {
         io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1439,6 +1443,12 @@ impl Fs for Folder {
             at = end;
         }
         Ok(crc.value())
+    }
+
+    async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource> {
+        Ok(crate::ondisk::Sliced::new(
+            snapshot(&self.file(path).await?).await?,
+        ))
     }
 
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {

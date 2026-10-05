@@ -557,6 +557,10 @@ impl Fs for Disk {
         crate::ondisk::crc_of(&mut File::open(self.locate(path)?)?)
     }
 
+    async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource> {
+        nord_usb::envelope::Positional::new(File::open(self.locate(path)?)?)
+    }
+
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match self.locate(path).and_then(fs::symlink_metadata) {
             Ok(meta) if meta.is_file() => Ok(Some(stat(&meta))),
