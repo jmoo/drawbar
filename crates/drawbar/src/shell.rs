@@ -18,7 +18,7 @@ use crate::icon::{painted, sized, Glyph};
 use crate::log::Level;
 use crate::menu::{key_text, new_menu, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
-use crate::platform::{Frame, Platform, CRAMPED};
+use crate::platform::{Frame, Platform};
 use crate::tabs::Spot;
 use crate::zoom::{Step, Stop, Zoom};
 
@@ -616,8 +616,7 @@ impl DrawbarApp {
                 ui.add_space(6.0);
             }
         }
-        let roomy = ui.ctx().screen_rect().width() >= CRAMPED;
-        if self.platform != Platform::Windows && roomy {
+        if self.platform != Platform::Windows {
             self.file_tools(ui, acts);
         }
     }
@@ -2267,6 +2266,69 @@ mod tests {
             .expect("the Instrument menu offers to connect");
         assert!(!offer.enabled, "Instrument ▸ Connect… can be picked");
         assert_eq!(offer.hint, Some(NO_USB));
+    }
+
+    /// At the window's minimum size and a 13" laptop's 960×600, the library's names stay
+    /// whole and the top bar keeps its open, new and save buttons, clear of the search.
+    #[test]
+    fn the_main_window_keeps_name_and_file_buttons_at_its_minimum_size() {
+        const NAME: &str = "Africa Split";
+        let gnome = |layout| Frame::HeaderBar(crate::platform::Layout::read(layout));
+        for (platform, chrome) in [
+            (Platform::Web, Frame::System),
+            (Platform::Linux, Frame::System),
+            (Platform::Linux, gnome("close,minimize,maximize:")),
+            (Platform::Linux, gnome(":minimize,maximize,close")),
+            (Platform::Mac, Frame::System),
+        ] {
+            for screen in [egui::vec2(900.0, 560.0), egui::vec2(960.0, 600.0)] {
+                let ctx = egui::Context::default();
+                let mut app = app(&ctx, None);
+                app.platform = platform;
+                app.chrome = chrome.clone();
+                attach(&mut app);
+                let saved = crate::workspace::Saved {
+                    id: 1,
+                    name: format!("{NAME}.ne5p"),
+                    path: Some(crate::store::LibPath::root().join(&format!("{NAME}.ne5p"))),
+                    origin: crate::workspace::Origin::Fresh,
+                    saved: Vec::new(),
+                    file: None,
+                    unread: Some(1),
+                    unsaved: None,
+                };
+                app.workspace.restore(vec![saved], None, &mut app.log);
+                let painted = settled(&ctx, &mut app, screen);
+                let at = format!("{platform:?} {chrome:?} at {screen:?}");
+
+                let center = painted.center;
+                let whole = |text: &str| {
+                    painted.words.iter().any(|word| {
+                        word.text == text && !word.galley.elided && center.contains_rect(word.rect)
+                    })
+                };
+                assert!(whole("Name"), "{at}: the Name head");
+                assert!(whole(NAME), "{at}: the row's name");
+                assert_eq!(painted.wrote("drawbar"), platform == Platform::Web, "{at}");
+
+                let bar = painted.region("topbar").expect("a top bar");
+                let search = ctx.read_response(egui::Id::new(SEARCH)).unwrap().rect;
+                // Open, New and Save are the square buttons left of the search.
+                let tools = ctx.viewport(|viewport| {
+                    let widgets = &viewport.prev_pass.widgets;
+                    widgets
+                        .layer_ids()
+                        .flat_map(|layer| widgets.get_layer(layer))
+                        .filter(|widget| widget.sense.senses_click())
+                        .filter(|widget| bar.contains_rect(widget.rect))
+                        .filter(|widget| widget.rect.right() <= search.left())
+                        .filter(|widget| widget.rect.height() >= CHIP)
+                        .filter(|widget| (widget.rect.width() - widget.rect.height()).abs() < 4.0)
+                        .count()
+                });
+                assert_eq!(tools, 3, "{at}: the file buttons beside {search:?}");
+            }
+        }
     }
 
     /// The one-button menu lists every section's items while they fit under it, and

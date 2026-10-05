@@ -8,7 +8,7 @@ desktop app.
 |---|---|
 | **Top bar** | Open, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
 | **Browser** (left) | **This computer** and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
-| **Library** (center) | One table over both places. Sort by any column. |
+| **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
 | **Keyboard** (center) | The instrument's slots, bank by bank, once connected. |
 | **Inspector** (right) | What is selected and what you can do with it. |
