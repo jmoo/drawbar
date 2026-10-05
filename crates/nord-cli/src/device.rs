@@ -110,7 +110,7 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
             transact(&mut device, "device status", |d| {
                 nord_usb::block_on(op::inventory(d.transport()))
             })
-            .map_err(|e| e.to_string())?
+            .map_err(described)?
         }
         Source::Replay(path) => {
             let text =
@@ -312,7 +312,7 @@ pub(crate) fn explain(e: nord_usb::Error, at: Location) -> String {
              one object per name"
                 .to_string()
         }
-        other => other.to_string(),
+        other => described(other),
     }
 }
 
@@ -327,7 +327,7 @@ fn explain_pair(e: nord_usb::Error, from: Location, to: Location) -> String {
             shown(from),
             shown(to)
         ),
-        other => other.to_string(),
+        other => described(other),
     }
 }
 
@@ -343,6 +343,21 @@ pub(crate) fn explain_walk(e: nord_usb::Error) -> String {
              Per-slot `info` still works"
                 .into()
         }
+        other => described(other),
+    }
+}
+
+/// A failure of an exchange with the instrument, in terms of what to do about it.
+///
+/// A run interrupted mid-session leaves the instrument answering out of step until
+/// `nord device recover` releases the session. Confirmed on hardware.
+pub(crate) fn described(e: nord_usb::Error) -> String {
+    match e {
+        nord_usb::Error::UnexpectedResponse { .. } => format!(
+            "the instrument answered out of step, as it does while it still holds a \
+             session from an interrupted run; run `nord device recover`, then try again \
+             ({e})"
+        ),
         other => other.to_string(),
     }
 }
@@ -479,7 +494,7 @@ fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geo
     transact(device, "device geometry", |d| {
         nord_usb::block_on(d.geometry()).map(|_| ())
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(described)?;
     nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
 }
 
@@ -1003,12 +1018,24 @@ fn send_with<T: Transport + Recorded>(
     // it only to be asked whether they meant it.
     let backup = match &existing {
         // Nothing is deleted until the backup is in hand.
-        Some(info) => Some(back_up(ui, device, spill_into, class, info).map_err(|e| {
-            format!(
-                "could not read {} back before replacing it, so it was left alone: {e}",
-                shown(at),
+        Some(info) => {
+            let rescue = rescue_file(spill_into, info).map_err(|e| {
+                format!(
+                    "could not keep a rescue copy of {} in {} ({e}), so it was left alone; \
+                     run from a folder you can write to, or pass --rescue-dir",
+                    shown(at),
+                    spill_into.display(),
+                )
+            })?;
+            Some(
+                back_up(ui, device, spill_into, class, info, rescue).map_err(|e| {
+                    format!(
+                        "could not read {} back before replacing it, so it was left alone: {e}",
+                        shown(at),
+                    )
+                })?,
             )
-        })?),
+        }
         None => None,
     };
 
@@ -1139,26 +1166,27 @@ impl Backup {
     }
 }
 
-/// Read the occupant of `info.location` so it can be put back, into a new file in `dir`
-/// a transfer chunk at a time, synced with its entry in `dir` before this returns. A read
-/// that fails leaves no file behind.
+/// A new file in `dir` for the rescue copy of the occupant `info` describes.
+fn rescue_file(dir: &Path, info: &ProgramInfo) -> Result<(PathBuf, std::fs::File), String> {
+    if !dir.exists() {
+        return Err("the folder does not exist".into());
+    }
+    fresh(dir, &envelope::rescue_name_for(info.location, &info.format))
+}
+
+/// Read the occupant of `info.location` so it can be put back, into `rescue`, a new file
+/// in `dir`, a transfer chunk at a time, synced with its entry in `dir` before this
+/// returns. A read that fails leaves no file behind.
 fn back_up<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
     dir: &Path,
     class: ObjectClass,
     info: &ProgramInfo,
+    (path, mut file): (PathBuf, std::fs::File),
 ) -> Result<Backup, String> {
     let at = info.location;
     let intent = format!("{} read {}", noun(class), addr(at));
-    if !dir.exists() {
-        return Err(format!(
-            "the rescue folder {} does not exist",
-            dir.display()
-        ));
-    }
-    let (path, mut file) = fresh(dir, &envelope::rescue_name_for(at, &info.format))
-        .map_err(|e| format!("{e}; run from a folder you can write to, or pass --rescue-dir"))?;
     ui.note(format!(
         "reading {} into {} to put back if the write fails",
         shown(at),
@@ -1207,13 +1235,10 @@ fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, std::fs::File), String> {
         {
             Ok(file) => return Ok((path, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+            Err(e) => return Err(e.to_string()),
         }
     }
-    Err(format!(
-        "{}: a hundred rescues of this slot are already there",
-        dir.join(name).display()
-    ))
+    Err(format!("a hundred rescues named {name} are already there"))
 }
 
 /// Let a backup go once the slot holds what it should. A file that cannot be deleted is
@@ -1351,7 +1376,7 @@ fn referring_set_lists(
             usb_op::set_lists_referencing(s, &banks, targets).await
         }))
     })
-    .map_err(|e| e.to_string())
+    .map_err(described)
 }
 
 /// The pre-flight lines naming set lists a program move will rewrite.
@@ -1832,7 +1857,7 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
             Ok((at, info))
         }))
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(described)?;
 
     match info {
         Some(info) => ui.out(format!("{}  {:?}", addr(at), info.name)),
@@ -2135,6 +2160,27 @@ fn put_intent(class: ObjectClass, what: &str, at: Location, name: &str, stamp: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reply a stale session gives `device status` after an interrupted write.
+    #[test]
+    fn an_out_of_step_reply_names_the_recovery() {
+        let stale = || nord_usb::Error::UnexpectedResponse {
+            expected: 0x1,
+            got: 0x7,
+        };
+        let said = described(stale());
+        assert_eq!(
+            said,
+            "the instrument answered out of step, as it does while it still holds a \
+             session from an interrupted run; run `nord device recover`, then try again \
+             (expected a response to command 0x1, got 0x7)"
+        );
+        assert_eq!(explain_walk(stale()), said);
+        assert_eq!(
+            described(nord_usb::Error::DeviceStatus(0x5)),
+            "device reported status 0x5"
+        );
+    }
 
     #[test]
     fn replacement_refuses_unusable_geometry_before_deleting() {
@@ -2615,6 +2661,14 @@ mod tests {
             .unwrap_err();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+            assert!(
+                err.starts_with(&format!(
+                    "could not keep a rescue copy of {} in {} (",
+                    shown(AT),
+                    dir.display()
+                )),
+                "{err}"
+            );
             assert!(err.contains("left alone"), "{err}");
             assert!(err.contains("pass --rescue-dir"), "{err}");
             assert!(!device.transport().sent().contains(&delete));
@@ -2639,8 +2693,49 @@ mod tests {
                 Some(STAMP),
             )
             .unwrap_err();
-            assert!(err.contains("does not exist"), "{err}");
-            assert!(err.contains("left alone"), "{err}");
+            assert_eq!(
+                err,
+                format!(
+                    "could not keep a rescue copy of {} in {} (the folder does not exist), \
+                     so it was left alone; run from a folder you can write to, or pass \
+                     --rescue-dir",
+                    shown(AT),
+                    dir.display()
+                )
+            );
+        }
+
+        /// A rescue folder that is a file fails as a rescue copy that could not be
+        /// kept: the slot's read never started.
+        #[test]
+        fn a_rescue_folder_that_is_a_file_keeps_no_copy_and_touches_nothing() {
+            let dir = crate::edit::tests::scratch("send-file-folder").join("a-file");
+            std::fs::write(&dir, b"").unwrap();
+            let put = recorded();
+            let delete = put[4][5].frame().expect("the DELETE").to_vec();
+            let mut device = Device::new(ReplayTransport::new(put.concat()));
+            let err = send_with(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+            )
+            .unwrap_err();
+            assert!(
+                err.starts_with(&format!(
+                    "could not keep a rescue copy of {} in {} (",
+                    shown(AT),
+                    dir.display()
+                )),
+                "{err}"
+            );
+            assert!(!device.transport().sent().contains(&delete));
         }
 
         /// `--rescue-dir` wins over `NORD_RESCUE_DIR`, which wins over the working
