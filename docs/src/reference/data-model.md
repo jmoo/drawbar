@@ -543,7 +543,7 @@ asynchronously.
 | `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
 | `Import` | `Imported`: a copy of a file from outside or of the library's own, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
-| `Commit` | `Committed`: whether the working copies and the index were written, or the step that failed, its file and why (`Unkept`). A failure at the same step for the same cause is logged once, though each retry names a new working copy, until a commit lands. |
+| `Commit` | `Committed`: whether the working copies and the index were written, or the step that failed, its file and why (`Unkept`). A failure at the same step for the same cause is logged once, though each retry names a new working copy, until a commit lands. `ReadOnly` where another drawbar changed the index. |
 | `MakeDir`, `RemoveFile`, `RemoveDir`, `DropUnindexed`, `SetAside` | Only `Failed`, on failure. |
 
 Every command that writes first makes `.drawbar/` and takes the lock. Where it
@@ -694,10 +694,18 @@ library again. The command renames the index to
 then; nothing deletes it. While a set-aside index is in `.drawbar/`, the working
 copies it named are kept: a missing index does not make the library read-only,
 no open sweeps `working/`, and the next generation is always above every copy
-there, so none is written over. A write can also find the library closed
-to it later: another drawbar took the lock first, or `.drawbar/` could not be
-made. Then the library turns read-only, every save in flight counts as unsaved
-again, and edits stay in memory. An open that fails outright keeps nothing.
+there, so none is written over.
+
+A write can also find the library closed to it later: another drawbar took the
+lock first, `.drawbar/` could not be made, or another drawbar wrote the index.
+A lock does not reach every writer: a browser's Web Lock is unseen by another
+browser and by the desktop app. So before a commit writes anything, it compares
+the length and CRC-32 of the index on disk with those this backend last read or
+wrote (`Fs::last_index`), or checks that there is still none, and the index is
+put only over the file it looked at. Where they differ, the commit writes
+nothing, not even its working copies. Then the library turns read-only, every
+save in flight counts as unsaved again, and edits stay in memory. An open that
+fails outright keeps nothing.
 
 ### In the browser
 

@@ -574,7 +574,8 @@ pub enum Cmd {
     Fingerprint(Vec<(u64, LibPath, Fingerprint)>),
     /// Write the `working` copies, then the index, then delete the working copies in
     /// `drop`. Working copies are named `<id>-<generation>`. Answered by
-    /// [`Event::Committed`].
+    /// [`Event::Committed`], or, having written nothing, by [`Event::ReadOnly`] where the
+    /// index no longer holds what this backend last read or wrote.
     Commit {
         sidecar: Sidecar,
         working: Vec<(String, Vec<u8>)>,
@@ -684,7 +685,8 @@ pub enum Event {
     /// A command other than a save or a move failed: what it was doing, and why.
     Failed(String),
     /// A write found that nothing may be written after all, and why: another drawbar
-    /// took the lock first, or the folder refused the sidecar. The write did not run.
+    /// took the lock first or changed the index, or the folder refused the sidecar. The
+    /// write did not run.
     ReadOnly(String),
 }
 

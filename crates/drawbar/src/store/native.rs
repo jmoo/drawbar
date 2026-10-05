@@ -112,6 +112,7 @@ impl Backend {
             root: root.clone(),
             prepared: false,
             lock: None,
+            index: None,
             stop: stop.clone(),
             commands: Some(commands),
             held: None,
@@ -202,6 +203,8 @@ struct Disk {
     prepared: bool,
     /// The lock file, held open, and locked, while this library is written.
     lock: Option<File>,
+    /// The index as this backend last read or wrote it: see [`Fs::last_index`].
+    index: Option<(u64, u32)>,
     stop: Arc<AtomicBool>,
     /// The commands sent, in order. `None` in a test that runs commands one by one.
     commands: Option<Receiver<Cmd>>,
@@ -500,6 +503,10 @@ impl Fs for Disk {
         self.lock = None;
     }
 
+    fn last_index(&mut self) -> &mut Option<(u64, u32)> {
+        &mut self.index
+    }
+
     async fn children(
         &self,
         dir: &str,
@@ -663,6 +670,7 @@ mod tests {
             root: root.0.clone(),
             prepared: false,
             lock: None,
+            index: None,
             stop: Arc::default(),
             commands: None,
             held: None,

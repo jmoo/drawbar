@@ -690,6 +690,8 @@ struct Folder {
     moves: Moves,
     /// `.drawbar/` and its folders have been made, once, for this page.
     prepared: bool,
+    /// The index as this backend last read or wrote it: see [`Fs::last_index`].
+    index: Option<(u64, u32)>,
     /// Names the next temporary file under `.drawbar/tmp/`.
     temps: u64,
     room: Rc<RefCell<Room>>,
@@ -749,6 +751,7 @@ impl Folder {
             writes,
             moves,
             prepared: false,
+            index: None,
             temps: 0,
             room,
             asked: false,
@@ -1324,6 +1327,10 @@ impl Fs for Folder {
 
     async fn unlock(&mut self) {
         self.let_go().await;
+    }
+
+    fn last_index(&mut self) -> &mut Option<(u64, u32)> {
+        &mut self.index
     }
 
     /// A picked folder is written only while the browser lets the page write it.

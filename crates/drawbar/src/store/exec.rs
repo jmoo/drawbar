@@ -91,6 +91,9 @@ pub trait Fs {
     async fn lock(&mut self) -> io::Result<bool>;
     /// Let go of the lock, where it is held, for another drawbar to take.
     async fn unlock(&mut self);
+    /// The length and CRC-32 of the index as this backend last read or wrote it, or
+    /// `None` where there was none. A commit writes the index only while it holds that.
+    fn last_index(&mut self) -> &mut Option<(u64, u32)>;
     /// Whether a file could be written at the root, found out without leaving anything
     /// there. A backend that cannot tell answers `Ok(())`, and the first write finds out.
     async fn probe(&mut self) -> io::Result<()> {
@@ -320,7 +323,7 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             sidecar,
             working,
             drop,
-        } => Some(Event::Committed(commit(fs, &sidecar, working, drop).await)),
+        } => Some(commit(fs, &sidecar, working, drop).await),
         Cmd::Save {
             id,
             path,
@@ -636,24 +639,52 @@ enum Index {
     Refused(String),
 }
 
-async fn index(fs: &impl Fs) -> Index {
-    match fs.read(INDEX).await {
-        Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
-            Read::Known(sidecar) => Index::Read(sidecar),
-            Read::Newer(version) => Index::Refused(format!(
-                "a newer drawbar wrote this library's index (version {version}), so this one \
-                 only reads the library"
-            )),
-            Read::Unknown => Index::Refused(
-                "a newer drawbar wrote this library's index, holding what this one does not \
-                 know, so this one only reads the library"
-                    .into(),
-            ),
-            Read::Unreadable => Index::Damaged,
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Index::Missing,
-        Err(e) => Index::Refused(format!("the library's index could not be read: {e}")),
+/// The index, taking what it holds as [`Fs::last_index`].
+async fn index(fs: &mut impl Fs) -> Index {
+    let bytes = match fs.read(INDEX).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            *fs.last_index() = None;
+            return Index::Missing;
+        }
+        Err(e) => return Index::Refused(format!("the library's index could not be read: {e}")),
+    };
+    *fs.last_index() = Some(contents(&bytes));
+    match sidecar::read(&String::from_utf8_lossy(&bytes)) {
+        Read::Known(sidecar) => Index::Read(sidecar),
+        Read::Newer(version) => Index::Refused(format!(
+            "a newer drawbar wrote this library's index (version {version}), so this one only \
+             reads the library"
+        )),
+        Read::Unknown => Index::Refused(
+            "a newer drawbar wrote this library's index, holding what this one does not know, \
+             so this one only reads the library"
+                .into(),
+        ),
+        Read::Unreadable => Index::Damaged,
     }
+}
+
+/// The length and CRC-32 of these bytes.
+fn contents(bytes: &[u8]) -> (u64, u32) {
+    (bytes.len() as u64, nord_format::crc::crc32(bytes))
+}
+
+/// What a commit may write the index over: the index this backend last read or wrote, or
+/// nothing where there was none. `None` where the index holds anything else, which
+/// another drawbar wrote.
+async fn index_over(fs: &mut impl Fs) -> io::Result<Option<Over>> {
+    let now = index_now(fs).await?;
+    let over = now.map_or(Over::Nothing, |(stat, _)| Over::Held(stat));
+    Ok((now.map(|(_, held)| held) == *fs.last_index()).then_some(over))
+}
+
+/// The index's stat, with its length and CRC-32, or `None` where there is no index.
+async fn index_now(fs: &impl Fs) -> io::Result<Option<(Stat, (u64, u32))>> {
+    let Some(stat) = fs.stat(INDEX).await? else {
+        return Ok(None);
+    };
+    Ok(Some((stat, (stat.len, fs.crc(INDEX).await?))))
 }
 
 /// Rename an index that does not read to the first free [`DAMAGED`] name, where it is
@@ -1592,37 +1623,62 @@ pub fn too_much() -> String {
     )
 }
 
+/// Write the working copies, then the index, then delete the working copies in `drop`.
+/// Nothing is written where the index holds anything but what this backend last read or
+/// wrote: another drawbar wrote it, and the library is read-only from then on.
 async fn commit(
     fs: &mut impl Fs,
     sidecar: &Sidecar,
     working: Vec<(String, Vec<u8>)>,
     drop: Vec<String>,
-) -> Result<(), Unkept> {
-    let unkept = |step, path: &str, why: String| Unkept {
-        step,
-        path: path.to_string(),
-        why,
+) -> Event {
+    let unkept = |step, path: &str, why: String| {
+        Event::Committed(Err(Unkept {
+            step,
+            path: path.to_string(),
+            why,
+        }))
+    };
+    let changed = || Event::ReadOnly("another drawbar changed this library's index".into());
+    let over = match index_over(fs).await {
+        Ok(Some(over)) => over,
+        Ok(None) => return changed(),
+        Err(e) => return unkept(Keeping::Index, INDEX, e.to_string()),
     };
     for (name, bytes) in working {
         let path = format!("{WORKING}/{name}");
-        put(fs, &path, Staged::Bytes(&bytes), Over::Anything)
-            .await
-            .map_err(|e| unkept(Keeping::Working, &path, e.to_string()))?;
+        if let Err(e) = put(fs, &path, Staged::Bytes(&bytes), Over::Anything).await {
+            return unkept(Keeping::Working, &path, e.to_string());
+        }
     }
-    let text = sidecar::write(sidecar).map_err(|why| unkept(Keeping::Index, INDEX, why))?;
-    put(fs, INDEX, Staged::Bytes(text.as_bytes()), Over::Anything)
-        .await
-        .map_err(|e| unkept(Keeping::Index, INDEX, e.to_string()))?;
+    let text = match sidecar::write(sidecar) {
+        Ok(text) => text,
+        Err(why) => return unkept(Keeping::Index, INDEX, why),
+    };
+    let ours = contents(text.as_bytes());
+    let wrote = put(fs, INDEX, Staged::Bytes(text.as_bytes()), over).await;
+    // A write that failed past its rename landed all the same.
+    let landed = wrote.is_ok() || matches!(index_now(fs).await, Ok(Some((_, now))) if now == ours);
+    if landed {
+        *fs.last_index() = Some(ours);
+    }
+    if let Err(e) = wrote {
+        let why = e.to_string();
+        return match refusal(e) {
+            Failure::Moved => changed(),
+            Failure::Room(_) | Failure::Io(_) => unkept(Keeping::Index, INDEX, why),
+        };
+    }
     for name in drop {
         let path = format!("{WORKING}/{name}");
         match fs.remove_file(&path).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                return Err(unkept(Keeping::Dropping, &path, e.to_string()))
+                return unkept(Keeping::Dropping, &path, e.to_string())
             }
             _ => {}
         }
     }
-    Ok(())
+    Event::Committed(Ok(()))
 }
 
 /// Whether the file at `path` still holds what `expect` says, taking its CRC only when its
@@ -1795,6 +1851,7 @@ mod tests {
         looked: Cell<usize>,
         /// Each file read and each lock taken, in order.
         trace: std::cell::RefCell<Vec<String>>,
+        index: Option<(u64, u32)>,
         waiting: VecDeque<Cmd>,
         later: Option<(usize, Cmd)>,
     }
@@ -1810,6 +1867,7 @@ mod tests {
                 reads: Rc::default(),
                 looked: Cell::default(),
                 trace: Default::default(),
+                index: None,
                 waiting: VecDeque::new(),
                 later: None,
             }
@@ -1849,6 +1907,9 @@ mod tests {
             Ok(true)
         }
         async fn unlock(&mut self) {}
+        fn last_index(&mut self) -> &mut Option<(u64, u32)> {
+            &mut self.index
+        }
         async fn children(
             &self,
             dir: &str,

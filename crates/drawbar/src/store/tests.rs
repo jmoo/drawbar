@@ -1521,6 +1521,40 @@ fn a_second_drawbar_on_one_library_only_reads_it() {
     assert!(why.contains("another drawbar"), "{why}");
 }
 
+/// An index another writer changed since this drawbar read or wrote it, here to one of
+/// the same length, is never written over: the commit writes nothing, not even its
+/// working copies, and the library turns read-only and says why.
+#[test]
+fn a_commit_over_an_index_changed_by_another_writer_stops() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.sync();
+    let ours = String::from_utf8(root.read(exec::INDEX)).unwrap();
+    let theirs = ours.replace("Sunday", "Monday");
+    assert_eq!(theirs.len(), ours.len());
+    fs::write(root.at(exec::INDEX), &theirs).unwrap();
+
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    session.bench.browser.tags.make("Later").unwrap();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Full);
+    session.until(|session| session.store.read_only().is_some());
+    let why = session.store.read_only().unwrap();
+    assert!(why.contains("another drawbar changed"), "{why}");
+    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
+    assert_eq!(root.names(".drawbar/working"), [""; 0], "nothing written");
+}
+
 /// Two drawbars can open a folder neither has written, since opening takes no lock. The
 /// first to write takes it, and the other finds out at its own first write.
 #[test]
