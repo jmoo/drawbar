@@ -35,7 +35,7 @@ stay with their library and come back when you open it again.
 
 This works on the desktop and in Chrome and Edge. Firefox and Safari cannot open
 a folder. Brave can once you turn on `brave://flags/#file-system-access-api` and
-relaunch it.
+relaunch it. In Brave, saving or renaming a large piano takes a little longer.
 
 The first time you open a folder in the browser, drawbar reminds you not to open
 it in the desktop app at the same time.
@@ -43,6 +43,10 @@ it in the desktop app at the same time.
 In Chrome and Edge, the browser asks whether drawbar may change the folder.
 Unless you allow it on every visit, it forgets when you close drawbar.app.
 Choose **File ▸ Reconnect** and the folder's name to get it back.
+
+Chrome makes each file and folder drawbar writes there readable only by you, and
+on macOS marks it as downloaded, so in a shared folder other people lose access
+to what you save.
 
 ## Adding and making sounds
 
@@ -111,11 +115,17 @@ bring back any you deleted.
 
 - **Read-only.** Another copy of drawbar has this library open, in another window
   or browser tab. Close it. Hover the library's name for the reason. A browser
-  tab cannot tell that the desktop app has a folder open, so open a folder in
-  only one of them at a time. drawbar also opens a library read-only when its
-  hidden folder has lost the file that lists your unsaved edits, so they are not
-  deleted. On the desktop, put that file back from a backup to get them back.
+  tab cannot tell that the desktop app, or another browser, has a folder open,
+  so open a folder in only one of them at a time. If both write to it anyway,
+  the one that writes second turns read-only instead of undoing the other's
+  changes. drawbar also opens a library read-only when its hidden folder has
+  lost the file that lists your unsaved edits, so they are not deleted. On the desktop, put that file back from a backup to get them back.
   **Open without them** deletes those edits and opens the library as usual.
+- **Damaged index.** The file that keeps your tags, where each sound came from
+  and which sounds have unsaved edits cannot be read, so the library opens
+  read-only. **Set it aside and open without it** renames that file and opens the
+  library without them. The renamed file and the unsaved edits stay in the
+  hidden folder.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
 - **A write to the instrument left a file.** If drawbar stopped, or could not
@@ -123,6 +133,9 @@ bring back any you deleted.
   that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
   library** adds it to your sounds so you can send it back, **Show the file**
   shows where it is, and **Discard** deletes it.
+- **Differs only by case.** Two names in one folder differ only in upper and
+  lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
+  of them, so rename one to keep the library whole on every computer.
 - **Not read** or **not all listed.** drawbar could not read that file or
   folder.
 - **Failed verification.** The sample or piano file is damaged. drawbar will not

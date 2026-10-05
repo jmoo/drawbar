@@ -47,4 +47,8 @@ it, and warns about one it cannot find in exactly one slot. `pack` keeps a
 `meta.xml` it finds at the top of the folder; without one, it lists which set
 lists play which programs. Electro 5 bundles only.
 
+`inspect` and `unpack` read a bundle only in the uncompressed shape Nord Sound
+Manager writes. They refuse one with a compressed, damaged or repeated file, or a
+path that leads outside the folder, and `unpack` then writes nothing.
+
 Changing what is inside a file is [Editing](editing.md).

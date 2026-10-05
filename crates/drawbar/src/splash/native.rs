@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use super::{welcome, Wanted};
+use super::{welcome, Usb, Wanted};
 use crate::browser::Act;
 
 pub struct Splash {
@@ -20,7 +20,7 @@ impl Splash {
     }
 
     /// Draw the sheet while it is up, and return whatever the reader asked for.
-    pub fn show(&mut self, ctx: &egui::Context, usb: bool) -> Option<Act> {
+    pub fn show(&mut self, ctx: &egui::Context, usb: Usb) -> Option<Act> {
         if !self.showing {
             return None;
         }

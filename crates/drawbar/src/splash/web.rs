@@ -7,7 +7,7 @@ use eframe::egui;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use super::{https, news, opening, welcome, Notes, Opening, Wanted, VERSION};
+use super::{https, news, opening, welcome, Notes, Opening, Usb, Wanted, VERSION};
 use crate::about::RELEASES;
 use crate::browser::Act;
 use crate::js::field;
@@ -77,7 +77,7 @@ impl Splash {
 
     /// Draw whichever sheet is up, record the version once it is dismissed, and return
     /// what the reader asked for.
-    pub fn show(&mut self, ctx: &egui::Context, usb: bool) -> Option<Act> {
+    pub fn show(&mut self, ctx: &egui::Context, usb: Usb) -> Option<Act> {
         while let Ok(notes) = self.inbox.try_recv() {
             self.notes = notes;
         }

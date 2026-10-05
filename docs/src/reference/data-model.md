@@ -114,15 +114,20 @@ none, and Chromium hides a link at any depth below a picked folder.
 
 The version is read first, on its own. An index with a higher version opens the
 library read-only and is never rewritten, so a newer drawbar's index survives an
-older one being run over it. An index that does not parse also opens the library
-read-only.
+older one being run over it. So does an index of this version that holds a
+field, or a kind of origin or working copy, this build does not know: rewriting
+it would drop what a newer build added. An index that does not parse also opens
+the library read-only, and can be set aside (see [Opening, the lock and
+read-only](#opening-the-lock-and-read-only)).
 
 ### Working copies, `tmp/` and `lock`
 
-- `working/<id>-<generation>` holds an unsaved edit. A new edit gets a new
-  generation, and the old file is deleted once the index stops naming it. A copy
-  is rewritten only by a save of a later edit, just before the save lands (see
-  [The order of a pass](#the-order-of-a-pass)). One that `keeps: Bytes` holds
+- `working/<id>-<generation>` holds an unsaved edit. An edit whose bytes differ
+  from the copy's gets a new generation, and the old file is deleted once the
+  index stops naming it; one the copy already holds, as at every launch, writes
+  none. A copy is rewritten only by a save of a later edit, just before the save
+  lands (see [The order of a pass](#the-order-of-a-pass)), and moved into place
+  by a save of exactly what it holds. One that `keeps: Bytes` holds
   the asset's bytes whole. One that `keeps: Edit` holds an edit of a piano
   library or sample instrument resting in its file, as RON text under a version
   of its own (`rewrite::Edit::working`):
@@ -170,7 +175,7 @@ every asset as a `LocalEntity`. The fields that matter here:
 | `saved` | Its `Baseline`: what it was last saved as. |
 | `kept` | Whether it is on this computer, as opposed to a view of a slot. |
 | `pending` | Whether an editor holds an edit not yet applied to `bytes`. |
-| `stamp` | Distinct for every set of bytes this id has held. |
+| `stamp` | Distinct for every set of bytes this id has held. Bytes back to the baseline's take its stamp, so the baseline does not move and nothing is written. |
 | `remembered` | While it is unread, the `Summary` a read of its file found before. See [The derived cache](#the-derived-cache). |
 
 `Bytes` wraps an `Arc<[u8]>`. The baseline shares the allocation while the bytes
@@ -274,7 +279,9 @@ stateDiagram-v2
   limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
   snapshot the page took of it.
 - **Unsaved.** Its stamp differs from its baseline's. At the next full pass its
-  bytes are written to `working/` under a new generation. An edit of a resting
+  bytes are written to `working/` under a new generation, unless its working copy
+  holds them already. An asset whose file is missing counts as unsaved as soon as
+  it is restored, so its copy is kept as it was. An edit of a resting
   asset stays an edit held over its file, and the asset stays resting until the
   save writes the file again; its working copy keeps the edit, not the bytes.
 - **Saving.** Saving moves the baseline to the current bytes, and the store
@@ -398,7 +405,8 @@ stat moved is told to hold what drawbar knew by its CRC, taken in one streaming
 pass (`Fs::crc`). A save, a copy over a file and a rewrite look at the file
 again once the new contents are staged, just before the rename, and refuse one
 whose stat moved (`exec::put`); a window of one stat and one rename remains,
-since no portable rename checks what it replaces. A resting file changed on disk under an unsaved edit is not
+since no portable rename checks what it replaces. Where the browser copies
+instead of moving, the copy looks again just before it lands. A resting file changed on disk under an unsaved edit is not
 read whole to keep the edit apart: the asset rests in the new file, and the
 workspace makes the edit again over it (`rewrite::Edit::over`). An edit the new
 file already holds is let go. One that no longer applies is kept as it was,
@@ -539,7 +547,8 @@ asynchronously.
 | `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
 | `Import` | `Imported`: a copy of a file from outside or of the library's own, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
-| `Commit`, `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |
+| `Commit` | `Committed`: whether the working copies and the index were written, or the step that failed, its file and why (`Unkept`). A failure at the same step for the same cause is logged once, though each retry names a new working copy, until a commit lands. `ReadOnly` where another drawbar changed the index. |
+| `MakeDir`, `RemoveFile`, `RemoveDir`, `DropUnindexed`, `SetAside` | Only `Failed`, on failure. |
 
 Every command that writes first makes `.drawbar/` and takes the lock. Where it
 cannot, it runs no further and is answered by `Event::ReadOnly`.
@@ -578,7 +587,7 @@ sequenceDiagram
     participant Backend
     participant Disk
     Store->>Backend: Open
-    Backend->>Disk: read the index and working copies, lock, sweep
+    Backend->>Disk: lock, read the index and working copies, sweep
     Backend-->>Store: Opened
     Backend-->>Store: Listed (the index's rows, ran 0)
     Note over Store: the user renames Kits to Drums
@@ -646,7 +655,14 @@ its save has answered. A save whose working copy holds an older edit carries it
 file, so a crash after a save lands and before the next index leaves a working
 copy of what the file holds. The next open sees that and does not count the asset
 as unsaved. A copy newer than the save is left alone, and after a crash it comes
-back over the file as a change made outside drawbar would.
+back over the file as a change made outside drawbar would. A save whose working
+copy holds exactly the bytes it writes (`store::Cmd::Save`'s `promote`) moves the
+copy into place instead of writing the bytes again: on the desktop by a rename,
+or a hard link where the file is new, and in the browser's private storage by
+`move()`. It needs no room of its own, so a save on a nearly full disk does not
+fail for want of the room the copy already takes. Where the backend cannot move
+it, as in a picked folder, across volumes or on one without links, the save
+writes the bytes as any other does.
 
 A save over a file sends the file's fingerprint and lands only where the file
 still holds it: its stat is the one taken, or else its CRC is. A file that moved
@@ -661,15 +677,17 @@ library. An unchanged index is not written again.
 
 ### Opening, the lock and read-only
 
-Opening reads the index before anything is written. Where `.drawbar/` exists and
-the library may be written, the open takes the lock and sweeps: everything in
-`tmp/` but the rescues, every working copy the index does not name, and, once the walk has
+Where `.drawbar/` exists, opening takes the lock first, then reads the index and
+the working copies it names, so no other drawbar changes them in between. Nothing
+else is written before the index is read. A library that opens read-only lets
+the lock go. One that may be written is swept: everything in `tmp/` but the
+rescues, every working copy the index does not name, and, once the walk has
 found them, the `.drawbar-tmp` siblings. A library drawbar has never written
 holds nothing to sweep, and its lock is taken at the first write.
 
 On the desktop the lock is an exclusive `File::try_lock` on `.drawbar/lock`,
 held for as long as the backend lives. A library opens read-only when its index
-is newer or does not read, when a working copy the index names does not read,
+is newer, holds what this build does not know, or does not read, when a working copy the index names does not read,
 when the index is missing but `working/` is not, or when another drawbar holds
 the lock. Working copies are found only through the index, so a sweep without it
 would delete every one, and an index put back finds them only where they were.
@@ -677,10 +695,28 @@ Once listed, such a library asks (`Browser::ask_unindexed`): **Keep read-only**,
 or **Open without them**, which, confirmed with the number of edits it loses,
 sends `Cmd::DropUnindexed` and opens the library again. The command deletes the
 copies only while there is still no index. In the browser's private storage
-that answer is the only way to them short of clearing the site's data. A write can also find the library closed
-to it later: another drawbar took the lock first, or `.drawbar/` could not be
-made. Then the library turns read-only, every save in flight counts as unsaved
-again, and edits stay in memory. An open that fails outright keeps nothing.
+that answer is the only way to them short of clearing the site's data.
+
+An index that does not parse is damaged. The library opens read-only, and once
+listed it asks (`Browser::ask_damaged`): **Keep read-only**, or **Set it aside
+and open without it**, which, confirmed, sends `Cmd::SetAside` and opens the
+library again. The command renames the index to
+`.drawbar/library.ron.damaged-<n>`, the first free `n`, unless it reads again by
+then; nothing deletes it. While a set-aside index is in `.drawbar/`, the working
+copies it named are kept: a missing index does not make the library read-only,
+no open sweeps `working/`, and the next generation is always above every copy
+there, so none is written over.
+
+A write can also find the library closed to it later: another drawbar took the
+lock first, `.drawbar/` could not be made, or another drawbar wrote the index.
+A lock does not reach every writer: a browser's Web Lock is unseen by another
+browser and by the desktop app. So before a commit writes anything, it compares
+the length and CRC-32 of the index on disk with those this backend last read or
+wrote (`Fs::last_index`), or checks that there is still none, and the index is
+put only over the file it looked at. Where they differ, the commit writes
+nothing, not even its working copies. Then the library turns read-only, every
+save in flight counts as unsaved again, and edits stay in memory. An open that
+fails outright keeps nothing.
 
 ### In the browser
 
@@ -723,6 +759,25 @@ file already there. In a picked folder the page writes through
 Web Lock named for the folder, taken with `ifAvailable`, keeps a second tab to
 reading. Reads go through `File` snapshots in 4 MiB slices.
 
+Brave refuses `move()` everywhere but the private file system. The first
+`NotSupportedError` in a picked folder is remembered for the library, and from
+then on nothing is moved there (`store::dom::Moves`). A save writes its target
+in place through `createWritable`: Chromium writes the stream to a swap file
+beside it, `<name>.crswap`, and moves that over the file as the stream closes,
+so a file already there still changes all at once, and the staged copy is then
+removed. A save over a file looks at it again just before the stream closes,
+and aborts where its stat moved. A new file is made empty first, so a crash
+before its stream closes leaves it empty; one found already holding bytes is
+another program's, refused as taken, and a failed write removes only an empty
+file it made, untouched since. A rename copies the file to its new name and
+then removes the old one, so one interrupted between the two leaves the file at
+both names, none lost. The old file is looked at again before it is removed,
+and one that changed while it was copied is kept and fails the rename. A folder
+moves this way file by file, and stops at the first file that changed. A
+rename that changes only a file's case goes through `<name>.<n>.drawbar-move`
+as well, and the next open puts a file it left there back, as it does a
+folder.
+
 Two things differ from the desktop. A new file's write checks the name and then
 moves, in two steps, so in a picked folder another program can write between
 them. Chrome cannot move a folder whole, so a folder moves file by file, and an
@@ -740,10 +795,10 @@ not run through), a `beforeunload` listener cancels the event (`closing.rs`), an
 the browser asks whether to leave. The page keeps running while it asks, so
 staying lets the writes land. A browser asks only after the user has interacted
 with the page, and may close without asking when it discards a tab or quits.
-A folder such a rename left under that name when the tab closed is put back at
-the next open, under the spelling the index's rows use, before the listing
-looks for them; where another folder has the name it stays, and the log says
-so. The
+A folder or file such a rename left under that name when the tab closed is put
+back at the next open, under the spelling the index's rows use, before the
+listing looks for them; where something else has the name it stays, and the log
+says so. Only the top level and the folders that hold a row are looked in. The
 first write to the private file system also asks the browser to keep it through
 a shortage of space. A tab opens a new library only once the one before it has
 run its last command and let go of its lock.
@@ -825,6 +880,8 @@ become the baseline, and the edit stays. The user is then asked:
 - **Keep both** writes the edit as a new file beside it under a free name, and
   reverts the original.
 
+Neither revert writes the changed file again.
+
 At open, a file that changed under a working copy raises the same question,
 unless the working copy holds what the file now holds. An edit's copy is made
 again over the file as it is now, and asks only where the file changed and does
@@ -839,6 +896,11 @@ character; starts or ends with a space; starts with a dot, which hides it; ends
 with a dot, which Windows drops; is a Windows device name such as `CON` or
 `LPT1`, in any case and with any extension; or is longer than 255 bytes of
 UTF-8.
+
+On Windows, a file or folder already in the library under a name Windows
+cannot open (one with a forbidden or control character, a trailing space or
+dot, or a device name) is refused by name before drawbar opens it
+(`names::windows_refusal`).
 
 A name the user typed is refused with its reason. A name the app chose is made
 to fit instead (`names::portable`): forbidden characters become `-`, control

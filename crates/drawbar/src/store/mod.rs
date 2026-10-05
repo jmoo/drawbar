@@ -27,6 +27,8 @@
 
 mod cache;
 mod diff;
+#[cfg(any(target_arch = "wasm32", test))]
+mod dom;
 mod exec;
 mod mirror;
 pub mod names;
@@ -35,7 +37,7 @@ mod sidecar;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{default_root, sync_dir, Backend};
+pub use native::{default_root, openable, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -227,6 +229,7 @@ pub struct Stat {
 /// held. Where they moved, the CRC decides, and a fingerprint without one says only that
 /// the file is not known to be the same.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<u64>,
@@ -380,12 +383,17 @@ pub struct Opened {
     /// `.drawbar/` was there already. Where it was not, nothing has been written, and
     /// the library's lock is taken at the first write.
     pub indexed: bool,
+    /// The index does not read, which leaves the library read-only until it is set
+    /// aside: see [`Cmd::SetAside`].
+    pub damaged: bool,
     /// The index, or an empty one for a library that has none or one this build must not
     /// read.
     pub sidecar: Sidecar,
     /// The working copies the index names, by asset id. One that is not there is left
     /// out, and one that did not read leaves the library read-only.
     pub working: std::collections::BTreeMap<u64, Vec<u8>>,
+    /// The length and CRC-32 of each working copy in `working`, by asset id.
+    pub prints: std::collections::BTreeMap<u64, (u64, u32)>,
     /// How many leftovers of interrupted writes were removed.
     pub swept: usize,
     /// Folders an interrupted rename left under the name it moved them through, that
@@ -529,10 +537,11 @@ pub struct Stale {
 pub enum Cmd {
     /// Read the index, and list every file by its name, length and time. Nothing is read
     /// but the file under each working copy the index names. Where `.drawbar/` exists,
-    /// take the lock and sweep interrupted writes first; where it does not, write
-    /// nothing. Answered by [`Event::Opened`], then the files the index names in
-    /// [`Event::Listed`] parts, then the rest of the listing in parts, breadth first,
-    /// then [`Event::Complete`]. Only [`Event::Opened`] answers an open that failed.
+    /// take the lock before the index is read, and sweep interrupted writes before the
+    /// listing; where it does not, write nothing. Answered by [`Event::Opened`], then
+    /// the files the index names in [`Event::Listed`] parts, then the rest of the
+    /// listing in parts, breadth first, then [`Event::Complete`]. Only
+    /// [`Event::Opened`] answers an open that failed.
     ///
     /// Every command sent while the listing is in flight runs between two of its folders,
     /// in the order sent, and the rest of the listing follows what it moved, made or
@@ -566,7 +575,9 @@ pub enum Cmd {
     /// [`Event::Fingerprinted`].
     Fingerprint(Vec<(u64, LibPath, Fingerprint)>),
     /// Write the `working` copies, then the index, then delete the working copies in
-    /// `drop`. Working copies are named `<id>-<generation>`. Answered only on failure.
+    /// `drop`. Working copies are named `<id>-<generation>`. Answered by
+    /// [`Event::Committed`], or, having written nothing, by [`Event::ReadOnly`] where the
+    /// index no longer holds what this backend last read or wrote.
     Commit {
         sidecar: Sidecar,
         working: Vec<(String, Vec<u8>)>,
@@ -580,6 +591,10 @@ pub enum Cmd {
         bytes: Vec<u8>,
         expect: Option<Fingerprint>,
         stale: Option<Stale>,
+        /// The working copy that holds exactly `bytes`, by name. Where the backend moves
+        /// files, it is moved into place in their stead, so the save takes no room of its
+        /// own, and it is gone once the save lands.
+        promote: Option<String>,
     },
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].
@@ -614,6 +629,11 @@ pub enum Cmd {
     /// Delete every working copy, where there is still no index to name any. Answered
     /// only on failure.
     DropUnindexed,
+    /// Rename an index that does not read to `.drawbar/library.ron.damaged-<n>`, where
+    /// it is kept, so the library opens again without it. The working copies it names
+    /// are kept too: no open sweeps a working copy while an index set aside is there.
+    /// An index that reads again stays. Answered only on failure.
+    SetAside,
 }
 
 /// What a backend answers.
@@ -666,11 +686,54 @@ pub enum Event {
         to: LibPath,
         result: Result<(), String>,
     },
+    /// Whether a [`Cmd::Commit`] wrote everything it was sent to, and why not.
+    Committed(Result<(), Unkept>),
     /// A command other than a save or a move failed: what it was doing, and why.
     Failed(String),
     /// A write found that nothing may be written after all, and why: another drawbar
-    /// took the lock first, or the folder refused the sidecar. The write did not run.
+    /// took the lock first or changed the index, or the folder refused the sidecar. The
+    /// write did not run.
     ReadOnly(String),
+}
+
+/// Why a [`Cmd::Commit`] did not write everything it was sent to.
+#[derive(Clone, Debug)]
+pub struct Unkept {
+    pub step: Keeping,
+    /// The file it failed on. A working copy is written under a new name at every
+    /// retry, so this differs between retries that fail the same way.
+    pub path: String,
+    pub why: String,
+}
+
+/// The step of a [`Cmd::Commit`] that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keeping {
+    /// Writing a working copy.
+    Working,
+    /// Writing the index.
+    Index,
+    /// Deleting a working copy the index no longer names.
+    Dropping,
+}
+
+impl Unkept {
+    /// Whether `other` failed at the same step for the same cause, whichever file it
+    /// failed on.
+    pub fn same(&self, other: &Unkept) -> bool {
+        self.step == other.step && self.why == other.why
+    }
+}
+
+impl std::fmt::Display for Unkept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let doing = match self.step {
+            Keeping::Working | Keeping::Index => "writing",
+            Keeping::Dropping => "deleting",
+        };
+        let Unkept { path, why, .. } = self;
+        write!(f, "keeping the library's index: {doing} {path}: {why}")
+    }
 }
 
 impl Event {
@@ -684,7 +747,7 @@ impl Event {
             Event::ReadOnly(_) => one("read-only"),
             Event::Scanned(Err(_)) | Event::Checked(Err(_)) => one("rescan"),
             Event::Moved { result: Err(_), .. } => one("move"),
-            Event::Failed(_) => one("write"),
+            Event::Failed(_) | Event::Committed(Err(_)) => one("write"),
             Event::Read(answers) => answers
                 .iter()
                 .filter_map(|(_, result)| result.as_ref().err())
@@ -700,6 +763,7 @@ impl Event {
             | Event::Checked(Ok(_))
             | Event::Walked { .. }
             | Event::Fingerprinted(_)
+            | Event::Committed(Ok(()))
             | Event::Moved { result: Ok(()), .. } => Default::default(),
         }
     }

@@ -27,26 +27,42 @@ pub fn refusal(name: &str) -> Option<&'static str> {
     if name == "." || name == ".." {
         return Some("it names a folder's link to itself or its parent");
     }
+    if name.starts_with(' ') {
+        return Some("it starts with a space");
+    }
+    if name.starts_with('.') {
+        return Some("it starts with a dot, which hides it");
+    }
+    if let Some(why) = windows_refusal(name) {
+        return Some(why);
+    }
+    if name.len() > LONGEST {
+        return Some("it is longer than 255 bytes");
+    }
+    None
+}
+
+/// Why Windows cannot open an entry of this name, or `None` when it can. A library made
+/// elsewhere can hold such a name, and the native store refuses it on Windows before
+/// opening anything.
+///
+/// ⚠️ Windows opens the device for a device name, which can wait on the console, and
+/// drops a trailing space or dot, which opens another entry than the one listed.
+pub fn windows_refusal(name: &str) -> Option<&'static str> {
     if name.contains(FORBIDDEN) {
         return Some("it holds a character Windows forbids: / \\ : * ? \" < > |");
     }
     if name.chars().any(char::is_control) {
         return Some("it holds a control character");
     }
-    if name.starts_with(' ') || name.ends_with(' ') {
-        return Some("it starts or ends with a space");
-    }
-    if name.starts_with('.') {
-        return Some("it starts with a dot, which hides it");
+    if name.ends_with(' ') {
+        return Some("it ends with a space, which Windows drops");
     }
     if name.ends_with('.') {
         return Some("it ends with a dot, which Windows drops");
     }
     if is_device(name) {
         return Some("Windows keeps that name for a device");
-    }
-    if name.len() > LONGEST {
-        return Some("it is longer than 255 bytes");
     }
     None
 }
@@ -76,10 +92,10 @@ pub fn inside(path: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// What the name a folder moves through ends in: `<name>.<n>.drawbar-move`.
+/// What the name a folder or file moves through ends in: `<name>.<n>.drawbar-move`.
 const MOVING: &str = ".drawbar-move";
 
-/// The `n`-th name beside the folder `from` that it can move through.
+/// The `n`-th name beside `from` that it can move through.
 pub fn aside(from: &str, n: u32) -> String {
     format!("{from}.{n}{MOVING}")
 }
@@ -92,11 +108,11 @@ pub fn moved_through(name: &str) -> Option<&str> {
     (numbered && !folder.is_empty()).then_some(folder)
 }
 
-/// The renames that move the folder `from` to `to` one at a time, where a folder cannot
-/// move whole: `to` itself, or, where the two differ only in case, `aside` and then `to`,
-/// so no step moves a folder onto itself on a disk that ignores case. `aside` is a free
-/// name beside `from`.
-pub fn folder_steps(from: &str, to: &str, aside: &str) -> Vec<(String, String)> {
+/// The renames that take `from` to `to` one at a time, where it cannot move whole: `to`
+/// itself, or, where the two differ only in case, `aside` and then `to`, so no step
+/// moves a folder or file onto itself on a disk that ignores case. `aside` is a free name
+/// beside `from`.
+pub fn steps(from: &str, to: &str, aside: &str) -> Vec<(String, String)> {
     let parent = |path: &str| path.rsplit_once('/').map(|(dir, _)| dir.to_string());
     match parent(from) == parent(to) && key(from) == key(to) {
         true => vec![
@@ -187,14 +203,14 @@ mod tests {
 
     #[test]
     fn a_case_only_folder_rename_never_moves_a_folder_onto_itself() {
-        let steps = folder_steps("Gigs/cello", "Gigs/Cello", "Gigs/cello.1.drawbar-move");
-        assert_eq!(steps.len(), 2);
-        for (from, to) in &steps {
+        let both = steps("Gigs/cello", "Gigs/Cello", "Gigs/cello.1.drawbar-move");
+        assert_eq!(both.len(), 2);
+        for (from, to) in &both {
             assert_ne!(key(from), key(to), "{from} onto {to}");
         }
-        assert_eq!(steps.last().map(|(_, to)| to.as_str()), Some("Gigs/Cello"));
+        assert_eq!(both.last().map(|(_, to)| to.as_str()), Some("Gigs/Cello"));
         assert_eq!(
-            folder_steps("Gigs/cello", "Old/Cello", "unused"),
+            steps("Gigs/cello", "Old/Cello", "unused"),
             [("Gigs/cello".to_string(), "Old/Cello".to_string())]
         );
     }
@@ -251,6 +267,32 @@ mod tests {
         }
         assert!(refusal(&"a".repeat(256)).is_some(), "256 bytes");
         assert!(refusal(&"a".repeat(255)).is_none(), "255 bytes");
+    }
+
+    #[test]
+    fn windows_reserved_names_are_refused_by_name() {
+        for (name, why) in [
+            ("CON.ne5p", "device"),
+            ("com1.ne5p", "device"),
+            ("Lpt9", "device"),
+            ("newline\nname.ne5p", "control"),
+            ("colon:name.ne5p", "character"),
+            ("back\\slash.ne5p", "character"),
+            ("c3.ne5p ", "space"),
+            ("c3.", "dot"),
+        ] {
+            let said = windows_refusal(name).unwrap_or_else(|| panic!("{name:?} was opened"));
+            assert!(said.contains(why), "{name:?}: {said}");
+        }
+        for name in [
+            "CONSOLE.ne5p",
+            "COM10.ne5p",
+            "Flügel.npno",
+            " leading space.ne5p",
+            ".drawbar",
+        ] {
+            assert_eq!(windows_refusal(name), None, "{name:?}");
+        }
     }
 
     #[test]

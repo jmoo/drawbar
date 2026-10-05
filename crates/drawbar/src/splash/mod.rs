@@ -14,10 +14,11 @@ use eframe::egui;
 
 use crate::app::{accent, bold, caption, good, unlit, warn};
 use crate::browser::Act;
-use crate::device::NO_USB;
+use crate::device::{Device, NO_USB};
 use crate::icon::{sized, Glyph};
 use crate::panel::caps;
 use crate::sheet::{self, GAP};
+use crate::tabs::Spot;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -197,20 +198,47 @@ enum Start {
     Demo,
 }
 
+/// What the Connect card can do.
+#[derive(Clone, Copy)]
+pub enum Usb<'a> {
+    /// This browser has no WebUSB, so the card is grayed out.
+    Missing,
+    Ready,
+    /// An instrument is attached, by its product name, so the card shows its slots.
+    Attached(&'a str),
+}
+
+impl Usb<'_> {
+    pub fn of(device: &Device) -> Usb<'_> {
+        match (device.state.product(), device.usb()) {
+            (Some(product), _) => Usb::Attached(product),
+            (None, true) => Usb::Ready,
+            (None, false) => Usb::Missing,
+        }
+    }
+}
+
 /// How one [`Start`] reads on the sheet.
-struct Card {
+struct Card<'a> {
     glyph: Glyph,
-    label: &'static str,
-    sub: &'static str,
-    hint: &'static str,
+    label: &'a str,
+    sub: &'a str,
+    hint: &'a str,
     /// Drawn in the accent color, for the tested path.
     lead: bool,
 }
 
 impl Start {
-    const fn card(self) -> Card {
-        match self {
-            Start::Connect => Card {
+    fn card(self, usb: Usb) -> Card {
+        match (self, usb) {
+            (Start::Connect, Usb::Attached(product)) => Card {
+                glyph: Glyph::Usb,
+                label: product,
+                sub: "Attached. Every slot is in the Keyboard tab.",
+                hint: "",
+                lead: true,
+            },
+            (Start::Connect, _) => Card {
                 glyph: Glyph::Usb,
                 label: "Connect an instrument…",
                 sub: "See every slot, pull sounds off to keep or edit, and put them back \
@@ -218,14 +246,14 @@ impl Start {
                 hint: "USB has been tested only with the Electro 5",
                 lead: true,
             },
-            Start::Open => Card {
+            (Start::Open, _) => Card {
                 glyph: Glyph::FolderOpen,
                 label: "Open files…",
                 sub: "Programs, samples, pianos and set lists already on this computer.",
                 hint: "",
                 lead: false,
             },
-            Start::Demo => Card {
+            (Start::Demo, _) => Card {
                 glyph: Glyph::AudioWaveform,
                 label: "Start with a demo",
                 sub: "A tine piano and a pad, in a Demo sounds folder on this computer.",
@@ -237,14 +265,14 @@ impl Start {
 }
 
 /// The welcome sheet. `Some` once the reader has asked for something.
-pub fn welcome(ctx: &egui::Context, usb: bool) -> Option<Wanted> {
+pub fn welcome(ctx: &egui::Context, usb: Usb) -> Option<Wanted> {
     egui::Modal::new(egui::Id::new("welcome"))
         .frame(sheet::frame(&ctx.style().visuals))
         .show(ctx, |ui| welcome_body(ui, usb))
         .inner
 }
 
-fn welcome_body(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
+fn welcome_body(ui: &mut egui::Ui, usb: Usb) -> Option<Wanted> {
     ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
     let mut wanted = None;
     // The start cards stay under the scrolling middle, so a short window scrolls the
@@ -493,7 +521,7 @@ const CARD_TITLE: f32 = 12.0;
 const CARD_SUB: f32 = 10.5;
 
 /// The cards, as many across as the sheet has room for.
-fn starts(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
+fn starts(ui: &mut egui::Ui, usb: Usb) -> Option<Wanted> {
     let full = ui.available_width();
     let across = (((full + CARD_GAP) / (CARD_LEAST + CARD_GAP)) as usize).clamp(1, STARTS.len());
     let width = (full - CARD_GAP * (across - 1) as f32) / across as f32;
@@ -508,9 +536,9 @@ fn starts(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
             for start in row {
-                let reachable = usb || !matches!(start, Start::Connect);
+                let reachable = !matches!((start, usb), (Start::Connect, Usb::Missing));
                 let (drawn, needs) = ui
-                    .add_enabled_ui(reachable, |ui| card(ui, start.card(), width, height))
+                    .add_enabled_ui(reachable, |ui| card(ui, start.card(usb), width, height))
                     .inner;
                 let drawn = drawn.on_disabled_hover_text(NO_USB);
                 tallest = tallest.max(needs);
@@ -518,7 +546,12 @@ fn starts(ui: &mut egui::Ui, usb: bool) -> Option<Wanted> {
                     continue;
                 }
                 match start {
-                    Start::Connect => wanted = Some(Wanted::Act(Act::Connect)),
+                    Start::Connect => {
+                        wanted = Some(Wanted::Act(match usb {
+                            Usb::Attached(_) => Act::ShowTab(Spot::Keyboard),
+                            Usb::Missing | Usb::Ready => Act::Connect,
+                        }))
+                    }
                     Start::Open => wanted = Some(Wanted::Act(Act::OpenFiles)),
                     Start::Demo => wanted = Some(Wanted::Act(Act::FetchDemos)),
                 }
@@ -1155,13 +1188,13 @@ mod tests {
         let mut said = Vec::new();
         for _ in 0..3 {
             said = drawn_at(&ctx, size, |ctx| {
-                welcome(ctx, true);
+                welcome(ctx, Usb::Ready);
             });
         }
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
         let risk = format!("{RISK_LEAD}{RISK_REST}");
-        let starts = STARTS.map(|start| start.card().label);
+        let starts = STARTS.map(|start| start.card(Usb::Ready).label);
         for label in ["I understand", risk.as_str()].into_iter().chain(starts) {
             let drawn = box_of(&said, label)
                 .unwrap_or_else(|| panic!("{label} was never painted: {said:?}"));
@@ -1204,7 +1237,7 @@ mod tests {
         let frame = |events: Vec<egui::Event>| {
             let input = testing::screen(size, events);
             let mut wanted = None;
-            let output = testing::run(&ctx, input, |ctx| wanted = welcome(ctx, false));
+            let output = testing::run(&ctx, input, |ctx| wanted = welcome(ctx, Usb::Missing));
             (wanted, testing::painted(&output))
         };
         // The sheet centers itself, and the cards match heights, over the first frames.
@@ -1228,6 +1261,38 @@ mod tests {
         assert!(wanted.is_none(), "the grayed card asked to connect");
     }
 
+    #[test]
+    fn with_an_instrument_attached_the_first_card_names_it_and_shows_its_slots() {
+        let ctx = headless();
+        let size = egui::vec2(1200.0, 900.0);
+        let usb = Usb::Attached("Nord Electro 5");
+        let frame = |events: Vec<egui::Event>| {
+            let input = testing::screen(size, events);
+            let mut wanted = None;
+            let output = testing::run(&ctx, input, |ctx| wanted = welcome(ctx, usb));
+            (wanted, testing::painted(&output))
+        };
+        for _ in 0..3 {
+            let _ = frame(Vec::new());
+        }
+        let (_, said) = frame(Vec::new());
+        assert!(
+            box_of(&said, "Connect an instrument…").is_none(),
+            "{said:?}"
+        );
+        let at = ctx
+            .read_response(card_id("Nord Electro 5"))
+            .expect("a card names the instrument")
+            .rect
+            .center();
+
+        let (wanted, _) = frame(vec![testing::button(at, true), testing::button(at, false)]);
+        assert!(
+            matches!(wanted, Some(Wanted::Act(Act::ShowTab(Spot::Keyboard)))),
+            "the card asked for something else"
+        );
+    }
+
     /// How tall the start cards stand on a screen `width` wide, once they have settled.
     fn cards_tall(ctx: &egui::Context, width: f32) -> f32 {
         let mut tall = 0.0;
@@ -1235,7 +1300,7 @@ mod tests {
             let _ = drawn_at(ctx, egui::vec2(width, 900.0), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let top = ui.cursor().top();
-                    starts(ui, true);
+                    starts(ui, Usb::Ready);
                     tall = ui.cursor().top() - top;
                 });
             });
@@ -1265,13 +1330,13 @@ mod tests {
             let size = egui::vec2(width, least.y);
             for _ in 0..3 {
                 let _ = drawn_at(&ctx, size, |ctx| {
-                    welcome(ctx, true);
+                    welcome(ctx, Usb::Ready);
                 });
             }
             let rects: Vec<(&str, egui::Rect)> = STARTS
                 .iter()
                 .map(|start| {
-                    let label = start.card().label;
+                    let label = start.card(Usb::Ready).label;
                     let rect = ctx
                         .read_response(card_id(label))
                         .unwrap_or_else(|| panic!("{label} was never laid out at {width}"))

@@ -113,7 +113,7 @@ fn shape(entity: &LocalEntity) -> Shape {
         if encode::is_wav(&entity.bytes) {
             return Shape::Wav;
         }
-        return match entity.is_text {
+        return match entity.is_text() {
             true => Shape::Text,
             false => Shape::Undecoded,
         };
@@ -2026,6 +2026,29 @@ mod tests {
             left.iter().any(|(_, rect)| rect.top() >= row_bottom - 1.0),
             "at 720 px something has to wrap: {header:?}"
         );
+    }
+
+    /// The left group wraps only at the last stage. Until then the controls give up
+    /// their words first, however wide the kind's own boxes make the left group.
+    #[test]
+    fn a_header_wraps_its_left_group_only_once_the_controls_are_short() {
+        for width in (720..=1400).step_by(20) {
+            let mut open = Open::file("Test Piano.npno", piano_bytes());
+            open.width = width as f32;
+            open.frame(Vec::new());
+            let said = open.painted(Vec::new());
+            let row = testing::where_(&said, "Test Piano");
+            let size = said
+                .iter()
+                .find(|word| word.text.ends_with(" kB"))
+                .expect("the size is painted");
+            let wrapped = size.rect.top() > row.bottom();
+            let short = !said.iter().any(|word| word.text == "Queue send");
+            assert!(
+                !wrapped || short,
+                "at {width} px the size wrapped while the loud action kept its words"
+            );
+        }
     }
 
     /// The quiet actions go first, then the faces. The loud action keeps a short label

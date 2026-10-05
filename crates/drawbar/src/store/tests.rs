@@ -335,6 +335,69 @@ fn a_new_asset_is_a_file_that_comes_back_with_its_id_and_tags() {
     assert_eq!(second.bench.browser.tags.name_of(tag), Some("Sunday"));
 }
 
+/// A program kept under a name drawbar does not open is held through its index row, and
+/// counts toward neither the badge nor the status line.
+#[test]
+fn the_badge_and_the_status_count_the_same_files() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["Grand", "Organ.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut index = Sidecar {
+        next_id: 2,
+        tags: [(7, "Sunday".to_string())].into(),
+        ..Sidecar::default()
+    };
+    let origin = Origin::File("Grand".into());
+    let row = Row::of(LibPath::parse("Grand"), "", None, [7].into(), &origin, None);
+    index.assets.insert(1, row);
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    fs::write(root.at(exec::INDEX), sidecar::write(&index).unwrap()).unwrap();
+
+    let session = Session::open(&root);
+    assert_eq!(session.bench.workspace.listed().count(), 2, "both are held");
+    let badge = session
+        .bench
+        .browser
+        .folders
+        .count(None, &session.bench.workspace);
+    assert_eq!(badge, 1);
+    assert_eq!(
+        session.bench.log.status().1,
+        "1 file on this computer.",
+        "the status line counts what the badge counts"
+    );
+}
+
+/// The tree lists a folder's files by name, whether or not the index holds a row for one.
+#[test]
+fn a_file_with_an_index_row_sorts_by_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut first = Session::open(&root);
+    let keys = first.named("Keys.ne5p");
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(keys, tag, true);
+    first.close();
+    assert_eq!(rows(&root).len(), 1, "only the tagged file has a row");
+
+    let second = Session::open(&root);
+    let Bench {
+        browser, workspace, ..
+    } = &second.bench;
+    let names: Vec<&str> = browser
+        .folders
+        .members(None, workspace)
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"]);
+}
+
 #[test]
 fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     let root = Temp::new();
@@ -369,6 +432,105 @@ fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
         root.names(".drawbar/working").is_empty(),
         "the working copy goes once the save has landed"
     );
+}
+
+/// A launch writes no new generation of an unsaved edit nothing has changed since it was
+/// kept, whether its file is there or went missing: a large piano would otherwise cost
+/// its size again at every launch.
+#[test]
+fn an_unchanged_working_copy_is_not_rewritten_at_launch() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let kept = first.create();
+    let gone = first.create();
+    first.sync();
+    for id in [kept, gone] {
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited, log);
+    }
+    first.close();
+    let path = rows(&root)[&gone].path.clone().expect("a file");
+    fs::remove_file(root.at(path.as_str())).unwrap();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 2, "{working:?}");
+
+    for launch in 0..2 {
+        let mut session = Session::open(&root);
+        assert!(session.bench.browser.folders.missing.contains(&gone));
+        session.autosave();
+        session.close();
+        assert_eq!(root.names(".drawbar/working"), working, "launch {launch}");
+    }
+}
+
+/// An edit that comes back to the bytes its working copy holds writes no new generation.
+#[test]
+fn an_edit_back_to_what_its_working_copy_holds_writes_no_new_one() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = session.bytes(id);
+    let edited = with_gain(&saved, "96");
+    for bytes in [&edited, &with_gain(&saved, "12"), &edited] {
+        let log = &mut session.bench.log;
+        session
+            .bench
+            .workspace
+            .replace_bytes(id, bytes.clone(), log);
+        if *bytes == edited {
+            session.autosave();
+        }
+    }
+    session.close();
+    assert_eq!(root.names(".drawbar/working"), [working_name(id, 1)]);
+}
+
+/// Saving an edit whose working copy holds exactly what the save writes moves that copy
+/// into place, over the file or where the file went missing, so the save takes no room of
+/// its own: the file is the copy's own data on disk.
+#[cfg(unix)]
+#[test]
+fn saving_an_unchanged_working_copy_promotes_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let kept = first.create();
+    let gone = first.create();
+    first.sync();
+    for id in [kept, gone] {
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited, log);
+    }
+    first.close();
+    let paths = |id| rows(&root)[&id].path.clone().expect("a file").to_string();
+    let (kept_at, gone_at) = (paths(kept), paths(gone));
+    fs::remove_file(root.at(&gone_at)).unwrap();
+    let inode = |path: &str| fs::metadata(root.at(path)).unwrap().ino();
+    let copies = |id| {
+        let copy = rows(&root)[&id].working.expect("a working copy");
+        format!(".drawbar/working/{}", working_name(id, copy.generation))
+    };
+    let copied = [
+        (kept_at, inode(&copies(kept))),
+        (gone_at, inode(&copies(gone))),
+    ];
+
+    let mut second = Session::open(&root);
+    let edits = [kept, gone].map(|id| second.bytes(id));
+    for id in [kept, gone] {
+        second.bench.workspace.mark_saved(id);
+    }
+    second.sync();
+    second.sync();
+    for ((path, copy), bytes) in copied.iter().zip(edits) {
+        assert_eq!(root.read(path), bytes, "{path} holds the edit");
+        assert_eq!(inode(path), *copy, "{path} is its working copy, moved");
+    }
+    assert_eq!(root.names(".drawbar/working"), [""; 0]);
 }
 
 /// A working copy that does not read is the only copy of its edit, so the library opens
@@ -589,6 +751,82 @@ fn a_library_without_its_index_opens_without_its_edits_when_asked() {
 
     let third = Session::open(&root);
     assert_eq!(third.store.read_only(), None);
+}
+
+/// An index that does not parse opens the library read-only, says so without the
+/// parser's words, and offers to set it aside. Set aside, it is kept under a new name,
+/// the library opens for writing without it, and the working copies it named are never
+/// swept or written over.
+#[test]
+fn a_damaged_index_can_be_set_aside_and_its_copies_survive() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+    let kept = root.names(".drawbar/working");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let damaged = b"(version: 1, next_id: 2, ass";
+    fs::write(root.at(exec::INDEX), damaged).unwrap();
+
+    let mut second = Session::open(&root);
+    let why = second.store.read_only().expect("read-only").to_string();
+    assert!(why.contains("damaged"), "{why}");
+    assert!(!why.contains("Expected") && !why.contains("Probe"), "{why}");
+    let (title, answers) = second.bench.browser.asking().expect("a question");
+    assert_eq!(title, "This library's index is damaged");
+    assert_eq!(
+        answers,
+        ["Keep read-only", "Set it aside and open without it…"]
+    );
+    let acts = second
+        .bench
+        .browser
+        .answer("Set it aside and open without it…");
+    second.bench.act(acts);
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Open the library without its index?");
+    let acts = second.bench.browser.answer("Open without it");
+    assert!(
+        matches!(
+            acts[..],
+            [crate::browser::Act::SetAside { confirmed: true }]
+        ),
+        "{acts:?}"
+    );
+    second.store.set_aside();
+    second.close();
+    assert_eq!(
+        root.names(".drawbar"),
+        ["library.ron.damaged-1", "lock", "tmp", "working"]
+    );
+    assert_eq!(root.read(".drawbar/library.ron.damaged-1"), damaged);
+
+    let mut third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+    assert_eq!(third.bench.browser.asking(), None, "nothing to ask");
+    let again = third.only();
+    let other = with_gain(&third.bytes(again), "12");
+    let log = &mut third.bench.log;
+    third.bench.workspace.replace_bytes(again, other, log);
+    third.close();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 2, "{working:?}");
+    assert!(working.contains(&kept[0]), "{working:?}");
+    assert_eq!(
+        root.read(&format!(".drawbar/working/{}", kept[0])),
+        edited,
+        "the kept copy is not written over"
+    );
+
+    Session::open(&root).close();
+    assert!(
+        root.names(".drawbar/working").contains(&kept[0]),
+        "an open with an index does not sweep it either"
+    );
 }
 
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
@@ -951,6 +1189,41 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
 }
 
 #[test]
+fn keep_both_writes_only_the_new_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = session.bytes(id);
+    let (mine, theirs) = (with_gain(&saved, "96"), with_gain(&saved, "12"));
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), &mut session.bench.log);
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(root.at("untitled.ne5p"))
+        .and_then(|file| file.set_modified(then))
+        .unwrap();
+    let modified = || {
+        fs::metadata(root.at("untitled.ne5p"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+
+    session.refocus();
+    let acts = session.bench.browser.answer("Keep both");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.read("untitled 2.ne5p"), mine);
+    assert_eq!(root.read("untitled.ne5p"), theirs);
+    assert_eq!(modified(), then, "theirs was written again");
+}
+
+#[test]
 fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -1261,6 +1534,95 @@ fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
+/// A commit that fails the same way at every retry is logged once, and logged again
+/// where it fails after one has landed.
+#[test]
+fn a_failure_every_retry_repeats_is_logged_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let tmp = root.at(".drawbar/tmp");
+    let block = || {
+        fs::remove_dir_all(&tmp).unwrap();
+        fs::write(&tmp, b"not a folder").unwrap();
+    };
+    let unblock = || {
+        fs::remove_file(&tmp).unwrap();
+        fs::create_dir(&tmp).unwrap();
+    };
+    let failed = "did not change as asked: keeping the library's index";
+
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    block();
+    session.bench.browser.tags.set(id, tag, true);
+    for _ in 0..3 {
+        session.sync();
+    }
+    assert_eq!(session.said(failed), 1, "logged once");
+
+    unblock();
+    session.sync();
+    assert_eq!(session.said(failed), 1, "the retry landed");
+
+    block();
+    session.bench.browser.tags.set(id, tag, false);
+    session.sync();
+    assert_eq!(session.said(failed), 2, "logged again after a landing");
+}
+
+/// A working copy that cannot be written at any retry is logged once, though each
+/// retry writes it under a new name, and the line names the file.
+#[test]
+fn a_working_copy_that_fails_at_every_retry_is_logged_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    fs::remove_dir_all(root.at(".drawbar/tmp")).unwrap();
+    fs::write(root.at(".drawbar/tmp"), b"not a folder").unwrap();
+    let edited = with_gain(&session.bytes(id), "96");
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, edited, log);
+    for _ in 0..3 {
+        session.sync();
+    }
+    let failed: Vec<&str> = session
+        .bench
+        .log
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .filter(|text| text.contains("did not change as asked"))
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].contains("writing .drawbar/working/"),
+        "{failed:?}"
+    );
+}
+
+/// A delete that fails the same way twice is logged twice: only a commit's retries are
+/// quiet.
+#[test]
+fn a_delete_that_fails_again_is_logged_again() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.create();
+    session.sync();
+    let failed = "did not change as asked: deleting untitled.ne5p";
+    for nth in 1..=2 {
+        let id = session.only();
+        // A file that changed on disk since drawbar read it is left.
+        let mut changed = root.read("untitled.ne5p");
+        changed.push(0);
+        fs::write(root.at("untitled.ne5p"), changed).unwrap();
+        let Bench { workspace, log, .. } = &mut session.bench;
+        workspace.remove(id, log);
+        session.sync();
+        assert_eq!(session.said(failed), nth);
+    }
+}
+
 /// After a write fails, every working copy is written again under a new name, and the
 /// ones they replace go.
 #[test]
@@ -1323,10 +1685,29 @@ fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
     );
     assert_eq!(
         root.names(".drawbar"),
-        ["library.ron", "tmp"],
-        "no lock taken"
+        ["library.ron", "lock", "tmp"],
+        "nothing but the lock"
     );
     assert_eq!(root.names(exec::TMP), ["theirs"], "nothing swept");
+}
+
+/// A drawbar that opens a library read-only, here for an index it must not read, holds
+/// no lock, so a drawbar that may write the library still can.
+#[test]
+fn a_library_opened_read_only_leaves_its_lock_to_a_drawbar_that_may_write_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let index = root.read(exec::INDEX);
+    fs::write(root.at(exec::INDEX), "(version: 99, next_id: 3)").unwrap();
+    let reading = Session::open(&root);
+    assert!(reading.store.read_only().is_some());
+
+    fs::write(root.at(exec::INDEX), index).unwrap();
+    let writing = Session::open(&root);
+    assert_eq!(writing.store.read_only(), None);
+    drop(reading);
 }
 
 #[test]
@@ -1339,6 +1720,40 @@ fn a_second_drawbar_on_one_library_only_reads_it() {
     assert_eq!(first.store.read_only(), None);
     let why = second.store.read_only().expect("read-only");
     assert!(why.contains("another drawbar"), "{why}");
+}
+
+/// An index another writer changed since this drawbar read or wrote it, here to one of
+/// the same length, is never written over: the commit writes nothing, not even its
+/// working copies, and the library turns read-only and says why.
+#[test]
+fn a_commit_over_an_index_changed_by_another_writer_stops() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.sync();
+    let ours = String::from_utf8(root.read(exec::INDEX)).unwrap();
+    let theirs = ours.replace("Sunday", "Monday");
+    assert_eq!(theirs.len(), ours.len());
+    fs::write(root.at(exec::INDEX), &theirs).unwrap();
+
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    session.bench.browser.tags.make("Later").unwrap();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Full);
+    session.until(|session| session.store.read_only().is_some());
+    let why = session.store.read_only().unwrap();
+    assert!(why.contains("another drawbar changed"), "{why}");
+    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
+    assert_eq!(root.names(".drawbar/working"), [""; 0], "nothing written");
 }
 
 /// Two drawbars can open a folder neither has written, since opening takes no lock. The
@@ -1502,6 +1917,40 @@ fn a_file_that_cannot_be_looked_at_is_shown_unread_and_the_library_opens() {
         .map(|(path, _)| path.as_str())
         .collect();
     assert_eq!(unread, ["Cello/c3.ne5p"]);
+}
+
+/// A rescan that finds several changes made outside drawbar says each in the log and all
+/// of them in the status line; one delete or move is said by its own line.
+#[test]
+fn a_rescan_reports_what_changed() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for (name, gain) in [("Bass.ne5p", "10"), ("Keys.ne5p", "20"), ("Pad.ne5p", "30")] {
+        fs::write(root.at(name), with_gain(&program, gain)).unwrap();
+    }
+    Session::open(&root).close();
+    let mut session = Session::open(&root);
+    fs::write(root.at("Lead.ne5p"), with_gain(&program, "40")).unwrap();
+    fs::remove_file(root.at("Bass.ne5p")).unwrap();
+    fs::rename(root.at("Keys.ne5p"), root.at("Organ.ne5p")).unwrap();
+    session.refocus();
+
+    assert_eq!(session.said("“Bass.ne5p” was deleted outside drawbar."), 1);
+    assert_eq!(
+        session.said("“Keys.ne5p” was moved to Organ.ne5p outside drawbar"),
+        1
+    );
+    assert_eq!(
+        session.bench.log.status().1,
+        "Outside drawbar, 1 file appeared, 1 was deleted and 1 was moved."
+    );
+
+    fs::remove_file(root.at("Pad.ne5p")).unwrap();
+    session.refocus();
+    assert_eq!(
+        session.bench.log.status().1,
+        "“Pad.ne5p” was deleted outside drawbar."
+    );
 }
 
 /// An asset deleted while its first write is in flight loses its file once that write
@@ -1692,6 +2141,37 @@ fn two_assets_one_name_apart_in_case_are_flagged_both() {
     assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
 }
 
+/// The pair is flagged on every disk, since a library copied to one that ignores case
+/// could hold only one of them, and the warning claims nothing about this disk.
+#[test]
+fn two_names_differing_only_by_case_are_flagged_without_claiming_the_disk_ignores_case() {
+    let Bench {
+        mut workspace,
+        mut browser,
+        mut log,
+        ..
+    } = Bench::new();
+    for name in ["Case.ne5p", "case.ne5p"] {
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        workspace.place(id, LibPath::root().join(name));
+    }
+    let before = log.iter().count();
+    mirror::flag_duplicates(&workspace, &mut browser, &mut log);
+    let said: Vec<&str> = log
+        .iter()
+        .skip(before)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "“Case.ne5p” and “case.ne5p” in the library differ only by case and would collide \
+          on macOS or Windows; rename one of them."
+        ]
+    );
+    assert_eq!(browser.folders.duplicates.len(), 2);
+}
+
 #[test]
 fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     let root = Temp::new();
@@ -1706,9 +2186,9 @@ fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     let mut session = Session::open(&root);
     assert_eq!(session.bench.workspace.listed().count(), 2);
     assert_eq!(session.bench.browser.folders.duplicates.len(), 2);
-    assert_eq!(session.said("are one name on a disk that ignores case"), 1);
+    assert_eq!(session.said("differ only by case"), 1);
     session.refocus();
-    assert_eq!(session.said("are one name"), 1, "said once");
+    assert_eq!(session.said("differ only by case"), 1, "said once");
     session.close();
     assert_eq!(
         root.names(""),
@@ -1786,7 +2266,44 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
     assert_eq!(sidecar::read(&text), Read::Known(index));
 
     assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
-    assert!(matches!(sidecar::read("not an index"), Read::Unreadable(_)));
+    assert_eq!(sidecar::read("not an index"), Read::Unreadable);
+}
+
+/// A field or a kind this build does not know, at any depth, is what a newer drawbar that
+/// kept the version wrote, and never taken for a damaged index.
+#[test]
+fn an_index_holding_what_this_build_does_not_know_is_known_as_that() {
+    for text in [
+        "(version: 1, next_id: 2, colors: {})",
+        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), color: 3)})"#,
+        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), fingerprint: Some((len: 1, modified: None, crc: None, sha: 0)))})"#,
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Shared(4))})",
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Rescued(bank: 0, slot: 1, page: 2))})",
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", working: Some((generation: 1, keeps: Bytes, at: 0)))})",
+    ] {
+        assert_eq!(sidecar::read(text), Read::Unknown, "{text}");
+    }
+}
+
+/// An index a newer drawbar wrote under this build's version, holding a field this one
+/// does not know, opens the library read-only, and the field survives.
+#[test]
+fn an_index_with_an_unknown_field_opens_read_only() {
+    let root = Temp::new();
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    let theirs = "(version: 1, next_id: 3, colors: {1: \"red\"})";
+    fs::write(root.at(exec::INDEX), theirs).unwrap();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+
+    let mut session = Session::open(&root);
+    let why = session.store.read_only().expect("read-only");
+    assert!(why.contains("newer drawbar"), "{why}");
+    let id = session.only();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.create();
+    session.close();
+    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
 }
 
 /// An asset made with New keeps saying so once its file is written and drawbar opens
@@ -5064,6 +5581,36 @@ fn a_folder_left_mid_rename_beside_one_of_its_name_stays_and_is_named() {
     assert_eq!(held, ["CELLO", "cello.1.drawbar-move"]);
     assert_eq!(root.names("Gigs/cello.1.drawbar-move"), ["Grand.ne5p"]);
     assert_eq!(second.said("interrupted rename"), 1);
+}
+
+/// A file an interrupted case-only rename left under the name it moved through is put
+/// back at open: under its row's spelling, keeping its tag, and, with no row, under its
+/// own name at the top level.
+#[test]
+fn a_file_left_mid_rename_is_put_back() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Gigs")).unwrap();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Gigs/Grand.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.only();
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(grand, tag, true);
+    first.autosave();
+    first.close();
+    fs::rename(
+        root.at("Gigs/Grand.ne5p"),
+        root.at("Gigs/grand.ne5p.1.drawbar-move"),
+    )
+    .unwrap();
+    fs::write(root.at("solo.ne5p.1.drawbar-move"), &program).unwrap();
+
+    let second = Session::open(&root);
+    assert_eq!(root.names("Gigs"), ["Grand.ne5p"]);
+    assert!(root.names("").contains(&"solo.ne5p".to_string()));
+    assert_eq!(second.path(grand).as_deref(), Some("Gigs/Grand.ne5p"));
+    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
+    assert_eq!(second.said("interrupted rename"), 0);
 }
 
 #[test]

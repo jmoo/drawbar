@@ -106,8 +106,8 @@ impl Face {
 /// How much of the header fits, measured on the header's own width.
 ///
 /// The collapse order, widest first: the quiet actions lose their words, then the faces
-/// lose theirs, then the loud action keeps only its number. The identity row wraps after
-/// all three.
+/// lose theirs, then the loud action keeps only its number. The left group wraps only
+/// at the last stage, and the identity row after all three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Full,
@@ -116,15 +116,60 @@ pub enum Stage {
     Narrow,
 }
 
-/// The three widths the strip changes shape at.
+/// The least widths of [`Stage::Full`], [`Stage::Quiet`] and [`Stage::Faces`].
 const BREAKPOINTS: [f32; 3] = [1000.0, 860.0, 720.0];
 
-pub fn stage(width: f32) -> Stage {
-    match width {
-        width if width >= BREAKPOINTS[0] => Stage::Full,
-        width if width >= BREAKPOINTS[1] => Stage::Quiet,
-        width if width >= BREAKPOINTS[2] => Stage::Faces,
-        _ => Stage::Narrow,
+/// The widest stage whose least width in `least` is `width` or under.
+fn staged(width: f32, least: &[f32; 3]) -> Stage {
+    [Stage::Full, Stage::Quiet, Stage::Faces]
+        .into_iter()
+        .zip(least)
+        .find(|(_, least)| width >= **least)
+        .map_or(Stage::Narrow, |(stage, _)| stage)
+}
+
+/// The least widths a header has learned, and a fingerprint of the left group they
+/// were learned for.
+///
+/// Whether the left group wraps depends on what it holds, which differs by kind, by
+/// document and over time, so each header learns its own and starts again from
+/// [`BREAKPOINTS`] whenever the left group changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Learned {
+    shows: u64,
+    least: [f32; 3],
+}
+
+impl Default for Learned {
+    fn default() -> Learned {
+        Learned {
+            shows: 0,
+            least: BREAKPOINTS,
+        }
+    }
+}
+
+impl Learned {
+    /// Take in a frame drawn at `stage` and `width`, whose left group `shows` this
+    /// fingerprint and did or did not wrap. Returns whether `width` now gets another
+    /// stage, so the frame is worth drawing again.
+    fn frame(&mut self, shows: u64, stage: Stage, width: f32, wrapped: bool) -> bool {
+        if self.shows != shows {
+            *self = Learned {
+                shows,
+                ..Learned::default()
+            };
+        }
+        let index = match stage {
+            Stage::Full => Some(0),
+            Stage::Quiet => Some(1),
+            Stage::Faces => Some(2),
+            Stage::Narrow => None,
+        };
+        if let (true, Some(index)) = (wrapped, index) {
+            self.least[index] = self.least[index].max(width + 1.0);
+        }
+        staged(width, &self.least) != stage
     }
 }
 
@@ -263,7 +308,10 @@ pub(super) fn ui(
     boxes: (&mut String, &mut String),
     sets: &mut Sets,
 ) -> Clicked {
-    let stage = stage(ui.available_width());
+    let width = ui.available_width();
+    let key = ui.id().with(("least widths", entity.id));
+    let mut learned: Learned = ui.data(|data| data.get_temp(key)).unwrap_or_default();
+    let stage = staged(width, &learned.least);
     let cells = identity(entity, facts.tags);
     let visuals = ui.visuals().clone();
     let mut act = Clicked::default();
@@ -282,12 +330,18 @@ pub(super) fn ui(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             ui.spacing_mut().interact_size.y = CONTROL;
-            strip(
+            let mut shows = 0;
+            let wrapped = strip(
                 ui,
                 &mut act,
                 |rhs, act| right(rhs, entity, facts, stage, act),
-                |lhs, act| left(lhs, entity, facts, boxes, sets, act),
+                |lhs, act| shows = left(lhs, entity, facts, boxes, sets, act),
             );
+            let restage = learned.frame(shows, stage, width, wrapped);
+            ui.data_mut(|data| data.insert_temp(key, learned));
+            if restage {
+                ui.ctx().request_discard("header restaged");
+            }
             if !cells.is_empty() {
                 row(ui, &cells, stage);
             }
@@ -302,7 +356,7 @@ pub(super) fn ui(
 
 /// One row of the strip. The right-hand group takes the width it needs at the right
 /// edge. The left-hand group gets the rest and wraps onto a second line when it runs
-/// out of room, so it never runs under the controls.
+/// out of room, so it never runs under the controls. Whether it wrapped is returned.
 ///
 /// The right group is laid out first because its width decides the left group's room.
 fn strip<T>(
@@ -310,7 +364,7 @@ fn strip<T>(
     state: &mut T,
     right: impl FnOnce(&mut egui::Ui, &mut T),
     left: impl FnOnce(&mut egui::Ui, &mut T),
-) {
+) -> bool {
     let row = egui::Rect::from_min_size(
         ui.cursor().min,
         egui::vec2(ui.available_width(), HEIGHT - 8.0),
@@ -332,9 +386,11 @@ fn strip<T>(
     lhs.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
     left(&mut lhs, state);
     ui.advance_cursor_after_rect(lhs.min_rect().union(taken).union(row));
+    lhs.min_rect().bottom() > row.bottom()
 }
 
-/// The kind, the name, the format, the place, the size and the state.
+/// The kind, the name, the format, the place, the size and the state, and a
+/// fingerprint of the words among them, which decide how wide they are.
 fn left(
     ui: &mut egui::Ui,
     entity: &LocalEntity,
@@ -342,7 +398,9 @@ fn left(
     boxes: (&mut String, &mut String),
     sets: &mut Sets,
     act: &mut Clicked,
-) {
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut shows = std::hash::DefaultHasher::new();
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
     let glyph = Kind::of(entity).glyph();
@@ -350,8 +408,10 @@ fn left(
 
     let (held, stored) = named(entity, facts.shape, facts.view, facts.renaming.clone());
     act.rename = name(ui, entity, &held, &stored, boxes, sets);
+    (&stored, &facts.renaming).hash(&mut shows);
 
     let (badge, hint) = badge(entity);
+    badge.hash(&mut shows);
     let drawn = pill(
         ui,
         Pill {
@@ -375,7 +435,9 @@ fn left(
         drawn.on_hover_text(hint);
     }
 
-    mono(ui, &lives(entity), quiet).on_hover_text(entity.origin.label());
+    let place = lives(entity);
+    place.hash(&mut shows);
+    mono(ui, &place, quiet).on_hover_text(entity.origin.label());
 
     let own = sized(entity);
     if let Some(size) = facts.extras.size.as_ref().or(own.as_ref()) {
@@ -388,12 +450,15 @@ fn left(
         if !size.hint.is_empty() {
             drawn.on_hover_text(&size.hint);
         }
+        size.text.hash(&mut shows);
     }
 
     if let Some(state) = state(entity, facts) {
         let ink = state.ink.color(&visuals);
         claim(ui, &state.words, ink).on_hover_text(&state.hint);
+        state.words.hash(&mut shows);
     }
+    shows.finish()
 }
 
 /// The state dot and its phrase as one widget, so a wrapping row keeps them on the same
@@ -1299,8 +1364,38 @@ mod tests {
         );
     }
 
+    /// A header learns the width its left group wrapped at, and forgets it once the left
+    /// group changes, so a phrase that was wide for a moment does not keep the controls
+    /// short.
+    #[test]
+    fn a_header_forgets_a_wrap_once_its_left_group_changes() {
+        let mut learned = Learned::default();
+        assert!(
+            learned.frame(1, Stage::Full, 1400.0, true),
+            "a wrap redraws"
+        );
+        assert_eq!(staged(1400.0, &learned.least), Stage::Quiet);
+        assert!(
+            !learned.frame(1, Stage::Quiet, 1400.0, false),
+            "then settles"
+        );
+
+        assert!(
+            learned.frame(2, Stage::Quiet, 1400.0, false),
+            "a change redraws"
+        );
+        assert_eq!(staged(1400.0, &learned.least), Stage::Full);
+
+        let mut narrow = Learned::default();
+        assert!(
+            !narrow.frame(1, Stage::Narrow, 600.0, true),
+            "the last stage has no stage after it"
+        );
+    }
+
     #[test]
     fn each_breakpoint_belongs_to_the_stage_above_it() {
+        let stage = |width| staged(width, &BREAKPOINTS);
         assert_eq!(stage(1600.0), Stage::Full);
         assert_eq!(stage(1000.0), Stage::Full);
         assert_eq!(stage(999.0), Stage::Quiet);

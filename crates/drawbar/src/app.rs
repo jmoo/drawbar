@@ -622,12 +622,18 @@ impl DrawbarApp {
     fn rescue(&mut self, ctx: &egui::Context, acts: Vec<browser::Act>) -> Vec<browser::Act> {
         let mut rest = Vec::new();
         for act in acts {
-            if let browser::Act::DropUnindexed {
-                confirmed: true, ..
-            } = act
-            {
-                self.drop_unindexed(ctx);
-                continue;
+            match act {
+                browser::Act::DropUnindexed {
+                    confirmed: true, ..
+                } => {
+                    self.reopen(ctx, Store::drop_unindexed);
+                    continue;
+                }
+                browser::Act::SetAside { confirmed: true } => {
+                    self.reopen(ctx, Store::set_aside);
+                    continue;
+                }
+                _ => {}
             }
             let browser::Act::Rescue(rescue, what) = act else {
                 rest.push(act);
@@ -650,13 +656,13 @@ impl DrawbarApp {
         rest
     }
 
-    /// Delete the working copies of the open library, whose index is missing, and open it
-    /// again without them. The open library runs the deletion before it lets go.
-    fn drop_unindexed(&mut self, ctx: &egui::Context) {
+    /// Send `fix` to the open library, which opened read-only, and open it again. The
+    /// open library runs what `fix` sent before it lets go.
+    fn reopen(&mut self, ctx: &egui::Context, fix: fn(&mut Store)) {
         let Some(store) = self.store.as_mut() else {
             return;
         };
-        store.drop_unindexed();
+        fix(store);
         let root = store.root().to_owned();
         self.switch_library(ctx, root);
     }
@@ -684,11 +690,8 @@ impl DrawbarApp {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !root.is_dir() {
-            self.log.trouble(format!(
-                "{} is not a folder drawbar can open as the library.",
-                root.display()
-            ));
+        if let Err(why) = crate::store::openable(&root, crate::store::default_root().as_deref()) {
+            self.log.trouble(why);
             return;
         }
         let unkept = self
@@ -964,7 +967,7 @@ impl eframe::App for DrawbarApp {
         if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
             self.tabs.open(made);
         }
-        let asked = self.splash.show(ctx, self.device.usb());
+        let asked = self.splash.show(ctx, crate::splash::Usb::of(&self.device));
         crate::about::dialog(ctx, &mut self.about, &self.log);
         crate::report::dialog(ctx, &mut self.report, &self.log);
 
@@ -1541,6 +1544,20 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the library did not open");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn opening_another_library_replaces_the_count_of_the_last() {
+        let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        std::fs::write(first.at("Grand.ne5p"), program).unwrap();
+        let (ctx, mut app) = opened_over(&first);
+        assert_eq!(app.log.status().1, "1 file on this computer.");
+
+        app.open_library(&ctx, second.0.clone(), false);
+        until_open(&ctx, &mut app);
+        assert_eq!(app.log.status().1, "No files on this computer.");
     }
 
     /// Switching writes the library open until then, its unsaved edit as a working copy

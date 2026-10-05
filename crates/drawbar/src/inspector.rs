@@ -9,6 +9,8 @@
 //! Nothing here asks for data the rest of the app does not already have; a card with no
 //! data says so.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use eframe::egui;
 
 use nord_usb::wire::Dependency;
@@ -288,12 +290,12 @@ impl Shown {
         device: &Device,
         queue: &Queue,
     ) -> Shown {
-        let checked: Vec<Item> = browser.picked().items().collect();
-        let locals = browser.picked().locals();
+        let checked = as_listed(browser.picked().items(), workspace);
+        let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
         let (about, going) = match checked.len() {
             0 => (About::Nothing, None),
             many if many > MANY => (About::Several(summed(&checked, workspace, device)), None),
-            picked => {
+            _ => {
                 let rows: Vec<Row> = checked
                     .iter()
                     .filter_map(|item| {
@@ -305,7 +307,7 @@ impl Shown {
                     &device.state,
                     queue,
                 );
-                (about(picked, &rows, workspace, device), going)
+                (about(&checked, &rows, browser, workspace, device), going)
             }
         };
         let offers = Bulk::ALL
@@ -404,12 +406,15 @@ pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
     said
 }
 
-/// The summary of a multiple selection: how many rows are picked, how many are unsaved,
-/// and how many are on the keyboard.
+/// The summary of a multiple selection: how many rows are picked, and of the assets among
+/// them, how many are unsaved and how many are on the keyboard.
 ///
-/// ⚠️ `picked` counts the rows the browser holds; the other two count only assets, which
+/// ⚠️ `picked` counts the rows the browser holds; `rows` holds only assets, which
 /// excludes folder and tag rows.
 pub fn tally(picked: usize, rows: &[Row]) -> String {
+    if rows.is_empty() {
+        return format!("{picked} selected");
+    }
     let unsaved = rows.iter().filter(|row| row.unsaved).count();
     let keyboard = rows
         .iter()
@@ -419,7 +424,19 @@ pub fn tally(picked: usize, rows: &[Row]) -> String {
 }
 
 /// The facts about one picked row, or a summary of several.
-fn about(picked: usize, rows: &[Row], workspace: &Workspace, device: &Device) -> About {
+fn about(
+    checked: &[Item],
+    rows: &[Row],
+    browser: &Browser,
+    workspace: &Workspace,
+    device: &Device,
+) -> About {
+    let picked = checked.len();
+    if let [item] = checked {
+        if let Some(facts) = grouping(*item, browser, workspace) {
+            return About::One(facts);
+        }
+    }
     let [row] = rows else {
         return About::Several(vec![tally(picked, rows)]);
     };
@@ -434,6 +451,49 @@ fn about(picked: usize, rows: &[Row], workspace: &Workspace, device: &Device) ->
         .map(|entity| fit(&device.state, entity))
         .unwrap_or(Fit::Unattached);
     About::One(facts(row, &held))
+}
+
+/// The facts about a folder or a tag: its name, and how many files are in it or wear it.
+fn grouping(item: Item, browser: &Browser, workspace: &Workspace) -> Option<Vec<Fact>> {
+    let (name, kind, files) = match item {
+        Item::Folder(id) => (
+            browser.folders.name_of(id)?,
+            "folder",
+            browser.folders.count(Some(id), workspace),
+        ),
+        Item::Tag(id) => (browser.tags().name_of(id)?, "tag", browser.tags().count(id)),
+        Item::Local(_) | Item::Slot { .. } => return None,
+    };
+    let fact = |what, said: String| Fact {
+        what,
+        said,
+        hint: None,
+    };
+    Some(vec![
+        fact("name", name.to_string()),
+        fact("kind", kind.to_string()),
+        fact("files", files.to_string()),
+    ])
+}
+
+/// The selection as the library's table shows it: a slot that an asset on this computer
+/// stands for is that asset's row.
+fn as_listed(items: impl Iterator<Item = Item>, workspace: &Workspace) -> Vec<Item> {
+    let items: Vec<Item> = items.collect();
+    if !items.iter().any(|item| matches!(item, Item::Slot { .. })) {
+        return items;
+    }
+    let mut spots = BTreeMap::new();
+    for entity in workspace.listed() {
+        if let Some((class, at)) = entity.spot() {
+            spots.entry(Item::Slot { class, at }).or_insert(entity.id);
+        }
+    }
+    let listed: BTreeSet<Item> = items
+        .into_iter()
+        .map(|item| spots.get(&item).map_or(item, |id| Item::Local(*id)))
+        .collect();
+    listed.into_iter().collect()
 }
 
 /// A selection too large to describe row by row: how many rows, how many bytes, and how
@@ -1085,8 +1145,99 @@ mod tests {
         ];
         assert_eq!(tally(3, &rows), "3 selected, 1 unsaved, 2 on the keyboard");
 
-        // A picked folder is not an asset, so it counts only as picked.
-        assert_eq!(tally(1, &[]), "1 selected, 0 unsaved, 0 on the keyboard");
+        // Folders and tags are not assets, so they count only as picked.
+        assert_eq!(tally(2, &[]), "2 selected");
+    }
+
+    /// One frame of the inspector over the bench, and every word it painted.
+    fn inspected(bench: &mut Bench) -> Vec<String> {
+        let input = testing::screen(egui::vec2(800.0, 900.0), Vec::new());
+        let output = testing::run(&bench.ctx, input, |ctx| {
+            egui::SidePanel::right("inspector")
+                .exact_width(crate::shell::INSPECTOR)
+                .show(ctx, |panel| {
+                    let Bench {
+                        shell,
+                        browser,
+                        workspace,
+                        device,
+                        queue,
+                        ..
+                    } = bench;
+                    super::ui(panel, shell, browser, workspace, device, queue);
+                });
+        });
+        testing::words(&output)
+    }
+
+    #[test]
+    fn a_folder_selection_is_not_summarized_as_an_asset() {
+        let mut bench = Bench::new();
+        let root = crate::store::LibPath::root();
+        let folder = bench.browser.folders.make(&root, &bench.workspace);
+        let dir = bench.browser.folders.path_of(folder).unwrap().clone();
+        for name in ["Grand.ne5p", "Upright.ne5p"] {
+            let id = bench
+                .workspace
+                .create(Fresh::Program, &mut bench.log)
+                .unwrap();
+            bench.workspace.place(id, dir.join(name));
+        }
+        let tag = bench.browser.tags.make("Sunday").unwrap();
+
+        for (item, name, kind, files) in [
+            (Item::Folder(folder), "New folder", "folder", "2"),
+            (Item::Tag(tag), "Sunday", "tag", "0"),
+        ] {
+            bench.browser.check(item);
+            let said = inspected(&mut bench);
+            for word in [name, kind, files] {
+                assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
+            }
+            assert!(
+                !said.iter().any(|word| word.contains("selected")),
+                "{kind} is described, not counted: {said:?}"
+            );
+            bench.browser.check(item);
+        }
+    }
+
+    #[test]
+    fn a_slot_copied_here_is_described_as_the_asset_it_became() {
+        let mut bench = Bench::new();
+        let (class, at) = (ObjectClass::Program, Location { bank: 6, slot: 0 });
+        let bytes = Fresh::Program.bytes().unwrap();
+        let origin = || crate::workspace::Origin::Device { class, at };
+        let mut scratch = Workspace::new(bench.ctx.clone());
+        let held = scratch.ingest("x".into(), origin(), bytes.clone(), &mut bench.log);
+        let crc = scratch.get(held).unwrap().saved.crc32().unwrap();
+        bench
+            .device
+            .pretend_bodies(class, 7, &[Some(("Africa Split", crc))]);
+        bench.browser.check(Item::Slot { class, at });
+        let copy = |bench: &Bench| {
+            let shown = bench.shell.picked.shown.as_ref().unwrap();
+            let mut offers = shown.offers.iter();
+            offers
+                .find(|(action, _)| *action == Bulk::Copy)
+                .unwrap()
+                .1
+                .live
+        };
+
+        let said = inspected(&mut bench);
+        assert!(said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(copy(&bench), "a slot on the keyboard only can be copied");
+
+        let name = "Africa Split.ne5p".to_string();
+        bench
+            .workspace
+            .ingest(name, origin(), bytes, &mut bench.log);
+        bench.device.relink(&mut bench.workspace);
+        let said = inspected(&mut bench);
+        assert!(said.iter().any(|word| word.starts_with("both")), "{said:?}");
+        assert!(!said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(!copy(&bench), "a copy is already on this computer");
     }
 
     /// ⚠️ Every class is addressed by the same banks and slots, so the sample at a

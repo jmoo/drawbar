@@ -684,6 +684,11 @@ pub const OUT_OF_RANGE: u32 = 0x3;
 /// [overwrite in place](ObjectClass::overwrites_in_place). Confirmed on hardware.
 pub const OCCUPIED: u32 = 0x4;
 
+/// Device status refusing a library write named as another object of that library
+/// already is. The names are compared exactly, case included, and the slot written to
+/// makes no difference. Confirmed on hardware.
+pub const NAME_TAKEN: u32 = 0x18;
+
 /// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
 /// walking forward, its last when walking backward.
 pub const SLOT_BOUNDARY: u32 = 0xffff_ffff;
