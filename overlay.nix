@@ -496,9 +496,13 @@ let
   # The GitHub Pages tree: the browser build at the root, the guide under /docs.
   # Copies, not links: the tree leaves the store as a tarball.
   # `web` is a parameter so the deployed tree can pair a released bundle with
-  # this checkout's guide; scripts/site.bash overrides it.
+  # this checkout's guide; scripts/site.bash overrides it, and passes the release
+  # before it as `previous`.
   site = makeOverridable (
-    { web }:
+    {
+      previous ? null,
+      web,
+    }:
     final.runCommand "drawbar-site-${web.version}"
       {
         meta.description = "drawbar and its guide, laid out for GitHub Pages";
@@ -518,6 +522,13 @@ let
             exit 1
           }
         done
+
+        ${optionalString (previous != null) ''
+          # A page cached before a deploy names the modules of the release before,
+          # which stay beside the new ones under their own hashed names.
+          chmod -R u+w "$out/pkg"
+          cp -rL --update=none ${previous}/pkg/. "$out/pkg/"
+        ''}
       ''
   ) { web = drawbar-web; };
 

@@ -579,16 +579,29 @@ fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
     let root = Temp::new();
     fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut session = Session::open(&root);
-    assert!(!session.store.losing(&session.bench.workspace), "listed");
+    assert!(
+        !session
+            .store
+            .losing(&session.bench.workspace, &session.bench.browser),
+        "listed"
+    );
     let id = session.only();
     let edited = with_gain(&session.bytes(id), "96");
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.replace_bytes(id, edited, log);
-    assert!(session.store.losing(&session.bench.workspace), "edited");
+    assert!(
+        session
+            .store
+            .losing(&session.bench.workspace, &session.bench.browser),
+        "edited"
+    );
     session.autosave();
 
     let started = std::time::Instant::now();
-    while session.store.losing(&session.bench.workspace) {
+    while session
+        .store
+        .losing(&session.bench.workspace, &session.bench.browser)
+    {
         assert!(started.elapsed().as_secs() < 10, "the disk never caught up");
         std::thread::yield_now();
     }
@@ -605,7 +618,12 @@ fn a_library_only_read_is_never_losing() {
     let root = Temp::new();
     programs(&root, 300);
     let mut session = Session::opening(&root);
-    let losing = |session: &Session| session.store.losing(&session.bench.workspace);
+    let losing = |session: &Session| {
+        let Bench {
+            workspace, browser, ..
+        } = &session.bench;
+        session.store.losing(workspace, browser)
+    };
     assert!(!losing(&session), "while listing");
     session.listed_whole();
 
@@ -1016,6 +1034,37 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     assert_eq!(again.path(id).as_deref(), Some("Pianos/Grand.ne5p"));
     assert!(again.bench.browser.tags.worn(id).contains(&tag));
     assert_eq!(again.bench.workspace.listed().count(), 1);
+}
+
+/// A browser can hear the user leave and come back between two frames, as when a frame
+/// is not drawn while the tab is hidden. The library still rescans on the return.
+#[test]
+fn coming_back_to_a_picked_folder_rescans_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let mut presence = crate::presence::Presence::default();
+    session.store.focus(presence.read());
+
+    presence.heard(false);
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    presence.heard(true);
+    session.store.focus(presence.read());
+    assert!(
+        !session.store.scanning(),
+        "away for the frame that read the return"
+    );
+    session.store.focus(presence.read());
+    assert!(session.store.scanning(), "back at the next frame");
+    while session.store.scanning() {
+        assert!(session.next(), "the rescan answered");
+    }
+    let names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Grand.ne5p"]);
 }
 
 /// A file with a tag that nothing has read is read in the background once the library is
@@ -1704,6 +1753,72 @@ fn a_library_opened_read_only_leaves_its_lock_to_a_drawbar_that_may_write_it() {
     let writing = Session::open(&root);
     assert_eq!(writing.store.read_only(), None);
     drop(reading);
+}
+
+/// A read-only library holds each change in memory only, so a tab on it asks before it
+/// closes, as it does for an unsaved edit. Reading it, and changes made outside it, do
+/// not.
+#[test]
+fn leaving_with_held_changes_asks_first() {
+    use crate::browser::Act;
+
+    let root = Temp::new();
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    fs::write(root.at(exec::INDEX), "(version: 99)").unwrap();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let frame = |session: &mut Session| session.until(|_| true);
+    let losing = |session: &Session| {
+        let Bench {
+            workspace, browser, ..
+        } = &session.bench;
+        session.store.losing(workspace, browser)
+    };
+    type Change = fn(&mut Session, u64);
+    let changes: [(&str, Change); 5] = [
+        ("a deletion", |session, id| {
+            session.bench.act(vec![Act::Remove(id)])
+        }),
+        ("a save", |session, id| {
+            let edited = with_gain(&session.bytes(id), "96");
+            let Bench { workspace, log, .. } = &mut session.bench;
+            workspace.replace_bytes(id, edited, log);
+            session.bench.act(vec![Act::SaveDoc(id)]);
+            assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+        }),
+        ("a rename", |session, id| {
+            let name = "Organ".to_string();
+            session.bench.act(vec![Act::RenameLocal { id, name }]);
+        }),
+        ("a tag", |session, id| {
+            let tag = session.bench.browser.tags.make("Sunday").unwrap();
+            session.bench.act(vec![Act::Tag { ids: vec![id], tag }]);
+        }),
+        ("a new folder", |session, _| {
+            session.bench.act(vec![Act::NewFolder])
+        }),
+    ];
+    for (change, make) in changes {
+        let mut session = Session::open(&root);
+        assert!(session.store.read_only().is_some());
+        frame(&mut session);
+        fs::write(root.at("Outside.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+        session.refocus();
+        frame(&mut session);
+        assert!(!losing(&session), "{change}: nothing is held before it");
+
+        let id = session.named("Grand.ne5p");
+        make(&mut session, id);
+        assert!(losing(&session), "{change}: held in the frame that made it");
+        frame(&mut session);
+        session.refocus();
+        assert!(losing(&session), "{change}: still held");
+        fs::remove_file(root.at("Outside.ne5p")).unwrap();
+    }
+    assert_eq!(
+        root.read(exec::INDEX),
+        b"(version: 99)",
+        "nothing was written"
+    );
 }
 
 #[test]

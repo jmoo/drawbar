@@ -36,6 +36,10 @@ const LOG: usize = 60_000;
 /// How long to wait before trying again once a send found no one, in seconds.
 const RETRY: f64 = 15.0;
 
+/// How long a send may go unanswered before it counts as finding no one, in seconds. A
+/// late answer is dropped, and the retry carries the same id, so the report arrives once.
+const PATIENCE: f64 = 20.0;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Problem,
@@ -61,7 +65,10 @@ impl Kind {
 /// Where the send is.
 enum State {
     Drafting,
-    Sending(Arc<Mutex<Option<Result<(), Undelivered>>>>),
+    Sending {
+        answer: Arc<Mutex<Option<Result<(), Undelivered>>>>,
+        since: f64,
+    },
     /// The collector could not be reached; the draft is kept and sent again once the
     /// browser is online and [`RETRY`] has passed.
     Waiting {
@@ -135,28 +142,33 @@ impl Report {
         let slot = Arc::new(Mutex::new(None));
         let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
         let body = self.freeze(telemetry::instrument(), tail);
-        let (done, ctx) = (slot.clone(), ctx.clone());
+        self.state = State::Sending {
+            answer: slot.clone(),
+            since: ctx.input(|input| input.time),
+        };
+        let ctx = ctx.clone();
         spawn(async move {
             let answer = telemetry::submit(body).await;
-            if let Ok(mut done) = done.lock() {
+            if let Ok(mut done) = slot.lock() {
                 *done = Some(answer);
             }
             ctx.request_repaint();
         });
-        self.state = State::Sending(slot);
     }
 
-    /// Move the send along: collect an answer, or try again once the wait is over.
+    /// Move the send along: collect an answer, give up waiting for one, or try again once
+    /// the wait is over.
     fn advance(&mut self, ctx: &egui::Context, log: &Log) {
         let now = ctx.input(|input| input.time);
         self.collect(now);
-        let State::Waiting { since } = self.state else {
-            return;
-        };
-        if now - since >= RETRY && telemetry::online() {
-            self.send(ctx, log);
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        match self.state {
+            State::Waiting { since } if now - since >= RETRY && telemetry::online() => {
+                self.send(ctx, log)
+            }
+            State::Sending { .. } | State::Waiting { .. } => {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1))
+            }
+            State::Drafting | State::Refused(_) | State::Sent => {}
         }
     }
 }
@@ -200,14 +212,17 @@ impl Report {
         body
     }
 
-    /// Take the collector's answer, if it has come, at `now`. A server error is waited
-    /// out like no answer at all.
+    /// Take the collector's answer, if it has come, at `now`. A server error, and an
+    /// answer [`PATIENCE`] has run out on, are waited out like no answer at all.
     fn collect(&mut self, now: f64) {
-        let State::Sending(slot) = &self.state else {
+        let State::Sending { answer, since } = &self.state else {
             return;
         };
-        let Some(answer) = slot.lock().ok().and_then(|mut answer| answer.take()) else {
-            return;
+        let answer = answer.lock().ok().and_then(|mut answer| answer.take());
+        let answer = match answer {
+            Some(answer) => answer,
+            None if now - since >= PATIENCE => Err(Undelivered::Unreachable),
+            None => return,
         };
         self.state = match answer {
             Ok(()) => State::Sent,
@@ -221,7 +236,7 @@ impl Report {
     }
 
     fn busy(&self) -> bool {
-        matches!(self.state, State::Sending(_) | State::Waiting { .. })
+        matches!(self.state, State::Sending { .. } | State::Waiting { .. })
     }
 
     fn show(&mut self, ui: &mut egui::Ui, log: &Log) -> Option<Pressed> {
@@ -384,7 +399,7 @@ impl Report {
     fn progress(&self) -> String {
         match self.state {
             State::Drafting | State::Sent => String::new(),
-            State::Sending(_) => "Sending…".to_string(),
+            State::Sending { .. } => "Sending…".to_string(),
             State::Waiting { .. } => {
                 "drawbar could not reach its server. It will try again while this stays \
                  open."
@@ -457,9 +472,17 @@ mod tests {
     use super::*;
     use crate::testing;
 
+    /// A send made at 0 s, whose answer is `answer` once it has come.
+    fn sending(answer: Option<Result<(), Undelivered>>) -> State {
+        State::Sending {
+            answer: Arc::new(Mutex::new(answer)),
+            since: 0.0,
+        }
+    }
+
     /// The state a send reaches once the collector's `answer` arrives at 1 s.
     fn after(answer: Result<(), Undelivered>) -> State {
-        let mut report = report(State::Sending(Arc::new(Mutex::new(Some(answer)))));
+        let mut report = report(sending(Some(answer)));
         report.collect(1.0);
         report.state
     }
@@ -525,9 +548,7 @@ mod tests {
 
     #[test]
     fn a_refusal_thaws_the_body_since_nothing_was_kept() {
-        let mut report = report(State::Sending(Arc::new(Mutex::new(Some(Err(
-            Undelivered::Refused(413),
-        ))))));
+        let mut report = report(sending(Some(Err(Undelivered::Refused(413)))));
         report.frozen = Some(Frozen {
             instrument: electro(),
             tail: String::new(),
@@ -539,9 +560,26 @@ mod tests {
 
     #[test]
     fn a_send_still_out_stays_sending() {
-        let mut report = report(State::Sending(Arc::default()));
+        let mut report = report(sending(None));
         report.collect(1.0);
-        assert!(matches!(report.state, State::Sending(_)));
+        assert!(matches!(report.state, State::Sending { .. }));
+    }
+
+    /// A collector that takes the connection and never answers is waited out like one
+    /// that cannot be reached, and the draft is sent again later.
+    #[test]
+    fn a_report_that_gets_no_answer_times_out_into_a_retry() {
+        let mut report = report(sending(None));
+        report.collect(PATIENCE - 0.5);
+        assert!(
+            matches!(report.state, State::Sending { .. }),
+            "still patient"
+        );
+        report.collect(PATIENCE);
+        assert!(
+            matches!(report.state, State::Waiting { since } if since == PATIENCE),
+            "waiting to try again"
+        );
     }
 
     fn report(state: State) -> Report {
@@ -568,7 +606,7 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
         for (name, state, button) in [
             ("drafting", State::Drafting, "Send"),
-            ("sending", State::Sending(Arc::default()), "Send"),
+            ("sending", sending(None), "Send"),
             ("waiting", State::Waiting { since: 0.0 }, "Send"),
             ("refused", State::Refused(403), "Send"),
             ("sent", State::Sent, "Close"),

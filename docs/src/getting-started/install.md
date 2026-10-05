@@ -44,5 +44,6 @@ causes:
 
 - The connection dropped, or the download stopped partway. Reload the page.
 - The browser lacks WebAssembly or WebGL2, which drawbar needs. Every current
-  browser has both.
+  browser has both. If the page says WebGL isn't supported, turn on hardware
+  acceleration in the browser's settings and restart the browser.
 - An extension or a content blocker stopped drawbar. Allow this site and reload.

@@ -506,6 +506,8 @@
           "A file drawbar needs could not be downloaded.",
         start:
           "drawbar arrived but could not start in this browser.",
+        webgl:
+          "Turn on hardware acceleration in the browser's settings, then restart the browser.",
       };
 
       let total = Number("@wasmBytes@");
@@ -609,19 +611,22 @@
       }
 
       function fail(step, error) {
+        const said = error.message || String(error);
         splash.classList.add("failed");
         glyph.setAttribute("href", "#circle-alert");
         label.textContent = "drawbar could not start";
         figure.textContent = "";
-        note.textContent = NOTE[step];
-        foot.textContent = [size(), error.message || String(error)]
-          .filter(Boolean)
-          .join(" · ");
+        note.textContent = /WebGL/.test(said) ? NOTE.webgl : NOTE[step];
+        foot.textContent = [size(), said].filter(Boolean).join(" · ");
       }
 
-      document
-        .getElementById("retry")
-        .addEventListener("click", () => location.reload());
+      /* A reload can be answered from a cache with this same page, which may name the
+         module of a build no longer served. A new address is fetched afresh. */
+      document.getElementById("retry").addEventListener("click", () => {
+        const fresh = new URL(location.href);
+        fresh.searchParams.set("v", Date.now());
+        location.replace(fresh);
+      });
 
       let step = "download";
       try {
