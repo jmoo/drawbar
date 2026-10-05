@@ -12,6 +12,7 @@ use std::thread::JoinHandle;
 use eframe::egui;
 
 use super::exec::{self, Children, Fs, Kind, Over, Staged, TEMP, TMP, WORKING};
+use super::names;
 use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
 
@@ -235,11 +236,15 @@ impl Disk {
         let mut parts = path.split('/').filter(|part| !part.is_empty()).peekable();
         let mut looking = true;
         while let Some(part) = parts.next() {
-            // A drive letter or an alternate data stream on Windows.
-            if cfg!(windows) && part.contains(':') {
+            // ⚠️ A `:` names a drive or a stream and a `\\` separates folders, so either
+            // can reach outside the library.
+            if let Some(why) = cfg!(windows)
+                .then(|| names::windows_refusal(part))
+                .flatten()
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("{part:?} is not a name Windows holds"),
+                    format!("{part:?} is not a name Windows holds, since {why}"),
                 ));
             }
             at.push(part);

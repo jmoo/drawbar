@@ -861,6 +861,11 @@ with a dot, which Windows drops; is a Windows device name such as `CON` or
 `LPT1`, in any case and with any extension; or is longer than 255 bytes of
 UTF-8.
 
+On Windows, a file or folder already in the library under a name Windows
+cannot open (one with a forbidden or control character, a trailing space or
+dot, or a device name) is refused by name before drawbar opens it
+(`names::windows_refusal`).
+
 A name the user typed is refused with its reason. A name the app chose is made
 to fit instead (`names::portable`): forbidden characters become `-`, control
 characters go, spaces and dots are trimmed from the ends, a device name gains a

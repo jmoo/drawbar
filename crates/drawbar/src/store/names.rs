@@ -27,26 +27,42 @@ pub fn refusal(name: &str) -> Option<&'static str> {
     if name == "." || name == ".." {
         return Some("it names a folder's link to itself or its parent");
     }
+    if name.starts_with(' ') {
+        return Some("it starts with a space");
+    }
+    if name.starts_with('.') {
+        return Some("it starts with a dot, which hides it");
+    }
+    if let Some(why) = windows_refusal(name) {
+        return Some(why);
+    }
+    if name.len() > LONGEST {
+        return Some("it is longer than 255 bytes");
+    }
+    None
+}
+
+/// Why Windows cannot open an entry of this name, or `None` when it can. A library made
+/// elsewhere can hold such a name, and the native store refuses it on Windows before
+/// opening anything.
+///
+/// ⚠️ Windows opens the device for a device name, which can wait on the console, and
+/// drops a trailing space or dot, which opens another entry than the one listed.
+pub fn windows_refusal(name: &str) -> Option<&'static str> {
     if name.contains(FORBIDDEN) {
         return Some("it holds a character Windows forbids: / \\ : * ? \" < > |");
     }
     if name.chars().any(char::is_control) {
         return Some("it holds a control character");
     }
-    if name.starts_with(' ') || name.ends_with(' ') {
-        return Some("it starts or ends with a space");
-    }
-    if name.starts_with('.') {
-        return Some("it starts with a dot, which hides it");
+    if name.ends_with(' ') {
+        return Some("it ends with a space, which Windows drops");
     }
     if name.ends_with('.') {
         return Some("it ends with a dot, which Windows drops");
     }
     if is_device(name) {
         return Some("Windows keeps that name for a device");
-    }
-    if name.len() > LONGEST {
-        return Some("it is longer than 255 bytes");
     }
     None
 }
@@ -251,6 +267,32 @@ mod tests {
         }
         assert!(refusal(&"a".repeat(256)).is_some(), "256 bytes");
         assert!(refusal(&"a".repeat(255)).is_none(), "255 bytes");
+    }
+
+    #[test]
+    fn windows_reserved_names_are_refused_by_name() {
+        for (name, why) in [
+            ("CON.ne5p", "device"),
+            ("com1.ne5p", "device"),
+            ("Lpt9", "device"),
+            ("newline\nname.ne5p", "control"),
+            ("colon:name.ne5p", "character"),
+            ("back\\slash.ne5p", "character"),
+            ("c3.ne5p ", "space"),
+            ("c3.", "dot"),
+        ] {
+            let said = windows_refusal(name).unwrap_or_else(|| panic!("{name:?} was opened"));
+            assert!(said.contains(why), "{name:?}: {said}");
+        }
+        for name in [
+            "CONSOLE.ne5p",
+            "COM10.ne5p",
+            "Flügel.npno",
+            " leading space.ne5p",
+            ".drawbar",
+        ] {
+            assert_eq!(windows_refusal(name), None, "{name:?}");
+        }
     }
 
     #[test]
