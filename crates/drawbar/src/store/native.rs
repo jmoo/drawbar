@@ -236,7 +236,7 @@ impl Disk {
         let mut parts = path.split('/').filter(|part| !part.is_empty()).peekable();
         let mut looking = true;
         while let Some(part) = parts.next() {
-            // ⚠️ A `:` names a drive or a stream and a `\\` separates folders, so either
+            // ⚠️ A `:` names a drive or a stream and a `\` separates folders, so either
             // can reach outside the library.
             if let Some(why) = cfg!(windows)
                 .then(|| names::windows_refusal(part))
