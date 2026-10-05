@@ -222,9 +222,10 @@ The library writes these:
 | save, delete file, rename, move tree | the effect's entries, below                   |
 | undo, redo      | the reversing entries, then their effects' entries                 |
 
-An intent with a file effect is journaled whole before the effect's first step, so
-its entries reach the log only once its files have changed. Garbage collection and
-the recovery of staged bytes write intents of their own.
+An intent's file effects are all checked before any of them runs, and then
+journaled together in one record before the first step, so its entries reach the
+log only once its files have changed. Garbage collection and the recovery of staged
+bytes write intents of their own.
 
 ## Blobs
 
@@ -265,29 +266,36 @@ intent's own entries:
 | rename     | the file renamed                                | `field` `path` |
 | move tree  | the directory and everything in it renamed      | `field` `path` for each entity bound under it |
 
-Each `field` entry's `prior` is the value the writer's merged state held. Before
-any step, an effect checks its precondition. A save or delete expects one of: no
-file at the path; the fingerprint the writer last read, compared by length, then by
-hash when both sides have one, then by an equal modification time; or a file whose
-bytes hash to a given blob id. A rename or move refuses a destination that exists.
-A refused effect writes nothing.
+Each `field` entry's `prior` is the value the writer's merged state held before the
+intent. Before any step of an intent, each of its effects checks its precondition.
+A save or delete expects one of: no file at the path; the fingerprint the writer
+last read, compared by length, then by hash when both sides have one, then by an
+equal modification time; or a file whose bytes hash to a given blob id. A rename or
+move refuses a destination that exists. When one effect is refused, the intent
+writes nothing: no file, directory or entry.
 
-A rename syncs the destination directory before the source directory, so a crash
-between the two leaves the entry under both names rather than under neither.
+A step creates the directories its destination needs. A rename syncs the
+destination directory before the source directory, so a crash between the two
+leaves the entry under both names rather than under neither.
 
 ## Journal
 
-Before the first step of an effect, writer `w` creates `journal/<w>/<n>.json`,
-where `<n>` is the counter of the effect's intent id, and syncs it and its
-directory. After the effect's entries are in the log, the writer removes the file.
+Before the first step of an intent's effects, writer `w` creates
+`journal/<w>/<n>.json`, where `<n>` is the counter of the intent id, and syncs it
+and its directory. After the intent's entries are in the log, the writer removes the
+file.
 
 The file is one JSON object with exactly these keys:
 
 | Key       | Value                                                        |
 | --------- | ------------------------------------------------------------ |
 | `intent`  | The intent id                                                |
-| `step`    | The step, below                                              |
-| `entries` | An array of strings, each an entry's JSON as a log line holds it: the intent's entries, stamped before the first step, which the log gains when the step finishes |
+| `entries` | The intent's own entries, its `intent` entry first, which the log gains when every step finishes |
+| `steps`   | An array of `{"step":<step>,"entries":[..]}`, one per effect in the order they run; a step's `entries` are what the log gains when that step finishes |
+
+Each array of entries holds strings, each an entry's JSON as a log line holds it,
+stamped before the first step: the record's `entries` first, then each step's in
+order.
 
 A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 
@@ -296,26 +304,38 @@ A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 | `{"save":{"path":..,"new":<stored>,"old":<stored or null>}}` | Put the bytes staged as `tmp/<w>/<new blob>` at `path`, which held `old` or no file |
 | `{"delete":{"path":..,"old":<stored>}}`                  | Move the file at `path`, holding `old`, into blobs |
 | `{"move":{"from":..,"to":..}}`                           | Rename a file, or a directory where the backend renames directories |
-| `{"move_files":{"from":..,"to":..,"files":[..],"dirs":[..]}}` | Create `dirs` under `to`, move each of `files`, then remove the empty `dirs` under `from`; both lists are relative, and `dirs` holds `""` for the directory itself |
+| `{"move_files":{"from":..,"to":..,"files":[..],"dirs":[..]}}` | Create `dirs` under `to`, move each of `files`, then remove the empty `dirs` under `from`; both lists are relative and sorted, and `dirs` holds `""` for the directory itself |
 
 ### Recovery
 
-At open, writer `w` settles each record in order of `<n>`. It brings the files to
-the step's end from whatever state they are in:
+At open, writer `w` settles each record in order of `<n>`. It runs the steps in
+order, bringing each one's files to its end from whatever state they are in:
 
 | Step       | Finished when                                    | Otherwise |
 | ---------- | ------------------------------------------------ | --------- |
-| save       | `path` holds `new`                               | With the staged file present: rename it into place if `path` is empty, or move `old` into blobs first if `path` holds `old`. Anything else at `path` rolls back. |
-| delete     | `path` is empty and blobs holds `old`            | Move the file into blobs if it holds `old`; anything else rolls back. |
-| move       | only `to` exists                                 | Rename if only `from` exists; remove `from` if both are files with the same bytes; anything else rolls back. |
-| move_files | always                                           | Each file moves if only its source exists, and its source is removed if both hold the same bytes; a file in conflict stays where it is. |
+| save       | `path` holds `new`                               | With the staged file present: rename it into place if `path` is empty, or move `old` into blobs first if `path` holds `old`; anything else at `path` conflicts. With the staged file absent, it conflicts. |
+| delete     | `path` is empty and blobs holds `old`            | Move the file into blobs if it holds `old`; anything else conflicts. |
+| move       | only `to` exists                                 | Rename if only `from` exists; remove `from` if both are files with the same bytes; anything else conflicts. |
+| move_files | every file has arrived                           | A file arrives when only its destination exists, by a rename when only its source exists, or by removing its source when both hold the same bytes. A file whose destination holds other bytes, or that is at neither place, stays and conflicts. |
 
-When the step finishes, `w` appends the record's entries with their recorded
-versions; appending an entry twice changes nothing in the merge. When it rolls
-back, `w` leaves the library as it found it, moves any staged bytes into blobs, and
-appends under the record's intent an `intent` entry with no members and a
-`blob_added` for each of the step's bytes now in blobs, or nothing when there are
-none. Either way it then removes the record.
+A save that conflicts moves its staged file, if any, into blobs. The first conflict
+ends the run: each later step is given up, and a given-up save moves its staged file
+into blobs. Then `w` appends, keeping each entry's recorded version, since
+appending an entry twice changes nothing in the merge:
+
+- when every step finished, the record's entries and every step's entries;
+- when a step changed files before the run ended, a new `intent` entry with the
+  record's `label` and no `reverses`; the entries of each finished step, and of a
+  move_files step some of whose files arrived, less each `field` `path` entry
+  whose value is the destination of a file that stayed; and a `blob_added` for each
+  of the conflicting and given-up steps' bytes now in blobs, where a save's bytes
+  are `new` and `old` and a delete's are `old`;
+- when no step changed files, a new `intent` entry with no members and those
+  `blob_added` entries, or nothing when there are none.
+
+Either way it then removes the record. An intent that runs without a crash ends the
+same way, and reports a conflict after a step that changed files as an intent
+applied in part.
 
 Last, `w` moves every file left in `tmp/<w>/` whose name is a blob id into blobs,
 logging `blob_added` for each first, under a new intent. Any other file there is a

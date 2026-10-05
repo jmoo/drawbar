@@ -71,6 +71,15 @@ pub enum Error {
     #[error("{} is not as expected", .0.path)]
     Changed(Box<Mismatch>),
 
+    /// A file was not as expected partway through an intent's file effects. The
+    /// effects before it were made and logged; the files in `stayed` were left where
+    /// and as they were.
+    #[error("{error}, so the intent was applied in part")]
+    Partial {
+        error: Box<Error>,
+        stayed: Vec<RelPath>,
+    },
+
     #[error("cannot undo or redo: {0}")]
     Refused(Box<Refusal>),
 

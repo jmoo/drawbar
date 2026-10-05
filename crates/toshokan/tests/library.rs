@@ -693,13 +693,7 @@ fn every_crash_while_deleting_a_file_recovers() {
 #[test]
 fn every_crash_while_moving_a_tree_recovers() {
     let case = Case {
-        setup: |library| {
-            save_new(library, "a/xy", b"3");
-            vec![
-                save_new(library, "a/x/1", b"1"),
-                save_new(library, "a/x/y/2", b"2"),
-            ]
-        },
+        setup: bound_tree,
         act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
     };
     let without_both = Capabilities {
@@ -713,5 +707,108 @@ fn every_crash_while_moving_a_tree_recovers() {
         without_both,
     ] {
         case.run(capabilities);
+    }
+}
+
+/// Files `a/xy`, `a/x/1` and `a/x/y/2`, each saved by its own entity; returns the two
+/// entities under `a/x`.
+fn bound_tree(library: &mut Library<MemFs>) -> Vec<EntityId> {
+    save_new(library, "a/xy", b"3");
+    vec![
+        save_new(library, "a/x/1", b"1"),
+        save_new(library, "a/x/y/2", b"2"),
+    ]
+}
+
+#[test]
+fn every_crash_while_undoing_a_tree_move_recovers() {
+    let case = Case {
+        setup: |library| {
+            let entities = bound_tree(library);
+            block_on(library.move_tree(&path("a/x"), &path("b/x"))).unwrap();
+            entities
+        },
+        act: |library, _| block_on(library.undo()),
+    };
+    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC, WITHOUT_DIRECTORY_RENAME] {
+        case.run(capabilities);
+    }
+}
+
+#[test]
+fn an_undo_refused_for_one_file_changes_none() {
+    let mut a = open(MemFs::new(), A);
+    let entities = bound_tree(&mut a);
+    block_on(a.move_tree(&path("a/x"), &path("b/x"))).unwrap();
+    block_on(a.fs().create_dir_all(&path("a/x/y"))).unwrap();
+    block_on(a.fs().create(&path("a/x/y/2"), b"theirs")).unwrap();
+    let before = tree(a.fs());
+    let facts = Observed::of(&a).facts;
+
+    let refused = block_on(a.undo());
+    assert!(
+        matches!(&refused, Err(Error::AlreadyExists { path: at }) if *at == path("a/x/y/2")),
+        "{refused:?}"
+    );
+    assert_eq!(tree(a.fs()), before, "a refused undo wrote");
+    assert_eq!(Observed::of(&a).facts, facts);
+    assert_eq!(a.state().field(entities[0], "path"), Some(&text("b/x/1")));
+}
+
+/// The bytes of the file at the entity's `path` hash to its `content`, for every
+/// entity bound to a file.
+fn bound_files_hold_their_contents(library: &Library<MemFs>) -> Result<(), String> {
+    let state = library.state();
+    for entity in state.entities() {
+        let (Some(Value::Text(at)), Some(Value::Blob(content))) =
+            (state.field(entity, "path"), state.field(entity, "content"))
+        else {
+            continue;
+        };
+        let held = block_on(library.fs().read(&path(at))).ok();
+        if held.as_deref().map(BlobId::of) != Some(*content) {
+            return Err(format!("{entity} is bound to {at}, which holds {held:?}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_tree_move_recovered_around_files_put_in_its_way_never_binds_them() {
+    let case = Case {
+        setup: bound_tree,
+        act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
+    };
+    let destinations = [path("b/x/1"), path("b/x/y/2")];
+    for capabilities in [Capabilities::ALL, WITHOUT_DIRECTORY_RENAME] {
+        let (mut clean, entities) = case.prepared(capabilities);
+        let start = clean.fs().mutations();
+        (case.act)(&mut clean, &entities).unwrap();
+        for crash in 0..clean.fs().mutations() - start {
+            let disk = case.crashed(capabilities, crash);
+            let mut planted = Vec::new();
+            for at in &destinations {
+                if block_on(disk.metadata(at)).unwrap().is_none() {
+                    block_on(disk.create_dir_all(&at.parent().unwrap())).unwrap();
+                    block_on(disk.create(at, b"theirs")).unwrap();
+                    planted.push(at.clone());
+                }
+            }
+            let library = open(disk.clone(), A);
+            let at = format!("{capabilities:?}, crash {crash}");
+            bound_files_hold_their_contents(&library).unwrap_or_else(|f| panic!("{at}: {f}"));
+            for planted in &planted {
+                assert_eq!(library_files(&disk)[planted], b"theirs", "{at}");
+            }
+            let finished = library
+                .recovered()
+                .iter()
+                .any(|recovered| recovered.outcome == Outcome::Finished);
+            assert!(
+                planted.is_empty() || !finished,
+                "{at}: {:?}",
+                library.recovered()
+            );
+        }
     }
 }

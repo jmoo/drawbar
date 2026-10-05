@@ -359,8 +359,8 @@ impl<F: Fs> Library<F> {
     }
 
     /// Append `kinds`, which start with the intent's `Intent` entry, and apply
-    /// `effects` in order. The entries are journaled with the first effect, so they
-    /// reach the log only once its files are changed.
+    /// `effects` in order. The entries and effects are journaled together, so they
+    /// reach the log only once the effects' files are changed.
     async fn commit(&mut self, kinds: Vec<Kind>, effects: Vec<Effect>) -> Result<Change> {
         self.log.writable()?;
         let intent = self.log.new_intent();
@@ -383,24 +383,17 @@ impl<F: Fs> Library<F> {
                 files,
             });
         }
-        let mut kinds = Some(kinds);
-        let mut files = Report::default();
-        for effect in &effects {
-            let entries = kinds.take().unwrap_or_default();
-            let applied = effects::apply(
-                &self.fs,
-                &self.layout,
-                &mut self.log,
-                &self.state,
-                intent,
-                entries,
-                effect,
-            )
-            .await;
-            let report = self.reloaded(applied).await?;
-            files.displaced.extend(report.displaced);
-            files.moved.extend(report.moved);
-        }
+        let applied = effects::apply(
+            &self.fs,
+            &self.layout,
+            &mut self.log,
+            &self.state,
+            intent,
+            kinds,
+            &effects,
+        )
+        .await;
+        let files = self.reloaded(applied).await?;
         let entries = self
             .own
             .all_entries()

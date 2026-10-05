@@ -220,13 +220,13 @@ fn choose(
 }
 
 /// Free space for a save the disk refused: collect every blob nothing needs but
-/// `needed`, the save's own source, and with `evict_undo` first drop this writer's
+/// `needed`, the saves' own sources, and with `evict_undo` first drop this writer's
 /// undo history so the blobs only it kept can go too.
 pub(crate) async fn make_room<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
-    needed: Option<BlobId>,
+    needed: &[BlobId],
     evict_undo: bool,
 ) -> Result<()> {
     if evict_undo {
@@ -235,7 +235,7 @@ pub(crate) async fn make_room<F: Fs>(
     }
     let state = merge(&read_logs(fs, layout).await?);
     let mut referenced = state.referenced_blobs();
-    referenced.extend(needed);
+    referenced.extend(needed.iter().copied());
     collect_with(fs, layout, log, state.blob_adds(), &referenced, 0)
         .await
         .map(drop)

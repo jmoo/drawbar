@@ -2,11 +2,11 @@
 //!
 //! Every effect checks its precondition first and refuses with
 //! [`crate::Error::Changed`] rather than overwrite. Displaced bytes enter the blob
-//! store. Every effect is journaled before its first step, so recovery at the next
-//! open can finish or roll back each one.
+//! store. An intent's effects are journaled together before the first step, so
+//! recovery at the next open can finish them or say what it could not finish.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +17,9 @@ use crate::fs::{
     RelPath, Sameness,
 };
 use crate::ids::{EntityId, IntentId, WriterId};
-use crate::journal::{self, Record};
+use crate::journal::{self, Record, StepRecord};
 use crate::layout::Layout;
-use crate::log::{Kind, LogWriter};
+use crate::log::{Entry, Kind, LogWriter};
 use crate::merge::State;
 use crate::value::{BlobId, Value};
 use crate::{CONTENT_FIELD, PATH_FIELD};
@@ -88,14 +88,21 @@ pub struct Report {
     pub moved: Vec<(RelPath, RelPath)>,
 }
 
-/// Apply `effect`, and append `entries` and the effect's own entries to the log under
-/// `intent` once its files are changed. When the precondition fails nothing is
-/// written.
+impl Report {
+    pub(crate) fn extend(&mut self, other: Report) {
+        self.displaced.extend(other.displaced);
+        self.moved.extend(other.moved);
+    }
+}
+
+/// Apply `effects` as one intent, and append `entries` and the effects' own entries to
+/// the log under `intent` once the files are changed. Every effect is checked before
+/// any is run, so when one is refused nothing is written.
 ///
-/// A save the disk has no room for first collects this writer's blobs that nothing
+/// An intent the disk has no room for first collects this writer's blobs that nothing
 /// needs, then gives up this writer's undo history and collects again, and only then
-/// refuses with [`Error::NoSpace`]. A save from the blob store, as undo and redo
-/// make, keeps both its source blob and the history.
+/// refuses with [`Error::NoSpace`]. One that saves bytes from the blob store, as undo
+/// and redo do, keeps both those blobs and the history.
 pub async fn apply<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -103,59 +110,88 @@ pub async fn apply<F: Fs>(
     state: &State,
     intent: IntentId,
     entries: Vec<Kind>,
-    effect: &Effect,
+    effects: &[Effect],
 ) -> Result<Report> {
     log.writable()?;
-    let known = Known::of(state, effect);
-    let (needed, rounds): (_, &[bool]) = match effect {
-        Effect::Save {
-            contents: Source::Blob(blob),
-            ..
-        } => (Some(*blob), &[false]),
-        Effect::Save { .. }
-        | Effect::Delete { .. }
-        | Effect::Rename { .. }
-        | Effect::MoveTree { .. } => (None, &[false, true]),
+    let known = Known::of(state, effects);
+    let sources: Vec<BlobId> = effects.iter().filter_map(Effect::source_blob).collect();
+    let rounds: &[bool] = match sources.is_empty() {
+        true => &[false, true],
+        false => &[false],
     };
-    let mut planned = plan(fs, layout, log.writer(), effect, &known).await;
+    let mut planned = plan(fs, layout, log.writer(), effects, &known).await;
     for &evict_undo in rounds {
         if !matches!(planned, Err(Error::NoSpace { .. })) {
             break;
         }
-        blobs::make_room(fs, layout, log, needed, evict_undo).await?;
-        planned = plan(fs, layout, log.writer(), effect, &known).await;
+        blobs::make_room(fs, layout, log, &sources, evict_undo).await?;
+        planned = plan(fs, layout, log.writer(), effects, &known).await;
     }
     perform(fs, layout, log, intent, entries, planned?).await
 }
 
-/// Stamp `entries` and a planned effect's entries, journal them, and run the effect.
+impl Effect {
+    fn source_blob(&self) -> Option<BlobId> {
+        match self {
+            Self::Save {
+                contents: Source::Blob(blob),
+                ..
+            } => Some(*blob),
+            Self::Save { .. }
+            | Self::Delete { .. }
+            | Self::Rename { .. }
+            | Self::MoveTree { .. } => None,
+        }
+    }
+}
+
+/// Stamp `entries` and the planned steps' entries, journal them as one record, and run
+/// the steps.
 pub(crate) async fn perform<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
     intent: IntentId,
     entries: Vec<Kind>,
-    planned: Planned,
+    planned: Vec<Planned>,
 ) -> Result<Report> {
-    let entries = entries
-        .into_iter()
-        .chain(planned.facts)
-        .map(|kind| log.stamp(intent, kind))
-        .collect();
-    let record = Record {
-        intent,
-        step: planned.step,
-        entries,
-    };
+    let record = stamped(log, intent, entries, planned);
     journal::write(fs, layout, log.writer(), &record).await?;
-    match journal::settle(fs, layout, log, &record).await? {
-        Ran::Finished(report) => Ok(report),
-        Ran::Conflict { error, .. } => Err(error),
+    journal::settle(fs, layout, log, &record)
+        .await?
+        .into_result()
+}
+
+/// The journal record of `entries` and `planned`, stamped in that order.
+pub(crate) fn stamped(
+    log: &mut LogWriter,
+    intent: IntentId,
+    entries: Vec<Kind>,
+    planned: Vec<Planned>,
+) -> Record {
+    let mut stamp = |kinds: Vec<Kind>| -> Vec<Entry> {
+        kinds
+            .into_iter()
+            .map(|kind| log.stamp(intent, kind))
+            .collect()
+    };
+    let entries = stamp(entries);
+    let steps = planned
+        .into_iter()
+        .map(|planned| StepRecord {
+            step: planned.step,
+            entries: stamp(planned.facts),
+        })
+        .collect();
+    Record {
+        intent,
+        entries,
+        steps,
     }
 }
 
-/// The `path` and `content` fields the merged state holds for the entities an
-/// effect touches.
+/// The `path` and `content` fields the merged state holds for the entities effects
+/// touch.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Known(pub BTreeMap<EntityId, Fields>);
 
@@ -166,20 +202,23 @@ pub(crate) struct Fields {
 }
 
 impl Known {
-    fn of(state: &State, effect: &Effect) -> Self {
-        let entities = match effect {
-            Effect::Save { entity, .. }
-            | Effect::Delete { entity, .. }
-            | Effect::Rename { entity, .. } => vec![*entity],
-            Effect::MoveTree { from, .. } => state
-                .entities()
-                .into_iter()
-                .filter(|entity| {
-                    bound_path(state.field(*entity, PATH_FIELD))
-                        .is_some_and(|p| p.starts_with(from))
-                })
-                .collect(),
-        };
+    fn of(state: &State, effects: &[Effect]) -> Self {
+        let mut entities = BTreeSet::new();
+        for effect in effects {
+            match effect {
+                Effect::Save { entity, .. }
+                | Effect::Delete { entity, .. }
+                | Effect::Rename { entity, .. } => {
+                    entities.insert(*entity);
+                }
+                Effect::MoveTree { from, .. } => {
+                    entities.extend(state.entities().into_iter().filter(|entity| {
+                        bound_path(state.field(*entity, PATH_FIELD))
+                            .is_some_and(|p| p.starts_with(from))
+                    }));
+                }
+            }
+        }
         let fields = |entity| Fields {
             path: state.field(entity, PATH_FIELD).cloned(),
             content: state.field(entity, CONTENT_FIELD).cloned(),
@@ -206,56 +245,96 @@ pub(crate) struct Planned {
     pub facts: Vec<Kind>,
 }
 
-/// Check `effect` against the files and stage what it writes. Nothing in the library
-/// changes; a refusal leaves nothing behind.
+/// An effect whose precondition held, with the bytes it stages before it is journaled.
+struct Checked<'a> {
+    step: Step,
+    facts: Vec<Kind>,
+    stage: Option<Cow<'a, [u8]>>,
+}
+
+/// Check every effect against the files, then stage what they write. Nothing in the
+/// library changes, and a refusal leaves nothing staged.
 pub(crate) async fn plan<F: Fs>(
     fs: &F,
     layout: &Layout,
     writer: WriterId,
-    effect: &Effect,
+    effects: &[Effect],
     known: &Known,
-) -> Result<Planned> {
+) -> Result<Vec<Planned>> {
     if !fs.capabilities().rename_file {
         return Err(Error::Unsupported(Capability::RenameFile));
     }
-    let planner = Planner {
-        fs,
-        layout,
-        writer,
-        known,
-    };
-    match effect {
-        Effect::Save {
-            entity,
-            path,
-            contents,
-            expect,
-        } => planner.save(*entity, path, contents, expect).await,
-        Effect::Delete {
-            entity,
-            path,
-            expect,
-        } => planner.delete(*entity, path, expect).await,
-        Effect::Rename { entity, from, to } => planner.rename(*entity, from, to).await,
-        Effect::MoveTree { from, to } => planner.move_tree(from, to).await,
+    let planner = Planner { fs, layout, known };
+    let mut checked = Vec::with_capacity(effects.len());
+    for effect in effects {
+        checked.push(planner.check(effect).await?);
     }
+    let mut planned = Vec::with_capacity(checked.len());
+    for effect in checked {
+        if let Some(bytes) = &effect.stage {
+            if let Err(error) = blobs::stage(fs, layout, writer, bytes).await {
+                unstage(fs, layout, writer, &planned).await?;
+                return Err(error);
+            }
+        }
+        planned.push(Planned {
+            step: effect.step,
+            facts: effect.facts,
+        });
+    }
+    Ok(planned)
+}
+
+/// Remove the bytes `planned` staged.
+async fn unstage<F: Fs>(
+    fs: &F,
+    layout: &Layout,
+    writer: WriterId,
+    planned: &[Planned],
+) -> Result<()> {
+    for planned in planned {
+        if let Step::Save { new, .. } = &planned.step {
+            let staged = blobs::staged(layout, writer, new.blob);
+            if exists(fs, &staged).await? {
+                fs.remove_file(&staged).await?;
+            }
+        }
+    }
+    fs.sync(&layout.tmp(writer)).await
 }
 
 struct Planner<'a, F> {
     fs: &'a F,
     layout: &'a Layout,
-    writer: WriterId,
     known: &'a Known,
 }
 
 impl<F: Fs> Planner<'_, F> {
-    async fn save(
+    async fn check<'e>(&self, effect: &'e Effect) -> Result<Checked<'e>> {
+        match effect {
+            Effect::Save {
+                entity,
+                path,
+                contents,
+                expect,
+            } => self.save(*entity, path, contents, expect).await,
+            Effect::Delete {
+                entity,
+                path,
+                expect,
+            } => self.delete(*entity, path, expect).await,
+            Effect::Rename { entity, from, to } => self.rename(*entity, from, to).await,
+            Effect::MoveTree { from, to } => self.move_tree(from, to).await,
+        }
+    }
+
+    async fn save<'e>(
         &self,
         entity: EntityId,
         path: &RelPath,
-        contents: &Source,
+        contents: &'e Source,
         expect: &Precondition,
-    ) -> Result<Planned> {
+    ) -> Result<Checked<'e>> {
         self.library_path(path)?;
         let old = check(self.fs, path, expect).await?;
         let bytes = match contents {
@@ -264,10 +343,6 @@ impl<F: Fs> Planner<'_, F> {
         };
         let new = Stored::of(&bytes);
         let displaced = old.filter(|old| old.blob != new.blob);
-        if old != Some(new) {
-            ensure_dir(self.fs, &parent(path)).await?;
-            blobs::stage(self.fs, self.layout, self.writer, &bytes).await?;
-        }
         let fields = self.known.fields(entity);
         let facts = displaced
             .map(Stored::added)
@@ -280,13 +355,14 @@ impl<F: Fs> Planner<'_, F> {
                 fields.content,
             ))
             .collect();
-        Ok(Planned {
+        Ok(Checked {
             step: Step::Save {
                 path: path.clone(),
                 new,
                 old,
             },
             facts,
+            stage: (old != Some(new)).then_some(bytes),
         })
     }
 
@@ -295,7 +371,7 @@ impl<F: Fs> Planner<'_, F> {
         entity: EntityId,
         path: &RelPath,
         expect: &Precondition,
-    ) -> Result<Planned> {
+    ) -> Result<Checked<'static>> {
         self.library_path(path)?;
         let old = check(self.fs, path, expect)
             .await?
@@ -305,16 +381,22 @@ impl<F: Fs> Planner<'_, F> {
             .chain(field(entity, PATH_FIELD, None, fields.path))
             .chain(field(entity, CONTENT_FIELD, None, fields.content))
             .collect();
-        Ok(Planned {
+        Ok(Checked {
             step: Step::Delete {
                 path: path.clone(),
                 old,
             },
             facts,
+            stage: None,
         })
     }
 
-    async fn rename(&self, entity: EntityId, from: &RelPath, to: &RelPath) -> Result<Planned> {
+    async fn rename(
+        &self,
+        entity: EntityId,
+        from: &RelPath,
+        to: &RelPath,
+    ) -> Result<Checked<'static>> {
         self.free_destination(from, to).await?;
         match self.fs.metadata(from).await? {
             None => return Err(Error::NotFound { path: from.clone() }),
@@ -323,9 +405,8 @@ impl<F: Fs> Planner<'_, F> {
             }
             Some(_) => {}
         }
-        ensure_dir(self.fs, &parent(to)).await?;
         let prior = self.known.fields(entity).path;
-        Ok(Planned {
+        Ok(Checked {
             step: Step::Move {
                 from: from.clone(),
                 to: to.clone(),
@@ -333,10 +414,11 @@ impl<F: Fs> Planner<'_, F> {
             facts: field(entity, PATH_FIELD, Some(text(to)), prior)
                 .into_iter()
                 .collect(),
+            stage: None,
         })
     }
 
-    async fn move_tree(&self, from: &RelPath, to: &RelPath) -> Result<Planned> {
+    async fn move_tree(&self, from: &RelPath, to: &RelPath) -> Result<Checked<'static>> {
         self.free_destination(from, to).await?;
         if to.starts_with(from) {
             return Err(Error::InvalidPath {
@@ -351,7 +433,6 @@ impl<F: Fs> Planner<'_, F> {
             }
             Some(_) => {}
         }
-        ensure_dir(self.fs, &parent(to)).await?;
         let step = match self.fs.capabilities().rename_dir {
             true => Step::Move {
                 from: from.clone(),
@@ -376,7 +457,11 @@ impl<F: Fs> Planner<'_, F> {
                 field(*entity, PATH_FIELD, Some(text(&moved)), fields.path.clone())
             })
             .collect();
-        Ok(Planned { step, facts })
+        Ok(Checked {
+            step,
+            facts,
+            stage: None,
+        })
     }
 
     /// Refuse paths that are toshokan's own, and a destination something occupies.
@@ -510,28 +595,19 @@ pub(crate) enum Step {
 #[derive(Debug)]
 pub(crate) enum Ran {
     Finished(Report),
-    /// The files no longer allow the step, for the reason in `error`. `kept` are the
-    /// step's bytes now in the store, which the log must name.
+    /// Some of a tree's files moved, and the rest stayed where they were for the
+    /// reason in `error`. `stayed` holds each one's source and destination.
+    Partly {
+        report: Report,
+        stayed: Vec<(RelPath, RelPath)>,
+        error: Error,
+    },
+    /// The files no longer allow the step, for the reason in `error`, and it changed
+    /// nothing. `kept` are the step's bytes now in the store, which the log must name.
     Conflict {
         error: Error,
         kept: Vec<Stored>,
     },
-}
-
-impl Ran {
-    pub(crate) fn outcome(&self) -> journal::Outcome {
-        match self {
-            Self::Finished(_) => journal::Outcome::Finished,
-            Self::Conflict { .. } => journal::Outcome::RolledBack,
-        }
-    }
-
-    pub(crate) fn kept(&self) -> Vec<BlobId> {
-        match self {
-            Self::Finished(_) => Vec::new(),
-            Self::Conflict { kept, .. } => kept.iter().map(|stored| stored.blob).collect(),
-        }
-    }
 }
 
 impl Step {
@@ -541,6 +617,14 @@ impl Step {
             Self::Move { from, to } | Self::MoveFiles { from, to, .. } => {
                 vec![from.clone(), to.clone()]
             }
+        }
+    }
+
+    /// The path whose file the step changes or moves.
+    pub(crate) fn subject(&self) -> &RelPath {
+        match self {
+            Self::Save { path, .. } | Self::Delete { path, .. } => path,
+            Self::Move { from, .. } | Self::MoveFiles { from, .. } => from,
         }
     }
 
@@ -561,6 +645,26 @@ impl Step {
                 dirs,
             } => move_files(fs, from, to, files, dirs).await,
         }
+    }
+
+    /// Give up a step that has not run, because an earlier step of its intent could not
+    /// finish: its staged bytes move into the store. Returns the step's bytes the store
+    /// holds.
+    pub(crate) async fn abandon<F: Fs>(
+        &self,
+        fs: &F,
+        layout: &Layout,
+        writer: WriterId,
+    ) -> Result<Vec<Stored>> {
+        let Self::Save { new, .. } = self else {
+            return Ok(Vec::new());
+        };
+        let staged = blobs::staged(layout, writer, new.blob);
+        if exists(fs, &staged).await? {
+            displace(fs, layout, &staged, new.blob).await?;
+            sync_parent(fs, &staged).await?;
+        }
+        in_store(fs, layout, vec![*new]).await
     }
 }
 
@@ -586,9 +690,11 @@ async fn same_bytes<F: Fs>(fs: &F, a: &RelPath, b: &RelPath) -> Result<bool> {
     Ok(hash_file(fs, a).await?.0 == hash_file(fs, b).await?.0)
 }
 
-/// Rename `from` to `to` durably. The destination's directory is synced first, so a
-/// crash between the syncs leaves the entry at both names rather than at neither.
+/// Rename `from` to `to` durably, creating `to`'s directory if it is missing. The
+/// destination's directory is synced first, so a crash between the syncs leaves the
+/// entry at both names rather than at neither.
 async fn place<F: Fs>(fs: &F, from: &RelPath, to: &RelPath) -> Result<()> {
+    ensure_dir(fs, &parent(to)).await?;
     fs.rename(from, to).await?;
     sync_parent(fs, to).await?;
     if from.parent() != to.parent() {
@@ -709,7 +815,8 @@ async fn move_entry<F: Fs>(fs: &F, from: &RelPath, to: &RelPath) -> Result<Ran> 
     })
 }
 
-/// Moves every file it can and leaves one in conflict at its old path.
+/// Moves every file whose destination is free or already holds its bytes, and leaves
+/// any other where it is.
 async fn move_files<F: Fs>(
     fs: &F,
     from: &RelPath,
@@ -717,19 +824,38 @@ async fn move_files<F: Fs>(
     files: &[RelPath],
     dirs: &[RelPath],
 ) -> Result<Ran> {
+    ensure_dir(fs, &parent(to)).await?;
     for dir in dirs {
         fs.create_dir_all(&under(to, dir)).await?;
     }
+    let mut report = Report::default();
+    let mut stayed = Vec::new();
+    let mut error = None;
     for file in files {
         let (source, target) = (under(from, file), under(to, file));
-        match (exists(fs, &source).await?, exists(fs, &target).await?) {
-            (true, false) => fs.rename(&source, &target).await?,
-            (true, true) => {
-                if same_bytes(fs, &source, &target).await? {
-                    fs.remove_file(&source).await?;
-                }
+        let refused = match (exists(fs, &source).await?, exists(fs, &target).await?) {
+            (true, false) => {
+                fs.rename(&source, &target).await?;
+                None
             }
-            (false, _) => {}
+            (true, true) if same_bytes(fs, &source, &target).await? => {
+                fs.remove_file(&source).await?;
+                None
+            }
+            (true, true) => Some(Error::AlreadyExists {
+                path: target.clone(),
+            }),
+            (false, true) => None,
+            (false, false) => Some(Error::NotFound {
+                path: source.clone(),
+            }),
+        };
+        match refused {
+            None => report.moved.push((source, target)),
+            Some(refused) => {
+                error.get_or_insert(refused);
+                stayed.push((source, target));
+            }
         }
     }
     sync_parent(fs, to).await?;
@@ -749,14 +875,14 @@ async fn move_files<F: Fs>(
         }
     }
     sync_parent(fs, from).await?;
-    let moved = files
-        .iter()
-        .map(|file| (under(from, file), under(to, file)))
-        .collect();
-    Ok(Ran::Finished(Report {
-        displaced: Vec::new(),
-        moved,
-    }))
+    Ok(match error {
+        None => Ran::Finished(report),
+        Some(error) => Ran::Partly {
+            report,
+            stayed,
+            error,
+        },
+    })
 }
 
 async fn changed<F: Fs>(fs: &F, path: &RelPath, expected: Option<Stored>) -> Result<Error> {
@@ -793,7 +919,7 @@ mod tests {
 
     use super::*;
     use crate::fs::{Capabilities, MemFs};
-    use crate::journal::recover;
+    use crate::journal::{recover, Outcome, Recovered};
     use crate::log::testing::{logged, reopen};
     use crate::log::{Entry, Kind};
 
@@ -884,20 +1010,24 @@ mod tests {
             Self::new(Capabilities::ALL, files, known)
         }
 
-        fn plan(&self, effect: &Effect) -> Result<Planned> {
-            block_on(plan(&self.fs, &self.layout, WRITER, effect, &self.known))
+        fn plan(&self, effects: &[Effect]) -> Result<Vec<Planned>> {
+            block_on(plan(&self.fs, &self.layout, WRITER, effects, &self.known))
         }
 
-        fn apply(&mut self, effect: &Effect) -> Result<Report> {
-            let planned = self.plan(effect)?;
+        fn apply_all(&mut self, effects: &[Effect]) -> Result<Report> {
+            let planned = self.plan(effects)?;
             block_on(perform(
                 &self.fs,
                 &self.layout,
                 &mut self.log,
                 INTENT,
-                Vec::new(),
+                vec![Kind::INTENT],
                 planned,
             ))
+        }
+
+        fn apply(&mut self, effect: &Effect) -> Result<Report> {
+            self.apply_all(std::slice::from_ref(effect))
         }
 
         fn files(&self) -> BTreeMap<RelPath, Vec<u8>> {
@@ -908,10 +1038,12 @@ mod tests {
             store(&self.fs, &self.layout)
         }
 
+        /// The logged entries' kinds, without `Intent` entries.
         fn kinds(&self) -> Vec<Kind> {
             logged(&self.fs, WRITER)
                 .into_iter()
                 .map(|entry| entry.kind)
+                .filter(|kind| !matches!(kind, Kind::Intent { .. }))
                 .collect()
         }
     }
@@ -946,13 +1078,18 @@ mod tests {
     }
 
     macro_rules! assert_refused {
-        ($library:expr, $effect:expr, $pattern:pat) => {
+        ($library:expr, $effects:expr, $pattern:pat) => {
             let library = $library;
-            let (files, mutations) = (library.fs.files(), library.fs.mutations());
-            let result = library.apply(&$effect);
+            let fs = &library.fs;
+            let before = (fs.files(), fs.directories(), fs.mutations());
+            let result = library.apply_all(&$effects);
             assert!(matches!(result, Err($pattern)), "{result:?}");
-            assert_eq!(library.fs.files(), files, "a refused effect changed files");
-            assert_eq!(library.fs.mutations(), mutations, "a refused effect wrote");
+            let fs = &library.fs;
+            assert_eq!(
+                (fs.files(), fs.directories(), fs.mutations()),
+                before,
+                "a refused effect wrote"
+            );
             assert_eq!(logged(&library.fs, WRITER), Vec::<Entry>::new());
         };
     }
@@ -1027,7 +1164,7 @@ mod tests {
             contents: Source::Bytes(b"new".to_vec()),
             expect: hashed(b"mine!!"),
         };
-        assert_refused!(&mut library, save, Error::Changed(_));
+        assert_refused!(&mut library, [save], Error::Changed(_));
     }
 
     #[test]
@@ -1039,7 +1176,7 @@ mod tests {
             contents: Source::Bytes(b"new".to_vec()),
             expect: Precondition::Absent,
         };
-        assert_refused!(&mut library, save, Error::Changed(_));
+        assert_refused!(&mut library, [save], Error::Changed(_));
     }
 
     #[test]
@@ -1115,8 +1252,8 @@ mod tests {
             path: path(at),
             expect: hashed(b"mine!!"),
         };
-        assert_refused!(&mut library, delete("song"), Error::Changed(_));
-        assert_refused!(&mut library, delete("gone"), Error::Changed(_));
+        assert_refused!(&mut library, [delete("song")], Error::Changed(_));
+        assert_refused!(&mut library, [delete("gone")], Error::Changed(_));
     }
 
     #[test]
@@ -1151,7 +1288,56 @@ mod tests {
             from: path("a"),
             to: path("b"),
         };
-        assert_refused!(&mut library, rename, Error::AlreadyExists { .. });
+        assert_refused!(&mut library, [rename], Error::AlreadyExists { .. });
+    }
+
+    #[test]
+    fn an_intent_whose_later_effect_is_refused_changes_nothing() {
+        let known = bound(&[(1, "a", Some(b"1")), (2, "c", None)]);
+        let mut library = Library::with(&[("a", b"1"), ("c", b"2"), ("d", b"3")], known);
+        let save = Effect::Save {
+            entity: entity(1),
+            path: path("a"),
+            contents: Source::Bytes(b"new".to_vec()),
+            expect: hashed(b"1"),
+        };
+        let rename = |from: &str, to: &str| Effect::Rename {
+            entity: entity(2),
+            from: path(from),
+            to: path(to),
+        };
+        assert_refused!(
+            &mut library,
+            [save.clone(), rename("c", "d")],
+            Error::AlreadyExists { .. }
+        );
+        assert_refused!(
+            &mut library,
+            [rename("c", "e"), rename("c", "d")],
+            Error::AlreadyExists { .. }
+        );
+    }
+
+    #[test]
+    fn a_save_refused_for_space_leaves_no_directory_behind() {
+        let mut library = Library::with(&[("keep", b"k")], Known::default());
+        library.fs.set_capacity(Some(2));
+        let save = Effect::Save {
+            entity: entity(1),
+            path: path("d/new"),
+            contents: Source::Bytes(b"new".to_vec()),
+            expect: Precondition::Absent,
+        };
+        let result = library.apply(&save);
+        assert!(matches!(result, Err(Error::NoSpace { .. })), "{result:?}");
+        let directories: Vec<RelPath> = library
+            .fs
+            .directories()
+            .into_iter()
+            .filter(|dir| !library.layout.owns(dir))
+            .collect();
+        assert_eq!(directories, []);
+        assert_eq!(library.files(), files(&[("keep", b"k")]));
     }
 
     fn tree_library(capabilities: Capabilities) -> Library {
@@ -1206,13 +1392,15 @@ mod tests {
             to: path("b/x"),
         };
         let step = tree_library(Capabilities::ALL)
-            .plan(&move_tree)
+            .plan(std::slice::from_ref(&move_tree))
             .unwrap()
+            .remove(0)
             .step;
         assert!(matches!(step, Step::Move { .. }), "{step:?}");
         let step = tree_library(NO_DIRECTORY_RENAME)
-            .plan(&move_tree)
+            .plan(std::slice::from_ref(&move_tree))
             .unwrap()
+            .remove(0)
             .step;
         let Step::MoveFiles { files, dirs, .. } = step else {
             panic!("{step:?}");
@@ -1228,8 +1416,54 @@ mod tests {
             from: path("a/x"),
             to: path(to),
         };
-        assert_refused!(&mut library, into("a/x/y/z"), Error::InvalidPath { .. });
-        assert_refused!(&mut library, into("a/xy"), Error::AlreadyExists { .. });
+        assert_refused!(&mut library, [into("a/x/y/z")], Error::InvalidPath { .. });
+        assert_refused!(&mut library, [into("a/xy")], Error::AlreadyExists { .. });
+    }
+
+    #[test]
+    fn recovering_a_tree_move_whose_destination_was_taken_logs_only_the_files_that_moved() {
+        let mut library = tree_library(NO_DIRECTORY_RENAME);
+        let move_tree = Effect::MoveTree {
+            from: path("a/x"),
+            to: path("b/x"),
+        };
+        let planned = library.plan(std::slice::from_ref(&move_tree)).unwrap();
+        let record = stamped(&mut library.log, INTENT, vec![Kind::INTENT], planned);
+        let (fs, layout) = (&library.fs, &library.layout);
+        block_on(journal::write(fs, layout, WRITER, &record)).unwrap();
+        block_on(fs.create_dir_all(&path("b/x/y"))).unwrap();
+        block_on(fs.rename(&path("a/x/1"), &path("b/x/1"))).unwrap();
+        block_on(fs.create(&path("b/x/y/2"), b"theirs")).unwrap();
+
+        let recovered = block_on(recover(fs, layout, &mut reopen(fs, WRITER))).unwrap();
+        assert_eq!(
+            recovered,
+            [Recovered {
+                intent: INTENT,
+                paths: vec![path("a/x"), path("b/x")],
+                outcome: Outcome::Partial,
+                kept: vec![],
+                stayed: vec![path("a/x/y/2")],
+            }]
+        );
+        assert_eq!(
+            library.files(),
+            files(&[
+                ("a/x/y/2", b"2"),
+                ("a/xy", b"3"),
+                ("b/x/1", b"1"),
+                ("b/x/y/2", b"theirs")
+            ])
+        );
+        assert_eq!(
+            library.kinds(),
+            [set_field(
+                1,
+                PATH_FIELD,
+                text_value("b/x/1"),
+                text_value("a/x/1")
+            )]
+        );
     }
 
     #[test]
@@ -1242,12 +1476,12 @@ mod tests {
             contents: Source::Bytes(b"x".to_vec()),
             expect: Precondition::Absent,
         };
-        assert_refused!(&mut library, save, Error::InvalidPath { .. });
+        assert_refused!(&mut library, [save], Error::InvalidPath { .. });
         let move_holder = Effect::MoveTree {
             from: path("lib"),
             to: path("elsewhere"),
         };
-        assert_refused!(&mut library, move_holder, Error::InvalidPath { .. });
+        assert_refused!(&mut library, [move_holder], Error::InvalidPath { .. });
     }
 
     #[test]
@@ -1264,7 +1498,7 @@ mod tests {
         };
         assert_refused!(
             &mut library,
-            delete,
+            [delete],
             Error::Unsupported(Capability::RenameFile)
         );
     }
@@ -1323,7 +1557,7 @@ mod tests {
             let staging = {
                 let library = self.library(capabilities);
                 let start = library.fs.mutations();
-                library.plan(&self.effect).unwrap();
+                library.plan(std::slice::from_ref(&self.effect)).unwrap();
                 library.fs.mutations() - start
             };
             for crash in 0..operations {
