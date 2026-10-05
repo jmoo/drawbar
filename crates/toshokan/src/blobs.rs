@@ -7,9 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compact::compact;
 use crate::error::{Error, Result};
-use crate::fs::{hash_file, FileKind, Fs, RelPath};
+use crate::fs::{ensure_dir, hash_file, sync_parent, Fs, RelPath};
 use crate::ids::{Version, WriterId};
-use crate::journal::{writable, Ledger};
 use crate::layout::Layout;
 use crate::log::{read_log, read_logs, Kind, LogWriter};
 use crate::merge::{merge, BlobAdd, State};
@@ -104,39 +103,6 @@ pub(crate) async fn displace<F: Fs>(
     }
 }
 
-/// Make durable the removal or arrival of a name in the directory holding `path`.
-pub(crate) async fn sync_parent<F: Fs>(fs: &F, path: &RelPath) -> Result<()> {
-    let parent = path
-        .parent()
-        .expect("only the library folder has no parent");
-    fs.sync(&parent).await
-}
-
-/// Create `dir` and its missing ancestors, durably.
-pub(crate) async fn ensure_dir<F: Fs>(fs: &F, dir: &RelPath) -> Result<()> {
-    let mut missing = Vec::new();
-    let mut at = dir.clone();
-    loop {
-        match fs.metadata(&at).await? {
-            Some(found) if found.kind == FileKind::Directory => break,
-            Some(_) => return Err(Error::NotDirectory { path: at }),
-            None => {
-                let parent = at.parent().expect("the library folder exists");
-                missing.push(parent.clone());
-                at = parent;
-            }
-        }
-    }
-    if missing.is_empty() {
-        return Ok(());
-    }
-    fs.create_dir_all(dir).await?;
-    for parent in missing.iter().rev() {
-        fs.sync(parent).await?;
-    }
-    Ok(())
-}
-
 /// What a garbage collection removed and what it left.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Collection {
@@ -163,15 +129,15 @@ pub async fn collect<F: Fs>(
     collect_with(fs, layout, log, state.blob_adds(), &referenced, budget).await
 }
 
-pub(crate) async fn collect_with<F: Fs, L: Ledger>(
+pub(crate) async fn collect_with<F: Fs>(
     fs: &F,
     layout: &Layout,
-    log: &mut L,
+    log: &mut LogWriter,
     adds: &BTreeMap<BlobId, BTreeMap<WriterId, BlobAdd>>,
     referenced: &BTreeSet<BlobId>,
     budget: u64,
 ) -> Result<Collection> {
-    writable(log)?;
+    log.writable()?;
     let chosen = choose(log.writer(), adds, referenced, budget);
     if chosen.removed.is_empty() {
         return Ok(Collection {
@@ -280,7 +246,7 @@ mod tests {
 
     use super::*;
     use crate::fs::MemFs;
-    use crate::journal::fake::FakeLog;
+    use crate::log::testing::{logged, reopen};
     use crate::log::Entry;
 
     const WRITER: WriterId = WriterId::from_u128(0xa);
@@ -427,7 +393,7 @@ mod tests {
             blob
         }
 
-        fn collect(&self, log: &mut FakeLog, referenced: &[BlobId], budget: u64) -> Collection {
+        fn collect(&self, log: &mut LogWriter, referenced: &[BlobId], budget: u64) -> Collection {
             let referenced = referenced.iter().copied().collect();
             block_on(collect_with(
                 &self.fs,
@@ -451,13 +417,16 @@ mod tests {
         let newest = library.blob(b"newest", &[(WRITER, 9, false)]);
         let oldest = library.blob(b"oldest", &[(WRITER, 1, false)]);
         let middle = library.blob(b"middle", &[(WRITER, 5, false)]);
-        let mut log = FakeLog::new(WRITER);
+        let mut log = reopen(&library.fs, WRITER);
         let collection = library.collect(&mut log, &[], 6);
         assert_eq!(collection.removed, [oldest, middle]);
         assert_eq!((collection.freed, collection.kept), (12, 6));
         assert!(library.stored(newest));
         assert!(!library.stored(oldest) && !library.stored(middle));
-        let kinds: Vec<Kind> = log.entries().into_iter().map(|e| e.kind).collect();
+        let kinds: Vec<Kind> = logged(&library.fs, WRITER)
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
         assert_eq!(
             kinds,
             [
@@ -482,7 +451,7 @@ mod tests {
             b"released by other",
             &[(WRITER, 6, false), (OTHER, 7, true)],
         );
-        let mut log = FakeLog::new(WRITER);
+        let mut log = reopen(&library.fs, WRITER);
         let collection = library.collect(&mut log, &[referenced], 0);
         assert_eq!(collection.removed, [released_by_other]);
         assert_eq!(
@@ -498,13 +467,13 @@ mod tests {
     fn collection_under_budget_removes_and_logs_nothing() {
         let mut library = Library::new();
         library.blob(b"small", &[(WRITER, 1, false)]);
-        let mut log = FakeLog::new(WRITER);
+        let mut log = reopen(&library.fs, WRITER);
         let mutations = library.fs.mutations();
         let collection = library.collect(&mut log, &[], 5);
         assert_eq!(collection.removed, Vec::<BlobId>::new());
         assert_eq!(collection.kept, 5);
         assert_eq!(library.fs.mutations(), mutations);
-        assert_eq!(log.entries(), Vec::<Entry>::new());
+        assert_eq!(logged(&library.fs, WRITER), Vec::<Entry>::new());
     }
 
     #[test]
@@ -512,10 +481,9 @@ mod tests {
         let mut library = Library::new();
         let gone = library.blob(b"gone", &[(WRITER, 1, false)]);
         block_on(library.fs.remove_file(&library.layout.blob(gone))).unwrap();
-        let mut log = FakeLog::new(WRITER);
+        let mut log = reopen(&library.fs, WRITER);
         assert_eq!(library.collect(&mut log, &[], 0).removed, [gone]);
-        assert!(log
-            .entries()
+        assert!(logged(&library.fs, WRITER)
             .iter()
             .any(|e| e.kind == Kind::BlobRemoved { blob: gone }));
     }

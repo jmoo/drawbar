@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::compact::Snapshot;
 use crate::error::{Error, Result};
-use crate::fs::{FileKind, Fs, RelPath};
+use crate::fs::{ensure_dir, FileKind, Fs, RelPath};
 use crate::ids::{EntityId, IntentId, Version, WriterId};
 use crate::layout::{Layout, LogFile};
 use crate::value::{BlobId, Value};
@@ -128,6 +128,29 @@ pub(crate) fn parse_entry(json: &str) -> Option<Entry> {
         intent,
         kind,
     })
+}
+
+/// Entries as a list of their JSON texts, each exactly as a log line holds it, so an
+/// entry this build does not know stays verbatim.
+pub(crate) mod json_texts {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{entry_json, parse_entry, Entry};
+
+    pub fn serialize<S: Serializer>(entries: &[Entry], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(entries.iter().map(entry_json))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Entry>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .iter()
+            .map(|json| {
+                parse_entry(json)
+                    .ok_or_else(|| D::Error::custom(format!("{json:?} is not an entry")))
+            })
+            .collect()
+    }
 }
 
 /// The line for `entry`, newline included.
@@ -338,20 +361,6 @@ pub async fn read_logs<F: Fs>(fs: &F, layout: &Layout) -> Result<Vec<WriterLog>>
     Ok(logs)
 }
 
-/// Create `dir` if it is missing, and make its name durable.
-pub(crate) async fn ensure_dir<F: Fs>(fs: &F, dir: &RelPath) -> Result<()> {
-    if fs.metadata(dir).await?.is_some() {
-        return Ok(());
-    }
-    fs.create_dir_all(dir).await?;
-    let mut parent = RelPath::ROOT;
-    for name in dir.components() {
-        fs.sync(&parent).await?;
-        parent = parent.join(name)?;
-    }
-    Ok(())
-}
-
 /// One writer's handle for appending: its clock and counters.
 ///
 /// Each handle writes its own segments: the first append creates a new segment after
@@ -368,7 +377,7 @@ pub struct LogWriter {
     next_segment: Option<u64>,
     /// The segment this handle created and may append to.
     open_segment: Option<u64>,
-    /// The version of the last entry this handle appended.
+    /// The highest version this handle has appended.
     appended: Option<Version>,
 }
 
@@ -445,6 +454,17 @@ impl LogWriter {
         exhausted.then_some("its clock, counters or segment numbers are exhausted")
     }
 
+    /// Refuse with [`Error::ReadOnly`] when [`Self::read_only`] says so.
+    pub fn writable(&self) -> Result<()> {
+        match self.read_only() {
+            Some(reason) => Err(Error::ReadOnly {
+                writer: self.writer,
+                reason: reason.to_owned(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Raise the clock past a version seen since open.
     pub fn observe(&mut self, version: Version) {
         self.lamport = self.lamport.max(version.lamport);
@@ -473,7 +493,9 @@ impl LogWriter {
     }
 
     /// Append `entries` to this writer's log; they are durable when this returns.
-    /// Refuses with [`crate::Error::ReadOnly`] when [`Self::read_only`] says so.
+    /// Refuses with [`crate::Error::ReadOnly`] when [`Self::read_only`] says so. The
+    /// clock and counters move past every appended entry, so entries stamped before a
+    /// crash and appended by recovery are never stamped again.
     ///
     /// After an error the entries may or may not be in the log; appending them again
     /// is harmless, because merging an entry twice changes nothing.
@@ -483,12 +505,7 @@ impl LogWriter {
         layout: &Layout,
         entries: &[Entry],
     ) -> Result<()> {
-        if let Some(reason) = self.read_only() {
-            return Err(Error::ReadOnly {
-                writer: self.writer,
-                reason: reason.to_owned(),
-            });
-        }
+        self.writable()?;
         if let Some(foreign) = entries
             .iter()
             .find(|e| e.version.writer != self.writer || e.intent.writer != self.writer)
@@ -498,16 +515,21 @@ impl LogWriter {
                 text: foreign.version.to_string(),
             });
         }
-        let Some(last) = entries.last() else {
+        if entries.is_empty() {
             return Ok(());
-        };
+        }
         let lines: String = entries.iter().map(encode_line).collect();
         let written = self.write(fs, layout, lines.as_bytes()).await;
-        match written {
-            Ok(()) => self.appended = Some(last.version),
-            Err(_) => self.open_segment = None,
+        if written.is_err() {
+            self.open_segment = None;
+            return written;
         }
-        written
+        for entry in entries {
+            self.observe(entry.version);
+            self.past_ids(entry);
+        }
+        self.appended = self.appended.max(entries.iter().map(|e| e.version).max());
+        Ok(())
     }
 
     async fn write<F: Fs>(&mut self, fs: &F, layout: &Layout, bytes: &[u8]) -> Result<()> {
@@ -604,6 +626,36 @@ pub(crate) mod testing {
             value,
             prior: None,
         }
+    }
+
+    /// A fresh handle for `writer` over what `fs` holds now, as a restarted app opens it.
+    pub(crate) fn reopen(fs: &MemFs, writer: WriterId) -> LogWriter {
+        let logs = pollster::block_on(read_logs(fs, &Layout::default())).unwrap();
+        LogWriter::open(writer, &logs)
+    }
+
+    /// Every entry `writer`'s log on `fs` holds.
+    pub(crate) fn logged(fs: &MemFs, writer: WriterId) -> Vec<Entry> {
+        let log = pollster::block_on(read_log(fs, &Layout::default(), writer)).unwrap();
+        log.all_entries().cloned().collect()
+    }
+
+    /// Append to `writer`'s log a checksummed line of a kind no build knows.
+    pub(crate) fn append_unknown(fs: &MemFs, writer: WriterId, lamport: u64) {
+        let json =
+            format!(r#"{{"version":"{lamport}@{writer}","intent":"{writer}:0","kind":"comment"}}"#);
+        let line = format!("{json}\t{:08x}\n", crc32(json.as_bytes()));
+        let layout = Layout::default();
+        let dir = layout.writer(writer);
+        pollster::block_on(ensure_dir(fs, &dir)).unwrap();
+        let mut number = 1;
+        while pollster::block_on(fs.metadata(&layout.segment(writer, number)))
+            .unwrap()
+            .is_some()
+        {
+            number += 1;
+        }
+        pollster::block_on(fs.create(&layout.segment(writer, number), line.as_bytes())).unwrap();
     }
 
     /// The facts of a state, without what its applied entries name.

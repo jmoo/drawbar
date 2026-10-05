@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::fs::{hash_file, Fs, RelPath};
+use crate::fs::{ensure_dir, hash_file, Fs, RelPath};
 use crate::ids::{IntentId, Version, WriterId};
 use crate::layout::{Layout, LogFile};
-use crate::log::{ensure_dir, entry_json, parse_entry, Entry, LogWriter, WriterLog};
+use crate::log::{json_texts, Entry, LogWriter, WriterLog};
 use crate::merge::{State, StateFile};
 use crate::value::BlobId;
 
@@ -32,8 +32,8 @@ pub struct Snapshot {
 struct SnapshotFile {
     through: u64,
     state: StateFile,
-    /// Each entry's JSON as a log line holds it, so unknown entries stay verbatim.
-    retained: Vec<String>,
+    #[serde(with = "json_texts")]
+    retained: Vec<Entry>,
 }
 
 impl Snapshot {
@@ -42,7 +42,7 @@ impl Snapshot {
         let file = SnapshotFile {
             through: self.through,
             state: StateFile::from(&self.state),
-            retained: self.retained.iter().map(entry_json).collect(),
+            retained: self.retained.clone(),
         };
         let mut bytes = serde_json::to_vec(&file).expect("a snapshot serializes");
         bytes.push(b'\n');
@@ -51,23 +51,14 @@ impl Snapshot {
 
     /// The snapshot in `bytes`, read from `path`.
     pub fn decode(path: &RelPath, bytes: &[u8]) -> Result<Self> {
-        let corrupt = |reason: String| Error::Corrupt {
+        let file: SnapshotFile = serde_json::from_slice(bytes).map_err(|error| Error::Corrupt {
             path: path.clone(),
-            reason,
-        };
-        let file: SnapshotFile =
-            serde_json::from_slice(bytes).map_err(|error| corrupt(error.to_string()))?;
-        let retained = file
-            .retained
-            .iter()
-            .map(|json| {
-                parse_entry(json).ok_or_else(|| corrupt(format!("{json:?} is not an entry")))
-            })
-            .collect::<Result<_>>()?;
+            reason: error.to_string(),
+        })?;
         Ok(Self {
             through: file.through,
             state: file.state.into(),
-            retained,
+            retained: file.retained,
         })
     }
 

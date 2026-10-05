@@ -10,13 +10,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::blobs::{self, displace, ensure_dir, sync_parent};
+use crate::blobs::{self, displace};
 use crate::error::{Error, Mismatch, Result};
-use crate::fs::{fingerprint, hash_file, Capability, FileKind, Fingerprint, Fs, RelPath, Sameness};
+use crate::fs::{
+    ensure_dir, fingerprint, hash_file, sync_parent, Capability, FileKind, Fingerprint, Fs,
+    RelPath, Sameness,
+};
 use crate::ids::{EntityId, IntentId, WriterId};
-use crate::journal::{self, writable, Fact, Ledger, Logged, Record};
+use crate::journal::{self, Record};
 use crate::layout::Layout;
-use crate::log::LogWriter;
+use crate::log::{Kind, LogWriter};
 use crate::merge::State;
 use crate::value::{BlobId, Value};
 use crate::{CONTENT_FIELD, PATH_FIELD};
@@ -27,13 +30,17 @@ pub enum Precondition {
     Absent,
     /// The file still matches what the writer last read.
     Matches(Fingerprint),
+    /// The file holds exactly these bytes.
+    Holds(BlobId),
 }
 
 impl Precondition {
-    fn fingerprint(&self) -> Option<Fingerprint> {
-        match self {
-            Self::Absent => None,
-            Self::Matches(print) => Some(*print),
+    fn holds(&self, found: Option<&Fingerprint>) -> bool {
+        match (self, found) {
+            (Self::Absent, None) => true,
+            (Self::Matches(expected), Some(found)) => expected.compare(found) == Sameness::Same,
+            (Self::Holds(blob), Some(found)) => found.hash == Some(*blob),
+            (Self::Absent, Some(_)) | (Self::Matches(_) | Self::Holds(_), None) => false,
         }
     }
 }
@@ -81,7 +88,9 @@ pub struct Report {
     pub moved: Vec<(RelPath, RelPath)>,
 }
 
-/// Apply `effect` and append its entries to the log under `intent`.
+/// Apply `effect`, and append `entries` and the effect's own entries to the log under
+/// `intent` once its files are changed. When the precondition fails nothing is
+/// written.
 ///
 /// A save the disk has no room for first collects this writer's blobs that nothing
 /// needs, then gives up this writer's undo history and collects again, and only then
@@ -92,9 +101,10 @@ pub async fn apply<F: Fs>(
     log: &mut LogWriter,
     state: &State,
     intent: IntentId,
+    entries: Vec<Kind>,
     effect: &Effect,
 ) -> Result<Report> {
-    writable(log)?;
+    log.writable()?;
     let known = Known::of(state, effect);
     let mut planned = plan(fs, layout, log.writer(), effect, &known).await;
     for evict_undo in [false, true] {
@@ -104,24 +114,22 @@ pub async fn apply<F: Fs>(
         blobs::make_room(fs, layout, log, evict_undo).await?;
         planned = plan(fs, layout, log.writer(), effect, &known).await;
     }
-    perform(fs, layout, log, intent, planned?).await
+    perform(fs, layout, log, intent, entries, planned?).await
 }
 
-/// Stamp a planned effect's entries, journal it, and run it.
-pub(crate) async fn perform<F: Fs, L: Ledger>(
+/// Stamp `entries` and a planned effect's entries, journal them, and run the effect.
+pub(crate) async fn perform<F: Fs>(
     fs: &F,
     layout: &Layout,
-    log: &mut L,
+    log: &mut LogWriter,
     intent: IntentId,
+    entries: Vec<Kind>,
     planned: Planned,
 ) -> Result<Report> {
-    let entries = planned
-        .facts
+    let entries = entries
         .into_iter()
-        .map(|fact| Logged {
-            version: log.stamp(intent, fact.kind()).version,
-            fact,
-        })
+        .chain(planned.facts)
+        .map(|kind| log.stamp(intent, kind))
         .collect();
     let record = Record {
         intent,
@@ -184,7 +192,7 @@ fn bound_path(value: Option<&Value>) -> Option<RelPath> {
 /// journal and the facts to log once it is done.
 pub(crate) struct Planned {
     pub step: Step,
-    pub facts: Vec<Fact>,
+    pub facts: Vec<Kind>,
 }
 
 /// Check `effect` against the files and stage what it writes. Nothing in the library
@@ -251,7 +259,7 @@ impl<F: Fs> Planner<'_, F> {
         }
         let fields = self.known.fields(entity);
         let facts = displaced
-            .map(|old| Fact::added(old.blob, old.len))
+            .map(Stored::added)
             .into_iter()
             .chain(field(entity, PATH_FIELD, Some(text(path)), fields.path))
             .chain(field(
@@ -282,7 +290,7 @@ impl<F: Fs> Planner<'_, F> {
             .await?
             .ok_or_else(|| Error::NotFound { path: path.clone() })?;
         let fields = self.known.fields(entity);
-        let facts = std::iter::once(Fact::added(old.blob, old.len))
+        let facts = std::iter::once(old.added())
             .chain(field(entity, PATH_FIELD, None, fields.path))
             .chain(field(entity, CONTENT_FIELD, None, fields.content))
             .collect();
@@ -386,15 +394,10 @@ impl<F: Fs> Planner<'_, F> {
 /// what is there.
 async fn check<F: Fs>(fs: &F, path: &RelPath, expect: &Precondition) -> Result<Option<Stored>> {
     let found = fingerprint(fs, path, true).await?;
-    let holds = match (expect, &found) {
-        (Precondition::Absent, None) => true,
-        (Precondition::Matches(expected), Some(found)) => expected.compare(found) == Sameness::Same,
-        _ => false,
-    };
-    if !holds {
+    if !expect.holds(found.as_ref()) {
         return Err(Error::Changed(Box::new(Mismatch {
             path: path.clone(),
-            expected: expect.fingerprint(),
+            expected: *expect,
             found,
         })));
     }
@@ -404,8 +407,8 @@ async fn check<F: Fs>(fs: &F, path: &RelPath, expect: &Precondition) -> Result<O
     }))
 }
 
-fn field(entity: EntityId, name: &str, value: Option<Value>, prior: Option<Value>) -> Option<Fact> {
-    (value != prior).then(|| Fact::Field {
+fn field(entity: EntityId, name: &str, value: Option<Value>, prior: Option<Value>) -> Option<Kind> {
+    (value != prior).then(|| Kind::Field {
         entity,
         name: name.to_owned(),
         value,
@@ -465,11 +468,10 @@ impl Stored {
         }
     }
 
-    fn fingerprint(self) -> Fingerprint {
-        Fingerprint {
+    pub(crate) fn added(self) -> Kind {
+        Kind::BlobAdded {
+            blob: self.blob,
             len: self.len,
-            modified: None,
-            hash: Some(self.blob),
         }
     }
 }
@@ -754,10 +756,14 @@ async fn move_files<F: Fs>(
 }
 
 async fn changed<F: Fs>(fs: &F, path: &RelPath, expected: Option<Stored>) -> Result<Error> {
+    let expected = match expected {
+        Some(stored) => Precondition::Holds(stored.blob),
+        None => Precondition::Absent,
+    };
     match fingerprint(fs, path, false).await {
         Ok(found) => Ok(Error::Changed(Box::new(Mismatch {
             path: path.clone(),
-            expected: expected.map(Stored::fingerprint),
+            expected,
             found,
         }))),
         Err(Error::IsDirectory { path }) => Ok(Error::IsDirectory { path }),
@@ -783,8 +789,8 @@ mod tests {
 
     use super::*;
     use crate::fs::{Capabilities, MemFs};
-    use crate::journal::fake::FakeLog;
-    use crate::journal::recover_with;
+    use crate::journal::recover;
+    use crate::log::testing::{logged, reopen};
     use crate::log::{Entry, Kind};
 
     const WRITER: WriterId = WriterId::from_u128(0xe);
@@ -799,7 +805,7 @@ mod tests {
     }
 
     fn hashed(bytes: &[u8]) -> Precondition {
-        Precondition::Matches(Stored::of(bytes).fingerprint())
+        Precondition::Holds(BlobId::of(bytes))
     }
 
     fn bound(entities: &[(u64, &str, Option<&[u8]>)]) -> Known {
@@ -846,7 +852,7 @@ mod tests {
     struct Library {
         fs: MemFs,
         layout: Layout,
-        log: FakeLog,
+        log: LogWriter,
         known: Known,
     }
 
@@ -863,9 +869,9 @@ mod tests {
                 block_on(fs.sync(durable)).unwrap();
             }
             Self {
+                log: reopen(&fs, WRITER),
                 fs,
                 layout: Layout::default(),
-                log: FakeLog::new(WRITER),
                 known,
             }
         }
@@ -885,6 +891,7 @@ mod tests {
                 &self.layout,
                 &mut self.log,
                 INTENT,
+                Vec::new(),
                 planned,
             ))
         }
@@ -898,8 +905,7 @@ mod tests {
         }
 
         fn kinds(&self) -> Vec<Kind> {
-            self.log
-                .entries()
+            logged(&self.fs, WRITER)
                 .into_iter()
                 .map(|entry| entry.kind)
                 .collect()
@@ -943,7 +949,7 @@ mod tests {
             assert!(matches!(result, Err($pattern)), "{result:?}");
             assert_eq!(library.fs.files(), files, "a refused effect changed files");
             assert_eq!(library.fs.mutations(), mutations, "a refused effect wrote");
-            assert_eq!(library.log.entries(), Vec::<Entry>::new());
+            assert_eq!(logged(&library.fs, WRITER), Vec::<Entry>::new());
         };
     }
 
@@ -1282,7 +1288,7 @@ mod tests {
 
         /// The disk and log a writer opens after a crash `crash` operations into
         /// the effect.
-        fn crashed(&self, capabilities: Capabilities, crash: u64) -> (MemFs, FakeLog) {
+        fn crashed(&self, capabilities: Capabilities, crash: u64) -> (MemFs, LogWriter) {
             let mut library = self.library(capabilities);
             library.fs.crash_after(crash);
             let result = library.apply(&self.effect);
@@ -1291,7 +1297,7 @@ mod tests {
                 "crash {crash}: {result:?}"
             );
             let disk = library.fs.restart();
-            let log = library.log.reopen(&disk);
+            let log = reopen(&disk, WRITER);
             (disk, log)
         }
 
@@ -1305,11 +1311,10 @@ mod tests {
             let expected = Expected {
                 before,
                 after: clean.files(),
-                entries: clean.log.entries(),
+                entries: logged(&clean.fs, WRITER),
             };
             let finished = clean.fs.restart();
-            let log = clean.log.reopen(&finished);
-            check(&finished, &layout, &log, &expected, self.new)
+            check(&finished, &layout, &expected, self.new)
                 .unwrap_or_else(|failure| panic!("{capabilities:?}, uncrashed: {failure}"));
             let staging = {
                 let library = self.library(capabilities);
@@ -1321,23 +1326,22 @@ mod tests {
                 let new = self.new.filter(|_| crash >= staging);
                 let (disk, mut log) = self.crashed(capabilities, crash);
                 let start = disk.mutations();
-                block_on(recover_with(&disk, &layout, &mut log)).unwrap();
+                block_on(recover(&disk, &layout, &mut log)).unwrap();
                 let recovery = disk.mutations() - start;
                 for interrupt in (0..recovery).map(Some).chain([None]) {
                     let (mut disk, mut log) = self.crashed(capabilities, crash);
                     if let Some(interrupt) = interrupt {
                         disk.crash_after(interrupt);
-                        let result = block_on(recover_with(&disk, &layout, &mut log));
+                        let result = block_on(recover(&disk, &layout, &mut log));
                         assert!(matches!(result, Err(Error::Crashed)), "{result:?}");
                         disk = disk.restart();
-                        log = log.reopen(&disk);
+                        log = reopen(&disk, WRITER);
                     }
-                    block_on(recover_with(&disk, &layout, &mut log)).unwrap();
+                    block_on(recover(&disk, &layout, &mut log)).unwrap();
                     let recovered = disk.restart();
-                    let log = log.reopen(&recovered);
                     let at =
                         format!("{capabilities:?}, crash {crash}, recovery crash {interrupt:?}");
-                    check(&recovered, &layout, &log, &expected, new)
+                    check(&recovered, &layout, &expected, new)
                         .unwrap_or_else(|failure| panic!("{at}: {failure}"));
                 }
             }
@@ -1348,7 +1352,6 @@ mod tests {
     fn check(
         disk: &MemFs,
         layout: &Layout,
-        log: &FakeLog,
         expected: &Expected,
         new: Option<&[u8]>,
     ) -> std::result::Result<(), String> {
@@ -1363,7 +1366,7 @@ mod tests {
             return Err(format!("recovery left {leftovers:?}"));
         }
         let files = library_files(disk, layout);
-        let entries = log.entries();
+        let entries = logged(disk, WRITER);
         if files == expected.after {
             if let Some(missing) = expected.entries.iter().find(|e| !entries.contains(e)) {
                 return Err(format!("the effect finished without logging {missing:?}"));

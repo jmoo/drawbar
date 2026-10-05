@@ -1,5 +1,6 @@
 use thiserror::Error as ThisError;
 
+use crate::effects::Precondition;
 use crate::fs::{Capability, Fingerprint, RelPath};
 use crate::ids::WriterId;
 use crate::undo::Refusal;
@@ -78,6 +79,6 @@ pub enum Error {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Mismatch {
     pub path: RelPath,
-    pub expected: Option<Fingerprint>,
+    pub expected: Precondition,
     pub found: Option<Fingerprint>,
 }

@@ -368,6 +368,39 @@ pub async fn hash_file<F: Fs + ?Sized>(fs: &F, path: &RelPath) -> Result<(BlobId
     }
 }
 
+/// Make durable the removal or arrival of a name in the directory holding `path`.
+pub(crate) async fn sync_parent<F: Fs>(fs: &F, path: &RelPath) -> Result<()> {
+    let parent = path
+        .parent()
+        .expect("only the library folder has no parent");
+    fs.sync(&parent).await
+}
+
+/// Create `dir` and its missing ancestors, durably.
+pub(crate) async fn ensure_dir<F: Fs>(fs: &F, dir: &RelPath) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut at = dir.clone();
+    loop {
+        match fs.metadata(&at).await? {
+            Some(found) if found.kind == FileKind::Directory => break,
+            Some(_) => return Err(Error::NotDirectory { path: at }),
+            None => {
+                let parent = at.parent().expect("the library folder exists");
+                missing.push(parent.clone());
+                at = parent;
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    fs.create_dir_all(dir).await?;
+    for parent in missing.iter().rev() {
+        fs.sync(parent).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

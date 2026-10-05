@@ -14,9 +14,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::effects::{Effect, Precondition};
+use crate::effects::{Effect, Precondition, Source};
 use crate::error::{Error, Result};
-use crate::fs::{Fingerprint, RelPath};
+use crate::fs::RelPath;
 use crate::ids::{EntityId, IntentId, Version};
 use crate::log::{Entry, Kind, WriterLog};
 use crate::merge::State;
@@ -257,7 +257,7 @@ fn plan(history: &History, intent: Option<IntentId>, state: &State) -> Result<Pl
             }));
         }
     }
-    let effects = file_effects(entries, &changes, state)?;
+    let effects = file_effects(&changes, state)?;
 
     let label = entries.iter().find_map(|entry| match &entry.kind {
         Kind::Intent { label, .. } => label.clone(),
@@ -322,10 +322,9 @@ fn compensate<'a>(
 }
 
 /// The file changes that reverse the intent's `content` and `path` writes: its
-/// contents restored from the blob store at the entity's current path, then its
-/// renames reversed.
+/// contents restored from the blob store where the file is, or was before the intent
+/// unbound it, then its renames reversed.
 fn file_effects(
-    entries: &[Entry],
     changes: &BTreeMap<(EntityId, &str), FieldChange>,
     state: &State,
 ) -> Result<Vec<Effect>> {
@@ -334,22 +333,22 @@ fn file_effects(
         .iter()
         .filter(|((_, name), _)| *name == CONTENT_FIELD)
     {
-        let Some(Value::Text(path)) = state.field(entity, PATH_FIELD) else {
+        let unbound = changes
+            .get(&(entity, PATH_FIELD))
+            .and_then(|change| change.before.as_ref());
+        let Some(Value::Text(path)) = state.field(entity, PATH_FIELD).or(unbound) else {
             continue;
         };
         let path = RelPath::new(path)?;
         let before = change.before.as_ref().and_then(Value::as_blob);
         let after = change.after.as_ref().and_then(Value::as_blob);
-        let expect = match after {
-            Some(blob) => Precondition::Matches(fingerprint(blob, entries, state)?),
-            None => Precondition::Absent,
-        };
+        let expect = after.map_or(Precondition::Absent, Precondition::Holds);
         effects.push(match before {
             Some(blob) if !kept(blob, state) => return Err(refuse(Refusal::BlobGone { blob })),
             Some(blob) => Effect::Save {
                 entity,
                 path,
-                contents: crate::effects::Source::Blob(blob),
+                contents: Source::Blob(blob),
                 expect,
             },
             None if after.is_none() => continue,
@@ -382,35 +381,9 @@ fn kept(blob: BlobId, state: &State) -> bool {
         .is_some_and(|adds| adds.values().any(|add| !add.removed))
 }
 
-/// What the file holds when it still holds `blob`: its hash, and its length from the
-/// intent's own `BlobAdded` or any writer's.
-fn fingerprint(blob: BlobId, entries: &[Entry], state: &State) -> Result<Fingerprint> {
-    let logged = entries.iter().find_map(|entry| match entry.kind {
-        Kind::BlobAdded { blob: added, len } if added == blob => Some(len),
-        _ => None,
-    });
-    let stored = || {
-        state
-            .blob_adds()
-            .get(&blob)?
-            .values()
-            .map(|add| add.len)
-            .max()
-    };
-    let len = logged
-        .or_else(stored)
-        .ok_or_else(|| refuse(Refusal::BlobGone { blob }))?;
-    Ok(Fingerprint {
-        len,
-        modified: None,
-        hash: Some(blob),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::Source;
     use crate::ids::WriterId;
     use crate::log::testing::{field, text, writer, Session};
     use crate::MemFs;
@@ -597,11 +570,7 @@ mod tests {
             field(e, CONTENT_FIELD, Some(Value::Blob(new))),
         ]);
         let plan = reverse(&mut session, false).unwrap();
-        let expect = Precondition::Matches(Fingerprint {
-            len: 5,
-            modified: None,
-            hash: Some(new),
-        });
+        let expect = Precondition::Holds(new);
         let path = RelPath::new("a/b.txt").unwrap();
         assert_eq!(
             plan.effects,
@@ -661,17 +630,38 @@ mod tests {
             }]
         );
         let plan = reverse(&mut session, false).unwrap();
-        let expect = Precondition::Matches(Fingerprint {
-            len: 5,
-            modified: None,
-            hash: Some(blob),
-        });
+        let expect = Precondition::Holds(blob);
         assert_eq!(
             plan.effects,
             [Effect::Delete {
                 entity: e,
                 path: path("a"),
                 expect
+            }]
+        );
+    }
+
+    #[test]
+    fn undoing_a_file_delete_restores_the_file_where_it_was() {
+        let (_, mut session, e) = setup(1);
+        let (blob, added) = saved(b"bytes");
+        session.act(vec![
+            field(e, PATH_FIELD, Some(text("a"))),
+            field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
+        ]);
+        session.act(vec![
+            added,
+            field(e, PATH_FIELD, None),
+            field(e, CONTENT_FIELD, None),
+        ]);
+        let plan = reverse(&mut session, false).unwrap();
+        assert_eq!(
+            plan.effects,
+            [Effect::Save {
+                entity: e,
+                path: RelPath::new("a").unwrap(),
+                contents: Source::Blob(blob),
+                expect: Precondition::Absent,
             }]
         );
     }
