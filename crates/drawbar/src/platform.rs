@@ -69,9 +69,6 @@ impl Platform {
     }
 }
 
-/// The window width under which the top bar drops its file tools.
-pub const CRAMPED: f32 = 1060.0;
-
 /// How the window's frame is drawn on this run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {

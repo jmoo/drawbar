@@ -607,15 +607,60 @@ const COLUMN_MOST: f32 = 480.0;
 /// The width of the grip on a column's right edge in the head.
 const GRIP: f32 = 8.0;
 
+/// The columns that give way to the name in a narrow table, first to go first.
+const YIELDING: [Column; 6] = [
+    Column::Needs,
+    Column::Tags,
+    Column::Size,
+    Column::Kind,
+    Column::At,
+    Column::Where,
+];
+
+/// The width the name keeps while another column can give way: about 16 characters.
+const NAME_LEAST: f32 = 100.0;
+
 /// Where each column sits across `width`, laid out by [`crate::panel::tracks`], with any
 /// dragged `widths` in place of the columns' own tracks.
+///
+/// Where the name would be narrower than about 16 characters, or than a width it was
+/// dragged to, the secondary columns are hidden in turn, least needed first, until it is
+/// not. A hidden column's track is empty, at the end of the one before it.
 pub fn tracks(width: f32, widths: &Widths) -> [Range<f32>; 8] {
     let wanted = Column::ALL.map(|column| match widths[column as usize] {
         Some(px) => Track::Px(px),
         None => column.track(),
     });
-    let held = crate::panel::tracks(width, &wanted, GAP);
-    std::array::from_fn(|index| held[index].clone())
+    let least = widths[Column::Name as usize].map_or(NAME_LEAST, |px| px.min(NAME_LEAST));
+    let mut shown = [true; 8];
+    let mut laid = lay(width, &wanted, &shown);
+    for column in YIELDING {
+        let name = &laid[Column::Name as usize];
+        if name.end - name.start >= least {
+            break;
+        }
+        shown[column as usize] = false;
+        laid = lay(width, &wanted, &shown);
+    }
+    laid
+}
+
+/// The `shown` columns laid out across `width`, and the others empty.
+fn lay(width: f32, wanted: &[Track; 8], shown: &[bool; 8]) -> [Range<f32>; 8] {
+    let kept: Vec<Track> = (0..8)
+        .filter(|&at| shown[at])
+        .map(|at| wanted[at])
+        .collect();
+    let mut held = crate::panel::tracks(width, &kept, GAP).into_iter();
+    let mut end = 0.0;
+    std::array::from_fn(|at| {
+        let track = match shown[at] {
+            true => held.next().unwrap_or(end..end),
+            false => end..end,
+        };
+        end = track.end;
+        track
+    })
 }
 
 /// The rows the table shows: those matching the omnibox, sorted by a column.
@@ -1077,7 +1122,7 @@ impl Library {
     /// ⚠️ Added after the head, so a press on a grip drags it instead of sorting.
     fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; 8]) {
         for (column, track) in Column::ALL.iter().zip(tracks) {
-            if !column.resizable() {
+            if !column.resizable() || track.is_empty() {
                 continue;
             }
             let edge = content.left() + track.end + GAP / 2.0;
@@ -1124,7 +1169,7 @@ impl Library {
         let content = rect.shrink2(egui::vec2(CELL_PAD, 0.0));
 
         for (column, track) in Column::ALL.iter().zip(tracks) {
-            if column.head().is_empty() {
+            if column.head().is_empty() || track.is_empty() {
                 continue;
             }
             let sorted = self.by == *column;
@@ -1422,8 +1467,8 @@ fn paint(
             ..egui::TextFormat::simple(egui::FontId::new(NAME, family), ink)
         },
     );
-    if row.tags > 0 {
-        let tags = cell(Column::Tags);
+    let tags = cell(Column::Tags);
+    if row.tags > 0 && tags.width() > 0.0 {
         painted(
             ui,
             Glyph::Tag,
@@ -1600,8 +1645,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ Every track shrinks and none goes negative. At the center's width with both
-    /// docks open, the address, size, and dependency columns still have room.
+    /// ⚠️ Every track shrinks and none goes negative. With the room, every column has
+    /// some.
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
@@ -1622,13 +1667,39 @@ mod tests {
                     "columns overlap at {width}: {pair:?}"
                 );
             }
-            for column in [Column::At, Column::Size, Column::Needs] {
-                let track = &tracks[column as usize];
-                assert!(
-                    track.end - track.start > 0.0,
-                    "{column:?} vanished at {width}"
-                );
-            }
+        }
+        let wide = tracks(900.0, &[None; 8]);
+        for (column, track) in Column::ALL.iter().zip(&wide) {
+            assert!(track.end - track.start > 0.0, "{column:?} vanished at 900");
+        }
+    }
+
+    /// A narrow table hides its secondary columns, in turn, before the name gets narrower
+    /// than [`NAME_LEAST`]: programs are told apart by their names.
+    #[test]
+    fn a_narrow_table_hides_secondary_columns_before_the_name_shrinks() {
+        let mut hidden_before = Vec::new();
+        for width in (130..=900).rev().step_by(10).map(|width| width as f32) {
+            let tracks = tracks(width, &[None; 8]);
+            let name = &tracks[Column::Name as usize];
+            assert!(
+                name.end - name.start >= NAME_LEAST,
+                "the name at {width}: {name:?}"
+            );
+            let hidden: Vec<Column> = Column::ALL
+                .into_iter()
+                .filter(|column| tracks[*column as usize].is_empty())
+                .collect();
+            let first = &YIELDING[..hidden.len()];
+            assert!(
+                hidden.iter().all(|column| first.contains(column)),
+                "at {width}, {hidden:?} hidden out of turn"
+            );
+            assert!(
+                hidden.len() >= hidden_before.len(),
+                "at {width}, only {hidden:?} hidden, though {hidden_before:?} were wider"
+            );
+            hidden_before = hidden;
         }
     }
 

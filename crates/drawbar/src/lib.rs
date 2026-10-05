@@ -62,7 +62,8 @@ pub mod zoom;
 
 pub use app::DrawbarApp;
 
-/// The name eframe keeps this app's state under, which names its storage directory.
+/// The name eframe keeps this app's state under, which names its storage directory, and
+/// the window's app id. eframe names the directory after the app id when one is set.
 pub const APP: &str = "drawbar";
 
 /// Start the app on `canvas`. Called from `index.html` after the wasm module loads.
