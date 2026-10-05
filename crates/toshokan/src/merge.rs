@@ -776,6 +776,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn forged_entries_sharing_a_version_resolve_to_the_greater_value_in_either_order() {
+        let a = writer(1);
+        let entity = EntityId::new(a, 0);
+        let named = |value| entry(a, 5, field(entity, "name", value));
+        let ties = [
+            (named(None), named(Some(text("z"))), Some(text("z"))),
+            (
+                named(Some(text("z"))),
+                named(Some(Value::Int(0))),
+                Some(Value::Int(0)),
+            ),
+            (
+                named(Some(text("a"))),
+                named(Some(text("b"))),
+                Some(text("b")),
+            ),
+        ];
+        for (lesser, greater, wins) in ties {
+            for order in [[&lesser, &greater], [&greater, &lesser]] {
+                let state = applied(order);
+                assert_eq!(state.field(entity, "name").cloned(), wins, "{order:?}");
+            }
+        }
+        let create = entry(a, 5, Kind::Create { entity });
+        let delete = entry(a, 5, Kind::Delete { entity });
+        for order in [[&create, &delete], [&delete, &create]] {
+            assert!(applied(order).exists(entity), "{order:?}");
+        }
+    }
+
+    #[test]
     fn a_remove_spares_the_adds_it_did_not_observe() {
         let (a, b) = (writer(1), writer(2));
         let entity = EntityId::new(a, 0);

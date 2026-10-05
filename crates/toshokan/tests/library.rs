@@ -551,11 +551,12 @@ fn a_full_disk_gives_up_undo_history_before_refusing_a_save() {
     assert_eq!(library_files(&fs), [(at, second)].into());
 }
 
-/// The facts and files a crash may leave: those before the intent, or those after.
+/// What an intent changes: the library's files, the facts, and the blobs stored.
 #[derive(PartialEq, Debug)]
 struct Observed {
     files: BTreeMap<RelPath, Vec<u8>>,
     facts: BTreeMap<EntityId, BTreeMap<String, Value>>,
+    blobs: BTreeSet<BlobId>,
 }
 
 impl Observed {
@@ -570,18 +571,38 @@ impl Observed {
                 (entity, fields.collect())
             })
             .collect();
+        let blobs = Layout::default().blobs();
+        let stored = files_under(library.fs(), &blobs);
         Self {
             files: library_files(library.fs()),
             facts,
+            blobs: stored
+                .into_values()
+                .map(|bytes| BlobId::of(&bytes))
+                .collect(),
         }
+    }
+
+    /// Whether the files and facts are those of `other`: a crash leaves those before
+    /// the intent or after it.
+    fn settled_as(&self, other: &Observed) -> bool {
+        (&self.files, &self.facts) == (&other.files, &other.facts)
     }
 }
 
-/// One intent with file effects, crashed at each of its operations and at each
-/// operation of the recovery that follows.
+fn files_under<F: Fs>(fs: &F, dir: &RelPath) -> BTreeMap<RelPath, Vec<u8>> {
+    tree(fs)
+        .into_iter()
+        .filter(|(path, _)| path.starts_with(dir))
+        .filter_map(|(path, node)| Some((path, node?.0)))
+        .collect()
+}
+
+/// One intent, crashed at each of its operations and at each operation of the
+/// recovery that follows.
 struct Case {
     setup: fn(&mut Library<MemFs>) -> Vec<EntityId>,
-    act: fn(&mut Library<MemFs>, &[EntityId]) -> toshokan::Result<toshokan::Change>,
+    act: fn(&mut Library<MemFs>, &[EntityId]) -> toshokan::Result<()>,
 }
 
 impl Case {
@@ -638,8 +659,30 @@ impl Case {
 fn check(disk: &MemFs, before: &Observed, after: &Observed) -> Result<(), String> {
     let library = open(disk.clone(), A);
     let outcome = Observed::of(&library);
-    if outcome != *before && outcome != *after && !kept_both(&library, &outcome, before, after) {
+    let settled = outcome.settled_as(before) || outcome.settled_as(after);
+    if !settled && !kept_both(&library, &outcome, before, after) {
         return Err(format!("partial state {outcome:?}"));
+    }
+    let state = library.state();
+    let held = |blob: &BlobId| {
+        let adds = state.blob_adds().get(blob);
+        adds.is_some_and(|by| by.values().any(|add| !add.removed))
+    };
+    let needed = state.referenced_blobs().into_iter().filter(held);
+    if let Some(gone) = needed
+        .into_iter()
+        .find(|blob| !outcome.blobs.contains(blob))
+    {
+        return Err(format!("blob {gone} is needed and held but not stored"));
+    }
+    if let Some(gone) = before
+        .blobs
+        .intersection(&after.blobs)
+        .find(|b| !outcome.blobs.contains(b))
+    {
+        return Err(format!(
+            "blob {gone} was kept both before and after, but not now"
+        ));
     }
     let layout = Layout::default();
     let leftovers: Vec<RelPath> = disk
@@ -759,6 +802,7 @@ fn every_crash_while_saving_a_new_file_recovers() {
         act: |library, entities| {
             let bytes = b"new".to_vec();
             block_on(library.save(entities[0], &path("d/new"), bytes, Precondition::Absent))
+                .map(drop)
         },
     };
     for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
@@ -772,7 +816,7 @@ fn every_crash_while_saving_over_a_file_recovers() {
         setup: |library| vec![save_new(library, "d/song", b"old")],
         act: |library, entities| {
             let bytes = b"new".to_vec();
-            block_on(library.save(entities[0], &path("d/song"), bytes, holds(b"old")))
+            block_on(library.save(entities[0], &path("d/song"), bytes, holds(b"old"))).map(drop)
         },
     };
     for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
@@ -787,7 +831,9 @@ fn every_crash_while_deleting_a_file_recovers() {
             save_new(library, "other", b"o");
             vec![save_new(library, "song", b"old")]
         },
-        act: |library, entities| block_on(library.delete_file(entities[0], holds(b"old"))),
+        act: |library, entities| {
+            block_on(library.delete_file(entities[0], holds(b"old"))).map(drop)
+        },
     };
     for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
         case.run(disk);
@@ -798,7 +844,7 @@ fn every_crash_while_deleting_a_file_recovers() {
 fn every_crash_while_moving_a_tree_recovers() {
     let case = Case {
         setup: bound_tree,
-        act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
+        act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))).map(drop),
     };
     let without_both = Disk {
         capabilities: Capabilities {
@@ -836,7 +882,7 @@ fn every_crash_while_undoing_a_tree_move_recovers() {
             block_on(library.move_tree(&path("a/x"), &path("b/x"))).unwrap();
             entities
         },
-        act: |library, _| block_on(library.undo()),
+        act: |library, _| block_on(library.undo()).map(drop),
     };
     for disk in [ALL, WITHOUT_FSYNC, WITHOUT_DIRECTORY_RENAME, EAGER_NAMES] {
         case.run(disk);
@@ -885,7 +931,7 @@ fn bound_files_hold_their_contents(library: &Library<MemFs>) -> Result<(), Strin
 fn a_tree_move_recovered_around_files_put_in_its_way_never_binds_them() {
     let case = Case {
         setup: bound_tree,
-        act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
+        act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))).map(drop),
     };
     let destinations = [path("b/x/1"), path("b/x/y/2")];
     for kind in [ALL, WITHOUT_DIRECTORY_RENAME] {
@@ -927,7 +973,7 @@ fn a_read_only_writer_reports_the_effect_a_crash_interrupted_and_writes_nothing(
         setup: |library| vec![save_new(library, "song", b"old")],
         act: |library, entities| {
             let bytes = b"new".to_vec();
-            block_on(library.save(entities[0], &path("song"), bytes, holds(b"old")))
+            block_on(library.save(entities[0], &path("song"), bytes, holds(b"old"))).map(drop)
         },
     };
     let (mut clean, entities) = case.prepared(ALL);
@@ -957,4 +1003,87 @@ fn a_read_only_writer_reports_the_effect_a_crash_interrupted_and_writes_nothing(
         reported += usize::from(journaled);
     }
     assert!(reported > 0, "no crash left the save journaled");
+}
+
+#[test]
+fn every_crash_while_undoing_a_save_recovers() {
+    let case = Case {
+        setup: |library| {
+            let song = save_new(library, "song", b"old");
+            block_on(library.save(song, &path("song"), b"new".to_vec(), holds(b"old"))).unwrap();
+            vec![song]
+        },
+        act: |library, _| block_on(library.undo()).map(drop),
+    };
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
+    }
+}
+
+#[test]
+fn every_crash_while_undoing_a_file_delete_recovers() {
+    let case = Case {
+        setup: |library| {
+            let song = save_new(library, "song", b"bytes");
+            block_on(library.delete_file(song, holds(b"bytes"))).unwrap();
+            vec![song]
+        },
+        act: |library, _| block_on(library.undo()).map(drop),
+    };
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
+    }
+}
+
+#[test]
+fn every_crash_while_redoing_a_save_recovers() {
+    let case = Case {
+        setup: |library| {
+            let song = save_new(library, "song", b"old");
+            block_on(library.save(song, &path("song"), b"new".to_vec(), holds(b"old"))).unwrap();
+            block_on(library.undo()).unwrap();
+            vec![song]
+        },
+        act: |library, _| block_on(library.redo()).map(drop),
+    };
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
+    }
+}
+
+#[test]
+fn every_crash_while_collecting_recovers() {
+    let case = Case {
+        setup: |library| {
+            let song = save_new(library, "song", b"old");
+            block_on(library.save(song, &path("song"), b"new".to_vec(), holds(b"old"))).unwrap();
+            block_on(library.compact(0)).unwrap();
+            vec![song]
+        },
+        act: |library, _| block_on(library.collect(0)).map(drop),
+    };
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
+    }
+}
+
+#[test]
+fn every_crash_while_saving_on_a_full_disk_recovers() {
+    let case = Case {
+        setup: |library| {
+            let [first, second] = b"12".map(|byte| vec![byte; 4_000]);
+            let song = save_new(library, "song", &first);
+            block_on(library.save(song, &path("song"), second, holds(&first))).unwrap();
+            let used: usize = library.fs().files().values().map(Vec::len).sum();
+            library.fs().set_capacity(Some(used as u64 + 2_000));
+            vec![song]
+        },
+        act: |library, entities| {
+            let [second, third] = b"23".map(|byte| vec![byte; 4_000]);
+            block_on(library.save(entities[0], &path("song"), third, holds(&second))).map(drop)
+        },
+    };
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
+    }
 }
