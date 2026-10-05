@@ -250,7 +250,8 @@ adds total at most its byte budget. It removes the files first, then logs
 `blob_removed` for each under a new intent, so a removal that the log missed is
 logged by the next collection. When a save finds the disk full, the writer
 collects with a budget of zero, then compacts away its undo window and collects
-again, before it refuses the save.
+again, before it refuses the save. A save of bytes from blobs, as undo and redo
+make, keeps its source blob and only collects.
 
 ## File effects
 

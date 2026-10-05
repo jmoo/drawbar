@@ -94,7 +94,8 @@ pub struct Report {
 ///
 /// A save the disk has no room for first collects this writer's blobs that nothing
 /// needs, then gives up this writer's undo history and collects again, and only then
-/// refuses with [`Error::NoSpace`].
+/// refuses with [`Error::NoSpace`]. A save from the blob store, as undo and redo
+/// make, keeps both its source blob and the history.
 pub async fn apply<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -106,12 +107,22 @@ pub async fn apply<F: Fs>(
 ) -> Result<Report> {
     log.writable()?;
     let known = Known::of(state, effect);
+    let (needed, rounds): (_, &[bool]) = match effect {
+        Effect::Save {
+            contents: Source::Blob(blob),
+            ..
+        } => (Some(*blob), &[false]),
+        Effect::Save { .. }
+        | Effect::Delete { .. }
+        | Effect::Rename { .. }
+        | Effect::MoveTree { .. } => (None, &[false, true]),
+    };
     let mut planned = plan(fs, layout, log.writer(), effect, &known).await;
-    for evict_undo in [false, true] {
+    for &evict_undo in rounds {
         if !matches!(planned, Err(Error::NoSpace { .. })) {
             break;
         }
-        blobs::make_room(fs, layout, log, evict_undo).await?;
+        blobs::make_room(fs, layout, log, needed, evict_undo).await?;
         planned = plan(fs, layout, log.writer(), effect, &known).await;
     }
     perform(fs, layout, log, intent, entries, planned?).await

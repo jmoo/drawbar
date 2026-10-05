@@ -442,6 +442,43 @@ on_every_backend!(
     binding_follows_a_file_renamed_outside_the_app,
 );
 
+#[test]
+fn a_full_disk_gives_up_undo_history_before_refusing_a_save() {
+    let fs = MemFs::new();
+    let mut a = open(fs.clone(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    let at = path("song");
+    let [first, second, third] = b"123".map(|byte| vec![byte; 10_000]);
+    block_on(a.save(song, &at, first.clone(), Precondition::Absent)).unwrap();
+    block_on(a.save(song, &at, second.clone(), holds(&first))).unwrap();
+    let used: usize = fs.files().values().map(Vec::len).sum();
+    fs.set_capacity(Some(used as u64 + 5_000));
+
+    block_on(a.save(song, &at, third.clone(), holds(&second))).unwrap();
+    assert_eq!(library_files(&fs), [(at.clone(), third.clone())].into());
+    assert!(
+        !stored(&fs, &first),
+        "the bytes only undo needed were collected"
+    );
+    let refused = block_on(a.undo());
+    assert!(matches!(refused, Err(Error::NoSpace { .. })), "{refused:?}");
+    assert!(stored(&fs, &second), "an undo keeps the bytes it restores");
+    fs.set_capacity(None);
+    block_on(a.undo()).unwrap();
+    assert_eq!(library_files(&fs), [(at.clone(), second.clone())].into());
+    let refused = block_on(a.undo());
+    assert!(
+        matches!(&refused, Err(Error::Refused(refusal)) if **refusal == Refusal::Nothing),
+        "the history before the full disk is gone: {refused:?}"
+    );
+
+    let used: usize = fs.files().values().map(Vec::len).sum();
+    fs.set_capacity(Some(used as u64));
+    let refused = block_on(a.save(song, &at, first.clone(), holds(&second)));
+    assert!(matches!(refused, Err(Error::NoSpace { .. })), "{refused:?}");
+    assert_eq!(library_files(&fs), [(at, second)].into());
+}
+
 /// The facts and files a crash may leave: those before the intent, or those after.
 #[derive(PartialEq, Debug)]
 struct Observed {
