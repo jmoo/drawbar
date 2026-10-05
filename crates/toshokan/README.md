@@ -48,7 +48,7 @@ async fn tag_a_new_song(writer: WriterId, bytes: Vec<u8>) -> toshokan::Result<()
    finishes or reports what was interrupted.
 7. **Keep what you don't understand.** Entries and fields from a newer writer
    survive verbatim. A writer that cannot represent its own history opens
-   read-only.
+   read-only, and reports any change a crash interrupted without touching it.
 8. **Conflicts are said, not hidden.** Metadata resolves by fixed rules. Byte
    conflicts are reported, and both sides are kept.
 9. **Capabilities are declared.** A backend says what it can do, and plans follow

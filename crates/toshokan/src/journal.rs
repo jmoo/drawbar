@@ -28,6 +28,11 @@ pub enum Outcome {
     Partial,
     /// No file changed. The log has only the bytes recovery kept.
     RolledBack,
+    /// This writer is read-only, so the intent is left as the crash left it, for a
+    /// build that can finish it.
+    Pending,
+    /// As `Pending`, and this build cannot read the record, so its paths are unknown.
+    Unreadable,
 }
 
 /// An intent a crash interrupted, and how recovery settled it.
@@ -48,22 +53,27 @@ pub struct Recovered {
 /// journal. Bytes a crash left in the writer's `tmp/` before journaling them are
 /// moved into the blob store and reported under a new intent. Recovery is itself
 /// safe to interrupt and repeat.
+///
+/// A read-only writer changes nothing and reports each journaled intent as pending.
 pub async fn recover<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
 ) -> Result<Vec<Recovered>> {
     let records = read(fs, layout, log.writer()).await?;
-    if records.is_empty() && log.read_only().is_some() {
-        return Ok(Vec::new());
+    if log.read_only().is_some() {
+        return Ok(records.into_iter().map(pending).collect());
     }
-    log.writable()?;
+    let records: Vec<Record> = records
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect::<Result<_>>()?;
     let mut recovered = Vec::new();
     for record in records {
         let settled = settle(fs, layout, log, &record).await?;
         recovered.push(Recovered {
             intent: record.intent,
-            paths: record.steps.iter().flat_map(|s| s.step.paths()).collect(),
+            paths: record.paths(),
             outcome: settled.outcome(),
             kept: settled.kept.iter().map(|stored| stored.blob).collect(),
             stayed: settled.stayed,
@@ -71,6 +81,20 @@ pub async fn recover<F: Fs>(
     }
     recovered.extend(keep_staged(fs, layout, log).await?);
     Ok(recovered)
+}
+
+fn pending((intent, record): (IntentId, Result<Record>)) -> Recovered {
+    let (paths, outcome) = match record {
+        Ok(record) => (record.paths(), Outcome::Pending),
+        Err(_) => (Vec::new(), Outcome::Unreadable),
+    };
+    Recovered {
+        intent,
+        paths,
+        outcome,
+        kept: Vec::new(),
+        stayed: Vec::new(),
+    }
 }
 
 /// What running a record's steps did.
@@ -98,14 +122,13 @@ impl Settled {
 
     /// The report of a finished intent, or why it did not finish.
     pub(crate) fn into_result(self) -> Result<Report> {
-        let outcome = self.outcome();
-        match (self.error, outcome) {
+        match (self.error, self.changed) {
             (None, _) => Ok(self.report),
-            (Some(error), Outcome::Partial) => Err(Error::Partial {
+            (Some(error), true) => Err(Error::Partial {
                 error: Box::new(error),
                 stayed: self.stayed,
             }),
-            (Some(error), Outcome::Finished | Outcome::RolledBack) => Err(error),
+            (Some(error), false) => Err(error),
         }
     }
 }
@@ -157,14 +180,11 @@ pub(crate) async fn settle<F: Fs>(
             }
         }
     }
-    let entries: Vec<Entry> = match settled.outcome() {
-        Outcome::Finished => record.entries.iter().chain(&facts).cloned().collect(),
-        Outcome::RolledBack if settled.kept.is_empty() => Vec::new(),
-        outcome => {
-            let label = match outcome {
-                Outcome::Partial => record.label(),
-                Outcome::Finished | Outcome::RolledBack => None,
-            };
+    let entries: Vec<Entry> = match (&settled.error, settled.changed) {
+        (None, _) => record.entries.iter().chain(&facts).cloned().collect(),
+        (Some(_), false) if settled.kept.is_empty() => Vec::new(),
+        (Some(_), changed) => {
+            let label = changed.then(|| record.label()).flatten();
             let head = log.stamp(
                 record.intent,
                 Kind::Intent {
@@ -252,6 +272,10 @@ pub(crate) struct Record {
 }
 
 impl Record {
+    fn paths(&self) -> Vec<RelPath> {
+        self.steps.iter().flat_map(|s| s.step.paths()).collect()
+    }
+
     fn label(&self) -> Option<String> {
         self.entries.iter().find_map(|entry| match &entry.kind {
             Kind::Intent { label, .. } => label.clone(),
@@ -297,9 +321,14 @@ async fn clear<F: Fs>(fs: &F, layout: &Layout, writer: WriterId, intent: IntentI
     fs.sync(&layout.journal(writer)).await
 }
 
-/// The writer's records, in the order of their intents. A record that does not
-/// decode is corrupt; one from a newer build is refused the same way.
-async fn read<F: Fs>(fs: &F, layout: &Layout, writer: WriterId) -> Result<Vec<Record>> {
+/// The writer's records by intent, in the order of their intents, each with whether
+/// it decodes. A record that does not decode is corrupt, and one from a newer build
+/// is refused the same way.
+async fn read<F: Fs>(
+    fs: &F,
+    layout: &Layout,
+    writer: WriterId,
+) -> Result<Vec<(IntentId, Result<Record>)>> {
     let dir = layout.journal(writer);
     if fs.metadata(&dir).await?.is_none() {
         return Ok(Vec::new());
@@ -311,14 +340,14 @@ async fn read<F: Fs>(fs: &F, layout: &Layout, writer: WriterId) -> Result<Vec<Re
         };
         let path = dir.join(&entry.name)?;
         let bytes = fs.read(&path).await?;
-        let record: Record = serde_json::from_slice(&bytes).map_err(|error| Error::Corrupt {
+        let record = serde_json::from_slice(&bytes).map_err(|error| Error::Corrupt {
             path,
             reason: error.to_string(),
-        })?;
-        records.push((counter, record));
+        });
+        records.push((IntentId::new(writer, counter), record));
     }
-    records.sort_by_key(|(counter, _)| *counter);
-    Ok(records.into_iter().map(|(_, record)| record).collect())
+    records.sort_by_key(|(intent, _)| intent.counter);
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -466,17 +495,31 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_writer_does_not_recover_its_journal() {
+    fn a_read_only_writer_reports_its_journal_as_pending_and_changes_nothing() {
         let layout = Layout::default();
         let fs = library(&[("song", b"old")]);
         let record = save_record(&layout, &fs, b"new", b"old");
         block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+        let unreadable = layout.journal(WRITER).join("9.json").unwrap();
+        block_on(fs.create(&unreadable, b"{\"intent\"")).unwrap();
         append_unknown(&fs, WRITER, 1);
-        let files = fs.files();
+        let (files, mutations) = (fs.files(), fs.mutations());
         let mut log = reopen(&fs, WRITER);
-        let result = block_on(recover(&fs, &layout, &mut log));
-        assert!(matches!(result, Err(Error::ReadOnly { .. })), "{result:?}");
-        assert_eq!(fs.files(), files);
+        let pending = |intent, paths, outcome| Recovered {
+            intent,
+            paths,
+            outcome,
+            kept: vec![],
+            stayed: vec![],
+        };
+        assert_eq!(
+            block_on(recover(&fs, &layout, &mut log)).unwrap(),
+            [
+                pending(INTENT, vec![path("song")], Outcome::Pending),
+                pending(IntentId::new(WRITER, 9), vec![], Outcome::Unreadable),
+            ]
+        );
+        assert_eq!((fs.files(), fs.mutations()), (files, mutations));
     }
 
     #[test]

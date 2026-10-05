@@ -812,3 +812,41 @@ fn a_tree_move_recovered_around_files_put_in_its_way_never_binds_them() {
         }
     }
 }
+
+#[test]
+fn a_read_only_writer_reports_the_effect_a_crash_interrupted_and_writes_nothing() {
+    let case = Case {
+        setup: |library| vec![save_new(library, "song", b"old")],
+        act: |library, entities| {
+            let bytes = b"new".to_vec();
+            block_on(library.save(entities[0], &path("song"), bytes, holds(b"old")))
+        },
+    };
+    let (mut clean, entities) = case.prepared(Capabilities::ALL);
+    let start = clean.fs().mutations();
+    (case.act)(&mut clean, &entities).unwrap();
+    let mut reported = 0;
+    for crash in 0..clean.fs().mutations() - start {
+        let disk = case.crashed(Capabilities::ALL, crash);
+        append_unknown(&disk, A);
+        let journal = Layout::default().journal(A);
+        let journaled = disk.files().keys().any(|at| at.starts_with(&journal));
+        let before = tree(&disk);
+
+        let library = open(disk.clone(), A);
+        assert!(library.read_only().is_some(), "crash {crash}");
+        assert_eq!(tree(&disk), before, "crash {crash}: opening wrote");
+        let reports: Vec<_> = library
+            .recovered()
+            .iter()
+            .map(|recovered| (recovered.outcome, recovered.paths.clone()))
+            .collect();
+        let expected = match journaled {
+            true => vec![(Outcome::Pending, vec![path("song")])],
+            false => vec![],
+        };
+        assert_eq!(reports, expected, "crash {crash}");
+        reported += usize::from(journaled);
+    }
+    assert!(reported > 0, "no crash left the save journaled");
+}

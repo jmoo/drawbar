@@ -342,4 +342,6 @@ logging `blob_added` for each first, under a new intent. Any other file there is
 snapshot a compaction had not yet renamed into place. Recovery may itself be
 interrupted and repeated.
 
-A writer that is read-only leaves its journal unrecovered.
+A writer that is read-only changes nothing: it leaves its journal and `tmp/<w>/` as
+they are, and reports each record as an intent still pending, with the record's
+paths when it can read the record.

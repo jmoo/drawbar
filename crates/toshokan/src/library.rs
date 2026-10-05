@@ -58,16 +58,14 @@ impl<F: Fs> Library<F> {
     /// back this writer's interrupted effects, merge, and scan the files.
     ///
     /// With nothing to recover, opening writes nothing. A writer whose own log holds
-    /// entries this build does not understand opens read-only and leaves its journal
-    /// for a build that does.
+    /// entries this build does not understand opens read-only: it writes nothing, and
+    /// reports each intent a crash interrupted as pending, for a build that can finish
+    /// it.
     pub async fn open(fs: F, layout: Layout, writer: WriterId) -> Result<Self> {
         let mut logs = read_logs(&fs, &layout).await?;
         let mut log = LogWriter::open(writer, &logs);
-        let recovered = match log.read_only() {
-            Some(_) => Vec::new(),
-            None => journal::recover(&fs, &layout, &mut log).await?,
-        };
-        if !recovered.is_empty() {
+        let recovered = journal::recover(&fs, &layout, &mut log).await?;
+        if log.read_only().is_none() && !recovered.is_empty() {
             logs = read_logs(&fs, &layout).await?;
         }
         let mut library = Self {
@@ -106,7 +104,8 @@ impl<F: Fs> Library<F> {
         &self.scan
     }
 
-    /// The effects a crash interrupted, as open settled them.
+    /// The intents a crash interrupted, as open settled them, or as it left them when
+    /// this writer is read-only.
     pub fn recovered(&self) -> &[Recovered] {
         &self.recovered
     }
