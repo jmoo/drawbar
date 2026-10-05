@@ -869,8 +869,7 @@ impl DrawbarApp {
                         continue;
                     }
                     rule_if(ui, &mut owed_rule);
-                    button(ui, RECENT, |ui| {
-                        drop_down_style(ui);
+                    submenu(ui, RECENT, |ui| {
                         for (command, offer) in &recent {
                             if self.item(ui, *command, offer) {
                                 self.run(ui.ctx(), frame, *command, acts);

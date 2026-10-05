@@ -2213,11 +2213,20 @@ mod tests {
         let mut app = app(&ctx, None);
         app.platform = Platform::Web;
         let _ = settled(&ctx, &mut app, screen);
+        app.browser.folders.libraries = vec![crate::folders::Library {
+            root: "elsewhere".into(),
+            name: "Elsewhere".to_string(),
+            open: false,
+        }];
         let f10 = pressed(egui::Key::F10, egui::Modifiers::NONE);
         let _ = frame_of(&ctx, &mut app, screen, vec![f10]);
         let _ = settled(&ctx, &mut app, screen);
         let said = words_at(&ctx, &mut app, screen, Vec::new());
-        for (sub, item) in [("New", "Open…"), ("Theme", "Browser panel")] {
+        for (sub, item) in [
+            ("New", "Open…"),
+            (crate::menu::RECENT, "Open…"),
+            ("Theme", "Browser panel"),
+        ] {
             let (sub, item) = (testing::where_(&said, sub), testing::where_(&said, item));
             assert_eq!(sub.left(), item.left(), "{sub:?} against {item:?}");
         }
