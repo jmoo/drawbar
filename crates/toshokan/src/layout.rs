@@ -6,7 +6,8 @@
 //! <root>/writers/<writer>/snapshot-<hash>.json  a snapshot, named by its BLAKE3 hash
 //! <root>/blobs/<hash>                           a blob, named by its BLAKE3 hash
 //! <root>/journal/<writer>/                      a writer's journal of unfinished effects
-//! <root>/tmp/<writer>/                          a writer's files before they are renamed into place
+//! <root>/tmp/<writer>/                          a writer's files before they are renamed into place,
+//!                                               and blobs its collection sets aside
 //! <root>/quarantine/<writer>/<hash>             a store file whose bytes were not its name
 //! ```
 

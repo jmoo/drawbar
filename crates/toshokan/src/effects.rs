@@ -684,11 +684,11 @@ impl Step {
         &self,
         fs: &F,
         layout: &Layout,
-        writer: WriterId,
+        log: &mut LogWriter,
     ) -> Result<Ran> {
         match self {
-            Self::Save { path, new, old } => save(fs, layout, writer, path, *new, *old).await,
-            Self::Delete { path, old } => delete(fs, layout, writer, path, *old).await,
+            Self::Save { path, new, old } => save(fs, layout, log, path, *new, *old).await,
+            Self::Delete { path, old } => delete(fs, layout, log, path, *old).await,
             Self::Move { from, to } => move_entry(fs, from, to).await,
             Self::MoveFiles {
                 from,
@@ -706,14 +706,14 @@ impl Step {
         &self,
         fs: &F,
         layout: &Layout,
-        writer: WriterId,
+        log: &mut LogWriter,
     ) -> Result<Vec<Stored>> {
         let Self::Save { new, .. } = self else {
             return Ok(Vec::new());
         };
-        let staged = blobs::staged(layout, writer, new.blob);
+        let staged = blobs::staged(layout, log.writer(), new.blob);
         if exists(fs, &staged).await? {
-            displace(fs, layout, writer, &staged, *new).await?;
+            displace(fs, layout, log, &staged, *new).await?;
             sync_parent(fs, &staged).await?;
         }
         in_store(fs, layout, vec![*new]).await
@@ -758,12 +758,12 @@ async fn place<F: Fs>(fs: &F, from: &RelPath, to: &RelPath) -> Result<()> {
 async fn save<F: Fs>(
     fs: &F,
     layout: &Layout,
-    writer: WriterId,
+    log: &mut LogWriter,
     path: &RelPath,
     new: Stored,
     old: Option<Stored>,
 ) -> Result<Ran> {
-    let staged = blobs::staged(layout, writer, new.blob);
+    let staged = blobs::staged(layout, log.writer(), new.blob);
     let has_staged = exists(fs, &staged).await?;
     let finished = match at(fs, path).await? {
         At::File(blob) if blob == new.blob => {
@@ -780,7 +780,7 @@ async fn save<F: Fs>(
         }
         At::File(blob) if Some(blob) == old.map(|old| old.blob) => {
             let old = old.expect("the file holds the old bytes");
-            displace(fs, layout, writer, path, old).await?;
+            displace(fs, layout, log, path, old).await?;
             place(fs, &staged, path).await?;
             true
         }
@@ -798,7 +798,7 @@ async fn save<F: Fs>(
     }
     let error = changed(fs, path, old).await?;
     if has_staged {
-        displace(fs, layout, writer, &staged, new).await?;
+        displace(fs, layout, log, &staged, new).await?;
         sync_parent(fs, &staged).await?;
     }
     let mut kept = vec![new];
@@ -812,13 +812,13 @@ async fn save<F: Fs>(
 async fn delete<F: Fs>(
     fs: &F,
     layout: &Layout,
-    writer: WriterId,
+    log: &mut LogWriter,
     path: &RelPath,
     old: Stored,
 ) -> Result<Ran> {
     let finished = match at(fs, path).await? {
         At::File(blob) if blob == old.blob => {
-            displace(fs, layout, writer, path, old).await?;
+            displace(fs, layout, log, path, old).await?;
             sync_parent(fs, path).await?;
             true
         }

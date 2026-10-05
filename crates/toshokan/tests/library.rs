@@ -429,6 +429,28 @@ fn collection_reaches_only_blobs_older_than_the_undo_window<F: Fs>(disk: impl Fn
     assert_eq!(library_files(a.fs()), [(at, b"2".to_vec())].into());
 }
 
+fn collection_keeps_a_blob_another_writer_added_since_the_collector_last_read<F: Fs>(
+    disk: impl Fn() -> F,
+) {
+    let mut a = open(disk(), A);
+    let (first, _) = block_on(a.create()).unwrap();
+    block_on(a.save(first, &path("a"), b"same".to_vec(), Precondition::Absent)).unwrap();
+    block_on(a.save(first, &path("a"), b"new".to_vec(), holds(b"same"))).unwrap();
+    block_on(a.compact(0)).unwrap();
+    let mut b = open(disk(), B);
+    let (second, _) = block_on(b.create()).unwrap();
+    block_on(b.save(second, &path("b"), b"same".to_vec(), Precondition::Absent)).unwrap();
+    block_on(b.save(second, &path("b"), b"other".to_vec(), holds(b"same"))).unwrap();
+
+    block_on(a.collect(0)).unwrap();
+    assert!(
+        stored(&disk(), b"same"),
+        "B's displaced bytes were collected"
+    );
+    block_on(b.undo()).unwrap();
+    assert_eq!(library_files(&disk())[&path("b")], b"same");
+}
+
 fn opening_writes_nothing<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
@@ -559,6 +581,7 @@ on_every_backend!(
     compaction_never_turns_an_undo_into_a_redo,
     collection_never_removes_a_blob_a_live_value_names,
     collection_reaches_only_blobs_older_than_the_undo_window,
+    collection_keeps_a_blob_another_writer_added_since_the_collector_last_read,
     opening_writes_nothing,
     an_intent_the_entity_does_not_allow_is_refused_before_anything_changes,
     reopening_an_untouched_library_reads_no_file,

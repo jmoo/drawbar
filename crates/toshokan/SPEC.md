@@ -19,7 +19,7 @@ to the root.
 | `writers/<writer>/snapshot-<hash>.json` | A snapshot of a writer's log             |
 | `blobs/<hash>`                        | A blob                                     |
 | `journal/<writer>/`                   | A writer's journal of unfinished effects   |
-| `tmp/<writer>/`                       | A writer's files before they are renamed into place |
+| `tmp/<writer>/`                       | A writer's files before they are renamed into place, and blobs its collection sets aside |
 | `quarantine/<writer>/<hash>`          | A file found in `blobs/` whose bytes were not its name |
 
 `<writer>` is a writer id. `<n>` is a decimal segment number; a writer's segments
@@ -258,7 +258,16 @@ bytes write intents of their own.
 bytes as `tmp/<writer>/<hash>`, syncs them, and renames them into place. A blob is
 never rewritten. A library file that an effect displaces is renamed into `blobs/`
 under the hash of its contents; when the store already holds that hash, the file is
-removed instead.
+removed instead, as below.
+
+Writer `w` removes a file because the store holds its bytes only once its own log
+durably holds a `blob_added` for them that no later `blob_removed` of `w` follows,
+appending one under an intent of its own when it does not, and only if
+`blobs/<hash>` still holds those bytes when checked after that. When the blob is
+gone by then, `w` renames its file into place instead. A collection by another
+writer reads every log after it sets the blob aside (below), so it either sees that
+add and puts the blob back, or has set it aside before the check, which then finds
+it gone.
 
 A writer trusts no store file by its name. Before it removes a file because
 `blobs/<hash>` exists, it compares that store file's length, then its hash, with
@@ -277,9 +286,12 @@ file. Garbage collection is per writer: writer `w` may remove a blob only when
   entity with a field or set member that holds it, and
 - no other writer's latest entry for it is an add.
 
-It removes such blobs oldest first, by the version of its add, until its remaining
-adds total at most its byte budget. It removes the files first, then logs
-`blob_removed` for each under a new intent. A removal that a crash kept from the log
+It reads every writer's log and chooses such blobs oldest first, by the version of
+its add, until its remaining adds total at most its byte budget. It renames each
+chosen blob to `tmp/<w>/aside-<hash>` and reads every writer's log again. A blob no
+longer eligible goes back to `blobs/<hash>`, or, when another copy is there by
+then, its set-aside copy is removed; every other set-aside blob is removed. Then it
+logs `blob_removed` for each removed blob under a new intent. A removal that a crash kept from the log
 is logged by the next collection that finds the blob still eligible; until then the
 blob counts as held, and an undo that needs it fails to read it. When a save finds
 the disk full, the writer collects with a budget of zero, then compacts away its
@@ -344,8 +356,10 @@ A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 
 ### Recovery
 
-At open, writer `w` first removes every file in `tmp/<w>/` that is not staged
-bytes: a record or snapshot not yet renamed into place, or a file named by a blob id
+At open, writer `w` first puts back each blob a collection left set aside as
+`tmp/<w>/aside-<hash>`, as the collection would, and moves one whose bytes do not
+hash to `<hash>` to its quarantine; it logs nothing, since no removal was logged.
+Then it removes every other file in `tmp/<w>/` that is not staged bytes: a record or snapshot not yet renamed into place, or a file named by a blob id
 whose bytes do not hash to it. No record names any of them. Then it settles each
 record in order of `<n>`. It runs the steps in order, bringing each one's files to
 its end from whatever state they are in:

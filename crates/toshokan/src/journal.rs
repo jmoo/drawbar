@@ -76,6 +76,7 @@ pub async fn recover<F: Fs>(
         .into_iter()
         .map(|(_, record)| record)
         .collect::<Result<_>>()?;
+    put_back(fs, layout, log.writer()).await?;
     remove_unfinished(fs, layout, log.writer()).await?;
     records
         .iter()
@@ -209,11 +210,11 @@ pub(crate) async fn settle<F: Fs>(
     let mut facts = Vec::new();
     for StepRecord { step, entries } in &record.steps {
         if settled.error.is_some() {
-            settled.kept.extend(step.abandon(fs, layout, writer).await?);
+            settled.kept.extend(step.abandon(fs, layout, log).await?);
             settled.stayed.push(step.subject().clone());
             continue;
         }
-        match step.run(fs, layout, writer).await? {
+        match step.run(fs, layout, log).await? {
             Ran::Finished(report) => {
                 settled.changed = true;
                 settled.report.extend(report);
@@ -279,6 +280,25 @@ fn moves_to(entry: &Entry, path: &RelPath) -> bool {
     )
 }
 
+/// Return to the store each blob an interrupted collection set aside, and quarantine
+/// one whose bytes are not its name. No entry is needed: the collection had not logged
+/// the removal.
+async fn put_back<F: Fs>(fs: &F, layout: &Layout, writer: WriterId) -> Result<()> {
+    for path in tmp_files(fs, layout, writer).await? {
+        let Some(named) = path.name().and_then(blobs::aside_blob) else {
+            continue;
+        };
+        match hash_file(fs, &path).await? {
+            (blob, len) if blob == named => {
+                blobs::release(fs, layout, writer, &path, Stored { blob, len }).await?
+            }
+            _ => blobs::quarantine(fs, layout, writer, &path).await?,
+        }
+        fs.sync(&layout.tmp(writer)).await?;
+    }
+    Ok(())
+}
+
 /// Remove every file in this writer's `tmp/` that is not whole staged bytes: a
 /// journal record or snapshot not yet renamed into place, or staged bytes cut short.
 /// No record names any of them.
@@ -322,7 +342,7 @@ async fn keep_staged<F: Fs>(
         .collect();
     log.append(fs, layout, &entries).await?;
     for &(ref path, blob, len) in &staged {
-        blobs::displace(fs, layout, log.writer(), path, Stored { blob, len }).await?;
+        blobs::release(fs, layout, log.writer(), path, Stored { blob, len }).await?;
     }
     fs.sync(&layout.tmp(log.writer())).await?;
     Ok(Some(Recovered {

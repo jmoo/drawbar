@@ -337,12 +337,14 @@ impl<F: Fs> Library<F> {
     /// so collection keeps those; [`Library::compact`] to the undo window to keep, then
     /// collect, to bound the store.
     ///
+    /// It judges from every writer's log as read when it runs, not from
+    /// [`Library::state`].
+    ///
     /// ⚠️ A crash after a blob is removed but before its removal is logged leaves it
     /// held in the log until a collection finds it eligible again; an undo that needs
     /// it meanwhile fails with [`Error::NotFound`].
     pub async fn collect(&mut self, budget: u64) -> Result<Collection> {
-        let collected =
-            blobs::collect(&self.fs, &self.layout, &mut self.log, &self.state, budget).await;
+        let collected = blobs::collect(&self.fs, &self.layout, &mut self.log, &[], budget).await;
         self.reloaded(collected).await
     }
 

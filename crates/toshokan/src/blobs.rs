@@ -3,7 +3,7 @@
 //! A blob is written under the writer's `tmp/` directory and renamed into
 //! `blobs/<hash>`, so a reader never sees a partial blob, and it is never rewritten.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::compact::compact;
 use crate::effects::Stored;
@@ -12,7 +12,7 @@ use crate::fs::{ensure_dir, hash_file, Fs, RelPath};
 use crate::ids::{Version, WriterId};
 use crate::layout::Layout;
 use crate::log::{read_log, read_logs, Kind, LogWriter};
-use crate::merge::{merge, BlobAdd, State};
+use crate::merge::{merge, State};
 use crate::value::BlobId;
 
 /// The bytes of `blob`, refused as corrupt when they do not hash to its id.
@@ -60,10 +60,41 @@ pub(crate) fn staged(layout: &Layout, writer: WriterId, blob: BlobId) -> RelPath
         .expect("a blob id is one path component")
 }
 
-/// Move the file at `path`, whose contents hash to `blob`, into the store. When the
-/// store already holds `blob` the file is removed instead. The move is durable in
-/// the store; making the file's absence at `path` durable is the caller's step.
+/// Move the file at `path`, whose bytes are `stored`, into the store, durably. When
+/// the store holds those bytes already, the file is released only once this writer's
+/// log holds an add of them not since removed, appending one under an intent of its
+/// own when it does not. Making the file's absence at `path` durable is the caller's
+/// step.
 pub(crate) async fn displace<F: Fs>(
+    fs: &F,
+    layout: &Layout,
+    log: &mut LogWriter,
+    path: &RelPath,
+    stored: Stored,
+) -> Result<()> {
+    let writer = log.writer();
+    if enter(fs, layout, writer, path, stored).await? == Entered::Moved {
+        return Ok(());
+    }
+    let own = merge(&[read_log(fs, layout, writer).await?]);
+    let held = own
+        .blob_adds()
+        .get(&stored.blob)
+        .and_then(|by| by.get(&writer));
+    if !held.is_some_and(|add| !add.removed) {
+        let intent = log.new_intent();
+        let entries = [Kind::INTENT, stored.added()].map(|kind| log.stamp(intent, kind));
+        log.append(fs, layout, &entries).await?;
+    }
+    release(fs, layout, writer, path, stored).await
+}
+
+/// Remove the file at `path`, whose bytes are `stored`, when the store holds them, or
+/// else move it in.
+///
+/// ⚠️ Call this only once this writer's log durably holds `blob_added` for `stored`.
+/// A collection that read the logs before then may remove the store copy this finds.
+pub(crate) async fn release<F: Fs>(
     fs: &F,
     layout: &Layout,
     writer: WriterId,
@@ -78,7 +109,7 @@ pub(crate) async fn displace<F: Fs>(
 
 /// How [`enter`] left a file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Entered {
+enum Entered {
     /// Renamed into the store.
     Moved,
     /// Still at its path, because the store holds its bytes already.
@@ -88,7 +119,7 @@ pub(crate) enum Entered {
 /// Rename the file at `path`, whose bytes are `stored`, into the store, durably,
 /// unless the store holds those bytes already. A store copy whose bytes are not
 /// `stored` is moved into this writer's quarantine first, so the file takes its place.
-pub(crate) async fn enter<F: Fs>(
+async fn enter<F: Fs>(
     fs: &F,
     layout: &Layout,
     writer: WriterId,
@@ -124,12 +155,14 @@ async fn holds<F: Fs>(fs: &F, path: &RelPath, stored: Stored) -> Result<Option<b
     if found.len != stored.len {
         return Ok(Some(false));
     }
-    Ok(Some(hash_file(fs, path).await? == (stored.blob, stored.len)))
+    Ok(Some(
+        hash_file(fs, path).await? == (stored.blob, stored.len),
+    ))
 }
 
-/// Move a store file whose bytes are not its name to `quarantine/<writer>/<hash>`,
-/// named by the hash of its bytes.
-async fn quarantine<F: Fs>(
+/// Move a file whose bytes are not its name to `quarantine/<writer>/<hash>`, named
+/// by the hash of its bytes.
+pub(crate) async fn quarantine<F: Fs>(
     fs: &F,
     layout: &Layout,
     writer: WriterId,
@@ -159,108 +192,147 @@ pub struct Collection {
 /// Remove this writer's eligible blobs, oldest first, until its blobs occupy at most
 /// `budget` bytes, logging `BlobRemoved` for each.
 ///
-/// A blob is eligible when this writer added it, no live value refers to it, no entry
-/// inside any writer's retained undo window refers to it, and no other writer's
-/// retained log has added it.
-pub async fn collect<F: Fs>(
+/// A blob is eligible when this writer holds it, no live value refers to it, no entry
+/// inside any writer's retained undo window refers to it, no other writer holds it,
+/// and it is not in `needed`. Eligibility is judged from every writer's log as read
+/// now, and judged again once the chosen blobs are [`set_aside`]; a blob another
+/// writer added or referred to in between goes back.
+pub(crate) async fn collect<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
-    state: &State,
-    budget: u64,
-) -> Result<Collection> {
-    let referenced = state.referenced_blobs();
-    collect_with(fs, layout, log, state.blob_adds(), &referenced, budget).await
-}
-
-pub(crate) async fn collect_with<F: Fs>(
-    fs: &F,
-    layout: &Layout,
-    log: &mut LogWriter,
-    adds: &BTreeMap<BlobId, BTreeMap<WriterId, BlobAdd>>,
-    referenced: &BTreeSet<BlobId>,
+    needed: &[BlobId],
     budget: u64,
 ) -> Result<Collection> {
     log.writable()?;
-    let chosen = choose(log.writer(), adds, referenced, budget);
-    if chosen.removed.is_empty() {
-        return Ok(Collection {
-            removed: Vec::new(),
-            freed: 0,
-            kept: chosen.kept,
-        });
+    let writer = log.writer();
+    let state = merge(&read_logs(fs, layout).await?);
+    let chosen = choose(writer, &state, needed, budget);
+    let mut gone = BTreeSet::new();
+    let mut aside = Vec::new();
+    if !chosen.picked.is_empty() {
+        ensure_dir(fs, &layout.tmp(writer)).await?;
     }
-    let mut removed_any = false;
-    for (blob, _) in &chosen.removed {
-        match fs.remove_file(&layout.blob(*blob)).await {
-            Ok(()) => removed_any = true,
-            Err(Error::NotFound { .. }) => {}
+    for stored in &chosen.picked {
+        let to = set_aside(layout, writer, stored.blob);
+        match fs.rename(&layout.blob(stored.blob), &to).await {
+            Ok(()) => aside.push((to, *stored)),
+            Err(Error::NotFound { .. }) => {
+                gone.insert(stored.blob);
+            }
+            Err(Error::AlreadyExists { .. }) => {}
             Err(error) => return Err(error),
         }
     }
-    if removed_any {
+    if !aside.is_empty() {
+        fs.sync(&layout.tmp(writer)).await?;
         fs.sync(&layout.blobs()).await?;
+        let claimed = claimed(writer, &merge(&read_logs(fs, layout).await?), needed);
+        for (path, stored) in aside {
+            if claimed.contains(&stored.blob) {
+                release(fs, layout, writer, &path, stored).await?;
+            } else {
+                fs.remove_file(&path).await?;
+                gone.insert(stored.blob);
+            }
+        }
+        fs.sync(&layout.tmp(writer)).await?;
     }
-    let intent = log.new_intent();
-    let removals = chosen
-        .removed
-        .iter()
-        .map(|(blob, _)| Kind::BlobRemoved { blob: *blob });
-    let entries: Vec<_> = std::iter::once(Kind::INTENT)
-        .chain(removals)
-        .map(|kind| log.stamp(intent, kind))
+    let removed: Vec<Stored> = chosen
+        .picked
+        .into_iter()
+        .filter(|stored| gone.contains(&stored.blob))
         .collect();
-    log.append(fs, layout, &entries).await?;
+    let freed = removed.iter().map(|stored| stored.len).sum();
+    if !removed.is_empty() {
+        let intent = log.new_intent();
+        let removals = removed
+            .iter()
+            .map(|stored| Kind::BlobRemoved { blob: stored.blob });
+        let entries: Vec<_> = std::iter::once(Kind::INTENT)
+            .chain(removals)
+            .map(|kind| log.stamp(intent, kind))
+            .collect();
+        log.append(fs, layout, &entries).await?;
+    }
     Ok(Collection {
-        removed: chosen.removed.iter().map(|(blob, _)| *blob).collect(),
-        freed: chosen.removed.iter().map(|(_, len)| len).sum(),
-        kept: chosen.kept,
+        removed: removed.iter().map(|stored| stored.blob).collect(),
+        freed,
+        kept: chosen.held.saturating_sub(freed),
     })
 }
 
-struct Chosen {
-    removed: Vec<(BlobId, u64)>,
-    kept: u64,
+/// Where a collection keeps `blob` while it judges it again: `tmp/<writer>/aside-<hash>`.
+/// The writer's log still holds the blob's add until the collection logs its removal.
+pub(crate) fn set_aside(layout: &Layout, writer: WriterId, blob: BlobId) -> RelPath {
+    layout
+        .tmp(writer)
+        .join(&format!("{ASIDE}{blob}"))
+        .expect("a blob id is one path component")
 }
 
-fn choose(
-    writer: WriterId,
-    adds: &BTreeMap<BlobId, BTreeMap<WriterId, BlobAdd>>,
-    referenced: &BTreeSet<BlobId>,
-    budget: u64,
-) -> Chosen {
-    let held = |add: &BlobAdd| !add.removed;
-    let own: Vec<(BlobId, &BlobAdd)> = adds
+/// The blob a file name from [`set_aside`] names.
+pub(crate) fn aside_blob(name: &str) -> Option<BlobId> {
+    name.strip_prefix(ASIDE)?.parse().ok()
+}
+
+const ASIDE: &str = "aside-";
+
+struct Chosen {
+    /// The blobs to remove, oldest first.
+    picked: Vec<Stored>,
+    /// Bytes of every blob this writer holds.
+    held: u64,
+}
+
+fn choose(writer: WriterId, state: &State, needed: &[BlobId], budget: u64) -> Chosen {
+    let mut own: Vec<(Version, Stored)> = state
+        .blob_adds()
         .iter()
         .filter_map(|(blob, by)| {
-            by.get(&writer)
-                .filter(|add| held(add))
-                .map(|add| (*blob, add))
+            let add = by.get(&writer).filter(|add| !add.removed)?;
+            Some((
+                add.version,
+                Stored {
+                    blob: *blob,
+                    len: add.len,
+                },
+            ))
         })
         .collect();
-    let mut kept = own
+    let held = own
         .iter()
-        .fold(0u64, |sum, (_, add)| sum.saturating_add(add.len));
-    let mut eligible: Vec<(Version, BlobId, u64)> = own
-        .iter()
-        .filter(|(blob, _)| !referenced.contains(blob))
-        .filter(|(blob, _)| {
-            !adds[blob]
-                .iter()
-                .any(|(other, add)| *other != writer && held(add))
-        })
-        .map(|(blob, add)| (add.version, *blob, add.len))
-        .collect();
-    eligible.sort();
-    let mut removed = Vec::new();
-    for (_, blob, len) in eligible {
-        if kept <= budget {
+        .fold(0u64, |sum, (_, stored)| sum.saturating_add(stored.len));
+    let claimed = claimed(writer, state, needed);
+    own.retain(|(_, stored)| !claimed.contains(&stored.blob));
+    own.sort_by_key(|(version, stored)| (*version, stored.blob));
+    let mut left = held;
+    let mut picked = Vec::new();
+    for (_, stored) in own {
+        if left <= budget {
             break;
         }
-        kept -= len;
-        removed.push((blob, len));
+        left -= stored.len;
+        picked.push(stored);
     }
-    Chosen { removed, kept }
+    Chosen { picked, held }
+}
+
+/// The blobs `writer` may not remove: those referred to, those `needed`, and those
+/// another writer holds.
+fn claimed(writer: WriterId, state: &State, needed: &[BlobId]) -> BTreeSet<BlobId> {
+    let held_by_others = state
+        .blob_adds()
+        .iter()
+        .filter(|(_, by)| {
+            by.iter()
+                .any(|(other, add)| *other != writer && !add.removed)
+        })
+        .map(|(blob, _)| *blob);
+    let mut claimed = state.referenced_blobs();
+    claimed.extend(needed);
+    claimed.extend(held_by_others);
+    claimed
 }
 
 /// Free space for a save the disk refused: collect every blob nothing needs but
@@ -277,12 +349,7 @@ pub(crate) async fn make_room<F: Fs>(
         let own = read_log(fs, layout, log.writer()).await?;
         compact(fs, layout, log, &own, 0).await?;
     }
-    let state = merge(&read_logs(fs, layout).await?);
-    let mut referenced = state.referenced_blobs();
-    referenced.extend(needed.iter().copied());
-    collect_with(fs, layout, log, state.blob_adds(), &referenced, 0)
-        .await
-        .map(drop)
+    collect(fs, layout, log, needed, 0).await.map(drop)
 }
 
 #[cfg(test)]
@@ -304,8 +371,8 @@ mod tests {
 
     use super::*;
     use crate::fs::MemFs;
-    use crate::log::testing::{logged, reopen};
-    use crate::log::Entry;
+    use crate::log::testing::{field, logged, reopen, Session};
+    use crate::value::Value;
 
     const WRITER: WriterId = WriterId::from_u128(0xa);
     const OTHER: WriterId = WriterId::from_u128(0xb);
@@ -341,52 +408,47 @@ mod tests {
         );
     }
 
-    fn add(len: u64, lamport: u64, writer: WriterId, removed: bool) -> BlobAdd {
-        BlobAdd {
-            len,
-            version: Version::new(lamport, writer),
-            removed,
-        }
-    }
-
-    struct Library {
+    /// A blob store beside logs that writers append to as an app would.
+    struct Store {
         fs: MemFs,
         layout: Layout,
-        adds: BTreeMap<BlobId, BTreeMap<WriterId, BlobAdd>>,
     }
 
-    impl Library {
+    impl Store {
         fn new() -> Self {
             Self {
                 fs: MemFs::new(),
                 layout: Layout::default(),
-                adds: BTreeMap::new(),
             }
         }
 
-        fn blob(&mut self, bytes: &[u8], adds: &[(WriterId, u64, bool)]) -> BlobId {
-            let blob = testing::plant(&self.fs, &self.layout, bytes);
-            let len = bytes.len() as u64;
-            self.adds.insert(
-                blob,
-                adds.iter()
-                    .map(|&(writer, lamport, removed)| (writer, add(len, lamport, writer, removed)))
-                    .collect(),
-            );
-            blob
+        /// Put `bytes` in the store, if they are not there, and log their add as
+        /// `writer`.
+        fn add(&self, writer: WriterId, bytes: &[u8]) -> BlobId {
+            if !self.stored(BlobId::of(bytes)) {
+                testing::plant(&self.fs, &self.layout, bytes);
+            }
+            self.log(writer, vec![Stored::of(bytes).added()]);
+            BlobId::of(bytes)
         }
 
-        fn collect(&self, log: &mut LogWriter, referenced: &[BlobId], budget: u64) -> Collection {
-            let referenced = referenced.iter().copied().collect();
-            block_on(collect_with(
-                &self.fs,
-                &self.layout,
-                log,
-                &self.adds,
-                &referenced,
-                budget,
-            ))
-            .unwrap()
+        fn log(&self, writer: WriterId, kinds: Vec<Kind>) {
+            Session::open(&self.fs, writer).act(kinds);
+        }
+
+        /// Fold each writer's log with an empty undo window, so that no entry an undo
+        /// could reach refers to a blob.
+        fn fold(&self, writers: &[WriterId]) {
+            for &writer in writers {
+                let own = block_on(read_log(&self.fs, &self.layout, writer)).unwrap();
+                let mut log = reopen(&self.fs, writer);
+                block_on(compact(&self.fs, &self.layout, &mut log, &own, 0)).unwrap();
+            }
+        }
+
+        fn collect(&self, needed: &[BlobId], budget: u64) -> Collection {
+            let mut log = reopen(&self.fs, WRITER);
+            block_on(collect(&self.fs, &self.layout, &mut log, needed, budget)).unwrap()
         }
 
         fn stored(&self, blob: BlobId) -> bool {
@@ -396,17 +458,17 @@ mod tests {
 
     #[test]
     fn collection_removes_the_oldest_eligible_blobs_until_under_budget() {
-        let mut library = Library::new();
-        let newest = library.blob(b"newest", &[(WRITER, 9, false)]);
-        let oldest = library.blob(b"oldest", &[(WRITER, 1, false)]);
-        let middle = library.blob(b"middle", &[(WRITER, 5, false)]);
-        let mut log = reopen(&library.fs, WRITER);
-        let collection = library.collect(&mut log, &[], 6);
+        let store = Store::new();
+        let oldest = store.add(WRITER, b"oldest");
+        let middle = store.add(WRITER, b"middle");
+        let newest = store.add(WRITER, b"newest");
+        store.fold(&[WRITER]);
+        let collection = store.collect(&[], 6);
         assert_eq!(collection.removed, [oldest, middle]);
         assert_eq!((collection.freed, collection.kept), (12, 6));
-        assert!(library.stored(newest));
-        assert!(!library.stored(oldest) && !library.stored(middle));
-        let kinds: Vec<Kind> = logged(&library.fs, WRITER)
+        assert!(store.stored(newest));
+        assert!(!store.stored(oldest) && !store.stored(middle));
+        let kinds: Vec<Kind> = logged(&store.fs, WRITER)
             .into_iter()
             .map(|e| e.kind)
             .collect();
@@ -421,50 +483,102 @@ mod tests {
     }
 
     #[test]
-    fn collection_keeps_what_another_writer_or_a_reference_still_needs() {
-        let mut library = Library::new();
-        let referenced = library.blob(b"referenced", &[(WRITER, 1, false)]);
-        let shared = library.blob(b"shared", &[(WRITER, 2, false), (OTHER, 3, false)]);
-        let foreign = library.blob(b"foreign", &[(OTHER, 4, false)]);
-        let released = library.blob(b"released", &[(WRITER, 5, true)]);
-        let released_by_other = library.blob(
-            b"released by other",
-            &[(WRITER, 6, false), (OTHER, 7, true)],
+    fn collection_keeps_what_another_writer_a_reference_or_the_caller_still_needs() {
+        let store = Store::new();
+        let referenced = store.add(WRITER, b"referenced");
+        let mut session = Session::open(&store.fs, WRITER);
+        let entity = session.log.new_entity();
+        session.act(vec![
+            Kind::Create { entity },
+            field(entity, "sound", Some(Value::Blob(referenced))),
+        ]);
+        let shared = store.add(WRITER, b"shared");
+        store.add(OTHER, b"shared");
+        let foreign = store.add(OTHER, b"foreign");
+        let released = store.add(WRITER, b"released");
+        store.log(WRITER, vec![Kind::BlobRemoved { blob: released }]);
+        let released_by_other = store.add(WRITER, b"released by other");
+        store.add(OTHER, b"released by other");
+        store.log(
+            OTHER,
+            vec![Kind::BlobRemoved {
+                blob: released_by_other,
+            }],
         );
-        let mut log = reopen(&library.fs, WRITER);
-        let collection = library.collect(&mut log, &[referenced], 0);
+        let needed = store.add(WRITER, b"needed");
+        store.fold(&[WRITER, OTHER]);
+
+        let collection = store.collect(&[needed], 0);
         assert_eq!(collection.removed, [released_by_other]);
         assert_eq!(
             collection.kept,
-            (b"referenced".len() + b"shared".len()) as u64
+            (b"referenced".len() + b"shared".len() + b"needed".len()) as u64
         );
-        for blob in [referenced, shared, foreign, released] {
-            assert!(library.stored(blob), "{blob:?} was removed");
+        for blob in [referenced, shared, foreign, released, needed] {
+            assert!(store.stored(blob), "{blob:?} was removed");
         }
     }
 
     #[test]
     fn collection_under_budget_removes_and_logs_nothing() {
-        let mut library = Library::new();
-        library.blob(b"small", &[(WRITER, 1, false)]);
-        let mut log = reopen(&library.fs, WRITER);
-        let mutations = library.fs.mutations();
-        let collection = library.collect(&mut log, &[], 5);
+        let store = Store::new();
+        store.add(WRITER, b"small");
+        store.fold(&[WRITER]);
+        let (mutations, entries) = (store.fs.mutations(), logged(&store.fs, WRITER));
+        let collection = store.collect(&[], 5);
         assert_eq!(collection.removed, Vec::<BlobId>::new());
         assert_eq!(collection.kept, 5);
-        assert_eq!(library.fs.mutations(), mutations);
-        assert_eq!(logged(&library.fs, WRITER), Vec::<Entry>::new());
+        assert_eq!(store.fs.mutations(), mutations);
+        assert_eq!(logged(&store.fs, WRITER), entries);
     }
 
     #[test]
     fn collecting_a_blob_already_gone_still_logs_its_removal() {
-        let mut library = Library::new();
-        let gone = library.blob(b"gone", &[(WRITER, 1, false)]);
-        block_on(library.fs.remove_file(&library.layout.blob(gone))).unwrap();
-        let mut log = reopen(&library.fs, WRITER);
-        assert_eq!(library.collect(&mut log, &[], 0).removed, [gone]);
-        assert!(logged(&library.fs, WRITER)
+        let store = Store::new();
+        let gone = store.add(WRITER, b"gone");
+        store.fold(&[WRITER]);
+        block_on(store.fs.remove_file(&store.layout.blob(gone))).unwrap();
+        assert_eq!(store.collect(&[], 0).removed, [gone]);
+        assert!(logged(&store.fs, WRITER)
             .iter()
             .any(|e| e.kind == Kind::BlobRemoved { blob: gone }));
+    }
+
+    #[test]
+    fn a_file_whose_blob_is_collected_after_the_check_and_before_the_add_takes_its_place() {
+        let store = Store::new();
+        let blob = store.add(WRITER, b"same");
+        store.fold(&[WRITER]);
+        let song = path("song");
+        block_on(store.fs.create(&song, b"same")).unwrap();
+        let stored = Stored::of(b"same");
+
+        let entered = block_on(enter(&store.fs, &store.layout, OTHER, &song, stored));
+        assert_eq!(entered.unwrap(), Entered::AlreadyStored);
+        assert_eq!(store.collect(&[], 0).removed, [blob]);
+        store.log(OTHER, vec![stored.added()]);
+        block_on(release(&store.fs, &store.layout, OTHER, &song, stored)).unwrap();
+
+        let files = store.fs.files();
+        assert_eq!(files.get(&store.layout.blob(blob)), Some(&b"same".to_vec()));
+        assert!(!files.contains_key(&song));
+    }
+
+    #[test]
+    fn displacing_bytes_the_store_holds_logs_their_add_before_removing_the_file() {
+        let store = Store::new();
+        let blob = store.add(OTHER, b"same");
+        let song = path("song");
+        block_on(store.fs.create(&song, b"same")).unwrap();
+        let mut log = reopen(&store.fs, WRITER);
+        let stored = Stored::of(b"same");
+        block_on(displace(&store.fs, &store.layout, &mut log, &song, stored)).unwrap();
+        assert!(store.stored(blob));
+        assert!(!store.fs.files().contains_key(&song));
+        let kinds: Vec<Kind> = logged(&store.fs, WRITER)
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, [Kind::INTENT, stored.added()]);
     }
 }
