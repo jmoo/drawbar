@@ -1624,6 +1624,40 @@ fn a_file_that_cannot_be_looked_at_is_shown_unread_and_the_library_opens() {
     assert_eq!(unread, ["Cello/c3.ne5p"]);
 }
 
+/// A rescan that finds several changes made outside drawbar says each in the log and all
+/// of them in the status line; one delete or move is said by its own line.
+#[test]
+fn a_rescan_reports_what_changed() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for (name, gain) in [("Bass.ne5p", "10"), ("Keys.ne5p", "20"), ("Pad.ne5p", "30")] {
+        fs::write(root.at(name), with_gain(&program, gain)).unwrap();
+    }
+    Session::open(&root).close();
+    let mut session = Session::open(&root);
+    fs::write(root.at("Lead.ne5p"), with_gain(&program, "40")).unwrap();
+    fs::remove_file(root.at("Bass.ne5p")).unwrap();
+    fs::rename(root.at("Keys.ne5p"), root.at("Organ.ne5p")).unwrap();
+    session.refocus();
+
+    assert_eq!(session.said("“Bass.ne5p” was deleted outside drawbar."), 1);
+    assert_eq!(
+        session.said("“Keys.ne5p” was moved to Organ.ne5p outside drawbar"),
+        1
+    );
+    assert_eq!(
+        session.bench.log.status().1,
+        "Outside drawbar, 1 file appeared, 1 was deleted and 1 was moved."
+    );
+
+    fs::remove_file(root.at("Pad.ne5p")).unwrap();
+    session.refocus();
+    assert_eq!(
+        session.bench.log.status().1,
+        "“Pad.ne5p” was deleted outside drawbar."
+    );
+}
+
 /// An asset deleted while its first write is in flight loses its file once that write
 /// answers, and a rescan meanwhile does not bring the file back as a new one.
 #[test]

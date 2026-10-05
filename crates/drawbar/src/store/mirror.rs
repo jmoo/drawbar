@@ -1933,6 +1933,7 @@ impl Store {
             touched.insert(id);
             self.changed(id, found, workspace, browser, log);
         }
+        let moved = matched.renamed.len();
         for (id, found) in matched.renamed {
             touched.insert(id);
             let before = workspace.get(id).map(|entity| entity.name.clone());
@@ -1952,11 +1953,17 @@ impl Store {
                 ));
             }
         }
+        let (mut deleted, mut missing) = (0, 0);
         for id in matched.vanished {
             touched.insert(id);
-            self.vanished(id, workspace, browser, queue, log);
+            match self.vanished(id, workspace, browser, queue, log) {
+                Vanished::Deleted => deleted += 1,
+                Vanished::Missing => missing += 1,
+                Vanished::Untouched => {}
+            }
         }
         let arrived: Vec<Found> = matched.arrived;
+        let appeared = arrived.len();
         if !arrived.is_empty() {
             let mut next = workspace.next_id();
             let mut back = Vec::new();
@@ -1965,16 +1972,16 @@ impl Store {
                 next = next.saturating_add(1);
             }
             let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
-            log.say(match ids.len() {
-                1 => "1 file appeared in the library folder.".to_string(),
-                n => format!("{n} files appeared in the library folder."),
-            });
             workspace.restore(back, Some(next), log);
             for id in ids {
                 self.settle(id, workspace, &BTreeMap::new());
                 self.place_ahead(id, workspace, &browser.folders);
                 self.recall(id, workspace);
             }
+        }
+        // A file gone missing keeps the status line, which asks for it to be saved.
+        if let Some(said) = changed_outside(appeared, deleted, moved).filter(|_| missing == 0) {
+            log.say(said);
         }
         touched
     }
@@ -2040,15 +2047,15 @@ impl Store {
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
-    ) {
+    ) -> Vanished {
         let Some(record) = self.records.get_mut(&id) else {
-            return;
+            return Vanished::Untouched;
         };
         if record.missing {
-            return;
+            return Vanished::Untouched;
         }
         let Some(entity) = workspace.get(id) else {
-            return;
+            return Vanished::Untouched;
         };
         let name = entity.name.clone();
         let keep = precious(entity, queue)
@@ -2061,7 +2068,7 @@ impl Store {
                 "“{name}” is missing from the library folder. drawbar still holds it; save \
                  it to write it back."
             ));
-            return;
+            return Vanished::Missing;
         }
         if let Some(path) = self.records.remove(&id).and_then(|record| record.path) {
             self.cache.forget(&path);
@@ -2069,6 +2076,7 @@ impl Store {
         browser.tags.forget(id);
         workspace.remove(id, log);
         log.say(format!("“{name}” was deleted outside drawbar."));
+        Vanished::Deleted
     }
 
     fn saved(
@@ -3213,6 +3221,40 @@ pub(crate) fn duplicates(
         .flat_map(|(_, group)| group.iter().filter_map(|(id, _)| *id))
         .collect();
     (flagged, groups)
+}
+
+/// What became of an asset whose file a rescan found gone.
+enum Vanished {
+    Deleted,
+    /// Kept, since it holds something its file did not, and shown missing.
+    Missing,
+    /// Already known to be missing, or no longer held.
+    Untouched,
+}
+
+/// What a rescan found changed outside drawbar, in one line: `None` where nothing changed,
+/// or where the one change was a delete or a move that its own line has said.
+fn changed_outside(appeared: usize, deleted: usize, moved: usize) -> Option<String> {
+    let changes = [
+        (appeared, "appeared", "appeared"),
+        (deleted, "was deleted", "were deleted"),
+        (moved, "was moved", "were moved"),
+    ];
+    let said: Vec<String> = changes
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .enumerate()
+        .map(|(at, (n, one, many))| match at {
+            0 => crate::strings::counted(n, &format!("file {one}"), &format!("files {many}")),
+            _ => crate::strings::counted(n, one, many),
+        })
+        .collect();
+    let said = crate::strings::listed(&said);
+    match (appeared, deleted + moved) {
+        (0, 0 | 1) => None,
+        (_, 0) => Some(format!("{said} in the library folder.")),
+        _ => Some(format!("Outside drawbar, {said}.")),
+    }
 }
 
 /// A file drawbar did not know, recorded under `id`, and the asset it becomes.
