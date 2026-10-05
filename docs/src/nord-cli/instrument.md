@@ -63,5 +63,6 @@ folder. Without a folder it can write to, `nord` leaves the slot alone.
 `put` checks that the file is intact before it touches the instrument.
 
 Every command closes its session even when it fails, so an error cannot leave the
-instrument stuck on its progress screen. If a run is interrupted, `nord device
-recover` releases the session.
+instrument stuck on its progress screen. If a run is interrupted, the next
+command may say the instrument answered out of step. `nord device recover`
+releases the session it still holds.
