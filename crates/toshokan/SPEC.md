@@ -260,14 +260,20 @@ never rewritten. A library file that an effect displaces is renamed into `blobs/
 under the hash of its contents; when the store already holds that hash, the file is
 removed instead, as below.
 
-Writer `w` removes a file because the store holds its bytes only once its own log
-durably holds a `blob_added` for them that no later `blob_removed` of `w` follows,
-appending one under an intent of its own when it does not, and only if
-`blobs/<hash>` still holds those bytes when checked after that. When the blob is
-gone by then, `w` renames its file into place instead. A collection by another
-writer reads every log after it sets the blob aside (below), so it either sees that
-add and puts the blob back, or has set it aside before the check, which then finds
-it gone.
+Every file in `blobs/` is named by a durable `blob_added` in some writer's log,
+written before the file entered the store. Before writer `w` renames a file into
+`blobs/`, or removes one because the store holds its bytes, its own log durably holds
+a `blob_added` for them that no later `blob_removed` of `w` follows; `w` appends one
+under an intent of its own when it does not. It removes its file only if
+`blobs/<hash>` still holds those bytes when checked after that, and otherwise
+renames the file into place. A collection by another writer reads every log after it
+sets a blob aside (below), so it either sees the add and puts the blob back, or set
+the blob aside before `w` checked or renamed, and `w`'s file takes its place.
+
+An add can precede a rename that never happens: a crash comes between them, and the
+file changes before recovery. The store may then never hold the bytes the add names.
+Its intent holds only `intent` and `blob_added` entries, so undo never reverses it,
+and a collection that chooses the blob finds nothing to remove and logs its removal.
 
 A writer trusts no store file by its name. Before it removes a file because
 `blobs/<hash>` exists, it compares that store file's length, then its hash, with

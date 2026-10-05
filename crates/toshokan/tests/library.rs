@@ -1140,6 +1140,109 @@ fn recovery_says_which_file_kept_an_interrupted_save_from_finishing() {
 }
 
 #[test]
+fn bytes_saved_over_survive_a_collection_by_a_writer_whose_log_still_holds_them() {
+    let held = b"held".to_vec();
+    let prepared = || {
+        let fs = MemFs::new();
+        let mut a = open(fs.clone(), A);
+        let song = save_new(&mut a, "a", &held);
+        block_on(a.save(song, &path("a"), b"newer".to_vec(), holds(&held))).unwrap();
+        block_on(a.compact(0)).unwrap();
+        // A collection by A removed the blob, and a crash kept the removal from its log.
+        let layout = Layout::default();
+        block_on(fs.remove_file(&layout.blob(BlobId::of(&held)))).unwrap();
+        block_on(fs.sync(&layout.blobs())).unwrap();
+        block_on(fs.create(&path("b"), &held)).unwrap();
+        block_on(fs.sync(&path("b"))).unwrap();
+        block_on(fs.sync(&RelPath::ROOT)).unwrap();
+        let mut b = open(fs, B);
+        let (unbound, _) = block_on(b.create()).unwrap();
+        (b, unbound)
+    };
+    let save = |b: &mut Library<MemFs>, entity| {
+        block_on(b.save(entity, &path("b"), b"mine".to_vec(), holds(&held))).map(drop)
+    };
+    let (mut clean, entity) = prepared();
+    let start = clean.fs().mutations();
+    save(&mut clean, entity).unwrap();
+
+    for crash in 0..clean.fs().mutations() - start {
+        let (mut b, entity) = prepared();
+        b.fs().crash_after(crash);
+        let result = save(&mut b, entity);
+        assert!(
+            matches!(result, Err(Error::Crashed)),
+            "crash {crash}: {result:?}"
+        );
+        let disk = b.fs().restart();
+        block_on(open(disk.clone(), A).collect(0)).unwrap();
+        open(disk.clone(), B);
+        assert!(
+            disk.files().values().any(|bytes| *bytes == held),
+            "crash {crash}: the bytes saved over are nowhere"
+        );
+    }
+}
+
+#[test]
+fn an_add_whose_file_changed_before_it_entered_the_store_is_harmless() {
+    let old = b"old".to_vec();
+    let prepared = || {
+        let fs = MemFs::new();
+        block_on(fs.create(&path("song"), &old)).unwrap();
+        block_on(fs.sync(&path("song"))).unwrap();
+        block_on(fs.sync(&RelPath::ROOT)).unwrap();
+        let mut a = open(fs, A);
+        let (entity, created) = block_on(a.create()).unwrap();
+        (a, entity, created.intent)
+    };
+    let save = |a: &mut Library<MemFs>, entity| {
+        block_on(a.save(entity, &path("song"), b"new".to_vec(), holds(&old))).map(drop)
+    };
+    let (mut clean, entity, _) = prepared();
+    let start = clean.fs().mutations();
+    save(&mut clean, entity).unwrap();
+
+    let layout = Layout::default();
+    let added = Kind::BlobAdded {
+        blob: BlobId::of(&old),
+        len: old.len() as u64,
+    };
+    let mut found = 0;
+    for crash in 0..clean.fs().mutations() - start {
+        let (mut a, entity, created) = prepared();
+        a.fs().crash_after(crash);
+        assert!(matches!(save(&mut a, entity), Err(Error::Crashed)));
+        let disk = a.fs().restart();
+        let own = block_on(toshokan::log::read_log(&disk, &layout, A)).unwrap();
+        let logged = own.all_entries().any(|entry| entry.kind == added);
+        if !logged || stored(&disk, &old) {
+            continue;
+        }
+        found += 1;
+        block_on(disk.remove_file(&path("song"))).unwrap();
+        block_on(disk.create(&path("song"), b"theirs")).unwrap();
+
+        let mut a = open(disk.clone(), A);
+        let own = block_on(toshokan::log::read_log(&disk, &layout, A)).unwrap();
+        let undoable = toshokan::undo::History::new(&own).undoable();
+        assert_eq!(undoable, Some(created), "crash {crash}");
+        block_on(a.compact(0)).unwrap();
+        let collection = block_on(a.collect(0)).unwrap();
+        assert!(
+            collection.removed.contains(&BlobId::of(&old)),
+            "crash {crash}: {collection:?}"
+        );
+        assert_eq!(
+            library_files(&disk),
+            [(path("song"), b"theirs".to_vec())].into(),
+            "crash {crash}"
+        );
+    }
+    assert!(found > 0, "no crash came between the add and the rename");
+}
+
+#[test]
 fn every_crash_while_undoing_a_save_recovers() {
     let case = Case {
         setup: |library| {

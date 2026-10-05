@@ -515,6 +515,23 @@ mod tests {
         fs.files()[path].clone()
     }
 
+    /// The kinds of the logged entries of `intent`.
+    fn kinds_of(fs: &MemFs, intent: IntentId) -> Vec<Kind> {
+        logged(fs, WRITER)
+            .into_iter()
+            .filter(|entry| entry.intent == intent)
+            .map(|entry| entry.kind)
+            .collect()
+    }
+
+    /// Whether the log holds an add of `bytes` under an intent other than `INTENT`.
+    fn added_apart(fs: &MemFs, bytes: &[u8]) -> bool {
+        let added = Stored::of(bytes).added();
+        logged(fs, WRITER)
+            .iter()
+            .any(|entry| entry.intent != INTENT && entry.kind == added)
+    }
+
     fn save_record(layout: &Layout, fs: &MemFs, new: &[u8], old: &[u8]) -> Record {
         block_on(blobs::stage(fs, layout, WRITER, new)).unwrap();
         let entity = EntityId::new(WRITER, 1);
@@ -566,9 +583,14 @@ mod tests {
         );
         assert_eq!(contents(&fs, &path("song")), b"new");
         assert_eq!(contents(&fs, &layout.blob(BlobId::of(b"old"))), b"old");
-        assert_eq!(
-            logged(&fs, WRITER),
-            record.all_entries().cloned().collect::<Vec<_>>()
+        let finished: Vec<Entry> = logged(&fs, WRITER)
+            .into_iter()
+            .filter(|entry| entry.intent == INTENT)
+            .collect();
+        assert_eq!(finished, record.all_entries().cloned().collect::<Vec<_>>());
+        assert!(
+            added_apart(&fs, b"old"),
+            "the old bytes entered the store unlogged"
         );
         assert!(block_on(read(&fs, &layout, WRITER)).unwrap().is_empty());
     }
@@ -603,8 +625,14 @@ mod tests {
         );
         assert_eq!(contents(&fs, &path("song")), b"theirs");
         assert_eq!(contents(&fs, &layout.blob(new)), b"new");
-        let kinds: Vec<Kind> = logged(&fs, WRITER).into_iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, [Kind::INTENT, Kind::BlobAdded { blob: new, len: 3 }]);
+        assert_eq!(
+            kinds_of(&fs, INTENT),
+            [Kind::INTENT, Kind::BlobAdded { blob: new, len: 3 }]
+        );
+        assert!(
+            added_apart(&fs, b"new"),
+            "the new bytes entered the store unlogged"
+        );
     }
 
     #[test]
@@ -626,9 +654,12 @@ mod tests {
                 "song held {now:?}"
             );
             assert_eq!(fs.files().get(&path("song")).map(Vec::as_slice), now);
-            let kinds: Vec<Kind> = logged(&fs, WRITER).into_iter().map(|e| e.kind).collect();
             let new = Stored::of(b"new").added();
-            assert_eq!(kinds, [Kind::INTENT, new], "song held {now:?}");
+            assert_eq!(
+                kinds_of(&fs, INTENT),
+                [Kind::INTENT, new],
+                "song held {now:?}"
+            );
         }
     }
 

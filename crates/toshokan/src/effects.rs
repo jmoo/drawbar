@@ -1109,12 +1109,13 @@ mod tests {
             store(&self.fs, &self.layout)
         }
 
-        /// The logged entries' kinds, without `Intent` entries and the fields that
-        /// describe a file's length and time.
+        /// The kinds of the intent's logged entries, without its `Intent` entry and the
+        /// fields that describe a file's length and time.
         fn kinds(&self) -> Vec<Kind> {
             let described = [LENGTH_FIELD, MODIFIED_FIELD];
             logged(&self.fs, WRITER)
                 .into_iter()
+                .filter(|entry| entry.intent == INTENT)
                 .map(|entry| entry.kind)
                 .filter(|kind| match kind {
                     Kind::Intent { .. } => false,
@@ -1716,6 +1717,7 @@ mod tests {
     struct Expected {
         before: BTreeMap<RelPath, Vec<u8>>,
         after: BTreeMap<RelPath, Vec<u8>>,
+        /// The entries of the effect's intent.
         entries: Vec<Entry>,
     }
 
@@ -1749,7 +1751,10 @@ mod tests {
             let expected = Expected {
                 before,
                 after: clean.files(),
-                entries: logged(&clean.fs, WRITER),
+                entries: logged(&clean.fs, WRITER)
+                    .into_iter()
+                    .filter(|entry| entry.intent == INTENT)
+                    .collect(),
             };
             let finished = clean.fs.restart();
             check(&finished, &layout, &expected, self.new)

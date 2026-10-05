@@ -60,11 +60,12 @@ pub(crate) fn staged(layout: &Layout, writer: WriterId, blob: BlobId) -> RelPath
         .expect("a blob id is one path component")
 }
 
-/// Move the file at `path`, whose bytes are `stored`, into the store, durably. When
-/// the store holds those bytes already, the file is released only once this writer's
-/// log holds an add of them not since removed, appending one under an intent of its
-/// own when it does not. Making the file's absence at `path` durable is the caller's
-/// step.
+/// Move the file at `path`, whose bytes are `stored`, into the store, durably, or
+/// remove it when the store holds those bytes already. First this writer's log
+/// durably holds an add of them not since removed, appending one under an intent of
+/// its own when it does not, so a collection that reads the logs after the file
+/// enters the store sees the add. Making the file's absence at `path` durable is the
+/// caller's step.
 pub(crate) async fn displace<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -73,9 +74,6 @@ pub(crate) async fn displace<F: Fs>(
     stored: Stored,
 ) -> Result<()> {
     let writer = log.writer();
-    if enter(fs, layout, writer, path, stored).await? == Entered::Moved {
-        return Ok(());
-    }
     let own = merge(&[read_log(fs, layout, writer).await?]);
     let held = own
         .blob_adds()
@@ -93,7 +91,8 @@ pub(crate) async fn displace<F: Fs>(
 /// else move it in.
 ///
 /// ⚠️ Call this only once this writer's log durably holds `blob_added` for `stored`.
-/// A collection that read the logs before then may remove the store copy this finds.
+/// A collection that read the logs before then may remove the store copy this finds,
+/// or the file this moves in.
 pub(crate) async fn release<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -562,6 +561,44 @@ mod tests {
         let files = store.fs.files();
         assert_eq!(files.get(&store.layout.blob(blob)), Some(&b"same".to_vec()));
         assert!(!files.contains_key(&song));
+    }
+
+    #[test]
+    fn a_displaced_file_is_in_the_store_only_once_its_add_is_logged() {
+        let (song, stored) = (path("song"), Stored::of(b"song"));
+        let displaced = |crash: Option<u64>| {
+            let store = Store::new();
+            block_on(store.fs.create(&song, b"song")).unwrap();
+            block_on(store.fs.sync(&song)).unwrap();
+            block_on(store.fs.sync(&RelPath::ROOT)).unwrap();
+            let mut log = reopen(&store.fs, WRITER);
+            let start = store.fs.mutations();
+            if let Some(crash) = crash {
+                store.fs.crash_after(crash);
+            }
+            let result = block_on(displace(&store.fs, &store.layout, &mut log, &song, stored));
+            (store, result, start)
+        };
+        let (clean, result, start) = displaced(None);
+        result.unwrap();
+        let crashes = (0..clean.fs.mutations() - start).map(Some);
+        for crash in crashes.chain([None]) {
+            let (crashed, result, _) = displaced(crash);
+            assert_eq!(
+                result.is_err(),
+                crash.is_some(),
+                "crash {crash:?}: {result:?}"
+            );
+            let disk = crashed.fs.restart();
+            let arrived = disk.files().contains_key(&crashed.layout.blob(stored.blob));
+            let logged = logged(&disk, WRITER)
+                .iter()
+                .any(|e| e.kind == stored.added());
+            assert!(
+                !arrived || logged,
+                "crash {crash:?}: the blob arrived unlogged"
+            );
+        }
     }
 
     #[test]
