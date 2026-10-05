@@ -150,7 +150,8 @@ impl MemFs {
     }
 
     /// Refuse writes that would make the files hold more than `bytes` in total, with
-    /// [`Error::NoSpace`].
+    /// [`Error::NoSpace`]. A file left with two names, by a crash between the syncs of
+    /// a rename's two directories, counts once.
     pub fn set_capacity(&self, bytes: Option<u64>) {
         self.disk.borrow_mut().capacity = bytes;
     }
@@ -338,15 +339,28 @@ impl Disk {
         let Some(capacity) = self.capacity else {
             return Ok(());
         };
+        let mut counted = BTreeSet::new();
         let mut used = 0u64;
-        self.walk(ROOT, &RelPath::ROOT, &mut |_, content| {
+        self.walk_inodes(ROOT, &mut |ino, content| {
             if let Content::File { data, .. } = content {
-                used += data.len() as u64;
+                if counted.insert(ino) {
+                    used += data.len() as u64;
+                }
             }
         });
         match used.checked_add(more as u64) {
             Some(total) if total <= capacity => Ok(()),
             _ => Err(Error::NoSpace { path: path.clone() }),
+        }
+    }
+
+    fn walk_inodes(&self, ino: Ino, visit: &mut impl FnMut(Ino, &Content)) {
+        let content = &self.nodes[ino].live;
+        visit(ino, content);
+        if let Content::Directory(entries) = content {
+            for &child in entries.values() {
+                self.walk_inodes(child, visit);
+            }
         }
     }
 
@@ -794,6 +808,21 @@ mod tests {
         );
         block_on(fs.append(&path("a"), b"d")).unwrap();
         assert_eq!(fs.files(), files(&[("a", b"abcd")]));
+
+        let fs = MemFs::new();
+        for durable in ["a", "b"] {
+            block_on(fs.create_dir_all(&path(durable))).unwrap();
+        }
+        block_on(fs.create(&path("a/f"), b"abc")).unwrap();
+        for durable in ["a/f", "a", "b", ""] {
+            block_on(fs.sync(&path(durable))).unwrap();
+        }
+        block_on(fs.rename(&path("a/f"), &path("b/f"))).unwrap();
+        block_on(fs.sync(&path("b"))).unwrap();
+        let fs = fs.restart();
+        assert_eq!(fs.files(), files(&[("a/f", b"abc"), ("b/f", b"abc")]));
+        fs.set_capacity(Some(4));
+        block_on(fs.create(&path("g"), b"d")).unwrap();
     }
 
     #[test]

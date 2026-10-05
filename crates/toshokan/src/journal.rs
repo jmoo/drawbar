@@ -6,15 +6,17 @@
 //! stamped before the first step, so recovery appends the same entries the intent
 //! would have.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::blobs;
 use crate::effects::{Ran, Report, Step, Stored};
 use crate::error::{Error, Result};
 use crate::fs::{ensure_dir, hash_file, FileKind, Fs, RelPath};
-use crate::ids::{canonical_u64, IntentId, WriterId};
+use crate::ids::{canonical_u64, IntentId, Version, WriterId};
 use crate::layout::Layout;
-use crate::log::{json_texts, Entry, Kind, LogWriter};
+use crate::log::{json_texts, read_log, Entry, Kind, LogWriter};
 use crate::value::{BlobId, Value};
 use crate::PATH_FIELD;
 
@@ -69,9 +71,17 @@ pub async fn recover<F: Fs>(
         .map(|(_, record)| record)
         .collect::<Result<_>>()?;
     remove_unfinished(fs, layout, log.writer()).await?;
+    let logged: BTreeSet<Version> = match records.is_empty() {
+        true => BTreeSet::new(),
+        false => read_log(fs, layout, log.writer())
+            .await?
+            .all_entries()
+            .map(|entry| entry.version)
+            .collect(),
+    };
     let mut recovered = Vec::new();
     for record in records {
-        let settled = settle(fs, layout, log, &record).await?;
+        let settled = settle(fs, layout, log, &record, &logged).await?;
         recovered.push(Recovered {
             intent: record.intent,
             paths: record.paths(),
@@ -134,16 +144,17 @@ impl Settled {
     }
 }
 
-/// Run `record`'s steps in order, append the entries they leave, and clear the
-/// record. When every step finishes the log gains all the record's entries. A step
-/// the files no longer allow ends the run: the steps after it are given up, and the
-/// log gains only the entries of the steps that changed files, and the bytes kept,
-/// under a new `Intent` entry that reverses nothing.
+/// Run `record`'s steps in order, append the entries they leave that `logged` does
+/// not hold, and clear the record. When every step finishes the log gains all the
+/// record's entries. A step the files no longer allow ends the run: the steps after
+/// it are given up, and the log gains only the entries of the steps that changed
+/// files, and the bytes kept, under a new `Intent` entry that reverses nothing.
 pub(crate) async fn settle<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
     record: &Record,
+    logged: &BTreeSet<Version>,
 ) -> Result<Settled> {
     let writer = log.writer();
     let mut settled = Settled::default();
@@ -201,6 +212,10 @@ pub(crate) async fn settle<F: Fs>(
             entries
         }
     };
+    let entries: Vec<Entry> = entries
+        .into_iter()
+        .filter(|entry| !logged.contains(&entry.version))
+        .collect();
     log.append(fs, layout, &entries).await?;
     clear(fs, layout, writer, record.intent).await?;
     Ok(settled)

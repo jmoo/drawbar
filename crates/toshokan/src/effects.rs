@@ -157,7 +157,7 @@ pub(crate) async fn perform<F: Fs>(
 ) -> Result<Report> {
     let record = stamped(log, intent, entries, planned);
     journal::write(fs, layout, log.writer(), &record).await?;
-    journal::settle(fs, layout, log, &record)
+    journal::settle(fs, layout, log, &record, &BTreeSet::new())
         .await?
         .into_result()
 }

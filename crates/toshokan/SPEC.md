@@ -337,8 +337,9 @@ in:
 
 A save that conflicts moves its staged file, if any, into blobs. The first conflict
 ends the run: each later step is given up, and a given-up save moves its staged file
-into blobs. Then `w` appends, keeping each entry's recorded version, since
-appending an entry twice changes nothing in the merge:
+into blobs. Then `w` appends, keeping each entry's recorded version and leaving out
+any entry its log already holds, though appending an entry twice changes nothing in
+the merge:
 
 - when every step finished, the record's entries and every step's entries;
 - when a step changed files before the run ended, a new `intent` entry with the
