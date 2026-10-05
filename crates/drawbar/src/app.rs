@@ -1540,6 +1540,20 @@ mod tests {
         panic!("the library did not open");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn opening_another_library_replaces_the_count_of_the_last() {
+        let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        std::fs::write(first.at("Grand.ne5p"), program).unwrap();
+        let (ctx, mut app) = opened_over(&first);
+        assert_eq!(app.log.status().1, "1 file on this computer.");
+
+        app.open_library(&ctx, second.0.clone(), false);
+        until_open(&ctx, &mut app);
+        assert_eq!(app.log.status().1, "No files on this computer.");
+    }
+
     /// Switching writes the library open until then, its unsaved edit as a working copy
     /// in its own sidecar, and opening it again brings the edit back. A view of a slot
     /// stays in the window and leaves nothing in the library it was open over.

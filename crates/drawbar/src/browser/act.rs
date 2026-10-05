@@ -2889,13 +2889,15 @@ mod tests {
             .folders
             .file(&mut bench.workspace, fresh, Some(folder));
 
-        let members: Vec<Item> = bench
+        // In the order a selection of them iterates.
+        let members: std::collections::BTreeSet<Item> = bench
             .browser
             .folders
             .members(Some(folder), &bench.workspace)
             .iter()
             .map(|entity| Item::Local(entity.id))
             .collect();
+        let members: Vec<Item> = members.into_iter().collect();
         bench.act(bulk(Bulk::Queue, &members, &bench.device.state));
         let classes: Vec<ObjectClass> = bench
             .queue

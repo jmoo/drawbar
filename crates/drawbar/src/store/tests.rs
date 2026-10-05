@@ -335,6 +335,69 @@ fn a_new_asset_is_a_file_that_comes_back_with_its_id_and_tags() {
     assert_eq!(second.bench.browser.tags.name_of(tag), Some("Sunday"));
 }
 
+/// A program kept under a name drawbar does not open is held through its index row, and
+/// counts toward neither the badge nor the status line.
+#[test]
+fn the_badge_and_the_status_count_the_same_files() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["Grand", "Organ.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut index = Sidecar {
+        next_id: 2,
+        tags: [(7, "Sunday".to_string())].into(),
+        ..Sidecar::default()
+    };
+    let origin = Origin::File("Grand".into());
+    let row = Row::of(LibPath::parse("Grand"), "", None, [7].into(), &origin, None);
+    index.assets.insert(1, row);
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    fs::write(root.at(exec::INDEX), sidecar::write(&index).unwrap()).unwrap();
+
+    let session = Session::open(&root);
+    assert_eq!(session.bench.workspace.listed().count(), 2, "both are held");
+    let badge = session
+        .bench
+        .browser
+        .folders
+        .count(None, &session.bench.workspace);
+    assert_eq!(badge, 1);
+    assert_eq!(
+        session.bench.log.status().1,
+        "1 file on this computer.",
+        "the status line counts what the badge counts"
+    );
+}
+
+/// The tree lists a folder's files by name, whether or not the index holds a row for one.
+#[test]
+fn a_file_with_an_index_row_sorts_by_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut first = Session::open(&root);
+    let keys = first.named("Keys.ne5p");
+    let tag = first.bench.browser.tags.make("Sunday").unwrap();
+    first.bench.browser.tags.set(keys, tag, true);
+    first.close();
+    assert_eq!(rows(&root).len(), 1, "only the tagged file has a row");
+
+    let second = Session::open(&root);
+    let Bench {
+        browser, workspace, ..
+    } = &second.bench;
+    let names: Vec<&str> = browser
+        .folders
+        .members(None, workspace)
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"]);
+}
+
 #[test]
 fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     let root = Temp::new();
@@ -1622,6 +1685,40 @@ fn a_file_that_cannot_be_looked_at_is_shown_unread_and_the_library_opens() {
         .map(|(path, _)| path.as_str())
         .collect();
     assert_eq!(unread, ["Cello/c3.ne5p"]);
+}
+
+/// A rescan that finds several changes made outside drawbar says each in the log and all
+/// of them in the status line; one delete or move is said by its own line.
+#[test]
+fn a_rescan_reports_what_changed() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for (name, gain) in [("Bass.ne5p", "10"), ("Keys.ne5p", "20"), ("Pad.ne5p", "30")] {
+        fs::write(root.at(name), with_gain(&program, gain)).unwrap();
+    }
+    Session::open(&root).close();
+    let mut session = Session::open(&root);
+    fs::write(root.at("Lead.ne5p"), with_gain(&program, "40")).unwrap();
+    fs::remove_file(root.at("Bass.ne5p")).unwrap();
+    fs::rename(root.at("Keys.ne5p"), root.at("Organ.ne5p")).unwrap();
+    session.refocus();
+
+    assert_eq!(session.said("“Bass.ne5p” was deleted outside drawbar."), 1);
+    assert_eq!(
+        session.said("“Keys.ne5p” was moved to Organ.ne5p outside drawbar"),
+        1
+    );
+    assert_eq!(
+        session.bench.log.status().1,
+        "Outside drawbar, 1 file appeared, 1 was deleted and 1 was moved."
+    );
+
+    fs::remove_file(root.at("Pad.ne5p")).unwrap();
+    session.refocus();
+    assert_eq!(
+        session.bench.log.status().1,
+        "“Pad.ne5p” was deleted outside drawbar."
+    );
 }
 
 /// An asset deleted while its first write is in flight loses its file once that write
