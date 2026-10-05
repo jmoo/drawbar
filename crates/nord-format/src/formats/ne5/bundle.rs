@@ -1,8 +1,10 @@
 //! The decoded contents of an Electro 5 bundle or backup archive.
 
 use crate::bank::Entry;
+use crate::bundle::archive::{copy_member, Directory};
+use crate::bundle::manifest;
 use crate::cbin::Cbin;
-use crate::error::Error;
+use crate::error::{try_with_capacity, Error};
 use crate::formats::ne5::{program, song};
 use crate::formats::npno::Piano;
 use crate::formats::nsmp::Sample;
@@ -26,20 +28,20 @@ impl Bundle {
         Self::default()
     }
 
+    /// Reads a stored ZIP of the shape [`crate::bundle::archive`] accepts, checking every
+    /// member's bytes against its entry. A member that does not decode is skipped, not
+    /// refused.
     pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Bundle, Error> {
         let mut bundle = Bundle::new();
+        let directory = Directory::read_from(reader)?;
 
-        let mut zip = zip::ZipArchive::new(reader)?;
-
-        for i in 0..zip.len() {
-            let mut file = zip.by_index(i)?;
-            // Skip directories and the backup manifest, which describes the archive.
-            if file.is_dir() || file.name().ends_with("meta.xml") {
+        for member in &directory.members {
+            let name = member.entry.name.clone();
+            let mut buffer = try_with_capacity(member.entry.size as usize, "bytes")?;
+            copy_member(reader, member, &mut buffer)?;
+            if name == manifest::PATH {
                 continue;
             }
-            let name = file.name().to_string();
-
-            let buffer = crate::formats::zip_member_bytes(&mut file)?;
             let mut cursor = std::io::Cursor::new(buffer);
 
             match from_stream(&mut cursor) {

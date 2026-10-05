@@ -31,7 +31,7 @@ pub fn unpack(ui: &Ui, bundle: &Path, out: Option<PathBuf>) -> Result<(), String
     let temp = fresh_dir(&out, "unpacking")?;
     let written = (|| {
         for member in &directory.members {
-            unpack_member(&mut file, member, &temp)?;
+            unpack_member(bundle, &mut file, member, &temp)?;
         }
         std::fs::rename(&temp, &out).map_err(|e| format!("{}: {e}", out.display()))
     })();
@@ -61,7 +61,10 @@ fn fresh_dir(path: &Path, what: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Writes one member under `out`. A member whose bytes disagree with its entry is
+/// reported against `bundle`, and a failed write against the file being written.
 fn unpack_member(
+    bundle: &Path,
     file: &mut std::fs::File,
     member: &nord_format::bundle::archive::Member,
     out: &Path,
@@ -72,7 +75,10 @@ fn unpack_member(
     }
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let mut written = std::fs::File::create_new(&path).map_err(|e| named(&e))?;
-    copy_member(file, member, &mut written).map_err(|e| named(&e))
+    copy_member(file, member, &mut written).map_err(|e| match e {
+        nord_format::error::Error::Parse(e) => format!("{}: {e}", bundle.display()),
+        e => named(&e),
+    })
 }
 
 /// The path under the output folder for an archive path, or an error for one that could

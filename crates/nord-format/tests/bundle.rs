@@ -71,21 +71,48 @@ fn an_empty_archive_is_an_empty_bundle() {
     assert!(bundle.skipped().is_empty());
 }
 
-/// Real backups contain both. Reporting them as skipped would make every backup look
-/// partly unreadable.
+/// The manifest describes the archive. Reporting it as skipped would make every bundle
+/// look partly unreadable.
 #[test]
-fn a_directory_entry_and_the_manifest_are_not_skipped_members() {
-    let bytes = archive(&[
-        ("Bank 1/", b""),
-        ("meta.xml", b"<meta/>"),
-        ("Bank 1/One.ne5p", &program(0)),
-    ]);
+fn the_manifest_is_not_a_skipped_member() {
+    let bytes = archive(&[("meta.xml", b"<meta/>"), ("Bank 1/One.ne5p", &program(0))]);
     let bundle = ne5::Bundle::read_from(&mut std::io::Cursor::new(bytes)).unwrap();
     assert_eq!(bundle.programs().len(), 1);
     assert_eq!(
         bundle.skipped(),
         [] as [(String, String); 0],
-        "a directory entry or the manifest was reported as a member"
+        "the manifest was reported as a member"
+    );
+}
+
+/// The archive layer's refusals hold for the decoded bundle too, so a bundle that
+/// `nord inspect` reads is one an unpack accepts.
+#[test]
+fn an_archive_the_bundle_reader_refuses_fails_the_read() {
+    let refused = |members: &[(&str, &[u8])]| {
+        ne5::Bundle::read_from(&mut std::io::Cursor::new(archive(members)))
+            .unwrap_err()
+            .to_string()
+    };
+    let one = program(0);
+    assert_eq!(
+        refused(&[("Bank 1/", b""), ("Bank 1/One.ne5p", &one)]),
+        "the entry \"Bank 1/\" is a folder, not a file"
+    );
+    assert_eq!(
+        refused(&[("../One.ne5p", &one)]),
+        "member \"../One.ne5p\" is not a path inside the bundle"
+    );
+
+    let mut lying = archive(&[("Bank 1/One.ne5p", &one)]);
+    let body = 30 + "Bank 1/One.ne5p".len();
+    lying[body] ^= 0xff;
+    let err = ne5::Bundle::read_from(&mut std::io::Cursor::new(lying))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("CRC-32"),
+        "refused for the wrong reason: {err}"
     );
 }
 
