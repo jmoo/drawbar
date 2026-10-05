@@ -51,8 +51,8 @@ pub struct Recovered {
 
 /// Finish or roll back each of this writer's journaled intents, then clear the
 /// journal. Bytes a crash left in the writer's `tmp/` before journaling them are
-/// moved into the blob store and reported under a new intent. Recovery is itself
-/// safe to interrupt and repeat.
+/// moved into the blob store and reported under a new intent, and any other file
+/// there is removed. Recovery is itself safe to interrupt and repeat.
 ///
 /// A read-only writer changes nothing and reports each journaled intent as pending.
 pub async fn recover<F: Fs>(
@@ -68,6 +68,7 @@ pub async fn recover<F: Fs>(
         .into_iter()
         .map(|(_, record)| record)
         .collect::<Result<_>>()?;
+    remove_unfinished(fs, layout, log.writer()).await?;
     let mut recovered = Vec::new();
     for record in records {
         let settled = settle(fs, layout, log, &record).await?;
@@ -214,23 +215,33 @@ fn moves_to(entry: &Entry, path: &RelPath) -> bool {
     )
 }
 
-/// Move the blobs a crash left in this writer's `tmp/` into the store, logging each
-/// before moving it so that no blob enters the store unlogged. Other files there are
-/// a compaction's, which rewrites them.
+/// Remove every file in this writer's `tmp/` that is not whole staged bytes: a
+/// journal record or snapshot not yet renamed into place, or staged bytes cut short.
+/// No record names any of them.
+async fn remove_unfinished<F: Fs>(fs: &F, layout: &Layout, writer: WriterId) -> Result<()> {
+    let mut removed = false;
+    for path in tmp_files(fs, layout, writer).await? {
+        if whole_blob(fs, &path).await?.is_none() {
+            fs.remove_file(&path).await?;
+            removed = true;
+        }
+    }
+    if removed {
+        fs.sync(&layout.tmp(writer)).await?;
+    }
+    Ok(())
+}
+
+/// Move the staged bytes a crash left in this writer's `tmp/` into the store, logging
+/// each before moving it so that no blob enters the store unlogged.
 async fn keep_staged<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
 ) -> Result<Option<Recovered>> {
-    let dir = layout.tmp(log.writer());
-    if fs.metadata(&dir).await?.is_none() {
-        return Ok(None);
-    }
     let mut staged = Vec::new();
-    for entry in fs.list(&dir).await? {
-        if entry.kind == FileKind::File && entry.name.parse::<BlobId>().is_ok() {
-            let path = dir.join(&entry.name)?;
-            let (blob, len) = hash_file(fs, &path).await?;
+    for path in tmp_files(fs, layout, log.writer()).await? {
+        if let Some((blob, len)) = whole_blob(fs, &path).await? {
             staged.push((path, blob, len));
         }
     }
@@ -249,7 +260,7 @@ async fn keep_staged<F: Fs>(
     for (path, blob, _) in &staged {
         blobs::displace(fs, layout, path, *blob).await?;
     }
-    fs.sync(&dir).await?;
+    fs.sync(&layout.tmp(log.writer())).await?;
     Ok(Some(Recovered {
         intent,
         paths: Vec::new(),
@@ -257,6 +268,29 @@ async fn keep_staged<F: Fs>(
         kept: staged.into_iter().map(|(_, blob, _)| blob).collect(),
         stayed: Vec::new(),
     }))
+}
+
+async fn tmp_files<F: Fs>(fs: &F, layout: &Layout, writer: WriterId) -> Result<Vec<RelPath>> {
+    let dir = layout.tmp(writer);
+    if fs.metadata(&dir).await?.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in fs.list(&dir).await? {
+        if entry.kind == FileKind::File {
+            files.push(dir.join(&entry.name)?);
+        }
+    }
+    Ok(files)
+}
+
+/// The blob and length of a staged file whose bytes hash to its name.
+async fn whole_blob<F: Fs>(fs: &F, path: &RelPath) -> Result<Option<(BlobId, u64)>> {
+    let Some(Ok(named)) = path.name().map(str::parse::<BlobId>) else {
+        return Ok(None);
+    };
+    let (blob, len) = hash_file(fs, path).await?;
+    Ok((blob == named).then_some((blob, len)))
 }
 
 /// One intent's effects in progress: `journal/<writer>/<intent counter>.json`.
@@ -300,19 +334,25 @@ fn record_path(layout: &Layout, writer: WriterId, intent: IntentId) -> RelPath {
         .expect("a record name is one path component")
 }
 
-/// Record an effect durably before its first step.
+/// Record an intent's effects durably before the first step. The record is written
+/// under the writer's `tmp/` directory and renamed into the journal, so the journal
+/// never holds part of a record.
 pub(crate) async fn write<F: Fs>(
     fs: &F,
     layout: &Layout,
     writer: WriterId,
     record: &Record,
 ) -> Result<()> {
+    let bytes = serde_json::to_vec(record).expect("a record has only string map keys");
+    let tmp = layout.tmp(writer);
+    let unfinished = tmp.join(&format!("journal-{}.json", record.intent.counter))?;
+    ensure_dir(fs, &tmp).await?;
+    fs.create(&unfinished, &bytes).await?;
+    fs.sync(&unfinished).await?;
     let dir = layout.journal(writer);
     ensure_dir(fs, &dir).await?;
-    let path = record_path(layout, writer, record.intent);
-    let bytes = serde_json::to_vec(record).expect("a record has only string map keys");
-    fs.create(&path, &bytes).await?;
-    fs.sync(&path).await?;
+    fs.rename(&unfinished, &record_path(layout, writer, record.intent))
+        .await?;
     fs.sync(&dir).await
 }
 
@@ -483,6 +523,41 @@ mod tests {
         assert!(logged(&fs, WRITER)
             .iter()
             .any(|e| e.kind == Kind::BlobAdded { blob, len: 7 }));
+    }
+
+    #[test]
+    fn recovery_removes_what_a_crash_left_unfinished_in_tmp() {
+        let layout = Layout::default();
+        let fs = library(&[]);
+        let tmp = layout.tmp(WRITER);
+        block_on(ensure_dir(&fs, &tmp)).unwrap();
+        let snapshot = format!("snapshot-{}.json", BlobId::of(b"{}"));
+        let cut_short = BlobId::of(b"whole").to_string();
+        for (name, bytes) in [
+            (snapshot.as_str(), &b"{}"[..]),
+            ("journal-3.json", b"{"),
+            (&cut_short, b"who"),
+        ] {
+            block_on(fs.create(&tmp.join(name).unwrap(), bytes)).unwrap();
+        }
+        block_on(blobs::stage(&fs, &layout, WRITER, b"kept")).unwrap();
+
+        let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        let kept: Vec<BlobId> = recovered.iter().flat_map(|r| r.kept.clone()).collect();
+        assert_eq!(kept, [BlobId::of(b"kept")]);
+        let left: Vec<RelPath> = fs
+            .files()
+            .into_keys()
+            .filter(|p| p.starts_with(&tmp))
+            .collect();
+        assert_eq!(left, []);
+        let added: Vec<Kind> = logged(&fs, WRITER)
+            .into_iter()
+            .map(|entry| entry.kind)
+            .filter(|kind| matches!(kind, Kind::BlobAdded { .. }))
+            .collect();
+        let blob = BlobId::of(b"kept");
+        assert_eq!(added, [Kind::BlobAdded { blob, len: 4 }]);
     }
 
     #[test]

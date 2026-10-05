@@ -280,10 +280,11 @@ leaves the entry under both names rather than under neither.
 
 ## Journal
 
-Before the first step of an intent's effects, writer `w` creates
-`journal/<w>/<n>.json`, where `<n>` is the counter of the intent id, and syncs it
-and its directory. After the intent's entries are in the log, the writer removes the
-file.
+Before the first step of an intent's effects, writer `w` writes the record as
+`tmp/<w>/journal-<n>.json`, where `<n>` is the counter of the intent id, syncs it,
+renames it to `journal/<w>/<n>.json`, and syncs that directory, so a record exists
+only whole. After the intent's entries are in the log, the writer removes the
+record.
 
 The file is one JSON object with exactly these keys:
 
@@ -308,8 +309,12 @@ A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 
 ### Recovery
 
-At open, writer `w` settles each record in order of `<n>`. It runs the steps in
-order, bringing each one's files to its end from whatever state they are in:
+At open, writer `w` first removes every file in `tmp/<w>/` that is not staged
+bytes: a record or snapshot not yet renamed into place, or a file named by a blob id
+whose bytes do not hash to it. No record names any of them. Then it settles each
+record in order of `<n>`, refusing to open when one does not decode. It runs the
+steps in order, bringing each one's files to its end from whatever state they are
+in:
 
 | Step       | Finished when                                    | Otherwise |
 | ---------- | ------------------------------------------------ | --------- |
@@ -337,10 +342,8 @@ Either way it then removes the record. An intent that runs without a crash ends 
 same way, and reports a conflict after a step that changed files as an intent
 applied in part.
 
-Last, `w` moves every file left in `tmp/<w>/` whose name is a blob id into blobs,
-logging `blob_added` for each first, under a new intent. Any other file there is a
-snapshot a compaction had not yet renamed into place. Recovery may itself be
-interrupted and repeated.
+Last, `w` moves every file left in `tmp/<w>/` into blobs, logging `blob_added` for
+each first, under a new intent. Recovery may itself be interrupted and repeated.
 
 A writer that is read-only changes nothing: it leaves its journal and `tmp/<w>/` as
 they are, and reports each record as an intent still pending, with the record's

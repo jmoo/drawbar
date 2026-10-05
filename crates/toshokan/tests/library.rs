@@ -513,15 +513,15 @@ struct Case {
 }
 
 impl Case {
-    fn prepared(&self, capabilities: Capabilities) -> (Library<MemFs>, Vec<EntityId>) {
-        let mut library = open(MemFs::with_capabilities(capabilities), A);
+    fn prepared(&self, disk: Disk) -> (Library<MemFs>, Vec<EntityId>) {
+        let mut library = open(disk.fresh(), A);
         let entities = (self.setup)(&mut library);
         (library, entities)
     }
 
     /// The disk as a crash `crash` operations into the intent leaves it.
-    fn crashed(&self, capabilities: Capabilities, crash: u64) -> MemFs {
-        let (mut library, entities) = self.prepared(capabilities);
+    fn crashed(&self, disk: Disk, crash: u64) -> MemFs {
+        let (mut library, entities) = self.prepared(disk);
         library.fs().crash_after(crash);
         let result = (self.act)(&mut library, &entities);
         assert!(
@@ -531,8 +531,8 @@ impl Case {
         library.fs().restart()
     }
 
-    fn run(&self, capabilities: Capabilities) {
-        let (mut clean, entities) = self.prepared(capabilities);
+    fn run(&self, kind: Disk) {
+        let (mut clean, entities) = self.prepared(kind);
         let before = Observed::of(&clean);
         let start = clean.fs().mutations();
         (self.act)(&mut clean, &entities).unwrap();
@@ -543,19 +543,19 @@ impl Case {
         assert_ne!(after, before, "the intent changes something");
 
         for crash in 0..operations {
-            let disk = self.crashed(capabilities, crash);
+            let disk = self.crashed(kind, crash);
             let start = disk.mutations();
             open(disk.clone(), A);
             let recovery = disk.mutations() - start;
             for interrupt in (0..recovery).map(Some).chain([None]) {
-                let mut disk = self.crashed(capabilities, crash);
+                let mut disk = self.crashed(kind, crash);
                 if let Some(interrupt) = interrupt {
                     disk.crash_after(interrupt);
                     let result = block_on(Library::open(disk.clone(), Layout::default(), A));
                     assert!(matches!(result, Err(Error::Crashed)), "{:?}", result.err());
                     disk = disk.restart();
                 }
-                let at = format!("{capabilities:?}, crash {crash}, recovery crash {interrupt:?}");
+                let at = format!("{kind:?}, crash {crash}, recovery crash {interrupt:?}");
                 check(&disk, &before, &after).unwrap_or_else(|failure| panic!("{at}: {failure}"));
             }
         }
@@ -629,14 +629,46 @@ fn kept_both(
     reported && outcome.facts == before.facts && outcome.files == both
 }
 
-const WITHOUT_FSYNC: Capabilities = Capabilities {
-    fsync: false,
-    ..Capabilities::ALL
+/// The kind of disk a case runs on.
+#[derive(Clone, Copy, Debug)]
+struct Disk {
+    capabilities: Capabilities,
+    eager_names: bool,
+}
+
+impl Disk {
+    fn fresh(self) -> MemFs {
+        let fs = MemFs::with_capabilities(self.capabilities);
+        fs.set_eager_names(self.eager_names);
+        fs
+    }
+}
+
+const ALL: Disk = Disk {
+    capabilities: Capabilities::ALL,
+    eager_names: false,
 };
 
-const WITHOUT_DIRECTORY_RENAME: Capabilities = Capabilities {
-    rename_dir: false,
-    ..Capabilities::ALL
+const WITHOUT_FSYNC: Disk = Disk {
+    capabilities: Capabilities {
+        fsync: false,
+        ..Capabilities::ALL
+    },
+    ..ALL
+};
+
+const WITHOUT_DIRECTORY_RENAME: Disk = Disk {
+    capabilities: Capabilities {
+        rename_dir: false,
+        ..Capabilities::ALL
+    },
+    ..ALL
+};
+
+/// A disk that may make a new name durable before its contents.
+const EAGER_NAMES: Disk = Disk {
+    eager_names: true,
+    ..ALL
 };
 
 fn save_new(library: &mut Library<MemFs>, at: &str, bytes: &[u8]) -> EntityId {
@@ -657,8 +689,8 @@ fn every_crash_while_saving_a_new_file_recovers() {
             block_on(library.save(entities[0], &path("d/new"), bytes, Precondition::Absent))
         },
     };
-    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC] {
-        case.run(capabilities);
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
     }
 }
 
@@ -671,8 +703,8 @@ fn every_crash_while_saving_over_a_file_recovers() {
             block_on(library.save(entities[0], &path("d/song"), bytes, holds(b"old")))
         },
     };
-    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC] {
-        case.run(capabilities);
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
     }
 }
 
@@ -685,8 +717,8 @@ fn every_crash_while_deleting_a_file_recovers() {
         },
         act: |library, entities| block_on(library.delete_file(entities[0], holds(b"old"))),
     };
-    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC] {
-        case.run(capabilities);
+    for disk in [ALL, WITHOUT_FSYNC, EAGER_NAMES] {
+        case.run(disk);
     }
 }
 
@@ -696,17 +728,21 @@ fn every_crash_while_moving_a_tree_recovers() {
         setup: bound_tree,
         act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
     };
-    let without_both = Capabilities {
-        fsync: false,
-        ..WITHOUT_DIRECTORY_RENAME
+    let without_both = Disk {
+        capabilities: Capabilities {
+            fsync: false,
+            ..WITHOUT_DIRECTORY_RENAME.capabilities
+        },
+        ..ALL
     };
-    for capabilities in [
-        Capabilities::ALL,
+    for disk in [
+        ALL,
         WITHOUT_FSYNC,
         WITHOUT_DIRECTORY_RENAME,
         without_both,
+        EAGER_NAMES,
     ] {
-        case.run(capabilities);
+        case.run(disk);
     }
 }
 
@@ -730,8 +766,8 @@ fn every_crash_while_undoing_a_tree_move_recovers() {
         },
         act: |library, _| block_on(library.undo()),
     };
-    for capabilities in [Capabilities::ALL, WITHOUT_FSYNC, WITHOUT_DIRECTORY_RENAME] {
-        case.run(capabilities);
+    for disk in [ALL, WITHOUT_FSYNC, WITHOUT_DIRECTORY_RENAME, EAGER_NAMES] {
+        case.run(disk);
     }
 }
 
@@ -780,12 +816,12 @@ fn a_tree_move_recovered_around_files_put_in_its_way_never_binds_them() {
         act: |library, _| block_on(library.move_tree(&path("a/x"), &path("b/x"))),
     };
     let destinations = [path("b/x/1"), path("b/x/y/2")];
-    for capabilities in [Capabilities::ALL, WITHOUT_DIRECTORY_RENAME] {
-        let (mut clean, entities) = case.prepared(capabilities);
+    for kind in [ALL, WITHOUT_DIRECTORY_RENAME] {
+        let (mut clean, entities) = case.prepared(kind);
         let start = clean.fs().mutations();
         (case.act)(&mut clean, &entities).unwrap();
         for crash in 0..clean.fs().mutations() - start {
-            let disk = case.crashed(capabilities, crash);
+            let disk = case.crashed(kind, crash);
             let mut planted = Vec::new();
             for at in &destinations {
                 if block_on(disk.metadata(at)).unwrap().is_none() {
@@ -795,7 +831,7 @@ fn a_tree_move_recovered_around_files_put_in_its_way_never_binds_them() {
                 }
             }
             let library = open(disk.clone(), A);
-            let at = format!("{capabilities:?}, crash {crash}");
+            let at = format!("{kind:?}, crash {crash}");
             bound_files_hold_their_contents(&library).unwrap_or_else(|f| panic!("{at}: {f}"));
             for planted in &planted {
                 assert_eq!(library_files(&disk)[planted], b"theirs", "{at}");
@@ -822,12 +858,12 @@ fn a_read_only_writer_reports_the_effect_a_crash_interrupted_and_writes_nothing(
             block_on(library.save(entities[0], &path("song"), bytes, holds(b"old")))
         },
     };
-    let (mut clean, entities) = case.prepared(Capabilities::ALL);
+    let (mut clean, entities) = case.prepared(ALL);
     let start = clean.fs().mutations();
     (case.act)(&mut clean, &entities).unwrap();
     let mut reported = 0;
     for crash in 0..clean.fs().mutations() - start {
-        let disk = case.crashed(Capabilities::ALL, crash);
+        let disk = case.crashed(ALL, crash);
         append_unknown(&disk, A);
         let journal = Layout::default().journal(A);
         let journaled = disk.files().keys().any(|at| at.starts_with(&journal));

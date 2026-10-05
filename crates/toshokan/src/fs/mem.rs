@@ -15,7 +15,8 @@ use crate::error::{Error, Result};
 /// directory. A crash keeps exactly the durable state: an unsynced new file vanishes,
 /// a file whose name was synced but whose contents were not comes back empty, and a
 /// rename across directories that syncs only one side loses or duplicates the file.
-/// Without `fsync`, every completed operation is durable at once.
+/// Without `fsync`, every completed operation is durable at once. With
+/// [`MemFs::set_eager_names`], a new name is durable as soon as it is created.
 ///
 /// **Crashes.** Every call of a mutating method (`create_dir_all`, `create`, `append`,
 /// `rename`, `remove_file`, `remove_dir`, `sync`) counts as one
@@ -63,6 +64,7 @@ struct Disk {
     crash_at: Option<u64>,
     crashed: bool,
     capacity: Option<u64>,
+    eager_names: bool,
 }
 
 impl Default for MemFs {
@@ -92,6 +94,7 @@ impl MemFs {
             crash_at: None,
             crashed: false,
             capacity: None,
+            eager_names: false,
         })
     }
 
@@ -142,6 +145,7 @@ impl MemFs {
             crash_at: None,
             crashed: false,
             capacity: disk.capacity,
+            eager_names: disk.eager_names,
         })
     }
 
@@ -149,6 +153,13 @@ impl MemFs {
     /// [`Error::NoSpace`].
     pub fn set_capacity(&self, bytes: Option<u64>) {
         self.disk.borrow_mut().capacity = bytes;
+    }
+
+    /// Make each new file's or directory's name durable as soon as it is created, as a
+    /// file system may on its own, while a file's contents still wait for
+    /// [`Fs::sync`]. A crash then leaves a file created but never synced, empty.
+    pub fn set_eager_names(&self, eager: bool) {
+        self.disk.borrow_mut().eager_names = eager;
     }
 
     /// Set a file's modification time without touching its contents, as another
@@ -241,8 +252,20 @@ impl Disk {
 
     fn add_dir(&mut self, parent: Ino, name: &str) -> Ino {
         let ino = self.add(Content::Directory(BTreeMap::new()));
-        self.entries_mut(parent).insert(name.to_owned(), ino);
+        self.link(parent, name, ino);
         ino
+    }
+
+    /// Give a new node its name in `dir`, durably at once with eager names.
+    fn link(&mut self, dir: Ino, name: &str, ino: Ino) {
+        self.entries_mut(dir).insert(name.to_owned(), ino);
+        if !self.eager_names {
+            return;
+        }
+        match &mut self.nodes[dir].durable {
+            Content::Directory(entries) => entries.insert(name.to_owned(), ino),
+            Content::File { .. } => unreachable!("a node's kind never changes"),
+        };
     }
 
     fn lookup(&self, path: &RelPath) -> Result<Option<Ino>> {
@@ -429,7 +452,7 @@ impl Fs for MemFs {
                 data: bytes.to_vec(),
                 modified,
             });
-            disk.entries_mut(dir).insert(name.to_owned(), ino);
+            disk.link(dir, name, ino);
             Ok(())
         })
     }
@@ -670,6 +693,23 @@ mod tests {
         let after = fs.restart();
         assert_eq!(after.files(), files(&[("named", b""), ("whole", b"kept")]));
         assert_fails!(block_on(fs.read(&path("whole"))), Error::Crashed);
+    }
+
+    #[test]
+    fn with_eager_names_a_created_file_survives_a_crash_empty_until_synced() {
+        let fs = MemFs::new();
+        fs.set_eager_names(true);
+        block_on(fs.create_dir_all(&path("d"))).unwrap();
+        block_on(fs.create(&path("d/torn"), b"lost")).unwrap();
+        block_on(fs.create(&path("d/whole"), b"kept")).unwrap();
+        block_on(fs.sync(&path("d/whole"))).unwrap();
+        let after = fs.restart();
+        assert_eq!(
+            after.files(),
+            files(&[("d/torn", b""), ("d/whole", b"kept")])
+        );
+        block_on(after.create(&path("again"), b"x")).unwrap();
+        assert_eq!(after.restart().files()[&path("again")], b"");
     }
 
     #[test]
