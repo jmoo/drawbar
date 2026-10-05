@@ -930,8 +930,8 @@ fn overwritable(occupant: Occupant, workspace: &Workspace) -> Option<u64> {
 fn ambiguous(held: &[String], dir: &LibPath) -> String {
     let named: Vec<String> = held.iter().map(|name| format!("“{name}”")).collect();
     format!(
-        "{} in {} are already one name on a disk that ignores case. Rename one of them \
-         first.",
+        "{} in {} differ only by case and would collide on macOS or Windows. Rename one \
+         of them first.",
         named.join(" and "),
         spoken(dir)
     )
