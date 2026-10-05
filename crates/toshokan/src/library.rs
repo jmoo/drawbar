@@ -238,6 +238,9 @@ impl<F: Fs> Library<F> {
 
     /// Write an entity's file at `path`, where the file must meet `expect`. Old
     /// contents move into the blob store.
+    ///
+    /// An entity bound to a file saves only at that file's path, so that it owns one
+    /// file; [`Library::rename`] moves the file first.
     pub async fn save(
         &mut self,
         entity: EntityId,
@@ -246,6 +249,13 @@ impl<F: Fs> Library<F> {
         expect: Precondition,
     ) -> Result<Change> {
         self.existing(entity)?;
+        let bound = self.state.field(entity, PATH_FIELD);
+        if bound.is_some_and(|bound| *bound != Value::Text(path.as_str().to_owned())) {
+            return Err(Error::Entity {
+                entity,
+                reason: "has its file at another path; rename it before saving there",
+            });
+        }
         let save = Effect::Save {
             entity,
             path: path.clone(),

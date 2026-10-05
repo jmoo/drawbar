@@ -271,8 +271,9 @@ intent. Before any step of an intent, each of its effects checks its preconditio
 A save or delete expects one of: no file at the path; the fingerprint the writer
 last read, compared by length, then by hash when both sides have one, then by an
 equal modification time; or a file whose bytes hash to a given blob id. A rename or
-move refuses a destination that exists. When one effect is refused, the intent
-writes nothing: no file, directory or entry.
+move refuses a destination that exists. A save of an entity whose `path` is set must
+save at that path, so an entity has one file. When one effect is refused, the
+intent writes nothing: no file, directory or entry.
 
 A step creates the directories its destination needs. A rename syncs the
 destination directory before the source directory, so a crash between the two

@@ -273,6 +273,23 @@ fn undo_of_a_save_restores_the_displaced_bytes<F: Fs>(disk: impl Fn() -> F) {
     assert_eq!(reopened.state().field(song, "path"), None);
 }
 
+fn saving_an_entity_away_from_its_file_is_refused<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.save(song, &path("a"), b"first".to_vec(), Precondition::Absent)).unwrap();
+    let before = tree(a.fs());
+
+    let refused = block_on(a.save(song, &path("b"), b"second".to_vec(), Precondition::Absent));
+    assert!(
+        matches!(refused, Err(Error::Entity { entity, .. }) if entity == song),
+        "{refused:?}"
+    );
+    assert_eq!(tree(a.fs()), before, "a refused save wrote");
+    block_on(a.undo()).unwrap();
+    assert_eq!(library_files(a.fs()), BTreeMap::new());
+    assert!(stored(a.fs(), b"first"), "undoing the save kept its bytes");
+}
+
 fn undo_of_a_file_delete_puts_the_file_back<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
@@ -434,6 +451,7 @@ on_every_backend!(
     a_torn_log_tail_costs_one_entry,
     a_read_only_library_refuses_every_intent_before_anything_changes,
     undo_of_a_save_restores_the_displaced_bytes,
+    saving_an_entity_away_from_its_file_is_refused,
     undo_of_a_file_delete_puts_the_file_back,
     undo_is_refused_where_another_writer_changed_the_field_since,
     collection_never_removes_a_blob_a_live_value_names,
