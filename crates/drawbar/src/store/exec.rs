@@ -143,6 +143,12 @@ pub trait Fs {
     async fn discard(&mut self, temp: Self::Temp);
     /// Rename a file or folder. Refused when another entry is at `to`.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
+    /// Move the file at `from`, written and flushed whole, to `path`, over what `over`
+    /// allows, as [`Fs::place`] puts a temporary. Where it fails, `from` stays where it
+    /// was. `Ok(false)` where this backend does not move it there, and nothing changed.
+    async fn promote(&mut self, _from: &str, _path: &str, _over: Over) -> io::Result<bool> {
+        Ok(false)
+    }
     async fn make_dir(&mut self, path: &str) -> io::Result<()>;
     async fn remove_file(&mut self, path: &str) -> io::Result<()>;
     /// Only an empty folder.
@@ -210,6 +216,17 @@ async fn put(fs: &mut impl Fs, path: &str, what: Staged<'_>, over: Over) -> io::
         }
     }
     fs.place(temp, path, over).await
+}
+
+/// Move the file at `from` to `path`, over what `over` allows, as [`put`] puts a
+/// temporary, where the backend moves it there: see [`Fs::promote`].
+async fn moved_in(fs: &mut impl Fs, from: &str, path: &str, over: Over) -> io::Result<bool> {
+    if let Over::Held(held) = over {
+        if !matches!(fs.stat(path).await, Ok(Some(now)) if now == held) {
+            return Err(moved());
+        }
+    }
+    fs.promote(from, path, over).await
 }
 
 /// What a write may put its file over, where the file at `path` must still hold what
@@ -330,8 +347,9 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             bytes,
             expect,
             stale,
+            promote,
         } => {
-            let result = save(fs, &path, &bytes, expect, stale).await;
+            let result = save(fs, &path, &bytes, expect, stale, promote).await;
             Some(Event::Saved { id, path, result })
         }
         Cmd::Rewrite {
@@ -444,6 +462,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         })
         .collect();
     let mut working = BTreeMap::new();
+    let mut prints = BTreeMap::new();
     for (name, (id, keeps)) in &named {
         let read = fs.read(&format!("{WORKING}/{name}")).await;
         // An edit's copy is read through here, so one this build cannot read is not
@@ -456,6 +475,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         });
         match read {
             Ok(bytes) => {
+                prints.insert(*id, contents(&bytes));
                 working.insert(*id, bytes);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -531,6 +551,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         damaged,
         sidecar,
         working,
+        prints,
         swept,
         stranded,
         rescued,
@@ -666,7 +687,7 @@ async fn index(fs: &mut impl Fs) -> Index {
 }
 
 /// The length and CRC-32 of these bytes.
-fn contents(bytes: &[u8]) -> (u64, u32) {
+pub fn contents(bytes: &[u8]) -> (u64, u32) {
     (bytes.len() as u64, nord_format::crc::crc32(bytes))
 }
 
@@ -1711,22 +1732,34 @@ async fn freshen(fs: &mut impl Fs, stale: Option<Stale>) -> Result<(), Failure> 
     .map_err(|e| Failure::Io(format!("keeping the edit: {e}")))
 }
 
+/// Write `bytes` to `path`, over what `expect` allows: by moving the working copy
+/// `promote` names into place, where it holds them and the backend moves it, and
+/// otherwise through a temporary.
 async fn save(
     fs: &mut impl Fs,
     path: &LibPath,
     bytes: &[u8],
     expect: Option<Fingerprint>,
     stale: Option<Stale>,
+    promote: Option<String>,
 ) -> Result<Fingerprint, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
     let over = match expect {
         None => Over::Nothing,
         Some(expect) => held(fs, path, &expect).await?,
     };
-    freshen(fs, stale).await?;
-    put(fs, path.as_str(), Staged::Bytes(bytes), over)
-        .await
-        .map_err(refusal)?;
+    let promoted = match promote {
+        Some(name) => moved_in(fs, &format!("{WORKING}/{name}"), path.as_str(), over)
+            .await
+            .map_err(refusal)?,
+        None => false,
+    };
+    if !promoted {
+        freshen(fs, stale).await?;
+        put(fs, path.as_str(), Staged::Bytes(bytes), over)
+            .await
+            .map_err(refusal)?;
+    }
     let stat = fs
         .stat(path.as_str())
         .await
@@ -2199,9 +2232,27 @@ mod tests {
             b"new",
             Some(expect),
             None,
+            None,
         ));
         assert_eq!(saved, Err(Failure::Moved));
         assert_eq!(fs.files["Grand.ne5p"], 99, "what was written there stays");
+    }
+
+    /// A save asked to move a working copy into place, on a backend that moves no files
+    /// there, as a picked folder in the browser does not, writes the bytes instead.
+    #[test]
+    fn a_save_whose_working_copy_cannot_be_moved_writes_its_bytes() {
+        let mut fs = Claimed::of([]);
+        let saved = now(save(
+            &mut fs,
+            &path("Grand.ne5p"),
+            b"new",
+            None,
+            None,
+            Some("1-1".to_string()),
+        ));
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(fs.files["Grand.ne5p"], 3);
     }
 
     /// A read asked for leaves a sample instrument in its file, which takes none of the
@@ -2538,6 +2589,7 @@ mod tests {
             bytes: vec![0; 3],
             expect: None,
             stale: None,
+            promote: None,
         });
         let mut listed = Vec::new();
         let mut saved = false;

@@ -1566,6 +1566,24 @@ impl Fs for Folder {
         moved
     }
 
+    /// Only in the private file system, where a move lands without reading the file.
+    async fn promote(&mut self, from: &str, path: &str, over: Over) -> io::Result<bool> {
+        if !matches!(self.writes, Writes::Worker(_)) {
+            return Ok(false);
+        }
+        if !over.replaces() && self.taken(path).await? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let Ok(file) = self.file(from).await else {
+            return Ok(false);
+        };
+        if over.replaces() {
+            self.forget(path);
+        }
+        let (dir, leaf) = self.spot(path).await?;
+        Ok(move_to(&file, &dir, &leaf).await.is_ok())
+    }
+
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {
         let made = self.dir(path, true).await.map(|_| ());
         self.dirs.get_mut().clear();

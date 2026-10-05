@@ -392,6 +392,8 @@ pub struct Opened {
     /// The working copies the index names, by asset id. One that is not there is left
     /// out, and one that did not read leaves the library read-only.
     pub working: std::collections::BTreeMap<u64, Vec<u8>>,
+    /// The length and CRC-32 of each working copy in `working`, by asset id.
+    pub prints: std::collections::BTreeMap<u64, (u64, u32)>,
     /// How many leftovers of interrupted writes were removed.
     pub swept: usize,
     /// Folders an interrupted rename left under the name it moved them through, that
@@ -589,6 +591,10 @@ pub enum Cmd {
         bytes: Vec<u8>,
         expect: Option<Fingerprint>,
         stale: Option<Stale>,
+        /// The working copy that holds exactly `bytes`, by name. Where the backend moves
+        /// files, it is moved into place in their stead, so the save takes no room of its
+        /// own, and it is gone once the save lands.
+        promote: Option<String>,
     },
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].

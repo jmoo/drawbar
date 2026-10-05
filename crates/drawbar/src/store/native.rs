@@ -635,6 +635,27 @@ impl Fs for Disk {
         sync_dir(parent(&target))
     }
 
+    /// A working copy is renamed over its target, or linked where nothing may be there,
+    /// so nothing is written. Across volumes, or on one without links, nothing moves.
+    async fn promote(&mut self, from: &str, path: &str, over: Over) -> io::Result<bool> {
+        let (source, target) = (self.locate(from)?, self.locate(path)?);
+        let moved = match over.replaces() {
+            true => fs::rename(&source, &target),
+            false => fs::hard_link(&source, &target),
+        };
+        match moved {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            Err(_) => return Ok(false),
+        }
+        if !over.replaces() {
+            let _ = fs::remove_file(&source);
+        }
+        sync_dir(parent(&target))?;
+        sync_dir(parent(&source))?;
+        Ok(true)
+    }
+
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {
         let target = self.locate(path)?;
         fs::create_dir_all(&target)?;
@@ -963,6 +984,7 @@ mod tests {
                 bytes: b"saved".to_vec(),
                 expect: None,
                 stale: None,
+                promote: None,
             },
         );
         assert!(
@@ -1019,6 +1041,7 @@ mod tests {
                 bytes: b"saved".to_vec(),
                 expect: None,
                 stale: None,
+                promote: None,
             },
         );
         assert!(
@@ -1033,6 +1056,7 @@ mod tests {
                 bytes: b"saved".to_vec(),
                 expect: Some(Fingerprint::unread(x)),
                 stale: None,
+                promote: None,
             },
         );
         assert!(

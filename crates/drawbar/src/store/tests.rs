@@ -371,6 +371,105 @@ fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     );
 }
 
+/// A launch writes no new generation of an unsaved edit nothing has changed since it was
+/// kept, whether its file is there or went missing: a large piano would otherwise cost
+/// its size again at every launch.
+#[test]
+fn an_unchanged_working_copy_is_not_rewritten_at_launch() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let kept = first.create();
+    let gone = first.create();
+    first.sync();
+    for id in [kept, gone] {
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited, log);
+    }
+    first.close();
+    let path = rows(&root)[&gone].path.clone().expect("a file");
+    fs::remove_file(root.at(path.as_str())).unwrap();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 2, "{working:?}");
+
+    for launch in 0..2 {
+        let mut session = Session::open(&root);
+        assert!(session.bench.browser.folders.missing.contains(&gone));
+        session.autosave();
+        session.close();
+        assert_eq!(root.names(".drawbar/working"), working, "launch {launch}");
+    }
+}
+
+/// An edit that comes back to the bytes its working copy holds writes no new generation.
+#[test]
+fn an_edit_back_to_what_its_working_copy_holds_writes_no_new_one() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = session.bytes(id);
+    let edited = with_gain(&saved, "96");
+    for bytes in [&edited, &with_gain(&saved, "12"), &edited] {
+        let log = &mut session.bench.log;
+        session
+            .bench
+            .workspace
+            .replace_bytes(id, bytes.clone(), log);
+        if *bytes == edited {
+            session.autosave();
+        }
+    }
+    session.close();
+    assert_eq!(root.names(".drawbar/working"), [working_name(id, 1)]);
+}
+
+/// Saving an edit whose working copy holds exactly what the save writes moves that copy
+/// into place, over the file or where the file went missing, so the save takes no room of
+/// its own: the file is the copy's own data on disk.
+#[cfg(unix)]
+#[test]
+fn saving_an_unchanged_working_copy_promotes_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let kept = first.create();
+    let gone = first.create();
+    first.sync();
+    for id in [kept, gone] {
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited, log);
+    }
+    first.close();
+    let paths = |id| rows(&root)[&id].path.clone().expect("a file").to_string();
+    let (kept_at, gone_at) = (paths(kept), paths(gone));
+    fs::remove_file(root.at(&gone_at)).unwrap();
+    let inode = |path: &str| fs::metadata(root.at(path)).unwrap().ino();
+    let copies = |id| {
+        let copy = rows(&root)[&id].working.expect("a working copy");
+        format!(".drawbar/working/{}", working_name(id, copy.generation))
+    };
+    let copied = [
+        (kept_at, inode(&copies(kept))),
+        (gone_at, inode(&copies(gone))),
+    ];
+
+    let mut second = Session::open(&root);
+    let edits = [kept, gone].map(|id| second.bytes(id));
+    for id in [kept, gone] {
+        second.bench.workspace.mark_saved(id);
+    }
+    second.sync();
+    second.sync();
+    for ((path, copy), bytes) in copied.iter().zip(edits) {
+        assert_eq!(root.read(path), bytes, "{path} holds the edit");
+        assert_eq!(inode(path), *copy, "{path} is its working copy, moved");
+    }
+    assert_eq!(root.names(".drawbar/working"), [""; 0]);
+}
+
 /// A working copy that does not read is the only copy of its edit, so the library opens
 /// read-only rather than drop it, and the edit comes back once the copy reads again.
 #[cfg(unix)]

@@ -122,10 +122,12 @@ read-only](#opening-the-lock-and-read-only)).
 
 ### Working copies, `tmp/` and `lock`
 
-- `working/<id>-<generation>` holds an unsaved edit. A new edit gets a new
-  generation, and the old file is deleted once the index stops naming it. A copy
-  is rewritten only by a save of a later edit, just before the save lands (see
-  [The order of a pass](#the-order-of-a-pass)). One that `keeps: Bytes` holds
+- `working/<id>-<generation>` holds an unsaved edit. An edit whose bytes differ
+  from the copy's gets a new generation, and the old file is deleted once the
+  index stops naming it; one the copy already holds, as at every launch, writes
+  none. A copy is rewritten only by a save of a later edit, just before the save
+  lands (see [The order of a pass](#the-order-of-a-pass)), and moved into place
+  by a save of exactly what it holds. One that `keeps: Bytes` holds
   the asset's bytes whole. One that `keeps: Edit` holds an edit of a piano
   library or sample instrument resting in its file, as RON text under a version
   of its own (`rewrite::Edit::working`):
@@ -277,7 +279,9 @@ stateDiagram-v2
   limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
   snapshot the page took of it.
 - **Unsaved.** Its stamp differs from its baseline's. At the next full pass its
-  bytes are written to `working/` under a new generation. An edit of a resting
+  bytes are written to `working/` under a new generation, unless its working copy
+  holds them already. An asset whose file is missing counts as unsaved as soon as
+  it is restored, so its copy is kept as it was. An edit of a resting
   asset stays an edit held over its file, and the asset stays resting until the
   save writes the file again; its working copy keeps the edit, not the bytes.
 - **Saving.** Saving moves the baseline to the current bytes, and the store
@@ -651,7 +655,14 @@ its save has answered. A save whose working copy holds an older edit carries it
 file, so a crash after a save lands and before the next index leaves a working
 copy of what the file holds. The next open sees that and does not count the asset
 as unsaved. A copy newer than the save is left alone, and after a crash it comes
-back over the file as a change made outside drawbar would.
+back over the file as a change made outside drawbar would. A save whose working
+copy holds exactly the bytes it writes (`store::Cmd::Save`'s `promote`) moves the
+copy into place instead of writing the bytes again: on the desktop by a rename,
+or a hard link where the file is new, and in the browser's private storage by
+`move()`. It needs no room of its own, so a save on a nearly full disk does not
+fail for want of the room the copy already takes. Where the backend cannot move
+it, as in a picked folder, across volumes or on one without links, the save
+writes the bytes as any other does.
 
 A save over a file sends the file's fingerprint and lands only where the file
 still holds it: its stat is the one taken, or else its CRC is. A file that moved
