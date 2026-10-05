@@ -60,6 +60,11 @@ pub enum Error {
     #[error("writer {writer} is read-only: {reason}")]
     ReadOnly { writer: WriterId, reason: String },
 
+    /// The log given for a writer was read before that writer's latest append, so
+    /// folding it would lose entries.
+    #[error("the log of writer {writer} was read before its latest append")]
+    StaleLog { writer: WriterId },
+
     /// A file effect found the file no longer matching what the writer last read.
     /// Nothing was changed.
     #[error("{} changed since it was last read", .0.path)]
