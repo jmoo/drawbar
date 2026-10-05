@@ -290,3 +290,67 @@ pub fn planned_key_map(
         writes: !plan.is_empty(),
     }))
 }
+
+/// Every zone's stream as a lattice, in stored order, each shift read against the file
+/// peak.
+pub fn lattices(sample: &Sample) -> Result<Vec<nsmp::codec::Lattice>, String> {
+    let layout = sample.layout().context("layout")?;
+    let file_peak = peak(&sample.stroke_streams(), layout) as u32;
+    sample
+        .zones()
+        .context("zones")?
+        .iter()
+        .enumerate()
+        .map(|(index, zone)| {
+            nsmp::codec::lattice(zone.stream, zone.at, layout, file_peak)
+                .context(format!("zone {index}"))
+        })
+        .collect()
+}
+
+/// Whether `converted` holds `source`'s fields at its own shift: the same fields as
+/// far as both reach, and past that, in whichever is longer, only the loop again. A
+/// loop repeats itself to fit a generation, or less of itself where a generation's
+/// floor lets its mark sit nearer the resync point; either plays the same.
+pub fn holds_fields(
+    source: &nsmp::codec::Lattice,
+    converted: &nsmp::codec::Lattice,
+) -> Result<(), String> {
+    let rise = converted.shift - source.shift;
+    ensure!(
+        rise >= 0,
+        "the shift went from {} to {}",
+        source.shift,
+        converted.shift
+    );
+    let (given, laid) = (source.fields.len(), converted.fields.len());
+    let shared = given.min(laid);
+    if let Some(at) = (0..shared).find(|&f| source.fields[f] >> rise != converted.fields[f]) {
+        return Err(format!("field {at} differs"));
+    }
+    if given == laid {
+        return Ok(());
+    }
+    let mark = source
+        .mark
+        .ok_or("a stream that does not loop changed length")?;
+    let period = given - mark;
+    let longer = match laid > given {
+        true => &converted.fields,
+        false => &source.fields,
+    };
+    let repeats = (shared..longer.len()).all(|f| longer[f] == longer[f - period]);
+    ensure!(
+        repeats,
+        "{laid} fields of {given}, and the difference is not the loop again"
+    );
+    Ok(())
+}
+
+/// Whether a stroke runs past the reach of its directory's 16-bit word pointers. The
+/// editor writes such streams, and this crate's writer refuses them.
+pub fn past_directory_reach(sample: &Sample) -> Result<bool, String> {
+    let layout = sample.layout().context("layout")?;
+    let reach = nsmp::codec::WRAP * layout.word();
+    Ok(sample.stroke_streams().iter().any(|(_, s)| s.len() > reach))
+}

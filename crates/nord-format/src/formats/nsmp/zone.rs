@@ -340,7 +340,7 @@ fn key_quads(map: &[u8]) -> Result<impl Iterator<Item = (u8, usize, &[u8])>, Par
 /// The lowest key the per-key table describes, and the note the editor's project
 /// file counts its note list from. The editor writes it into the bottom zone's
 /// `low`; the vendor library writes 0 there with the same meaning.
-pub(super) const KEY_FLOOR: u8 = 17;
+pub(crate) const KEY_FLOOR: u8 = 17;
 
 /// How far a partner root below a zone's own may be pitched up to cover it: a
 /// minor third. Pitching down is unrestricted as far as any specimen shows.

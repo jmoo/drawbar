@@ -26,6 +26,9 @@ pub struct Sidecar {
     pub source: Option<String>,
     /// The same source rendered in the wide generations.
     pub wide_renders: Vec<String>,
+    /// Wide renders whose statistic B has the other sign from the one a conversion of
+    /// this narrow render infers.
+    pub twin_sign_differs: Vec<String>,
     /// The instrument this one was saved from after a rename and zone remap.
     pub edited_from: Option<String>,
     /// An instrument whose decoded audio this one's must differ from.
@@ -79,6 +82,7 @@ pub const SPECIMEN_KEYS: &[&str] = &[
     "schema",
     "source",
     "traits",
+    "twin_sign_differs",
     "unoracled",
     "wide_renders",
 ];
@@ -96,6 +100,7 @@ const CLAIMS: &[&str] = &[
     "same_body_as",
     "source",
     "traits",
+    "twin_sign_differs",
     "wide_renders",
 ];
 
@@ -159,6 +164,7 @@ pub fn load(path: &Path) -> Result<Sidecar, String> {
         same_body_as: string(object, "same_body_as")?,
         source: string(object, "source")?,
         wide_renders: strings(object, "wide_renders")?,
+        twin_sign_differs: strings(object, "twin_sign_differs")?,
         edited_from: string(object, "edited_from")?,
         audio_differs_from: string(object, "audio_differs_from")?,
         render: object.get("render").map(render).transpose()?,
