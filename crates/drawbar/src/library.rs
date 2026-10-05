@@ -623,9 +623,9 @@ const NAME_LEAST: f32 = 100.0;
 /// Where each column sits across `width`, laid out by [`crate::panel::tracks`], with any
 /// dragged `widths` in place of the columns' own tracks.
 ///
-/// Where the name would be narrower than [`NAME_LEAST`], or than a width it was dragged
-/// to, the [`YIELDING`] columns are hidden in turn until it is not. A hidden column's
-/// track is empty, at the end of the one before it.
+/// Where the name would be narrower than about 16 characters, or than a width it was
+/// dragged to, the secondary columns are hidden in turn, least needed first, until it is
+/// not. A hidden column's track is empty, at the end of the one before it.
 pub fn tracks(width: f32, widths: &Widths) -> [Range<f32>; 8] {
     let wanted = Column::ALL.map(|column| match widths[column as usize] {
         Some(px) => Track::Px(px),
