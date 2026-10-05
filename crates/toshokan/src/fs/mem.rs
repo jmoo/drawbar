@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 /// Without `fsync`, every completed operation is durable at once.
 ///
 /// **Crashes.** Every call of a mutating method (`create_dir_all`, `create`, `append`,
-/// `rename`, `hard_link`, `remove_file`, `remove_dir`, `sync`) counts as one
+/// `rename`, `remove_file`, `remove_dir`, `sync`) counts as one
 /// operation, whether or not it succeeds. After [`MemFs::crash_after`]`(n)`, the next
 /// `n` operations run and the one after fails with [`Error::Crashed`] without taking
 /// effect; from then on every call on every handle to this disk fails the same way.
@@ -146,7 +146,7 @@ impl MemFs {
     }
 
     /// Refuse writes that would make the files hold more than `bytes` in total, with
-    /// [`Error::NoSpace`]. A file with two names counts once.
+    /// [`Error::NoSpace`].
     pub fn set_capacity(&self, bytes: Option<u64>) {
         self.disk.borrow_mut().capacity = bytes;
     }
@@ -315,28 +315,15 @@ impl Disk {
         let Some(capacity) = self.capacity else {
             return Ok(());
         };
-        let mut counted = BTreeSet::new();
         let mut used = 0u64;
-        self.walk_inodes(ROOT, &mut |ino, content| {
+        self.walk(ROOT, &RelPath::ROOT, &mut |_, content| {
             if let Content::File { data, .. } = content {
-                if counted.insert(ino) {
-                    used += data.len() as u64;
-                }
+                used += data.len() as u64;
             }
         });
         match used.checked_add(more as u64) {
             Some(total) if total <= capacity => Ok(()),
             _ => Err(Error::NoSpace { path: path.clone() }),
-        }
-    }
-
-    fn walk_inodes(&self, ino: Ino, visit: &mut impl FnMut(Ino, &Content)) {
-        let content = &self.nodes[ino].live;
-        visit(ino, content);
-        if let Content::Directory(entries) = content {
-            for &child in entries.values() {
-                self.walk_inodes(child, visit);
-            }
         }
     }
 
@@ -483,20 +470,6 @@ impl Fs for MemFs {
                 });
             }
             disk.entries_mut(from_dir).remove(from_name);
-            disk.entries_mut(to_dir).insert(to_name.to_owned(), ino);
-            Ok(())
-        })
-    }
-
-    async fn hard_link(&self, from: &RelPath, to: &RelPath) -> Result<()> {
-        self.mutate(|disk| {
-            disk.require(Capability::HardLink)?;
-            disk.file(from)?;
-            let ino = disk.existing(from)?;
-            let (to_dir, to_name) = disk.place(to)?;
-            if disk.child(to_dir, to_name).is_some() {
-                return Err(Error::AlreadyExists { path: to.clone() });
-            }
             disk.entries_mut(to_dir).insert(to_name.to_owned(), ino);
             Ok(())
         })
@@ -659,16 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_link_is_a_second_name_for_the_same_bytes() {
-        let fs = MemFs::new();
-        block_on(fs.create(&path("a"), b"x")).unwrap();
-        block_on(fs.hard_link(&path("a"), &path("b"))).unwrap();
-        block_on(fs.append(&path("a"), b"y")).unwrap();
-        block_on(fs.remove_file(&path("a"))).unwrap();
-        assert_eq!(fs.files(), files(&[("b", b"xy")]));
-    }
-
-    #[test]
     fn undeclared_capabilities_are_refused_and_change_nothing() {
         let fs = MemFs::with_capabilities(Capabilities {
             rename_file: true,
@@ -681,10 +644,6 @@ mod tests {
             (
                 block_on(fs.rename(&path("d"), &path("e"))),
                 Capability::RenameDir,
-            ),
-            (
-                block_on(fs.hard_link(&path("f"), &path("g"))),
-                Capability::HardLink,
             ),
         ];
         for (result, capability) in refused {
@@ -785,7 +744,6 @@ mod tests {
         let fs = MemFs::new();
         fs.set_capacity(Some(4));
         block_on(fs.create(&path("a"), b"abc")).unwrap();
-        block_on(fs.hard_link(&path("a"), &path("b"))).unwrap();
         assert_fails!(
             block_on(fs.append(&path("a"), b"de")),
             Error::NoSpace { .. }
@@ -794,8 +752,8 @@ mod tests {
             block_on(fs.create(&path("c"), b"de")),
             Error::NoSpace { .. }
         );
-        block_on(fs.append(&path("b"), b"d")).unwrap();
-        assert_eq!(fs.files(), files(&[("a", b"abcd"), ("b", b"abcd")]));
+        block_on(fs.append(&path("a"), b"d")).unwrap();
+        assert_eq!(fs.files(), files(&[("a", b"abcd")]));
     }
 
     #[test]

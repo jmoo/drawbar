@@ -166,7 +166,7 @@ pub struct Capabilities {
     pub rename_file: bool,
     /// [`Fs::rename`] works on directories, atomically, with everything inside.
     pub rename_dir: bool,
-    /// [`Fs::hard_link`] works.
+    /// The backend can give a file a second name. No plan uses this yet.
     pub hard_link: bool,
     /// [`Fs::create`] checks for an existing file atomically, even against other
     /// processes. Without it the check and the write are separate steps.
@@ -270,9 +270,6 @@ pub trait Fs {
     /// directory inside itself. Needs [`Capabilities::rename_file`] or
     /// [`Capabilities::rename_dir`] for the kind being moved.
     async fn rename(&self, from: &RelPath, to: &RelPath) -> Result<()>;
-
-    /// Give the file at `from` a second name `to`. Needs [`Capabilities::hard_link`].
-    async fn hard_link(&self, from: &RelPath, to: &RelPath) -> Result<()>;
 
     async fn remove_file(&self, path: &RelPath) -> Result<()>;
 

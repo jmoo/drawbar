@@ -221,36 +221,6 @@ mod suite {
         assert_eq!(names(fs, "b/sub").await, named(&[("f", FileKind::File)]));
     }
 
-    pub async fn a_hard_link_is_a_second_name_for_the_same_bytes(fs: &impl Fs) {
-        fs.create(&path("a"), b"x").await.unwrap();
-        fs.create(&path("taken"), b"t").await.unwrap();
-        let linked = fs.hard_link(&path("a"), &path("b")).await;
-        declared(fs, Capability::HardLink, &linked);
-        if linked.is_err() {
-            return;
-        }
-        assert_fails!(
-            fs.hard_link(&path("a"), &path("taken")).await,
-            Error::AlreadyExists { .. }
-        );
-        fs.create_dir_all(&path("d")).await.unwrap();
-        assert_fails!(
-            fs.hard_link(&path("d"), &path("e")).await,
-            Error::IsDirectory { .. }
-        );
-        if fs.capabilities().append {
-            fs.append(&path("a"), b"y").await.unwrap();
-        }
-        fs.remove_file(&path("a")).await.unwrap();
-        let expected: &[u8] = if fs.capabilities().append {
-            b"xy"
-        } else {
-            b"x"
-        };
-        assert_eq!(contents(fs, "b").await, expected);
-        assert_eq!(contents(fs, "taken").await, b"t");
-    }
-
     pub async fn removal_refuses_the_wrong_kind_and_full_directories(fs: &impl Fs) {
         fs.create_dir_all(&path("d")).await.unwrap();
         fs.create(&path("d/f"), b"").await.unwrap();
@@ -300,7 +270,6 @@ macro_rules! conformance {
             append_extends_an_existing_file,
             rename_moves_a_file_and_never_replaces,
             rename_moves_a_directory_whole_and_never_replaces,
-            a_hard_link_is_a_second_name_for_the_same_bytes,
             removal_refuses_the_wrong_kind_and_full_directories,
             sync_accepts_files_directories_and_the_root,
         );

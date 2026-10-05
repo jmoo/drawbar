@@ -288,11 +288,6 @@ impl Fs for NativeFs {
         rename_new(&self.full(from)?, &self.full(to)?).map_err(|error| io_error(to, error))
     }
 
-    async fn hard_link(&self, from: &RelPath, to: &RelPath) -> Result<()> {
-        refuse_root(to)?;
-        fs::hard_link(self.file(from)?, self.full(to)?).map_err(|error| io_error(to, error))
-    }
-
     async fn remove_file(&self, path: &RelPath) -> Result<()> {
         refuse_root(path)?;
         fs::remove_file(self.file(path)?).map_err(|error| io_error(path, error))
