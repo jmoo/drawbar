@@ -145,7 +145,8 @@ impl Settled {
 }
 
 /// Run `record`'s steps in order, append the entries they leave that `logged` does
-/// not hold, and clear the record. When every step finishes the log gains all the
+/// not hold, and clear the record. The clock first passes every version the record
+/// holds, so no entry recovery stamps shares one with a recorded entry. When every step finishes the log gains all the
 /// record's entries. A step the files no longer allow ends the run: the steps after
 /// it are given up, and the log gains only the entries of the steps that changed
 /// files, and the bytes kept, under a new `Intent` entry that reverses nothing.
@@ -157,6 +158,9 @@ pub(crate) async fn settle<F: Fs>(
     logged: &BTreeSet<Version>,
 ) -> Result<Settled> {
     let writer = log.writer();
+    if let Some(latest) = record.versions().max() {
+        log.observe(latest);
+    }
     let mut settled = Settled::default();
     let mut facts = Vec::new();
     for StepRecord { step, entries } in &record.steps {
@@ -325,6 +329,11 @@ impl Record {
         self.steps.iter().flat_map(|s| s.step.paths()).collect()
     }
 
+    fn versions(&self) -> impl Iterator<Item = Version> + '_ {
+        let steps = self.steps.iter().flat_map(|step| &step.entries);
+        self.entries.iter().chain(steps).map(|entry| entry.version)
+    }
+
     fn label(&self) -> Option<String> {
         self.entries.iter().find_map(|entry| match &entry.kind {
             Kind::Intent { label, .. } => label.clone(),
@@ -413,7 +422,7 @@ mod tests {
     use crate::effects::Stored;
     use crate::fs::MemFs;
     use crate::ids::{EntityId, Version};
-    use crate::log::testing::{append_unknown, logged, reopen};
+    use crate::log::testing::{append_unknown, logged, reopen, well_formed, Session};
     use crate::value::Value;
 
     const WRITER: WriterId = WriterId::from_u128(0xc);
@@ -519,6 +528,53 @@ mod tests {
         assert_eq!(contents(&fs, &layout.blob(new)), b"new");
         let kinds: Vec<Kind> = logged(&fs, WRITER).into_iter().map(|e| e.kind).collect();
         assert_eq!(kinds, [Kind::INTENT, Kind::BlobAdded { blob: new, len: 3 }]);
+    }
+
+    #[test]
+    fn recovery_stamps_its_entries_past_every_version_the_record_holds() {
+        let layout = Layout::default();
+        let fs = library(&[("a", b"a"), ("song", b"theirs")]);
+        let mut session = Session::open(&fs, WRITER);
+        let entity = session.log.new_entity();
+        session.act(vec![Kind::Create { entity }]);
+        block_on(blobs::stage(&fs, &layout, WRITER, b"new")).unwrap();
+        let entry = |lamport, kind| Entry {
+            version: Version::new(lamport, WRITER),
+            intent: INTENT,
+            kind,
+        };
+        let field = |name: &str, value: Value| Kind::Field {
+            entity,
+            name: name.into(),
+            value: Some(value),
+            prior: None,
+        };
+        let record = Record {
+            intent: INTENT,
+            entries: vec![entry(3, Kind::INTENT)],
+            steps: vec![
+                StepRecord {
+                    step: Step::Move {
+                        from: path("a"),
+                        to: path("b"),
+                    },
+                    entries: vec![entry(4, field("path", Value::Text("b".into())))],
+                },
+                StepRecord {
+                    step: Step::Save {
+                        path: path("song"),
+                        new: Stored::of(b"new"),
+                        old: Some(Stored::of(b"old")),
+                    },
+                    entries: vec![entry(5, field("content", Value::Blob(BlobId::of(b"new"))))],
+                },
+            ],
+        };
+        block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+
+        let recovered = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        assert_eq!(recovered[0].outcome, Outcome::Partial);
+        well_formed(&logged(&fs, WRITER)).unwrap();
     }
 
     #[test]

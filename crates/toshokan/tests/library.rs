@@ -9,8 +9,8 @@ use toshokan::fs::{Capabilities, FileKind};
 use toshokan::journal::Outcome;
 use toshokan::undo::Refusal;
 use toshokan::{
-    BlobId, EntityId, Error, Fs, Kind, Layout, Library, MemFs, Precondition, RelPath, Value,
-    WriterId,
+    BlobId, EntityId, Error, Fs, IntentId, Kind, Layout, Library, MemFs, Precondition, RelPath,
+    Value, WriterId,
 };
 
 const A: WriterId = WriterId::from_u128(0xa);
@@ -684,6 +684,7 @@ fn check(disk: &MemFs, before: &Observed, after: &Observed) -> Result<(), String
             "blob {gone} was kept both before and after, but not now"
         ));
     }
+    well_formed(disk, A)?;
     let layout = Layout::default();
     let leftovers: Vec<RelPath> = disk
         .files()
@@ -720,6 +721,24 @@ fn check(disk: &MemFs, before: &Observed, after: &Observed) -> Result<(), String
         return Err("recovery was not finished and durable".to_owned());
     }
     Ok(())
+}
+
+/// Whether `writer`'s log gives each version once and each intent one `intent` entry.
+fn well_formed(disk: &MemFs, writer: WriterId) -> Result<(), String> {
+    let log = block_on(toshokan::log::read_log(disk, &Layout::default(), writer)).unwrap();
+    let mut versions = BTreeSet::new();
+    let mut heads: BTreeMap<IntentId, usize> = BTreeMap::new();
+    for entry in log.all_entries() {
+        if !versions.insert(entry.version) {
+            return Err(format!("two entries share version {}", entry.version));
+        }
+        let head = usize::from(matches!(entry.kind, Kind::Intent { .. }));
+        *heads.entry(entry.intent).or_default() += head;
+    }
+    match heads.into_iter().find(|&(_, count)| count != 1) {
+        Some((intent, count)) => Err(format!("intent {intent} has {count} intent entries")),
+        None => Ok(()),
+    }
 }
 
 /// Whether recovery rolled the intent back and reported it, keeping the files both

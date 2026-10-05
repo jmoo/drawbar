@@ -613,6 +613,8 @@ impl Kind {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::merge::{merge, State};
     use crate::MemFs;
@@ -662,6 +664,23 @@ pub(crate) mod testing {
             number += 1;
         }
         pollster::block_on(fs.create(&layout.segment(writer, number), line.as_bytes())).unwrap();
+    }
+
+    /// Whether `entries` give each version once and each intent one `Intent` entry.
+    pub(crate) fn well_formed(entries: &[Entry]) -> std::result::Result<(), String> {
+        let mut versions = BTreeSet::new();
+        let mut heads: BTreeMap<IntentId, usize> = BTreeMap::new();
+        for entry in entries {
+            if !versions.insert(entry.version) {
+                return Err(format!("two entries share version {}", entry.version));
+            }
+            let head = usize::from(matches!(entry.kind, Kind::Intent { .. }));
+            *heads.entry(entry.intent).or_default() += head;
+        }
+        match heads.into_iter().find(|&(_, count)| count != 1) {
+            Some((intent, count)) => Err(format!("intent {intent} has {count} intent entries")),
+            None => Ok(()),
+        }
     }
 
     /// The facts of a state, without what its applied entries name.

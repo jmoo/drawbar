@@ -968,7 +968,7 @@ mod tests {
     use super::*;
     use crate::fs::{Capabilities, MemFs};
     use crate::journal::{recover, Outcome, Recovered};
-    use crate::log::testing::{logged, reopen};
+    use crate::log::testing::{logged, reopen, well_formed};
     use crate::log::{Entry, Kind};
 
     const WRITER: WriterId = WriterId::from_u128(0xe);
@@ -1713,6 +1713,7 @@ mod tests {
         }
         let files = library_files(disk, layout);
         let entries = logged(disk, WRITER);
+        well_formed(&entries)?;
         if files == expected.after {
             if let Some(missing) = expected.entries.iter().find(|e| !entries.contains(e)) {
                 return Err(format!("the effect finished without logging {missing:?}"));
