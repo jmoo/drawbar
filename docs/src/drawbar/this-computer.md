@@ -114,13 +114,16 @@ bring back any you deleted.
 ## If something goes wrong
 
 - **Read-only.** Another copy of drawbar has this library open, in another window
-  or browser tab. Close it. Hover the library's name for the reason. A browser
-  tab cannot tell that the desktop app, or another browser, has a folder open,
-  so open a folder in only one of them at a time. If both write to it anyway,
-  the one that writes second turns read-only instead of undoing the other's
-  changes. drawbar also opens a library read-only when its hidden folder has
-  lost the file that lists your unsaved edits, so they are not deleted. On the desktop, put that file back from a backup to get them back.
-  **Open without them** deletes those edits and opens the library as usual.
+  or browser tab. Close it. Hover the library's name for the reason. Changes you
+  make in a read-only library are held in memory only, and the browser asks
+  before you leave a tab that holds some. A browser tab cannot tell that the
+  desktop app, or another browser, has a folder open, so open a folder in only
+  one of them at a time. If both write to it anyway, the one that writes second
+  turns read-only instead of undoing the other's changes. drawbar also opens a
+  library read-only when its hidden folder has lost the file that lists your
+  unsaved edits, so they are not deleted. On the desktop, put that file back
+  from a backup to get them back. **Open without them** deletes those edits and
+  opens the library as usual.
 - **Damaged index.** The file that keeps your tags, where each sound came from
   and which sounds have unsaved edits cannot be read, so the library opens
   read-only. **Set it aside and open without it** renames that file and opens the

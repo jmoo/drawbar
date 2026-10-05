@@ -61,6 +61,8 @@ pub struct Where {
     pub reveal: Option<String>,
     /// What state it is in, when that is not simply open.
     pub note: Option<String>,
+    /// Nothing may be written to it, so a change to it is held in memory only.
+    pub read_only: bool,
     /// It is still being read.
     pub opening: bool,
     /// How many files its listing has found, while it is still being listed.
@@ -591,6 +593,11 @@ impl Folders {
         self.list.retain(|folder| folder.id != id);
         self.generation += 1;
         self.ops.push(Op::RemoveDir(path));
+    }
+
+    /// Whether the open library is read-only, so a change to it is held in memory only.
+    pub(crate) fn read_only(&self) -> bool {
+        self.place.as_ref().is_some_and(|place| place.read_only)
     }
 
     /// Whether a change is waiting to be sent to the disk.

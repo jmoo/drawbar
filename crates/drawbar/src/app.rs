@@ -1056,7 +1056,7 @@ impl eframe::App for DrawbarApp {
         crate::closing::ask_while(
             self.store
                 .as_ref()
-                .is_some_and(|store| store.losing(&self.workspace)),
+                .is_some_and(|store| store.losing(&self.workspace, &self.browser)),
         );
     }
 }

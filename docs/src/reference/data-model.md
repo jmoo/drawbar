@@ -790,9 +790,10 @@ A closing tab gets no last pass: the browser runs nothing of the page once it ha
 gone, and waits for none of its asynchronous writes. eframe saves when the page
 loses focus or is hidden, which sends a pass, but nothing waits for it to land.
 So while `Store::losing` says that letting the library go would lose an edit (one
-no working copy holds yet, an asset never written, or a command the backend has
-not run through), a `beforeunload` listener cancels the event (`closing.rs`), and
-the browser asks whether to leave. The page keeps running while it asks, so
+no working copy holds yet, an asset never written, a command the backend has
+not run through, or, in a read-only library, a deletion, save, rename, folder or
+tag change held in memory), a `beforeunload` listener cancels the event
+(`closing.rs`), and the browser asks whether to leave. The page keeps running while it asks, so
 staying lets the writes land. A browser asks only after the user has interacted
 with the page, and may close without asking when it discards a tab or quits.
 A folder or file such a rename left under that name when the tab closed is put

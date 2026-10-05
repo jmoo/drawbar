@@ -712,9 +712,16 @@ impl Browser {
 
     /// Ask before an asset is deleted with its file.
     fn ask_delete(&mut self, id: u64, name: &str) {
+        let note = match self.folders.read_only() {
+            false => "It is deleted from this computer, with its file in the library folder.",
+            true => {
+                "The library is read-only, so its file stays in the library folder, and the \
+                 deletion is held in memory only."
+            }
+        };
         self.raise(Ask::new(
             format!("Delete “{name}”?"),
-            Some("It is deleted from this computer, with its file in the library folder.".into()),
+            Some(note.into()),
             Verb::Delete,
             vec![Act::Remove(id)],
         ));
@@ -1028,15 +1035,24 @@ impl Browser {
                 "{n} items are removed from the instrument. There is no undo."
             )),
         }
-        match locals {
-            0 => {}
-            1 => note.push(
+        match (locals, self.folders.read_only()) {
+            (0, _) => {}
+            (1, false) => note.push(
                 "1 item is deleted from this computer, with its file in the library folder."
                     .to_string(),
             ),
-            n => note.push(format!(
+            (n, false) => note.push(format!(
                 "{n} items are deleted from this computer, with their files in the library \
                  folder."
+            )),
+            (1, true) => note.push(
+                "1 item leaves the list. The library is read-only, so its file stays in the \
+                 library folder, and the deletion is held in memory only."
+                    .to_string(),
+            ),
+            (n, true) => note.push(format!(
+                "{n} items leave the list. The library is read-only, so their files stay in \
+                 the library folder, and the deletions are held in memory only."
             )),
         }
         self.ask = Some(Ask::new(
