@@ -47,3 +47,13 @@ pub const PATH_FIELD: &str = "path";
 /// The field naming the bytes toshokan last wrote or bound for an entity's file, as a
 /// blob.
 pub const CONTENT_FIELD: &str = "content";
+
+/// The field holding the length of that file as an `Int`.
+pub const LENGTH_FIELD: &str = "length";
+
+/// The field holding that file's modification time as its backend reported it, as an
+/// `Int`. Only equality means anything.
+pub const MODIFIED_FIELD: &str = "modified";
+
+/// The fields only file effects and binding write.
+pub(crate) const FILE_FIELDS: [&str; 4] = [PATH_FIELD, CONTENT_FIELD, LENGTH_FIELD, MODIFIED_FIELD];

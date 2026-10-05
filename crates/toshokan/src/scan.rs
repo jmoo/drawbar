@@ -3,7 +3,8 @@
 //! A scan lists every file outside toshokan's root, fingerprints it, and binds it to
 //! an entity: by the entity's `path` field first, then by its `content` blob, which
 //! follows a file renamed outside the app. A file is hashed only when its length and
-//! modification time cannot decide. A scan writes nothing, and what it finds is never
+//! modification time, against those toshokan recorded in the entity's `length` and
+//! `modified` fields, cannot decide. A scan writes nothing, and what it finds is never
 //! logged.
 
 use std::collections::BTreeMap;
@@ -14,7 +15,7 @@ use crate::ids::EntityId;
 use crate::layout::Layout;
 use crate::merge::State;
 use crate::value::{BlobId, Value};
-use crate::{CONTENT_FIELD, PATH_FIELD};
+use crate::{CONTENT_FIELD, LENGTH_FIELD, MODIFIED_FIELD, PATH_FIELD};
 
 /// An entity whose file was found at another path.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -66,8 +67,9 @@ struct Claim {
     entity: EntityId,
     path: RelPath,
     content: Option<BlobId>,
-    /// The length of `content`, when some writer recorded the blob.
+    /// The file's length and modification time as toshokan last wrote or bound it.
     len: Option<u64>,
+    modified: Option<u64>,
 }
 
 /// The claims of every existing entity with a `path`, and the entities whose `path`
@@ -83,16 +85,16 @@ fn claims(state: &State) -> (Vec<Claim>, Vec<EntityId>) {
             unplaced.push(entity);
             continue;
         };
-        let content = state.field(entity, CONTENT_FIELD).and_then(Value::as_blob);
-        let len = content
-            .and_then(|blob| state.blob_adds().get(&blob))
-            .and_then(|adds| adds.values().next())
-            .map(|add| add.len);
+        let count = |name| match state.field(entity, name) {
+            Some(Value::Int(n)) => u64::try_from(*n).ok(),
+            _ => None,
+        };
         claims.push(Claim {
             entity,
             path,
-            content,
-            len,
+            content: state.field(entity, CONTENT_FIELD).and_then(Value::as_blob),
+            len: count(LENGTH_FIELD),
+            modified: count(MODIFIED_FIELD),
         });
     }
     (claims, unplaced)
@@ -178,7 +180,7 @@ async fn bind_paths<'c, F: Fs>(
             scan.contested.insert(path.clone(), entities);
         }
         if let Some(blob) = first.content {
-            if !holds(fs, path, print, blob, first.len).await? {
+            if !holds(fs, path, print, blob, first).await? {
                 scan.changed.push(first.entity);
             }
         }
@@ -236,21 +238,27 @@ async fn follow_contents<F: Fs>(fs: &F, scan: &mut Scan, missing: Vec<&Claim>) -
 }
 
 /// Whether the file at `path` holds `blob`, hashing it only when its length and
-/// `len` cannot decide.
+/// modification time, against the claim's, cannot decide.
 async fn holds<F: Fs>(
     fs: &F,
     path: &RelPath,
     print: &mut Fingerprint,
     blob: BlobId,
-    len: Option<u64>,
+    claim: &Claim,
 ) -> Result<bool> {
     if let Some(hash) = print.hash {
         return Ok(hash == blob);
     }
-    if len.is_some_and(|len| len != print.len) {
-        return Ok(false);
+    let recorded = claim.len.map(|len| Fingerprint {
+        len,
+        modified: claim.modified,
+        hash: None,
+    });
+    match recorded.map(|recorded| recorded.compare(print)) {
+        Some(Sameness::Same) => Ok(true),
+        Some(Sameness::Different) => Ok(false),
+        Some(Sameness::Unknown) | None => Ok(hashed(fs, path, print).await? == blob),
     }
-    Ok(hashed(fs, path, print).await? == blob)
 }
 
 async fn hashed<F: Fs>(fs: &F, path: &RelPath, print: &mut Fingerprint) -> Result<BlobId> {
@@ -282,13 +290,15 @@ mod tests {
         texts.iter().map(|text| path(text)).collect()
     }
 
-    /// Entity `counter` at `at`, last written or bound holding `bytes`.
+    /// Entity `counter` at `at`, last written or bound holding `bytes`, at a time the
+    /// scan does not know.
     fn claim(counter: u64, at: &str, bytes: &[u8]) -> Claim {
         Claim {
             entity: entity(counter),
             path: path(at),
             content: Some(BlobId::of(bytes)),
             len: Some(bytes.len() as u64),
+            modified: None,
         }
     }
 
@@ -461,6 +471,24 @@ mod tests {
             rescan(&previous).changed.is_empty(),
             "a new time is read again"
         );
+    }
+
+    #[test]
+    fn a_file_with_the_length_and_time_toshokan_recorded_is_not_read() {
+        let fs = library(&[("a", b"one"), ("b", b"two")]);
+        let time = |at: &str| block_on(fs.metadata(&path(at))).unwrap().unwrap().modified;
+        let recorded = |counter, at: &str, bytes: &[u8]| Claim {
+            modified: time(at),
+            ..claim(counter, at, bytes)
+        };
+        let claims = [recorded(1, "a", b"one"), recorded(2, "b", b"owt")];
+        let scan = run(&fs, &claims);
+        assert_eq!(scan.changed, [], "the recorded time is trusted");
+        for (at, print) in &scan.files {
+            assert_eq!(print.hash, None, "{at} was hashed");
+        }
+        fs.set_modified(&path("b"), time("b").unwrap() + 1).unwrap();
+        assert_eq!(run(&fs, &claims).changed, [entity(2)], "a new time is read");
     }
 
     #[test]

@@ -22,7 +22,7 @@ use crate::layout::Layout;
 use crate::log::{Entry, Kind, LogWriter};
 use crate::merge::State;
 use crate::value::{BlobId, Value};
-use crate::{CONTENT_FIELD, PATH_FIELD};
+use crate::{CONTENT_FIELD, LENGTH_FIELD, MODIFIED_FIELD, PATH_FIELD};
 
 /// What the writer expects to find at a path before changing it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -190,8 +190,7 @@ pub(crate) fn stamped(
     }
 }
 
-/// The `path` and `content` fields the merged state holds for the entities effects
-/// touch.
+/// The fields of their files the merged state holds for the entities effects touch.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Known(pub BTreeMap<EntityId, Fields>);
 
@@ -199,6 +198,8 @@ pub(crate) struct Known(pub BTreeMap<EntityId, Fields>);
 pub(crate) struct Fields {
     pub path: Option<Value>,
     pub content: Option<Value>,
+    pub length: Option<Value>,
+    pub modified: Option<Value>,
 }
 
 impl Known {
@@ -222,6 +223,8 @@ impl Known {
         let fields = |entity| Fields {
             path: state.field(entity, PATH_FIELD).cloned(),
             content: state.field(entity, CONTENT_FIELD).cloned(),
+            length: state.field(entity, LENGTH_FIELD).cloned(),
+            modified: state.field(entity, MODIFIED_FIELD).cloned(),
         };
         Self(entities.into_iter().map(|e| (e, fields(e))).collect())
     }
@@ -250,6 +253,9 @@ struct Checked<'a> {
     step: Step,
     facts: Vec<Kind>,
     stage: Option<Cow<'a, [u8]>>,
+    /// The entity whose `length` and `modified` describe the file the step leaves at
+    /// its path, with the file there now, which stays when nothing is staged.
+    describes: Option<(EntityId, Option<Fingerprint>)>,
 }
 
 /// Check every effect against the files, then stage what they write. Nothing in the
@@ -271,18 +277,52 @@ pub(crate) async fn plan<F: Fs>(
     }
     let mut planned = Vec::with_capacity(checked.len());
     for effect in checked {
-        if let Some(bytes) = &effect.stage {
-            if let Err(error) = blobs::stage(fs, layout, writer, bytes).await {
-                unstage(fs, layout, writer, &planned).await?;
-                return Err(error);
-            }
+        let staged = match &effect.stage {
+            None => None,
+            Some(bytes) => match blobs::stage(fs, layout, writer, bytes).await {
+                Ok(staged) => Some(staged),
+                Err(error) => {
+                    unstage(fs, layout, writer, &planned).await?;
+                    return Err(error);
+                }
+            },
+        };
+        let mut facts = effect.facts;
+        if let Some((entity, present)) = effect.describes {
+            let print = match staged {
+                Some(staged) => fingerprint(fs, &staged, false).await?,
+                None => present,
+            };
+            facts.extend(described(entity, print, &known.fields(entity)));
         }
         planned.push(Planned {
             step: effect.step,
-            facts: effect.facts,
+            facts,
         });
     }
     Ok(planned)
+}
+
+/// The `length` and `modified` entries for an entity whose file has `print`, or has
+/// none. A rename keeps a file's modification time, so a staged file's is the one it
+/// has once placed.
+fn described(entity: EntityId, print: Option<Fingerprint>, fields: &Fields) -> Vec<Kind> {
+    let length = print.and_then(|print| int(print.len));
+    let modified = print.and_then(|print| print.modified).and_then(int);
+    field(entity, LENGTH_FIELD, length, fields.length.clone())
+        .into_iter()
+        .chain(field(
+            entity,
+            MODIFIED_FIELD,
+            modified,
+            fields.modified.clone(),
+        ))
+        .collect()
+}
+
+/// `n` as an `Int`; `None` past `i64::MAX`, which leaves a scan to hash the file.
+pub(crate) fn int(n: u64) -> Option<Value> {
+    i64::try_from(n).ok().map(Value::Int)
 }
 
 /// Remove the bytes `planned` staged.
@@ -336,7 +376,8 @@ impl<F: Fs> Planner<'_, F> {
         expect: &Precondition,
     ) -> Result<Checked<'e>> {
         self.library_path(path)?;
-        let old = check(self.fs, path, expect).await?;
+        let found = fingerprint(self.fs, path, true).await?;
+        let old = check(path, expect, found)?;
         let bytes = match contents {
             Source::Bytes(bytes) => Cow::Borrowed(bytes.as_slice()),
             Source::Blob(blob) => Cow::Owned(blobs::get(self.fs, self.layout, *blob).await?),
@@ -363,6 +404,7 @@ impl<F: Fs> Planner<'_, F> {
             },
             facts,
             stage: (old != Some(new)).then_some(bytes),
+            describes: Some((entity, found)),
         })
     }
 
@@ -373,9 +415,9 @@ impl<F: Fs> Planner<'_, F> {
         expect: &Precondition,
     ) -> Result<Checked<'static>> {
         self.library_path(path)?;
-        let old = check(self.fs, path, expect)
-            .await?
-            .ok_or_else(|| Error::NotFound { path: path.clone() })?;
+        let found = fingerprint(self.fs, path, true).await?;
+        let old =
+            check(path, expect, found)?.ok_or_else(|| Error::NotFound { path: path.clone() })?;
         let fields = self.known.fields(entity);
         let facts = std::iter::once(old.added())
             .chain(field(entity, PATH_FIELD, None, fields.path))
@@ -388,6 +430,7 @@ impl<F: Fs> Planner<'_, F> {
             },
             facts,
             stage: None,
+            describes: Some((entity, None)),
         })
     }
 
@@ -415,6 +458,7 @@ impl<F: Fs> Planner<'_, F> {
                 .into_iter()
                 .collect(),
             stage: None,
+            describes: None,
         })
     }
 
@@ -461,6 +505,7 @@ impl<F: Fs> Planner<'_, F> {
             step,
             facts,
             stage: None,
+            describes: None,
         })
     }
 
@@ -479,10 +524,13 @@ impl<F: Fs> Planner<'_, F> {
     }
 }
 
-/// Refuse with [`Error::Changed`] unless the file at `path` meets `expect`, and return
-/// what is there.
-async fn check<F: Fs>(fs: &F, path: &RelPath, expect: &Precondition) -> Result<Option<Stored>> {
-    let found = fingerprint(fs, path, true).await?;
+/// Refuse with [`Error::Changed`] unless `found`, the hashed fingerprint of the file at
+/// `path`, meets `expect`, and return what is there.
+fn check(
+    path: &RelPath,
+    expect: &Precondition,
+    found: Option<Fingerprint>,
+) -> Result<Option<Stored>> {
     if !expect.holds(found.as_ref()) {
         return Err(Error::Changed(Box::new(Mismatch {
             path: path.clone(),
@@ -946,6 +994,7 @@ mod tests {
                     let fields = Fields {
                         path: Some(Value::Text(at.into())),
                         content: content.map(|bytes| Value::Blob(BlobId::of(bytes))),
+                        ..Fields::default()
                     };
                     (entity(counter), fields)
                 })
@@ -1038,13 +1087,40 @@ mod tests {
             store(&self.fs, &self.layout)
         }
 
-        /// The logged entries' kinds, without `Intent` entries.
+        /// The logged entries' kinds, without `Intent` entries and the fields that
+        /// describe a file's length and time.
         fn kinds(&self) -> Vec<Kind> {
+            let described = [LENGTH_FIELD, MODIFIED_FIELD];
             logged(&self.fs, WRITER)
                 .into_iter()
                 .map(|entry| entry.kind)
-                .filter(|kind| !matches!(kind, Kind::Intent { .. }))
+                .filter(|kind| match kind {
+                    Kind::Intent { .. } => false,
+                    Kind::Field { name, .. } => !described.contains(&name.as_str()),
+                    _ => true,
+                })
                 .collect()
+        }
+
+        /// The entity's `length` and `modified` as logged last.
+        fn described(&self, counter: u64) -> (Option<Value>, Option<Value>) {
+            let mut described = (None, None);
+            for entry in logged(&self.fs, WRITER) {
+                if let Kind::Field {
+                    entity: of,
+                    name,
+                    value,
+                    ..
+                } = entry.kind
+                {
+                    match name.as_str() {
+                        LENGTH_FIELD if of == entity(counter) => described.0 = value,
+                        MODIFIED_FIELD if of == entity(counter) => described.1 = value,
+                        _ => {}
+                    }
+                }
+            }
+            described
         }
     }
 
@@ -1139,6 +1215,38 @@ mod tests {
                 set_field(1, CONTENT_FIELD, blob_value(b"new"), blob_value(b"old")),
             ]
         );
+    }
+
+    #[test]
+    fn saving_records_the_length_and_time_of_the_placed_file_and_deleting_clears_them() {
+        let mut library = Library::with(&[], Known::default());
+        let save = Effect::Save {
+            entity: entity(1),
+            path: path("song"),
+            contents: Source::Bytes(b"new".to_vec()),
+            expect: Precondition::Absent,
+        };
+        library.apply(&save).unwrap();
+        let placed = block_on(library.fs.metadata(&path("song")))
+            .unwrap()
+            .unwrap();
+        let time = i64::try_from(placed.modified.unwrap()).unwrap();
+        assert_eq!(
+            library.described(1),
+            (Some(Value::Int(3)), Some(Value::Int(time)))
+        );
+        library.known = bound(&[(1, "song", Some(b"new"))]);
+        let described = library.described(1);
+        let fields = library.known.0.get_mut(&entity(1)).unwrap();
+        (fields.length, fields.modified) = described;
+        library
+            .apply(&Effect::Delete {
+                entity: entity(1),
+                path: path("song"),
+                expect: hashed(b"new"),
+            })
+            .unwrap();
+        assert_eq!(library.described(1), (None, None));
     }
 
     #[test]

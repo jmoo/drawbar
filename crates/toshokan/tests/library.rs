@@ -397,6 +397,7 @@ fn an_intent_the_entity_does_not_allow_is_refused_before_anything_changes<F: Fs>
         block_on(a.set(gone, "name", None)).map(drop),
         block_on(a.set(song, "path", Some(text("elsewhere")))).map(drop),
         block_on(a.set(song, "content", None)).map(drop),
+        block_on(a.set(song, "modified", None)).map(drop),
         block_on(a.remove(song, "tags", &text("never added"))).map(drop),
         block_on(a.rename(song, &path("to"))).map(drop),
         block_on(a.delete_file(song, Precondition::Absent)).map(drop),
@@ -408,6 +409,25 @@ fn an_intent_the_entity_does_not_allow_is_refused_before_anything_changes<F: Fs>
         );
     }
     assert_eq!(tree(a.fs()), before, "a refused intent wrote");
+}
+
+fn reopening_an_untouched_library_reads_no_file<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    for (at, bytes) in [("a", b"one"), ("d/b", b"two")] {
+        let (entity, _) = block_on(a.create()).unwrap();
+        block_on(a.save(entity, &path(at), bytes.to_vec(), Precondition::Absent)).unwrap();
+    }
+    block_on(a.fs().create(&path("c"), b"three")).unwrap();
+    let (entity, _) = block_on(a.create()).unwrap();
+    block_on(a.bind(entity, &path("c"))).unwrap();
+
+    let reopened = open(disk(), A);
+    let scan = reopened.scan();
+    assert_eq!(scan.bound.len(), 3, "{scan:?}");
+    assert!(scan.changed.is_empty(), "{scan:?}");
+    for (at, print) in &scan.files {
+        assert_eq!(print.hash, None, "{at} was read");
+    }
 }
 
 fn binding_follows_a_file_renamed_outside_the_app<F: Fs>(disk: impl Fn() -> F) {
@@ -474,6 +494,7 @@ on_every_backend!(
     collection_never_removes_a_blob_a_live_value_names,
     opening_writes_nothing,
     an_intent_the_entity_does_not_allow_is_refused_before_anything_changes,
+    reopening_an_untouched_library_reads_no_file,
     binding_follows_a_file_renamed_outside_the_app,
 );
 

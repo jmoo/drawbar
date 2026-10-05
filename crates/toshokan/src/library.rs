@@ -4,7 +4,7 @@ use crate::blobs::{self, Collection};
 use crate::compact::{self, Compaction};
 use crate::effects::{self, Effect, Precondition, Report, Source};
 use crate::error::{Error, Result};
-use crate::fs::{hash_file, Fs, RelPath};
+use crate::fs::{fingerprint, Fs, RelPath};
 use crate::ids::{EntityId, IntentId, Version, WriterId};
 use crate::journal::{self, Recovered};
 use crate::layout::Layout;
@@ -13,7 +13,7 @@ use crate::merge::{merge, State};
 use crate::scan::{scan, Scan};
 use crate::undo::{plan_redo, plan_undo, History};
 use crate::value::Value;
-use crate::{CONTENT_FIELD, PATH_FIELD};
+use crate::{CONTENT_FIELD, FILE_FIELDS, LENGTH_FIELD, MODIFIED_FIELD, PATH_FIELD};
 
 /// A library folder opened by one writer.
 ///
@@ -161,8 +161,8 @@ impl<F: Fs> Library<F> {
         Ok((entity, change))
     }
 
-    /// Set a field, or clear it with `None`. `path` and `content` belong to file
-    /// effects and [`Library::bind`].
+    /// Set a field, or clear it with `None`. `path`, `content`, `length` and
+    /// `modified` belong to file effects and [`Library::bind`].
     pub async fn set(
         &mut self,
         entity: EntityId,
@@ -170,10 +170,10 @@ impl<F: Fs> Library<F> {
         value: Option<Value>,
     ) -> Result<Change> {
         self.existing(entity)?;
-        if name == PATH_FIELD || name == CONTENT_FIELD {
+        if FILE_FIELDS.contains(&name) {
             return Err(Error::Entity {
                 entity,
-                reason: "has its path and content set only by file effects and binding",
+                reason: "has its file's fields set only by file effects and binding",
             });
         }
         let field = self.field(entity, name, value);
@@ -224,14 +224,19 @@ impl<F: Fs> Library<F> {
     pub async fn bind(&mut self, entity: EntityId, path: &RelPath) -> Result<Change> {
         self.existing(entity)?;
         self.layout.check_library_path(path)?;
-        let (blob, _) = hash_file(&self.fs, path).await?;
+        let print = fingerprint(&self.fs, path, true)
+            .await?
+            .ok_or_else(|| Error::NotFound { path: path.clone() })?;
+        let int = effects::int;
         let fields = vec![
             self.field(
                 entity,
                 PATH_FIELD,
                 Some(Value::Text(path.as_str().to_owned())),
             ),
-            self.field(entity, CONTENT_FIELD, Some(Value::Blob(blob))),
+            self.field(entity, CONTENT_FIELD, print.hash.map(Value::Blob)),
+            self.field(entity, LENGTH_FIELD, int(print.len)),
+            self.field(entity, MODIFIED_FIELD, print.modified.and_then(int)),
         ];
         self.record(fields).await
     }

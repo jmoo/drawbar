@@ -61,9 +61,13 @@ A value is a JSON object with exactly one key, naming its type:
 
 Values are ordered by type in the order of this table, then by contents.
 
-Two field names are toshokan's own: `path` holds an entity's library path as text,
-and `content` holds the blob id of the bytes toshokan last wrote or bound for that
-file.
+Four field names are toshokan's own, written only by file effects and binding:
+`path` holds an entity's library path as text; `content` holds the blob id of the
+bytes toshokan last wrote or bound for that file; and `length` and `modified` hold,
+as integers, that file's length and its modification time as the backend reported
+it, so a scan can tell an untouched file without reading it. Only equality of
+`modified` means anything. A length or time past the largest integer is not
+written.
 
 ## Log segments
 
@@ -223,7 +227,7 @@ The library writes these:
 | add             | `set_add`                                                          |
 | remove          | `set_remove` observing the value's live tags in the writer's merged state |
 | delete          | `delete`                                                           |
-| bind            | `field` `path` and `content`: the file's path and the hash of its bytes |
+| bind            | `field` `path`, `content`, `length` and `modified`: the file's path, the hash of its bytes, its length and its time |
 | save, delete file, rename, move tree | the effect's entries, below                   |
 | undo, redo      | the reversing entries, then their effects' entries                 |
 
@@ -266,13 +270,15 @@ intent's own entries:
 
 | Effect     | Library                                         | Entries |
 | ---------- | ----------------------------------------------- | ------- |
-| save       | new bytes at the path; the old file into blobs  | `blob_added` for the old file; `field` `path` and `content` where they change |
-| delete     | the file into blobs                             | `blob_added`; `field` `path` and `content` cleared |
+| save       | new bytes at the path; the old file into blobs  | `blob_added` for the old file; `field` `path`, `content`, `length` and `modified` where they change |
+| delete     | the file into blobs                             | `blob_added`; `field` `path`, `content`, `length` and `modified` cleared |
 | rename     | the file renamed                                | `field` `path` |
 | move tree  | the directory and everything in it renamed      | `field` `path` for each entity bound under it |
 
 Each `field` entry's `prior` is the value the writer's merged state held before the
-intent. Before any step of an intent, each of its effects checks its precondition.
+intent. A save's `length` and `modified` are those of the file it leaves at the
+path: the staged file's, which the rename keeps, or the file's already there when
+it holds the new bytes. Before any step of an intent, each of its effects checks its precondition.
 A save or delete expects one of: no file at the path; the fingerprint the writer
 last read, compared by length, then by hash when both sides have one, then by an
 equal modification time; or a file whose bytes hash to a given blob id. A rename or
