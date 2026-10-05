@@ -9,6 +9,29 @@ and every change can be undone.
 > ⚠️ Proof of concept. The on-disk format is unstable, and the crate is not
 > published.
 
+## Use
+
+An app opens a library folder as one writer and changes it by intents, each of
+which can be undone. The calls are async and need no particular runtime.
+
+```rust
+use toshokan::native::NativeFs;
+use toshokan::{Layout, Library, Precondition, RelPath, Value, WriterId};
+
+async fn tag_a_new_song(writer: WriterId, bytes: Vec<u8>) -> toshokan::Result<()> {
+    let folder = NativeFs::new("/path/to/library");
+    let mut library = Library::open(folder, Layout::default(), writer).await?;
+    let (song, _) = library.create().await?;
+    let path = RelPath::new("Organ/song.txt")?;
+    library.save(song, &path, bytes, Precondition::Absent).await?;
+    library.add(song, "tags", Value::Text("brass".into())).await?;
+    library.undo().await?;
+    Ok(())
+}
+```
+
+[SPEC.md](SPEC.md) specifies every file toshokan writes.
+
 ## Principles
 
 1. **The folder belongs to the user.** Files keep their names, bytes and places

@@ -195,7 +195,36 @@ its `delete`, a `set_remove` observing only its own tag for its `set_add`, a
 `set_add` for its `set_remove`, and for each field it wrote, the prior of its
 first write to that field. A field's undo is refused when the field's deciding
 write is neither the intent's last write to it nor an undo or redo that restored
-that write.
+that write. An intent of only `blob_added` and `blob_removed` entries is not
+undone.
+
+Reversing an intent also reverses its files. For each entity whose `content` it
+changed, the file at the entity's `path`, or at the path the intent cleared, is
+restored: a save of the earlier blob when there was one, otherwise a delete. Either
+expects the file to hold exactly the intent's blob, or no file where the intent
+cleared `content`. Then each `path` the intent changed from one path to another is
+renamed back. The reversal is refused when the earlier blob has no `blob_added`
+that its writer has not since removed.
+
+## Intents
+
+An intent is one batch of entries under one intent id, its `intent` entry first.
+The library writes these:
+
+| Intent          | Entries after `intent`                                             |
+| --------------- | ------------------------------------------------------------------ |
+| create          | `create` with a new entity id                                      |
+| set             | `field`, never `path` or `content`                                 |
+| add             | `set_add`                                                          |
+| remove          | `set_remove` observing the value's live tags in the writer's merged state |
+| delete          | `delete`                                                           |
+| bind            | `field` `path` and `content`: the file's path and the hash of its bytes |
+| save, delete file, rename, move tree | the effect's entries, below                   |
+| undo, redo      | the reversing entries, then their effects' entries                 |
+
+An intent with a file effect is journaled whole before the effect's first step, so
+its entries reach the log only once its files have changed. Garbage collection and
+the recovery of staged bytes write intents of their own.
 
 ## Blobs
 
@@ -205,12 +234,15 @@ never rewritten. A library file that an effect displaces is renamed into `blobs/
 under the hash of its contents; when the store already holds that hash, the file is
 removed instead.
 
-A writer logs `blob_added` for every blob it adds or displaces. Garbage collection
-is per writer: writer `w` may remove a blob only when
+A writer logs `blob_added` for every blob it adds or displaces. The new bytes of a
+save are not kept in the store: `content` names them while they are the library
+file. Garbage collection is per writer: writer `w` may remove a blob only when
 
 - `w`'s latest `blob_added` or `blob_removed` entry for it is an add,
-- no live value refers to it,
-- no entry inside any writer's retained undo window refers to it, and
+- no field or set member of an existing entity holds it,
+- no entry a reader applies one by one (a snapshot's retained entries and the
+  segments after it) holds it as a value, prior or `blob_added`, nor names an
+  entity with a field or set member that holds it, and
 - no other writer's latest entry for it is an add.
 
 It removes such blobs oldest first, by the version of its add, until its remaining
@@ -222,7 +254,8 @@ again, before it refuses the save.
 
 ## File effects
 
-An effect changes the library and logs what it did under the caller's intent:
+An effect changes the library and logs what it did under the intent, after the
+intent's own entries:
 
 | Effect     | Library                                         | Entries |
 | ---------- | ----------------------------------------------- | ------- |
@@ -232,11 +265,11 @@ An effect changes the library and logs what it did under the caller's intent:
 | move tree  | the directory and everything in it renamed      | `field` `path` for each entity bound under it |
 
 Each `field` entry's `prior` is the value the writer's merged state held. Before
-any step, an effect checks its precondition: a save of a new file expects no file
-at the path, and a save or delete of an existing one expects the fingerprint the
-writer last read. Length decides first, then the hash when both sides have one,
-then an equal modification time. A rename or move refuses a destination that
-exists. A refused effect changes nothing.
+any step, an effect checks its precondition. A save or delete expects one of: no
+file at the path; the fingerprint the writer last read, compared by length, then by
+hash when both sides have one, then by an equal modification time; or a file whose
+bytes hash to a given blob id. A rename or move refuses a destination that exists.
+A refused effect writes nothing.
 
 A rename syncs the destination directory before the source directory, so a crash
 between the two leaves the entry under both names rather than under neither.
@@ -253,11 +286,7 @@ The file is one JSON object with exactly these keys:
 | --------- | ------------------------------------------------------------ |
 | `intent`  | The intent id                                                |
 | `step`    | The step, below                                              |
-| `entries` | An array of `{"version":<version>,"fact":<fact>}`: what the log gains when the step finishes |
-
-A fact is `{"field":{"entity":<entity id>,"name":<string>,"value":<value or null>,"prior":<value or null>}}`
-or `{"blob_added":{"blob":<blob id>,"len":<integer>}}`. The versions are stamped
-before the first step.
+| `entries` | An array of strings, each an entry's JSON as a log line holds it: the intent's entries, stamped before the first step, which the log gains when the step finishes |
 
 A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
 
@@ -286,5 +315,9 @@ back, `w` leaves the library as it found it, moves any staged bytes into blobs, 
 logs `blob_added` under the record's intent for each of the step's bytes now in
 blobs. Either way it then removes the record.
 
-Last, `w` moves every file left in `tmp/<w>/` into blobs, logging `blob_added` for
-each first, under a new intent. Recovery may itself be interrupted and repeated.
+Last, `w` moves every file left in `tmp/<w>/` whose name is a blob id into blobs,
+logging `blob_added` for each first, under a new intent. Any other file there is a
+snapshot a compaction had not yet renamed into place. Recovery may itself be
+interrupted and repeated.
+
+A writer that is read-only leaves its journal unrecovered.
