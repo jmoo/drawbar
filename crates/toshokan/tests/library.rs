@@ -328,6 +328,22 @@ fn undo_is_refused_where_another_writer_changed_the_field_since<F: Fs>(disk: imp
     assert_eq!(a.state().field(song, "name"), Some(&text("theirs")));
 }
 
+fn compaction_never_turns_an_undo_into_a_redo<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    block_on(a.set(song, "name", Some(text("one")))).unwrap();
+    block_on(a.undo()).unwrap();
+    block_on(a.compact(1)).unwrap();
+
+    for refused in [block_on(a.undo()), block_on(a.redo())] {
+        assert!(
+            matches!(&refused, Err(Error::Refused(refusal)) if **refusal == Refusal::Nothing),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(a.state().field(song, "name"), None);
+}
+
 fn collection_never_removes_a_blob_a_live_value_names<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
@@ -454,6 +470,7 @@ on_every_backend!(
     saving_an_entity_away_from_its_file_is_refused,
     undo_of_a_file_delete_puts_the_file_back,
     undo_is_refused_where_another_writer_changed_the_field_since,
+    compaction_never_turns_an_undo_into_a_redo,
     collection_never_removes_a_blob_a_live_value_names,
     opening_writes_nothing,
     an_intent_the_entity_does_not_allow_is_refused_before_anything_changes,

@@ -152,7 +152,9 @@ before `true`.
 
 A snapshot folds one writer's entries up to a segment, keeping tombstones and
 set-remove observations, and keeping the entries of the writer's undo window
-whole. `writers/<writer>/snapshot-<hash>.json` holds one JSON object and a LF:
+whole. The undo window of size `k` is the last `k` intents, ordered by the version
+of each one's first entry, that hold an entry other than `intent`, `blob_added` and
+`blob_removed`; the writer chooses `k` each time it compacts. `writers/<writer>/snapshot-<hash>.json` holds one JSON object and a LF:
 
 | Member     | Contents                                                       |
 | ---------- | -------------------------------------------------------------- |
@@ -185,10 +187,13 @@ their retained entries. A read-only writer does not compact.
 
 A writer undoes and redoes only its own intents, by appending a new intent whose
 `intent` entry names the reversed intent in `reverses`. Replaying the writer's
-intents in version order gives two stacks. An intent that reverses the top of the
-undo stack is an undo and moves to the redo stack; one that reverses the top of
-the redo stack is a redo and moves back. Any other intent that writes a fact goes
-on the undo stack and empties the redo stack.
+intents that a reader applies one by one (its snapshot's retained entries and the
+segments after it), ordered by the version of each one's first entry, gives two
+stacks. An intent of only `intent`, `blob_added` and `blob_removed` entries goes on
+neither. An intent that reverses the top of the undo stack is an undo and moves to
+the redo stack; one that reverses the top of the redo stack is a redo and moves
+back; one that reverses an intent not replayed goes on neither. Any other intent
+goes on the undo stack and empties the redo stack.
 
 Reversing an intent writes, newest first: `delete` for its `create`, `create` for
 its `delete`, a `set_remove` observing only its own tag for its `set_add`, a

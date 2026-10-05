@@ -5,8 +5,9 @@
 //!
 //! The intents of the undo window replay as two stacks. An intent that reverses the
 //! top of the undo stack is an undo, and moves to the redo stack; one that reverses
-//! the top of the redo stack is a redo, and moves back. Any other intent that changes
-//! a fact goes on the undo stack and empties the redo stack.
+//! the top of the redo stack is a redo, and moves back. One that reverses an intent
+//! outside the window goes on neither. Any other intent that changes a fact goes on
+//! the undo stack and empties the redo stack.
 //!
 //! A field's write by an undo or redo stands for the write whose value it restores, so
 //! undoing two intents in a row is not refused for the first undo's own write.
@@ -119,6 +120,7 @@ impl History {
                 self.undo.push(intent);
                 Some(target)
             }
+            Some(target) if !self.intents.contains_key(&target) => None,
             _ => {
                 self.undo.push(intent);
                 self.redo.clear();
@@ -173,7 +175,7 @@ fn last_writes(entries: &[Entry]) -> BTreeMap<FieldKey, Version> {
 
 /// Whether reversing an entry of this kind changes a fact. Blob store bookkeeping
 /// does not, so an intent of only that is not undone.
-fn reversible(kind: &Kind) -> bool {
+pub(crate) fn reversible(kind: &Kind) -> bool {
     match kind {
         Kind::Create { .. }
         | Kind::Delete { .. }

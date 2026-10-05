@@ -14,6 +14,7 @@ use crate::ids::{IntentId, Version, WriterId};
 use crate::layout::{Layout, LogFile};
 use crate::log::{json_texts, Entry, LogWriter, WriterLog};
 use crate::merge::{State, StateFile};
+use crate::undo::reversible;
 use crate::value::BlobId;
 
 /// One writer's entries folded up to a segment.
@@ -164,17 +165,22 @@ fn fold(own: &WriterLog, window: usize) -> Snapshot {
     }
 }
 
-/// The entries of the last `window` intents, by the version of each intent's first
-/// entry, in version order.
+/// The entries of the last `window` intents that change a fact, by the version of
+/// each intent's first entry, in version order.
 fn undo_window(own: &WriterLog, window: usize) -> Vec<Entry> {
     let entries: BTreeMap<Version, &Entry> = own
         .all_entries()
         .map(|entry| (entry.version, entry))
         .collect();
+    let undoable: BTreeSet<IntentId> = entries
+        .values()
+        .filter(|entry| reversible(&entry.kind))
+        .map(|entry| entry.intent)
+        .collect();
     let mut seen = BTreeSet::new();
     let mut intents: Vec<IntentId> = entries
         .values()
-        .filter(|entry| seen.insert(entry.intent))
+        .filter(|entry| undoable.contains(&entry.intent) && seen.insert(entry.intent))
         .map(|entry| entry.intent)
         .collect();
     let kept: BTreeSet<IntentId> = intents
@@ -423,6 +429,23 @@ mod tests {
         assert_eq!(retained, intents[1..].iter().copied().collect());
         let plan = plan_undo(&History::new(&own), &a.state()).unwrap();
         assert_eq!(plan.reverses, intents[2]);
+    }
+
+    #[test]
+    fn the_undo_window_counts_only_intents_that_change_a_fact() {
+        let fs = MemFs::new();
+        let mut a = Session::open(&fs, writer(A));
+        let e = a.log.new_entity();
+        let named = a.act(vec![
+            Kind::Create { entity: e },
+            field(e, "name", Some(text("one"))),
+        ]);
+        let blob = BlobId::of(b"collected");
+        a.act(vec![Kind::BlobRemoved { blob }]);
+        let own = a.own();
+        block_on(compact(&fs, &a.layout, &mut a.log, &own, 1)).unwrap();
+        let plan = plan_undo(&History::new(&a.own()), &a.state()).unwrap();
+        assert_eq!(plan.reverses, named);
     }
 
     #[test]

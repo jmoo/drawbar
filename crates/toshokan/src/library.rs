@@ -312,8 +312,9 @@ impl<F: Fs> Library<F> {
         self.commit(plan.entries, plan.effects).await
     }
 
-    /// Fold this writer's log into a snapshot that keeps its last `window` intents
-    /// undoable.
+    /// Fold this writer's log into a snapshot that keeps whole its last `window`
+    /// intents that change a fact, so undo and redo can reach them. An undo or redo
+    /// kept without the intent it reverses can itself be neither undone nor redone.
     pub async fn compact(&mut self, window: usize) -> Result<Compaction> {
         self.log.writable()?;
         let own = read_log(&self.fs, &self.layout, self.writer()).await?;
