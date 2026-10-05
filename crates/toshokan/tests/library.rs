@@ -337,6 +337,27 @@ fn undo_of_a_file_delete_puts_the_file_back<F: Fs>(disk: impl Fn() -> F) {
     );
 }
 
+fn undoing_a_bind_leaves_the_file_where_it_is<F: Fs>(disk: impl Fn() -> F) {
+    let fs = disk();
+    block_on(fs.create(&path("user.txt"), b"theirs")).unwrap();
+    let mut a = open(disk(), A);
+    let (entity, _) = block_on(a.create()).unwrap();
+    block_on(a.bind(entity, &path("user.txt"))).unwrap();
+    let files = library_files(&fs);
+
+    block_on(a.undo()).unwrap();
+    assert_eq!(library_files(&fs), files, "undoing a bind moved a file");
+    assert_eq!(a.state().field(entity, "path"), None);
+    assert_eq!(block_on(a.rescan()).unwrap().arrivals, [path("user.txt")]);
+
+    block_on(a.redo()).unwrap();
+    assert_eq!(library_files(&fs), files, "redoing a bind moved a file");
+    assert_eq!(
+        block_on(a.rescan()).unwrap().bound,
+        [(path("user.txt"), entity)].into()
+    );
+}
+
 fn undo_is_refused_where_another_writer_changed_the_field_since<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
@@ -533,6 +554,7 @@ on_every_backend!(
     undo_of_a_save_restores_the_displaced_bytes,
     saving_an_entity_away_from_its_file_is_refused,
     undo_of_a_file_delete_puts_the_file_back,
+    undoing_a_bind_leaves_the_file_where_it_is,
     undo_is_refused_where_another_writer_changed_the_field_since,
     compaction_never_turns_an_undo_into_a_redo,
     collection_never_removes_a_blob_a_live_value_names,

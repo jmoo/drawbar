@@ -431,10 +431,7 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                Kind::Intent {
-                    label: None,
-                    reverses: None
-                },
+                Kind::INTENT,
                 Kind::BlobRemoved { blob: oldest },
                 Kind::BlobRemoved { blob: middle },
             ]

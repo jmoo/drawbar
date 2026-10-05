@@ -42,6 +42,10 @@ pub enum Kind {
         /// The intent this one undoes or redoes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reverses: Option<IntentId>,
+        /// The intent changed files by journaled effects, so reversing it changes
+        /// them back. An intent without it, as a bind, reverses only its entries.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        files: bool,
     },
     /// Sets the entity's last-writer-wins `exists` register to true.
     Create { entity: EntityId },
@@ -589,6 +593,7 @@ impl Kind {
     pub const INTENT: Kind = Kind::Intent {
         label: None,
         reverses: None,
+        files: false,
     };
 
     /// The entities this entry names, references in values included.
@@ -719,12 +724,13 @@ pub(crate) mod testing {
         /// Append one intent of `kinds` after its `Intent` entry, each field's prior
         /// taken from the merged state.
         pub fn act(&mut self, kinds: Vec<Kind>) -> IntentId {
+            self.act_as(Kind::INTENT, kinds)
+        }
+
+        /// As [`Self::act`], under the `Intent` entry `header`.
+        pub fn act_as(&mut self, header: Kind, kinds: Vec<Kind>) -> IntentId {
             let state = self.state();
             let intent = self.log.new_intent();
-            let header = Kind::Intent {
-                label: None,
-                reverses: None,
-            };
             let kinds = std::iter::once(header).chain(kinds.into_iter().map(|kind| match kind {
                 Kind::Field {
                     entity,
@@ -786,11 +792,9 @@ mod tests {
             Kind::Intent {
                 label: Some("Rename\ttab".into()),
                 reverses: Some(IntentId::new(writer(7), 2)),
+                files: true,
             },
-            Kind::Intent {
-                label: None,
-                reverses: None,
-            },
+            Kind::INTENT,
             Kind::Create { entity },
             Kind::Delete { entity },
             Kind::Field {
@@ -1023,16 +1027,7 @@ mod tests {
 
         let mut session = Session::open(&fs, writer(1));
         let intent = session.log.new_intent();
-        let next = |log: &mut LogWriter| {
-            log.stamp(
-                intent,
-                Kind::Intent {
-                    label: None,
-                    reverses: None,
-                },
-            )
-            .version
-        };
+        let next = |log: &mut LogWriter| log.stamp(intent, Kind::INTENT).version;
         assert_eq!(next(&mut session.log), Version::new(41, writer(1)));
         session.log.observe(Version::new(99, writer(3)));
         assert_eq!(next(&mut session.log), Version::new(100, writer(1)));
@@ -1089,13 +1084,7 @@ mod tests {
         let mut reopened = Session::open(&fs, writer(1));
         assert!(reopened.log.read_only().is_some());
         let intent = reopened.log.new_intent();
-        let refused = reopened.write(
-            intent,
-            vec![Kind::Intent {
-                label: None,
-                reverses: None,
-            }],
-        );
+        let refused = reopened.write(intent, vec![Kind::INTENT]);
         assert!(
             matches!(refused, Err(Error::ReadOnly { .. })),
             "{refused:?}"
@@ -1110,14 +1099,7 @@ mod tests {
     fn append_refuses_another_writers_entries() {
         let fs = MemFs::new();
         let mut session = Session::open(&fs, writer(1));
-        let foreign = entry(
-            writer(2),
-            1,
-            Kind::Intent {
-                label: None,
-                reverses: None,
-            },
-        );
+        let foreign = entry(writer(2), 1, Kind::INTENT);
         let refused = block_on(session.log.append(&fs, &session.layout, &[foreign]));
         assert!(
             matches!(refused, Err(Error::InvalidId { .. })),

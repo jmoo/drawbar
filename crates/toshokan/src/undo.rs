@@ -259,15 +259,21 @@ fn plan(history: &History, intent: Option<IntentId>, state: &State) -> Result<Pl
             }));
         }
     }
-    let effects = file_effects(&changes, state)?;
-
-    let label = entries.iter().find_map(|entry| match &entry.kind {
-        Kind::Intent { label, .. } => label.clone(),
-        _ => None,
-    });
+    let (label, files) = entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            Kind::Intent { label, files, .. } => Some((label.clone(), *files)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let effects = match files {
+        true => file_effects(&changes, state)?,
+        false => Vec::new(),
+    };
     let mut kinds = vec![Kind::Intent {
         label,
         reverses: Some(intent),
+        files,
     }];
     for entry in entries.iter().rev() {
         kinds.extend(compensate(entry, &mut changes));
@@ -323,9 +329,9 @@ fn compensate<'a>(
     }
 }
 
-/// The file changes that reverse the intent's `content` and `path` writes: its
-/// contents restored from the blob store where the file is, or was before the intent
-/// unbound it, then its renames reversed.
+/// The file changes that reverse the `content` and `path` writes of an intent that
+/// changed files: its contents restored from the blob store where the file is, or was
+/// before the intent unbound it, then its renames reversed.
 fn file_effects(
     changes: &BTreeMap<(EntityId, &str), FieldChange>,
     state: &State,
@@ -447,6 +453,7 @@ mod tests {
         let intent = session.act(vec![Kind::Intent {
             label: Some("rename".into()),
             reverses: None,
+            files: false,
         }]);
         let named = named(&mut session, e, "one");
         let plan = reverse(&mut session, false).unwrap();
@@ -456,7 +463,8 @@ mod tests {
             plan.entries[0],
             Kind::Intent {
                 label: None,
-                reverses: Some(named)
+                reverses: Some(named),
+                files: false,
             }
         );
     }
@@ -548,6 +556,13 @@ mod tests {
         assert_eq!(session.state().tags(e, "tags", &text("x")).len(), 2);
     }
 
+    /// The `Intent` entry of an intent that changed files.
+    const FILES: Kind = Kind::Intent {
+        label: None,
+        reverses: None,
+        files: true,
+    };
+
     fn saved(contents: &[u8]) -> (BlobId, Kind) {
         let blob = BlobId::of(contents);
         let added = Kind::BlobAdded {
@@ -562,15 +577,18 @@ mod tests {
         let (_, mut session, e) = setup(1);
         let (old, added_old) = saved(b"old");
         let (new, added_new) = saved(b"newer");
-        session.act(vec![
-            field(e, PATH_FIELD, Some(text("a/b.txt"))),
-            added_old,
-            field(e, CONTENT_FIELD, Some(Value::Blob(old))),
-        ]);
-        session.act(vec![
-            added_new,
-            field(e, CONTENT_FIELD, Some(Value::Blob(new))),
-        ]);
+        session.act_as(
+            FILES,
+            vec![
+                field(e, PATH_FIELD, Some(text("a/b.txt"))),
+                added_old,
+                field(e, CONTENT_FIELD, Some(Value::Blob(old))),
+            ],
+        );
+        session.act_as(
+            FILES,
+            vec![added_new, field(e, CONTENT_FIELD, Some(Value::Blob(new)))],
+        );
         let plan = reverse(&mut session, false).unwrap();
         let expect = Precondition::Holds(new);
         let path = RelPath::new("a/b.txt").unwrap();
@@ -595,15 +613,18 @@ mod tests {
         let (_, mut session, e) = setup(1);
         let (old, added_old) = saved(b"old");
         let (new, added_new) = saved(b"newer");
-        session.act(vec![
-            field(e, PATH_FIELD, Some(text("f"))),
-            added_old,
-            field(e, CONTENT_FIELD, Some(Value::Blob(old))),
-        ]);
-        session.act(vec![
-            added_new,
-            field(e, CONTENT_FIELD, Some(Value::Blob(new))),
-        ]);
+        session.act_as(
+            FILES,
+            vec![
+                field(e, PATH_FIELD, Some(text("f"))),
+                added_old,
+                field(e, CONTENT_FIELD, Some(Value::Blob(old))),
+            ],
+        );
+        session.act_as(
+            FILES,
+            vec![added_new, field(e, CONTENT_FIELD, Some(Value::Blob(new)))],
+        );
         session.act(vec![Kind::BlobRemoved { blob: old }]);
         assert_eq!(
             refusal(reverse(&mut session, false)),
@@ -615,12 +636,15 @@ mod tests {
     fn undoing_a_new_file_deletes_it_and_undoing_a_rename_moves_it_back() {
         let (_, mut session, e) = setup(1);
         let (blob, added) = saved(b"bytes");
-        session.act(vec![
-            field(e, PATH_FIELD, Some(text("a"))),
-            added,
-            field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
-        ]);
-        session.act(vec![field(e, PATH_FIELD, Some(text("b")))]);
+        session.act_as(
+            FILES,
+            vec![
+                field(e, PATH_FIELD, Some(text("a"))),
+                added,
+                field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
+            ],
+        );
+        session.act_as(FILES, vec![field(e, PATH_FIELD, Some(text("b")))]);
         let path = |text: &str| RelPath::new(text).unwrap();
         let plan = reverse(&mut session, false).unwrap();
         assert_eq!(
@@ -644,18 +668,43 @@ mod tests {
     }
 
     #[test]
+    fn undoing_a_bind_reverses_its_fields_and_leaves_the_file() {
+        let (_, mut session, e) = setup(1);
+        let blob = BlobId::of(b"theirs");
+        session.act(vec![
+            field(e, PATH_FIELD, Some(text("user.txt"))),
+            field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
+        ]);
+        let plan = reverse(&mut session, false).unwrap();
+        assert_eq!(plan.effects, []);
+        assert_eq!(session.state().field(e, PATH_FIELD), None);
+        let plan = reverse(&mut session, true).unwrap();
+        assert_eq!(plan.effects, []);
+        assert_eq!(
+            session.state().field(e, PATH_FIELD),
+            Some(&text("user.txt"))
+        );
+    }
+
+    #[test]
     fn undoing_a_file_delete_restores_the_file_where_it_was() {
         let (_, mut session, e) = setup(1);
         let (blob, added) = saved(b"bytes");
-        session.act(vec![
-            field(e, PATH_FIELD, Some(text("a"))),
-            field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
-        ]);
-        session.act(vec![
-            added,
-            field(e, PATH_FIELD, None),
-            field(e, CONTENT_FIELD, None),
-        ]);
+        session.act_as(
+            FILES,
+            vec![
+                field(e, PATH_FIELD, Some(text("a"))),
+                field(e, CONTENT_FIELD, Some(Value::Blob(blob))),
+            ],
+        );
+        session.act_as(
+            FILES,
+            vec![
+                added,
+                field(e, PATH_FIELD, None),
+                field(e, CONTENT_FIELD, None),
+            ],
+        );
         let plan = reverse(&mut session, false).unwrap();
         assert_eq!(
             plan.effects,

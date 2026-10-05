@@ -104,7 +104,7 @@ reader accepts any order. A member marked `?` is omitted when absent.
 
 | `kind`         | Members                                                  |
 | -------------- | -------------------------------------------------------- |
-| `intent`       | `label?` string, `reverses?` intent id                   |
+| `intent`       | `label?` string, `reverses?` intent id, `files?` `true`  |
 | `create`       | `entity` entity id                                       |
 | `delete`       | `entity` entity id                                       |
 | `field`        | `entity` entity id, `name` string, `value?` value, `prior?` value |
@@ -122,7 +122,7 @@ For example, with writer `0000000000000000000000000000000a`, this line sets fiel
 
 Every intent has one `intent` entry, appended before its other entries, and every
 entry of an intent carries its intent id. `reverses` names the intent an undo or
-redo reverses. A `field` entry's `prior` is what the writer's merged state held when
+redo reverses. `files` is present, and `true`, on an intent whose file effects ran. A `field` entry's `prior` is what the writer's merged state held when
 it wrote; undo restores it. A `blob_added` entry records that its writer put a blob
 in the store, and a `blob_removed` entry that its writer's garbage collection
 removed it.
@@ -217,7 +217,9 @@ write is neither the intent's last write to it nor an undo or redo that restored
 that write. An intent of only `blob_added` and `blob_removed` entries is not
 undone.
 
-Reversing an intent also reverses its files. For each entity whose `content` it
+Reversing an intent whose `intent` entry has `files` also reverses its files, and
+the reversing intent's `intent` entry has `files` too. Reversing any other intent,
+such as a bind, changes only entries. For each entity whose `content` the intent
 changed, the file at the entity's `path`, or at the path the intent cleared, is
 restored: a save of the earlier blob when there was one, otherwise a delete. Either
 expects the file to hold exactly the intent's blob, or no file where the intent
@@ -238,8 +240,11 @@ The library writes these:
 | remove          | `set_remove` observing the value's live tags in the writer's merged state |
 | delete          | `delete`                                                           |
 | bind            | `field` `path`, `content`, `length` and `modified`: the file's path, the hash of its bytes, its length and its time |
-| save, delete file, rename, move tree | the effect's entries, below                   |
+| save, delete file, rename, move tree | the effect's entries, below           |
 | undo, redo      | the reversing entries, then their effects' entries                 |
+
+The `intent` entry of a save, file delete, rename or tree move has `files`, and that
+of an undo or redo has it when the reversed intent does.
 
 An intent's file effects are all checked before any of them runs, and then
 journaled together in one record before the first step, so its entries reach the
@@ -355,7 +360,7 @@ crash before the record's removal thus appends nothing again. It appends:
 
 - when every step finished, the record's entries and every step's entries;
 - when a step changed files before the run ended, a new `intent` entry with the
-  record's `label` and no `reverses`; the entries of each finished step, and of a
+  record's `label`, `files` and no `reverses`; the entries of each finished step, and of a
   move_files step some of whose files arrived, less each `field` `path` entry
   whose value is the destination of a file that stayed; and a `blob_added` for each
   of the conflicting and given-up steps' bytes now in blobs, where a save's bytes

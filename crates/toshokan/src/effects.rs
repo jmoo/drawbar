@@ -146,15 +146,18 @@ impl Effect {
 }
 
 /// Stamp `entries` and the planned steps' entries, journal them as one record, and run
-/// the steps.
+/// the steps. The `Intent` entry, first in `entries`, is marked as changing files.
 pub(crate) async fn perform<F: Fs>(
     fs: &F,
     layout: &Layout,
     log: &mut LogWriter,
     intent: IntentId,
-    entries: Vec<Kind>,
+    mut entries: Vec<Kind>,
     planned: Vec<Planned>,
 ) -> Result<Report> {
+    if let Some(Kind::Intent { files, .. }) = entries.first_mut() {
+        *files = true;
+    }
     let record = stamped(log, intent, entries, planned);
     journal::write(fs, layout, log.writer(), &record).await?;
     journal::settle(fs, layout, log, &record, &journal::Logged::default())

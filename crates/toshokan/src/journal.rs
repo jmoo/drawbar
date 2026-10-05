@@ -247,6 +247,7 @@ pub(crate) async fn settle<F: Fs>(
                 Kind::Intent {
                     label,
                     reverses: None,
+                    files: changed,
                 },
             );
             let mut entries = vec![head];
