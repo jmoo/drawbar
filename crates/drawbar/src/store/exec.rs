@@ -604,6 +604,9 @@ async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
                 "a newer drawbar wrote this library's index (version {version}), so this one \
                  only reads the library"
             ),
+            Read::Unknown => "a newer drawbar wrote this library's index, holding what this \
+                 one does not know, so this one only reads the library"
+                .to_string(),
             Read::Unreadable(why) => format!(
                 "the library's index does not read ({why}), so drawbar leaves the library as \
                  it is"

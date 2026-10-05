@@ -114,7 +114,9 @@ none, and Chromium hides a link at any depth below a picked folder.
 
 The version is read first, on its own. An index with a higher version opens the
 library read-only and is never rewritten, so a newer drawbar's index survives an
-older one being run over it. An index that does not parse also opens the library
+older one being run over it. So does an index of this version that holds a
+field, or a kind of origin or working copy, this build does not know: rewriting
+it would drop what a newer build added. An index that does not parse also opens the library
 read-only.
 
 ### Working copies, `tmp/` and `lock`
@@ -673,7 +675,7 @@ holds nothing to sweep, and its lock is taken at the first write.
 
 On the desktop the lock is an exclusive `File::try_lock` on `.drawbar/lock`,
 held for as long as the backend lives. A library opens read-only when its index
-is newer or does not read, when a working copy the index names does not read,
+is newer, holds what this build does not know, or does not read, when a working copy the index names does not read,
 when the index is missing but `working/` is not, or when another drawbar holds
 the lock. Working copies are found only through the index, so a sweep without it
 would delete every one, and an index put back finds them only where they were.

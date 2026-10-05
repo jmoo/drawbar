@@ -229,6 +229,7 @@ pub struct Stat {
 /// held. Where they moved, the CRC decides, and a fingerprint without one says only that
 /// the file is not known to be the same.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<u64>,

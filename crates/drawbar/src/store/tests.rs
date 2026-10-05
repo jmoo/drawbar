@@ -1893,6 +1893,43 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
     assert!(matches!(sidecar::read("not an index"), Read::Unreadable(_)));
 }
 
+/// A field or a kind this build does not know, at any depth, is what a newer drawbar that
+/// kept the version wrote, and never taken for a damaged index.
+#[test]
+fn an_index_holding_what_this_build_does_not_know_is_known_as_that() {
+    for text in [
+        "(version: 1, next_id: 2, colors: {})",
+        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), color: 3)})"#,
+        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), fingerprint: Some((len: 1, modified: None, crc: None, sha: 0)))})"#,
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Shared(4))})",
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Rescued(bank: 0, slot: 1, page: 2))})",
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", working: Some((generation: 1, keeps: Bytes, at: 0)))})",
+    ] {
+        assert_eq!(sidecar::read(text), Read::Unknown, "{text}");
+    }
+}
+
+/// An index a newer drawbar wrote under this build's version, holding a field this one
+/// does not know, opens the library read-only, and the field survives.
+#[test]
+fn an_index_with_an_unknown_field_opens_read_only() {
+    let root = Temp::new();
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    let theirs = "(version: 1, next_id: 3, colors: {1: \"red\"})";
+    fs::write(root.at(exec::INDEX), theirs).unwrap();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+
+    let mut session = Session::open(&root);
+    let why = session.store.read_only().expect("read-only");
+    assert!(why.contains("newer drawbar"), "{why}");
+    let id = session.only();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.create();
+    session.close();
+    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
+}
+
 /// An asset made with New keeps saying so once its file is written and drawbar opens
 /// the library again; one opened from its file says it came from that file.
 #[test]

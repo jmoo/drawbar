@@ -19,11 +19,13 @@ use crate::workspace::Origin;
 
 /// The index version this build writes.
 ///
-/// ⚠️ A library whose index carries a higher version opens read-only and is never
-/// written, so a newer drawbar's index survives an older one being run over it.
+/// ⚠️ A library whose index carries a higher version, or a field or kind this build does
+/// not know, opens read-only and is never written, so a newer drawbar's index survives
+/// an older one being run over it. Every type the index holds denies unknown fields.
 pub const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sidecar {
     pub version: u32,
     /// The id the next new asset takes.
@@ -53,6 +55,7 @@ impl Default for Sidecar {
 
 /// One asset in the index. A field that holds nothing is not written.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Row {
     /// Where its file is. `None` for a view of a slot that holds an edit, kept only as a
     /// working copy until it becomes a file.
@@ -76,6 +79,7 @@ pub struct Row {
 
 /// A working copy, `working/<id>-<generation>`, and what it keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Working {
     pub generation: u64,
     pub keeps: Keeps,
@@ -145,6 +149,7 @@ impl Row {
 
 /// An [`Origin`] as the index writes it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Stored {
     /// Not written: read from its file, for a row with a path, and made in drawbar for
     /// one without.
@@ -226,6 +231,9 @@ pub enum Read {
     Known(Sidecar),
     /// Written by a newer drawbar, under this version.
     Newer(u32),
+    /// Written under this build's version, holding a field or a kind this build does not
+    /// know, as a newer drawbar that kept the version would.
+    Unknown,
     /// Not an index this build can read, and why.
     Unreadable(String),
 }
@@ -251,7 +259,12 @@ pub fn read(text: &str) -> Read {
             "version {} is not one this build reads",
             sidecar.version
         )),
-        Err(e) => Read::Unreadable(e.to_string()),
+        Err(e) => match e.code {
+            ron::Error::NoSuchStructField { .. } | ron::Error::NoSuchEnumVariant { .. } => {
+                Read::Unknown
+            }
+            _ => Read::Unreadable(e.to_string()),
+        },
     }
 }
 
