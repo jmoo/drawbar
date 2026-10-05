@@ -26,7 +26,7 @@ pub enum Outcome {
     /// Every file changed as the intent meant, and the log has all its entries.
     Finished,
     /// Some files changed and others were not as the intent expected. The log has the
-    /// entries of the changes made, under an intent that reverses nothing.
+    /// entries of the changes made.
     Partial,
     /// No file changed. The log has only the bytes recovery kept.
     RolledBack,
@@ -194,7 +194,8 @@ impl Settled {
 /// not hold, and clear the record. When every step finishes the log gains all the
 /// record's entries. A step the files no longer allow ends the run: the steps after
 /// it are given up, and the log gains only the entries of the steps that changed
-/// files, and the bytes kept, under a new `Intent` entry that reverses nothing.
+/// files, and the bytes kept, under a new `Intent` entry with the record's label and
+/// `reverses`, so a later recovery that finishes the record keeps them.
 ///
 /// ⚠️ The log's clock and counters must already be past every pending record's
 /// entries, or an entry stamped here can share a version with a recorded one.
@@ -245,12 +246,12 @@ pub(crate) async fn settle<F: Fs>(
         (None, _) => record.entries.iter().chain(&facts).cloned().collect(),
         (Some(_), false) if settled.kept.is_empty() => Vec::new(),
         (Some(_), changed) => {
-            let label = changed.then(|| record.label()).flatten();
+            let (label, reverses) = record.header();
             let head = log.stamp(
                 record.intent,
                 Kind::Intent {
                     label,
-                    reverses: None,
+                    reverses,
                     files: changed,
                 },
             );
@@ -400,11 +401,15 @@ impl Record {
         self.entries.iter().chain(steps)
     }
 
-    fn label(&self) -> Option<String> {
-        self.entries.iter().find_map(|entry| match &entry.kind {
-            Kind::Intent { label, .. } => label.clone(),
+    /// The label and the reversed intent of the record's `Intent` entry.
+    fn header(&self) -> (Option<String>, Option<IntentId>) {
+        let header = self.entries.iter().find_map(|entry| match &entry.kind {
+            Kind::Intent {
+                label, reverses, ..
+            } => Some((label.clone(), *reverses)),
             _ => None,
-        })
+        });
+        header.unwrap_or_default()
     }
 }
 
@@ -728,6 +733,57 @@ mod tests {
         let outcomes: Vec<Outcome> = recovered.iter().map(|r| r.outcome).collect();
         assert_eq!(outcomes, [Outcome::RolledBack, Outcome::Finished]);
         well_formed(&logged(&fs, WRITER)).unwrap();
+    }
+
+    #[test]
+    fn an_intent_recovered_in_part_and_then_finished_keeps_what_it_reverses() {
+        let layout = Layout::default();
+        let fs = library(&[("a", b"a"), ("c", b"c"), ("d", b"in the way")]);
+        let entity = EntityId::new(WRITER, 1);
+        let entry = |lamport, kind| Entry {
+            version: Version::new(lamport, WRITER),
+            intent: INTENT,
+            kind,
+        };
+        let moved = |to: &str| Kind::Field {
+            entity,
+            name: "path".into(),
+            value: Some(Value::Text(to.into())),
+            prior: None,
+        };
+        let undone = IntentId::new(WRITER, 2);
+        let head = Kind::Intent {
+            label: None,
+            reverses: Some(undone),
+            files: true,
+        };
+        let step = |from: &str, to: &str, lamport| StepRecord {
+            step: Step::Move {
+                from: path(from),
+                to: path(to),
+            },
+            entries: vec![entry(lamport, moved(to))],
+        };
+        let record = Record {
+            intent: INTENT,
+            entries: vec![entry(3, head)],
+            steps: vec![step("a", "b", 4), step("c", "d", 5)],
+        };
+        block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+        let partly = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        assert_eq!(partly[0].outcome, Outcome::Partial);
+        block_on(write(&fs, &layout, WRITER, &record)).unwrap();
+        block_on(fs.remove_file(&path("d"))).unwrap();
+
+        let finished = block_on(recover(&fs, &layout, &mut reopen(&fs, WRITER))).unwrap();
+        assert_eq!(finished[0].outcome, Outcome::Finished);
+        let entries = logged(&fs, WRITER);
+        well_formed(&entries).unwrap();
+        let reverses = entries.iter().find_map(|entry| match entry.kind {
+            Kind::Intent { reverses, .. } => Some(reverses),
+            _ => None,
+        });
+        assert_eq!(reverses, Some(Some(undone)));
     }
 
     #[test]

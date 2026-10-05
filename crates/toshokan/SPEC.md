@@ -383,13 +383,14 @@ crash before the record's removal thus appends nothing again. It appends:
 
 - when every step finished, the record's entries and every step's entries;
 - when a step changed files before the run ended, a new `intent` entry with the
-  record's `label`, with `files` and without `reverses`; the entries of each
+  record's `label` and `reverses`, and with `files`; the entries of each
   finished step, and of a move_files step some of whose files arrived, less each
   `field` `path` entry whose value is the destination of a file that stayed; and a
   `blob_added` for each of the conflicting and given-up steps' bytes now in blobs,
   where a save's bytes are `new` and `old` and a delete's are `old`;
-- when no step changed files, a new `intent` entry with no members and those
-  `blob_added` entries, or nothing when there are none.
+- when no step changed files, a new `intent` entry with the record's `label` and
+  `reverses`, without `files`, and those `blob_added` entries, or nothing when
+  there are none.
 
 Either way it then removes the record. An intent that runs without a crash ends the
 same way, and reports a conflict after a step that changed files as an intent
