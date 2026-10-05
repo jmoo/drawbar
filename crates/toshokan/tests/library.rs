@@ -365,6 +365,21 @@ fn collection_never_removes_a_blob_a_live_value_names<F: Fs>(disk: impl Fn() -> 
     assert!(!stored(a.fs(), b"first"));
 }
 
+fn collection_reaches_only_blobs_older_than_the_undo_window<F: Fs>(disk: impl Fn() -> F) {
+    let mut a = open(disk(), A);
+    let (song, _) = block_on(a.create()).unwrap();
+    let at = path("song");
+    block_on(a.save(song, &at, b"1".to_vec(), Precondition::Absent)).unwrap();
+    block_on(a.save(song, &at, b"2".to_vec(), holds(b"1"))).unwrap();
+    block_on(a.save(song, &at, b"3".to_vec(), holds(b"2"))).unwrap();
+
+    assert_eq!(block_on(a.collect(0)).unwrap().removed, []);
+    block_on(a.compact(1)).unwrap();
+    assert_eq!(block_on(a.collect(0)).unwrap().removed, [BlobId::of(b"1")]);
+    block_on(a.undo()).unwrap();
+    assert_eq!(library_files(a.fs()), [(at, b"2".to_vec())].into());
+}
+
 fn opening_writes_nothing<F: Fs>(disk: impl Fn() -> F) {
     let mut a = open(disk(), A);
     let (song, _) = block_on(a.create()).unwrap();
@@ -492,6 +507,7 @@ on_every_backend!(
     undo_is_refused_where_another_writer_changed_the_field_since,
     compaction_never_turns_an_undo_into_a_redo,
     collection_never_removes_a_blob_a_live_value_names,
+    collection_reaches_only_blobs_older_than_the_undo_window,
     opening_writes_nothing,
     an_intent_the_entity_does_not_allow_is_refused_before_anything_changes,
     reopening_an_untouched_library_reads_no_file,

@@ -30,6 +30,12 @@ async fn tag_a_new_song(writer: WriterId, bytes: Vec<u8>) -> toshokan::Result<()
 }
 ```
 
+Undo restores displaced bytes from a blob store beside the logs. To bound it,
+compact to the undo history worth keeping, then collect to a byte budget:
+`library.compact(50)`, then `library.collect(budget)`. Collection keeps every blob
+an entry since the last compaction names. A save on a full disk gives up the whole
+undo history before it refuses.
+
 [SPEC.md](SPEC.md) specifies every file toshokan writes.
 
 ## Principles

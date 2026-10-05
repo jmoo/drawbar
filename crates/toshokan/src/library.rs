@@ -246,6 +246,9 @@ impl<F: Fs> Library<F> {
     ///
     /// An entity bound to a file saves only at that file's path, so that it owns one
     /// file; [`Library::rename`] moves the file first.
+    ///
+    /// On a full disk the save collects the blobs nothing needs, then gives up this
+    /// writer's whole undo history and collects again, before it refuses.
     pub async fn save(
         &mut self,
         entity: EntityId,
@@ -329,6 +332,10 @@ impl<F: Fs> Library<F> {
 
     /// Remove this writer's blobs that nothing needs, oldest first, until they occupy at
     /// most `budget` bytes.
+    ///
+    /// Undo may restore any blob an entry since this writer's last compaction names,
+    /// so collection keeps those; [`Library::compact`] to the undo window to keep, then
+    /// collect, to bound the store.
     pub async fn collect(&mut self, budget: u64) -> Result<Collection> {
         let collected =
             blobs::collect(&self.fs, &self.layout, &mut self.log, &self.state, budget).await;
