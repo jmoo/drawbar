@@ -947,6 +947,41 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
 }
 
 #[test]
+fn keep_both_writes_only_the_new_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = session.bytes(id);
+    let (mine, theirs) = (with_gain(&saved, "96"), with_gain(&saved, "12"));
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), &mut session.bench.log);
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(root.at("untitled.ne5p"))
+        .and_then(|file| file.set_modified(then))
+        .unwrap();
+    let modified = || {
+        fs::metadata(root.at("untitled.ne5p"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+
+    session.refocus();
+    let acts = session.bench.browser.answer("Keep both");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.read("untitled 2.ne5p"), mine);
+    assert_eq!(root.read("untitled.ne5p"), theirs);
+    assert_eq!(modified(), then, "theirs was written again");
+}
+
+#[test]
 fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -1777,6 +1812,37 @@ fn two_assets_one_name_apart_in_case_are_flagged_both() {
     assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
 }
 
+/// The pair is flagged on every disk, since a library copied to one that ignores case
+/// could hold only one of them, and the warning claims nothing about this disk.
+#[test]
+fn two_names_differing_only_by_case_are_flagged_without_claiming_the_disk_ignores_case() {
+    let Bench {
+        mut workspace,
+        mut browser,
+        mut log,
+        ..
+    } = Bench::new();
+    for name in ["Case.ne5p", "case.ne5p"] {
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        workspace.place(id, LibPath::root().join(name));
+    }
+    let before = log.iter().count();
+    mirror::flag_duplicates(&workspace, &mut browser, &mut log);
+    let said: Vec<&str> = log
+        .iter()
+        .skip(before)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "“Case.ne5p” and “case.ne5p” in the library differ only by case and would collide \
+          on macOS or Windows; rename one of them."
+        ]
+    );
+    assert_eq!(browser.folders.duplicates.len(), 2);
+}
+
 #[test]
 fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     let root = Temp::new();
@@ -1791,9 +1857,9 @@ fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     let mut session = Session::open(&root);
     assert_eq!(session.bench.workspace.listed().count(), 2);
     assert_eq!(session.bench.browser.folders.duplicates.len(), 2);
-    assert_eq!(session.said("are one name on a disk that ignores case"), 1);
+    assert_eq!(session.said("differ only by case"), 1);
     session.refocus();
-    assert_eq!(session.said("are one name"), 1, "said once");
+    assert_eq!(session.said("differ only by case"), 1, "said once");
     session.close();
     assert_eq!(
         root.names(""),

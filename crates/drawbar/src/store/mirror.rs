@@ -3137,7 +3137,7 @@ fn beyond_files(sidecar: &Sidecar) -> bool {
 /// Flag the entries of one folder whose names are one name under [`names::key`], and
 /// warn once about each new pair. Nothing is renamed: renaming a user's files on open
 /// would be hostile, and either name may be the one other files refer to.
-fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
+pub(crate) fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
     let (flagged, groups) = duplicates(workspace, &browser.folders);
     for (dir, group) in groups {
         let ids: Vec<u64> = group.iter().filter_map(|(id, _)| *id).collect();
@@ -3150,7 +3150,8 @@ fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) 
             false => dir.to_string(),
         };
         log.warn(format!(
-            "{} in {place} are one name on a disk that ignores case; rename one of them.",
+            "{} in {place} differ only by case and would collide on macOS or Windows; rename \
+             one of them.",
             names.join(" and ")
         ));
     }

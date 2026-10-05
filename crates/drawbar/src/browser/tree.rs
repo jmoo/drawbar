@@ -1260,7 +1260,7 @@ impl Browser {
             self.folders.duplicates.contains(&entity.id),
         ) {
             (true, _) => Some("missing"),
-            (false, true) => Some("same name as another"),
+            (false, true) => Some("differs only by case"),
             (false, false) => entity.verify.note(),
         };
         let drawn = row(

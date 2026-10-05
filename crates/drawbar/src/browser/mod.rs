@@ -198,17 +198,18 @@ impl Offer {
         // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
         // this computer, where another instrument's file is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
-        let live = wanted && fits.as_ref().is_none_or(|fits| fits.takes > 0);
-        Offer {
-            label: match &fits {
-                Some(fits) => fits.label(),
-                None => action.label().to_string(),
-            },
-            live,
-            dead: fits
-                .and_then(|fits| fits.why)
-                .unwrap_or_else(|| action.nothing().to_string()),
-        }
+        let carried = action != Bulk::Bundle || act::bundled(checked, workspace, state);
+        let live = wanted && carried && fits.as_ref().is_none_or(|fits| fits.takes > 0);
+        let label = match &fits {
+            Some(fits) => fits.label(),
+            None => action.label().to_string(),
+        };
+        let dead = match fits.and_then(|fits| fits.why) {
+            Some(why) => why,
+            None if wanted && !carried => "nothing checked is a file a bundle carries".into(),
+            None => action.nothing().to_string(),
+        };
+        Offer { label, live, dead }
     }
 }
 
@@ -1109,6 +1110,47 @@ mod tests {
     #[test]
     fn the_tree_paints_with_an_instrument_to_show() {
         paint(true);
+    }
+
+    /// Neither the instrument nor a bundle holds a file that reads as nothing, so neither
+    /// is offered one.
+    #[test]
+    fn an_empty_program_file_is_offered_neither_queue_nor_bundle() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        device.pretend_attached_as("Nord Electro 5");
+        let empty = workspace.ingest(
+            "zero.ne5p".into(),
+            crate::workspace::Origin::Fresh,
+            Vec::new(),
+            &mut log,
+        );
+        let program = workspace.create(Fresh::Program, &mut log).unwrap();
+
+        let offer = |action, ids: &[u64]| {
+            let checked: Vec<Item> = ids.iter().copied().map(Item::Local).collect();
+            Offer::of(action, &checked, &workspace, &device.state)
+        };
+        for (action, why) in [
+            (
+                Bulk::Queue,
+                "“zero.ne5p” belongs in no folder the instrument has.",
+            ),
+            (Bulk::Bundle, "nothing checked is a file a bundle carries"),
+        ] {
+            let refused = offer(action, &[empty]);
+            assert!(
+                !refused.live,
+                "{action:?} is offered for an empty program file"
+            );
+            assert_eq!(refused.dead, why, "{action:?}");
+            assert!(offer(action, &[program]).live, "{action:?} for a program");
+        }
+        assert_eq!(offer(Bulk::Queue, &[empty, program]).label, "Queue 1 of 2");
     }
 
     /// A drag from an unselected row carries only that row.

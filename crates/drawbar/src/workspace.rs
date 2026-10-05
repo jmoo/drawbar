@@ -401,7 +401,7 @@ struct Decoded {
     plays: Option<Plays>,
     parse_error: Option<String>,
     verify: VerifyState,
-    is_text: bool,
+    words: bool,
     /// CRC-32 over all the bytes, where they were read through.
     crc: Option<u32>,
 }
@@ -415,7 +415,7 @@ impl Decoded {
             plays: None,
             parse_error: Some(why.to_string()),
             verify: VerifyState::Failed(why.to_string()),
-            is_text: false,
+            words: false,
             crc: None,
         }
     }
@@ -436,7 +436,7 @@ impl Decoded {
             entity,
             parse_error,
             verify,
-            is_text: crate::document::text::is_text(bytes),
+            words: crate::document::text::is_text(bytes),
             crc: Some(nord_format::crc::crc32(bytes)),
         }
     }
@@ -467,11 +467,12 @@ pub struct LocalEntity {
     pub plays: Option<Plays>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
-    /// Whether the bytes are a note, from `document::text::is_text`.
+    /// Whether the bytes are words a note may hold, from `document::text::is_text`.
+    /// [`LocalEntity::is_text`] decides with the name whether they are a note.
     ///
     /// ⚠️ Computed when the bytes land and never per frame: deciding it walks every
     /// byte, and every listed row asks for its kind on every frame.
-    pub is_text: bool,
+    words: bool,
     pub verify: VerifyState,
     /// What this asset was last saved as. The asset is unsaved when its bytes differ
     /// from these or an editor holds an edit not yet applied to them. See
@@ -553,7 +554,7 @@ impl LocalEntity {
             plays: None,
             parse_error: None,
             container: None,
-            is_text: false,
+            words: false,
             verify: VerifyState::Reading,
             pending: false,
             kept: true,
@@ -597,7 +598,7 @@ impl LocalEntity {
         self.plays = decoded.plays;
         self.parse_error = decoded.parse_error;
         self.verify = decoded.verify;
-        self.is_text = decoded.is_text;
+        self.words = decoded.words;
     }
 
     /// An asset whose bytes are the file `file` holds, left there and read by range. It
@@ -621,7 +622,7 @@ impl LocalEntity {
             plays: None,
             parse_error: None,
             container: None,
-            is_text: false,
+            words: false,
             verify: VerifyState::Checking,
             saved: Baseline::on_disk(file, stamp),
             pending: false,
@@ -655,6 +656,17 @@ impl LocalEntity {
                 file.known_crc().is_none() && matches!(self.verify, VerifyState::Checking)
             }
             None => self.unread() && !matches!(self.verify, VerifyState::NotRead(_)),
+        }
+    }
+
+    /// Whether it is a note: words under a note's name, or under a name no format claims.
+    /// An empty file is a note only under a note's name, since a new note is one and an
+    /// empty program is not.
+    pub fn is_text(&self) -> bool {
+        match self.by_name {
+            Some((_, crate::browser::Kind::Text)) => self.words,
+            Some(_) => false,
+            None => self.words && !self.bytes.is_empty(),
         }
     }
 
@@ -817,7 +829,7 @@ impl LocalEntity {
         match (self.entity.as_deref(), &self.container) {
             (Some(entity), _) => Cow::Borrowed(entity.identity().format),
             (None, Some(container)) => Cow::Owned(container.tag()),
-            (None, None) if self.is_text => Cow::Borrowed(crate::document::text::EXTENSION),
+            (None, None) if self.is_text() => Cow::Borrowed(crate::document::text::EXTENSION),
             (None, None) => match (self.rests(), self.remembered.as_deref()) {
                 (Some(file), _) => Cow::Borrowed(file.index.tag()),
                 (None, Some(known)) => Cow::Borrowed(&known.tag),
@@ -2353,7 +2365,7 @@ impl Workspace {
         }
         entity.decoded(decoded);
         // A note has no format to decode, so a parse error on text is not a failure.
-        if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text) {
+        if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text()) {
             log.warn(format!("{}: {e}", entity.name));
         }
         self.revision += 1;
@@ -2416,7 +2428,7 @@ impl Workspace {
         let arrival = match (&entity.parse_error, &entity.verify) {
             // A note has no format to decode, so a parse error on text is not a
             // failure.
-            (Some(_), _) if entity.is_text => {
+            (Some(_), _) if entity.is_text() => {
                 log.info(format!(
                     "{}: text ({} bytes)",
                     entity.name,
@@ -3295,7 +3307,7 @@ impl Workspace {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
-        let note = self.get(id).is_some_and(|held| held.is_text);
+        let note = self.get(id).is_some_and(|held| held.is_text());
         if note || matches!(verify, VerifyState::Ok) {
             return;
         }
@@ -3326,9 +3338,10 @@ impl Workspace {
             let saved = std::mem::take(&mut entity.saved.bytes);
             entity.saved = Baseline::read(saved, entity.saved.stamp);
         }
-        let stamp = self.stamp();
+        let fresh = self.stamp();
         // The baseline stays, but whether the asset holds it may change. A revert, or an
-        // edit made and then undone, puts back what it was saved as.
+        // edit made and then undone, puts back what it was saved as, under the stamp it
+        // was saved with: a baseline whose stamp moved would be written to its file again.
         let held = self
             .get(id)
             .is_some_and(|entity| entity.saved.holds(&bytes));
@@ -3336,16 +3349,9 @@ impl Workspace {
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
         let path = entity.path.take();
         let saved = std::mem::take(&mut entity.saved);
-        let saved = Baseline {
-            stamp: match held {
-                true => stamp,
-                false => saved.stamp,
-            },
-            ..saved
-        };
-        let bytes = match held {
-            true => saved.bytes.clone(),
-            false => bytes,
+        let (bytes, stamp) = match held {
+            true => (saved.bytes.clone(), saved.stamp),
+            false => (bytes, fresh),
         };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
@@ -3535,7 +3541,7 @@ impl Workspace {
                     }
                 }
             };
-            if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text) {
+            if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text()) {
                 log.warn(format!("{}: {e}", entity.name));
             }
             self.next_id = self.next_id.max(next);
@@ -3995,15 +4001,15 @@ mod tests {
         let mut workspace = Workspace::new(ctx);
         let mut log = Log::default();
         let id = workspace.ingest("held".into(), Origin::Fresh, b"Set 1\n".to_vec(), &mut log);
-        assert!(workspace.get(id).expect("held").is_text);
+        assert!(workspace.get(id).expect("held").is_text());
 
         workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], &mut log);
         let held = workspace.get(id).expect("held");
-        assert!(!held.is_text, "these bytes are no longer words");
+        assert!(!held.is_text(), "these bytes are no longer words");
         assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
 
         workspace.revert(id, &mut log);
-        assert!(workspace.get(id).expect("held").is_text, "and back again");
+        assert!(workspace.get(id).expect("held").is_text(), "and back again");
     }
 
     /// A slot opened for a look is a working copy that nothing lists, and it goes when
@@ -4338,13 +4344,15 @@ mod tests {
         assert_ne!(second, first);
 
         workspace.revert(id, &mut log);
-        let third = stamp(&workspace);
-        assert_ne!(third, second);
-        assert_ne!(third, first, "back to the same bytes is still a new decode");
+        assert_eq!(
+            stamp(&workspace),
+            first,
+            "the saved bytes are back under the stamp they were saved with"
+        );
 
         // Reverting to the bytes already held changes nothing, stamp included.
         workspace.revert(id, &mut log);
-        assert_eq!(stamp(&workspace), third);
+        assert_eq!(stamp(&workspace), first);
     }
 
     /// Unsaved is holding bytes other than the ones this asset was last saved as. An
@@ -4498,7 +4506,7 @@ mod tests {
             .parse_error
             .clone()
             .expect("the project did not decode");
-        assert!(!held.is_text);
+        assert!(!held.is_text());
         assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
         assert!(
             log.iter()
@@ -4511,7 +4519,7 @@ mod tests {
     fn words_longer_than_a_note_holds_stay_a_record() {
         let words = "Set 1\n".repeat(crate::document::text::MAX_BYTES / 6 + 1);
         let held = ingest("a long log.txt", words.into_bytes());
-        assert!(!held.is_text);
+        assert!(!held.is_text());
         assert_eq!(crate::browser::Kind::of(&held), crate::browser::Kind::Other);
         assert!(matches!(held.verify, VerifyState::NotApplicable(_)));
     }
@@ -4833,7 +4841,7 @@ mod tests {
 
         for id in [1, 2] {
             let entity = workspace.get(id).expect("listed");
-            assert!(entity.is_text, "Note {id} is a note");
+            assert!(entity.is_text(), "Note {id} is a note");
         }
         assert_eq!(log.problems(), 0, "{:?}", log.status());
     }

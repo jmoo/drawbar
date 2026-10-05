@@ -44,6 +44,10 @@ In Chrome and Edge, the browser asks whether drawbar may change the folder.
 Unless you allow it on every visit, it forgets when you close drawbar.app.
 Choose **File ▸ Reconnect** and the folder's name to get it back.
 
+Chrome makes each file and folder drawbar writes there readable only by you, and
+on macOS marks it as downloaded, so in a shared folder other people lose access
+to what you save.
+
 ## Adding and making sounds
 
 Drop files on the window, or use **File ▸ Open…**. drawbar copies them into your
@@ -123,6 +127,9 @@ bring back any you deleted.
   that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
   library** adds it to your sounds so you can send it back, **Show the file**
   shows where it is, and **Discard** deletes it.
+- **Differs only by case.** Two names in one folder differ only in upper and
+  lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
+  of them, so rename one to keep the library whole on every computer.
 - **Not read** or **not all listed.** drawbar could not read that file or
   folder.
 - **Failed verification.** The sample or piano file is damaged. drawbar will not
