@@ -312,8 +312,9 @@ the step's end from whatever state they are in:
 When the step finishes, `w` appends the record's entries with their recorded
 versions; appending an entry twice changes nothing in the merge. When it rolls
 back, `w` leaves the library as it found it, moves any staged bytes into blobs, and
-logs `blob_added` under the record's intent for each of the step's bytes now in
-blobs. Either way it then removes the record.
+appends under the record's intent an `intent` entry with no members and a
+`blob_added` for each of the step's bytes now in blobs, or nothing when there are
+none. Either way it then removes the record.
 
 Last, `w` moves every file left in `tmp/<w>/` whose name is a blob id into blobs,
 logging `blob_added` for each first, under a new intent. Any other file there is a

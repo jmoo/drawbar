@@ -576,6 +576,12 @@ fn take(counter: &mut Option<u64>) -> u64 {
 }
 
 impl Kind {
+    /// The `Intent` entry of an intent without a label that reverses nothing.
+    pub const INTENT: Kind = Kind::Intent {
+        label: None,
+        reverses: None,
+    };
+
     /// The entities this entry names, references in values included.
     pub(crate) fn entities(&self) -> Vec<EntityId> {
         let (entity, values): (Option<&EntityId>, [Option<&Value>; 2]) = match self {

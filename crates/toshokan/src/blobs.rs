@@ -158,15 +158,11 @@ pub(crate) async fn collect_with<F: Fs>(
         fs.sync(&layout.blobs()).await?;
     }
     let intent = log.new_intent();
-    let header = Kind::Intent {
-        label: None,
-        reverses: None,
-    };
     let removals = chosen
         .removed
         .iter()
         .map(|(blob, _)| Kind::BlobRemoved { blob: *blob });
-    let entries: Vec<_> = std::iter::once(header)
+    let entries: Vec<_> = std::iter::once(Kind::INTENT)
         .chain(removals)
         .map(|kind| log.stamp(intent, kind))
         .collect();

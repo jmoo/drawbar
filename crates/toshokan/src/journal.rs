@@ -65,7 +65,8 @@ pub async fn recover<F: Fs>(
 
 /// Run `record`'s step to its end, append the entries it leaves, and clear the record.
 /// A step that finished appends the record's entries; one the files no longer allow
-/// appends only the bytes it kept, so the intent rolls back whole.
+/// appends only the bytes it kept, under a bare `Intent` entry, so the intent rolls
+/// back whole.
 pub(crate) async fn settle<F: Fs>(
     fs: &F,
     layout: &Layout,
@@ -75,9 +76,10 @@ pub(crate) async fn settle<F: Fs>(
     let ran = record.step.run(fs, layout, log.writer()).await?;
     let entries: Vec<Entry> = match &ran {
         Ran::Finished(_) => record.entries.clone(),
-        Ran::Conflict { kept, .. } => kept
-            .iter()
-            .map(|stored| log.stamp(record.intent, stored.added()))
+        Ran::Conflict { kept, .. } if kept.is_empty() => Vec::new(),
+        Ran::Conflict { kept, .. } => std::iter::once(Kind::INTENT)
+            .chain(kept.iter().map(|stored| stored.added()))
+            .map(|kind| log.stamp(record.intent, kind))
             .collect(),
     };
     log.append(fs, layout, &entries).await?;
@@ -109,14 +111,10 @@ async fn keep_staged<F: Fs>(
         return Ok(None);
     }
     let intent = log.new_intent();
-    let header = Kind::Intent {
-        label: None,
-        reverses: None,
-    };
     let added = staged
         .iter()
         .map(|&(_, blob, len)| Kind::BlobAdded { blob, len });
-    let entries: Vec<Entry> = std::iter::once(header)
+    let entries: Vec<Entry> = std::iter::once(Kind::INTENT)
         .chain(added)
         .map(|kind| log.stamp(intent, kind))
         .collect();
@@ -295,7 +293,7 @@ mod tests {
         assert_eq!(contents(&fs, &path("song")), b"theirs");
         assert_eq!(contents(&fs, &layout.blob(new)), b"new");
         let kinds: Vec<Kind> = logged(&fs, WRITER).into_iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, [Kind::BlobAdded { blob: new, len: 3 }]);
+        assert_eq!(kinds, [Kind::INTENT, Kind::BlobAdded { blob: new, len: 3 }]);
     }
 
     #[test]

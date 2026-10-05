@@ -253,7 +253,7 @@ impl<F: Fs> Library<F> {
             contents: Source::Bytes(bytes),
             expect,
         };
-        self.commit(header(), vec![save]).await
+        self.commit(vec![Kind::INTENT], vec![save]).await
     }
 
     /// Move an entity's file to `to`, where nothing may be.
@@ -264,7 +264,7 @@ impl<F: Fs> Library<F> {
             from,
             to: to.clone(),
         };
-        self.commit(header(), vec![rename]).await
+        self.commit(vec![Kind::INTENT], vec![rename]).await
     }
 
     /// Move a directory and everything in it to `to`, where nothing may be, and every
@@ -274,7 +274,7 @@ impl<F: Fs> Library<F> {
             from: from.clone(),
             to: to.clone(),
         };
-        self.commit(header(), vec![move_tree]).await
+        self.commit(vec![Kind::INTENT], vec![move_tree]).await
     }
 
     /// Move an entity's file, which must meet `expect`, into the blob store and unbind
@@ -286,7 +286,7 @@ impl<F: Fs> Library<F> {
             path,
             expect,
         };
-        self.commit(header(), vec![delete]).await
+        self.commit(vec![Kind::INTENT], vec![delete]).await
     }
 
     /// Reverse this writer's latest intent that is not undone.
@@ -353,7 +353,7 @@ impl<F: Fs> Library<F> {
 
     /// Append an intent of `kinds` that changes no file.
     async fn record(&mut self, kinds: Vec<Kind>) -> Result<Change> {
-        let mut entries = header();
+        let mut entries = vec![Kind::INTENT];
         entries.extend(kinds);
         self.commit(entries, Vec::new()).await
     }
@@ -422,11 +422,4 @@ impl<F: Fs> Library<F> {
         refreshed?;
         Ok(value)
     }
-}
-
-fn header() -> Vec<Kind> {
-    vec![Kind::Intent {
-        label: None,
-        reverses: None,
-    }]
 }
