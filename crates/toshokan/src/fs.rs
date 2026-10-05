@@ -162,7 +162,9 @@ impl fmt::Display for Capability {
 pub struct Capabilities {
     /// [`Fs::append`] works.
     pub append: bool,
-    /// [`Fs::rename`] works on files, atomically.
+    /// [`Fs::rename`] works on files, atomically. Where the backend checks for an
+    /// existing destination before it renames, as `NativeFs` does off Linux, Android
+    /// and Apple systems, a file another process creates between the two is replaced.
     pub rename_file: bool,
     /// [`Fs::rename`] works on directories, atomically, with everything inside.
     pub rename_dir: bool,
@@ -266,7 +268,8 @@ pub trait Fs {
     async fn append(&self, path: &RelPath, bytes: &[u8]) -> Result<()>;
 
     /// Move a file or directory to a path where nothing is. Refuses with
-    /// [`Error::AlreadyExists`] rather than replace anything, and refuses to move a
+    /// [`Error::AlreadyExists`] rather than replace anything; see
+    /// [`Capabilities::rename_file`] for how far that check reaches. Refuses to move a
     /// directory inside itself. Needs [`Capabilities::rename_file`] or
     /// [`Capabilities::rename_dir`] for the kind being moved.
     async fn rename(&self, from: &RelPath, to: &RelPath) -> Result<()>;

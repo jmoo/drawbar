@@ -122,10 +122,10 @@ For example, with writer `0000000000000000000000000000000a`, this line sets fiel
 
 Every intent has one `intent` entry, appended before its other entries, and every
 entry of an intent carries its intent id. `reverses` names the intent an undo or
-redo reverses. `files` is present, and `true`, on an intent whose file effects ran. A `field` entry's `prior` is what the writer's merged state held when
-it wrote; undo restores it. A `blob_added` entry records that its writer put a blob
-in the store, and a `blob_removed` entry that its writer's garbage collection
-removed it.
+redo reverses. `files` is present, and `true`, on an intent whose file effects ran.
+A `field` entry's `prior` is what the writer's merged state held when it wrote;
+undo restores it. A `blob_added` entry records that its writer put a blob in the
+store, and a `blob_removed` entry that its writer's garbage collection removed it.
 
 A JSON object without a version, an intent id or a string `kind` is unreadable
 and ends the segment, as a failed checksum does. An entry whose kind a reader does
@@ -272,10 +272,11 @@ file. Garbage collection is per writer: writer `w` may remove a blob only when
 
 It removes such blobs oldest first, by the version of its add, until its remaining
 adds total at most its byte budget. It removes the files first, then logs
-`blob_removed` for each under a new intent, so a removal that the log missed is
-logged by the next collection. When a save finds the disk full, the writer
-collects with a budget of zero, then compacts away its undo window and collects
-again, before it refuses the save. A save of bytes from blobs, as undo and redo
+`blob_removed` for each under a new intent. A removal that a crash kept from the log
+is logged by the next collection that finds the blob still eligible; until then the
+blob counts as held, and an undo that needs it fails to read it. When a save finds
+the disk full, the writer collects with a budget of zero, then compacts away its
+undo window and collects again, before it refuses the save. A save of bytes from blobs, as undo and redo
 make, keeps its source blob and only collects.
 
 ## File effects
@@ -360,11 +361,11 @@ crash before the record's removal thus appends nothing again. It appends:
 
 - when every step finished, the record's entries and every step's entries;
 - when a step changed files before the run ended, a new `intent` entry with the
-  record's `label`, `files` and no `reverses`; the entries of each finished step, and of a
-  move_files step some of whose files arrived, less each `field` `path` entry
-  whose value is the destination of a file that stayed; and a `blob_added` for each
-  of the conflicting and given-up steps' bytes now in blobs, where a save's bytes
-  are `new` and `old` and a delete's are `old`;
+  record's `label`, with `files` and without `reverses`; the entries of each
+  finished step, and of a move_files step some of whose files arrived, less each
+  `field` `path` entry whose value is the destination of a file that stayed; and a
+  `blob_added` for each of the conflicting and given-up steps' bytes now in blobs,
+  where a save's bytes are `new` and `old` and a delete's are `old`;
 - when no step changed files, a new `intent` entry with no members and those
   `blob_added` entries, or nothing when there are none.
 

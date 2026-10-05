@@ -186,11 +186,12 @@ impl Settled {
 }
 
 /// Run `record`'s steps in order, append the entries they leave that `logged` does
-/// not hold, and clear the record. The clock first passes every version the record
-/// holds, so no entry recovery stamps shares one with a recorded entry. When every step finishes the log gains all the
+/// not hold, and clear the record. When every step finishes the log gains all the
 /// record's entries. A step the files no longer allow ends the run: the steps after
 /// it are given up, and the log gains only the entries of the steps that changed
-/// files, and the bytes kept, under a new `Intent` entry that reverses nothing.
+/// files, and the bytes kept, under a new `Intent` entry that reverses nothing. The
+/// clock first passes every version the record holds, so no entry stamped here
+/// shares one with a recorded entry.
 pub(crate) async fn settle<F: Fs>(
     fs: &F,
     layout: &Layout,

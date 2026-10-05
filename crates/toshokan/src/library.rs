@@ -336,6 +336,10 @@ impl<F: Fs> Library<F> {
     /// Undo may restore any blob an entry since this writer's last compaction names,
     /// so collection keeps those; [`Library::compact`] to the undo window to keep, then
     /// collect, to bound the store.
+    ///
+    /// ⚠️ A crash after a blob is removed but before its removal is logged leaves it
+    /// held in the log until a collection finds it eligible again; an undo that needs
+    /// it meanwhile fails with [`Error::NotFound`].
     pub async fn collect(&mut self, budget: u64) -> Result<Collection> {
         let collected =
             blobs::collect(&self.fs, &self.layout, &mut self.log, &self.state, budget).await;
