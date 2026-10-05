@@ -424,7 +424,7 @@ impl Decoded {
         let (entity, parse_error) = match nord_format::from_stream(&mut std::io::Cursor::new(bytes))
         {
             Ok(entity) => (Some(Box::new(entity)), None),
-            Err(e) => (None, Some(e.to_string())),
+            Err(e) => (None, Some(failed_decode(&e))),
         };
         let verify = match &entity {
             Some(entity) => verify(entity, bytes),
@@ -439,6 +439,23 @@ impl Decoded {
             is_text: crate::document::text::is_text(bytes),
             crc: Some(nord_format::crc::crc32(bytes)),
         }
+    }
+}
+
+/// Why bytes did not decode, in words that read after the file's name: plain words for a
+/// file that ends early or is of no known format, and nord-format's own for anything else.
+fn failed_decode(e: &nord_format::error::Error) -> String {
+    use nord_format::error::{Error, ParseError};
+    const CUT_OFF: &str = "it is shorter than a Nord file should be, so it may be cut off";
+    match e {
+        Error::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => CUT_OFF.to_string(),
+        Error::Parse(ParseError::WrongBodyLength { got, expected, .. }) if got < expected => {
+            CUT_OFF.to_string()
+        }
+        Error::Parse(ParseError::UnknownFormat(_) | ParseError::UnknownFileType(_)) => {
+            "it is not a file drawbar recognizes".to_string()
+        }
+        e => e.to_string(),
     }
 }
 
@@ -4483,6 +4500,44 @@ mod tests {
         assert!(entity.container.is_none());
         assert!(matches!(entity.verify, VerifyState::NotApplicable(_)));
         assert_eq!(entity.tag(), "?");
+    }
+
+    /// What the log says of a file imported as `name` holding `bytes`.
+    fn imported(name: &str, bytes: Vec<u8>) -> Vec<String> {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        workspace.ingest(name.into(), Origin::File(name.into()), bytes, &mut log);
+        log.iter().map(|entry| entry.text.clone()).collect()
+    }
+
+    #[test]
+    fn a_cut_off_file_is_reported_in_words() {
+        let whole = Fresh::Program.bytes().unwrap();
+        for kept in [12, 20, whole.len() / 2, whole.len() - 1] {
+            let said = imported("truncated.ne5p", whole[..kept].to_vec());
+            let line = "truncated.ne5p: it is shorter than a Nord file should be, so it may be \
+                        cut off";
+            assert!(
+                said.iter().any(|text| text == line),
+                "{kept} of {} bytes: {said:?}",
+                whole.len()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_file_is_reported_in_words() {
+        for bytes in [
+            vec![0xd9, 0x00, 0x01],
+            b"CBOX\0\0\0\0\x01\x02\x03\x04".to_vec(),
+        ] {
+            let said = imported("garbage.ne5p", bytes);
+            assert!(
+                said.iter()
+                    .any(|text| text == "garbage.ne5p: it is not a file drawbar recognizes"),
+                "{said:?}"
+            );
+        }
     }
 
     #[test]
