@@ -1323,7 +1323,7 @@ mod tests {
     #[test]
     fn saving_from_a_blob_copies_it_and_keeps_the_blob() {
         let mut library = Library::with(&[("song", b"new")], Known::default());
-        let old = block_on(blobs::put(&library.fs, &library.layout, WRITER, b"old")).unwrap();
+        let old = blobs::testing::plant(&library.fs, &library.layout, b"old");
         library
             .apply(&Effect::Save {
                 entity: entity(1),

@@ -139,7 +139,6 @@ pub enum Capability {
     Append,
     RenameFile,
     RenameDir,
-    HardLink,
     ExclusiveCreate,
     Fsync,
 }
@@ -150,7 +149,6 @@ impl fmt::Display for Capability {
             Self::Append => "append to a file",
             Self::RenameFile => "rename a file",
             Self::RenameDir => "rename a directory",
-            Self::HardLink => "make a hard link",
             Self::ExclusiveCreate => "create a file exclusively",
             Self::Fsync => "sync to storage",
         })
@@ -168,8 +166,6 @@ pub struct Capabilities {
     pub rename_file: bool,
     /// [`Fs::rename`] works on directories, atomically, with everything inside.
     pub rename_dir: bool,
-    /// The backend can give a file a second name. No plan uses this yet.
-    pub hard_link: bool,
     /// [`Fs::create`] checks for an existing file atomically, even against other
     /// processes. Without it the check and the write are separate steps.
     pub exclusive_create: bool,
@@ -184,7 +180,6 @@ impl Capabilities {
         append: true,
         rename_file: true,
         rename_dir: true,
-        hard_link: true,
         exclusive_create: true,
         fsync: true,
     };
@@ -193,7 +188,6 @@ impl Capabilities {
         append: false,
         rename_file: false,
         rename_dir: false,
-        hard_link: false,
         exclusive_create: false,
         fsync: false,
     };
@@ -203,7 +197,6 @@ impl Capabilities {
             Capability::Append => self.append,
             Capability::RenameFile => self.rename_file,
             Capability::RenameDir => self.rename_dir,
-            Capability::HardLink => self.hard_link,
             Capability::ExclusiveCreate => self.exclusive_create,
             Capability::Fsync => self.fsync,
         }

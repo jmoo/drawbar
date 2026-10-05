@@ -158,7 +158,6 @@ const CAPABILITIES: Capabilities = Capabilities {
     append: true,
     rename_file: true,
     rename_dir: true,
-    hard_link: true,
     exclusive_create: true,
     fsync: cfg!(unix),
 };

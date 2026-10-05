@@ -7,37 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compact::compact;
 use crate::error::{Error, Result};
-use crate::fs::{ensure_dir, hash_file, sync_parent, Fs, RelPath};
+use crate::fs::{ensure_dir, Fs, RelPath};
 use crate::ids::{Version, WriterId};
 use crate::layout::Layout;
 use crate::log::{read_log, read_logs, Kind, LogWriter};
 use crate::merge::{merge, BlobAdd, State};
 use crate::value::BlobId;
-
-/// Store `bytes` and return their id. Storing bytes already present changes nothing.
-/// The caller logs `BlobAdded`.
-pub async fn put<F: Fs>(fs: &F, layout: &Layout, writer: WriterId, bytes: &[u8]) -> Result<BlobId> {
-    let blob = BlobId::of(bytes);
-    if fs.metadata(&layout.blob(blob)).await?.is_some() {
-        return Ok(blob);
-    }
-    let staged = stage(fs, layout, writer, bytes).await?;
-    displace(fs, layout, &staged, blob).await?;
-    sync_parent(fs, &staged).await?;
-    Ok(blob)
-}
-
-/// Move the file at `path` into the store by rename, hashing it first, and return
-/// its id and length. The caller logs `BlobAdded`.
-///
-/// ⚠️ A program writing the file between the hash and the rename leaves a blob whose
-/// name is not its hash.
-pub async fn adopt<F: Fs>(fs: &F, layout: &Layout, path: &RelPath) -> Result<(BlobId, u64)> {
-    let (blob, len) = hash_file(fs, path).await?;
-    displace(fs, layout, path, blob).await?;
-    sync_parent(fs, path).await?;
-    Ok((blob, len))
-}
 
 /// The bytes of `blob`, refused as corrupt when they do not hash to its id.
 pub async fn get<F: Fs>(fs: &F, layout: &Layout, blob: BlobId) -> Result<Vec<u8>> {
@@ -242,6 +217,19 @@ pub(crate) async fn make_room<F: Fs>(
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Put `bytes` in the store under their hash, logging nothing.
+    pub(crate) fn plant<F: Fs>(fs: &F, layout: &Layout, bytes: &[u8]) -> BlobId {
+        let blob = BlobId::of(bytes);
+        pollster::block_on(ensure_dir(fs, &layout.blobs())).unwrap();
+        pollster::block_on(fs.create(&layout.blob(blob), bytes)).unwrap();
+        blob
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use pollster::block_on;
 
@@ -255,81 +243,6 @@ mod tests {
 
     fn path(text: &str) -> RelPath {
         RelPath::new(text).unwrap()
-    }
-
-    fn store(fs: &MemFs, layout: &Layout) -> BTreeMap<RelPath, Vec<u8>> {
-        fs.files()
-            .into_iter()
-            .filter(|(path, _)| path.starts_with(&layout.blobs()))
-            .collect()
-    }
-
-    #[test]
-    fn put_names_a_blob_by_its_hash_and_leaves_nothing_in_tmp() {
-        let (fs, layout) = (MemFs::new(), Layout::default());
-        let blob = block_on(put(&fs, &layout, WRITER, b"bytes")).unwrap();
-        assert_eq!(blob, BlobId::of(b"bytes"));
-        assert_eq!(block_on(get(&fs, &layout, blob)).unwrap(), b"bytes");
-        assert_eq!(
-            fs.files().keys().cloned().collect::<Vec<_>>(),
-            [layout.blob(blob)]
-        );
-    }
-
-    #[test]
-    fn putting_bytes_already_stored_changes_nothing() {
-        let (fs, layout) = (MemFs::new(), Layout::default());
-        block_on(put(&fs, &layout, WRITER, b"bytes")).unwrap();
-        let before = fs.mutations();
-        block_on(put(&fs, &layout, OTHER, b"bytes")).unwrap();
-        assert_eq!(fs.mutations(), before);
-    }
-
-    #[test]
-    fn a_put_interrupted_anywhere_leaves_no_partial_blob() {
-        let layout = Layout::default();
-        let clean = MemFs::new();
-        block_on(put(&clean, &layout, WRITER, b"bytes")).unwrap();
-        for crash in 0..clean.mutations() {
-            let fs = MemFs::new();
-            fs.crash_after(crash);
-            assert!(block_on(put(&fs, &layout, WRITER, b"bytes")).is_err());
-            let disk = fs.restart();
-            for (path, bytes) in store(&disk, &layout) {
-                assert_eq!(path, layout.blob(BlobId::of(&bytes)), "crash {crash}");
-            }
-        }
-        assert_eq!(
-            store(&clean.restart(), &layout)
-                .into_values()
-                .collect::<Vec<_>>(),
-            [b"bytes".to_vec()],
-            "a completed put is durable"
-        );
-    }
-
-    #[test]
-    fn adopting_a_file_moves_it_into_the_store() {
-        let (fs, layout) = (MemFs::new(), Layout::default());
-        block_on(fs.create(&path("song.npno"), b"old")).unwrap();
-        let adopted = block_on(adopt(&fs, &layout, &path("song.npno"))).unwrap();
-        assert_eq!(adopted, (BlobId::of(b"old"), 3));
-        assert_eq!(
-            fs.files(),
-            [(layout.blob(adopted.0), b"old".to_vec())].into()
-        );
-    }
-
-    #[test]
-    fn adopting_bytes_already_stored_removes_the_file_and_keeps_the_blob() {
-        let (fs, layout) = (MemFs::new(), Layout::default());
-        let blob = block_on(put(&fs, &layout, WRITER, b"same")).unwrap();
-        block_on(fs.create(&path("copy"), b"same")).unwrap();
-        assert_eq!(
-            block_on(adopt(&fs, &layout, &path("copy"))).unwrap(),
-            (blob, 4)
-        );
-        assert_eq!(fs.files(), [(layout.blob(blob), b"same".to_vec())].into());
     }
 
     #[test]
@@ -383,7 +296,7 @@ mod tests {
         }
 
         fn blob(&mut self, bytes: &[u8], adds: &[(WriterId, u64, bool)]) -> BlobId {
-            let blob = block_on(put(&self.fs, &self.layout, WRITER, bytes)).unwrap();
+            let blob = testing::plant(&self.fs, &self.layout, bytes);
             let len = bytes.len() as u64;
             self.adds.insert(
                 blob,
