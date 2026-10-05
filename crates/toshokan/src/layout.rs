@@ -7,6 +7,7 @@
 //! <root>/blobs/<hash>                           a blob, named by its BLAKE3 hash
 //! <root>/journal/<writer>/                      a writer's journal of unfinished effects
 //! <root>/tmp/<writer>/                          a writer's files before they are renamed into place
+//! <root>/quarantine/<writer>/<hash>             a store file whose bytes were not its name
 //! ```
 
 use crate::error::{Error, Result};
@@ -93,6 +94,10 @@ impl Layout {
     pub fn tmp(&self, writer: WriterId) -> RelPath {
         child(&child(&self.root, "tmp"), &writer.to_string())
     }
+
+    pub fn quarantine(&self, writer: WriterId) -> RelPath {
+        child(&child(&self.root, "quarantine"), &writer.to_string())
+    }
 }
 
 fn child(parent: &RelPath, name: &str) -> RelPath {
@@ -158,6 +163,10 @@ mod tests {
                 format!(".toshokan/journal/{writer}"),
             ),
             (layout.tmp(writer), format!(".toshokan/tmp/{writer}")),
+            (
+                layout.quarantine(writer),
+                format!(".toshokan/quarantine/{writer}"),
+            ),
         ];
         for (path, text) in expected {
             assert_eq!(path.as_str(), text);

@@ -6,8 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compact::compact;
+use crate::effects::Stored;
 use crate::error::{Error, Result};
-use crate::fs::{ensure_dir, Fs, RelPath};
+use crate::fs::{ensure_dir, hash_file, Fs, RelPath};
 use crate::ids::{Version, WriterId};
 use crate::layout::Layout;
 use crate::log::{read_log, read_logs, Kind, LogWriter};
@@ -65,17 +66,85 @@ pub(crate) fn staged(layout: &Layout, writer: WriterId, blob: BlobId) -> RelPath
 pub(crate) async fn displace<F: Fs>(
     fs: &F,
     layout: &Layout,
+    writer: WriterId,
     path: &RelPath,
-    blob: BlobId,
+    stored: Stored,
 ) -> Result<()> {
+    match enter(fs, layout, writer, path, stored).await? {
+        Entered::Moved => Ok(()),
+        Entered::AlreadyStored => fs.remove_file(path).await,
+    }
+}
+
+/// How [`enter`] left a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Entered {
+    /// Renamed into the store.
+    Moved,
+    /// Still at its path, because the store holds its bytes already.
+    AlreadyStored,
+}
+
+/// Rename the file at `path`, whose bytes are `stored`, into the store, durably,
+/// unless the store holds those bytes already. A store copy whose bytes are not
+/// `stored` is moved into this writer's quarantine first, so the file takes its place.
+pub(crate) async fn enter<F: Fs>(
+    fs: &F,
+    layout: &Layout,
+    writer: WriterId,
+    path: &RelPath,
+    stored: Stored,
+) -> Result<Entered> {
+    let target = layout.blob(stored.blob);
     ensure_dir(fs, &layout.blobs()).await?;
-    match fs.rename(path, &layout.blob(blob)).await {
-        Err(Error::AlreadyExists { .. }) => fs.remove_file(path).await,
-        moved => {
-            moved?;
-            fs.sync(&layout.blobs()).await
+    for _ in 0..2 {
+        match fs.rename(path, &target).await {
+            Ok(()) => {
+                fs.sync(&layout.blobs()).await?;
+                return Ok(Entered::Moved);
+            }
+            Err(Error::AlreadyExists { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        match holds(fs, &target, stored).await? {
+            Some(true) => return Ok(Entered::AlreadyStored),
+            Some(false) => quarantine(fs, layout, writer, &target).await?,
+            None => {}
         }
     }
+    Err(Error::AlreadyExists { path: target })
+}
+
+/// Whether the file at `path` holds `stored`, by length and then by hash; `None` when
+/// there is no file.
+async fn holds<F: Fs>(fs: &F, path: &RelPath, stored: Stored) -> Result<Option<bool>> {
+    let Some(found) = fs.metadata(path).await? else {
+        return Ok(None);
+    };
+    if found.len != stored.len {
+        return Ok(Some(false));
+    }
+    Ok(Some(hash_file(fs, path).await? == (stored.blob, stored.len)))
+}
+
+/// Move a store file whose bytes are not its name to `quarantine/<writer>/<hash>`,
+/// named by the hash of its bytes.
+async fn quarantine<F: Fs>(
+    fs: &F,
+    layout: &Layout,
+    writer: WriterId,
+    path: &RelPath,
+) -> Result<()> {
+    let (found, _) = hash_file(fs, path).await?;
+    let dir = layout.quarantine(writer);
+    ensure_dir(fs, &dir).await?;
+    match fs.rename(path, &dir.join(&found.to_string())?).await {
+        Ok(()) => fs.sync(&dir).await?,
+        // The quarantine keeps these bytes already.
+        Err(Error::AlreadyExists { .. }) => fs.remove_file(path).await?,
+        Err(error) => return Err(error),
+    }
+    fs.sync(&layout.blobs()).await
 }
 
 /// What a garbage collection removed and what it left.

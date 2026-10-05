@@ -688,7 +688,7 @@ impl Step {
     ) -> Result<Ran> {
         match self {
             Self::Save { path, new, old } => save(fs, layout, writer, path, *new, *old).await,
-            Self::Delete { path, old } => delete(fs, layout, path, *old).await,
+            Self::Delete { path, old } => delete(fs, layout, writer, path, *old).await,
             Self::Move { from, to } => move_entry(fs, from, to).await,
             Self::MoveFiles {
                 from,
@@ -713,7 +713,7 @@ impl Step {
         };
         let staged = blobs::staged(layout, writer, new.blob);
         if exists(fs, &staged).await? {
-            displace(fs, layout, &staged, new.blob).await?;
+            displace(fs, layout, writer, &staged, *new).await?;
             sync_parent(fs, &staged).await?;
         }
         in_store(fs, layout, vec![*new]).await
@@ -779,7 +779,8 @@ async fn save<F: Fs>(
             true
         }
         At::File(blob) if Some(blob) == old.map(|old| old.blob) => {
-            displace(fs, layout, path, blob).await?;
+            let old = old.expect("the file holds the old bytes");
+            displace(fs, layout, writer, path, old).await?;
             place(fs, &staged, path).await?;
             true
         }
@@ -797,7 +798,7 @@ async fn save<F: Fs>(
     }
     let error = changed(fs, path, old).await?;
     if has_staged {
-        displace(fs, layout, &staged, new.blob).await?;
+        displace(fs, layout, writer, &staged, new).await?;
         sync_parent(fs, &staged).await?;
     }
     let mut kept = vec![new];
@@ -808,10 +809,16 @@ async fn save<F: Fs>(
     })
 }
 
-async fn delete<F: Fs>(fs: &F, layout: &Layout, path: &RelPath, old: Stored) -> Result<Ran> {
+async fn delete<F: Fs>(
+    fs: &F,
+    layout: &Layout,
+    writer: WriterId,
+    path: &RelPath,
+    old: Stored,
+) -> Result<Ran> {
     let finished = match at(fs, path).await? {
         At::File(blob) if blob == old.blob => {
-            displace(fs, layout, path, blob).await?;
+            displace(fs, layout, writer, path, old).await?;
             sync_parent(fs, path).await?;
             true
         }
@@ -1223,6 +1230,49 @@ mod tests {
                 set_field(1, CONTENT_FIELD, blob_value(b"new"), blob_value(b"old")),
             ]
         );
+    }
+
+    #[test]
+    fn saving_over_a_file_moves_aside_a_store_copy_that_does_not_hold_its_bytes() {
+        let known = bound(&[(1, "song", Some(b"old"))]);
+        let mut library = Library::with(&[("song", b"old")], known);
+        let old = BlobId::of(b"old");
+        block_on(ensure_dir(&library.fs, &library.layout.blobs())).unwrap();
+        block_on(library.fs.create(&library.layout.blob(old), b"")).unwrap();
+        library
+            .apply(&Effect::Save {
+                entity: entity(1),
+                path: path("song"),
+                contents: Source::Bytes(b"new".to_vec()),
+                expect: hashed(b"old"),
+            })
+            .unwrap();
+        assert_eq!(library.files(), files(&[("song", b"new")]));
+        assert_eq!(library.store(), blobs(&[b"old"]));
+        let quarantined = library
+            .layout
+            .quarantine(WRITER)
+            .join(&BlobId::of(b"").to_string())
+            .unwrap();
+        assert_eq!(library.fs.files().get(&quarantined), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn saving_over_a_file_the_store_holds_already_keeps_one_copy() {
+        let known = bound(&[(1, "song", Some(b"old"))]);
+        let mut library = Library::with(&[("song", b"old")], known);
+        blobs::testing::plant(&library.fs, &library.layout, b"old");
+        library
+            .apply(&Effect::Save {
+                entity: entity(1),
+                path: path("song"),
+                contents: Source::Bytes(b"new".to_vec()),
+                expect: hashed(b"old"),
+            })
+            .unwrap();
+        assert_eq!(library.files(), files(&[("song", b"new")]));
+        assert_eq!(library.store(), blobs(&[b"old"]));
+        assert!(library.kinds().contains(&added(b"old")));
     }
 
     #[test]

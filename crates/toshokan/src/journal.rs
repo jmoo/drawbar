@@ -321,8 +321,8 @@ async fn keep_staged<F: Fs>(
         .map(|kind| log.stamp(intent, kind))
         .collect();
     log.append(fs, layout, &entries).await?;
-    for (path, blob, _) in &staged {
-        blobs::displace(fs, layout, path, *blob).await?;
+    for &(ref path, blob, len) in &staged {
+        blobs::displace(fs, layout, log.writer(), path, Stored { blob, len }).await?;
     }
     fs.sync(&layout.tmp(log.writer())).await?;
     Ok(Some(Recovered {

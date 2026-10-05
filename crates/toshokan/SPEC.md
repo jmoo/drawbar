@@ -20,6 +20,7 @@ to the root.
 | `blobs/<hash>`                        | A blob                                     |
 | `journal/<writer>/`                   | A writer's journal of unfinished effects   |
 | `tmp/<writer>/`                       | A writer's files before they are renamed into place |
+| `quarantine/<writer>/<hash>`          | A file found in `blobs/` whose bytes were not its name |
 
 `<writer>` is a writer id. `<n>` is a decimal segment number; a writer's segments
 are numbered in increasing order. `<hash>` is the BLAKE3 hash of the file's own
@@ -27,7 +28,7 @@ bytes, in 64 hexadecimal digits. A reader ignores any other name in a writer's
 directory.
 
 Only writer `w` creates, appends to or removes files under `writers/<w>/`,
-`journal/<w>/` and `tmp/<w>/`.
+`journal/<w>/`, `tmp/<w>/` and `quarantine/<w>/`.
 
 ## Identifiers
 
@@ -258,6 +259,12 @@ bytes as `tmp/<writer>/<hash>`, syncs them, and renames them into place. A blob 
 never rewritten. A library file that an effect displaces is renamed into `blobs/`
 under the hash of its contents; when the store already holds that hash, the file is
 removed instead.
+
+A writer trusts no store file by its name. Before it removes a file because
+`blobs/<hash>` exists, it compares that store file's length, then its hash, with
+the file's. When they differ, writer `w` renames the store file to
+`quarantine/<w>/<hash of its bytes>`, or removes it when that name exists, since a
+file there holds the same bytes, and then renames its own file into place.
 
 A writer logs `blob_added` for every blob it adds or displaces. The new bytes of a
 save are not kept in the store: `content` names them while they are the library
