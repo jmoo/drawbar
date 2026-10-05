@@ -1417,8 +1417,8 @@ mod wire_tests {
         watched: Option<std::path::PathBuf>,
         at_delete: Option<Vec<(String, Vec<u8>)>>,
         at_reads: Vec<Vec<String>>,
-        /// A folder whose files each have a body byte changed when a read past the first
-        /// chunk is heard, as a disk that does not keep what was written changes them.
+        /// A folder whose files each have a body byte changed when the second read is
+        /// heard, as a disk that does not keep what was written changes them.
         spoiled: Option<std::path::PathBuf>,
         /// A folder removed when the first read is heard.
         pulled: Option<std::path::PathBuf>,
@@ -1477,7 +1477,7 @@ mod wire_tests {
             self
         }
 
-        /// Changes a body byte of each file in `dir` once a read is past the first chunk.
+        /// Changes a body byte of each file in `dir` when it hears the second read.
         fn spoiling(mut self, dir: &crate::testing::Temp) -> Puppet {
             self.spoiled = Some(dir.0.clone());
             self
@@ -1803,8 +1803,12 @@ mod wire_tests {
             if let (true, Some(dir)) = (read, &self.watched) {
                 self.at_reads.push(listed(dir));
             }
-            if let (true, Some(dir)) = (read, &self.spoiled) {
-                for name in listed(dir) {
+            let again = read
+                && self.heard.iter().any(|heard| {
+                    heard.command == cmd::READ && matches!(heard.service, Service::Program)
+                });
+            if let Some(dir) = self.spoiled.take_if(|_| again) {
+                for name in listed(&dir) {
                     let path = dir.join(name);
                     let mut bytes = std::fs::read(&path).expect("a file reads");
                     if let Some(byte) = bytes.get_mut(BODY_START) {

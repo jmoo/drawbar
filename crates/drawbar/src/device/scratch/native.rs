@@ -54,8 +54,8 @@ impl Scratch {
 
     /// A new file to be named `name`, never over one already there, under its partial
     /// name until [`Kept::finish`]: in the folder named last, made where it is missing,
-    /// or else in drawbar's own data. Never in the system's
-    /// temporary folder, which may be emptied under a file that is a slot's only copy.
+    /// or else in drawbar's own data. Never in the system's temporary folder, which may
+    /// be emptied under a file that is a slot's only copy.
     pub async fn create(&self, name: &str) -> io::Result<Kept> {
         let dir = self.dir.lock().expect("unpoisoned").clone();
         let made = |dir: &Path| std::fs::create_dir_all(dir).and_then(|()| Kept::new(dir, name));

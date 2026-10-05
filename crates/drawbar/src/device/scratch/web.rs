@@ -96,8 +96,8 @@ impl Kept {
         self.writer.ask("end", &self.path, &[]).await.map(|_| ())
     }
 
-    /// Give the file, closed, its own name. The browser offers no sync, so the move is
-    /// ordered after the writes and no more.
+    /// Give the file, closed, its own name. The browser offers no sync, so all that
+    /// holds is the order: the move comes after the writes are flushed.
     pub async fn finish(&mut self) -> io::Result<()> {
         let handle: FileSystemFileHandle = settle(self.dir.get_file_handle(&self.leaf)).await?;
         move_to(&handle, &self.dir, &self.named).await?;
