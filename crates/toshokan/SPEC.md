@@ -199,10 +199,92 @@ that write.
 
 ## Blobs
 
-`blobs/<hash>` holds bytes whose BLAKE3 hash is `<hash>`. A blob is written under
-`tmp/<writer>/` and renamed into place, and is never rewritten.
+`blobs/<hash>` holds bytes whose BLAKE3 hash is `<hash>`. A writer stages new
+bytes as `tmp/<writer>/<hash>`, syncs them, and renames them into place. A blob is
+never rewritten. A library file that an effect displaces is renamed into `blobs/`
+under the hash of its contents; when the store already holds that hash, the file is
+removed instead.
+
+A writer logs `blob_added` for every blob it adds or displaces. Garbage collection
+is per writer: writer `w` may remove a blob only when
+
+- `w`'s latest `blob_added` or `blob_removed` entry for it is an add,
+- no live value refers to it,
+- no entry inside any writer's retained undo window refers to it, and
+- no other writer's latest entry for it is an add.
+
+It removes such blobs oldest first, by the version of its add, until its remaining
+adds total at most its byte budget. It removes the files first, then logs
+`blob_removed` for each under a new intent, so a removal that the log missed is
+logged by the next collection. When a save finds the disk full, the writer
+collects with a budget of zero, then compacts away its undo window and collects
+again, before it refuses the save.
+
+## File effects
+
+An effect changes the library and logs what it did under the caller's intent:
+
+| Effect     | Library                                         | Entries |
+| ---------- | ----------------------------------------------- | ------- |
+| save       | new bytes at the path; the old file into blobs  | `blob_added` for the old file; `field` `path` and `content` where they change |
+| delete     | the file into blobs                             | `blob_added`; `field` `path` and `content` cleared |
+| rename     | the file renamed                                | `field` `path` |
+| move tree  | the directory and everything in it renamed      | `field` `path` for each entity bound under it |
+
+Each `field` entry's `prior` is the value the writer's merged state held. Before
+any step, an effect checks its precondition: a save of a new file expects no file
+at the path, and a save or delete of an existing one expects the fingerprint the
+writer last read. Length decides first, then the hash when both sides have one,
+then an equal modification time. A rename or move refuses a destination that
+exists. A refused effect changes nothing.
+
+A rename syncs the destination directory before the source directory, so a crash
+between the two leaves the entry under both names rather than under neither.
 
 ## Journal
 
-A writer records each multi-step file effect under `journal/<writer>/` before its
-first step and removes the record after its last. Its encoding is to be completed.
+Before the first step of an effect, writer `w` creates `journal/<w>/<n>.json`,
+where `<n>` is the counter of the effect's intent id, and syncs it and its
+directory. After the effect's entries are in the log, the writer removes the file.
+
+The file is one JSON object with exactly these keys:
+
+| Key       | Value                                                        |
+| --------- | ------------------------------------------------------------ |
+| `intent`  | The intent id                                                |
+| `step`    | The step, below                                              |
+| `entries` | An array of `{"version":<version>,"fact":<fact>}`: what the log gains when the step finishes |
+
+A fact is `{"field":{"entity":<entity id>,"name":<string>,"value":<value or null>,"prior":<value or null>}}`
+or `{"blob_added":{"blob":<blob id>,"len":<integer>}}`. The versions are stamped
+before the first step.
+
+A stored blob is `{"blob":<blob id>,"len":<integer>}`. A step is one of:
+
+| Step                                                     | Files |
+| -------------------------------------------------------- | ----- |
+| `{"save":{"path":..,"new":<stored>,"old":<stored or null>}}` | Put the bytes staged as `tmp/<w>/<new blob>` at `path`, which held `old` or no file |
+| `{"delete":{"path":..,"old":<stored>}}`                  | Move the file at `path`, holding `old`, into blobs |
+| `{"move":{"from":..,"to":..}}`                           | Rename a file, or a directory where the backend renames directories |
+| `{"move_files":{"from":..,"to":..,"files":[..],"dirs":[..]}}` | Create `dirs` under `to`, move each of `files`, then remove the empty `dirs` under `from`; both lists are relative, and `dirs` holds `""` for the directory itself |
+
+### Recovery
+
+At open, writer `w` settles each record in order of `<n>`. It brings the files to
+the step's end from whatever state they are in:
+
+| Step       | Finished when                                    | Otherwise |
+| ---------- | ------------------------------------------------ | --------- |
+| save       | `path` holds `new`                               | With the staged file present: rename it into place if `path` is empty, or move `old` into blobs first if `path` holds `old`. Anything else at `path` rolls back. |
+| delete     | `path` is empty and blobs holds `old`            | Move the file into blobs if it holds `old`; anything else rolls back. |
+| move       | only `to` exists                                 | Rename if only `from` exists; remove `from` if both are files with the same bytes; anything else rolls back. |
+| move_files | always                                           | Each file moves if only its source exists, and its source is removed if both hold the same bytes; a file in conflict stays where it is. |
+
+When the step finishes, `w` appends the record's entries with their recorded
+versions; appending an entry twice changes nothing in the merge. When it rolls
+back, `w` leaves the library as it found it, moves any staged bytes into blobs, and
+logs `blob_added` under the record's intent for each of the step's bytes now in
+blobs. Either way it then removes the record.
+
+Last, `w` moves every file left in `tmp/<w>/` into blobs, logging `blob_added` for
+each first, under a new intent. Recovery may itself be interrupted and repeated.
