@@ -153,7 +153,8 @@ read-only](#opening-the-lock-and-read-only)).
   `.<name>.<n>.drawbar-tmp`. In the browser
   every write is staged in `tmp/`. It also holds a slot's occupant while a write
   to the instrument replaces it, as `nord-rescued-…`, which the open's sweep
-  leaves and offers once the listing is complete.
+  leaves and offers once the listing is complete, unless it is still named
+  `.partial`.
 - `lock` is held by the one drawbar that may write the library, so a second
   drawbar opens it read-only.
 
@@ -490,9 +491,12 @@ is put back.
 
 Nor is an occupant held whole. Before a write replaces one, the worker reads it
 back through `op::read_into` into a file, a transfer chunk at a time, so it can put
-it back through `write_from` if the write fails (`worker::put`). It closes the
-file, and syncs its folder, before the delete, so a process that dies with the
-slot empty leaves the occupant on disk. A power cut is covered only where the
+it back through `write_from` if the write fails (`worker::put`). The file is
+written under a `.partial` name, closed, checked against the length and checksum
+it was read with (`op::verify_read`), and only then renamed to its own name, with
+its folder synced, all before the delete. A process that dies with the slot empty
+leaves the whole occupant on disk, and one that dies during the read leaves only
+a `.partial` file and the slot as it was. A power cut is covered only where the
 folder sync is: on macOS and Linux, not on Windows, and not in the browser, which
 offers no sync at all. The file (`device::scratch`) is in the
 library's `.drawbar/tmp/` on the desktop while the library may be written, made
@@ -508,11 +512,15 @@ should. Where the restore fails as well, or a delete may have landed, it stays,
 only copy drawbar keeps. The file is named as its rescue,
 `nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken, and the
 open's sweep of `tmp/` leaves those names, since one left by an interrupted write
-is the slot's only copy.
+is the slot's only copy. It removes the `.partial` ones, which never are, as the
+open does in the `rescued` folder.
 
 Once an open's listing is complete, in a library that may be written, each file
 named that way in its `tmp/` and, on the desktop, in the `rescued` folder is
-offered in a question (`Browser::ask_rescue`). **Keep in library** renames one
+offered in a question (`Browser::ask_rescue`). Each is read through first and
+checked against its stored checksum (`envelope::verify`). One that does not read
+is said to be no copy of the slot, and offered only to be discarded. **Keep in
+library** renames one
 in `tmp/` into the library's top level under its own name, or a free one, and
 rescans; one in `rescued` is copied in as a file from outside and deleted once
 the copy lands. **Show the file** opens its folder and asks again. **Discard**

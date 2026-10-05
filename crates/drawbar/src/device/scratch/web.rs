@@ -110,10 +110,7 @@ impl Kept {
     pub async fn source(&self) -> io::Result<impl FileSource> {
         let handle: FileSystemFileHandle = settle(self.dir.get_file_handle(&self.leaf)).await?;
         let file: web_sys::File = settle(handle.get_file()).await?;
-        Ok(Slices {
-            len: file.size() as u64,
-            file,
-        })
+        Ok(crate::ondisk::Sliced::new(file))
     }
 
     /// The file, as one to copy into the library from outside it. It must be closed
@@ -140,21 +137,5 @@ impl FileSink for Kept {
             .ask("write", &self.path, &[("at", at), ("data", data)])
             .await
             .map(|_| ())
-    }
-}
-
-/// A file the browser gave, read by slices.
-struct Slices {
-    file: web_sys::File,
-    len: u64,
-}
-
-impl FileSource for Slices {
-    fn len(&self) -> u64 {
-        self.len
-    }
-
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        crate::ondisk::slice_into(&self.file, offset, buf).await
     }
 }

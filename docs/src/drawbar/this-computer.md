@@ -132,7 +132,8 @@ bring back any you deleted.
   put the old sound back, while it replaced a sound on your keyboard, the sound
   that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
   library** adds it to your sounds so you can send it back, **Show the file**
-  shows where it is, and **Discard** deletes it.
+  shows where it is, and **Discard** deletes it. A file that does not read is
+  not a copy of the sound, and drawbar offers only to discard it.
 - **Differs only by case.** Two names in one folder differ only in upper and
   lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
   of them, so rename one to keep the library whole on every computer.

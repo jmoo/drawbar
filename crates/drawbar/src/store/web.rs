@@ -1445,6 +1445,12 @@ impl Fs for Folder {
         Ok(crc.value())
     }
 
+    async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource> {
+        Ok(crate::ondisk::Sliced::new(
+            snapshot(&self.file(path).await?).await?,
+        ))
+    }
+
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match self.handle(path).await {
             Ok(handle) if handle.kind() == FileSystemHandleKind::Directory => Ok(None),

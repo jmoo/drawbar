@@ -15,7 +15,7 @@ use super::exec::{contents, too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stale, Stat, Unkept, MOST_BYTES,
+    LibPath, Listing, Opened, Rescue, Source, Stale, Unkept, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -94,7 +94,7 @@ struct Loading {
     swept: usize,
     /// The slots' former occupants the open found in `.drawbar/tmp/`, offered once the
     /// listing is complete.
-    rescued: Vec<(String, Stat)>,
+    rescued: Vec<Rescue>,
     /// The working copies the open found with no index, asked about once the listing
     /// is complete.
     unindexed: usize,
@@ -1707,17 +1707,14 @@ impl Store {
 
     /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
     /// in drawbar's own data.
-    fn rescues(&self, in_tmp: Vec<(String, Stat)>) -> Vec<Rescue> {
-        let in_tmp = in_tmp.into_iter().map(|(name, stat)| Rescue {
-            name,
-            at: Left::Library(stat),
-        });
+    fn rescues(&self, in_tmp: Vec<Rescue>) -> Vec<Rescue> {
         #[cfg(not(target_arch = "wasm32"))]
-        let in_tmp = in_tmp.chain(self.shelved_rescues());
-        in_tmp.collect()
+        let in_tmp = in_tmp.into_iter().chain(self.shelved_rescues()).collect();
+        in_tmp
     }
 
-    /// The rescues in drawbar's own data, by name.
+    /// The rescues in drawbar's own data, by name, each read whole on this thread to
+    /// check it. A partial one is never a slot's only copy, and is deleted.
     #[cfg(not(target_arch = "wasm32"))]
     fn shelved_rescues(&self) -> Vec<Rescue> {
         let Some(entries) = self
@@ -1732,11 +1729,20 @@ impl Store {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .filter_map(|entry| {
                 let name = entry.file_name().into_string().ok()?;
-                name.starts_with(nord_usb::envelope::RESCUED)
-                    .then(|| Rescue {
-                        name,
-                        at: Left::Shelf(entry.path()),
-                    })
+                let path = entry.path();
+                if !name.starts_with(nord_usb::envelope::RESCUED) {
+                    return None;
+                }
+                if !nord_usb::envelope::is_rescue(&name) {
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+                let file = std::fs::File::open(&path).and_then(nord_usb::envelope::Positional::new);
+                Some(Rescue {
+                    name,
+                    broken: nord_usb::block_on(super::unwhole(file)),
+                    at: Left::Shelf(path),
+                })
             })
             .collect();
         found.sort_by(|a, b| a.name.cmp(&b.name));

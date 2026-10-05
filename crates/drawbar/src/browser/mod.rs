@@ -806,27 +806,48 @@ impl Browser {
 
     /// Offer what to do with a slot's former occupant an interrupted write to the
     /// instrument left on this computer. Show the file is offered where the system can
-    /// show it.
+    /// show it. A file that does not read is said to be no copy, and offered only to be
+    /// discarded.
     pub(crate) fn ask_rescue(&mut self, rescue: Rescue) {
         let act = |what| vec![Act::Rescue(rescue.clone(), what)];
         let mut others = Vec::new();
         if rescue.shows() {
             others.push(("Show the file", act(Rescuing::Show)));
         }
-        others.push(("Discard…", act(Rescuing::Confirm)));
-        self.raise(Ask {
-            title: format!("A write to the instrument left “{}”", rescue.name),
-            note: Some(
-                "It may be the only copy of what that slot held. Keep in library puts it \
-                 in the library, where you can send it back."
-                    .into(),
-            ),
-            verb: Verb::Keep,
-            acts: act(Rescuing::Keep),
-            others,
-            cancel: "Later",
-            strong: Answer::Verb,
-        });
+        let ask = match &rescue.broken {
+            None => {
+                others.push(("Discard…", act(Rescuing::Confirm)));
+                Ask {
+                    title: format!("A write to the instrument left “{}”", rescue.name),
+                    note: Some(
+                        "It may be the only copy of what that slot held. Keep in library \
+                         puts it in the library, where you can send it back."
+                            .into(),
+                    ),
+                    verb: Verb::Keep,
+                    acts: act(Rescuing::Keep),
+                    others,
+                    cancel: "Later",
+                    strong: Answer::Verb,
+                }
+            }
+            Some(why) => Ask {
+                title: format!(
+                    "A write to the instrument left “{}”, which does not read",
+                    rescue.name
+                ),
+                note: Some(format!(
+                    "It is not a whole Nord file ({why}), so it is no copy of what that \
+                     slot held, and cannot be sent back."
+                )),
+                verb: Verb::Discard,
+                acts: act(Rescuing::Discard),
+                others,
+                cancel: "Later",
+                strong: Answer::Cancel,
+            },
+        };
+        self.raise(ask);
     }
 
     /// Say why a library whose index is missing opened read-only, keeping the `copies`

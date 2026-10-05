@@ -1306,12 +1306,18 @@ fn a_kept_occupant_is_not_swept() {
     let mut first = Session::open(&root);
     first.create();
     first.close();
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-1.npno"), b"a piano").unwrap();
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-1.npno"), a_rescue()).unwrap();
     fs::write(root.at(".drawbar/tmp/library.ron"), b"half an index").unwrap();
 
     let second = Session::open(&root);
     assert_eq!(root.names(exec::TMP), ["nord-rescued-1-1.npno"]);
     assert_eq!(second.said("removed 1 leftovers"), 1);
+}
+
+/// A whole file a write to the instrument could have left: a small piano's container.
+fn a_rescue() -> Vec<u8> {
+    let at = nord_usb::Location::from_user(1, 4);
+    nord_usb::envelope::wrap("npno", at, 0, b"a piano").unwrap()
 }
 
 /// A library drawbar has written, with a slot's former occupant an interrupted write
@@ -1320,7 +1326,7 @@ fn with_rescue(root: &Temp) {
     let mut first = Session::open(root);
     first.create();
     first.close();
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), b"a piano").unwrap();
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), a_rescue()).unwrap();
 }
 
 impl Session {
@@ -1358,6 +1364,52 @@ fn a_rescue_left_in_tmp_is_offered_on_open() {
     );
 }
 
+/// A rescue still being written when drawbar stopped is never the slot's only copy, since
+/// the slot is not touched until it is whole. It is not offered, and is deleted, in the
+/// library and in drawbar's own data alike.
+#[test]
+fn a_partial_rescue_file_is_never_offered() {
+    let (root, shelf) = (Temp::new(), Temp::new());
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let partial = "nord-rescued-1-4.npno.partial";
+    fs::write(root.at(&format!("{}/{partial}", exec::TMP)), a_rescue()).unwrap();
+    fs::write(shelf.at(partial), a_rescue()).unwrap();
+    let bench = Bench::new();
+    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let mut session = Session {
+        store: store.shelving(Some(shelf.0.clone())),
+        bench,
+    };
+    session.opened();
+
+    assert_eq!(session.bench.browser.asking(), None, "nothing is offered");
+    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+    assert_eq!(shelf.names(""), Vec::<String>::new());
+}
+
+/// A rescue file that does not read, such as one an older drawbar left half written, is
+/// no copy of the slot. It is said so, and offered only to be discarded.
+#[test]
+fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let mut half = a_rescue();
+    half[..8].fill(0);
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), half).unwrap();
+
+    let mut second = Session::open(&root);
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
+    assert!(title.contains("does not read"), "{title}");
+    assert_eq!(answers, ["Later", "Show the file", "Discard"]);
+    second.choose("Discard");
+    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+}
+
 /// A library whose folder for temporary files is a link offers the device no place in
 /// it for a rescue, so a rescue never lands outside the library.
 #[cfg(unix)]
@@ -1385,7 +1437,7 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
     let mut second = Session::open(&root);
     second.choose("Keep in library");
     assert_eq!(root.names(exec::TMP), Vec::<String>::new());
-    assert_eq!(root.read("nord-rescued-1-4.npno"), b"a piano");
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
     let names: Vec<&str> = second
         .bench
         .workspace
@@ -1427,7 +1479,7 @@ fn a_rescue_discarded_is_deleted_once_confirmed() {
 fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
     let (root, shelf) = (Temp::new(), Temp::new());
     for name in ["nord-rescued-1-4.npno", "nord-rescued-2-1.nsmp"] {
-        fs::write(shelf.at(name), name.as_bytes()).unwrap();
+        fs::write(shelf.at(name), a_rescue()).unwrap();
     }
     let bench = Bench::new();
     let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
@@ -1440,7 +1492,7 @@ fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
     let (title, _) = session.bench.browser.asking().expect("asked");
     assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
     session.choose("Keep in library");
-    assert_eq!(root.read("nord-rescued-1-4.npno"), b"nord-rescued-1-4.npno");
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
     assert_eq!(shelf.names(""), ["nord-rescued-2-1.nsmp"]);
 
     let (title, _) = session.bench.browser.asking().expect("asked");

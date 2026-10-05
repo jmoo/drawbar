@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use super::sidecar::{self, Keeps, Read, Sidecar};
 use super::{
-    names, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, Keeping, LibPath, Listing,
-    Opened, Outside, Source, Stale, Stat, Unkept,
+    names, unwhole, Cmd, Complete, Event, Failure, Fingerprint, Found, Holds, Keeping, Left,
+    LibPath, Listing, Opened, Outside, Rescue, Source, Stale, Stat, Unkept,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -115,6 +115,8 @@ pub trait Fs {
     /// CRC-32 over the whole file at `path`, taken in one streaming pass that never holds
     /// it whole.
     async fn crc(&self, path: &str) -> io::Result<u32>;
+    /// The file at `path`, read by position a piece at a time, never held whole.
+    async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource>;
     /// The file at `path`, or `None` where no file is: nothing, a folder, or a link.
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
     /// [`Fs::stat`] of each of `paths`, in order.
@@ -509,7 +511,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     let mut rescued = Vec::new();
     if sweeps {
         // ⚠️ A rescue is a slot's only copy, left by a write that did not finish.
-        let rescue = |name: &str| name.starts_with(nord_usb::envelope::RESCUED);
+        let rescue = nord_usb::envelope::is_rescue;
         swept += sweep(fs, TMP, |name| !rescue(name)).await;
         // ⚠️ An index set aside names copies no row here does, and they stay for it.
         if !aside {
@@ -517,8 +519,13 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         }
         let names = fs.names(TMP).await.unwrap_or_default();
         for name in names.into_iter().filter(|name| rescue(name)) {
-            if let Ok(Some(stat)) = fs.stat(&format!("{TMP}/{name}")).await {
-                rescued.push((name, stat));
+            let path = format!("{TMP}/{name}");
+            if let Ok(Some(stat)) = fs.stat(&path).await {
+                rescued.push(Rescue {
+                    name,
+                    at: Left::Library(stat),
+                    broken: unwhole(fs.source(&path).await).await,
+                });
             }
         }
         // ⚠️ No working copy is written over: the next generation is above every one
@@ -1981,6 +1988,10 @@ mod tests {
             self.read(path)
                 .await
                 .map(|bytes| nord_format::crc::crc32(&bytes))
+        }
+
+        async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource> {
+            nord_usb::envelope::Positional::new(io::Cursor::new(self.read(path).await?))
         }
 
         async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
