@@ -236,7 +236,7 @@ The library writes these:
 | Intent          | Entries after `intent`                                             |
 | --------------- | ------------------------------------------------------------------ |
 | create          | `create` with a new entity id                                      |
-| set             | `field`, never `path` or `content`                                 |
+| set             | `field`, never `path`, `content`, `length` or `modified`           |
 | add             | `set_add`                                                          |
 | remove          | `set_remove` observing the value's live tags in the writer's merged state |
 | delete          | `delete`                                                           |
