@@ -619,9 +619,13 @@
           .join(" · ");
       }
 
-      document
-        .getElementById("retry")
-        .addEventListener("click", () => location.reload());
+      /* A reload can be answered from a cache with this same page, which may name the
+         module of a build no longer served. A new address is fetched afresh. */
+      document.getElementById("retry").addEventListener("click", () => {
+        const fresh = new URL(location.href);
+        fresh.searchParams.set("v", Date.now());
+        location.replace(fresh);
+      });
 
       let step = "download";
       try {
