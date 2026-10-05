@@ -4,9 +4,11 @@
 //! storage in the browser.
 //!
 //! A file is named as the rescue it becomes if the write and its restore both fail
-//! ([`nord_usb::envelope::rescue_name_for`]). The library's sweep of `tmp/` leaves those
-//! names alone, since one an interrupted write left behind is the slot's only copy, and
-//! the next open offers each to the user ([`crate::store::Rescue`]).
+//! ([`nord_usb::envelope::rescue_name_for`]). It is written under a
+//! [partial](nord_usb::envelope::PARTIAL) name, which the library's sweep of `tmp/`
+//! removes, and takes its own only once [`Kept::finish`] is called on it whole. The sweep
+//! leaves those names alone, since one an interrupted write left behind is the slot's
+//! only copy, and the next open offers each to the user ([`crate::store::Rescue`]).
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -32,6 +34,11 @@ fn numbered(name: &str, attempt: u32) -> String {
         Some((stem, extension)) => format!("{stem}-{n}.{extension}"),
         None => format!("{name}-{n}"),
     }
+}
+
+/// What the file to be called `leaf` is called until it is finished.
+fn partial(leaf: &str) -> String {
+    format!("{leaf}{}", nord_usb::envelope::PARTIAL)
 }
 
 /// Why no new file could be named.

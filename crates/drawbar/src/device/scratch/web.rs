@@ -10,8 +10,8 @@ use web_sys::{FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDire
 
 use nord_usb::{FileSink, FileSource};
 
-use super::{all_taken, numbered, NAMES};
-use crate::store::{buffer, private_root, settle, Writer, TMP};
+use super::{all_taken, numbered, partial, NAMES};
+use crate::store::{buffer, move_to, private_root, settle, Writer, TMP};
 
 /// The writer new files are written through, started with the first.
 #[derive(Clone, Default)]
@@ -28,28 +28,37 @@ impl Scratch {
         Ok(held.clone().expect("started above"))
     }
 
-    /// A new file named `name` under `.drawbar/tmp/`, never one already there.
+    /// A new file to be named `name` under `.drawbar/tmp/`, never over one already there,
+    /// under its partial name until [`Kept::finish`].
     pub async fn create(&self, name: &str) -> io::Result<Kept> {
         let dir = tmp().await?;
         let writer = self.writer()?;
         for attempt in 0..NAMES {
-            let leaf = numbered(name, attempt);
-            match settle::<FileSystemFileHandle>(dir.get_file_handle(&leaf)).await {
-                Ok(_) => continue,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    let path = format!("{TMP}/{leaf}");
-                    writer.ask("begin", &path, &[]).await?;
-                    return Ok(Kept {
-                        writer,
-                        dir,
-                        leaf,
-                        path,
-                    });
-                }
-                Err(e) => return Err(e),
+            let named = numbered(name, attempt);
+            let leaf = partial(&named);
+            if !free(&dir, &named).await? || !free(&dir, &leaf).await? {
+                continue;
             }
+            let path = format!("{TMP}/{leaf}");
+            writer.ask("begin", &path, &[]).await?;
+            return Ok(Kept {
+                writer,
+                dir,
+                leaf,
+                path,
+                named,
+            });
         }
         Err(all_taken(name))
+    }
+}
+
+/// Whether no file is called `leaf` in `dir`.
+async fn free(dir: &FileSystemDirectoryHandle, leaf: &str) -> io::Result<bool> {
+    match settle::<FileSystemFileHandle>(dir.get_file_handle(leaf)).await {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
     }
 }
 
@@ -68,9 +77,12 @@ async fn tmp() -> io::Result<FileSystemDirectoryHandle> {
 pub struct Kept {
     writer: Rc<Writer>,
     dir: FileSystemDirectoryHandle,
+    /// Its partial name until [`Kept::finish`], then its own.
     leaf: String,
     /// From the private storage's root, as the writer names files.
     path: String,
+    /// The name [`Kept::finish`] gives it.
+    named: String,
 }
 
 impl Kept {
@@ -82,6 +94,16 @@ impl Kept {
     /// Flush what was written and let the file go.
     pub async fn close(&mut self) -> io::Result<()> {
         self.writer.ask("end", &self.path, &[]).await.map(|_| ())
+    }
+
+    /// Give the file, closed, its own name. The browser offers no sync, so the move is
+    /// ordered after the writes and no more.
+    pub async fn finish(&mut self) -> io::Result<()> {
+        let handle: FileSystemFileHandle = settle(self.dir.get_file_handle(&self.leaf)).await?;
+        move_to(&handle, &self.dir, &self.named).await?;
+        self.leaf = self.named.clone();
+        self.path = format!("{TMP}/{}", self.leaf);
+        Ok(())
     }
 
     /// The file, read from its start. It must be closed first.

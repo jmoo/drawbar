@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use nord_usb::envelope::Positional;
 use nord_usb::{FileSink, FileSource};
 
-use super::{all_taken, numbered, NAMES};
+use super::{all_taken, numbered, partial, NAMES};
 
 /// Where new files go: the folder the app last named, shared with the worker thread, and
 /// drawbar's own data for where none is named or it cannot take one.
@@ -52,8 +52,9 @@ impl Scratch {
         *self.dir.lock().expect("unpoisoned") = dir;
     }
 
-    /// A new file named `name`, never one already there: in the folder named last, made
-    /// where it is missing, or else in drawbar's own data. Never in the system's
+    /// A new file to be named `name`, never over one already there, under its partial
+    /// name until [`Kept::finish`]: in the folder named last, made where it is missing,
+    /// or else in drawbar's own data. Never in the system's
     /// temporary folder, which may be emptied under a file that is a slot's only copy.
     pub async fn create(&self, name: &str) -> io::Result<Kept> {
         let dir = self.dir.lock().expect("unpoisoned").clone();
@@ -73,21 +74,29 @@ impl Scratch {
 
 /// One file made by [`Scratch::create`], open for writing.
 pub struct Kept {
+    /// Where it is now: its partial name until [`Kept::finish`], then its own.
     path: PathBuf,
+    /// The name [`Kept::finish`] gives it.
+    named: PathBuf,
     file: File,
 }
 
 impl Kept {
     fn new(dir: &Path, name: &str) -> io::Result<Kept> {
         for attempt in 0..NAMES {
-            let path = dir.join(numbered(name, attempt));
+            let leaf = numbered(name, attempt);
+            let named = dir.join(&leaf);
+            if named.try_exists()? {
+                continue;
+            }
+            let path = dir.join(partial(&leaf));
             match File::options()
                 .read(true)
                 .write(true)
                 .create_new(true)
                 .open(&path)
             {
-                Ok(file) => return Ok(Kept { path, file }),
+                Ok(file) => return Ok(Kept { path, named, file }),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
             }
@@ -105,9 +114,15 @@ impl Kept {
         Ok(self.path.clone())
     }
 
-    /// Put what was written on the disk, and the file's entry in its folder with it.
+    /// Put what was written on the disk.
     pub async fn close(&mut self) -> io::Result<()> {
-        self.file.sync_all()?;
+        self.file.sync_all()
+    }
+
+    /// Give the file, closed, its own name, and put that name on the disk with it.
+    pub async fn finish(&mut self) -> io::Result<()> {
+        std::fs::rename(&self.path, &self.named)?;
+        self.path = self.named.clone();
         crate::store::sync_dir(self.path.parent().unwrap_or(&self.path))
     }
 
@@ -140,11 +155,33 @@ mod tests {
         let (library, shelf) = (Temp::new(), Temp::new());
         let scratch = Scratch::shelved_in(shelf.0.clone());
         scratch.keep_in(Some(library.at(".drawbar/tmp")));
-        let kept = nord_usb::block_on(scratch.create("Grand.npno")).unwrap();
+        let mut kept = nord_usb::block_on(scratch.create("Grand.npno")).unwrap();
+        nord_usb::block_on(kept.finish()).unwrap();
         assert_eq!(
             kept.place(),
             library.at(".drawbar/tmp/Grand.npno").display().to_string()
         );
+    }
+
+    /// A file is not called by its name until it is finished, and never takes the name
+    /// of a file already there.
+    #[test]
+    fn a_file_takes_its_free_name_only_once_finished() {
+        let dir = Temp::new();
+        std::fs::write(dir.at("nord-rescued-1-1.npno"), b"earlier").unwrap();
+        let scratch = Scratch::shelved_in(dir.at("shelf"));
+        scratch.keep_in(Some(dir.0.clone()));
+        let mut kept = nord_usb::block_on(scratch.create("nord-rescued-1-1.npno")).unwrap();
+        assert_eq!(
+            dir.names(""),
+            ["nord-rescued-1-1-2.npno.partial", "nord-rescued-1-1.npno"]
+        );
+        nord_usb::block_on(kept.finish()).unwrap();
+        assert_eq!(
+            dir.names(""),
+            ["nord-rescued-1-1-2.npno", "nord-rescued-1-1.npno"]
+        );
+        assert_eq!(dir.read("nord-rescued-1-1.npno"), b"earlier");
     }
 
     /// With no library to take it, a file goes to drawbar's own data, made where missing.
@@ -154,7 +191,8 @@ mod tests {
         let shelf = data.at(SHELF);
         let scratch = Scratch::shelved_in(shelf.clone());
         scratch.keep_in(None);
-        let kept = nord_usb::block_on(scratch.create("Grand.npno")).unwrap();
+        let mut kept = nord_usb::block_on(scratch.create("Grand.npno")).unwrap();
+        nord_usb::block_on(kept.finish()).unwrap();
         assert_eq!(kept.place(), shelf.join("Grand.npno").display().to_string());
     }
 }

@@ -1038,7 +1038,11 @@ impl Folder {
 ///
 /// ⚠️ `move(folder, name)` with both arguments: Safari has no one-argument form.
 /// Chrome, Firefox and Safari all replace a file already at the name.
-async fn move_to(handle: &JsValue, dir: &FileSystemDirectoryHandle, name: &str) -> io::Result<()> {
+pub(crate) async fn move_to(
+    handle: &JsValue,
+    dir: &FileSystemDirectoryHandle,
+    name: &str,
+) -> io::Result<()> {
     let cannot = || {
         io::Error::new(
             io::ErrorKind::Unsupported,
