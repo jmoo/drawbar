@@ -18,6 +18,9 @@ project, loops and stereo included. `--generation 2`, `3` or `4` picks the
 layout, and v2 is the default. v3 and v4 also need `--unverified`, because they
 have not been played on an instrument.
 
+Both take 16-bit PCM WAVs at 44.1 kHz, mono or stereo, in the plain or the
+extensible WAV format. Convert anything else first.
+
 ## Pianos
 
 ```sh
@@ -40,7 +43,8 @@ range, or cut it in two. `trim` and `split` never write over their input, and
 `build` makes a library from a directory of WAVs, one per stroke, named
 `<root>-b<bank>-l<layer>.wav`. `060-b0-l00.wav` is MIDI note 60, the attack bank,
 the loudest layer. Banks are 0 for attack, 1 for pedal resonance and 2 for
-release. Any sample rate is accepted.
+release. The WAVs must be 16-bit PCM, mono or stereo, in the plain or the
+extensible WAV format. Any sample rate is accepted.
 
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
