@@ -9,6 +9,8 @@
 //! Nothing here asks for data the rest of the app does not already have; a card with no
 //! data says so.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use eframe::egui;
 
 use nord_usb::wire::Dependency;
@@ -288,8 +290,8 @@ impl Shown {
         device: &Device,
         queue: &Queue,
     ) -> Shown {
-        let checked: Vec<Item> = browser.picked().items().collect();
-        let locals = browser.picked().locals();
+        let checked = as_listed(browser.picked().items(), workspace);
+        let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
         let (about, going) = match checked.len() {
             0 => (About::Nothing, None),
             many if many > MANY => (About::Several(summed(&checked, workspace, device)), None),
@@ -472,6 +474,26 @@ fn grouping(item: Item, browser: &Browser, workspace: &Workspace) -> Option<Vec<
         fact("kind", kind.to_string()),
         fact("files", files.to_string()),
     ])
+}
+
+/// The selection as the library's table shows it: a slot that an asset on this computer
+/// stands for is that asset's row.
+fn as_listed(items: impl Iterator<Item = Item>, workspace: &Workspace) -> Vec<Item> {
+    let items: Vec<Item> = items.collect();
+    if !items.iter().any(|item| matches!(item, Item::Slot { .. })) {
+        return items;
+    }
+    let mut spots = BTreeMap::new();
+    for entity in workspace.listed() {
+        if let Some((class, at)) = entity.spot() {
+            spots.entry(Item::Slot { class, at }).or_insert(entity.id);
+        }
+    }
+    let listed: BTreeSet<Item> = items
+        .into_iter()
+        .map(|item| spots.get(&item).map_or(item, |id| Item::Local(*id)))
+        .collect();
+    listed.into_iter().collect()
 }
 
 /// A selection too large to describe row by row: how many rows, how many bytes, and how
@@ -1178,6 +1200,44 @@ mod tests {
             );
             bench.browser.check(item);
         }
+    }
+
+    #[test]
+    fn a_slot_copied_here_is_described_as_the_asset_it_became() {
+        let mut bench = Bench::new();
+        let (class, at) = (ObjectClass::Program, Location { bank: 6, slot: 0 });
+        let bytes = Fresh::Program.bytes().unwrap();
+        let origin = || crate::workspace::Origin::Device { class, at };
+        let mut scratch = Workspace::new(bench.ctx.clone());
+        let held = scratch.ingest("x".into(), origin(), bytes.clone(), &mut bench.log);
+        let crc = scratch.get(held).unwrap().saved.crc32.unwrap();
+        bench
+            .device
+            .pretend_bodies(class, 7, &[Some(("Africa Split", crc))]);
+        bench.browser.check(Item::Slot { class, at });
+        let copy = |bench: &Bench| {
+            let shown = bench.shell.picked.shown.as_ref().unwrap();
+            let mut offers = shown.offers.iter();
+            offers
+                .find(|(action, _)| *action == Bulk::Copy)
+                .unwrap()
+                .1
+                .live
+        };
+
+        let said = inspected(&mut bench);
+        assert!(said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(copy(&bench), "a slot on the keyboard only can be copied");
+
+        let name = "Africa Split.ne5p".to_string();
+        bench
+            .workspace
+            .ingest(name, origin(), bytes, &mut bench.log);
+        bench.device.relink(&mut bench.workspace);
+        let said = inspected(&mut bench);
+        assert!(said.iter().any(|word| word.starts_with("both")), "{said:?}");
+        assert!(!said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(!copy(&bench), "a copy is already on this computer");
     }
 
     /// ⚠️ Every class is addressed by the same banks and slots, so the sample at a
