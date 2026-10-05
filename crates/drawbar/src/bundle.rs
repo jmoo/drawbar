@@ -13,6 +13,7 @@ use nord_format::cbin::Header;
 use nord_format::{Entity, Program};
 use nord_usb::ObjectClass;
 
+use crate::browser::Kind;
 use crate::device::DeviceState;
 use crate::ondisk::OnDisk;
 use crate::store::Outside;
@@ -199,6 +200,15 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
         bodies,
         left_out,
     }))
+}
+
+/// Whether a bundle may carry an asset of this kind. [`lay_out`] decides whether it
+/// carries the instrument's file the asset is.
+pub fn carries(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Program | Kind::SetList | Kind::Piano | Kind::Sample
+    )
 }
 
 /// The member an asset becomes, or why it is left out.

@@ -441,13 +441,31 @@ pub fn fits(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Fit
         .filter_map(|id| workspace.get(id));
     for entity in locals {
         held.of += 1;
-        let verdict = fit(state, entity);
+        let verdict = match Kind::of(entity).home() {
+            Some(_) => fit(state, entity),
+            None => Fit::Refuses(format!(
+                "“{}” belongs in no folder the instrument has.",
+                entity.name
+            )),
+        };
         match verdict.allowed() {
             true => held.takes += 1,
             false => held.why = held.why.or_else(|| verdict.why().map(str::to_string)),
         }
     }
     held
+}
+
+/// Whether a bundle would carry anything checked: a slot holding something, or an asset
+/// of a kind [`crate::bundle::carries`].
+pub fn bundled(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> bool {
+    checked.iter().any(|item| match *item {
+        Item::Local(id) => workspace
+            .get(id)
+            .is_some_and(|entity| crate::bundle::carries(Kind::of(entity))),
+        Item::Slot { class, at } => state.slot(class, at).flatten().is_some(),
+        Item::Folder(_) | Item::Tag(_) => false,
+    })
 }
 
 /// The acts one bulk action runs over the checked set.
