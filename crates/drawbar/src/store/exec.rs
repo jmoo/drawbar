@@ -24,6 +24,8 @@ pub const DIR: &str = ".drawbar";
 pub const INDEX: &str = ".drawbar/library.ron";
 pub const TMP: &str = ".drawbar/tmp";
 pub const WORKING: &str = ".drawbar/working";
+/// What an index set aside is renamed to in `.drawbar/`, numbered: see [`Cmd::SetAside`].
+const DAMAGED: &str = "library.ron.damaged-";
 /// What a save's temporary sibling ends in: `.<name>.drawbar-tmp`.
 pub const TEMP: &str = ".drawbar-tmp";
 
@@ -87,6 +89,11 @@ pub trait Fs {
     /// Hold the one-writer lock for as long as this lives. `Ok(false)` when another
     /// drawbar holds it. Taking a lock already held here answers `Ok(true)`.
     async fn lock(&mut self) -> io::Result<bool>;
+    /// Let go of the lock, where it is held, for another drawbar to take.
+    async fn unlock(&mut self);
+    /// The length and CRC-32 of the index as this backend last read or wrote it, or
+    /// `None` where there was none. A commit writes the index only while it holds that.
+    fn last_index(&mut self) -> &mut Option<(u64, u32)>;
     /// Whether a file could be written at the root, found out without leaving anything
     /// there. A backend that cannot tell answers `Ok(())`, and the first write finds out.
     async fn probe(&mut self) -> io::Result<()> {
@@ -136,6 +143,12 @@ pub trait Fs {
     async fn discard(&mut self, temp: Self::Temp);
     /// Rename a file or folder. Refused when another entry is at `to`.
     async fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
+    /// Move the file at `from`, written and flushed whole, to `path`, over what `over`
+    /// allows, as [`Fs::place`] puts a temporary. Where it fails, `from` stays where it
+    /// was. `Ok(false)` where this backend does not move it there, and nothing changed.
+    async fn promote(&mut self, _from: &str, _path: &str, _over: Over) -> io::Result<bool> {
+        Ok(false)
+    }
     async fn make_dir(&mut self, path: &str) -> io::Result<()>;
     async fn remove_file(&mut self, path: &str) -> io::Result<()>;
     /// Only an empty folder.
@@ -203,6 +216,17 @@ async fn put(fs: &mut impl Fs, path: &str, what: Staged<'_>, over: Over) -> io::
         }
     }
     fs.place(temp, path, over).await
+}
+
+/// Move the file at `from` to `path`, over what `over` allows, as [`put`] puts a
+/// temporary, where the backend moves it there: see [`Fs::promote`].
+async fn moved_in(fs: &mut impl Fs, from: &str, path: &str, over: Over) -> io::Result<bool> {
+    if let Over::Held(held) = over {
+        if !matches!(fs.stat(path).await, Ok(Some(now)) if now == held) {
+            return Err(moved());
+        }
+    }
+    fs.promote(from, path, over).await
 }
 
 /// What a write may put its file over, where the file at `path` must still hold what
@@ -316,15 +340,16 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             sidecar,
             working,
             drop,
-        } => Some(Event::Committed(commit(fs, &sidecar, working, drop).await)),
+        } => Some(commit(fs, &sidecar, working, drop).await),
         Cmd::Save {
             id,
             path,
             bytes,
             expect,
             stale,
+            promote,
         } => {
-            let result = save(fs, &path, &bytes, expect, stale).await;
+            let result = save(fs, &path, &bytes, expect, stale, promote).await;
             Some(Event::Saved { id, path, result })
         }
         Cmd::Rewrite {
@@ -369,6 +394,10 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             .await
             .err()
             .map(|e| Event::Failed(format!("deleting the unsaved edits: {e}"))),
+        Cmd::SetAside => set_aside(fs)
+            .await
+            .err()
+            .map(|e| Event::Failed(format!("setting the library's index aside: {e}"))),
     };
     if let Some(event) = answered {
         answer(event);
@@ -393,16 +422,36 @@ async fn reads_between(fs: &mut impl Fs, ran: &mut u64, answer: &mut impl FnMut(
 /// parts, then [`Event::Complete`]. An error is why nothing opened, and nothing was
 /// answered.
 async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), String> {
-    let indexed = fs.names(DIR).await.is_ok();
-    // ⚠️ The index is read before anything is written: one a newer drawbar wrote keeps
-    // its `.drawbar/` as that drawbar left it.
-    let (sidecar, mut writable, unindexed) = match index(fs).await {
-        Ok(Some(sidecar)) => (sidecar, Ok(()), 0),
-        Ok(None) => match unindexed(fs).await {
+    let sidecar_dir = fs.names(DIR).await;
+    let indexed = sidecar_dir.is_ok();
+    let aside = sidecar_dir
+        .iter()
+        .flatten()
+        .any(|name| name.starts_with(DAMAGED));
+    // ⚠️ drawbar has written here before, so the lock is taken before the index and its
+    // working copies are read, and no other drawbar changes them in between. Nothing but
+    // the lock is written before the index is read: one a newer drawbar wrote keeps its
+    // `.drawbar/` as that drawbar left it.
+    let locked = match indexed {
+        true => Some(lock(fs).await),
+        false => None,
+    };
+    let index = index(fs).await;
+    let damaged = matches!(index, Index::Damaged);
+    let (mut sidecar, mut writable, unindexed) = match index {
+        Index::Read(sidecar) => (sidecar, Ok(()), 0),
+        Index::Missing => match unindexed(fs).await {
+            // The copies are kept for the index set aside, which names them.
+            Ok(_) if aside => (Sidecar::default(), Ok(()), 0),
             Ok(copies) => (Sidecar::default(), refuse_unindexed(copies), copies),
             Err(why) => (Sidecar::default(), Err(why), 0),
         },
-        Err(why) => (Sidecar::default(), Err(why), 0),
+        Index::Damaged => (
+            Sidecar::default(),
+            Err("the library's index is damaged, so drawbar leaves the library as it is".into()),
+            0,
+        ),
+        Index::Refused(why) => (Sidecar::default(), Err(why), 0),
     };
     let named: BTreeMap<String, (u64, Keeps)> = sidecar
         .assets
@@ -413,6 +462,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         })
         .collect();
     let mut working = BTreeMap::new();
+    let mut prints = BTreeMap::new();
     for (name, (id, keeps)) in &named {
         let read = fs.read(&format!("{WORKING}/{name}")).await;
         // An edit's copy is read through here, so one this build cannot read is not
@@ -425,6 +475,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         });
         match read {
             Ok(bytes) => {
+                prints.insert(*id, contents(&bytes));
                 working.insert(*id, bytes);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -437,16 +488,19 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
             }
         }
     }
-    if writable.is_ok() {
-        writable = match indexed {
-            // drawbar has written here before, so it takes the lock now and a second
-            // drawbar finds it taken.
-            true => take(fs).await,
-            false => fs
-                .probe()
-                .await
-                .map_err(|e| format!("drawbar cannot write here: {e}")),
-        };
+    let held = locked == Some(Ok(()));
+    if let Some(locked) = locked {
+        writable = writable.and(locked);
+    }
+    if writable.is_ok() && !indexed {
+        writable = fs
+            .probe()
+            .await
+            .map_err(|e| format!("drawbar cannot write here: {e}"));
+    }
+    // A library opened read-only leaves its lock to a drawbar that may write it.
+    if held && writable.is_err() {
+        fs.unlock().await;
     }
     // A library drawbar has never written holds nothing of drawbar's to sweep, and one it
     // must not write keeps what a newer drawbar left.
@@ -457,13 +511,23 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         // ⚠️ A rescue is a slot's only copy, left by a write that did not finish.
         let rescue = |name: &str| name.starts_with(nord_usb::envelope::RESCUED);
         swept += sweep(fs, TMP, |name| !rescue(name)).await;
-        swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
+        // ⚠️ An index set aside names copies no row here does, and they stay for it.
+        if !aside {
+            swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
+        }
         let names = fs.names(TMP).await.unwrap_or_default();
         for name in names.into_iter().filter(|name| rescue(name)) {
             if let Ok(Some(stat)) = fs.stat(&format!("{TMP}/{name}")).await {
                 rescued.push((name, stat));
             }
         }
+        // ⚠️ No working copy is written over: the next generation is above every one
+        // there, those kept for an index set aside among them.
+        let copies = fs.names(WORKING).await.unwrap_or_default();
+        let above = copies
+            .iter()
+            .filter_map(|name| generation(name)?.checked_add(1));
+        sidecar.next_generation = above.fold(sidecar.next_generation, u64::max);
     }
     let rows: Vec<Row> = sidecar
         .assets
@@ -484,8 +548,10 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     answer(Event::Opened(Ok(Opened {
         writable,
         indexed,
+        damaged,
         sidecar,
         working,
+        prints,
         swept,
         stranded,
         rescued,
@@ -583,25 +649,83 @@ async fn scan(
     Ok(listing)
 }
 
-/// The index, `None` where there is none, or why nothing may be written where the index
-/// is one this build must not read or rewrite.
-async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
-    let why = match fs.read(INDEX).await {
-        Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
-            Read::Known(sidecar) => return Ok(Some(sidecar)),
-            Read::Newer(version) => format!(
-                "a newer drawbar wrote this library's index (version {version}), so this one \
-                 only reads the library"
-            ),
-            Read::Unreadable(why) => format!(
-                "the library's index does not read ({why}), so drawbar leaves the library as \
-                 it is"
-            ),
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => format!("the library's index could not be read: {e}"),
+/// What an open found of the index.
+enum Index {
+    Read(Sidecar),
+    Missing,
+    /// It does not parse, and may be set aside: see [`Cmd::SetAside`].
+    Damaged,
+    /// Why nothing may be written, where the index is one this build must not read or
+    /// rewrite.
+    Refused(String),
+}
+
+/// The index, taking what it holds as [`Fs::last_index`].
+async fn index(fs: &mut impl Fs) -> Index {
+    let bytes = match fs.read(INDEX).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            *fs.last_index() = None;
+            return Index::Missing;
+        }
+        Err(e) => return Index::Refused(format!("the library's index could not be read: {e}")),
     };
-    Err(why)
+    *fs.last_index() = Some(contents(&bytes));
+    match sidecar::read(&String::from_utf8_lossy(&bytes)) {
+        Read::Known(sidecar) => Index::Read(sidecar),
+        Read::Newer(version) => Index::Refused(format!(
+            "a newer drawbar wrote this library's index (version {version}), so this one only \
+             reads the library"
+        )),
+        Read::Unknown => Index::Refused(
+            "a newer drawbar wrote this library's index, holding what this one does not know, \
+             so this one only reads the library"
+                .into(),
+        ),
+        Read::Unreadable => Index::Damaged,
+    }
+}
+
+/// The length and CRC-32 of these bytes.
+pub fn contents(bytes: &[u8]) -> (u64, u32) {
+    (bytes.len() as u64, nord_format::crc::crc32(bytes))
+}
+
+/// What a commit may write the index over: the index this backend last read or wrote, or
+/// nothing where there was none. `None` where the index holds anything else, which
+/// another drawbar wrote.
+async fn index_over(fs: &mut impl Fs) -> io::Result<Option<Over>> {
+    let now = index_now(fs).await?;
+    let over = now.map_or(Over::Nothing, |(stat, _)| Over::Held(stat));
+    Ok((now.map(|(_, held)| held) == *fs.last_index()).then_some(over))
+}
+
+/// The index's stat, with its length and CRC-32, or `None` where there is no index.
+async fn index_now(fs: &impl Fs) -> io::Result<Option<(Stat, (u64, u32))>> {
+    let Some(stat) = fs.stat(INDEX).await? else {
+        return Ok(None);
+    };
+    Ok(Some((stat, (stat.len, fs.crc(INDEX).await?))))
+}
+
+/// Rename an index that does not read to the first free [`DAMAGED`] name, where it is
+/// kept. Nothing is done where there is no index, and an index that reads again stays.
+async fn set_aside(fs: &mut impl Fs) -> Result<(), String> {
+    match index(fs).await {
+        Index::Damaged => {}
+        Index::Missing => return Ok(()),
+        Index::Read(_) | Index::Refused(_) => {
+            return Err("the library's index reads again, so it stays".into())
+        }
+    }
+    let taken = fs.names(DIR).await.map_err(|e| e.to_string())?;
+    let free = (1..)
+        .map(|n| format!("{DAMAGED}{n}"))
+        .find(|name| !taken.contains(name))
+        .expect("a folder holds finitely many names");
+    fs.rename(INDEX, &format!("{DIR}/{free}"))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The names of the working copies: none where the folder is not there. A folder that
@@ -655,6 +779,11 @@ async fn take(fs: &mut impl Fs) -> Result<(), String> {
     fs.prepare()
         .await
         .map_err(|e| format!("drawbar cannot write here: {e}"))?;
+    lock(fs).await
+}
+
+/// Hold the library's lock, or say why it cannot be held.
+async fn lock(fs: &mut impl Fs) -> Result<(), String> {
     match fs.lock().await {
         Ok(true) => Ok(()),
         Ok(false) => Err("another drawbar has this library open".to_string()),
@@ -665,6 +794,11 @@ async fn take(fs: &mut impl Fs) -> Result<(), String> {
 /// A working copy's file name.
 pub fn working_name(id: u64, generation: u64) -> String {
     format!("{id}-{generation}")
+}
+
+/// The generation a working copy's file name carries.
+fn generation(name: &str) -> Option<u64> {
+    name.rsplit_once('-')?.1.parse().ok()
 }
 
 /// Remove the files in `dir` that `stale` picks, and return how many went.
@@ -1510,37 +1644,62 @@ pub fn too_much() -> String {
     )
 }
 
+/// Write the working copies, then the index, then delete the working copies in `drop`.
+/// Nothing is written where the index holds anything but what this backend last read or
+/// wrote: another drawbar wrote it, and the library is read-only from then on.
 async fn commit(
     fs: &mut impl Fs,
     sidecar: &Sidecar,
     working: Vec<(String, Vec<u8>)>,
     drop: Vec<String>,
-) -> Result<(), Unkept> {
-    let unkept = |step, path: &str, why: String| Unkept {
-        step,
-        path: path.to_string(),
-        why,
+) -> Event {
+    let unkept = |step, path: &str, why: String| {
+        Event::Committed(Err(Unkept {
+            step,
+            path: path.to_string(),
+            why,
+        }))
+    };
+    let changed = || Event::ReadOnly("another drawbar changed this library's index".into());
+    let over = match index_over(fs).await {
+        Ok(Some(over)) => over,
+        Ok(None) => return changed(),
+        Err(e) => return unkept(Keeping::Index, INDEX, e.to_string()),
     };
     for (name, bytes) in working {
         let path = format!("{WORKING}/{name}");
-        put(fs, &path, Staged::Bytes(&bytes), Over::Anything)
-            .await
-            .map_err(|e| unkept(Keeping::Working, &path, e.to_string()))?;
+        if let Err(e) = put(fs, &path, Staged::Bytes(&bytes), Over::Anything).await {
+            return unkept(Keeping::Working, &path, e.to_string());
+        }
     }
-    let text = sidecar::write(sidecar).map_err(|why| unkept(Keeping::Index, INDEX, why))?;
-    put(fs, INDEX, Staged::Bytes(text.as_bytes()), Over::Anything)
-        .await
-        .map_err(|e| unkept(Keeping::Index, INDEX, e.to_string()))?;
+    let text = match sidecar::write(sidecar) {
+        Ok(text) => text,
+        Err(why) => return unkept(Keeping::Index, INDEX, why),
+    };
+    let ours = contents(text.as_bytes());
+    let wrote = put(fs, INDEX, Staged::Bytes(text.as_bytes()), over).await;
+    // A write that failed past its rename landed all the same.
+    let landed = wrote.is_ok() || matches!(index_now(fs).await, Ok(Some((_, now))) if now == ours);
+    if landed {
+        *fs.last_index() = Some(ours);
+    }
+    if let Err(e) = wrote {
+        let why = e.to_string();
+        return match refusal(e) {
+            Failure::Moved => changed(),
+            Failure::Room(_) | Failure::Io(_) => unkept(Keeping::Index, INDEX, why),
+        };
+    }
     for name in drop {
         let path = format!("{WORKING}/{name}");
         match fs.remove_file(&path).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                return Err(unkept(Keeping::Dropping, &path, e.to_string()))
+                return unkept(Keeping::Dropping, &path, e.to_string())
             }
             _ => {}
         }
     }
-    Ok(())
+    Event::Committed(Ok(()))
 }
 
 /// Whether the file at `path` still holds what `expect` says, taking its CRC only when its
@@ -1573,22 +1732,34 @@ async fn freshen(fs: &mut impl Fs, stale: Option<Stale>) -> Result<(), Failure> 
     .map_err(|e| Failure::Io(format!("keeping the edit: {e}")))
 }
 
+/// Write `bytes` to `path`, over what `expect` allows: by moving the working copy
+/// `promote` names into place, where it holds them and the backend moves it, and
+/// otherwise through a temporary.
 async fn save(
     fs: &mut impl Fs,
     path: &LibPath,
     bytes: &[u8],
     expect: Option<Fingerprint>,
     stale: Option<Stale>,
+    promote: Option<String>,
 ) -> Result<Fingerprint, Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
     let over = match expect {
         None => Over::Nothing,
         Some(expect) => held(fs, path, &expect).await?,
     };
-    freshen(fs, stale).await?;
-    put(fs, path.as_str(), Staged::Bytes(bytes), over)
-        .await
-        .map_err(refusal)?;
+    let promoted = match promote {
+        Some(name) => moved_in(fs, &format!("{WORKING}/{name}"), path.as_str(), over)
+            .await
+            .map_err(refusal)?,
+        None => false,
+    };
+    if !promoted {
+        freshen(fs, stale).await?;
+        put(fs, path.as_str(), Staged::Bytes(bytes), over)
+            .await
+            .map_err(refusal)?;
+    }
     let stat = fs
         .stat(path.as_str())
         .await
@@ -1711,6 +1882,9 @@ mod tests {
         reads: Rc<Cell<usize>>,
         /// How many times a file has been looked at, by a stat or a listing.
         looked: Cell<usize>,
+        /// Each file read and each lock taken, in order.
+        trace: std::cell::RefCell<Vec<String>>,
+        index: Option<(u64, u32)>,
         waiting: VecDeque<Cmd>,
         later: Option<(usize, Cmd)>,
     }
@@ -1725,6 +1899,8 @@ mod tests {
                 vanished: BTreeSet::new(),
                 reads: Rc::default(),
                 looked: Cell::default(),
+                trace: Default::default(),
+                index: None,
                 waiting: VecDeque::new(),
                 later: None,
             }
@@ -1760,7 +1936,12 @@ mod tests {
             Ok(())
         }
         async fn lock(&mut self) -> io::Result<bool> {
+            self.trace.borrow_mut().push("lock".to_string());
             Ok(true)
+        }
+        async fn unlock(&mut self) {}
+        fn last_index(&mut self) -> &mut Option<(u64, u32)> {
+            &mut self.index
         }
         async fn children(
             &self,
@@ -1804,6 +1985,7 @@ mod tests {
 
         async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             self.reads.set(self.reads.get() + 1);
+            self.trace.borrow_mut().push(path.to_string());
             Ok(path.as_bytes().to_vec())
         }
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
@@ -1936,6 +2118,22 @@ mod tests {
             .collect()
     }
 
+    /// A library drawbar has written before is locked before its index is read, so no
+    /// other drawbar changes the index between the read and the lock.
+    #[test]
+    fn the_lock_is_taken_before_the_index_is_read() {
+        let mut fs = Claimed::of([]);
+        now(run(&mut fs, Cmd::Open, &mut |_| {}));
+        let trace = fs.trace.borrow();
+        let at = |what: &str| trace.iter().position(|done| done == what);
+        assert!(
+            at("lock")
+                .zip(at(INDEX))
+                .is_some_and(|(lock, read)| lock < read),
+            "{trace:?}"
+        );
+    }
+
     /// An open lists every file by name, length and time, and reads none of them, the
     /// files the index names among them.
     #[test]
@@ -2034,9 +2232,27 @@ mod tests {
             b"new",
             Some(expect),
             None,
+            None,
         ));
         assert_eq!(saved, Err(Failure::Moved));
         assert_eq!(fs.files["Grand.ne5p"], 99, "what was written there stays");
+    }
+
+    /// A save asked to move a working copy into place, on a backend that moves no files
+    /// there, as a picked folder in the browser does not, writes the bytes instead.
+    #[test]
+    fn a_save_whose_working_copy_cannot_be_moved_writes_its_bytes() {
+        let mut fs = Claimed::of([]);
+        let saved = now(save(
+            &mut fs,
+            &path("Grand.ne5p"),
+            b"new",
+            None,
+            None,
+            Some("1-1".to_string()),
+        ));
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(fs.files["Grand.ne5p"], 3);
     }
 
     /// A read asked for leaves a sample instrument in its file, which takes none of the
@@ -2373,6 +2589,7 @@ mod tests {
             bytes: vec![0; 3],
             expect: None,
             stale: None,
+            promote: None,
         });
         let mut listed = Vec::new();
         let mut saved = false;

@@ -113,6 +113,7 @@ impl Backend {
             root: root.clone(),
             prepared: false,
             lock: None,
+            index: None,
             stop: stop.clone(),
             commands: Some(commands),
             held: None,
@@ -203,6 +204,8 @@ struct Disk {
     prepared: bool,
     /// The lock file, held open, and locked, while this library is written.
     lock: Option<File>,
+    /// The index as this backend last read or wrote it: see [`Fs::last_index`].
+    index: Option<(u64, u32)>,
     stop: Arc<AtomicBool>,
     /// The commands sent, in order. `None` in a test that runs commands one by one.
     commands: Option<Receiver<Cmd>>,
@@ -501,6 +504,14 @@ impl Fs for Disk {
         }
     }
 
+    async fn unlock(&mut self) {
+        self.lock = None;
+    }
+
+    fn last_index(&mut self) -> &mut Option<(u64, u32)> {
+        &mut self.index
+    }
+
     async fn children(
         &self,
         dir: &str,
@@ -629,6 +640,27 @@ impl Fs for Disk {
         sync_dir(parent(&target))
     }
 
+    /// A working copy is renamed over its target, or linked where nothing may be there,
+    /// so nothing is written. Across volumes, or on one without links, nothing moves.
+    async fn promote(&mut self, from: &str, path: &str, over: Over) -> io::Result<bool> {
+        let (source, target) = (self.locate(from)?, self.locate(path)?);
+        let moved = match over.replaces() {
+            true => fs::rename(&source, &target),
+            false => fs::hard_link(&source, &target),
+        };
+        match moved {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            Err(_) => return Ok(false),
+        }
+        if !over.replaces() {
+            let _ = fs::remove_file(&source);
+        }
+        sync_dir(parent(&target))?;
+        sync_dir(parent(&source))?;
+        Ok(true)
+    }
+
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {
         let target = self.locate(path)?;
         fs::create_dir_all(&target)?;
@@ -664,6 +696,7 @@ mod tests {
             root: root.0.clone(),
             prepared: false,
             lock: None,
+            index: None,
             stop: Arc::default(),
             commands: None,
             held: None,
@@ -956,6 +989,7 @@ mod tests {
                 bytes: b"saved".to_vec(),
                 expect: None,
                 stale: None,
+                promote: None,
             },
         );
         assert!(
@@ -1012,6 +1046,7 @@ mod tests {
                 bytes: b"saved".to_vec(),
                 expect: None,
                 stale: None,
+                promote: None,
             },
         );
         assert!(
@@ -1026,6 +1061,7 @@ mod tests {
                 bytes: b"saved".to_vec(),
                 expect: Some(Fingerprint::unread(x)),
                 stale: None,
+                promote: None,
             },
         );
         assert!(

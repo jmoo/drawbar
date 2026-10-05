@@ -245,6 +245,12 @@ pub enum Act {
         copies: usize,
         confirmed: bool,
     },
+    /// Set aside the index of a library that does not read it, and open it again without
+    /// it: asked again first unless `confirmed`. The app runs the confirmed one, not
+    /// [`apply`], since it reaches the library's files.
+    SetAside {
+        confirmed: bool,
+    },
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -354,6 +360,7 @@ impl Act {
             | Act::OpenLibraryDiscarding(_)
             | Act::Rescue(..)
             | Act::DropUnindexed { .. }
+            | Act::SetAside { .. }
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -811,6 +818,7 @@ pub fn apply(
                 copies,
                 confirmed: false,
             } => browser.ask_drop_unindexed(copies),
+            Act::SetAside { confirmed: false } => browser.ask_set_aside(),
             // The app takes these before the browser's acts run.
             Act::PickLibrary
             | Act::OpenLibrary(_)
@@ -818,7 +826,8 @@ pub fn apply(
             | Act::Rescue(..)
             | Act::DropUnindexed {
                 confirmed: true, ..
-            } => {}
+            }
+            | Act::SetAside { confirmed: true } => {}
         }
     }
 }

@@ -434,6 +434,105 @@ fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
     );
 }
 
+/// A launch writes no new generation of an unsaved edit nothing has changed since it was
+/// kept, whether its file is there or went missing: a large piano would otherwise cost
+/// its size again at every launch.
+#[test]
+fn an_unchanged_working_copy_is_not_rewritten_at_launch() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let kept = first.create();
+    let gone = first.create();
+    first.sync();
+    for id in [kept, gone] {
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited, log);
+    }
+    first.close();
+    let path = rows(&root)[&gone].path.clone().expect("a file");
+    fs::remove_file(root.at(path.as_str())).unwrap();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 2, "{working:?}");
+
+    for launch in 0..2 {
+        let mut session = Session::open(&root);
+        assert!(session.bench.browser.folders.missing.contains(&gone));
+        session.autosave();
+        session.close();
+        assert_eq!(root.names(".drawbar/working"), working, "launch {launch}");
+    }
+}
+
+/// An edit that comes back to the bytes its working copy holds writes no new generation.
+#[test]
+fn an_edit_back_to_what_its_working_copy_holds_writes_no_new_one() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = session.bytes(id);
+    let edited = with_gain(&saved, "96");
+    for bytes in [&edited, &with_gain(&saved, "12"), &edited] {
+        let log = &mut session.bench.log;
+        session
+            .bench
+            .workspace
+            .replace_bytes(id, bytes.clone(), log);
+        if *bytes == edited {
+            session.autosave();
+        }
+    }
+    session.close();
+    assert_eq!(root.names(".drawbar/working"), [working_name(id, 1)]);
+}
+
+/// Saving an edit whose working copy holds exactly what the save writes moves that copy
+/// into place, over the file or where the file went missing, so the save takes no room of
+/// its own: the file is the copy's own data on disk.
+#[cfg(unix)]
+#[test]
+fn saving_an_unchanged_working_copy_promotes_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let kept = first.create();
+    let gone = first.create();
+    first.sync();
+    for id in [kept, gone] {
+        let edited = with_gain(&first.bytes(id), "96");
+        let log = &mut first.bench.log;
+        first.bench.workspace.replace_bytes(id, edited, log);
+    }
+    first.close();
+    let paths = |id| rows(&root)[&id].path.clone().expect("a file").to_string();
+    let (kept_at, gone_at) = (paths(kept), paths(gone));
+    fs::remove_file(root.at(&gone_at)).unwrap();
+    let inode = |path: &str| fs::metadata(root.at(path)).unwrap().ino();
+    let copies = |id| {
+        let copy = rows(&root)[&id].working.expect("a working copy");
+        format!(".drawbar/working/{}", working_name(id, copy.generation))
+    };
+    let copied = [
+        (kept_at, inode(&copies(kept))),
+        (gone_at, inode(&copies(gone))),
+    ];
+
+    let mut second = Session::open(&root);
+    let edits = [kept, gone].map(|id| second.bytes(id));
+    for id in [kept, gone] {
+        second.bench.workspace.mark_saved(id);
+    }
+    second.sync();
+    second.sync();
+    for ((path, copy), bytes) in copied.iter().zip(edits) {
+        assert_eq!(root.read(path), bytes, "{path} holds the edit");
+        assert_eq!(inode(path), *copy, "{path} is its working copy, moved");
+    }
+    assert_eq!(root.names(".drawbar/working"), [""; 0]);
+}
+
 /// A working copy that does not read is the only copy of its edit, so the library opens
 /// read-only rather than drop it, and the edit comes back once the copy reads again.
 #[cfg(unix)]
@@ -652,6 +751,82 @@ fn a_library_without_its_index_opens_without_its_edits_when_asked() {
 
     let third = Session::open(&root);
     assert_eq!(third.store.read_only(), None);
+}
+
+/// An index that does not parse opens the library read-only, says so without the
+/// parser's words, and offers to set it aside. Set aside, it is kept under a new name,
+/// the library opens for writing without it, and the working copies it named are never
+/// swept or written over.
+#[test]
+fn a_damaged_index_can_be_set_aside_and_its_copies_survive() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+    let kept = root.names(".drawbar/working");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let damaged = b"(version: 1, next_id: 2, ass";
+    fs::write(root.at(exec::INDEX), damaged).unwrap();
+
+    let mut second = Session::open(&root);
+    let why = second.store.read_only().expect("read-only").to_string();
+    assert!(why.contains("damaged"), "{why}");
+    assert!(!why.contains("Expected") && !why.contains("Probe"), "{why}");
+    let (title, answers) = second.bench.browser.asking().expect("a question");
+    assert_eq!(title, "This library's index is damaged");
+    assert_eq!(
+        answers,
+        ["Keep read-only", "Set it aside and open without it…"]
+    );
+    let acts = second
+        .bench
+        .browser
+        .answer("Set it aside and open without it…");
+    second.bench.act(acts);
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Open the library without its index?");
+    let acts = second.bench.browser.answer("Open without it");
+    assert!(
+        matches!(
+            acts[..],
+            [crate::browser::Act::SetAside { confirmed: true }]
+        ),
+        "{acts:?}"
+    );
+    second.store.set_aside();
+    second.close();
+    assert_eq!(
+        root.names(".drawbar"),
+        ["library.ron.damaged-1", "lock", "tmp", "working"]
+    );
+    assert_eq!(root.read(".drawbar/library.ron.damaged-1"), damaged);
+
+    let mut third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+    assert_eq!(third.bench.browser.asking(), None, "nothing to ask");
+    let again = third.only();
+    let other = with_gain(&third.bytes(again), "12");
+    let log = &mut third.bench.log;
+    third.bench.workspace.replace_bytes(again, other, log);
+    third.close();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 2, "{working:?}");
+    assert!(working.contains(&kept[0]), "{working:?}");
+    assert_eq!(
+        root.read(&format!(".drawbar/working/{}", kept[0])),
+        edited,
+        "the kept copy is not written over"
+    );
+
+    Session::open(&root).close();
+    assert!(
+        root.names(".drawbar/working").contains(&kept[0]),
+        "an open with an index does not sweep it either"
+    );
 }
 
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
@@ -1506,10 +1681,29 @@ fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
     );
     assert_eq!(
         root.names(".drawbar"),
-        ["library.ron", "tmp"],
-        "no lock taken"
+        ["library.ron", "lock", "tmp"],
+        "nothing but the lock"
     );
     assert_eq!(root.names(exec::TMP), ["theirs"], "nothing swept");
+}
+
+/// A drawbar that opens a library read-only, here for an index it must not read, holds
+/// no lock, so a drawbar that may write the library still can.
+#[test]
+fn a_library_opened_read_only_leaves_its_lock_to_a_drawbar_that_may_write_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let index = root.read(exec::INDEX);
+    fs::write(root.at(exec::INDEX), "(version: 99, next_id: 3)").unwrap();
+    let reading = Session::open(&root);
+    assert!(reading.store.read_only().is_some());
+
+    fs::write(root.at(exec::INDEX), index).unwrap();
+    let writing = Session::open(&root);
+    assert_eq!(writing.store.read_only(), None);
+    drop(reading);
 }
 
 #[test]
@@ -1522,6 +1716,40 @@ fn a_second_drawbar_on_one_library_only_reads_it() {
     assert_eq!(first.store.read_only(), None);
     let why = second.store.read_only().expect("read-only");
     assert!(why.contains("another drawbar"), "{why}");
+}
+
+/// An index another writer changed since this drawbar read or wrote it, here to one of
+/// the same length, is never written over: the commit writes nothing, not even its
+/// working copies, and the library turns read-only and says why.
+#[test]
+fn a_commit_over_an_index_changed_by_another_writer_stops() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.sync();
+    let ours = String::from_utf8(root.read(exec::INDEX)).unwrap();
+    let theirs = ours.replace("Sunday", "Monday");
+    assert_eq!(theirs.len(), ours.len());
+    fs::write(root.at(exec::INDEX), &theirs).unwrap();
+
+    let edited = with_gain(&session.bytes(id), "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, edited, log);
+    session.bench.browser.tags.make("Later").unwrap();
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, queue, Pass::Full);
+    session.until(|session| session.store.read_only().is_some());
+    let why = session.store.read_only().unwrap();
+    assert!(why.contains("another drawbar changed"), "{why}");
+    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
+    assert_eq!(root.names(".drawbar/working"), [""; 0], "nothing written");
 }
 
 /// Two drawbars can open a folder neither has written, since opening takes no lock. The
@@ -2034,7 +2262,44 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
     assert_eq!(sidecar::read(&text), Read::Known(index));
 
     assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
-    assert!(matches!(sidecar::read("not an index"), Read::Unreadable(_)));
+    assert_eq!(sidecar::read("not an index"), Read::Unreadable);
+}
+
+/// A field or a kind this build does not know, at any depth, is what a newer drawbar that
+/// kept the version wrote, and never taken for a damaged index.
+#[test]
+fn an_index_holding_what_this_build_does_not_know_is_known_as_that() {
+    for text in [
+        "(version: 1, next_id: 2, colors: {})",
+        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), color: 3)})"#,
+        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), fingerprint: Some((len: 1, modified: None, crc: None, sha: 0)))})"#,
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Shared(4))})",
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Rescued(bank: 0, slot: 1, page: 2))})",
+        "(version: 1, next_id: 2, assets: {1: (name: \"a\", working: Some((generation: 1, keeps: Bytes, at: 0)))})",
+    ] {
+        assert_eq!(sidecar::read(text), Read::Unknown, "{text}");
+    }
+}
+
+/// An index a newer drawbar wrote under this build's version, holding a field this one
+/// does not know, opens the library read-only, and the field survives.
+#[test]
+fn an_index_with_an_unknown_field_opens_read_only() {
+    let root = Temp::new();
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    let theirs = "(version: 1, next_id: 3, colors: {1: \"red\"})";
+    fs::write(root.at(exec::INDEX), theirs).unwrap();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+
+    let mut session = Session::open(&root);
+    let why = session.store.read_only().expect("read-only");
+    assert!(why.contains("newer drawbar"), "{why}");
+    let id = session.only();
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session.bench.browser.tags.set(id, tag, true);
+    session.create();
+    session.close();
+    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
 }
 
 /// An asset made with New keeps saying so once its file is written and drawbar opens

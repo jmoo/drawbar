@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::cache::{self, Cache};
 use super::diff::{self, match_files, Known};
-use super::exec::{too_much, working_name};
+use super::exec::{contents, too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
@@ -81,6 +81,8 @@ struct Loading {
     claimed: BTreeSet<u64>,
     /// The working copies not yet taken up, by id.
     working: BTreeMap<u64, Vec<u8>>,
+    /// The length and CRC-32 of every working copy read, by id, taken up or not.
+    prints: BTreeMap<u64, (u64, u32)>,
     /// The id the next file the index does not name takes, unless the workspace has
     /// given it out since.
     next: u64,
@@ -96,6 +98,9 @@ struct Loading {
     /// The working copies the open found with no index, asked about once the listing
     /// is complete.
     unindexed: usize,
+    /// The open found an index that does not read, asked about once the listing is
+    /// complete.
+    damaged: bool,
     /// Each rename sent while the listing is in flight that has not failed. A part the
     /// backend gathered before it ran names what it moved where it was.
     moves: Vec<Rename>,
@@ -264,6 +269,8 @@ struct Kept {
     /// The stamp of what the copy holds: the [`LocalEntity::stamp`] of the bytes, or
     /// the stamp of the edit (see [`Workspace::kept_edit`]).
     stamp: u64,
+    /// The length and CRC-32 of the copy's file.
+    holds: (u64, u32),
 }
 
 pub struct Store {
@@ -1319,8 +1326,10 @@ impl Store {
         let Opened {
             writable,
             indexed,
+            damaged,
             sidecar,
             mut working,
+            mut prints,
             swept,
             stranded,
             rescued,
@@ -1366,6 +1375,9 @@ impl Store {
             if let Some(bytes) = working.remove(&id) {
                 working.insert(moved, bytes);
             }
+            if let Some(print) = prints.remove(&id) {
+                prints.insert(moved, print);
+            }
             if let Some(copy) = row.working {
                 self.renamed
                     .push((moved, working_name(id, copy.generation)));
@@ -1382,12 +1394,14 @@ impl Store {
             rows,
             claimed: BTreeSet::new(),
             working,
+            prints,
             next,
             dirs: Vec::new(),
             files: 0,
             swept,
             rescued,
             unindexed,
+            damaged,
             moves: Vec::new(),
             held: Default::default(),
         });
@@ -1508,7 +1522,8 @@ impl Store {
     }
 
     /// Put assets back in the workspace, with the edits their working copies kept over
-    /// their files, and record what each was restored as.
+    /// their files, and record what each was restored as. One whose file is missing holds
+    /// nothing saved, and counts as unsaved before its working copy is settled.
     fn restored(
         &mut self,
         back: Vec<Saved>,
@@ -1524,7 +1539,11 @@ impl Store {
             workspace.restore_edit(id, edit);
         }
         for id in ids {
-            self.settle(id, workspace, &loading.rows);
+            if self.records.get(&id).is_some_and(|record| record.missing) {
+                workspace.unsave(id);
+            }
+            let copy = loading.rows.get(&id).and_then(|row| row.working);
+            self.settle(id, workspace, copy.zip(loading.prints.get(&id).copied()));
             self.place_ahead(id, workspace, folders);
             self.recall(id, workspace);
         }
@@ -1641,7 +1660,7 @@ impl Store {
         let mut viewed = Vec::new();
         for (id, row) in loading.rows.iter().filter(|(_, row)| row.path.is_none()) {
             if let (Some(bytes), Some(copy)) = (loading.working.remove(id), row.working) {
-                viewed.push((*id, copy));
+                viewed.push((*id, copy, contents(&bytes)));
                 back.push(saved_from(*id, row, bytes));
             }
         }
@@ -1654,15 +1673,12 @@ impl Store {
         // A file gone since the walk listed it went somewhere the walk may not have
         // looked, so the tree is listed again.
         self.owes |= !complete.gone.is_empty();
-        for id in &missing {
-            workspace.unsave(*id);
-            browser.folders.missing.insert(*id);
-        }
-        for (id, copy) in viewed {
+        browser.folders.missing.extend(missing);
+        for (id, copy, holds) in viewed {
             let stamp = workspace.get(id).map_or(0, |entity| entity.stamp);
             let mut record = Record::of_file(LibPath::root(), None);
             record.path = None;
-            record.working = Some(Kept { copy, stamp });
+            record.working = Some(Kept { copy, stamp, holds });
             self.records.insert(id, record);
         }
         browser.folders.sync(&loading.dirs);
@@ -1683,6 +1699,9 @@ impl Store {
         if loading.unindexed > 0 {
             let reachable = self.backend.reveal().is_some();
             browser.ask_unindexed(loading.unindexed, reachable);
+        }
+        if loading.damaged {
+            browser.ask_damaged();
         }
     }
 
@@ -1751,6 +1770,12 @@ impl Store {
     /// without them. The library must be opened again after, since it opened read-only.
     pub fn drop_unindexed(&mut self) {
         self.write(Cmd::DropUnindexed);
+    }
+
+    /// Set aside the library's index, which does not read, to open it again without it.
+    /// The library must be opened again after, since it opened read-only.
+    pub fn set_aside(&mut self) {
+        self.write(Cmd::SetAside);
     }
 
     /// Move a rescue into the library's top level, under its own name or a free one, where
@@ -1828,14 +1853,14 @@ impl Store {
     }
 
     /// Record the stamps of an asset just restored, and the working copy it came back
-    /// with, so nothing is written again for it. A copy whose edit is no longer held is
-    /// dropped at the next full pass.
-    fn settle(&mut self, id: u64, workspace: &Workspace, rows: &BTreeMap<u64, Row>) {
+    /// with, read, and what that holds, so nothing is written again for it. A copy whose
+    /// edit is no longer held is dropped at the next full pass.
+    fn settle(&mut self, id: u64, workspace: &Workspace, kept: Option<(Working, (u64, u32))>) {
         let (Some(entity), Some(record)) = (workspace.get(id), self.records.get_mut(&id)) else {
             return;
         };
         record.saved = entity.saved.stamp;
-        let Some(copy) = rows.get(&id).and_then(|row| row.working) else {
+        let Some((copy, holds)) = kept else {
             record.working = None;
             return;
         };
@@ -1843,7 +1868,7 @@ impl Store {
             Keeps::Bytes => entity.is_unsaved().then_some(entity.stamp),
             Keeps::Edit => workspace.kept_edit(id).map(|(_, stamp)| stamp),
         };
-        record.working = stamp.map(|stamp| Kept { copy, stamp });
+        record.working = stamp.map(|stamp| Kept { copy, stamp, holds });
         if record.working.is_none() {
             self.stale.push(working_name(id, copy.generation));
         }
@@ -1974,7 +1999,7 @@ impl Store {
             let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
             workspace.restore(back, Some(next), log);
             for id in ids {
-                self.settle(id, workspace, &BTreeMap::new());
+                self.settle(id, workspace, None);
                 self.place_ahead(id, workspace, &browser.folders);
                 self.recall(id, workspace);
             }
@@ -2716,13 +2741,17 @@ impl Store {
                 .records
                 .remove(&entity.id)
                 .and_then(|record| record.working);
-            let stale = stale(
-                entity.id,
-                working.as_ref(),
-                Keeps::Bytes,
-                entity.saved.stamp,
-                || Some(bytes()),
-            );
+            let promote = promoted(entity.id, working.as_ref(), &entity.saved.bytes);
+            let stale = match promote {
+                Some(_) => None,
+                None => stale(
+                    entity.id,
+                    working.as_ref(),
+                    Keeps::Bytes,
+                    entity.saved.stamp,
+                    || Some(bytes()),
+                ),
+            };
             self.records.insert(
                 entity.id,
                 Record {
@@ -2738,6 +2767,7 @@ impl Store {
                 bytes: bytes(),
                 expect: None,
                 stale,
+                promote,
             });
             return true;
         }
@@ -2772,26 +2802,31 @@ impl Store {
         let save = (unsaved && !record.saving).then(|| {
             record.saved = entity.saved.stamp;
             record.saving = true;
-            let stale = stale(
-                entity.id,
-                record.working.as_ref(),
-                Keeps::Bytes,
-                entity.saved.stamp,
-                || Some(bytes()),
-            );
-            (record.fingerprint.filter(|_| !missing), stale)
+            let promote = promoted(entity.id, record.working.as_ref(), &entity.saved.bytes);
+            let stale = match promote {
+                Some(_) => None,
+                None => stale(
+                    entity.id,
+                    record.working.as_ref(),
+                    Keeps::Bytes,
+                    entity.saved.stamp,
+                    || Some(bytes()),
+                ),
+            };
+            (record.fingerprint.filter(|_| !missing), stale, promote)
         });
         if let Some(from) = from {
             self.cache.moved(&from, path);
             self.rename(from, path.clone(), Vec::new());
         }
-        if let Some((expect, stale)) = save {
+        if let Some((expect, stale, promote)) = save {
             self.write(Cmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect,
                 stale,
+                promote,
             });
         }
         !waits
@@ -2888,11 +2923,21 @@ impl Store {
                 let Ok(bytes) = bytes else {
                     return;
                 };
+                let holds = contents(&bytes);
+                // A copy that holds these bytes already, under another stamp, keeps them.
+                if let Some(held) = record
+                    .working
+                    .as_mut()
+                    .filter(|held| (held.copy.keeps, held.holds) == (keeps, holds))
+                {
+                    held.stamp = stamp;
+                    return;
+                }
                 let generation = self.next_generation;
                 self.next_generation += 1;
                 writes.push((working_name(entity.id, generation), bytes));
                 let copy = Working { generation, keeps };
-                if let Some(old) = record.working.replace(Kept { copy, stamp }) {
+                if let Some(old) = record.working.replace(Kept { copy, stamp, holds }) {
                     drops.push(working_name(entity.id, old.copy.generation));
                 }
             }
@@ -3072,6 +3117,17 @@ fn stale(
         name: working_name(id, held.copy.generation),
         copy: copy()?,
     })
+}
+
+/// `id`'s working copy, by name, where it holds exactly `bytes`, the bytes a save is about
+/// to write, so the save can move it into place.
+fn promoted(id: u64, working: Option<&Kept>, bytes: &[u8]) -> Option<String> {
+    let held = working.filter(|held| {
+        held.copy.keeps == Keeps::Bytes
+            && held.holds.0 == bytes.len() as u64
+            && held.holds == contents(bytes)
+    })?;
+    Some(working_name(id, held.copy.generation))
 }
 
 /// The paths a change to the folders acts on, where it was and where it goes.

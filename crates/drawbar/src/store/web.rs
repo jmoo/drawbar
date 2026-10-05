@@ -690,6 +690,8 @@ struct Folder {
     moves: Moves,
     /// `.drawbar/` and its folders have been made, once, for this page.
     prepared: bool,
+    /// The index as this backend last read or wrote it: see [`Fs::last_index`].
+    index: Option<(u64, u32)>,
     /// Names the next temporary file under `.drawbar/tmp/`.
     temps: u64,
     room: Rc<RefCell<Room>>,
@@ -749,6 +751,7 @@ impl Folder {
             writes,
             moves,
             prepared: false,
+            index: None,
             temps: 0,
             room,
             asked: false,
@@ -1322,6 +1325,14 @@ impl Fs for Folder {
         }
     }
 
+    async fn unlock(&mut self) {
+        self.let_go().await;
+    }
+
+    fn last_index(&mut self) -> &mut Option<(u64, u32)> {
+        &mut self.index
+    }
+
     /// A picked folder is written only while the browser lets the page write it.
     async fn probe(&mut self) -> io::Result<()> {
         if matches!(self.writes, Writes::Worker(_)) {
@@ -1553,6 +1564,24 @@ impl Fs for Folder {
             self.follow(from, to).await;
         }
         moved
+    }
+
+    /// Only in the private file system, where a move lands without reading the file.
+    async fn promote(&mut self, from: &str, path: &str, over: Over) -> io::Result<bool> {
+        if !matches!(self.writes, Writes::Worker(_)) {
+            return Ok(false);
+        }
+        if !over.replaces() && self.taken(path).await? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let Ok(file) = self.file(from).await else {
+            return Ok(false);
+        };
+        if over.replaces() {
+            self.forget(path);
+        }
+        let (dir, leaf) = self.spot(path).await?;
+        Ok(move_to(&file, &dir, &leaf).await.is_ok())
     }
 
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {
