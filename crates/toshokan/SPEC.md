@@ -59,7 +59,12 @@ A value is a JSON object with exactly one key, naming its type:
 | `{"ref":"<entity id>"}`  | A reference to an entity    |
 | `{"blob":"<blob id>"}`   | A reference to a blob       |
 
-Values are ordered by type in the order of this table, then by contents.
+Values are ordered by type in the order of this table, then by contents: text by
+its UTF-8 bytes, which is Unicode code point order; integers by number; `false`
+before `true`; references by entity id; blobs by blob id. Entity and intent ids
+are ordered by writer id, compared as a 128-bit number, then by counter, and blob
+ids by their bytes, which is the order of their text. Names are ordered by their
+UTF-8 bytes.
 
 Four field names are toshokan's own, written only by file effects and binding:
 `path` holds an entity's library path as text; `content` holds the blob id of the
@@ -104,7 +109,7 @@ reader accepts any order. A member marked `?` is omitted when absent.
 | `delete`       | `entity` entity id                                       |
 | `field`        | `entity` entity id, `name` string, `value?` value, `prior?` value |
 | `set_add`      | `entity` entity id, `name` string, `value` value         |
-| `set_remove`   | `entity` entity id, `name` string, `value` value, `observed` array of versions |
+| `set_remove`   | `entity` entity id, `name` string, `value` value, `observed` array of versions, in increasing order without repeats |
 | `blob_added`   | `blob` blob id, `len` number of bytes                    |
 | `blob_removed` | `blob` blob id                                           |
 
@@ -115,11 +120,12 @@ For example, with writer `0000000000000000000000000000000a`, this line sets fiel
 {"version":"3@0000000000000000000000000000000a","intent":"0000000000000000000000000000000a:1","kind":"field","entity":"0000000000000000000000000000000a:0","name":"tag","value":{"text":"Brass"}}	c8b0f391
 ```
 
-Every intent starts with an `intent` entry, and every entry of an intent carries
-its intent id. `reverses` names the intent an undo or redo reverses. A `field`
-entry's `prior` is what the writer's merged state held when it wrote; undo
-restores it. A `blob_added` entry records that its writer put a blob in the store,
-and a `blob_removed` entry that its writer's garbage collection removed it.
+Every intent has one `intent` entry, appended before its other entries, and every
+entry of an intent carries its intent id. `reverses` names the intent an undo or
+redo reverses. A `field` entry's `prior` is what the writer's merged state held when
+it wrote; undo restores it. A `blob_added` entry records that its writer put a blob
+in the store, and a `blob_removed` entry that its writer's garbage collection
+removed it.
 
 A JSON object without a version, an intent id or a string `kind` is unreadable
 and ends the segment, as a failed checksum does. An entry whose kind a reader does
@@ -144,7 +150,8 @@ of reading does not matter, and reading an entry twice changes nothing.
   observed survives.
 - **Blobs.** For each blob and writer, that writer's `blob_added` or
   `blob_removed` with the highest version says whether the writer still holds
-  the blob.
+  the blob; at equal versions a removal wins. The blob's length is the largest
+  `len` of that writer's `blob_added` entries for it.
 - **Clock.** A writer's next Lamport time is one more than the highest in any log
   it has read.
 
@@ -155,10 +162,11 @@ before `true`.
 ## Snapshots
 
 A snapshot folds one writer's entries up to a segment, keeping tombstones and
-set-remove observations, and keeping the entries of the writer's undo window
-whole. The undo window of size `k` is the last `k` intents, ordered by the version
-of each one's first entry, that hold an entry other than `intent`, `blob_added` and
-`blob_removed`; the writer chooses `k` each time it compacts. `writers/<writer>/snapshot-<hash>.json` holds one JSON object and a LF:
+set-remove observations, and keeping the entries of the writer's undo window whole.
+The undo window of size `k` is the last `k` intents, ordered by the version of each
+one's first entry, that hold an entry other than `intent`, `blob_added` and
+`blob_removed`; the writer chooses `k` each time it compacts.
+`writers/<writer>/snapshot-<hash>.json` holds one JSON object and a LF:
 
 | Member     | Contents                                                       |
 | ---------- | -------------------------------------------------------------- |
@@ -171,14 +179,16 @@ of each one's first entry, that hold an entry other than `intent`, `blob_added` 
 | `lamport`      | The highest Lamport time folded                               |
 | `exists`       | `{"entity","version","exists"}` for each existence register   |
 | `fields`       | `{"entity","name","version","value"?}` for each field          |
-| `sets`         | `{"entity","name","value","added","removed"}`, with the value's add tags and removed tags as arrays of versions |
-| `blobs`        | `{"blob","len","version","removed"}`, one per blob and writer; the writer is the version's |
+| `sets`         | `{"entity","name","value","added","removed"}`, with the value's add tags and removed tags as arrays of versions in increasing order |
+| `blobs`        | `{"blob","len","version","removed"}`, one per blob and writer: the writer is the version's, and `version`, `removed` and `len` are as merging gives them |
 | `allocated`    | `{"writer","entity"?,"intent"?}`: the highest entity and intent counters seen of each writer |
 
-Records are sorted by their key, and a reader joins repeated records. A reader
-skips the writer's segments numbered `through` or less, applies the state, and
-then applies the retained entries and the later segments as it would any entries.
-A snapshot whose bytes do not hash to its name is corrupt.
+Each array of records is sorted by its key: `exists` by entity; `fields` by entity,
+then name; `sets` by entity, name, then value; `blobs` by blob, then writer;
+`allocated` by writer. A reader accepts any order and joins repeated records. A
+reader skips the writer's segments numbered `through` or less, applies the state,
+and then applies the retained entries and the later segments as it would any
+entries. A snapshot whose bytes do not hash to its name is corrupt.
 
 A writer compacts by writing a snapshot of its own snapshots and segments, then
 removing its segments numbered `through` or less and its other snapshots. Where
@@ -277,14 +287,14 @@ intent's own entries:
 
 Each `field` entry's `prior` is the value the writer's merged state held before the
 intent. A save's `length` and `modified` are those of the file it leaves at the
-path: the staged file's, which the rename keeps, or the file's already there when
-it holds the new bytes. Before any step of an intent, each of its effects checks its precondition.
-A save or delete expects one of: no file at the path; the fingerprint the writer
-last read, compared by length, then by hash when both sides have one, then by an
-equal modification time; or a file whose bytes hash to a given blob id. A rename or
-move refuses a destination that exists. A save of an entity whose `path` is set must
-save at that path, so an entity has one file. When one effect is refused, the
-intent writes nothing: no file, directory or entry.
+path: the staged file's, which the rename keeps, or the file's already there when it
+holds the new bytes. Before any step of an intent, each of its effects checks its
+precondition. A save or delete expects one of: no file at the path; the fingerprint
+the writer last read, compared by length, then by hash when both sides have one,
+then by an equal modification time; or a file whose bytes hash to a given blob id. A
+rename or move refuses a destination that exists. A save of an entity whose `path`
+is set must save at that path, so an entity has one file. When one effect is
+refused, the intent writes nothing: no file, directory or entry.
 
 A step creates the directories its destination needs. A rename syncs the
 destination directory before the source directory, so a crash between the two
