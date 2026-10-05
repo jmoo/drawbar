@@ -3338,9 +3338,10 @@ impl Workspace {
             let saved = std::mem::take(&mut entity.saved.bytes);
             entity.saved = Baseline::read(saved, entity.saved.stamp);
         }
-        let stamp = self.stamp();
+        let fresh = self.stamp();
         // The baseline stays, but whether the asset holds it may change. A revert, or an
-        // edit made and then undone, puts back what it was saved as.
+        // edit made and then undone, puts back what it was saved as, under the stamp it
+        // was saved with: a baseline whose stamp moved would be written to its file again.
         let held = self
             .get(id)
             .is_some_and(|entity| entity.saved.holds(&bytes));
@@ -3348,16 +3349,9 @@ impl Workspace {
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
         let path = entity.path.take();
         let saved = std::mem::take(&mut entity.saved);
-        let saved = Baseline {
-            stamp: match held {
-                true => stamp,
-                false => saved.stamp,
-            },
-            ..saved
-        };
-        let bytes = match held {
-            true => saved.bytes.clone(),
-            false => bytes,
+        let (bytes, stamp) = match held {
+            true => (saved.bytes.clone(), saved.stamp),
+            false => (bytes, fresh),
         };
         let replaced =
             LocalEntity::new(id, entity.name.clone(), entity.origin.clone(), bytes, stamp);
@@ -4350,13 +4344,15 @@ mod tests {
         assert_ne!(second, first);
 
         workspace.revert(id, &mut log);
-        let third = stamp(&workspace);
-        assert_ne!(third, second);
-        assert_ne!(third, first, "back to the same bytes is still a new decode");
+        assert_eq!(
+            stamp(&workspace),
+            first,
+            "the saved bytes are back under the stamp they were saved with"
+        );
 
         // Reverting to the bytes already held changes nothing, stamp included.
         workspace.revert(id, &mut log);
-        assert_eq!(stamp(&workspace), third);
+        assert_eq!(stamp(&workspace), first);
     }
 
     /// Unsaved is holding bytes other than the ones this asset was last saved as. An

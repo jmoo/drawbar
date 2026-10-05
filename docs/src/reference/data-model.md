@@ -170,7 +170,7 @@ every asset as a `LocalEntity`. The fields that matter here:
 | `saved` | Its `Baseline`: what it was last saved as. |
 | `kept` | Whether it is on this computer, as opposed to a view of a slot. |
 | `pending` | Whether an editor holds an edit not yet applied to `bytes`. |
-| `stamp` | Distinct for every set of bytes this id has held. |
+| `stamp` | Distinct for every set of bytes this id has held. Bytes back to the baseline's take its stamp, so the baseline does not move and nothing is written. |
 | `remembered` | While it is unread, the `Summary` a read of its file found before. See [The derived cache](#the-derived-cache). |
 
 `Bytes` wraps an `Arc<[u8]>`. The baseline shares the allocation while the bytes
@@ -845,6 +845,8 @@ become the baseline, and the edit stays. The user is then asked:
 - **Take theirs** reverts to the new baseline.
 - **Keep both** writes the edit as a new file beside it under a free name, and
   reverts the original.
+
+Neither revert writes the changed file again.
 
 At open, a file that changed under a working copy raises the same question,
 unless the working copy holds what the file now holds. An edit's copy is made

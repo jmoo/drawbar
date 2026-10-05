@@ -947,6 +947,41 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
 }
 
 #[test]
+fn keep_both_writes_only_the_new_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = session.bytes(id);
+    let (mine, theirs) = (with_gain(&saved, "96"), with_gain(&saved, "12"));
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), &mut session.bench.log);
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(root.at("untitled.ne5p"))
+        .and_then(|file| file.set_modified(then))
+        .unwrap();
+    let modified = || {
+        fs::metadata(root.at("untitled.ne5p"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+
+    session.refocus();
+    let acts = session.bench.browser.answer("Keep both");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.read("untitled 2.ne5p"), mine);
+    assert_eq!(root.read("untitled.ne5p"), theirs);
+    assert_eq!(modified(), then, "theirs was written again");
+}
+
+#[test]
 fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     let root = Temp::new();
     let mut session = Session::open(&root);

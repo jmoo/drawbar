@@ -44,6 +44,10 @@ In Chrome and Edge, the browser asks whether drawbar may change the folder.
 Unless you allow it on every visit, it forgets when you close drawbar.app.
 Choose **File ▸ Reconnect** and the folder's name to get it back.
 
+Chrome makes each file and folder drawbar writes there readable only by you, and
+on macOS marks it as downloaded, so in a shared folder other people lose access
+to what you save.
+
 ## Adding and making sounds
 
 Drop files on the window, or use **File ▸ Open…**. drawbar copies them into your
