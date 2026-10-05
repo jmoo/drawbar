@@ -116,6 +116,11 @@ bring back any you deleted.
   hidden folder has lost the file that lists your unsaved edits, so they are not
   deleted. On the desktop, put that file back from a backup to get them back.
   **Open without them** deletes those edits and opens the library as usual.
+- **Damaged index.** The file that keeps your tags, where each sound came from
+  and which sounds have unsaved edits cannot be read, so the library opens
+  read-only. **Set it aside and open without it** renames that file and opens the
+  library without them. The renamed file and the unsaved edits stay in the
+  hidden folder.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
 - **A write to the instrument left a file.** If drawbar stopped, or could not

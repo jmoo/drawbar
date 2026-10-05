@@ -116,8 +116,9 @@ The version is read first, on its own. An index with a higher version opens the
 library read-only and is never rewritten, so a newer drawbar's index survives an
 older one being run over it. So does an index of this version that holds a
 field, or a kind of origin or working copy, this build does not know: rewriting
-it would drop what a newer build added. An index that does not parse also opens the library
-read-only.
+it would drop what a newer build added. An index that does not parse also opens
+the library read-only, and can be set aside (see [Opening, the lock and
+read-only](#opening-the-lock-and-read-only)).
 
 ### Working copies, `tmp/` and `lock`
 
@@ -543,7 +544,7 @@ asynchronously.
 | `Import` | `Imported`: a copy of a file from outside or of the library's own, found as a listing finds it, or why not. |
 | `Move` | `Moved`: whether the rename happened. |
 | `Commit` | `Committed`: whether the working copies and the index were written, or the step that failed, its file and why (`Unkept`). A failure at the same step for the same cause is logged once, though each retry names a new working copy, until a commit lands. |
-| `MakeDir`, `RemoveFile`, `RemoveDir` | Only `Failed`, on failure. |
+| `MakeDir`, `RemoveFile`, `RemoveDir`, `DropUnindexed`, `SetAside` | Only `Failed`, on failure. |
 
 Every command that writes first makes `.drawbar/` and takes the lock. Where it
 cannot, it runs no further and is answered by `Event::ReadOnly`.
@@ -683,7 +684,17 @@ Once listed, such a library asks (`Browser::ask_unindexed`): **Keep read-only**,
 or **Open without them**, which, confirmed with the number of edits it loses,
 sends `Cmd::DropUnindexed` and opens the library again. The command deletes the
 copies only while there is still no index. In the browser's private storage
-that answer is the only way to them short of clearing the site's data. A write can also find the library closed
+that answer is the only way to them short of clearing the site's data.
+
+An index that does not parse is damaged. The library opens read-only, and once
+listed it asks (`Browser::ask_damaged`): **Keep read-only**, or **Set it aside
+and open without it**, which, confirmed, sends `Cmd::SetAside` and opens the
+library again. The command renames the index to
+`.drawbar/library.ron.damaged-<n>`, the first free `n`, unless it reads again by
+then; nothing deletes it. While a set-aside index is in `.drawbar/`, the working
+copies it named are kept: a missing index does not make the library read-only,
+no open sweeps `working/`, and the next generation is always above every copy
+there, so none is written over. A write can also find the library closed
 to it later: another drawbar took the lock first, or `.drawbar/` could not be
 made. Then the library turns read-only, every save in flight counts as unsaved
 again, and edits stay in memory. An open that fails outright keeps nothing.

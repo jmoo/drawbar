@@ -622,12 +622,18 @@ impl DrawbarApp {
     fn rescue(&mut self, ctx: &egui::Context, acts: Vec<browser::Act>) -> Vec<browser::Act> {
         let mut rest = Vec::new();
         for act in acts {
-            if let browser::Act::DropUnindexed {
-                confirmed: true, ..
-            } = act
-            {
-                self.drop_unindexed(ctx);
-                continue;
+            match act {
+                browser::Act::DropUnindexed {
+                    confirmed: true, ..
+                } => {
+                    self.reopen(ctx, Store::drop_unindexed);
+                    continue;
+                }
+                browser::Act::SetAside { confirmed: true } => {
+                    self.reopen(ctx, Store::set_aside);
+                    continue;
+                }
+                _ => {}
             }
             let browser::Act::Rescue(rescue, what) = act else {
                 rest.push(act);
@@ -650,13 +656,13 @@ impl DrawbarApp {
         rest
     }
 
-    /// Delete the working copies of the open library, whose index is missing, and open it
-    /// again without them. The open library runs the deletion before it lets go.
-    fn drop_unindexed(&mut self, ctx: &egui::Context) {
+    /// Send `fix` to the open library, which opened read-only, and open it again. The
+    /// open library runs what `fix` sent before it lets go.
+    fn reopen(&mut self, ctx: &egui::Context, fix: fn(&mut Store)) {
         let Some(store) = self.store.as_mut() else {
             return;
         };
-        store.drop_unindexed();
+        fix(store);
         let root = store.root().to_owned();
         self.switch_library(ctx, root);
     }

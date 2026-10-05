@@ -126,6 +126,8 @@ enum Verb {
     TakeTheirs,
     Discard,
     OpenWithout,
+    SetAside,
+    OpenWithoutIndex,
 }
 
 impl Verb {
@@ -140,6 +142,8 @@ impl Verb {
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
             Verb::OpenWithout => "Open without them…",
+            Verb::SetAside => "Set it aside and open without it…",
+            Verb::OpenWithoutIndex => "Open without it",
         }
     }
 
@@ -153,7 +157,9 @@ impl Verb {
             | Verb::Overwrite
             | Verb::TakeTheirs
             | Verb::Discard
-            | Verb::OpenWithout => sheet::destructive(ui, glyph, label),
+            | Verb::OpenWithout
+            | Verb::SetAside
+            | Verb::OpenWithoutIndex => sheet::destructive(ui, glyph, label),
         }
     }
 
@@ -166,6 +172,7 @@ impl Verb {
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
+            Verb::SetAside | Verb::OpenWithoutIndex => Glyph::FolderOpen,
         }
     }
 }
@@ -847,6 +854,40 @@ impl Browser {
             cancel: "Keep read-only",
             strong: Answer::Cancel,
         });
+    }
+
+    /// Say why a library whose index does not read opened read-only, and offer to set the
+    /// index aside and open the library without it.
+    pub(crate) fn ask_damaged(&mut self) {
+        self.raise(Ask {
+            title: "This library's index is damaged".into(),
+            note: Some(
+                "drawbar cannot read the file that keeps this library's tags, where its \
+                 sounds came from, and which sounds its unsaved edits belong to, so the \
+                 library stays read-only."
+                    .into(),
+            ),
+            verb: Verb::SetAside,
+            acts: vec![Act::SetAside { confirmed: false }],
+            others: Vec::new(),
+            cancel: "Keep read-only",
+            strong: Answer::Cancel,
+        });
+    }
+
+    /// Ask before a library's damaged index is set aside.
+    pub(crate) fn ask_set_aside(&mut self) {
+        self.raise(Ask::new(
+            "Open the library without its index?".into(),
+            Some(
+                "Its sounds open without their tags, without where they came from, and \
+                 without their unsaved edits. The damaged index is kept, renamed, in the \
+                 library's hidden folder, and so are the unsaved edits."
+                    .into(),
+            ),
+            Verb::OpenWithoutIndex,
+            vec![Act::SetAside { confirmed: true }],
+        ));
     }
 
     /// Ask before a library's `copies` working copies with no index are deleted.

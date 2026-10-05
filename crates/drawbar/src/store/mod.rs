@@ -383,6 +383,9 @@ pub struct Opened {
     /// `.drawbar/` was there already. Where it was not, nothing has been written, and
     /// the library's lock is taken at the first write.
     pub indexed: bool,
+    /// The index does not read, which leaves the library read-only until it is set
+    /// aside: see [`Cmd::SetAside`].
+    pub damaged: bool,
     /// The index, or an empty one for a library that has none or one this build must not
     /// read.
     pub sidecar: Sidecar,
@@ -619,6 +622,11 @@ pub enum Cmd {
     /// Delete every working copy, where there is still no index to name any. Answered
     /// only on failure.
     DropUnindexed,
+    /// Rename an index that does not read to `.drawbar/library.ron.damaged-<n>`, where
+    /// it is kept, so the library opens again without it. The working copies it names
+    /// are kept too: no open sweeps a working copy while an index set aside is there.
+    /// An index that reads again stays. Answered only on failure.
+    SetAside,
 }
 
 /// What a backend answers.

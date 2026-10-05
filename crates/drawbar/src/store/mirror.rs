@@ -96,6 +96,9 @@ struct Loading {
     /// The working copies the open found with no index, asked about once the listing
     /// is complete.
     unindexed: usize,
+    /// The open found an index that does not read, asked about once the listing is
+    /// complete.
+    damaged: bool,
     /// Each rename sent while the listing is in flight that has not failed. A part the
     /// backend gathered before it ran names what it moved where it was.
     moves: Vec<Rename>,
@@ -1319,6 +1322,7 @@ impl Store {
         let Opened {
             writable,
             indexed,
+            damaged,
             sidecar,
             mut working,
             swept,
@@ -1388,6 +1392,7 @@ impl Store {
             swept,
             rescued,
             unindexed,
+            damaged,
             moves: Vec::new(),
             held: Default::default(),
         });
@@ -1686,6 +1691,9 @@ impl Store {
             let reachable = self.backend.reveal().is_some();
             browser.ask_unindexed(loading.unindexed, reachable);
         }
+        if loading.damaged {
+            browser.ask_damaged();
+        }
     }
 
     /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
@@ -1753,6 +1761,12 @@ impl Store {
     /// without them. The library must be opened again after, since it opened read-only.
     pub fn drop_unindexed(&mut self) {
         self.write(Cmd::DropUnindexed);
+    }
+
+    /// Set aside the library's index, which does not read, to open it again without it.
+    /// The library must be opened again after, since it opened read-only.
+    pub fn set_aside(&mut self) {
+        self.write(Cmd::SetAside);
     }
 
     /// Move a rescue into the library's top level, under its own name or a free one, where

@@ -591,6 +591,82 @@ fn a_library_without_its_index_opens_without_its_edits_when_asked() {
     assert_eq!(third.store.read_only(), None);
 }
 
+/// An index that does not parse opens the library read-only, says so without the
+/// parser's words, and offers to set it aside. Set aside, it is kept under a new name,
+/// the library opens for writing without it, and the working copies it named are never
+/// swept or written over.
+#[test]
+fn a_damaged_index_can_be_set_aside_and_its_copies_survive() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = with_gain(&first.bytes(id), "96");
+    let log = &mut first.bench.log;
+    first.bench.workspace.replace_bytes(id, edited.clone(), log);
+    first.close();
+    let kept = root.names(".drawbar/working");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let damaged = b"(version: 1, next_id: 2, ass";
+    fs::write(root.at(exec::INDEX), damaged).unwrap();
+
+    let mut second = Session::open(&root);
+    let why = second.store.read_only().expect("read-only").to_string();
+    assert!(why.contains("damaged"), "{why}");
+    assert!(!why.contains("Expected") && !why.contains("Probe"), "{why}");
+    let (title, answers) = second.bench.browser.asking().expect("a question");
+    assert_eq!(title, "This library's index is damaged");
+    assert_eq!(
+        answers,
+        ["Keep read-only", "Set it aside and open without it…"]
+    );
+    let acts = second
+        .bench
+        .browser
+        .answer("Set it aside and open without it…");
+    second.bench.act(acts);
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Open the library without its index?");
+    let acts = second.bench.browser.answer("Open without it");
+    assert!(
+        matches!(
+            acts[..],
+            [crate::browser::Act::SetAside { confirmed: true }]
+        ),
+        "{acts:?}"
+    );
+    second.store.set_aside();
+    second.close();
+    assert_eq!(
+        root.names(".drawbar"),
+        ["library.ron.damaged-1", "lock", "tmp", "working"]
+    );
+    assert_eq!(root.read(".drawbar/library.ron.damaged-1"), damaged);
+
+    let mut third = Session::open(&root);
+    assert_eq!(third.store.read_only(), None);
+    assert_eq!(third.bench.browser.asking(), None, "nothing to ask");
+    let again = third.only();
+    let other = with_gain(&third.bytes(again), "12");
+    let log = &mut third.bench.log;
+    third.bench.workspace.replace_bytes(again, other, log);
+    third.close();
+    let working = root.names(".drawbar/working");
+    assert_eq!(working.len(), 2, "{working:?}");
+    assert!(working.contains(&kept[0]), "{working:?}");
+    assert_eq!(
+        root.read(&format!(".drawbar/working/{}", kept[0])),
+        edited,
+        "the kept copy is not written over"
+    );
+
+    Session::open(&root).close();
+    assert!(
+        root.names(".drawbar/working").contains(&kept[0]),
+        "an open with an index does not sweep it either"
+    );
+}
+
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
 /// check, and be refused as a write over someone else's file.
 #[test]
@@ -1890,7 +1966,7 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
     assert_eq!(sidecar::read(&text), Read::Known(index));
 
     assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
-    assert!(matches!(sidecar::read("not an index"), Read::Unreadable(_)));
+    assert_eq!(sidecar::read("not an index"), Read::Unreadable);
 }
 
 /// A field or a kind this build does not know, at any depth, is what a newer drawbar that

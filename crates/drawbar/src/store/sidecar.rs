@@ -234,8 +234,8 @@ pub enum Read {
     /// Written under this build's version, holding a field or a kind this build does not
     /// know, as a newer drawbar that kept the version would.
     Unknown,
-    /// Not an index this build can read, and why.
-    Unreadable(String),
+    /// Not an index this build can read: damaged, or of an older version.
+    Unreadable,
 }
 
 /// Only the version, read first so an index from a newer build is recognized as that
@@ -248,22 +248,19 @@ struct Probe {
 pub fn read(text: &str) -> Read {
     let version = match ron::from_str::<Probe>(text) {
         Ok(probe) => probe.version,
-        Err(e) => return Read::Unreadable(e.to_string()),
+        Err(_) => return Read::Unreadable,
     };
     if version > VERSION {
         return Read::Newer(version);
     }
     match ron::from_str::<Sidecar>(text) {
         Ok(sidecar) if sidecar.version == VERSION => Read::Known(sidecar),
-        Ok(sidecar) => Read::Unreadable(format!(
-            "version {} is not one this build reads",
-            sidecar.version
-        )),
+        Ok(_) => Read::Unreadable,
         Err(e) => match e.code {
             ron::Error::NoSuchStructField { .. } | ron::Error::NoSuchEnumVariant { .. } => {
                 Read::Unknown
             }
-            _ => Read::Unreadable(e.to_string()),
+            _ => Read::Unreadable,
         },
     }
 }

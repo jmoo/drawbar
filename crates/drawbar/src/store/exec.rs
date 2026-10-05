@@ -24,6 +24,8 @@ pub const DIR: &str = ".drawbar";
 pub const INDEX: &str = ".drawbar/library.ron";
 pub const TMP: &str = ".drawbar/tmp";
 pub const WORKING: &str = ".drawbar/working";
+/// What an index set aside is renamed to in `.drawbar/`, numbered: see [`Cmd::SetAside`].
+const DAMAGED: &str = "library.ron.damaged-";
 /// What a save's temporary sibling ends in: `.<name>.drawbar-tmp`.
 pub const TEMP: &str = ".drawbar-tmp";
 
@@ -371,6 +373,10 @@ async fn step(fs: &mut impl Fs, cmd: Cmd, ran: &mut u64, answer: &mut impl FnMut
             .await
             .err()
             .map(|e| Event::Failed(format!("deleting the unsaved edits: {e}"))),
+        Cmd::SetAside => set_aside(fs)
+            .await
+            .err()
+            .map(|e| Event::Failed(format!("setting the library's index aside: {e}"))),
     };
     if let Some(event) = answered {
         answer(event);
@@ -395,7 +401,12 @@ async fn reads_between(fs: &mut impl Fs, ran: &mut u64, answer: &mut impl FnMut(
 /// parts, then [`Event::Complete`]. An error is why nothing opened, and nothing was
 /// answered.
 async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), String> {
-    let indexed = fs.names(DIR).await.is_ok();
+    let sidecar_dir = fs.names(DIR).await;
+    let indexed = sidecar_dir.is_ok();
+    let aside = sidecar_dir
+        .iter()
+        .flatten()
+        .any(|name| name.starts_with(DAMAGED));
     // ⚠️ drawbar has written here before, so the lock is taken before the index and its
     // working copies are read, and no other drawbar changes them in between. Nothing but
     // the lock is written before the index is read: one a newer drawbar wrote keeps its
@@ -404,13 +415,22 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         true => Some(lock(fs).await),
         false => None,
     };
-    let (sidecar, mut writable, unindexed) = match index(fs).await {
-        Ok(Some(sidecar)) => (sidecar, Ok(()), 0),
-        Ok(None) => match unindexed(fs).await {
+    let index = index(fs).await;
+    let damaged = matches!(index, Index::Damaged);
+    let (mut sidecar, mut writable, unindexed) = match index {
+        Index::Read(sidecar) => (sidecar, Ok(()), 0),
+        Index::Missing => match unindexed(fs).await {
+            // The copies are kept for the index set aside, which names them.
+            Ok(_) if aside => (Sidecar::default(), Ok(()), 0),
             Ok(copies) => (Sidecar::default(), refuse_unindexed(copies), copies),
             Err(why) => (Sidecar::default(), Err(why), 0),
         },
-        Err(why) => (Sidecar::default(), Err(why), 0),
+        Index::Damaged => (
+            Sidecar::default(),
+            Err("the library's index is damaged, so drawbar leaves the library as it is".into()),
+            0,
+        ),
+        Index::Refused(why) => (Sidecar::default(), Err(why), 0),
     };
     let named: BTreeMap<String, (u64, Keeps)> = sidecar
         .assets
@@ -468,13 +488,23 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
         // ⚠️ A rescue is a slot's only copy, left by a write that did not finish.
         let rescue = |name: &str| name.starts_with(nord_usb::envelope::RESCUED);
         swept += sweep(fs, TMP, |name| !rescue(name)).await;
-        swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
+        // ⚠️ An index set aside names copies no row here does, and they stay for it.
+        if !aside {
+            swept += sweep(fs, WORKING, |name| !named.contains_key(name)).await;
+        }
         let names = fs.names(TMP).await.unwrap_or_default();
         for name in names.into_iter().filter(|name| rescue(name)) {
             if let Ok(Some(stat)) = fs.stat(&format!("{TMP}/{name}")).await {
                 rescued.push((name, stat));
             }
         }
+        // ⚠️ No working copy is written over: the next generation is above every one
+        // there, those kept for an index set aside among them.
+        let copies = fs.names(WORKING).await.unwrap_or_default();
+        let above = copies
+            .iter()
+            .filter_map(|name| generation(name)?.checked_add(1));
+        sidecar.next_generation = above.fold(sidecar.next_generation, u64::max);
     }
     let rows: Vec<Row> = sidecar
         .assets
@@ -495,6 +525,7 @@ async fn open(fs: &mut impl Fs, answer: &mut impl FnMut(Event)) -> Result<(), St
     answer(Event::Opened(Ok(Opened {
         writable,
         indexed,
+        damaged,
         sidecar,
         working,
         swept,
@@ -594,28 +625,55 @@ async fn scan(
     Ok(listing)
 }
 
-/// The index, `None` where there is none, or why nothing may be written where the index
-/// is one this build must not read or rewrite.
-async fn index(fs: &impl Fs) -> Result<Option<Sidecar>, String> {
-    let why = match fs.read(INDEX).await {
+/// What an open found of the index.
+enum Index {
+    Read(Sidecar),
+    Missing,
+    /// It does not parse, and may be set aside: see [`Cmd::SetAside`].
+    Damaged,
+    /// Why nothing may be written, where the index is one this build must not read or
+    /// rewrite.
+    Refused(String),
+}
+
+async fn index(fs: &impl Fs) -> Index {
+    match fs.read(INDEX).await {
         Ok(bytes) => match sidecar::read(&String::from_utf8_lossy(&bytes)) {
-            Read::Known(sidecar) => return Ok(Some(sidecar)),
-            Read::Newer(version) => format!(
+            Read::Known(sidecar) => Index::Read(sidecar),
+            Read::Newer(version) => Index::Refused(format!(
                 "a newer drawbar wrote this library's index (version {version}), so this one \
                  only reads the library"
+            )),
+            Read::Unknown => Index::Refused(
+                "a newer drawbar wrote this library's index, holding what this one does not \
+                 know, so this one only reads the library"
+                    .into(),
             ),
-            Read::Unknown => "a newer drawbar wrote this library's index, holding what this \
-                 one does not know, so this one only reads the library"
-                .to_string(),
-            Read::Unreadable(why) => format!(
-                "the library's index does not read ({why}), so drawbar leaves the library as \
-                 it is"
-            ),
+            Read::Unreadable => Index::Damaged,
         },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => format!("the library's index could not be read: {e}"),
-    };
-    Err(why)
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Index::Missing,
+        Err(e) => Index::Refused(format!("the library's index could not be read: {e}")),
+    }
+}
+
+/// Rename an index that does not read to the first free [`DAMAGED`] name, where it is
+/// kept. Nothing is done where there is no index, and an index that reads again stays.
+async fn set_aside(fs: &mut impl Fs) -> Result<(), String> {
+    match index(fs).await {
+        Index::Damaged => {}
+        Index::Missing => return Ok(()),
+        Index::Read(_) | Index::Refused(_) => {
+            return Err("the library's index reads again, so it stays".into())
+        }
+    }
+    let taken = fs.names(DIR).await.map_err(|e| e.to_string())?;
+    let free = (1..)
+        .map(|n| format!("{DAMAGED}{n}"))
+        .find(|name| !taken.contains(name))
+        .expect("a folder holds finitely many names");
+    fs.rename(INDEX, &format!("{DIR}/{free}"))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The names of the working copies: none where the folder is not there. A folder that
@@ -684,6 +742,11 @@ async fn lock(fs: &mut impl Fs) -> Result<(), String> {
 /// A working copy's file name.
 pub fn working_name(id: u64, generation: u64) -> String {
     format!("{id}-{generation}")
+}
+
+/// The generation a working copy's file name carries.
+fn generation(name: &str) -> Option<u64> {
+    name.rsplit_once('-')?.1.parse().ok()
 }
 
 /// Remove the files in `dir` that `stale` picks, and return how many went.
