@@ -1759,7 +1759,7 @@ mod tests {
     fn crc(workspace: &Workspace, id: u64) -> u32 {
         workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one")
     }
 
@@ -2166,7 +2166,7 @@ mod tests {
             bytes,
             &mut log,
         );
-        let held = workspace.get(id).unwrap().saved.crc32.unwrap();
+        let held = workspace.get(id).unwrap().saved.crc32().unwrap();
         device.pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
         enqueue(
             &workspace,

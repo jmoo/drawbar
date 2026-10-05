@@ -1555,9 +1555,7 @@ mod tests {
             name: "Grand.ne5p".into(),
             path: Some(crate::store::LibPath::root().join("Grand.ne5p")),
             origin: crate::workspace::Origin::Fresh,
-            saved: Vec::new(),
-            file: None,
-            unread: Some(1),
+            content: crate::workspace::Content::unread(1),
             unsaved: None,
         };
         app.workspace.restore(vec![saved], None, &mut app.log);
@@ -1590,9 +1588,7 @@ mod tests {
                 name: format!("Sound {id:03}.ne5p"),
                 path: Some(crate::store::LibPath::root().join(&format!("Sound {id:03}.ne5p"))),
                 origin: crate::workspace::Origin::Fresh,
-                saved: Vec::new(),
-                file: None,
-                unread: Some(1),
+                content: crate::workspace::Content::unread(1),
                 unsaved: None,
             })
             .collect();
@@ -2334,7 +2330,7 @@ mod tests {
             bytes.clone(),
             &mut app.log,
         );
-        let held = app.workspace.get(id).unwrap().saved.crc32.unwrap();
+        let held = app.workspace.get(id).unwrap().saved.crc32().unwrap();
         app.device
             .pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
         app.device.relink(&mut app.workspace);

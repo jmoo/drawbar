@@ -385,7 +385,7 @@ pub fn agrees(
     info: &ProgramInfo,
     queue: &Queue,
 ) -> Option<bool> {
-    if let (Some(here), Some(there)) = (entity.saved.crc32, info.crc32) {
+    if let (Some(here), Some(there)) = (entity.saved.crc32(), info.crc32) {
         return Some(here == there);
     }
     if wrote(entity, class, info.location) {
@@ -404,7 +404,7 @@ pub fn agrees(
 /// write put there, and the write no longer counts as evidence.
 fn wrote(entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
     entity.wrote.is_some_and(|wrote| {
-        (wrote.class, wrote.at) == (class, at) && Some(wrote.crc32) == entity.saved.crc32
+        (wrote.class, wrote.at) == (class, at) && Some(wrote.crc32) == entity.saved.crc32()
     })
 }
 
@@ -458,7 +458,7 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
 /// The library a program names, and its name if the instrument has reported one. A
 /// program not read this session names what a read of it found before.
 pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let plays = match (&entity.entity, entity.remembered.as_deref()) {
+    let plays = match (&entity.entity, entity.remembered()) {
         (Some(_), _) => entity.plays,
         (None, Some(known)) => known.plays,
         (None, None) => None,
@@ -1772,7 +1772,7 @@ mod tests {
         );
         let crc = workspace
             .get(both)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         device.pretend_bodies(
             ObjectClass::Program,
@@ -1837,7 +1837,7 @@ mod tests {
         );
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         let filter = Filter::default();
         let where_ = |workspace: &Workspace, device: &Device| {
@@ -1903,7 +1903,7 @@ mod tests {
         );
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         // An Electro 5 whose Programs 7:1 holds something other than this.
         device.pretend_bodies(class, 7, &[Some(("Squabble B", crc ^ 1))]);
@@ -1937,7 +1937,7 @@ mod tests {
         let id = workspace.create(Fresh::Settings, &mut log).unwrap();
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let held = workspace.get(id).unwrap();
-        let crc = held.saved.crc32.expect("a container");
+        let crc = held.saved.crc32().expect("a container");
         let body_len = held.container.as_ref().expect("a container").body_len();
 
         // The walk reports a name and this asset's length, and no checksum.
@@ -2054,7 +2054,7 @@ mod tests {
         );
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("computed from the body, since the header carries no checksum");
 
         device.pretend_bodies(
@@ -2096,7 +2096,7 @@ mod tests {
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
-        let saved_as = workspace.get(id).unwrap().saved.crc32.unwrap();
+        let saved_as = workspace.get(id).unwrap().saved.crc32().unwrap();
 
         // Edited before anything is read, so there is no earlier link to fall back on.
         let (_, edited) =
@@ -2168,7 +2168,7 @@ mod tests {
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let saved_as = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", saved_as))]);
         device.relink(&mut workspace);
@@ -2210,7 +2210,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         device.pretend_bodies(ObjectClass::Program, 7, &[Some(("Africa Split", crc))]);
         device.relink(&mut workspace);
@@ -2551,7 +2551,7 @@ mod tests {
         let (_, typed) = crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
             .expect("the registry takes the set");
         let nowhere = workspace.ingest("typed.ne5p".into(), Origin::Fresh, typed, &mut log);
-        let held = workspace.get(same).unwrap().saved.crc32.unwrap();
+        let held = workspace.get(same).unwrap().saved.crc32().unwrap();
 
         let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
             keyboard_mark(workspace.get(id).unwrap(), &device.state, queue)
@@ -2650,9 +2650,7 @@ mod tests {
                 name: format!("Sound {id:04}.ne5p"),
                 path: Some(crate::store::LibPath::root().join(&format!("Sound {id:04}.ne5p"))),
                 origin: Origin::Fresh,
-                saved: Vec::new(),
-                file: None,
-                unread: Some(1),
+                content: crate::workspace::Content::unread(1),
                 unsaved: None,
             })
             .collect();
@@ -2688,9 +2686,7 @@ mod tests {
             name: "Grand.ns4p".into(),
             path: Some(crate::store::LibPath::root().join("Grand.ns4p")),
             origin: Origin::Fresh,
-            saved: Vec::new(),
-            file: None,
-            unread: Some(1),
+            content: crate::workspace::Content::unread(1),
             unsaved: None,
         };
         workspace.restore(vec![saved], None, &mut log);
@@ -2743,9 +2739,7 @@ mod tests {
                 name: name.to_string(),
                 path: Some(crate::store::LibPath::root().join(name)),
                 origin: Origin::Fresh,
-                saved: Vec::new(),
-                file: None,
-                unread: Some(1),
+                content: crate::workspace::Content::unread(1),
                 unsaved: None,
             })
             .collect()

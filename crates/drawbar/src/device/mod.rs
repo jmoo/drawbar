@@ -1036,7 +1036,7 @@ fn home(entity: &LocalEntity) -> Option<ObjectClass> {
 /// That folder, and the checksum a slot holding this asset's saved bytes would report
 /// (see [`crate::workspace::Baseline::crc32`]).
 fn matchable(entity: &LocalEntity) -> Option<(ObjectClass, u32)> {
-    Some((home(entity)?, entity.saved.crc32?))
+    Some((home(entity)?, entity.saved.crc32()?))
 }
 
 /// The name a write gives its slot: an asset's name without its format suffix, and
@@ -1703,7 +1703,7 @@ impl Device {
                 continue;
             };
             let (Some(here), Some(there)) = (
-                entity.saved.crc32,
+                entity.saved.crc32(),
                 self.state
                     .slot(class, at)
                     .flatten()
@@ -2400,7 +2400,7 @@ mod tests {
         let file = crate::testing::on_disk(&dir, "Upright.npno", &bytes);
         let id = crate::testing::rest(&mut workspace, "Upright.npno", file.clone());
         workspace.settle_files(&mut log);
-        let crc32 = workspace.get(id).unwrap().saved.crc32.unwrap();
+        let crc32 = workspace.get(id).unwrap().saved.crc32().unwrap();
         let sent = Payload::of(workspace.get(id).unwrap()).unwrap();
 
         // The last byte of its audio, changed, under a checksum that agrees.
@@ -2429,10 +2429,9 @@ mod tests {
         assert!(entity.is_unsaved(), "and is not what the slot holds");
         assert!(entity
             .saved
-            .file
-            .as_ref()
+            .file()
             .is_some_and(|held| Arc::ptr_eq(held, &file)));
-        assert_eq!(entity.saved.crc32, Some(crc32));
+        assert_eq!(entity.saved.crc32(), Some(crc32));
         assert_eq!(entity.link, Some((ObjectClass::Piano, at)));
         assert_eq!(file.take_reads(), [], "nothing read the file");
     }
@@ -2448,7 +2447,7 @@ mod tests {
         let id = workspace.ingest("Africa-Split.ne5p".into(), origin, bytes, log);
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         (id, crc)
     }
@@ -2463,7 +2462,7 @@ mod tests {
         let id = workspace.ingest("Africa-Split.ns4p".into(), origin, bytes, log);
         let crc = workspace
             .get(id)
-            .and_then(|entity| entity.saved.crc32)
+            .and_then(|entity| entity.saved.crc32())
             .expect("every CBIN container has one");
         (id, crc)
     }
@@ -2724,7 +2723,7 @@ mod tests {
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited, &mut log);
         workspace.mark_saved(id);
-        let now = workspace.get(id).unwrap().saved.crc32.unwrap();
+        let now = workspace.get(id).unwrap().saved.crc32().unwrap();
         assert_ne!(now, crc, "the edit changed the body");
         device.relink(&mut workspace);
         assert_eq!(workspace.get(id).unwrap().link, None, "nothing is read yet");
@@ -2985,7 +2984,7 @@ mod tests {
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
 
         let entity = workspace.get(id).expect("it is on the list");
-        assert_eq!(entity.saved.bytes, sent, "the instrument holds these");
+        assert_eq!(*entity.saved.bytes(), sent, "the instrument holds these");
         assert_eq!(entity.bytes, edited);
         assert!(entity.is_unsaved(), "the edit was never sent");
         assert_eq!(entity.link, Some((class, at)));

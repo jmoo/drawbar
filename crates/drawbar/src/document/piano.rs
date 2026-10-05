@@ -110,9 +110,9 @@ impl Default for Mark {
 }
 
 fn mark(entity: &LocalEntity) -> Mark {
-    match &entity.saved.file {
+    match entity.saved.file() {
         Some(file) => Mark::Resting(file.serial),
-        None => Mark::Held(entity.saved.bytes.len() as u64, entity.saved.crc32),
+        None => Mark::Held(entity.saved.bytes().len() as u64, entity.saved.crc32()),
     }
 }
 
@@ -132,7 +132,10 @@ impl<'a> Source<'a> {
 
     /// The bytes the asset was last saved as.
     fn saved(entity: &'a LocalEntity) -> Source<'a> {
-        Source::from(entity.saved.file.as_deref(), &entity.saved.bytes)
+        Source::from(
+            entity.saved.file().map(|file| &**file),
+            entity.saved.bytes(),
+        )
     }
 
     fn from(file: Option<&'a OnDisk>, bytes: &'a [u8]) -> Source<'a> {
@@ -1483,7 +1486,7 @@ impl State {
             self.pending(*id)
                 && workspace
                     .get(*id)
-                    .is_some_and(|entity| entity.saved.file.is_none())
+                    .is_some_and(|entity| entity.saved.file().is_none())
         };
         let waits = match &act {
             // Every asset on this computer leaves with its library, so each plan over one
@@ -1516,11 +1519,11 @@ impl State {
         let Some(entity) = workspace.get(id) else {
             return;
         };
-        if entity.saved.file.is_some() {
+        if entity.saved.file().is_some() {
             return;
         }
         let laying = plan.clone();
-        let held = entity.saved.bytes.clone();
+        let held = entity.saved.bytes().clone();
         let job = work::run(ctx, move |progress| {
             let library = planned(&held, &laying)?;
             progress.say(format!("laying out {} strokes", library.strokes().len()));
@@ -4890,7 +4893,7 @@ mod tests {
             .get(editor.id)
             .unwrap()
             .saved
-            .bytes
+            .bytes()
             .to_vec();
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
@@ -4980,7 +4983,7 @@ mod tests {
             .get(editor.id)
             .unwrap()
             .saved
-            .bytes
+            .bytes()
             .to_vec();
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
 
@@ -5058,7 +5061,7 @@ mod tests {
             .get(editor.id)
             .unwrap()
             .saved
-            .bytes
+            .bytes()
             .to_vec();
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         assert!(editor
@@ -5203,7 +5206,7 @@ mod tests {
 
         editor.apply();
         let trimmed = editor.workspace.get(editor.id).unwrap();
-        assert!(trimmed.bytes.len() < trimmed.saved.bytes.len());
+        assert!(trimmed.bytes.len() < trimmed.saved.bytes().len());
         assert!(trimmed.is_unsaved(), "the apply is what makes it unsaved");
 
         editor.workspace.mark_saved(editor.id);
