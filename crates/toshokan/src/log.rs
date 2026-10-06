@@ -2,8 +2,8 @@
 //!
 //! An entry is the JSON of a [`Line`]: an object with `prev`, `at` (an [`Hlc`]),
 //! `kind`, and the members its kind defines. Unknown kinds, ops and members are
-//! kept verbatim: the line itself is kept, and what does not decode is carried as
-//! [`Raw`].
+//! kept verbatim: the line itself is kept, what does not decode is carried as
+//! [`Raw`], and an entry with members this build does not know says so.
 
 use std::collections::BTreeMap;
 
@@ -22,6 +22,9 @@ pub struct Entry {
     pub line: Line,
     pub at: Hlc,
     pub kind: EntryKind,
+    /// Whether the line holds what [`Entry::kind`] leaves out: a member this
+    /// build does not know at any depth, or JSON it would write otherwise.
+    pub unknown_members: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -181,8 +184,8 @@ struct Written<'a> {
 impl Entry {
     /// Decodes a verified line. A known kind whose members do not decode becomes
     /// [`EntryKind::Unknown`], as does a genesis entry after another entry; an
-    /// unknown op becomes [`Op::Unknown`]; unknown members are ignored here and
-    /// survive in the line.
+    /// unknown op becomes [`Op::Unknown`]; unknown members are left out of the
+    /// kind, survive in the line, and set [`Entry::unknown_members`].
     pub fn decode(line: Line) -> Result<Self, Malformed> {
         let head: Head = serde_json::from_str(line.json()).map_err(|error| Malformed {
             hash: line.hash(),
@@ -198,6 +201,14 @@ impl Entry {
             Some("settle") => members(json).map(EntryKind::Settle),
             _ => None,
         };
+        let unknown_members = known.as_ref().is_some_and(|kind| {
+            let written = Written {
+                prev: line.prev(),
+                at: head.at,
+                kind,
+            };
+            serde_json::to_string(&written).ok().as_deref() != Some(json)
+        });
         let kind = known.unwrap_or_else(|| {
             EntryKind::Unknown(Raw::new(json).expect("a verified line holds a JSON object"))
         });
@@ -205,6 +216,7 @@ impl Entry {
             at: head.at,
             kind,
             line,
+            unknown_members,
         })
     }
 

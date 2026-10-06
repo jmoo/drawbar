@@ -2,7 +2,7 @@
 //! snapshot supersedes. Only the owner compacts, and never a writer it no longer
 //! writes as.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Error, Result};
 use crate::flow::{self, Flow};
@@ -12,6 +12,7 @@ use crate::merge::merge;
 use crate::path::RelPath;
 use crate::reader::{WriterFile, WriterLog, MAX_FILE};
 use crate::report::{Compacted, Rekey};
+use crate::schema::Raw;
 use crate::snapshot::Snapshot;
 use crate::writer::{holds, Writer};
 
@@ -122,13 +123,20 @@ fn fold(writer: &Writer, own: &WriterLog) -> Option<Snapshot> {
         .collect();
     chain.place(snapshots, lines);
     let at = chain.last_at()?;
+    let mut unknown: BTreeMap<String, Raw> = BTreeMap::new();
+    for (name, raw) in chain.snapshots().iter().flat_map(|old| &old.unknown) {
+        let kept = unknown.entry(name.clone()).or_insert_with(|| raw.clone());
+        if raw > kept {
+            *kept = raw.clone();
+        }
+    }
     Some(Snapshot {
         writer: own.writer(),
         label: own.label().unwrap_or_default().to_owned(),
         at,
         folded,
         state: merge([&chain]),
-        unknown: Default::default(),
+        unknown,
     })
 }
 

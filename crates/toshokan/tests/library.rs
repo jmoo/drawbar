@@ -408,6 +408,7 @@ through_both!(
     settling_an_own_effect_that_stops_partway_fails_before_the_next_intent,
     settling_an_orphan_that_stops_partway_fails_and_is_logged,
     a_folder_whose_renames_may_replace_is_written_and_says_so,
+    a_view_is_read_on_other_threads,
 );
 
 /// One machine of a shared folder.
@@ -556,6 +557,24 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
         facts(&a.view()),
         "a new reader agrees"
     );
+}
+
+fn a_view_is_read_on_other_threads<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let view = a.view();
+    let sent = view.clone();
+    let worker = std::thread::spawn(move || tags(&sent, song));
+    std::thread::scope(|scope| {
+        let shared = &view;
+        let readers = [(); 2].map(|()| scope.spawn(move || tags(shared, song)));
+        for reader in readers {
+            assert_eq!(reader.join().unwrap(), ["new"]);
+        }
+    });
+    assert_eq!(worker.join().unwrap(), ["new"]);
 }
 
 fn a_conflict_is_shown_and_resolved<F: Facade>() {

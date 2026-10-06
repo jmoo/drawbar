@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use common::{files_under, fresh, held, layout, machine, Instance};
 use toshokan::blocking::run;
 use toshokan::disk::Tail;
+use toshokan::line::Line;
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
@@ -301,6 +302,72 @@ fn a_running_writer_whose_segment_was_restored_refuses_to_append() {
     );
 }
 
+/// The open segment of `instance` with its last line replaced by one of the same
+/// length, as a sync client might deliver another version of the file.
+fn replace_last_line(instance: &Instance) -> (toshokan::RelPath, Vec<u8>) {
+    let files = instance.machine.folder.files(Root::Folder);
+    let (path, bytes) = files
+        .into_iter()
+        .find(|(path, _)| path.as_str().ends_with(".jsonl"))
+        .unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let last = text.lines().last().unwrap();
+    let (json, _) = last.split_once('\t').unwrap();
+    let other = Line::seal(json.replace("\"a2\"", "\"b2\"")).unwrap();
+    let mut replaced = text.as_bytes()[..text.len() - last.len() - 1].to_vec();
+    replaced.extend(other.to_bytes());
+    assert_eq!(replaced.len(), bytes.len());
+    restore(
+        &instance.machine.folder,
+        BTreeMap::from([(path.clone(), replaced)]),
+    );
+    (path, bytes)
+}
+
+#[test]
+fn a_running_writer_whose_segment_was_replaced_at_its_length_refuses_to_append() {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a1").unwrap();
+    instance.write("a2").unwrap();
+    let id = instance.id();
+    replace_last_line(&instance);
+    let before = instance.machine.folder.files(Root::Folder);
+    let refused = instance.write("a3");
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Rekey {
+                writer,
+                why: Rekey::Restored
+            }) if writer == id
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(instance.machine.folder.files(Root::Folder), before);
+}
+
+#[test]
+fn a_writer_whose_replaced_segment_survives_in_a_copy_appends_to_a_new_segment() {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a1").unwrap();
+    let head = *instance.write("a2").unwrap().last().unwrap();
+    let id = instance.id();
+    let (path, original) = replace_last_line(&instance);
+    let copy = layout().writer(id).join("copy.jsonl").unwrap();
+    let put = toshokan::Io::Create {
+        root: Root::Folder,
+        path: copy,
+        bytes: original,
+    };
+    instance.machine.folder.perform(put).unwrap();
+    let replaced = instance.machine.folder.files(Root::Folder)[&path].clone();
+    let next = instance.write("a3").unwrap();
+    assert_eq!(segments(&instance.machine, id), 3);
+    assert_eq!(instance.machine.folder.files(Root::Folder)[&path], replaced);
+    let view = fresh(&instance.machine.folder);
+    assert_eq!(view.writers()[&id].predecessor(next[0]), Some(head));
+}
+
 /// Puts back each of `files` as it was.
 fn restore(disk: &MemDisk, files: BTreeMap<toshokan::RelPath, Vec<u8>>) {
     for (path, bytes) in files {
@@ -340,6 +407,32 @@ fn a_writer_whose_head_the_folder_lost_compacts_nothing() {
         "{refused:?}"
     );
     assert_eq!(instance.machine.folder.files(Root::Folder), before);
+}
+
+#[test]
+fn compaction_keeps_the_members_a_newer_build_wrote_in_the_snapshot_it_folds() {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a1").unwrap();
+    let first = instance.compact().unwrap();
+    let id = instance.id();
+    let path = layout().snapshot(id, first.snapshot);
+    let text = String::from_utf8(instance.machine.folder.files(Root::Folder)[&path].clone());
+    let newer = text
+        .unwrap()
+        .replacen('{', r#"{"later":{"x":[1, 2]},"#, 1)
+        .replacen(r#""state":{"#, r#""state":{"also":[ true ],"#, 1);
+    restore(
+        &instance.machine.folder,
+        BTreeMap::from([(path.clone(), newer.into_bytes())]),
+    );
+    instance.write("a2").unwrap();
+    let second = instance.compact().unwrap();
+    let files = instance.machine.folder.files(Root::Folder);
+    assert!(!files.contains_key(&path), "the new snapshot supersedes it");
+    let kept = String::from_utf8(files[&layout().snapshot(id, second.snapshot)].clone()).unwrap();
+    for member in [r#""later":{"x":[1, 2]}"#, r#""also":[ true ]"#] {
+        assert!(kept.contains(member), "{member} in {kept}");
+    }
 }
 
 #[test]

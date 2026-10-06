@@ -1,7 +1,7 @@
 //! Views: immutable values the app renders from.
 
 use std::collections::BTreeSet;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::binding::Bindings;
 use crate::ids::EntityId;
@@ -10,9 +10,10 @@ use crate::path::RelPath;
 use crate::report::{Fork, Gap, WriterInfo};
 use crate::schema::{Field, Members, Raw, Register, Set, Value, Written};
 
-/// The library as one reader sees it. Cheap to clone; never changes.
+/// The library as one reader sees it. Cheap to clone; never changes; can be sent
+/// to and shared between threads.
 #[derive(Clone)]
-pub struct View(Rc<Parts>);
+pub struct View(Arc<Parts>);
 
 /// What a view is built from.
 pub struct Parts {
@@ -57,7 +58,7 @@ pub enum Conflicted {
 
 impl View {
     pub fn new(parts: Parts) -> Self {
-        Self(Rc::new(parts))
+        Self(Arc::new(parts))
     }
 
     /// The merged facts the view shows.

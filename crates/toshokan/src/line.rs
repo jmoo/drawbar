@@ -15,6 +15,14 @@ pub const MAX_LINE: usize = 1 << 20;
 
 const HASH_DIGITS: usize = 32;
 
+/// How many bytes a line ends with that name it: a tab, its hash and LF.
+pub const ENDING: u64 = HASH_DIGITS as u64 + 2;
+
+/// The last [`ENDING`] bytes of the line whose hash is `hash`.
+pub fn ending(hash: EntryHash) -> Vec<u8> {
+    format!("\t{hash}\n").into_bytes()
+}
+
 /// One verified line.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Line {
