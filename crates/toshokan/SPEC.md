@@ -248,8 +248,98 @@ the branches of another instance, are never deleted.
 
 ## File effects and pending records
 
-_To be specified._
+Nothing in a library path is overwritten or removed in place. An intent's file
+effects are a list of steps, each of which moves one file or directory:
+
+| Step                                      | Moves                                   |
+| ----------------------------------------- | --------------------------------------- |
+| `{"step":"to_trash","path":p,"item":n}`   | `p` to `trash/n`                        |
+| `{"step":"place","staged":n,"path":p}`    | `tmp/n` to `p`                          |
+| `{"step":"rename","from":p,"to":q}`       | `p` to `q`                              |
+| `{"step":"from_trash","item":n,"path":p}` | `trash/n` to `p`                        |
+| `{"step":"make_dir","path":p}`            | Creates directory `p`                   |
+| `{"step":"remove_dir","path":p}`          | Removes `p` if it is an empty directory |
+
+Paths in steps are library paths: relative to the folder, outside toshokan's
+root, and never the folder itself. `tmp/`, `trash/` and `pending/` are those of
+the writer the record belongs to.
+
+A save over a file is `to_trash` then `place`; a save where nothing is, `place`;
+a delete, `to_trash`; a rename, `rename`; restoring a trash item over a file,
+`to_trash` then `from_trash`. A directory moves by one `rename` where the
+backend renames directories, otherwise by one `rename` per file, deepest
+`remove_dir` first after them.
+
+A writer carries out an intent in this order:
+
+1. Write each new file to `tmp/<nonce>`, sync it, then sync `tmp/`.
+2. Check every precondition: a path holds nothing, or a file whose identity is
+   the one the writer last read. Check that every trash item a step restores
+   is there. On failure, remove the staged files and write nothing more.
+3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
+   `pending/<nonce>.json`.
+4. Carry out the steps in order. A move first creates the destination's
+   directory, renames without replacing, syncs the destination's directory and
+   then the source's, so a source's name is gone only once the destination's
+   is durable.
+5. Append the intent's entry.
+6. Remove the pending record.
+
+If a step fails, the rest are not tried: staged files not placed are renamed
+to `trash/<their nonce>`, and the entry records the effects that were made.
+
+A pending record is a JSON object:
+
+```json
+{"writer":"<w>","entry":<entry>,"label":"Save","steps":[<step>,…],"files":[{"entity":"<e>","path":"a/b.syx","done_after":2}]}
+```
+
+`entry` is the intent's entry as planned, whose `prev` is the writer's head when
+the record was written. `files` says where each entity's file is once the first
+`done_after` steps are done; a `path` of `null` is no file. A reader reads at
+most 16 MiB of a record.
+
+### Recovery
+
+A record is open while its writer's log holds the entry named by its entry's
+`prev` and no entry after it. A record that is not open is waiting only for its
+writer to remove it.
+
+A record is ignored, and reported, when it does not decode, names another
+writer, names a path that is not a library path, or its `prev` is not in its
+writer's log.
+
+A writer settles its own open records before it next writes, and only those
+whose `prev` is the head its local root recorded. It finds how far the steps
+got by checking them from the last: the first that shows done ends the done
+prefix. `to_trash` shows done when its trash item exists; any other move when
+its destination exists and its source does not, or both hold the same bytes.
+A `place` whose staged file is in the trash under its own nonce is not done. When
+the last done step's source still holds the same bytes as its destination, the
+source is removed. The remaining steps are carried out, the entry is appended
+and the record removed, as above. Then every file in its `tmp/` that no open
+record places is removed.
+
+An open record of any other writer may belong to a live writer elsewhere. A
+reader reports it, and settles it only when the user asks, as an intent of its
+own: to finish, it carries out the remaining steps; to roll back, it reverses
+the done ones. It copies files out of the other writer's `tmp/` and `trash/`
+rather than moving them, and moves a library file it displaces into its own
+trash. It then appends a `settle` entry naming the writer and record, after which
+no reader reports the record. Only the record's writer removes it.
 
 ## Trash
 
-_To be specified._
+`trash/<nonce>` holds bytes an intent of the writer displaced, or new bytes an
+intent staged and could not place. An item is listed with the entry whose
+`displaced` names it. Only its writer removes an item, and only by emptying:
+first every item displaced longer ago than the policy's age, by default 30 days,
+then the oldest items until the rest fit the policy's size, by default 1 GiB.
+An item no entry names is never emptied.
+
+Emptying a trash is the only way bytes leave the folder.
+
+## Drafts
+
+`<genesis>/drafts/<entity>.json` is the JSON line `{"base":"<identity>"}`, an LF,
+then the unsaved bytes. It applies only while the entity's file holds `base`.

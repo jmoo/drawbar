@@ -557,9 +557,8 @@ impl Reader {
     /// folder, each read bounded by [`MAX_FILE`].
     pub fn read(&mut self) -> Task<'_, Result<ReadReport>> {
         let layout = self.layout.clone();
-        let writers = flow::list(Root::Folder, layout.writers()).map_ok(|listed| {
+        let writers = flow::list(Root::Folder, &layout.writers()).map_ok(|listed| {
             listed
-                .unwrap_or_default()
                 .into_iter()
                 .filter(|entry| entry.kind == Kind::Directory)
                 .filter_map(|entry| entry.name.parse().ok())
@@ -570,7 +569,7 @@ impl Reader {
 
     /// As [`Reader::read`], for one writer's directory.
     pub fn read_writer(&mut self, writer: WriterId) -> Task<'_, Result<ReadReport>> {
-        self.scan(Flow::ok(vec![writer]), false)
+        self.scan(flow::ok(vec![writer]), false)
     }
 
     fn scan<'a>(
@@ -587,7 +586,7 @@ impl Reader {
         );
         writers
             .and_then(move |writers| {
-                flow::fold(writers, Vec::new(), move |mut done, writer| {
+                flow::fold(writers.into_iter(), Vec::new(), move |mut done, writer| {
                     scan_writer(&layout, writer, Rc::clone(&stamps)).map_ok(move |listed| {
                         done.push(listed);
                         done
@@ -687,15 +686,14 @@ fn scan_writer<'a>(
     stamps: Rc<BTreeMap<RelPath, Stamp>>,
 ) -> Flow<'a, Result<Listed>> {
     let dir = layout.writer(writer);
-    flow::list(Root::Folder, dir.clone())
+    flow::list(Root::Folder, &dir)
         .and_then(move |entries| {
             let paths: Vec<RelPath> = entries
-                .unwrap_or_default()
                 .into_iter()
                 .filter(|entry| entry.kind == Kind::File)
                 .filter_map(|entry| dir.join(&entry.name).ok())
                 .collect();
-            flow::fold(paths, Vec::new(), move |mut files, path| {
+            flow::fold(paths.into_iter(), Vec::new(), move |mut files, path| {
                 let known = stamps.get(&path).copied();
                 scan_file(path, known).map_ok(move |found| {
                     files.extend(found);
@@ -707,7 +705,7 @@ fn scan_writer<'a>(
 }
 
 fn scan_file<'a>(path: RelPath, known: Option<Stamp>) -> Flow<'a, Result<Option<Scanned>>> {
-    flow::stat(Root::Folder, path.clone()).and_then(move |meta| match meta {
+    flow::stat(Root::Folder, &path.clone()).and_then(move |meta| match meta {
         Some(meta) if meta.kind == Kind::File => {
             let stamp = meta.modified.map(|modified| Stamp {
                 len: meta.len,
@@ -715,13 +713,13 @@ fn scan_file<'a>(path: RelPath, known: Option<Stamp>) -> Flow<'a, Result<Option<
             });
             if stamp.is_some() && stamp == known {
                 let found = Found::Unchanged;
-                return Flow::ok(Some(Scanned { path, stamp, found }));
+                return flow::ok(Some(Scanned { path, stamp, found }));
             }
             let range = Range {
                 offset: 0,
                 len: meta.len.min(MAX_FILE),
             };
-            flow::read(Root::Folder, path.clone(), range).map_ok(move |bytes| {
+            flow::read_present(Root::Folder, &path.clone(), range).map_ok(move |bytes| {
                 bytes.map(|bytes| Scanned {
                     path,
                     stamp,
@@ -729,7 +727,7 @@ fn scan_file<'a>(path: RelPath, known: Option<Stamp>) -> Flow<'a, Result<Option<
                 })
             })
         }
-        _ => Flow::ok(None),
+        _ => flow::ok(None),
     })
 }
 

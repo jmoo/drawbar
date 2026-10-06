@@ -47,7 +47,7 @@ pub fn compact<'a>(
         .iter()
         .map(|segment| layout.segment(writer.id(), *segment))
         .collect();
-    flow::done(Io::Create {
+    flow::act(Io::Create {
         root: Root::Folder,
         path: path.clone(),
         bytes: snapshot.encode(),
@@ -58,7 +58,7 @@ pub fn compact<'a>(
     })
     .and_then({
         let path = path.clone();
-        move |()| flow::stat(Root::Folder, path)
+        move |()| flow::stat(Root::Folder, &path)
     })
     .and_then(move |held| match held {
         None => Flow::Done(Err(lost)),
@@ -66,7 +66,7 @@ pub fn compact<'a>(
             let removed_count = removed.len();
             remove_all(removed.clone())
                 .and_then(move |()| match removed_count {
-                    0 => Flow::ok(()),
+                    0 => flow::ok(()),
                     _ => sync(dir),
                 })
                 .map_ok(move |()| removed)
@@ -128,9 +128,8 @@ fn superseded<'a>(
     sealed: BTreeSet<RelPath>,
 ) -> Flow<'a, Result<Vec<RelPath>>> {
     let folded: BTreeSet<EntryHash> = snapshot.folded.iter().copied().collect();
-    flow::list(Root::Folder, dir.clone()).and_then(move |entries| {
+    flow::list(Root::Folder, &dir).and_then(move |entries| {
         let candidates: Vec<RelPath> = entries
-            .unwrap_or_default()
             .into_iter()
             .filter(|entry| entry.kind == Kind::File)
             .filter_map(|entry| dir.join(&entry.name).ok())
@@ -151,9 +150,9 @@ fn superseded<'a>(
                     WriterFile::Segment { .. } | WriterFile::Unreadable => false,
                 },
             );
-        flow::fold(candidates, Vec::new(), move |mut removed, file| {
+        flow::fold(candidates.into_iter(), Vec::new(), move |mut removed, file| {
             let judge = std::rc::Rc::clone(&judge);
-            flow::read_file(Root::Folder, file.clone(), MAX_FILE).map_ok(move |bytes| {
+            flow::read_file(Root::Folder, &file.clone(), MAX_FILE).map_ok(move |bytes| {
                 if bytes.is_some_and(|bytes| judge(&file, &bytes)) {
                     removed.push(file);
                 }
@@ -164,13 +163,13 @@ fn superseded<'a>(
 }
 
 fn remove_all<'a>(paths: Vec<RelPath>) -> Flow<'a, Result<()>> {
-    flow::fold(paths, (), |(), path| {
+    flow::fold(paths.into_iter(), (), |(), path| {
         flow::remove_if_present(Root::Folder, path)
     })
 }
 
 fn sync<'a>(path: RelPath) -> Flow<'a, Result<()>> {
-    flow::done(Io::Sync {
+    flow::act(Io::Sync {
         root: Root::Folder,
         path,
     })

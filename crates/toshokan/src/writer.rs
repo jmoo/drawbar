@@ -77,10 +77,9 @@ impl Writer {
         logs: &'a BTreeMap<WriterId, WriterLog>,
     ) -> Task<'a, Result<Claimed>> {
         let layout = layout.clone();
-        flow::list(Root::Local, RelPath::ROOT)
+        flow::list(Root::Local, &RelPath::ROOT)
             .and_then(move |entries| {
                 let mut pool: Vec<EntryHash> = entries
-                    .unwrap_or_default()
                     .into_iter()
                     .filter(|entry| entry.kind == Kind::Directory)
                     .filter_map(|entry| entry.name.parse().ok())
@@ -126,12 +125,12 @@ impl Writer {
             open: Some(OpenSegment { name: segment, len }),
             sealed: Vec::new(),
         };
-        flow::done(Io::MakeDir {
+        flow::act(Io::MakeDir {
             root: Root::Folder,
             path: dir,
         })
         .and_then(move |()| {
-            flow::done(Io::Create {
+            flow::act(Io::Create {
                 root: Root::Folder,
                 path,
                 bytes,
@@ -139,7 +138,7 @@ impl Writer {
         })
         .and_then(move |()| sync_all(Root::Folder, synced))
         .and_then(move |()| {
-            flow::done(Io::MakeDir {
+            flow::act(Io::MakeDir {
                 root: Root::Local,
                 path: Layout::local(genesis),
             })
@@ -236,7 +235,7 @@ impl Writer {
     /// Seals the open segment and releases the writer's lock.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
         self.seal();
-        flow::done(Io::Unlock {
+        flow::act(Io::Unlock {
             name: Layout::lock(self.genesis),
         })
         .task()
@@ -254,15 +253,15 @@ impl Writer {
         let path = self.open.map(|open| layout.segment(id, open.name));
         let held = move |confirmed| {
             holds(&layout, id, head).and_then(move |held| match held {
-                true => Flow::ok(confirmed),
+                true => flow::ok(confirmed),
                 false => Flow::Done(lost()),
             })
         };
         let (Some(open), Some(path)) = (self.open, path) else {
             return held(Confirmed::Fresh);
         };
-        flow::stat(Root::Folder, path).and_then(move |meta| match meta {
-            Some(meta) if meta.len == open.len => Flow::ok(Confirmed::Open(open)),
+        flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
+            Some(meta) if meta.len == open.len => flow::ok(Confirmed::Open(open)),
             Some(meta) if meta.len > open.len => held(Confirmed::Grown),
             _ => Flow::Done(lost()),
         })
@@ -294,7 +293,7 @@ impl Writer {
                 }
             }
         };
-        flow::done(request).then(move |landed| {
+        flow::act(request).then(move |landed| {
             if let Err(error) = landed {
                 if open.is_some() {
                     self.seal();
@@ -340,15 +339,15 @@ fn claim_first(
     mut pool: Vec<EntryHash>,
 ) -> Flow<'_, Result<Claimed>> {
     if pool.is_empty() {
-        return Flow::ok(Claimed {
+        return flow::ok(Claimed {
             writer: None,
             start: Start::New,
         });
     }
     let genesis = pool.remove(0);
-    flow::stat(Root::Local, Layout::retired(genesis))
+    flow::stat(Root::Local, &Layout::retired(genesis))
         .and_then(move |retired| match retired {
-            Some(_) => Flow::ok(Lock::Held),
+            Some(_) => flow::ok(Lock::Held),
             None => flow::lock(Layout::lock(genesis)),
         })
         .and_then(move |lock| match lock {
@@ -385,7 +384,7 @@ fn resume<'a>(
     };
     holds(&layout, id, tip).and_then(move |held| match held {
         false => retire(genesis, id, Rekey::Restored),
-        true => Flow::ok(Claimed {
+        true => flow::ok(Claimed {
             writer: Some(Writer {
                 layout,
                 id,
@@ -405,13 +404,10 @@ fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<
         path: Layout::retired(genesis),
         bytes: Vec::new(),
     };
-    flow::request(marker)
-        .then(|result| match result {
-            Err(Error::Io {
-                error: crate::io::IoError::AlreadyExists,
-                ..
-            }) => Flow::ok(()),
-            result => Flow::Done(result.map(|_| ())),
+    flow::attempt(marker.clone())
+        .then(move |result| match result {
+            Ok(_) | Err(crate::io::IoError::AlreadyExists) => flow::ok(()),
+            Err(error) => Flow::Done(Err(marker.failed(error))),
         })
         .and_then(move |()| unlock(genesis))
         .map_ok(move |()| Claimed {
@@ -421,7 +417,7 @@ fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<
 }
 
 fn unlock<'a>(genesis: EntryHash) -> Flow<'a, Result<()>> {
-    flow::done(Io::Unlock {
+    flow::act(Io::Unlock {
         name: Layout::lock(genesis),
     })
 }
@@ -432,9 +428,7 @@ fn record_head<'a>(writer: WriterId, genesis: EntryHash, head: EntryHash) -> Flo
 }
 
 fn sync_all<'a>(root: Root, paths: Vec<RelPath>) -> Flow<'a, Result<()>> {
-    flow::fold(paths, (), move |(), path| {
-        flow::done(Io::Sync { root, path })
-    })
+    flow::each(paths.into_iter(), move |path| flow::sync(root, &path))
 }
 
 /// Whether a file in `writer`'s directory of the folder holds `hash` now, in a
@@ -445,16 +439,15 @@ pub(crate) fn holds<'a>(
     hash: EntryHash,
 ) -> Flow<'a, Result<bool>> {
     let dir = layout.writer(writer);
-    flow::list(Root::Folder, dir.clone()).and_then(move |entries| {
+    flow::list(Root::Folder, &dir).and_then(move |entries| {
         let paths: Vec<RelPath> = entries
-            .unwrap_or_default()
             .into_iter()
             .filter(|entry| entry.kind == Kind::File)
             .filter_map(|entry| dir.join(&entry.name).ok())
             .collect();
-        flow::fold(paths, false, move |found, path| match found {
-            true => Flow::ok(true),
-            false => flow::read_file(Root::Folder, path, MAX_FILE).map_ok(move |bytes| {
+        flow::fold(paths.into_iter(), false, move |found, path| match found {
+            true => flow::ok(true),
+            false => flow::read_file(Root::Folder, &path, MAX_FILE).map_ok(move |bytes| {
                 bytes.is_some_and(|bytes| match WriterFile::parse(&bytes) {
                     WriterFile::Segment { lines, .. } => {
                         lines.iter().any(|line| line.hash() == hash)
