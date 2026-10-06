@@ -1268,6 +1268,18 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
         probe.seen.borrow().longest_pending_read <= toshokan::pending::MAX_RECORD,
         "an oversized record is not read"
     );
+    let pending = |name: &str| path(&format!("{}/pending/{name}.json", w(&own)));
+    for ignored in [pending(&zero), pending(&format!("{}1", &zero[1..]))] {
+        assert!(opened.ignored.contains(&ignored), "{:?}", opened.ignored);
+    }
+    for unreadable in ["noise.jsonl", "snapshot-x.json"] {
+        let unreadable = path(&format!("{}/{unreadable}", w(&own)));
+        assert!(
+            opened.unreadable.contains(&unreadable),
+            "{:?}",
+            opened.unreadable
+        );
+    }
     assert_eq!(tags(&a.view(), song), ["new"]);
     a.commit("Tag", |i| i.add(song, TAGS, tag("still")))
         .unwrap();

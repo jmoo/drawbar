@@ -54,6 +54,8 @@ pub struct Library {
     /// This writer's interrupted effects, settled before its next write.
     unsettled: Vec<Settling>,
     orphaned: Vec<Orphan>,
+    /// Pending records recovery would not act on.
+    ignored: Vec<RelPath>,
     folded: Folded,
     scan: Scan,
     bindings: Bindings,
@@ -148,6 +150,12 @@ impl Library {
                         drafts,
                         forks: report.forks,
                         gaps: report.gaps,
+                        unreadable: report
+                            .unreadable
+                            .into_iter()
+                            .map(|(path, _)| path)
+                            .collect(),
+                        ignored: library.ignored.clone(),
                         scan: library.bindings.report.clone(),
                     };
                     (library, opened)
@@ -185,6 +193,7 @@ impl Library {
             clock,
             unsettled: Vec::new(),
             orphaned: Vec::new(),
+            ignored: Vec::new(),
             folded,
             scan: Scan::default(),
             bindings: Bindings::default(),
@@ -858,6 +867,7 @@ fn recover(library: Library) -> Fallible<'static, Library> {
         flow::run(recovery::predict(&library.layout, assessed, open)).map_ok(move |assessed| {
             library.unsettled = assessed.own;
             library.orphaned = assessed.orphaned;
+            library.ignored = assessed.ignored;
             library
         })
     })

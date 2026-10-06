@@ -22,6 +22,12 @@ pub struct Opened {
     pub drafts: Vec<DraftStatus>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
+    /// Files in writers' directories that end before their last byte can be read,
+    /// or that are neither segment nor snapshot. Each is read again next time.
+    pub unreadable: Vec<RelPath>,
+    /// Pending records ignored: unreadable, naming a path outside the library, or
+    /// not chained to their writer's log.
+    pub ignored: Vec<RelPath>,
     pub scan: ScanReport,
 }
 

@@ -286,8 +286,8 @@ so nothing follows a torn line.
 A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
 up to 256 MiB of it; a file whose length and modification time are unchanged is
 not read again. A file is a segment when it is empty or its first line can be
-read, else a snapshot when it decodes as one; anything else is reported and read
-again next time. A snapshot whose `writer` is not `w` is reported, not used.
+read, else a snapshot when it decodes as one; anything else is reported when the
+library opens, and read again next time. A snapshot whose `writer` is not `w` is reported, not used.
 
 A reader places an entry when its `prev` is all zeros, placed, or folded by a
 snapshot it has read. An entry whose predecessor it has not is held back, a gap,
@@ -431,9 +431,9 @@ A record is open while its writer's log holds the entry named by its entry's
 `prev` and no entry after it. A record that is not open is waiting only for its
 writer to remove it.
 
-A record is ignored, and reported, when it does not decode, names another
-writer, names a path that is not a library path, or its `prev` is not in its
-writer's log.
+A record is ignored when it does not decode, names another writer, names a path
+that is not a library path, or its `prev` is not in its writer's log. Opening
+reports the records it ignores.
 
 Opening finds this writer's open records whose `prev` is its head, and says how
 settling each will end. Before its next write the writer settles them: it finds
