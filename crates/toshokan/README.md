@@ -55,7 +55,8 @@ cannot show half a conflict by accident.
 
 A save takes bytes or a source the driver streams into staging a chunk at a
 time, such as a `Splice` of the file being rewritten, so a file of hundreds of
-megabytes is never held whole.
+megabytes is never held whole. A commit whose file effects stop partway fails
+with `Error::Partial`, which says what it logged.
 
 ## Design
 

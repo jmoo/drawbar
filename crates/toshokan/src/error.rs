@@ -4,7 +4,7 @@ use crate::ids::{EntityId, EntryHash, Identity, WriterId};
 use crate::io::{IoError, Root};
 use crate::path::RelPath;
 use crate::plan::Expect;
-use crate::report::Rekey;
+use crate::report::{Partial, Rekey};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -42,6 +42,18 @@ pub enum Error {
     /// An intent, undo or redo was refused before anything was written.
     #[error("refused: {0}")]
     Refused(Refusal),
+
+    /// The intent's file effects stopped partway. It is logged with what they did,
+    /// and each path holds its old bytes, its new bytes or, where a step stopped
+    /// between the two, nothing.
+    #[error("{} stopped partway at {}: {}", .0.label, .0.report.stopped, .0.report.error)]
+    Partial(Box<Partial>),
+
+    /// An effect this writer left unfinished, settled before the operation asked
+    /// for, stopped partway. It is logged with what it did; the operation asked for
+    /// wrote nothing and may be tried again.
+    #[error("finishing {} stopped partway at {}: {}", .0.label, .0.report.stopped, .0.report.error)]
+    Unfinished(Box<Partial>),
 
     /// This instance has not written to the library yet, so it has no directory
     /// in the local root to keep drafts in.

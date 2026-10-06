@@ -31,7 +31,8 @@ use crate::reader::{CachedView, ReadReport, Reader, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode, Opened,
-    Orphan, Outcome, Presence, Refreshed, Settled, Start, TrashItem, What, WriterInfo,
+    Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start, TrashItem, What,
+    WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
@@ -248,7 +249,10 @@ impl Library {
     /// Settles this writer's interrupted effects, then checks every precondition
     /// against the view they leave and the files, logs the intent and carries out
     /// its file effects. Before its first write a new writer is created. A refusal
-    /// is [`crate::Error::Refused`], and the refused intent changes nothing.
+    /// is [`crate::Error::Refused`], and the refused intent changes nothing. Effects
+    /// that stop partway are [`crate::Error::Partial`]; the intent is logged as far
+    /// as they got. Settling that stops partway is [`crate::Error::Unfinished`],
+    /// and the intent is not tried.
     pub fn commit(
         &mut self,
         plan: std::result::Result<Plan, Invalid>,
@@ -1054,10 +1058,7 @@ fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
     if library.unsettled.is_empty() {
         return ok(library);
     }
-    settle_own(library).map_ok(|library| {
-        library.show();
-        library
-    })
+    settle_own(library)
 }
 
 /// Commits `resolved` once this writer's interrupted effects are settled: creates
@@ -1074,6 +1075,7 @@ fn commit<'a>(
         effects,
         reverses,
     } = resolved;
+    let shown = label.clone();
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
         .and_then(move |library| {
@@ -1089,19 +1091,42 @@ fn commit<'a>(
             };
             transact(library, logged, effects, Vec::new())
         })
-        .map_ok(move |(library, entry, outcome)| {
-            let mut changes = Vec::new();
-            if let EntryKind::Intent(logged) = &entry.kind {
-                changes_of(&logged.ops, &By::This, &mut changes);
+        .and_then(move |(library, entry, outcome)| {
+            match committed(shown, &entry, created, outcome) {
+                Ok(committed) => ok((library, committed)),
+                Err(partial) => Flow::Done(Err(Error::Partial(partial))),
             }
-            let committed = Committed {
-                intent: entry.hash(),
-                created,
-                changes,
-                outcome,
-            };
-            (library, committed)
         })
+}
+
+/// What committing `entry`, labeled `label`, did: the intent, or how its effects
+/// stopped partway.
+fn committed(
+    label: String,
+    entry: &Entry,
+    created: Vec<EntityId>,
+    outcome: Outcome,
+) -> std::result::Result<Committed, Box<Partial>> {
+    let mut changes = Vec::new();
+    if let EntryKind::Intent(logged) = &entry.kind {
+        changes_of(&logged.ops, &By::This, &mut changes);
+    }
+    let committed = Committed {
+        intent: entry.hash(),
+        created,
+        changes,
+    };
+    match outcome {
+        Outcome::Complete => Ok(committed),
+        Outcome::Partial(report) => Err(Box::new(Partial {
+            label,
+            committed,
+            report: PartialReport {
+                record: None,
+                ..report
+            },
+        })),
+    }
 }
 
 /// The entity whose file `op` writes, if it writes one.
@@ -1160,17 +1185,20 @@ fn ensure_writer<'a>(
     })
 }
 
-/// Settles this writer's interrupted effects, oldest first. A record stays to
-/// settle while settling it fails.
+/// Settles this writer's interrupted effects, oldest first, and shows what they
+/// leave. A record stays to settle while settling it fails. One whose effects
+/// stop partway is logged as far as they got, removed, and fails the settling
+/// with [`Error::Unfinished`].
 fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     let Some(settling) = library.unsettled.first().cloned() else {
+        library.show();
         return ok(library);
     };
     let layout = library.layout.clone();
     let PendingRecord { writer, .. } = settling.pending;
     let name = settling.record;
-    let settled = match settling.logged {
-        true => ok(library),
+    let settled: Fallible<'_, (&mut Library, Option<Box<Partial>>)> = match settling.logged {
+        true => ok((library, None)),
         false => {
             let record = Rc::new(settling.pending);
             let identify = Rc::clone(&library.env.identify);
@@ -1184,15 +1212,26 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
                 let mut logged = planned(&record);
                 logged.ops.extend(library.file_ops(&applied, &record.files));
                 logged.displaced = applied.displaced;
-                append(library, vec![EntryKind::Intent(logged)])
-                    .and_then(|(library, _)| rescan(library))
+                let label = logged.label.clone();
+                append(library, vec![EntryKind::Intent(logged)]).and_then(
+                    move |(library, entries)| {
+                        let partial = committed(label, &entries[0], Vec::new(), applied.outcome);
+                        rescan(library).map_ok(move |library| (library, partial.err()))
+                    },
+                )
             })
         }
     };
-    settled.and_then(move |library| {
+    settled.and_then(move |(library, partial)| {
         flow::run(effects::finish(&layout, writer, name)).and_then(move |()| {
             library.unsettled.retain(|settling| settling.record != name);
-            settle_own(library)
+            match partial {
+                None => settle_own(library),
+                Some(partial) => {
+                    library.show();
+                    Flow::Done(Err(Error::Unfinished(partial)))
+                }
+            }
         })
     })
 }
@@ -1362,13 +1401,7 @@ fn log_effects<'a>(
     let (name, journaled) = (effects.record, effects.moves_files());
     logged.ops.extend(library.file_ops(&applied, &record.files));
     logged.displaced = applied.displaced;
-    let outcome = match applied.outcome {
-        Outcome::Partial(report) => Outcome::Partial(crate::report::PartialReport {
-            record: None,
-            ..report
-        }),
-        Outcome::Complete => Outcome::Complete,
-    };
+    let outcome = applied.outcome;
     let mut kinds = vec![EntryKind::Intent(logged)];
     kinds.extend(after);
     let layout = library.layout.clone();
@@ -1429,24 +1462,35 @@ fn settle_orphan(
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
         .and_then(move |library| {
-            let logged: Fallible<'_, &mut Library> = match effects.is_empty() && facts.is_empty() {
-                true => append(library, vec![settle]).map_ok(|(library, _)| library),
-                false => {
-                    let logged = Logged {
-                        label: theirs.label,
-                        ops: facts,
-                        displaced: Vec::new(),
-                        reverses: None,
-                    };
-                    transact(library, logged, effects, vec![settle]).map_ok(|(library, ..)| library)
-                }
-            };
-            logged.map_ok(move |library| {
+            let logged: Fallible<'_, (&mut Library, Option<Box<Partial>>)> =
+                match effects.is_empty() && facts.is_empty() {
+                    true => append(library, vec![settle]).map_ok(|(library, _)| (library, None)),
+                    false => {
+                        let label = theirs.label.clone();
+                        let logged = Logged {
+                            label: theirs.label,
+                            ops: facts,
+                            displaced: Vec::new(),
+                            reverses: None,
+                        };
+                        transact(library, logged, effects, vec![settle]).map_ok(
+                            move |(library, entry, outcome)| {
+                                let partial = committed(label, &entry, Vec::new(), outcome);
+                                (library, partial.err())
+                            },
+                        )
+                    }
+                };
+            logged.and_then(move |(library, partial)| {
                 library.rebind(library.scan.clone());
                 library.show();
                 library
                     .orphaned
                     .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
+                match partial {
+                    None => ok(()),
+                    Some(partial) => Flow::Done(Err(Error::Partial(partial))),
+                }
             })
         })
 }

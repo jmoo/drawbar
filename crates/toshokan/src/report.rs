@@ -157,26 +157,35 @@ pub struct Ambiguous {
     pub candidates: Vec<RelPath>,
 }
 
-/// A committed intent.
+/// A committed intent, its file effects all made.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Committed {
     /// The entry that logged it.
     pub intent: EntryHash,
-    /// The entities it created, in the plan's order.
+    /// The entities it created, in the order the intent created them.
     pub created: Vec<EntityId>,
     pub changes: Vec<Change>,
-    pub outcome: Outcome,
 }
 
+/// How an intent's file effects end: all made, or stopped partway.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Outcome {
     Complete,
     Partial(PartialReport),
 }
 
-/// An intent whose file effects stopped partway. Every effect before `applied`
-/// was made; the pending record, while there is one, names what recovery will
-/// finish.
+/// An intent whose file effects stopped partway, logged with what they did.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Partial {
+    pub label: String,
+    /// The intent as logged: the facts it changed and the files as the folder
+    /// shows them.
+    pub committed: Committed,
+    pub report: PartialReport,
+}
+
+/// Where an intent's file effects stopped. Every effect before `applied` was made;
+/// the pending record, while there is one, names what recovery will finish.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PartialReport {
     pub applied: usize,

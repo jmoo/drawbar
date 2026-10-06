@@ -396,6 +396,11 @@ A commit:
 Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.
 
+A commit whose file effects stop partway is logged with what they did, and
+fails, saying where they stopped. When settling one of this writer's unfinished
+effects at step 4 stops partway, that settlement is logged and the commit fails
+before its own intent is tried.
+
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.
 
