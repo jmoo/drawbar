@@ -514,12 +514,16 @@ settling once.
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
 tell them apart. It reports the record, and settles it only when the user asks,
-as an intent of its own: to finish, it carries out the remaining steps and logs
-the facts the record planned; to roll back, it reverses the done ones; to
-dismiss, it changes no file. It copies files out of the other writer's `tmp/`
-and `trash/` rather than moving them, and moves a library file it displaces into
-its own trash. It then appends a `settle` entry naming the writer and record,
-after which no reader reports the record. Only the record's writer removes it.
+as an intent of its own: to finish, it carries out the remaining steps, skipping
+a `to_trash` whose path holds nothing, and logs the facts the record planned; to
+roll back, it reverses the done ones; to dismiss, it changes no file. It copies
+files out of the other writer's `tmp/` and `trash/` rather than moving them, and
+moves a library file it displaces into its own trash. Once its steps are done, it
+appends a `settle` entry naming the writer and record, after which no reader
+reports the record. If its steps stop partway, the settlement fails and its
+intent is logged with what they did, without the planned facts or a `settle`
+entry. The record stays open, and settling it again finds from the folder what
+remains. Only the record's writer removes it.
 
 ## Undo and redo
 

@@ -267,41 +267,67 @@ pub fn tidy(
         .task()
 }
 
+/// How far another writer's record got, as [`orphan_plan`] needs it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Reached {
+    progress: Progress,
+    /// The library paths its `to_trash` steps move that hold nothing.
+    vacant: BTreeSet<RelPath>,
+}
+
 /// How far another writer's record `theirs` got, for [`orphan_plan`].
-pub fn progress(layout: &Layout, theirs: &PendingRecord) -> Task<'static, Result<Progress>> {
+pub fn progress(layout: &Layout, theirs: &PendingRecord) -> Task<'static, Result<Reached>> {
     let layout = layout.clone();
     let theirs = theirs.clone();
     effects::observe(&layout, &theirs)
-        .map_ok(move |seen| effects::progress(&layout, &theirs, &seen))
+        .map_ok(move |seen| {
+            let vacant = theirs
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    EffectStep::ToTrash { path, .. } if !seen.holds(path) => Some(path.clone()),
+                    _ => None,
+                })
+                .collect();
+            Reached {
+                progress: effects::progress(&layout, &theirs, &seen),
+                vacant,
+            }
+        })
         .task()
 }
 
-/// The effects that settle another writer's record `theirs` as `how`, from
-/// `progress`, carried out by this writer like an intent's. Nothing is written in
+/// The effects that settle another writer's record `theirs` as `how`, from how
+/// far it got, carried out by this writer like an intent's. Nothing is written in
 /// the other writer's directory: its staged and trashed bytes are copied, and
-/// library files the settlement displaces go to this writer's trash. Dismissing
-/// changes no file.
+/// library files the settlement displaces go to this writer's trash. Finishing
+/// skips moving to the trash a path that holds nothing. Dismissing changes no
+/// file.
 ///
-/// The caller commits the plan, then appends a [`crate::log::Settle`] entry.
+/// Planned again after a settlement stopped partway, it plans what remains. The
+/// caller commits the plan, then, once its effects complete, appends a
+/// [`crate::log::Settle`] entry.
 pub fn orphan_plan(
     layout: &Layout,
     theirs: &PendingRecord,
-    progress: &Progress,
+    reached: &Reached,
     how: Settlement,
     env: &mut Env,
 ) -> EffectPlan {
     Orphaned {
         layout,
         theirs,
+        vacant: &reached.vacant,
         plan: EffectPlan::new(env.nonce()),
         env,
     }
-    .plan(progress, how)
+    .plan(&reached.progress, how)
 }
 
 struct Orphaned<'a> {
     layout: &'a Layout,
     theirs: &'a PendingRecord,
+    vacant: &'a BTreeSet<RelPath>,
     plan: EffectPlan,
     env: &'a mut Env,
 }
@@ -346,6 +372,7 @@ impl Orphaned<'_> {
     fn finish(&mut self, step: &EffectStep) {
         let writer = self.theirs.writer;
         match step {
+            EffectStep::ToTrash { path, .. } if self.vacant.contains(path) => {}
             EffectStep::ToTrash { path, .. } => self.trash(path),
             EffectStep::Place { staged, path } => {
                 self.copy(self.layout.staged(writer, *staged), path)

@@ -6,7 +6,9 @@
 //! names it. Recovery finishes every recorded effect, removes every record and
 //! staged file, changes nothing when run again, and ends the same however often
 //! it is itself cut short. After the local root is lost, an unfinished effect is
-//! reported for consent, and settling it never writes in its writer's directory.
+//! reported for consent, settling it never writes in its writer's directory, and
+//! settling it again after a settlement stopped partway ends as one settlement
+//! does.
 
 mod common;
 
@@ -439,8 +441,11 @@ fn recovery_cut_short_anywhere_then_run_again_ends_as_one_run_does() {
 
 const HEIR: WriterId = WriterId::from_u128(0x88);
 
-/// Settles every orphan of `WRITER` as `HEIR` would with the user's consent.
-fn settle_orphans(disk: &MemDisk, how: Settlement) -> usize {
+/// Settles every orphan of `WRITER` as `HEIR` would with the user's consent,
+/// drawing names from `seed` and carrying out at most `stop` steps of each
+/// settlement, as one that fails at the next step does. Returns how many orphans
+/// there were and whether a settlement stopped short.
+fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (usize, bool) {
     let layout = layout();
     let d = &mut BlockingMem(disk.clone());
     let found = d
@@ -455,16 +460,18 @@ fn settle_orphans(disk: &MemDisk, how: Settlement) -> usize {
         found.own.is_empty() && found.ignored.is_empty(),
         "{found:?}"
     );
-    let mut env = env(9);
+    let mut env = env(seed);
+    let mut stopped = false;
     for orphan in &found.orphaned {
         let theirs = d
             .run(pending::read_one(&layout, orphan.writer, orphan.record))
             .unwrap()
             .expect("the orphan's record is there");
-        let progress = d.run(recovery::progress(&layout, &theirs)).unwrap();
-        let plan = Rc::new(recovery::orphan_plan(
-            &layout, &theirs, &progress, how, &mut env,
-        ));
+        let reached = d.run(recovery::progress(&layout, &theirs)).unwrap();
+        let mut plan = recovery::orphan_plan(&layout, &theirs, &reached, how, &mut env);
+        stopped |= plan.steps.len() > stop;
+        plan.steps.truncate(stop);
+        let plan = Rc::new(plan);
         let record = Rc::new(PendingRecord::new(HEIR, "settle", entry(HEAD), &plan));
         let prepared = d
             .run(effects::prepare(
@@ -483,7 +490,27 @@ fn settle_orphans(disk: &MemDisk, how: Settlement) -> usize {
             d.run(effects::finish(&layout, HEIR, plan.record)).unwrap();
         }
     }
-    found.orphaned.len()
+    d.run(recovery::tidy(&layout, HEIR, &[])).unwrap();
+    (found.orphaned.len(), stopped)
+}
+
+/// The files in `WRITER`'s directory.
+fn in_theirs(files: &BTreeMap<RelPath, Vec<u8>>) -> Vec<(RelPath, Vec<u8>)> {
+    let theirs = layout().writer(WRITER);
+    files
+        .iter()
+        .filter(|(p, _)| p.starts_with(&theirs))
+        .map(|(p, b)| (p.clone(), b.clone()))
+        .collect()
+}
+
+/// What each user path of `case` holds once an open effect is settled as `how`.
+fn settled_state(case: &Case, how: Settlement) -> Vec<Option<Vec<u8>>> {
+    match how {
+        Settlement::Finished => case.state(true),
+        Settlement::RolledBack => case.state(false),
+        Settlement::Dismissed => unreachable!("dismissing changes no file"),
+    }
 }
 
 #[test]
@@ -502,20 +529,12 @@ fn after_losing_the_local_root_an_unfinished_effect_is_reported_and_settled_only
                     disk.lose_local();
                     let open =
                         !records(&disk, WRITER).is_empty() && !logs(&disk, WRITER)[&WRITER].closed;
-                    let theirs = layout().writer(WRITER);
                     let before = disk.files(Root::Folder);
                     let holds = case.holds(&before);
-                    let reported = settle_orphans(&disk, how);
+                    let (reported, _) = settle_orphans(&disk, how, usize::MAX, 9);
                     assert_eq!(reported, usize::from(open), "{shown}: reported");
 
                     let after = disk.files(Root::Folder);
-                    let in_theirs = |files: &BTreeMap<RelPath, Vec<u8>>| {
-                        files
-                            .iter()
-                            .filter(|(p, _)| p.starts_with(&theirs))
-                            .map(|(p, b)| (p.clone(), b.clone()))
-                            .collect::<Vec<_>>()
-                    };
                     assert_eq!(
                         in_theirs(&after),
                         in_theirs(&before),
@@ -524,14 +543,52 @@ fn after_losing_the_local_root_an_unfinished_effect_is_reported_and_settled_only
                     case.kept(&shown, &after);
                     let expected = match (open, how) {
                         (false, _) | (true, Settlement::Dismissed) => holds,
-                        (true, Settlement::Finished) => case.state(true),
-                        (true, Settlement::RolledBack) => case.state(false),
+                        (true, how) => settled_state(&case, how),
                     };
                     assert_eq!(case.holds(&after), expected, "{shown}: settled");
                 },
             );
         }
     }
+}
+
+#[test]
+fn a_settlement_stopped_at_any_step_and_settled_again_ends_as_one_settlement_does() {
+    let mut stopped_short = 0;
+    for case in cases() {
+        for how in [Settlement::Finished, Settlement::RolledBack] {
+            crash::sweep(
+                || case.disk(),
+                |disk| case.commit(disk),
+                |fault, crashed| {
+                    crashed.lose_local();
+                    for stop in 0.. {
+                        let shown =
+                            format!("{} at {fault:?}, {how:?} stopped at {stop}", case.name);
+                        let disk = crashed.restart();
+                        let before = disk.files(Root::Folder);
+                        let (reported, stopped) = settle_orphans(&disk, how, stop, 9);
+                        if reported == 0 || !stopped {
+                            break;
+                        }
+                        stopped_short += 1;
+                        let (reported, _) = settle_orphans(&disk, how, usize::MAX, 10);
+                        assert_eq!(reported, 1, "{shown}: still reported");
+
+                        let after = disk.files(Root::Folder);
+                        assert_eq!(
+                            in_theirs(&after),
+                            in_theirs(&before),
+                            "{shown}: wrote in their directory"
+                        );
+                        case.kept(&shown, &after);
+                        assert_eq!(case.holds(&after), settled_state(&case, how), "{shown}");
+                    }
+                },
+            );
+        }
+    }
+    assert!(stopped_short > 0, "some settlement stops short");
 }
 
 #[test]

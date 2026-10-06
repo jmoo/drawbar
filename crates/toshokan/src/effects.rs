@@ -801,6 +801,13 @@ pub(crate) struct Observation {
     equal: BTreeSet<(RelPath, RelPath)>,
 }
 
+impl Observation {
+    /// Whether the folder holds `path`, one of the record's paths.
+    pub(crate) fn holds(&self, path: &RelPath) -> bool {
+        self.present.contains(path)
+    }
+}
+
 /// How far a record's steps got: the first `done`, and a source the last of them
 /// left behind beside its destination with the same bytes.
 #[derive(Clone, PartialEq, Eq, Debug)]

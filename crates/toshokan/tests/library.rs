@@ -12,7 +12,7 @@ use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
-use toshokan::log::{Entry, EntryKind, Genesis, Settlement};
+use toshokan::log::{Entry, EntryKind, Genesis, Op, Settlement};
 use toshokan::report::{
     By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, Presence,
     Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
@@ -406,7 +406,7 @@ through_both!(
     effects_that_stop_partway_fail_the_commit_and_are_logged,
     an_undo_that_stops_partway_fails_and_is_logged,
     settling_an_own_effect_that_stops_partway_fails_before_the_next_intent,
-    settling_an_orphan_that_stops_partway_fails_and_is_logged,
+    a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
     a_folder_whose_renames_may_replace_is_written_and_says_so,
     a_view_is_read_on_other_threads,
 );
@@ -2099,14 +2099,18 @@ fn an_undo_that_stops_partway_fails_and_is_logged<F: Facade>() {
     assert_eq!(read(&folder, "song.npno"), None);
 }
 
-/// The disk `rename` leaves after each crash that leaves its pending record open
-/// with `song.npno` not yet moved to `b.npno`, reopened.
-fn interrupted_renames<F: Facade>(mut each: impl FnMut(MemDisk, &str)) {
+/// The disk `change` of `song.npno` leaves after each crash that leaves its
+/// pending record open and `unfinished` true of the folder, reopened.
+fn interrupted<F: Facade>(
+    change: fn(&mut F, EntityId) -> Result<Committed, Error>,
+    unfinished: fn(&MemDisk) -> bool,
+    mut each: impl FnMut(MemDisk, &str),
+) {
     let one_disk = |disk: &MemDisk| Machine {
         folder: disk.clone(),
         local: disk.clone(),
     };
-    let rename = |disk: &MemDisk, crash: Option<u64>| {
+    let run = |disk: &MemDisk, crash: Option<u64>| {
         let clock = TestClock::at(1_000);
         let (mut library, _) = F::open(Probe::new(&one_disk(disk)), env("a", 1, &clock)).unwrap();
         let song = create(&mut library, "song.npno", b"song");
@@ -2114,29 +2118,40 @@ fn interrupted_renames<F: Facade>(mut each: impl FnMut(MemDisk, &str)) {
         if let Some(crash) = crash {
             disk.crash_after(crash);
         }
-        let renamed = library.commit("Rename", |i| {
-            i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
-        });
-        (renamed, disk.mutations() - before)
+        let changed = change(&mut library, song);
+        (changed, disk.mutations() - before)
     };
-    let (renamed, total) = rename(&MemDisk::new(), None);
-    renamed.unwrap();
+    let (changed, total) = run(&MemDisk::new(), None);
+    changed.unwrap();
     let mut open = 0;
     for crash in 0..total {
         let disk = MemDisk::new();
-        let _ = rename(&disk, Some(crash));
+        let _ = run(&disk, Some(crash));
         let disk = disk.restart();
         let records = disk
             .files(Root::Folder)
             .into_keys()
             .filter(|p| p.components().any(|name| name == "pending"));
-        let unmoved = read(&disk, "song.npno").is_some() && read(&disk, "b.npno").is_none();
-        if records.count() == 1 && unmoved {
+        if records.count() == 1 && unfinished(&disk) {
             open += 1;
             each(disk, &format!("crash after {crash}"));
         }
     }
-    assert!(open > 0, "some crash leaves the rename open");
+    assert!(open > 0, "some crash leaves the change open");
+}
+
+/// The disk a rename of `song.npno` to `b.npno` leaves after each crash that
+/// leaves its record open with the file not yet moved, reopened.
+fn interrupted_renames<F: Facade>(each: impl FnMut(MemDisk, &str)) {
+    interrupted::<F>(
+        |library, song| {
+            library.commit("Rename", |i| {
+                i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
+            })
+        },
+        |disk| read(disk, "song.npno").is_some() && read(disk, "b.npno").is_none(),
+        each,
+    );
 }
 
 fn settling_an_own_effect_that_stops_partway_fails_before_the_next_intent<F: Facade>() {
@@ -2171,29 +2186,105 @@ fn settling_an_own_effect_that_stops_partway_fails_before_the_next_intent<F: Fac
     });
 }
 
-fn settling_an_orphan_that_stops_partway_fails_and_is_logged<F: Facade>() {
-    interrupted_renames::<F>(|disk, shown| {
-        disk.lose_local();
-        let machine = Machine {
-            folder: disk.clone(),
-            local: disk.clone(),
-        };
-        let clock = TestClock::at(2_000);
-        let (mut heir, opened) = F::open(Probe::new(&machine), env("b", 2, &clock)).unwrap();
-        let [orphan] = &opened.orphaned[..] else {
-            panic!("{shown}: {:?}", opened.orphaned);
-        };
-        put(&disk, "b.npno", b"theirs");
-        let settled = heir.settle(orphan.clone(), Settlement::Finished);
-        let Err(Error::Partial(partial)) = settled else {
-            panic!("{shown}: {settled:?}");
-        };
-        assert_eq!(partial.report.stopped, path("b.npno"), "{shown}");
-        heir.close().unwrap();
-        let (_, opened) = F::open(Probe::new(&machine), env("b", 3, &clock)).unwrap();
-        assert_eq!(opened.orphaned, [], "{shown}: the settlement is logged");
-        assert_eq!(read(&disk, "b.npno").as_deref(), Some(b"theirs".as_slice()));
-    });
+/// Every entry in `writer`'s segments in the folder.
+fn segment_entries(folder: &MemDisk, writer: WriterId) -> Vec<Entry> {
+    let dir = layout().writer(writer);
+    folder
+        .files(Root::Folder)
+        .into_iter()
+        .filter(|(p, _)| p.parent().as_ref() == Some(&dir) && p.as_str().ends_with(".jsonl"))
+        .flat_map(|(_, bytes)| toshokan::line::lines(&bytes).collect::<Vec<_>>())
+        .map(|line| Entry::decode(line).unwrap())
+        .collect()
+}
+
+fn a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again<F: Facade>() {
+    for how in [Settlement::Finished, Settlement::RolledBack] {
+        let mut stopped = 0;
+        interrupted::<F>(
+            |library, song| {
+                library.commit("Save", |i| {
+                    i.save(
+                        song,
+                        &path("song.npno"),
+                        b"saved".to_vec(),
+                        Expect::Holds(identity(b"song")),
+                    )
+                    .add(song, TAGS, tag("saved"))
+                })
+            },
+            |disk| read(disk, "song.npno").as_deref() != Some(b"saved".as_slice()),
+            |disk, crash| {
+                let shown = format!("{how:?}, {crash}");
+                disk.lose_local();
+                let here = Machine {
+                    folder: disk.clone(),
+                    local: disk.clone(),
+                };
+                let clock = TestClock::at(2_000);
+                let probe = Probe::new(&here);
+                let (mut heir, opened) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+                let [orphan] = &opened.orphaned[..] else {
+                    panic!("{shown}: {:?}", opened.orphaned);
+                };
+                refuse(&probe, Some("song.npno"));
+                let settled = heir.settle(orphan.clone(), how);
+                refuse(&probe, None);
+                let Err(Error::Partial(partial)) = settled else {
+                    assert!(
+                        how == Settlement::RolledBack && settled.is_ok(),
+                        "{shown}: {settled:?}"
+                    );
+                    return;
+                };
+                stopped += 1;
+                assert_eq!(partial.report.stopped, path("song.npno"), "{shown}");
+
+                let (between, opened) =
+                    F::open(Probe::new(&machine(&disk)), env("c", 3, &clock)).unwrap();
+                assert_eq!(
+                    opened.orphaned,
+                    std::slice::from_ref(orphan),
+                    "{shown}: still open"
+                );
+                let song = between.view().entities()[0].id();
+                assert_eq!(tags(&between.view(), song), ["new"], "{shown}");
+
+                heir.settle(orphan.clone(), how)
+                    .unwrap_or_else(|e| panic!("{shown}: settled again: {e}"));
+                let (after, opened) =
+                    F::open(Probe::new(&machine(&disk)), env("d", 4, &clock)).unwrap();
+                assert_eq!(opened.orphaned, [], "{shown}: settled");
+                let (bytes, tagged): (&[u8], &[&str]) = match how {
+                    Settlement::Finished => (b"saved", &["new", "saved"]),
+                    _ => (b"song", &["new"]),
+                };
+                assert_eq!(read(&disk, "song.npno").as_deref(), Some(bytes), "{shown}");
+                assert_eq!(tags(&after.view(), song), tagged, "{shown}");
+
+                let entries = segment_entries(&disk, label_of(&after.view(), "b"));
+                let settles = entries
+                    .iter()
+                    .filter(
+                        |e| matches!(&e.kind, EntryKind::Settle(s) if s.record == orphan.record),
+                    )
+                    .count();
+                let saved = toshokan::Raw::of(&"saved").unwrap();
+                let adds = entries
+                    .iter()
+                    .filter_map(|e| match &e.kind {
+                        EntryKind::Intent(logged) => Some(&logged.ops),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|op| matches!(op, Op::Add { value, .. } if *value == saved))
+                    .count();
+                let planned = usize::from(how == Settlement::Finished);
+                assert_eq!((settles, adds), (1, planned), "{shown}: settled once");
+            },
+        );
+        assert!(stopped > 0, "{how:?}: some settlement stops partway");
+    }
 }
 
 fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {

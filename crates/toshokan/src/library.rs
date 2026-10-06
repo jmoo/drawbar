@@ -370,7 +370,8 @@ impl Library {
 
     /// Settles another writer's unfinished effect, with the user's consent, in
     /// this writer's own log: finishes it, rolls it back or dismisses it. Nothing
-    /// is written in the other writer's directory.
+    /// is written in the other writer's directory. Effects that stop partway are
+    /// [`crate::Error::Partial`] and leave the effect open to settle again.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<()>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -385,12 +386,12 @@ impl Library {
                 let Some(theirs) = open else {
                     return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
                 };
-                let progress = recovery::progress(&library.layout, &theirs);
-                flow::run(progress).and_then(move |progress| {
+                let reached = recovery::progress(&library.layout, &theirs);
+                flow::run(reached).and_then(move |reached| {
                     let plan = recovery::orphan_plan(
                         &library.layout,
                         &theirs,
-                        &progress,
+                        &reached,
                         how,
                         &mut library.env,
                     );
@@ -1089,7 +1090,7 @@ fn commit<'a>(
                 displaced: Vec::new(),
                 reverses,
             };
-            transact(library, logged, effects, Vec::new())
+            transact(library, logged, effects, None)
         })
         .and_then(move |(library, entry, outcome)| {
             match committed(shown, &entry, created, outcome) {
@@ -1315,19 +1316,36 @@ fn appending<'a>(
     })
 }
 
+/// What settling another writer's record adds once the settlement's effects
+/// complete: the facts the record planned, ahead of the intent's own ops, then
+/// the entry that closes the record.
+struct Closing {
+    facts: Vec<Op>,
+    settle: Settle,
+}
+
+/// The entries that log `logged`, closed by `closing` when there is one.
+fn closed(mut logged: Logged, closing: Option<Closing>) -> Vec<EntryKind> {
+    let Some(Closing { mut facts, settle }) = closing else {
+        return vec![EntryKind::Intent(logged)];
+    };
+    facts.append(&mut logged.ops);
+    logged.ops = facts;
+    vec![EntryKind::Intent(logged), EntryKind::Settle(settle)]
+}
+
 /// Logs `logged`, carrying out `effects` under a pending record when there are
-/// any, then appends `after`. Returns the intent's entry and how the effects
-/// ended. An interrupted run leaves the record for the next write to settle.
+/// any, and closed by `closing` only when they complete. Returns the intent's
+/// entry and how the effects ended. An interrupted run leaves the record for the
+/// next write to settle.
 fn transact<'a>(
     library: &'a mut Library,
     logged: Logged,
     effects: Rc<EffectPlan>,
-    after: Vec<EntryKind>,
+    closing: Option<Closing>,
 ) -> Fallible<'a, (&'a mut Library, Entry, Outcome)> {
     if effects.is_empty() {
-        let mut kinds = vec![EntryKind::Intent(logged)];
-        kinds.extend(after);
-        return append(library, kinds).map_ok(|(library, entries)| {
+        return append(library, closed(logged, closing)).map_ok(|(library, entries)| {
             library.rebind(library.scan.clone());
             library.show();
             let entry = entries.into_iter().next().expect("the intent was appended");
@@ -1335,7 +1353,7 @@ fn transact<'a>(
         });
     }
     carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
-        log_effects(library, logged, &effects, record, applied, after)
+        log_effects(library, logged, &effects, record, applied, closing)
     })
 }
 
@@ -1388,22 +1406,23 @@ fn carry_out<'a>(
     })
 }
 
-/// Appends the intent `logged` with what `applied` says the effects did, then
-/// `after`, and removes the record once the entries are durable.
+/// Appends the intent `logged` with what `applied` says the effects did, closed
+/// by `closing` if they complete, and removes the record once the entries are
+/// durable.
 fn log_effects<'a>(
     library: &'a mut Library,
     mut logged: Logged,
     effects: &EffectPlan,
     record: Rc<PendingRecord>,
     applied: Applied,
-    after: Vec<EntryKind>,
+    closing: Option<Closing>,
 ) -> Fallible<'a, (&'a mut Library, Entry, Outcome)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     logged.ops.extend(library.file_ops(&applied, &record.files));
     logged.displaced = applied.displaced;
     let outcome = applied.outcome;
-    let mut kinds = vec![EntryKind::Intent(logged)];
-    kinds.extend(after);
+    let closing = closing.filter(|_| outcome == Outcome::Complete);
+    let kinds = closed(logged, closing);
     let layout = library.layout.clone();
     appending(library, kinds).then(move |(library, appended)| {
         let entries = match appended {
@@ -1442,6 +1461,8 @@ fn log_effects<'a>(
 /// Settles another writer's record `theirs` as `how` with `plan`, once this
 /// writer's own interrupted effects are settled: removes stale staging, then logs
 /// the settlement. Finishing logs the facts the other writer planned with it.
+/// Effects that stop partway are logged as far as they got, without those facts
+/// or the `settle` entry, and leave the record open to settle again.
 fn settle_orphan(
     library: &mut Library,
     orphan: Orphan,
@@ -1454,26 +1475,28 @@ fn settle_orphan(
         Settlement::Finished => planned(&theirs).ops,
         Settlement::RolledBack | Settlement::Dismissed => Vec::new(),
     };
-    let settle = EntryKind::Settle(Settle {
+    let settle = Settle {
         writer: orphan.writer,
         record: orphan.record,
         outcome: how,
-    });
+    };
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
         .and_then(move |library| {
             let logged: Fallible<'_, (&mut Library, Option<Box<Partial>>)> =
                 match effects.is_empty() && facts.is_empty() {
-                    true => append(library, vec![settle]).map_ok(|(library, _)| (library, None)),
+                    true => append(library, vec![EntryKind::Settle(settle)])
+                        .map_ok(|(library, _)| (library, None)),
                     false => {
                         let label = theirs.label.clone();
                         let logged = Logged {
                             label: theirs.label,
-                            ops: facts,
+                            ops: Vec::new(),
                             displaced: Vec::new(),
                             reverses: None,
                         };
-                        transact(library, logged, effects, vec![settle]).map_ok(
+                        let closing = Closing { facts, settle };
+                        transact(library, logged, effects, Some(closing)).map_ok(
                             move |(library, entry, outcome)| {
                                 let partial = committed(label, &entry, Vec::new(), outcome);
                                 (library, partial.err())
@@ -1484,13 +1507,13 @@ fn settle_orphan(
             logged.and_then(move |(library, partial)| {
                 library.rebind(library.scan.clone());
                 library.show();
+                if let Some(partial) = partial {
+                    return Flow::Done(Err(Error::Partial(partial)));
+                }
                 library
                     .orphaned
                     .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
-                match partial {
-                    None => ok(()),
-                    Some(partial) => Flow::Done(Err(Error::Partial(partial))),
-                }
+                ok(())
             })
         })
 }
