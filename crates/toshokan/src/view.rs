@@ -1,11 +1,6 @@
 //! Views: immutable values the app renders from.
 
-#![expect(
-    dead_code,
-    unused_variables,
-    reason = "the skeleton's bodies are todo!()"
-)]
-
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use crate::binding::Bindings;
@@ -13,7 +8,7 @@ use crate::ids::EntityId;
 use crate::merge::Folded;
 use crate::path::RelPath;
 use crate::report::{Fork, Gap, WriterInfo};
-use crate::schema::{Field, Members, Register, Set, Value};
+use crate::schema::{Field, Members, Raw, Register, Set, Value, Written};
 
 /// The library as one reader sees it. Cheap to clone; never changes.
 #[derive(Clone)]
@@ -62,65 +57,162 @@ pub enum Conflicted {
 
 impl View {
     pub fn new(parts: Parts) -> Self {
-        todo!()
+        Self(Rc::new(parts))
+    }
+
+    /// The merged facts the view shows.
+    pub fn folded(&self) -> &Folded {
+        &self.0.folded
     }
 
     /// Every entity that exists or whose deletion is in conflict, by id.
     pub fn entities(&self) -> Vec<EntityView<'_>> {
-        todo!()
+        self.0
+            .folded
+            .entities()
+            .into_iter()
+            .map(|id| EntityView { view: self, id })
+            .collect()
     }
 
     pub fn entity(&self, id: EntityId) -> Option<EntityView<'_>> {
-        todo!()
+        self.0
+            .folded
+            .present(id)
+            .then_some(EntityView { view: self, id })
     }
 
     /// The entities whose set `key` holds `value`, by id.
     pub fn find<T: Value>(&self, key: Set<T>, value: &T) -> Vec<EntityId> {
-        todo!()
+        self.entities()
+            .into_iter()
+            .filter(|entity| entity.members(key).values.binary_search(value).is_ok())
+            .map(|entity| entity.id)
+            .collect()
     }
 
+    /// Every conflict among the entities shown, sorted.
     pub fn conflicts(&self) -> Vec<Conflicted> {
-        todo!()
+        let folded = &self.0.folded;
+        let mut conflicts = Vec::new();
+        for entity in folded.entities() {
+            for key in folded.registers(entity) {
+                if distinct(&folded.register(entity, key)) > 1 {
+                    conflicts.push(Conflicted::Field {
+                        entity,
+                        key: key.to_owned(),
+                    });
+                }
+            }
+            if folded.deletion_conflicted(entity) {
+                conflicts.push(Conflicted::Existence { entity });
+            }
+        }
+        for (entity, files) in folded.files() {
+            if distinct(&files) > 1 {
+                conflicts.push(Conflicted::File { entity });
+            }
+        }
+        conflicts.sort();
+        conflicts
     }
 
     pub fn forks(&self) -> &[Fork] {
-        todo!()
+        &self.0.forks
     }
 
     pub fn gaps(&self) -> &[Gap] {
-        todo!()
+        &self.0.gaps
     }
 
     pub fn writers(&self) -> &[WriterInfo] {
-        todo!()
+        &self.0.writers
     }
 
     /// Library files no entity is bound to. They get an entity only when an intent
     /// says something about them.
     pub fn unbound(&self) -> &[RelPath] {
-        todo!()
+        &self.0.bindings.unbound
     }
+}
+
+fn distinct<T: PartialEq>(writes: &[Written<T>]) -> usize {
+    let mut values: Vec<&T> = Vec::new();
+    for write in writes {
+        if !values.contains(&&write.value) {
+            values.push(&write.value);
+        }
+    }
+    values.len()
 }
 
 impl EntityView<'_> {
     pub fn id(&self) -> EntityId {
-        todo!()
+        self.id
     }
 
+    /// The register as this view merges it. Writes of equal values are one value.
+    /// A value that does not decode as `T` makes the whole field unreadable, so an
+    /// app never shows part of a conflict as if it were all of it.
     pub fn get<T: Value>(&self, key: Register<T>) -> Field<T> {
-        todo!()
+        let writes = self.view.0.folded.register(self.id, key.name());
+        let mut all = Vec::with_capacity(writes.len());
+        for write in writes.iter().rev() {
+            match write.value.decode::<T>() {
+                Ok(value) => all.push(Written {
+                    value,
+                    by: write.by,
+                    at: write.at,
+                    entry: write.entry,
+                }),
+                Err(_) => return Field::Unreadable(write.value.clone()),
+            }
+        }
+        all.reverse();
+        let values: BTreeSet<&T> = all.iter().map(|write| &write.value).collect();
+        match (values.len(), all.last()) {
+            (_, None) => Field::Unset,
+            (1, Some(write)) => Field::Value(write.value.clone()),
+            (_, Some(write)) => Field::Conflict {
+                shown: write.value.clone(),
+                all,
+            },
+        }
     }
 
     pub fn members<T: Value>(&self, key: Set<T>) -> Members<T> {
-        todo!()
+        let mut values = BTreeSet::new();
+        let mut unreadable: Vec<Raw> = Vec::new();
+        for raw in self.view.0.folded.members(self.id, key.name()) {
+            match raw.decode::<T>() {
+                Ok(value) => {
+                    values.insert(value);
+                }
+                Err(_) => unreadable.push(raw),
+            }
+        }
+        Members {
+            values: values.into_iter().collect(),
+            unreadable,
+        }
     }
 
+    /// Where the view binds the entity's file; [`FileState::Missing`] at the
+    /// logged path when no binding was derived for it.
     pub fn file(&self) -> Option<FileRef> {
-        todo!()
+        if let Some(bound) = self.view.0.bindings.bound.get(&self.id) {
+            return Some(bound.clone());
+        }
+        let files = self.view.0.folded.files();
+        let latest = files.get(&self.id)?.last()?;
+        Some(FileRef {
+            path: latest.value.path.clone(),
+            state: FileState::Missing,
+        })
     }
 
     /// Whether a delete and a write it did not observe are both in effect.
     pub fn deletion_conflicted(&self) -> bool {
-        todo!()
+        self.view.0.folded.deletion_conflicted(self.id)
     }
 }

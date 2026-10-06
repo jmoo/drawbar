@@ -91,16 +91,25 @@ pub enum Op {
         key: String,
         value: Raw,
     },
-    /// A set remove of the adds it names.
+    /// A set remove of the adds of `value` that the entries `tags` made.
     Remove {
         entity: EntityId,
         key: String,
+        value: Raw,
         tags: Vec<EntryHash>,
     },
-    /// A write of the entity's file register; `None` says it has no file.
+    /// A write of the entity's file register by a file effect; `None` says it has
+    /// no file.
     File {
         entity: EntityId,
         file: Option<FileFact>,
+        replaces: Vec<EntryHash>,
+    },
+    /// A write of the entity's file register recording a binding a scan derived.
+    /// Merged as [`Op::File`]; undo leaves it alone.
+    Pin {
+        entity: EntityId,
+        file: FileFact,
         replaces: Vec<EntryHash>,
     },
     /// An op this build does not know, or a known op whose members do not decode,
@@ -286,12 +295,18 @@ enum OpOut<'a> {
     Remove {
         entity: EntityId,
         key: &'a str,
+        value: &'a Raw,
         tags: &'a [EntryHash],
     },
     File {
         entity: EntityId,
         #[serde(skip_serializing_if = "Option::is_none")]
         file: Option<&'a FileFact>,
+        replaces: &'a [EntryHash],
+    },
+    Pin {
+        entity: EntityId,
+        file: &'a FileFact,
         replaces: &'a [EntryHash],
     },
 }
@@ -329,9 +344,15 @@ impl Serialize for Op {
                 key,
                 value,
             },
-            Self::Remove { entity, key, tags } => OpOut::Remove {
+            Self::Remove {
+                entity,
+                key,
+                value,
+                tags,
+            } => OpOut::Remove {
                 entity: *entity,
                 key,
+                value,
                 tags,
             },
             Self::File {
@@ -341,6 +362,15 @@ impl Serialize for Op {
             } => OpOut::File {
                 entity: *entity,
                 file: file.as_ref(),
+                replaces,
+            },
+            Self::Pin {
+                entity,
+                file,
+                replaces,
+            } => OpOut::Pin {
+                entity: *entity,
+                file,
                 replaces,
             },
             Self::Unknown(raw) => return raw.serialize(serializer),
@@ -395,6 +425,7 @@ struct AddIn {
 struct RemoveIn {
     entity: EntityId,
     key: String,
+    value: Raw,
     tags: Vec<EntryHash>,
 }
 
@@ -403,6 +434,13 @@ struct FileIn {
     entity: EntityId,
     #[serde(default)]
     file: Option<FileFact>,
+    replaces: Vec<EntryHash>,
+}
+
+#[derive(Deserialize)]
+struct PinIn {
+    entity: EntityId,
+    file: FileFact,
     replaces: Vec<EntryHash>,
 }
 
@@ -441,15 +479,36 @@ fn decode_op(json: &str) -> Option<Op> {
             },
         ),
         "add" => members(json).map(|AddIn { entity, key, value }| Op::Add { entity, key, value }),
-        "remove" => {
-            members(json).map(|RemoveIn { entity, key, tags }| Op::Remove { entity, key, tags })
-        }
+        "remove" => members(json).map(
+            |RemoveIn {
+                 entity,
+                 key,
+                 value,
+                 tags,
+             }| Op::Remove {
+                entity,
+                key,
+                value,
+                tags,
+            },
+        ),
         "file" => members(json).map(
             |FileIn {
                  entity,
                  file,
                  replaces,
              }| Op::File {
+                entity,
+                file,
+                replaces,
+            },
+        ),
+        "pin" => members(json).map(
+            |PinIn {
+                 entity,
+                 file,
+                 replaces,
+             }| Op::Pin {
                 entity,
                 file,
                 replaces,
@@ -516,6 +575,7 @@ mod tests {
             Op::Remove {
                 entity,
                 key: "tags".into(),
+                value: raw(r#""Sunday""#),
                 tags: vec![hash(6)],
             },
             Op::File {
@@ -532,6 +592,16 @@ mod tests {
                 entity,
                 file: None,
                 replaces: vec![hash(8)],
+            },
+            Op::Pin {
+                entity,
+                file: FileFact {
+                    path: RelPath::new("c.npno").unwrap(),
+                    identity: Identity::from_u128(12),
+                    len: 13,
+                    modified: None,
+                },
+                replaces: vec![hash(10)],
             },
         ]
     }
