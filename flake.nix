@@ -82,6 +82,7 @@
                     node --test "$src/js/telemetry/test/check.test.js"
                     touch "$out"
                   '';
+              toshokan-spec = pkgs.nord.toshokan-spec;
             };
 
             devShells.default = pkgs.lib.crane.devShell {

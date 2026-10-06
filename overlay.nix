@@ -532,6 +532,43 @@ let
       ''
   ) { web = drawbar-web; };
 
+  # TLC over toshokan's portable-root spec, one run per config. A config whose
+  # first line reads `\* Violates <Property>: …` must report that violation; any
+  # other must pass.
+  toshokanSpec =
+    name: configs:
+    final.runCommand name
+      {
+        nativeBuildInputs = [ final.tlaplus ];
+        src = cleanSourceWith {
+          src = ./crates/toshokan/spec;
+          filter = path: _: hasSuffix ".tla" path || hasSuffix ".cfg" path;
+        };
+      }
+      ''
+        cp "$src"/* .
+        workers=''${NIX_BUILD_CORES:-0}
+        [ "$workers" -gt 0 ] || workers=auto
+        for config in ${escapeShellArgs configs}; do
+          violated=$(sed -n 's/^\\\* Violates \([A-Za-z]*\):.*/\1/p' "$config.cfg")
+          status=0
+          tlc -workers "$workers" -cleanup -config "$config.cfg" Portable.tla > "$config.log" 2>&1 || status=$?
+          if [ -z "$violated" ]; then
+            expected="No error has been found"
+          else
+            expected="$violated is violated"
+          fi
+          if ! grep -q "$expected" "$config.log"; then
+            cat "$config.log" >&2
+            echo "$config: expected \"$expected\", TLC exited $status" >&2
+            exit 1
+          fi
+          echo "$config: $expected"
+          grep -E 'distinct states found|depth of|Finished in' "$config.log" | tail -n 3
+        done
+        touch "$out"
+      '';
+
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
   # the host-independent web bundle.
   crossed =
@@ -663,6 +700,24 @@ in
           version = "0";
         }
       );
+
+      # The portable-root protocol, model-checked. `nix flake check` runs the
+      # small configs; the deep ones take about half an hour.
+      toshokan-spec = toshokanSpec "toshokan-spec" [
+        "Portable"
+        "Recovery"
+        "Liveness"
+        "Names"
+        "Anchors"
+        "Sealed"
+        "FreshView"
+      ];
+      toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
+        "Deep"
+        "OnePhase"
+        "Sync"
+        "LivenessDeep"
+      ];
 
       # The corpus assemblies themselves.
       inherit corpus;
