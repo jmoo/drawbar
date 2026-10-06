@@ -114,9 +114,10 @@ An entry is an object whose first members are:
 | `at`   | Its clock reading                     |
 | `kind` | `"genesis"`, `"intent"` or `"settle"` |
 
-followed by the members of its kind. A reader ignores members it does not know
-and keeps the line, so they survive. An entry of another kind, without `kind`, or
-whose members do not decode, is kept and merged as unknown; so is a line whose
+followed by the members of its kind. A reader ignores members it does not know,
+at any depth, and keeps the line and the whole entry (see Merging), so they
+survive. An entry of another kind, without `kind`, or whose members do not
+decode, is kept and merged as unknown; so is a line whose
 JSON has no readable `at`, because it still links the chain.
 
 A **genesis** entry starts a writer's chain, with `prev` all zeros:
@@ -207,7 +208,10 @@ values are the app's JSON.
 - **Files** are a register per entity whose writes are `file` and `pin` ops.
 - **Trash items** are kept per writer and item from the `displaced` lists, and
   **settled records** from the `settle` entries, so compaction keeps them.
-- **Unknown** entries and ops are kept with the entry that holds them.
+- **Unknown** entries and ops are kept with the entry that holds them. An entry
+  of a known kind is merged and also kept whole when its JSON is not what the
+  reader would write for what it decoded, as when it holds a member the reader
+  does not know, at any depth.
 
 A value that does not decode as the key's declared type is shown as unreadable,
 and kept and merged like any other.
@@ -224,8 +228,9 @@ and kept and merged like any other.
 | `folded` | The hash of every entry it folds, from the genesis entry on, each the successor of the one before it |
 | `state`  | The merged state of those entries                             |
 
-Members a reader does not know are kept. A reader refuses a `folded` list that is
-empty or repeats a hash. Because the list is whole, a reader can place an entry
+Members a reader does not know are kept, and a compaction carries those of the
+snapshots it folds into the new one, keeping the greater JSON text under each
+name. A reader refuses a `folded` list that is empty or repeats a hash. Because the list is whole, a reader can place an entry
 after any folded entry and see a fork from any point.
 
 `state` is an object:
@@ -239,16 +244,23 @@ after any folded entry and see a fork from any point.
    "file":{"writes":[{"entry","by","at","file"?}],"replaced":[…]}}},
  "trash":[{"writer","item","entry","at","from","identity","len"}],
  "settled":[["<writer>","<record>"]],
- "unknown":[["<entry>",<json>]]}
+ "unknown":[["<entry>",<json>]],
+ "extended":[["<entry>",<json>]]}
 ```
 
 `by` is the writing writer's id. An existence write with `deleted`, the hashes it
 observed, is a delete. A register write without `value` is a clear. A file write
 without `file` says the entity has no file. Members of an entity that are empty
-are omitted. Members of `state` a reader does not know are kept, and joined by
-keeping the greater JSON text. Inside `entities` a reader keeps only the members
-above: a writer whose snapshots a newer version wrote loses the others when an
-older version compacts it.
+are omitted. `extended` holds the entries of a known kind that the merge also
+keeps whole, each with its hash, so a reader that knows more of one can fold it
+again.
+
+Every object of `state` keeps the members a reader does not know: the state
+itself, each entity, each register or set, each write, add, removal and `file`,
+and each trash item. Where the merge joins two objects into one, such as one
+write read from two snapshots, it keeps the greater JSON text under each name.
+An object the merge drops, such as an add that a remove takes away, drops its
+members with it.
 
 Only a snapshot's writer compacts. It confirms that a file in its directory
 holds its last entry, as before an append; if none does, it writes nothing and a

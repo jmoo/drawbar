@@ -86,7 +86,8 @@ readers, and maps its properties to the tests that check the code.
 4. **Nothing is overwritten.** Displaced bytes go to the writer's trash, which
    only that writer empties.
 5. **Conflicts are shown.** Concurrent edits are kept, and the app can list them.
-6. **Keep what you don't understand.** What a newer writer wrote survives.
+6. **Keep what you don't understand.** What a newer writer wrote survives, even
+   when an older one compacts it.
 7. **Nondeterminism is injected.** Time, randomness and file identity come from
    the app, so tests replay exactly.
 8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on

@@ -93,6 +93,7 @@ impl Writer {
             line: Line::seal(json).unwrap(),
             at: self.clock,
             kind,
+            unknown_members: false,
         };
         self.head = entry.hash();
         self.folded.apply(self.id, &entry);
@@ -855,6 +856,300 @@ fn unknown_kinds_ops_keys_and_values_are_kept_through_merges_and_snapshots() {
             "seed {seed}: {rewritten}"
         );
         assert_eq!(reread(&other), other, "seed {seed}");
+    }
+}
+
+/// Members no build knows, added to JSON objects: each gets a fresh name and a
+/// value from [`json`], kept as text until [`Novel::render`].
+struct Novel<'a> {
+    random: &'a mut SeededRandom,
+    members: Vec<(String, String)>,
+}
+
+impl Novel<'_> {
+    fn add(&mut self, object: &mut serde_json::Value) {
+        let n = self.members.len();
+        let name = format!("novel{n}");
+        let text = json(self.random, 2);
+        let slot = object.as_object_mut().expect("a record is an object");
+        slot.insert(name.clone(), serde_json::Value::String(format!("@{n}@")));
+        self.members.push((name, text));
+    }
+
+    fn add_each(&mut self, array: Option<&mut serde_json::Value>) {
+        for item in array.and_then(|a| a.as_array_mut()).into_iter().flatten() {
+            self.add(item);
+        }
+    }
+
+    /// `value` as text, with each member's text in place.
+    fn render(&self, value: &serde_json::Value) -> String {
+        let mut text = value.to_string();
+        for (n, (_, member)) in self.members.iter().enumerate() {
+            text = text.replace(&format!("\"@{n}@\""), member);
+        }
+        text
+    }
+
+    /// Whether `text` holds every member byte for byte.
+    fn all_in(&self, text: &str) -> Result<(), String> {
+        let lost: Vec<_> = self
+            .members
+            .iter()
+            .filter(|(name, member)| !text.contains(&format!("\"{name}\":{member}")))
+            .collect();
+        match lost.is_empty() {
+            true => Ok(()),
+            false => Err(format!("lost {lost:?} from {text}")),
+        }
+    }
+}
+
+/// Adds a novel member to the entry and to each op, file and displaced item in it.
+fn novel_entry(novel: &mut Novel, entry: &mut serde_json::Value) {
+    novel.add(entry);
+    for op in entry
+        .get_mut("ops")
+        .and_then(|ops| ops.as_array_mut())
+        .into_iter()
+        .flatten()
+    {
+        novel.add(op);
+        if let Some(file) = op.get_mut("file") {
+            novel.add(file);
+        }
+    }
+    novel.add_each(entry.get_mut("displaced"));
+}
+
+/// Adds a novel member to every record of a snapshot's state.
+fn novel_state(novel: &mut Novel, state: &mut serde_json::Value) {
+    novel.add(state);
+    let register = |novel: &mut Novel, register: &mut serde_json::Value| {
+        novel.add(register);
+        for write in register["writes"].as_array_mut().unwrap() {
+            novel.add(write);
+            if let Some(file) = write.get_mut("file") {
+                novel.add(file);
+            }
+        }
+    };
+    for entity in state["entities"].as_object_mut().unwrap().values_mut() {
+        novel.add(entity);
+        for name in ["existence", "file"] {
+            if let Some(record) = entity.get_mut(name) {
+                register(novel, record);
+            }
+        }
+        if let Some(registers) = entity.get_mut("registers") {
+            for record in registers.as_object_mut().unwrap().values_mut() {
+                register(novel, record);
+            }
+        }
+        if let Some(sets) = entity.get_mut("sets") {
+            for set in sets.as_object_mut().unwrap().values_mut() {
+                novel.add(set);
+                novel.add_each(set.get_mut("adds"));
+                novel.add_each(set.get_mut("removed"));
+            }
+        }
+    }
+    novel.add_each(state.get_mut("trash"));
+}
+
+/// A history touching every part of the state: a genesis entry, then intents
+/// with every op, a displaced item and a settlement, each line holding what
+/// `edit` makes of the JSON this build writes.
+fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
+    use toshokan::log::{Genesis, Settle, Settlement};
+    let w = WriterId::from_u128(0xa);
+    let (e, gone) = (entity(1), entity(2));
+    let fact = |at: &str| FileFact {
+        path: RelPath::new(at).unwrap(),
+        identity: Identity::from_u128(7),
+        len: 3,
+        modified: Some(4),
+    };
+    let raw = |text: &str| Raw::new(text).unwrap();
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut log = |kind: EntryKind| -> EntryHash {
+        let prev = entries.last().map_or(EntryHash::ZERO, Entry::hash);
+        let at = Hlc {
+            wall_ms: entries.len() as u64 + 1,
+            counter: 0,
+        };
+        let canonical = Entry::encode(prev, at, kind).unwrap();
+        let line = Line::seal(edit(canonical.line.json())).unwrap();
+        let entry = Entry::decode(line).unwrap();
+        let hash = entry.hash();
+        entries.push(entry);
+        hash
+    };
+    let intent = |ops: Vec<Op>, displaced: Vec<Displaced>| {
+        EntryKind::Intent(Logged {
+            label: "every part".into(),
+            ops,
+            displaced,
+            reverses: None,
+        })
+    };
+    log(EntryKind::Genesis(Genesis {
+        writer: w,
+        label: "a".into(),
+    }));
+    let first = log(intent(
+        vec![
+            Op::Create {
+                entity: e,
+                replaces: Vec::new(),
+            },
+            Op::Create {
+                entity: gone,
+                replaces: Vec::new(),
+            },
+            Op::Write {
+                entity: e,
+                key: "name".into(),
+                value: Some(raw("\"x\"")),
+                replaces: Vec::new(),
+            },
+            Op::Add {
+                entity: e,
+                key: "tags".into(),
+                value: raw("\"a\""),
+            },
+            Op::File {
+                entity: e,
+                file: Some(fact("a.bin")),
+                replaces: Vec::new(),
+            },
+        ],
+        vec![Displaced {
+            item: Nonce::from_u128(5),
+            from: RelPath::new("a.bin").unwrap(),
+            identity: Identity::from_u128(6),
+            len: 2,
+        }],
+    ));
+    log(intent(
+        vec![
+            Op::Add {
+                entity: e,
+                key: "tags".into(),
+                value: raw("\"b\""),
+            },
+            Op::Remove {
+                entity: e,
+                key: "tags".into(),
+                value: raw("\"a\""),
+                tags: vec![first],
+            },
+            Op::Write {
+                entity: e,
+                key: "note".into(),
+                value: None,
+                replaces: Vec::new(),
+            },
+            Op::Pin {
+                entity: e,
+                file: fact("b.bin"),
+                replaces: vec![first],
+            },
+            Op::Delete {
+                entity: gone,
+                replaces: vec![first],
+                observed: Vec::new(),
+            },
+        ],
+        Vec::new(),
+    ));
+    log(EntryKind::Settle(Settle {
+        writer: WriterId::from_u128(0xb),
+        record: Nonce::from_u128(9),
+        outcome: Settlement::Dismissed,
+    }));
+    entries
+}
+
+fn folded(entries: &[Entry]) -> Folded {
+    let mut folded = Folded::default();
+    for entry in entries {
+        folded.apply(WriterId::from_u128(0xa), entry);
+    }
+    folded
+}
+
+#[test]
+fn members_no_build_knows_survive_merges_and_snapshots_at_every_level() {
+    for seed in 0..100 {
+        let mut random = SeededRandom::new(seed);
+        let mut novel = Novel {
+            random: &mut random,
+            members: Vec::new(),
+        };
+        let entries = every_part(|json| {
+            let mut entry = serde_json::from_str(json).unwrap();
+            novel_entry(&mut novel, &mut entry);
+            novel.render(&entry)
+        });
+        assert!(entries.iter().all(|entry| entry.unknown_members));
+        let state = folded(&entries);
+        let whole: BTreeSet<(EntryHash, Raw)> = entries
+            .iter()
+            .map(|entry| (entry.hash(), Raw::new(entry.line.json()).unwrap()))
+            .collect();
+        for (how, state) in [("applied", state.clone()), ("reread", reread(&state))] {
+            let kept: BTreeSet<_> = state.extended().cloned().collect();
+            assert_eq!(kept, whole, "seed {seed}, {how}");
+            let text = serde_json::to_string(&state).unwrap();
+            novel
+                .all_in(&text)
+                .unwrap_or_else(|lost| panic!("seed {seed}, {how}: {lost}"));
+        }
+
+        let canonical = every_part(str::to_owned);
+        assert!(canonical.iter().all(|entry| !entry.unknown_members));
+        let state = folded(&canonical[..3]);
+        assert_eq!(state.extended().count(), 0, "seed {seed}");
+        let mut value = serde_json::to_value(&state).unwrap();
+        let mut novel = Novel {
+            random: &mut random,
+            members: Vec::new(),
+        };
+        novel_state(&mut novel, &mut value);
+        let written = novel.render(&value);
+        let read: Folded = serde_json::from_str(&written).unwrap();
+        let again = serde_json::to_string(&read).unwrap();
+        let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        assert_eq!(parse(&again), parse(&written), "seed {seed}: {again}");
+        novel
+            .all_in(&again)
+            .unwrap_or_else(|lost| panic!("seed {seed}: {lost}"));
+
+        let mut compacted = read.clone();
+        compacted.apply(WriterId::from_u128(0xa), &canonical[3]);
+        let mut fresh = folded(&canonical);
+        fresh.join(&read);
+        assert_eq!(compacted, fresh, "seed {seed}");
+        let compacted = serde_json::to_string(&compacted).unwrap();
+        novel
+            .all_in(&compacted)
+            .unwrap_or_else(|lost| panic!("seed {seed}: {lost}"));
+
+        let mut rival = serde_json::to_value(&state).unwrap();
+        let names = novel.members.len();
+        let mut other = Novel {
+            random: &mut random,
+            members: Vec::new(),
+        };
+        novel_state(&mut other, &mut rival);
+        assert_eq!(other.members.len(), names, "seed {seed}");
+        let rival: Folded = serde_json::from_str(&other.render(&rival)).unwrap();
+        let (mut one, mut two) = (read.clone(), rival.clone());
+        one.join(&rival);
+        two.join(&read);
+        assert_eq!(one, two, "seed {seed}");
+        assert_eq!(reread(&one), one, "seed {seed}");
     }
 }
 

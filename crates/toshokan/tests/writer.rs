@@ -410,6 +410,32 @@ fn a_writer_whose_head_the_folder_lost_compacts_nothing() {
 }
 
 #[test]
+fn compaction_keeps_the_members_a_newer_build_wrote_in_the_snapshot_it_folds() {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a1").unwrap();
+    let first = instance.compact().unwrap();
+    let id = instance.id();
+    let path = layout().snapshot(id, first.snapshot);
+    let text = String::from_utf8(instance.machine.folder.files(Root::Folder)[&path].clone());
+    let newer = text
+        .unwrap()
+        .replacen('{', r#"{"later":{"x":[1, 2]},"#, 1)
+        .replacen(r#""state":{"#, r#""state":{"also":[ true ],"#, 1);
+    restore(
+        &instance.machine.folder,
+        BTreeMap::from([(path.clone(), newer.into_bytes())]),
+    );
+    instance.write("a2").unwrap();
+    let second = instance.compact().unwrap();
+    let files = instance.machine.folder.files(Root::Folder);
+    assert!(!files.contains_key(&path), "the new snapshot supersedes it");
+    let kept = String::from_utf8(files[&layout().snapshot(id, second.snapshot)].clone()).unwrap();
+    for member in [r#""later":{"x":[1, 2]}"#, r#""also":[ true ]"#] {
+        assert!(kept.contains(member), "{member} in {kept}");
+    }
+}
+
+#[test]
 fn losing_the_local_root_starts_a_new_writer_and_leaves_the_old_one_alone() {
     let mut instance = Instance::open(machine(), 1);
     instance.write("a").unwrap();

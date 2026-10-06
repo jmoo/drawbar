@@ -344,6 +344,7 @@ fn entry(line: Line) -> Entry {
         at: Hlc::ZERO,
         kind: EntryKind::Unknown(Raw::new(line.json()).expect("a verified line holds JSON")),
         line,
+        unknown_members: false,
     })
 }
 
