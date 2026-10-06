@@ -86,13 +86,48 @@ delivers files roughly in order.
 A config whose first line reads `\* Violates <Property>: …` must fail with that
 violation; every other config must pass.
 
-The crate's `tests/portable.rs` asserts `ChainOrder`, `NothingIgnored`,
-`Retained`, `DeliveredConverges`, `Monotone` and `ForksKept` of the real reader
-and writer. A sync simulator delivers the folder to readers as `Deliver` does:
+## Refinement
+
+The spec applies to the code because the code keeps the model's rules and its
+reader's obligations. [SPEC.md](../SPEC.md) states each in full.
+
+- A snapshot lists every entry it folds, in chain order, and so does the cached
+  view.
+- A reader reads every parseable file in a writer's directory whatever its name,
+  places entries by chain only, caches only entries whose predecessor it holds,
+  and never shrinks its cache.
+- A process deletes only segments it opened and sealed itself, and names each
+  segment at random.
+- No writer id is kept in the local root before its genesis entry is durable in
+  the folder, and a writer that has to stop is replaced by a new random id.
+- Another writer's pending record is settled only with the user's consent, in
+  the settling writer's own log, and removed only by its owner.
+- Each fork is reported once, found from the cached pairs of every entry ever
+  seen rather than from the files present now.
+- After the local root is lost, the install reads from scratch as a new writer
+  and never writes the old writer's directory again.
+
+The tests check the spec's properties against the real reader, writer and
+library. A sync simulator delivers the folder to readers as `Deliver` does:
 whole files, prefixes ending at a line, deletions before the files that replace
-them, resurrections, hidden files and conflicted copies under other names. The
-tests search every delivery order of small scenarios, and random interleavings
-of writes, compactions, crashes, clones and lost local roots with sync.
+them, resurrections, hidden files and conflicted copies under other names.
+
+| Property or rule | Checked by |
+| --- | --- |
+| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync |
+| `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
+| `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails |
+| `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another |
+| `FoldHashes` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
+| `UniqueNames` | `tests/writer.rs`: one new, randomly named segment per process |
+| `SealedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction deletes only segments this process sealed |
+| `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends nothing and is replaced |
+| `Convergence` | Liveness is not tested; `DeliveredConverges` is checked at the end of every complete delivery |
+
+What the model abstracts away is checked in Rust: the merge by
+`tests/facts.rs`, which compares every arrival order, split and compaction of
+bounded histories; file effects by `tests/crash.rs`; binding by the bounded
+search in `src/binding.rs`.
 
 ## What is abstracted away
 

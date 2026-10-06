@@ -1,43 +1,79 @@
 # toshokan
 
 **Keep what a file can't say about itself beside the file, for every writer.**
+
 toshokan (図書館, "library") keeps tags, provenance and relations between files
 in a hidden directory inside a folder of real files. Every running instance of
 an app writes its own log there, offline and without coordinating, and every
-reader merges the logs to the same state. Nothing in the user's files is
-overwritten in place, so file changes can be undone.
+reader merges the logs to the same state, whatever order a sync client delivers
+them in. Files are saved, renamed and deleted without overwriting anything in
+place, so file changes can be undone.
 
-> ⚠️ Proof of concept, being rewritten. The on-disk format is unstable, and the
-> crate is not published.
+> ⚠️ Proof of concept. The format is unstable, and the crate is not published.
 
 ## Use
 
-An app declares its keys, opens a library as one writer, reads views and
+An app declares its keys, opens a library as one writer, renders views and
 changes the library by intents:
 
 ```rust,ignore
+use std::rc::Rc;
 use toshokan::blocking::{Library, Native};
-use toshokan::{Expect, Layout, Register, Schema, Set};
+use toshokan::env::{ExactNames, OsRandom, PrefixIdentity, SystemClock};
+use toshokan::{Env, Expect, Layout, Register, Schema, Set};
 
 const ORIGIN: Register<String> = Register::new("origin");
 const TAGS: Set<String> = Set::new("tags");
 
 let schema = Schema::of(&[ORIGIN.key(), TAGS.key()])?;
+let env = Env {
+    clock: Box::new(SystemClock),
+    random: Box::new(OsRandom::new()),
+    identify: Rc::new(PrefixIdentity::default()),
+    names: Box::new(ExactNames),
+    label: "drawbar".into(),
+};
 let backend = Native::new("/path/to/library", "/path/to/app/data");
 let (mut lib, opened) = Library::open(backend, Layout::new(".app")?, &schema, env)?;
-lib.intent("Import")
+let song = lib
+    .intent("Import")
     .create(|e| {
-        e.set(ORIGIN, "B3 Split".into()).add(TAGS, "Sunday".into());
+        e.save(&path, bytes, Expect::Absent)
+            .set(ORIGIN, "B3 Split".into())
+            .add(TAGS, "Sunday".into());
     })
-    .commit()?;
+    .commit()?
+    .created[0];
+let view = lib.view();
+let tags = view.entity(song).unwrap().members(TAGS);
+lib.undo()?;
 ```
 
-The core does no I/O: each operation asks for reads and writes and consumes
-their results. The `blocking` driver runs it on the machine's file system, and
-the `asynch` driver on any async backend, such as a browser's.
+`opened` reports what needs the user: effects another writer left unfinished,
+drafts, forks, and files that arrived, moved or changed outside the app. A field
+read from a view is a value, a conflict between writers, or unreadable, so an app
+cannot show half a conflict by accident.
 
-[SPEC.md](SPEC.md) specifies every file toshokan writes. [spec/](spec/README.md)
-model-checks, in TLA+, the protocol between writers and readers.
+## Design
+
+The core does no I/O. Every operation is a state machine that asks for reads,
+writes and syncs, and consumes their results. The `blocking` driver runs it on
+the machine's file system, and the `asynch` driver on any async backend, such as
+a browser's; both run it on an in-memory disk that models what survives a crash.
+Time, randomness, the app's identity function and the volume's name rules are
+injected, so the crash harness and the sync simulator replay every run exactly.
+
+Each writer appends to a hash-chained log in its own directory. Entries name each
+other by hash, so writers never collide, and a reader places entries by chain
+whatever their files are called. Fields are multi-value registers and
+observed-remove sets, merged by a join. A file effect stages its bytes, writes a
+pending record, moves displaced bytes into the writer's trash, and logs what it
+did; recovery after a crash, or after losing the app's data, finishes or reports
+it.
+
+[SPEC.md](SPEC.md) specifies every file toshokan writes and how it is merged.
+[spec/](spec/README.md) model-checks, in TLA+, the protocol between writers and
+readers, and maps its properties to the tests that check the code.
 
 ## Principles
 

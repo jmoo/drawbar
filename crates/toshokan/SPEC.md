@@ -1,9 +1,8 @@
-# toshokan on-disk format
+# toshokan format and protocol
 
-This document specifies everything toshokan writes, precisely enough for a second
-implementation to read and write it. The format is unstable while toshokan is a
-proof of concept. Sections marked _To be specified_ are being written with the
-code that implements them.
+This document specifies everything toshokan writes and how it reads, merges and
+changes it, precisely enough for a second implementation to share a library with
+this one. The format is unstable while toshokan is a proof of concept.
 
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.
@@ -11,63 +10,70 @@ insignificant whitespace.
 ## Layout
 
 The app chooses a library folder and the name of a root directory inside it,
-such as `.drawbar`. In the folder, toshokan writes only under that root. Every
-path below is relative to it.
+such as `.drawbar`. In the folder, toshokan writes only under that root, and in
+the library's files only as an intent's file effects ask. Every path in this
+table is relative to the root.
 
-| Path                                  | Contents                                   |
-| ------------------------------------- | ------------------------------------------ |
-| `writers/<w>/<segment>.jsonl`         | A segment of writer `w`'s log              |
-| `writers/<w>/snapshot-<nonce>.json`   | A snapshot of writer `w`'s log             |
-| `writers/<w>/pending/<nonce>.json`    | A journal record of an unfinished effect   |
-| `writers/<w>/trash/<nonce>`           | Bytes an intent of `w` displaced           |
-| `writers/<w>/tmp/<nonce>`             | A file `w` is staging                      |
+| Path                                | Contents                                 |
+| ----------------------------------- | ---------------------------------------- |
+| `writers/<w>/<segment>.jsonl`       | A segment of writer `w`'s log            |
+| `writers/<w>/snapshot-<nonce>.json` | A snapshot of writer `w`'s log           |
+| `writers/<w>/pending/<nonce>.json`  | The record of an unfinished file effect  |
+| `writers/<w>/trash/<nonce>`         | Bytes an intent of `w` displaced         |
+| `writers/<w>/tmp/<nonce>`           | A file `w` is staging                    |
 
 Only writer `w` creates, appends to, renames or removes anything under
-`writers/<w>/`. There is no file at the level of the library.
+`writers/<w>/`. Others only make and sync the directories `writers/` and the
+root. There is no file at the level of the library.
 
 Names of segments and snapshots are advisory. A reader reads every file directly
-in `writers/<w>/`, whatever its name, as a segment or a snapshot by its contents,
-so a sync client's conflicted copy is read like any other file.
+in `writers/<w>/`, whatever its name, by its contents, so a sync client's
+conflicted copy is read like any other file.
 
-Each install also keeps a local root of its own, never synced, per library:
+A **library path** is a path in the folder outside the root, other than the
+folder itself. Only library paths are the user's files.
 
-| Path                          | Contents                                     |
-| ----------------------------- | -------------------------------------------- |
-| `<genesis>/head.json`         | The last entry this writer wrote             |
-| `<genesis>/view.json`         | The cached view                              |
-| `<genesis>/drafts/<entity>.json` | An unsaved edit                           |
-| `<genesis>/lock`              | Held while an instance writes as this writer |
-| `<genesis>/retired`           | Empty; the writer is never written again     |
+Each install keeps, per library, a local root of its own that is never synced:
+
+| Path                             | Contents                                     |
+| -------------------------------- | -------------------------------------------- |
+| `<genesis>/head.json`            | The last entry this writer wrote             |
+| `<genesis>/view.json`            | The cached view                              |
+| `<genesis>/drafts/<entity>.json` | An unsaved edit                              |
+| `<genesis>/lock`                 | Held while an instance writes as this writer |
+| `<genesis>/retired`              | Empty; the writer is never written again     |
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
 root are the install's pool of writers.
 
-`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, the last entry
-the writer made durable in the folder. A file in the local root that is replaced,
-such as `head.json` or `view.json`, is first written beside it as
-`<name>.next` and synced; then `<name>` is removed and `<name>.next` renamed to
-it. A reader takes `<name>`, or `<name>.next` when `<name>` is missing.
+`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`. A file in the
+local root that is replaced, such as `head.json`, `view.json` or a draft, is
+first written beside it as `<name>.next` and synced; then `<name>` is removed and
+`<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
+`<name>` is missing.
 
-## Identifiers
+## Identifiers and clocks
 
 Every identifier is 128 bits written as 32 hexadecimal digits.
 
-| Name        | Meaning                                                          |
-| ----------- | ---------------------------------------------------------------- |
-| writer id   | A writer, random                                                 |
-| entity id   | An entity, random                                                |
-| segment     | A segment's name, random                                         |
-| nonce       | The name of a snapshot, pending record, trash item or staged file, random |
-| entry hash  | An entry's id, link and checksum, below                          |
-| identity    | What the app's identity function says a file holds               |
+| Name       | Meaning                                                              |
+| ---------- | -------------------------------------------------------------------- |
+| writer id  | A writer, random                                                     |
+| entity id  | An entity, random                                                    |
+| segment    | A segment's name, random                                             |
+| nonce      | A snapshot, pending record, trash item or staged file's name, random |
+| entry hash | An entry's id, link and checksum                                     |
+| identity   | What the app's identity function says a file holds                   |
 
-References between entries, set tags, removes and replaced writes name entry
-hashes.
+The identity function is the app's: a cheap fingerprint of a file's contents
+from a few ranges of its bytes. toshokan compares identities and never computes
+one itself.
 
 A clock reading is the JSON array `[wall_ms, counter]`: milliseconds since the
-Unix epoch and a counter within the millisecond. Readings order entries for
-display only, by reading and then by writer id.
+Unix epoch and a counter within the millisecond, a hybrid logical clock. A
+writer's next reading is later than every reading it has seen. Readings order
+writes for display only, by reading and then by writer id.
 
 ## Segments
 
@@ -80,7 +86,7 @@ A segment is a sequence of lines. Each line is:
 `<json>` is one entry, a JSON object, with no tab or newline. Its `prev` member is
 the hash of the entry before it in the writer's chain, or 32 zeros for the
 writer's genesis entry. `<hash>` is the first 16 bytes of the BLAKE3 hash of the
-16 bytes of `prev` followed by the bytes of `<json>`.
+16 bytes of `prev` followed by the bytes of `<json>`. The hash is the entry's id.
 
 For example, the JSON `{"prev":"0…0"}` makes the line:
 
@@ -93,34 +99,32 @@ its LF, or a line starting with a zero byte ends the readable part of the file
 for now. Every line before it counts; a later read of the same file may get
 further.
 
-A writer appends to one segment per process, named at random when the process
-first appends. It deletes only segments its own process opened and sealed.
-
 ## Entries
 
-An entry is the JSON of one line: an object whose first members are
+An entry is an object whose first members are:
 
-| Member | Value                                          |
-| ------ | ---------------------------------------------- |
-| `prev` | The hash of the entry before it                |
-| `at`   | Its clock reading                              |
-| `kind` | `"genesis"`, `"intent"` or `"settle"`          |
+| Member | Value                                 |
+| ------ | ------------------------------------- |
+| `prev` | The hash of the entry before it       |
+| `at`   | Its clock reading                     |
+| `kind` | `"genesis"`, `"intent"` or `"settle"` |
 
 followed by the members of its kind. A reader ignores members it does not know
 and keeps the line, so they survive. An entry of another kind, without `kind`, or
-whose members do not decode, is kept and placed as an unknown entry; so is a
-line whose JSON has no readable `at`, because it still links the chain.
+whose members do not decode, is kept and merged as unknown; so is a line whose
+JSON has no readable `at`, because it still links the chain.
 
 A **genesis** entry starts a writer's chain, with `prev` all zeros:
 
-| Member   | Value                                          |
-| -------- | ---------------------------------------------- |
-| `writer` | The writer's id                                |
-| `label`  | The name other writers show for it             |
+| Member   | Value                              |
+| -------- | ---------------------------------- |
+| `writer` | The writer's id                    |
+| `label`  | The name other writers show for it |
 
 A genesis entry after another entry is unknown.
 
-An **intent** entry logs one committed intent:
+An **intent** entry logs one committed intent, the unit of commit, undo and
+attribution:
 
 | Member      | Value                                                   |
 | ----------- | ------------------------------------------------------- |
@@ -131,21 +135,23 @@ An **intent** entry logs one committed intent:
 
 Each op is an object whose `op` member names it:
 
-| `op`     | Members                                  | Meaning                                  |
-| -------- | ---------------------------------------- | ---------------------------------------- |
-| `create` | `entity`, `replaces`                     | The entity exists                        |
-| `delete` | `entity`, `replaces`, `observed`         | The entity is deleted                    |
-| `write`  | `entity`, `key`, `value`, `replaces`     | A register holds `value`; cleared without it |
-| `add`    | `entity`, `key`, `value`                 | A set gains `value`                      |
-| `remove` | `entity`, `key`, `tags`                  | A set loses the adds `tags` names        |
-| `file`   | `entity`, `file`, `replaces`             | The entity's file; none without `file`   |
+| `op`     | Members                                 | Meaning                                      |
+| -------- | --------------------------------------- | -------------------------------------------- |
+| `create` | `entity`, `replaces`                    | The entity exists                            |
+| `delete` | `entity`, `replaces`, `observed`        | The entity is deleted                        |
+| `write`  | `entity`, `key`, `value`, `replaces`    | A register holds `value`; cleared without it |
+| `add`    | `entity`, `key`, `value`                | A set gains `value`                          |
+| `remove` | `entity`, `key`, `value`, `tags`        | A set loses the adds of `value` `tags` names |
+| `file`   | `entity`, `file`, `replaces`            | A file effect left the entity's file here; none without `file` |
+| `pin`    | `entity`, `file`, `replaces`            | A reader bound the entity's file here        |
 
 `replaces`, `observed` and `tags` are arrays of entry hashes. A `value` is the
 app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
-`{"path","identity","len"}` with an optional `modified`. Each member of
-`displaced` is `{"item","from","identity","len"}`: the trash item's nonce, the
-library path the bytes left, their identity and length. An op of another name,
-or missing a member, is kept and unknown.
+`{"path","identity","len"}` with an optional `modified`, the backend's
+modification time, compared only for equality. Each member of `displaced` is
+`{"item","from","identity","len"}`: the trash item's nonce, the library path the
+bytes left, their identity and length. An op of another name, or missing a
+member, is kept and unknown.
 
 For example:
 
@@ -156,73 +162,50 @@ For example:
 A **settle** entry records that this writer settled another writer's unfinished
 effect with the user's consent:
 
-| Member    | Value                                              |
-| --------- | -------------------------------------------------- |
-| `writer`  | The writer whose pending record it settles         |
-| `record`  | The record's nonce                                 |
-| `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"`     |
+| Member    | Value                                          |
+| --------- | ---------------------------------------------- |
+| `writer`  | The writer whose pending record it settles     |
+| `record`  | The record's nonce                             |
+| `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"` |
 
-## Writers
-
-The writers of an install are the directories of its local root. An instance
-takes the first, in order of name, that has a readable `head.json`, no
-`retired`, and whose lock it gets. It continues that writer only if what it has
-read of the writer holds its genesis entry and its recorded head, its history
-has one last entry and no fork, and a file in its directory holds that last
-entry now. Otherwise it
-creates `retired`, releases the lock, and writes as a new writer from its next
-write: a copied local root, whose history another instance also continues, and a
-folder restored from an older copy, which no longer holds the writer's last
-entry, each start a new writer.
-
-A new writer creates its first segment holding its genesis entry and syncs it,
-its directory and every directory above it. Only then does it create its
-directory in the local root, take the lock and write `head.json`.
-
-Before each append, a writer confirms that the folder holds its last entry: its
-open segment has the length this process left it, or, with no segment open, a
-file in its directory holds that entry. If not, it writes nothing and is
-replaced by a new writer. After the append is synced it writes `head.json`. An
-append that fails seals the segment, so nothing follows a torn line.
-
-## Reading
-
-A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
-up to 256 MiB of it. A file is a segment when it is empty or its first line can
-be read, else a snapshot when it decodes as one; anything else is reported and
-read again next time. A snapshot whose `writer` is not `w` is reported, not used.
-
-A reader places an entry when its `prev` is all zeros, placed, or folded by a
-snapshot it has read. An entry whose predecessor it has not is held back as a
-gap. Two entries of one writer with one predecessor, among those placed, folded
-or ever held back, are a fork: both branches are merged, and the fork is
-reported once per predecessor.
-
-Each install keeps what it has placed as a cached view in `<genesis>/view.json`
-of its local root:
-
-```text
-{"writers":{"<w>":{
-  "snapshots":[<snapshot>, …],
-  "entries":["<json>\t<hash>", …],
-  "strays":[["<hash>","<prev>"], …],
-  "forks":[["<prev>",["<branch>","<branch>"]], …]
-}}}
-```
-
-`snapshots` are the snapshots read, none of whose folded lists starts
-another's; `entries` the placed lines no snapshot folds, each after its
-predecessor; `strays` the entries ever held back and never placed, so that a fork
-with one is found after its file is gone; `forks` every fork reported. The view
-only grows: a snapshot whose folded list starts a later one's is replaced by
-it, and the entries a snapshot folds leave `entries`. It never holds an entry
-whose predecessor it does not hold. A view that cannot be read this way is
-discarded, and the folder read from scratch.
+Nothing derived is logged: views, bindings a reader has not pinned, and the
+merged state exist only in readers and in snapshots.
 
 ## Merging
 
-_To be specified:_ multi-value registers with grow-only replaced sets,
-observed-remove sets, existence, and how unknown kinds and fields are kept.
+The merged state of a set of entries is a join: folding an entry, and joining
+two states, commute, associate and are idempotent. Readers holding the same
+entries compute the same state whatever was compacted and in whatever order the
+files arrived. Every write is keyed by the entry that made it.
+
+Keys are declared by the app as registers or sets, each under a name. A key's
+values are the app's JSON.
+
+- **Registers** are multi-value. A register keeps every write it has seen and a
+  grow-only set of replaced entry hashes, the union of every write's
+  `replaces`. The writes no write replaces survive. Surviving writes of
+  different values are a conflict; equal values are one value. A reader shows
+  the latest by clock reading, then by writer id, and lists the rest. A write
+  that replaces every survivor resolves the conflict. A surviving clear holds no
+  value, so a clear concurrent with a value leaves the value. Because the
+  replaced set travels with the state, a snapshot never brings back a write that
+  another log replaced.
+- **Sets** are observed-remove. An add's tag is the pair of its value and its
+  entry. A remove takes away the tags it names, so an add the remover had not
+  seen survives. The state keeps each removed tag with its earliest remove.
+- **Existence** is a register whose writes are `create` and `delete`. A delete
+  records the field writes it observed; writes in the delete's own entry count
+  as observed. An entity is shown while a create survives, or while a delete
+  survives together with a live field write it did not observe: a surviving
+  register value, a set add, or a file. That is a deletion conflict; a `create`
+  replacing the delete settles it in favor of the entity.
+- **Files** are a register per entity whose writes are `file` and `pin` ops.
+- **Trash items** are kept per writer and item from the `displaced` lists, and
+  **settled records** from the `settle` entries, so compaction keeps them.
+- **Unknown** entries and ops are kept with the entry that holds them.
+
+A value that does not decode as the key's declared type is shown as unreadable,
+and kept and merged like any other.
 
 ## Snapshots
 
@@ -237,14 +220,149 @@ observed-remove sets, existence, and how unknown kinds and fields are kept.
 | `state`  | The merged state of those entries                             |
 
 Members a reader does not know are kept. A reader refuses a `folded` list that is
-empty or repeats a hash.
+empty or repeats a hash. Because the list is whole, a reader can place an entry
+after any folded entry and see a fork from any point.
+
+`state` is an object:
+
+```text
+{"entities":{"<entity>":{
+   "existence":{"writes":[{"entry","by","at","deleted"?}],"replaced":[…]},
+   "registers":{"<key>":{"writes":[{"entry","by","at","value"?}],"replaced":[…]}},
+   "sets":{"<key>":{"adds":[{"value","entry","by","at"}],
+                    "removed":[{"value","entry","by","at","remove"}]}},
+   "file":{"writes":[{"entry","by","at","file"?}],"replaced":[…]}}},
+ "trash":[{"writer","item","entry","at","from","identity","len"}],
+ "settled":[["<writer>","<record>"]],
+ "unknown":[["<entry>",<json>]]}
+```
+
+`by` is the writing writer's id. An existence write with `deleted`, the hashes it
+observed, is a delete. A register write without `value` is a clear. A file write
+without `file` says the entity has no file. Members of an entity that are empty
+are omitted. Members of `state` a reader does not know are kept, and joined by
+keeping the greater JSON text.
 
 Only a snapshot's writer compacts. It folds its own chain up to its last entry
-into a new snapshot, syncs the snapshot and its directory, and confirms the
-folder holds it. Only then does it delete the segments its process sealed every
-line of which the snapshot folds, and every snapshot in its directory whose
-`folded` list starts the new one's. Segments left open by a crash or a copy, and
-the branches of another instance, are never deleted.
+into a new snapshot, syncs the snapshot and its directory, and confirms that the
+folder holds it. Only then does it delete the segments its own process sealed
+every line of which the snapshot folds, and every snapshot in its directory
+whose `folded` list starts the new one's. Segments left open by a crash or a
+copy, and the branches of another instance, are never deleted.
+
+## Writers
+
+The writers of an install are the directories of its local root. An instance
+takes the first, in order of name, that has a readable `head.json`, no
+`retired`, and whose lock it gets. It continues that writer only if what it has
+read of the writer holds its genesis entry and its recorded head, its history
+has one last entry and no fork, and a file in its directory holds that last
+entry now. Otherwise it creates `retired`, releases the lock, and writes as a
+new writer from its next write: a copied local root, whose history another
+instance also continues, and a folder restored from an older copy, which no
+longer holds the writer's last entry, each start a new writer. An instance that
+finds its own history forked while it runs does the same.
+
+A new writer is created at an instance's first write. Its first segment holds
+its genesis entry; the segment, its directory and every directory above it are
+synced. Only then does the writer get its directory in the local root, its lock
+and `head.json`.
+
+A process appends to one segment, named at random when it first appends, and
+seals it when it closes. Before each append, a writer confirms that the folder
+holds its last entry: its open segment has the length this process left it, or,
+with no segment open, a file in its directory holds that entry. If not, it
+writes nothing and stops: a new writer takes over from the next write. After the
+append is synced it writes `head.json`. An append that fails seals the segment,
+so nothing follows a torn line.
+
+## Reading
+
+A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
+up to 256 MiB of it; a file whose length and modification time are unchanged is
+not read again. A file is a segment when it is empty or its first line can be
+read, else a snapshot when it decodes as one; anything else is reported and read
+again next time. A snapshot whose `writer` is not `w` is reported, not used.
+
+A reader places an entry when its `prev` is all zeros, placed, or folded by a
+snapshot it has read. An entry whose predecessor it has not is held back, a gap,
+reported with the missing hash. Two entries of one writer with one predecessor,
+among those placed, folded or ever held back, are a fork: both branches are
+merged, and the fork is reported once per predecessor.
+
+Each install keeps what it has placed as a cached view in `<genesis>/view.json`
+of its local root, written after each read that placed an entry or found a fork,
+and when the instance closes. An instance that has not written yet has no such
+directory and starts from what its last writer cached:
+
+```text
+{"writers":{"<w>":{
+  "snapshots":[<snapshot>, …],
+  "entries":["<json>\t<hash>", …],
+  "strays":[["<hash>","<prev>"], …],
+  "forks":[["<prev>",["<branch>","<branch>"]], …]
+}}}
+```
+
+`snapshots` are the snapshots read, none of whose folded lists starts
+another's; `entries` the placed lines no snapshot folds, each after its
+predecessor; `strays` the entries ever held back and never placed, so that a fork
+with one is found after its file is gone; `forks` every fork reported. The view
+only grows: a snapshot whose folded list starts a later one's is replaced by it,
+and the entries a snapshot folds leave `entries`. It never holds an entry whose
+predecessor it does not hold. A view that cannot be read this way is discarded,
+and the folder read from scratch.
+
+## Binding
+
+Which library file is an entity's is derived, never logged as such. A binding is
+a function of the merged file registers, the library files a reader sees and
+their identities:
+
+1. A scan lists every library file with its length and modification time. It
+   reads an identity only when a file's length is that of some file fact, and no
+   earlier scan or fact gives the identity for that path, length and time.
+2. An entity whose file fact names a path a file is at is bound to it: in sync
+   when the file holds the fact's identity (or, without one, its length and
+   time), else changed outside. Paths compare under the volume's rules for case
+   and Unicode normalization. When several entities name one file, the one whose
+   identity it holds gets it.
+3. An entity whose path holds nothing is bound to the one unbound file holding
+   its identity: a move. With no such file it is missing; with several, or when
+   one file could be several entities', nothing is bound and the candidates are
+   reported.
+4. A file holding a bound entity's identity while that entity's own path still
+   holds it is a copy: a new file with no entity until an intent says something
+   about it.
+
+Every commit appends the bindings this writer holds that its facts do not say
+yet, as `pin` ops: a file in sync at another path, or with a new modification
+time. Conflicted file registers, changed files and missing ones are left for the
+user. A scan writes nothing.
+
+## Intents
+
+An intent is one user action: fact changes and file effects committed together.
+Opening, reading, refreshing and scanning write nothing in the folder; only
+committing an intent (an undo, a redo or a settlement included), emptying the
+trash and compaction do.
+
+A commit:
+
+1. Turns the fact changes into ops against the merged state: a register write
+   replaces every surviving write of the register, a remove names every live tag
+   of its value, a delete observes every live field write of its entity. A key
+   the app did not declare, or an entity that is not shown, refuses the intent.
+2. Turns the file changes into the steps below and their preconditions.
+3. If the instance has no writer yet, checks the preconditions without writing
+   and only then creates its writer, so a refused first intent leaves nothing.
+4. Settles this writer's own unfinished effects (see Recovery).
+5. Carries out the file effects under a pending record, then appends the intent
+   with a `file` op for each entity's file as the folder shows it afterwards and
+   a `pin` op for each binding to pin.
+
+An intent may also adopt a library file no entity is bound to: a precondition on
+its identity, no step, and a `pin` op giving the entity the file as it is.
 
 ## File effects and pending records
 
@@ -260,22 +378,21 @@ effects are a list of steps, each of which moves one file or directory:
 | `{"step":"make_dir","path":p}`            | Creates directory `p`                   |
 | `{"step":"remove_dir","path":p}`          | Removes `p` if it is an empty directory |
 
-Paths in steps are library paths: relative to the folder, outside toshokan's
-root, and never the folder itself. `tmp/`, `trash/` and `pending/` are those of
-the writer the record belongs to.
+Paths in steps are library paths. `tmp/`, `trash/` and `pending/` are those of the
+writer the record belongs to.
 
 A save over a file is `to_trash` then `place`; a save where nothing is, `place`;
-a delete, `to_trash`; a rename, `rename`; restoring a trash item over a file,
-`to_trash` then `from_trash`. A directory moves by one `rename` where the
-backend renames directories, otherwise by one `rename` per file, deepest
-`remove_dir` first after them.
+a trash, `to_trash`; a rename, `rename`, refused when something is at the
+destination; restoring a trash item over a file, `to_trash` then `from_trash`. A
+directory moves by one `rename` where the backend renames directories, otherwise
+by one `rename` per file the last scan saw, then `remove_dir` deepest first.
 
-A writer carries out an intent in this order:
+A writer carries out an intent's steps in this order:
 
 1. Write each new file to `tmp/<nonce>`, sync it, then sync `tmp/`.
 2. Check every precondition: a path holds nothing, or a file whose identity is
-   the one the writer last read. Check that every trash item a step restores
-   is there. On failure, remove the staged files and write nothing more.
+   the one the app expects. Check that every trash item a step restores is
+   there. On failure, remove the staged files and write nothing more.
 3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
    `pending/<nonce>.json`.
 4. Carry out the steps in order. A move first creates the destination's
@@ -285,8 +402,10 @@ A writer carries out an intent in this order:
 5. Append the intent's entry.
 6. Remove the pending record.
 
-If a step fails, the rest are not tried: staged files not placed are renamed
-to `trash/<their nonce>`, and the entry records the effects that were made.
+If a step fails, the rest are not tried: staged files not placed are renamed to
+`trash/<their nonce>`, the entry records the effects that were made, and the
+intent reports that it stopped partway. Each library path holds its old bytes,
+nothing, or its new bytes, and while it holds nothing a pending record names it.
 
 A pending record is a JSON object:
 
@@ -294,10 +413,10 @@ A pending record is a JSON object:
 {"writer":"<w>","entry":<entry>,"label":"Save","steps":[<step>,…],"files":[{"entity":"<e>","path":"a/b.syx","done_after":2}]}
 ```
 
-`entry` is the intent's entry as planned, whose `prev` is the writer's head when
-the record was written. `files` says where each entity's file is once the first
-`done_after` steps are done; a `path` of `null` is no file. A reader reads at
-most 16 MiB of a record.
+`entry` is the intent's entry as planned, without its `file` ops and
+`displaced`, whose `prev` is the writer's head when the record was written.
+`files` says where each entity's file is once the first `done_after` steps are
+done; a `path` of `null` is no file. A reader reads at most 16 MiB of a record.
 
 ### Recovery
 
@@ -309,24 +428,49 @@ A record is ignored, and reported, when it does not decode, names another
 writer, names a path that is not a library path, or its `prev` is not in its
 writer's log.
 
-A writer settles its own open records before it next writes, and only those
-whose `prev` is the head its local root recorded. It finds how far the steps
-got by checking them from the last: the first that shows done ends the done
-prefix. `to_trash` shows done when its trash item exists; any other move when
-its destination exists and its source does not, or both hold the same bytes.
-A `place` whose staged file is in the trash under its own nonce is not done. When
-the last done step's source still holds the same bytes as its destination, the
-source is removed. The remaining steps are carried out, the entry is appended
-and the record removed, as above. Then every file in its `tmp/` that no open
-record places is removed.
+Opening finds this writer's open records whose `prev` is its head, and says how
+settling each will end. Before its next write the writer settles them: it finds
+how far the steps got by checking them from the last, and the first that shows
+done ends the done prefix. `to_trash` shows done when its trash item exists; any
+other move when its destination exists and its source does not, or both hold the
+same bytes. A `place` whose staged file is in the trash under its own nonce is
+not done. When the last done step's source still holds the same bytes as its
+destination, the source is removed. The remaining steps are carried out, the
+planned entry is appended with what the steps did, and the record is removed.
+Then every file in its `tmp/` that no open record places is removed. Settling
+twice ends as settling once.
 
-An open record of any other writer may belong to a live writer elsewhere. A
-reader reports it, and settles it only when the user asks, as an intent of its
-own: to finish, it carries out the remaining steps; to roll back, it reverses
-the done ones. It copies files out of the other writer's `tmp/` and `trash/`
-rather than moving them, and moves a library file it displaces into its own
-trash. It then appends a `settle` entry naming the writer and record, after which
-no reader reports the record. Only the record's writer removes it.
+An open record of any other writer may belong to a live writer elsewhere, or to
+this install's own writer from before its local root was lost; a reader cannot
+tell them apart. It reports the record, and settles it only when the user asks,
+as an intent of its own: to finish, it carries out the remaining steps and logs
+the facts the record planned; to roll back, it reverses the done ones; to
+dismiss, it changes no file. It copies files out of the other writer's `tmp/`
+and `trash/` rather than moving them, and moves a library file it displaces into
+its own trash. It then appends a `settle` entry naming the writer and record,
+after which no reader reports the record. Only the record's writer removes it.
+
+## Undo and redo
+
+Each writer undoes only its own intents, most recent first, by committing a
+compensating intent whose `reverses` names the entry it reverses. A redo
+reverses the latest undo while the writer has committed nothing else since.
+
+- A register write is reversed by writing back the latest value it replaced,
+  another writer's included; a clear where there was none.
+- An add is reversed by a remove, a remove by an add.
+- A create is reversed by a delete, and a delete by a create replacing it.
+- A `file` op is reversed by putting back what it changed: the displaced bytes
+  from the trash, under a precondition on what the path holds now; the old name;
+  or the trash, for a file the intent added.
+- `pin` ops are left alone, so undoing an adoption leaves the file.
+
+An undo or redo is refused, naming the writer and entry, where another writer
+changed the same thing since: a register no longer holds only what the intent
+left, another writer added the same value or removed this add, a delete of the
+entity survives, or another writer wrote to an entity being uncreated. It is
+refused when the trash no longer holds the bytes it needs. Compaction folds the
+entries undo reads, so undo reaches back only to the latest snapshot.
 
 ## Trash
 
@@ -342,4 +486,17 @@ Emptying a trash is the only way bytes leave the folder.
 ## Drafts
 
 `<genesis>/drafts/<entity>.json` is the JSON line `{"base":"<identity>"}`, an LF,
-then the unsaved bytes. It applies only while the entity's file holds `base`.
+then the unsaved bytes. It is kept only in the local root, so losing the local
+root loses drafts and nothing else. Opening restores a draft only while the
+entity's file holds `base`; otherwise it reports what the file holds now. An
+instance that has never written has no directory in the local root and keeps no
+drafts.
+
+## What stays
+
+The folder keeps, for the life of a writer: every entry, in a segment or folded
+in a snapshot; the hash of every folded entry, about 35 bytes each; one segment
+per process that crashed, was copied, or closed before compacting; trash items
+until the writer empties them; and the pending records of a writer that will
+never run again, settled or not. The local root keeps one directory per writer
+the install has used.
