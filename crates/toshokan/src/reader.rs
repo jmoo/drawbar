@@ -125,6 +125,11 @@ impl WriterLog {
         self.chain.contains_key(&hash)
     }
 
+    /// Whether `hash` is placed, folded, or was ever held back.
+    fn saw(&self, hash: EntryHash) -> bool {
+        self.holds(hash) || self.strays.contains_key(&hash)
+    }
+
     /// The predecessor of a placed or folded entry.
     pub fn predecessor(&self, hash: EntryHash) -> Option<EntryHash> {
         self.chain.get(&hash).copied()
@@ -562,6 +567,9 @@ pub struct ReadReport {
 pub struct Reader {
     layout: Layout,
     cached: CachedView,
+    /// What each writer's files in the folder held at the last read, placed
+    /// without the cached view.
+    folder: BTreeMap<WriterId, WriterLog>,
     /// Files read before, by path, so an unchanged file is not read again.
     seen: BTreeMap<RelPath, Seen>,
 }
@@ -607,6 +615,7 @@ impl Reader {
         Self {
             layout,
             cached,
+            folder: BTreeMap::new(),
             seen: BTreeMap::new(),
         }
     }
@@ -617,6 +626,25 @@ impl Reader {
 
     pub fn logs(&self) -> &BTreeMap<WriterId, WriterLog> {
         &self.cached.writers
+    }
+
+    /// What `writer`'s files in the folder held at the last read, placed without
+    /// the cached view; `None` when the folder held no file of it.
+    pub fn folder_log(&self, writer: WriterId) -> Option<&WriterLog> {
+        self.folder.get(&writer)
+    }
+
+    /// Each writer's placed and folded entries that no file in the folder held at
+    /// the last read: a restore took them, or sync has not yet brought the files
+    /// that hold them now. Writers with none are left out.
+    pub fn removed(&self) -> BTreeMap<WriterId, BTreeSet<EntryHash>> {
+        let removed = self.cached.writers.iter().map(|(writer, log)| {
+            let folder = self.folder.get(writer);
+            let gone = log.chain.keys().copied();
+            let gone = gone.filter(|hash| !folder.is_some_and(|folder| folder.saw(*hash)));
+            (*writer, gone.collect::<BTreeSet<EntryHash>>())
+        });
+        removed.filter(|(_, gone)| !gone.is_empty()).collect()
     }
 
     /// Reads every writer's directory and places what it can. Requests only
@@ -679,7 +707,11 @@ impl Reader {
 
     /// Places entries this instance appended as `writer`, as a read would.
     pub fn add(&mut self, writer: WriterId, entries: &[Entry]) -> Placement {
-        let lines = entries.iter().map(|entry| entry.line.clone()).collect();
+        let lines: Vec<Line> = entries.iter().map(|entry| entry.line.clone()).collect();
+        self.folder
+            .entry(writer)
+            .or_insert_with(|| WriterLog::new(writer))
+            .place(Vec::new(), lines.clone());
         self.cached
             .writers
             .entry(writer)
@@ -700,6 +732,8 @@ impl Reader {
                 .collect();
             self.seen
                 .retain(|path, _| path.parent().is_some_and(|dir| dirs.contains(&dir)));
+            self.folder
+                .retain(|writer, _| listed.iter().any(|listed| listed.writer == *writer));
             for (writer, log) in &mut self.cached.writers {
                 if !listed.iter().any(|listed| listed.writer == *writer) {
                     log.gaps.clear();
@@ -758,6 +792,11 @@ impl Reader {
                     report.unreadable.push((path, None));
                 }
             }
+        }
+        if changed || !self.folder.contains_key(&writer) {
+            let mut folder = WriterLog::new(writer);
+            folder.place(snapshots.clone(), lines.clone());
+            self.folder.insert(writer, folder);
         }
         let log = self
             .cached

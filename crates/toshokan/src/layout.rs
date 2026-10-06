@@ -129,6 +129,12 @@ impl Layout {
         child(&Self::local(genesis), "lock")
     }
 
+    /// The entries this install let go once the folder no longer held them, by
+    /// writer.
+    pub fn let_go() -> RelPath {
+        child(&RelPath::ROOT, "let-go.json")
+    }
+
     /// Present once the writer can no longer be continued: it leaves the pool.
     pub fn retired(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "retired")

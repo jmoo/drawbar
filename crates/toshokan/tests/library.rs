@@ -14,8 +14,8 @@ use toshokan::intent::Intent;
 use toshokan::io::{Capabilities, Range};
 use toshokan::log::{Entry, EntryKind, Genesis, Settlement};
 use toshokan::report::{
-    By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, Presence, Rekey,
-    Start, TrashItem, What, WriterInfo,
+    By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, Presence,
+    Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
@@ -202,7 +202,9 @@ trait Facade: Sized {
     ) -> Result<Committed, Error>;
     fn undo(&mut self) -> Result<Committed, Error>;
     fn redo(&mut self) -> Result<Committed, Error>;
-    fn refresh(&mut self) -> Result<Vec<Change>, Error>;
+    fn refresh(&mut self) -> Result<Refreshed, Error>;
+    fn let_go(&mut self) -> Result<(), Error>;
+    fn adopt(&mut self, label: &str) -> Result<Committed, Error>;
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error>;
     fn trash(&mut self) -> Result<Vec<TrashItem>, Error>;
     fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error>;
@@ -244,8 +246,14 @@ impl Facade for Blocking {
     fn redo(&mut self) -> Result<Committed, Error> {
         self.0.redo()
     }
-    fn refresh(&mut self) -> Result<Vec<Change>, Error> {
+    fn refresh(&mut self) -> Result<Refreshed, Error> {
         self.0.refresh()
+    }
+    fn let_go(&mut self) -> Result<(), Error> {
+        self.0.let_go()
+    }
+    fn adopt(&mut self, label: &str) -> Result<Committed, Error> {
+        self.0.adopt(label)
     }
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error> {
         self.0.others()
@@ -303,8 +311,14 @@ impl Facade for Async {
     fn redo(&mut self) -> Result<Committed, Error> {
         pollster::block_on(self.0.redo())
     }
-    fn refresh(&mut self) -> Result<Vec<Change>, Error> {
+    fn refresh(&mut self) -> Result<Refreshed, Error> {
         pollster::block_on(self.0.refresh())
+    }
+    fn let_go(&mut self) -> Result<(), Error> {
+        pollster::block_on(self.0.let_go())
+    }
+    fn adopt(&mut self, label: &str) -> Result<Committed, Error> {
+        pollster::block_on(self.0.adopt(label))
     }
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error> {
         pollster::block_on(self.0.others())
@@ -369,6 +383,8 @@ through_both!(
     what_an_instance_has_shown_survives_its_crash,
     what_any_writer_of_an_install_showed_survives_a_restore,
     what_a_commit_returned_survives_a_crash_and_a_restore,
+    facts_a_restore_removed_are_shown_until_let_go,
+    facts_a_restore_removed_are_republished_when_adopted,
 );
 
 /// One machine of a shared folder.
@@ -486,7 +502,7 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
     b.commit("Tag", |i| i.add(song, TAGS, tag("live"))).unwrap();
     a.commit("Tag", |i| i.add(song, TAGS, tag("piano")))
         .unwrap();
-    let from_b = a.refresh().unwrap();
+    let from_b = a.refresh().unwrap().changes;
     b.refresh().unwrap();
 
     assert_eq!(tags(&a.view(), song), ["live", "new", "piano"]);
@@ -765,7 +781,7 @@ fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() 
         "{theirs:?}"
     );
 
-    let changes = a.refresh().unwrap();
+    let changes = a.refresh().unwrap().changes;
     assert_eq!(tags(&a.view(), song), ["from-b", "new"]);
     assert!(
         changes.contains(&Change {
@@ -1089,7 +1105,7 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
             to: path("moved/song.npno"),
         })
         .unwrap();
-    let changes = a.refresh().unwrap();
+    let changes = a.refresh().unwrap().changes;
     assert_eq!(
         changes,
         [Change {
@@ -1689,7 +1705,11 @@ fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
     let (mut first, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
     let song = create(&mut first, "song.npno", b"song");
     let (mut second, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
-    assert_eq!(opened.start, Start::New, "the first instance holds its writer");
+    assert_eq!(
+        opened.start,
+        Start::New,
+        "the first instance holds its writer"
+    );
     second
         .commit("Tag", |i| i.add(song, TAGS, tag("two")))
         .unwrap();
@@ -1728,7 +1748,11 @@ fn backed_up<F: Facade>(clock: &TestClock) -> (Machine, MemDisk, F, EntityId) {
     a.close().unwrap();
     let backup = copy_folder(&folder);
     let (a, opened) = F::open(Probe::new(&here), env("a", 2, clock)).unwrap();
-    assert!(matches!(opened.start, Start::Resumed(_)), "{:?}", opened.start);
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
     (here, backup, a, song)
 }
 
@@ -1760,4 +1784,150 @@ fn what_a_commit_returned_survives_a_crash_and_a_restore<F: Facade>() {
         }
         assert_eq!(crash == total, committed.is_ok(), "{shown}");
     }
+}
+
+/// Puts the folder back as `backup` holds it, as a restore from a backup does.
+fn restore(folder: &MemDisk, backup: &MemDisk) {
+    let kept = backup.files(Root::Folder);
+    for path in folder.files(Root::Folder).into_keys() {
+        if !kept.contains_key(&path) {
+            folder
+                .perform(Io::Remove {
+                    root: Root::Folder,
+                    path,
+                })
+                .unwrap();
+        }
+    }
+    for (path, bytes) in kept {
+        put(folder, path.as_str(), &bytes);
+    }
+}
+
+/// `a` creates `song`, the folder is backed up, then `b` tags it "theirs" and
+/// sets its origin, and `a` tags it "mine". Returns `a`, still open, with the
+/// backup.
+fn tagged_after_a_backup<F: Facade>(
+    folder: &MemDisk,
+    here: &Machine,
+    clock: &TestClock,
+) -> (F, MemDisk, EntityId) {
+    let (mut a, _) = F::open(Probe::new(here), env("a", 1, clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let backup = copy_folder(folder);
+    let (mut b, _) = F::open(Probe::new(&machine(folder)), env("b", 2, clock)).unwrap();
+    b.commit("Tag", |i| {
+        i.add(song, TAGS, tag("theirs"))
+            .set(song, ORIGIN, "from b".into())
+    })
+    .unwrap();
+    b.close().unwrap();
+    a.refresh().unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("mine"))).unwrap();
+    assert_eq!(tags(&a.view(), song), ["mine", "new", "theirs"]);
+    (a, backup, song)
+}
+
+fn label_of(view: &View, label: &str) -> WriterId {
+    view.writers()
+        .iter()
+        .find(|w| w.label == label)
+        .unwrap()
+        .writer
+}
+
+fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let mut here = machine(&folder);
+    let (a, backup, song) = tagged_after_a_backup::<F>(&folder, &here, &clock);
+    let shown = facts(&a.view());
+    let (old_a, b) = (label_of(&a.view(), "a"), label_of(&a.view(), "b"));
+    a.close().unwrap();
+    restore(&folder, &backup);
+
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
+    assert_eq!(facts(&a.view()), shown, "nothing is dropped silently");
+    let by_b = By::Writer {
+        writer: b,
+        label: "b".into(),
+    };
+    let field = |key: &str, by: &By| Change {
+        entity: song,
+        what: What::Field(key.into()),
+        by: by.clone(),
+    };
+    let by_a = By::Writer {
+        writer: old_a,
+        label: "a".into(),
+    };
+    for removed in [
+        field("tags", &by_a),
+        field("tags", &by_b),
+        field("origin", &by_b),
+    ] {
+        assert!(opened.removed.contains(&removed), "{:?}", opened.removed);
+    }
+    assert_eq!(opened.removed.len(), 3, "{:?}", opened.removed);
+
+    a.let_go().unwrap();
+    let (elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
+    assert_eq!(tags(&a.view(), song), ["new"]);
+    assert_eq!(facts(&a.view()), facts(&elsewhere.view()));
+    assert_eq!(a.refresh().unwrap().removed, []);
+    drop(a);
+    here.crash();
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 5, &clock)).unwrap();
+    assert_eq!(opened.removed, [], "letting go holds across opens");
+    assert_eq!(facts(&a.view()), facts(&elsewhere.view()));
+    a.commit("Tag", |i| i.add(song, TAGS, tag("after")))
+        .unwrap();
+    assert_eq!(tags(&a.view(), song), ["after", "new"]);
+}
+
+fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, backup, song) = tagged_after_a_backup::<F>(&folder, &here, &clock);
+    let shown = facts(&a.view());
+    restore(&folder, &backup);
+
+    let refreshed = a.refresh().unwrap();
+    assert_eq!(facts(&a.view()), shown, "nothing is dropped silently");
+    let mine = Change {
+        entity: song,
+        what: What::Field("tags".into()),
+        by: By::This,
+    };
+    assert!(refreshed.removed.contains(&mine), "{:?}", refreshed.removed);
+    assert_eq!(refreshed.removed.len(), 3, "{:?}", refreshed.removed);
+    let (elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
+    assert_eq!(
+        tags(&elsewhere.view(), song),
+        ["new"],
+        "the folder lost them"
+    );
+
+    let adopted = a.adopt("Keep what the restore removed").unwrap();
+    assert!(adopted.changes.iter().all(|change| change.entity == song));
+    assert_eq!(facts(&a.view()), shown);
+    assert_eq!(a.refresh().unwrap().removed, []);
+    let (elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("d", 5, &clock)).unwrap();
+    assert_eq!(
+        facts(&elsewhere.view()),
+        shown,
+        "the folder holds them again"
+    );
+    a.close().unwrap();
+    let (a, opened) = F::open(Probe::new(&here), env("a", 6, &clock)).unwrap();
+    assert_eq!(opened.removed, []);
+    assert_eq!(facts(&a.view()), shown);
+    assert!(matches!(
+        F::open(Probe::new(&here), env("a", 7, &clock))
+            .unwrap()
+            .0
+            .adopt("Again"),
+        Err(Error::Refused(Refusal::Nothing))
+    ));
 }

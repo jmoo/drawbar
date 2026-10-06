@@ -122,6 +122,18 @@ pub enum Part {
     File,
 }
 
+/// One way a state shows more than a state of fewer entries: what an entity's
+/// existence, a register, a set or its file shows, with the op that makes the
+/// smaller state show the same.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Beyond {
+    pub entity: EntityId,
+    pub part: Part,
+    /// The writer of the latest write behind the difference.
+    pub by: WriterId,
+    pub op: Op,
+}
+
 /// The values of `now` whose keys `old` does not hold.
 fn added<'a, K: Ord, V>(
     now: &'a BTreeMap<K, V>,
@@ -192,12 +204,57 @@ impl<V: Ord + Clone> Register<V> {
         Some(stamp.write(entry, value.clone()))
     }
 
+    /// The writer of the latest write this register holds and `old` does not.
+    fn newest_beyond(&self, old: &Self) -> Option<WriterId> {
+        let stamps = self.beyond(old).map(|(stamp, _)| *stamp);
+        stamps.max().map(|stamp| stamp.by)
+    }
+
+    /// The writes this register holds and `old` does not.
+    fn beyond<'a>(&'a self, old: &'a Self) -> impl Iterator<Item = &'a (Stamp, V)> {
+        added(&self.writes, Some(&old.writes))
+    }
+
     /// The surviving writes, oldest first.
     fn surviving(&self) -> Vec<Write<V>> {
         oldest_first(
             self.survivors()
                 .map(|(entry, stamp, value)| stamp.write(entry, value.clone())),
         )
+    }
+}
+
+impl<V: Ord + Clone> Register<Option<V>> {
+    /// The write that makes `old`, a register of fewer writes, show the values this
+    /// one shows, with the writer behind the difference: the latest value `old`
+    /// lacks, or else the latest this one shows, or a clear, replacing every
+    /// surviving write of `old` whose value this one does not show. `None` when
+    /// both show the same values.
+    fn rewrite(&self, old: &Self) -> Option<(Option<WriterId>, Option<V>, Vec<EntryHash>)> {
+        let values = |register: &Self| -> BTreeSet<V> {
+            let shown = register
+                .survivors()
+                .filter_map(|(_, _, value)| value.clone());
+            shown.collect()
+        };
+        let (shown, held) = (values(self), values(old));
+        if shown == held {
+            return None;
+        }
+        let latest = |new: bool| {
+            self.survivors()
+                .filter_map(|(_, stamp, value)| Some((stamp, value.as_ref()?)))
+                .filter(|(_, value)| !new || !held.contains(*value))
+                .max_by_key(|(stamp, _)| *stamp)
+                .map(|(_, value)| value.clone())
+        };
+        let value = latest(true).or_else(|| latest(false));
+        let replaces = old
+            .survivors()
+            .filter(|(_, _, value)| value.as_ref().is_none_or(|value| !shown.contains(value)))
+            .map(|(entry, ..)| entry)
+            .collect();
+        Some((self.newest_beyond(old), value, replaces))
     }
 }
 
@@ -234,6 +291,45 @@ impl OrSet {
             let kept = self.removed.entry(key).or_insert(by);
             *kept = (*kept).min(by);
         }
+    }
+
+    /// The adds and removes that make `old`, a set of fewer entries, hold the
+    /// members this one holds, each with the writer behind it.
+    fn rewrite(&self, old: &Self, entity: EntityId, key: &str) -> Vec<(Option<WriterId>, Op)> {
+        let members = |set: &Self| -> BTreeSet<Raw> {
+            set.adds.keys().map(|(value, _)| value.clone()).collect()
+        };
+        let (shown, held) = (members(self), members(old));
+        let added = shown.difference(&held).map(|value| {
+            let adds = self.adds.iter().filter(|((member, _), _)| member == value);
+            let by = adds.map(|(_, stamp)| *stamp).max().map(|stamp| stamp.by);
+            let op = Op::Add {
+                entity,
+                key: key.to_owned(),
+                value: value.clone(),
+            };
+            (by, op)
+        });
+        let removed = held.difference(&shown).map(|value| {
+            let tags: Vec<EntryHash> = old
+                .adds
+                .keys()
+                .filter(|(member, _)| member == value)
+                .map(|(_, tag)| *tag)
+                .collect();
+            let removes = tags
+                .iter()
+                .filter_map(|tag| self.removed.get(&(value.clone(), *tag)));
+            let by = removes.map(|(stamp, _)| *stamp).max().map(|stamp| stamp.by);
+            let op = Op::Remove {
+                entity,
+                key: key.to_owned(),
+                value: value.clone(),
+                tags,
+            };
+            (by, op)
+        });
+        added.chain(removed).collect()
     }
 
     fn join(&mut self, other: &Self) {
@@ -310,6 +406,28 @@ impl EntityState {
 
     fn deletion_conflicted(&self) -> bool {
         !self.unobserved().is_empty()
+    }
+
+    /// The writer of the latest write this state holds and `old` does not.
+    fn newest_beyond(&self, old: &Self) -> Option<WriterId> {
+        let none = Register::default();
+        let registers = self.registers.iter().flat_map(|(key, register)| {
+            let old = old.registers.get(key).unwrap_or(&none);
+            register.beyond(old).map(|(stamp, _)| *stamp)
+        });
+        let empty = OrSet::default();
+        let sets = self.sets.iter().flat_map(|(key, set)| {
+            let old = old.sets.get(key).unwrap_or(&empty);
+            let adds = added(&set.adds, Some(&old.adds)).copied();
+            adds.chain(added(&set.removed, Some(&old.removed)).map(|(stamp, _)| *stamp))
+        });
+        let existence = self
+            .existence
+            .beyond(&old.existence)
+            .map(|(stamp, _)| *stamp);
+        let file = self.file.beyond(&old.file).map(|(stamp, _)| *stamp);
+        let stamps = existence.chain(registers).chain(sets).chain(file);
+        stamps.max().map(|stamp| stamp.by)
     }
 
     fn present(&self) -> bool {
@@ -507,6 +625,88 @@ impl Folded {
             }
             for (stamp, _) in added(&now.file.writes, old.map(|o| &o.file.writes)) {
                 note(Part::File, stamp);
+            }
+        }
+        found
+    }
+
+    /// What this state shows that `kept`, the state of some of its entries, does
+    /// not, each with the op that makes `kept` show it too. A register or file
+    /// showing several values `kept` lacks comes back as the latest of them.
+    pub fn beyond(&self, kept: &Folded) -> Vec<Beyond> {
+        let none = EntityState::default();
+        let mut found = Vec::new();
+        for (&entity, now) in &self.entities {
+            let old = kept.entities.get(&entity).unwrap_or(&none);
+            let Some(latest) = now.newest_beyond(old) else {
+                continue;
+            };
+            let mut note = |part: Part, by: Option<WriterId>, op: Op| {
+                let by = by.unwrap_or(latest);
+                found.push(Beyond {
+                    entity,
+                    part,
+                    by,
+                    op,
+                });
+            };
+            let replaces = old.existence.survivors().map(|(entry, ..)| entry).collect();
+            let by = now.existence.newest_beyond(&old.existence);
+            match (now.present(), old.present()) {
+                (false, false) => continue,
+                (false, true) => {
+                    let observed = old.live().into_keys().collect();
+                    let op = Op::Delete {
+                        entity,
+                        replaces,
+                        observed,
+                    };
+                    note(Part::Deleted, by, op);
+                    continue;
+                }
+                (true, false) => note(Part::Created, by, Op::Create { entity, replaces }),
+                (true, true) => {}
+            }
+            let empty = Register::default();
+            let keys: BTreeSet<&String> =
+                now.registers.keys().chain(old.registers.keys()).collect();
+            for key in keys {
+                let n = now.registers.get(key).unwrap_or(&empty);
+                let o = old.registers.get(key).unwrap_or(&empty);
+                if let Some((by, value, replaces)) = n.rewrite(o) {
+                    let key = key.clone();
+                    let op = Op::Write {
+                        entity,
+                        key: key.clone(),
+                        value,
+                        replaces,
+                    };
+                    note(Part::Field(key), by, op);
+                }
+            }
+            let empty = OrSet::default();
+            let keys: BTreeSet<&String> = now.sets.keys().chain(old.sets.keys()).collect();
+            for key in keys {
+                let n = now.sets.get(key).unwrap_or(&empty);
+                let o = old.sets.get(key).unwrap_or(&empty);
+                for (by, op) in n.rewrite(o, entity, key) {
+                    note(Part::Field(key.clone()), by, op);
+                }
+            }
+            if let Some((by, file, replaces)) = now.file.rewrite(&old.file) {
+                let op = match file {
+                    Some(file) => Op::Pin {
+                        entity,
+                        file: file.into(),
+                        replaces,
+                    },
+                    None => Op::File {
+                        entity,
+                        file: None,
+                        replaces,
+                    },
+                };
+                note(Part::File, by, op);
             }
         }
         found

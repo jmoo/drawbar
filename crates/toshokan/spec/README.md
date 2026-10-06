@@ -147,6 +147,17 @@ this one through its sync client, which must then reconcile the writer's newer
 segment with the older copy; that is the excluded case below of a client that
 keeps one of two conflicting versions.
 
+After a restore, a reader with a cached view keeps the entries the folder lost,
+as `Monotone` requires, while a reader that opens later never sees them. Both
+count as converged. The model accepts this divergence; the code surfaces it and
+waits for consent. A reader keeps showing the facts whose entries no file in the
+folder holds, and reports them as removed by a restore. The user either lets
+them go, which shows their writers as the folder holds them on that install, or
+adopts them, which republishes them as new entries in the reader's own log.
+Neither happens silently: a restore is often deliberate. Letting go changes what
+is shown, not the cached view, which still only grows. `tests/library.rs` checks
+both choices through both drivers.
+
 The model does not cover a running process cloned with its open file handles,
 a sync client that keeps one of two conflicting versions and drops the other,
 a restore that lands between a writer's check and the write it guards, or hash

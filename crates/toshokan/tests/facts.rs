@@ -1,6 +1,6 @@
 //! Facts: how entries merge, what a view shows, how intents become ops, and undo.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -1029,8 +1029,9 @@ impl Node {
         children
     }
 
-    /// Checks every split of the history into two deliveries, and every
-    /// compaction an instance made, delivered with the rest.
+    /// Checks every split of the history into two deliveries, adopting what the
+    /// whole shows beyond each part, and every compaction an instance made,
+    /// delivered with the rest.
     fn check(&self) {
         let full = self.all();
         let oracle = &*self.states[full];
@@ -1040,6 +1041,13 @@ impl Node {
             assert!(
                 &state == oracle,
                 "{:?} delivered as {mask:b} and the rest",
+                self.acts
+            );
+            let adopted = adopt(oracle, &self.states[mask]);
+            assert_eq!(
+                shows(&adopted),
+                adopted_shows(oracle, &self.states[mask]),
+                "{:?} adopted onto {mask:b}",
                 self.acts
             );
         }
@@ -1062,6 +1070,45 @@ impl Node {
             self.acts
         );
     }
+}
+
+/// What a state shows of `E`: whether it exists, and if so its name's values and
+/// its tags.
+fn shows(state: &Folded) -> (bool, BTreeSet<Raw>, Vec<Raw>) {
+    if !state.present(E) {
+        return (false, BTreeSet::new(), Vec::new());
+    }
+    let values = state.register(E, "name").into_iter().map(|w| w.value);
+    (true, values.collect(), state.members(E, "tags"))
+}
+
+/// `kept` with one more entry, by a writer that saw everything, logging the ops
+/// that make it show what `all` shows.
+fn adopt(all: &Folded, kept: &Folded) -> Folded {
+    let ops: Vec<Op> = all.beyond(kept).into_iter().map(|b| b.op).collect();
+    let mut adopted = kept.clone();
+    if !ops.is_empty() {
+        let mut adopter = Writer::new(0xf);
+        let entry = adopter.intent(100, ops, Vec::new());
+        adopted.apply(adopter.id, &entry);
+    }
+    adopted
+}
+
+/// What adopting shows: what `all` shows, but of several name values `kept`
+/// lacks, only the latest beside those `kept` shows too.
+fn adopted_shows(all: &Folded, kept: &Folded) -> (bool, BTreeSet<Raw>, Vec<Raw>) {
+    let (present, values, members) = shows(all);
+    let held = shows(kept).1;
+    if values.difference(&held).count() <= 1 {
+        return (present, values, members);
+    }
+    let new = all.register(E, "name").into_iter();
+    let new = new.filter(|w| !held.contains(&w.value));
+    let latest = new.max_by_key(|w| (w.at, w.by)).unwrap().value;
+    let mut values: BTreeSet<Raw> = values.intersection(&held).cloned().collect();
+    values.insert(latest);
+    (present, values, members)
 }
 
 /// Every history of `entries` entries after the seed by up to three instances,

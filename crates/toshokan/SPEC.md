@@ -42,12 +42,14 @@ Each install keeps, per library, a local root of its own that is never synced:
 | `<genesis>/drafts/<entity>.json` | An unsaved edit                              |
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
 | `<genesis>/retired`              | Empty; the writer is never written again     |
+| `let-go.json`                    | Entries the install let go, by writer        |
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
 root are the install's pool of writers.
 
-`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`. A file in the
+`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, and
+`let-go.json` is `{"<writer id>":["<entry hash>",…]}`. A file in the
 local root that is replaced, such as `head.json`, `view.json` or a draft, is
 first written beside it as `<name>.next` and synced; then `<name>` is removed and
 `<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
@@ -323,6 +325,26 @@ and the entries a snapshot folds leave `entries`. It never holds an entry whose
 predecessor it does not hold. A view that cannot be read this way is discarded,
 and the folder read from scratch.
 
+### After a restore
+
+At each read a reader also places what the folder's files hold without its
+cached view. An entry the view holds that no file holds now was taken by a
+restore of the folder, or is in a file sync has not brought yet. The reader keeps
+showing it and reports the facts it shows that the folder's entries alone would
+not: an entity's existence, a register's values, a set's members or a file.
+Nothing is republished or dropped until the user chooses:
+
+- **Let go.** The install writes the entries the folder lacks to `let-go.json`
+  and shows each writer whose lost entries are all let go as the folder's files
+  hold it. The cached view keeps them. An entry the folder holds again is shown
+  again.
+- **Adopt.** The reader commits one intent whose ops make the folder show what
+  the reader showed: a `create` or `delete`, a `write` of a value shown (the
+  latest, of several the folder lacks), an `add` or `remove` per member and a
+  `pin` or `file` op, each replacing or naming what the folder's entries hold.
+  Then it lets the entries go. A writer whose own entries the folder lost stops
+  first, so the intent is a new writer's.
+
 ## Binding
 
 Which library file is an entity's is derived, never logged as such. A binding is
@@ -353,9 +375,9 @@ user. A scan writes nothing.
 ## Intents
 
 An intent is one user action: fact changes and file effects committed together.
-Opening, reading, refreshing and scanning write nothing in the folder; only
-committing an intent (an undo, a redo or a settlement included), emptying the
-trash and compaction do.
+Opening, reading, refreshing, letting go and scanning write nothing in the
+folder; only committing an intent (an undo, a redo, a settlement or an adoption
+included), emptying the trash and compaction do.
 
 A commit:
 

@@ -89,8 +89,8 @@ pub enum Refusal {
     /// did.
     #[error("{by} changed it since")]
     ChangedSince { by: WriterId, entry: EntryHash },
-    /// There is nothing to undo or redo.
-    #[error("there is nothing to undo or redo")]
+    /// There is nothing to undo, redo, settle, compact or adopt.
+    #[error("there is nothing to do")]
     Nothing,
     /// The bytes an undo would bring back have left the trash.
     #[error("the trash no longer holds what undo needs")]

@@ -12,7 +12,7 @@ use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
 use crate::report::{
-    Change, Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, TrashItem, WriterInfo,
+    Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::Policy;
@@ -93,8 +93,20 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.settle(orphan, how)).await
     }
 
-    pub async fn refresh(&mut self) -> Result<Vec<Change>> {
+    pub async fn refresh(&mut self) -> Result<Refreshed> {
         run(&self.fs, self.core.refresh()).await
+    }
+
+    /// Stops showing what [`Opened::removed`] reports, on every open of this
+    /// install, while the folder lacks it. Writes only in the local root.
+    pub async fn let_go(&mut self) -> Result<()> {
+        run(&self.fs, self.core.let_go()).await
+    }
+
+    /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
+    /// then lets it go: the folder holds again what this install showed.
+    pub async fn adopt(&mut self, label: &str) -> Result<Committed> {
+        run(&self.fs, self.core.adopt(label)).await
     }
 
     pub async fn others(&mut self) -> Result<Vec<WriterInfo>> {

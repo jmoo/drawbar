@@ -20,6 +20,10 @@ pub struct Opened {
     /// consent.
     pub orphaned: Vec<Orphan>,
     pub drafts: Vec<DraftStatus>,
+    /// Facts this install shows whose entries no file in the folder holds now: a
+    /// restore of the folder removed them, or sync has not yet brought the files
+    /// that hold them. They stay shown until the user lets them go or adopts them.
+    pub removed: Vec<Change>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
     /// Files in writers' directories that end before their last byte can be read,
@@ -174,6 +178,15 @@ pub struct PartialReport {
     pub stopped: RelPath,
     pub error: IoError,
     pub record: Option<Nonce>,
+}
+
+/// What a refresh found.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Refreshed {
+    /// What changed since the last view, by its writer or from outside.
+    pub changes: Vec<Change>,
+    /// As [`Opened::removed`], as of this refresh.
+    pub removed: Vec<Change>,
 }
 
 /// One change to what a reader sees.
