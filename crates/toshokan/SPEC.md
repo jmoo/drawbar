@@ -279,9 +279,11 @@ its cached view and, last, `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
 seals it when it closes. Before each append, a writer confirms that the folder
-holds its last entry: its open segment has the length this process left it, or,
-with no segment open, a file in its directory holds that entry. If not, it
-writes nothing and stops: a new writer takes over from the next write. After the
+holds its last entry: its open segment has the length this process left it and
+ends with that entry's line. Otherwise, or with no segment open, a file in its
+directory must hold that entry, and the writer seals the segment and appends to a
+new one. If no file holds it, the writer writes nothing and stops: a new writer
+takes over from the next write. After the
 append is synced it writes the cached view and then `head.json`, before the
 commit returns. An append that fails seals the segment, so nothing follows a torn
 line.

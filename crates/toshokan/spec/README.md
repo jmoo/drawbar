@@ -124,6 +124,13 @@ them, resurrections, hidden files and conflicted copies under other names.
 | `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends and compacts nothing, and is replaced |
 | `Convergence` | Liveness is not tested; `DeliveredConverges` is checked at the end of every complete delivery |
 
+The code also checks more than the model needs. The model treats a file as its
+lines, so a file replaced by another of the same length is a change it sees. The
+code compares contents where it would otherwise trust a length:
+
+- Before appending to its open segment, a writer reads the segment's last line
+  and confirms it is the writer's last entry (`tests/writer.rs`).
+
 What the model abstracts away is checked in Rust: the merge by
 `tests/facts.rs`, which compares every arrival order, split and compaction of
 bounded histories; file effects by `tests/crash.rs`; binding by the bounded

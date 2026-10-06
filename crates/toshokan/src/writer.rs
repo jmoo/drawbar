@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Invalid, Refusal, Result};
 use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, SegmentName, WriterId};
-use crate::io::{Io, Kind, Lock, Root, Task};
+use crate::io::{Io, Kind, Lock, Range, Root, Task};
 use crate::layout::Layout;
+use crate::line;
 use crate::log::{Entry, EntryKind, Genesis};
 use crate::path::RelPath;
 use crate::reader::{CachedView, WriterFile, WriterLog, MAX_FILE};
@@ -47,9 +48,9 @@ pub struct Claimed {
 enum Confirmed {
     /// The open segment is as this process left it.
     Open(OpenSegment),
-    /// The open segment holds bytes after the ones this process wrote, and the
-    /// folder holds the head: the segment is sealed, and a new one opened.
-    Grown,
+    /// The open segment no longer ends as this process left it, and the folder
+    /// holds the head: the segment is sealed, and a new one opened.
+    Changed,
     /// No segment is open, and the folder holds the head.
     Fresh,
 }
@@ -238,7 +239,7 @@ impl Writer {
                 let open = match confirmed {
                     Err(error) => return Flow::Done((writer, Err(error))),
                     Ok(Confirmed::Open(open)) => Some(open),
-                    Ok(Confirmed::Grown) => {
+                    Ok(Confirmed::Changed) => {
                         writer.seal();
                         None
                     }
@@ -296,8 +297,13 @@ impl Writer {
             return held(Confirmed::Fresh);
         };
         flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
-            Some(meta) if meta.len == open.len => flow::ok(Confirmed::Open(open)),
-            Some(meta) if meta.len > open.len => held(Confirmed::Grown),
+            Some(meta) if meta.len == open.len => {
+                ends_with(path, open.len, head).and_then(move |ends| match ends {
+                    true => flow::ok(Confirmed::Open(open)),
+                    false => held(Confirmed::Changed),
+                })
+            }
+            Some(meta) if meta.len > open.len => held(Confirmed::Changed),
             _ => Flow::Done(lost()),
         })
     }
@@ -495,6 +501,20 @@ fn record_head<'a>(writer: WriterId, genesis: EntryHash, head: EntryHash) -> Flo
 
 fn sync_all<'a>(root: Root, paths: Vec<RelPath>) -> Flow<'a, Result<()>> {
     flow::each(paths.into_iter(), move |path| flow::sync(root, &path))
+}
+
+/// Whether the file at `path`, `len` bytes long, ends with the line whose hash is
+/// `hash`.
+fn ends_with<'a>(path: RelPath, len: u64, hash: EntryHash) -> Flow<'a, Result<bool>> {
+    let Some(offset) = len.checked_sub(line::ENDING) else {
+        return flow::ok(false);
+    };
+    let range = Range {
+        offset,
+        len: line::ENDING,
+    };
+    flow::read_present(Root::Folder, &path, range)
+        .map_ok(move |bytes| bytes.is_some_and(|bytes| bytes == line::ending(hash)))
 }
 
 /// Whether a file in `writer`'s directory of the folder holds `hash` now, in a
