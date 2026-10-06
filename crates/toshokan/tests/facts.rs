@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use toshokan::binding::Bindings;
 use toshokan::env::SeededRandom;
-use toshokan::intent::{ops, Intent};
+use toshokan::intent::{ops, Driver, Intent};
 use toshokan::line::Line;
 use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Logged, Op};
 use toshokan::merge::Folded;
@@ -27,17 +27,36 @@ fn schema() -> Schema {
 }
 
 /// A change an intent makes to an entity.
-type Change = fn(Intent<()>, EntityId) -> Intent<()>;
+type Change = fn(Intent<Ids>, EntityId) -> Intent<Ids>;
+
+/// Builds intents without a library: the entities they create take these ids.
+struct Ids(Vec<EntityId>);
+
+impl Driver for Ids {
+    type Source = Vec<u8>;
+
+    fn bytes(bytes: Vec<u8>) -> Vec<u8> {
+        bytes
+    }
+
+    fn entity_id(&mut self) -> EntityId {
+        self.0.remove(0)
+    }
+}
 
 fn entity(id: u128) -> EntityId {
     EntityId::from_u128(id)
 }
 
-fn intent(label: &str) -> Intent<()> {
-    Intent::new((), label)
+fn intent(label: &str) -> Intent<Ids> {
+    creating(label, &[])
 }
 
-fn plan(intent: Intent<()>) -> Plan {
+fn creating(label: &str, ids: &[EntityId]) -> Intent<Ids> {
+    Intent::new(Ids(ids.to_vec()), label)
+}
+
+fn plan(intent: Intent<Ids>) -> Plan {
     intent.into_parts().1.unwrap()
 }
 
@@ -110,8 +129,8 @@ impl Writer {
         self.log(now, EntryKind::Intent(logged))
     }
 
-    fn commit(&mut self, plan: Plan, created: &[EntityId], now: u64) -> Result<Entry, Invalid> {
-        let ops = ops(&plan, created, &self.folded, &schema())?;
+    fn commit(&mut self, plan: Plan, now: u64) -> Result<Entry, Invalid> {
+        let ops = ops(&plan, &self.folded, &schema())?;
         let logged = Logged {
             label: plan.label,
             ops,
@@ -138,12 +157,12 @@ impl Writer {
 
     fn undo(&mut self, now: u64) -> Result<Entry, Refusal> {
         let plan = History::of(&self.own).plan_undo(&self.own, self.id, &self.view())?;
-        Ok(self.commit(plan, &[], now).unwrap())
+        Ok(self.commit(plan, now).unwrap())
     }
 
     fn redo(&mut self, now: u64) -> Result<Entry, Refusal> {
         let plan = History::of(&self.own).plan_redo(&self.own, self.id, &self.view())?;
-        Ok(self.commit(plan, &[], now).unwrap())
+        Ok(self.commit(plan, now).unwrap())
     }
 }
 
@@ -152,10 +171,11 @@ impl Writer {
 fn pair(e: EntityId) -> (Writer, Writer) {
     let mut a = Writer::new(0xa);
     let mut b = Writer::new(0xb);
-    let create = intent("Add").create(|new| {
+    let mut create = creating("Add", &[e]);
+    create.create(|new| {
         new.set(NAME, "first".into()).add(TAGS, "a".into());
     });
-    a.commit(plan(create), &[e], 1).unwrap();
+    a.commit(plan(create), 1).unwrap();
     b.sync(&a);
     (a, b)
 }
@@ -173,10 +193,10 @@ fn concurrent_different_values_conflict_and_the_latest_is_shown() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
     let left = a
-        .commit(plan(intent("").set(e, NAME, "left".into())), &[], 3)
+        .commit(plan(intent("").set(e, NAME, "left".into())), 3)
         .unwrap();
     let right = b
-        .commit(plan(intent("").set(e, NAME, "right".into())), &[], 2)
+        .commit(plan(intent("").set(e, NAME, "right".into())), 2)
         .unwrap();
     a.sync(&b);
 
@@ -207,9 +227,9 @@ fn concurrent_different_values_conflict_and_the_latest_is_shown() {
 fn the_writer_id_breaks_a_clock_tie() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
-    a.commit(plan(intent("").set(e, NAME, "left".into())), &[], 2)
+    a.commit(plan(intent("").set(e, NAME, "left".into())), 2)
         .unwrap();
-    b.commit(plan(intent("").set(e, NAME, "right".into())), &[], 2)
+    b.commit(plan(intent("").set(e, NAME, "right".into())), 2)
         .unwrap();
     a.sync(&b);
     assert_eq!(name(&a, e).shown().map(String::as_str), Some("right"));
@@ -219,9 +239,9 @@ fn the_writer_id_breaks_a_clock_tie() {
 fn equal_concurrent_values_are_not_a_conflict() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
-    a.commit(plan(intent("").set(e, NAME, "same".into())), &[], 2)
+    a.commit(plan(intent("").set(e, NAME, "same".into())), 2)
         .unwrap();
-    b.commit(plan(intent("").set(e, NAME, "same".into())), &[], 2)
+    b.commit(plan(intent("").set(e, NAME, "same".into())), 2)
         .unwrap();
     a.sync(&b);
     assert_eq!(name(&a, e), Field::Value("same".into()));
@@ -232,12 +252,12 @@ fn equal_concurrent_values_are_not_a_conflict() {
 fn a_write_after_seeing_a_conflict_resolves_it_for_every_reader() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
-    a.commit(plan(intent("").set(e, NAME, "left".into())), &[], 2)
+    a.commit(plan(intent("").set(e, NAME, "left".into())), 2)
         .unwrap();
-    b.commit(plan(intent("").set(e, NAME, "right".into())), &[], 2)
+    b.commit(plan(intent("").set(e, NAME, "right".into())), 2)
         .unwrap();
     a.sync(&b);
-    a.commit(plan(intent("").set(e, NAME, "chosen".into())), &[], 3)
+    a.commit(plan(intent("").set(e, NAME, "chosen".into())), 3)
         .unwrap();
     b.sync(&a);
     for reader in [&a, &b] {
@@ -250,9 +270,9 @@ fn a_write_after_seeing_a_conflict_resolves_it_for_every_reader() {
 fn a_clear_concurrent_with_a_value_leaves_the_value() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
-    a.commit(plan(intent("").clear(e, NAME)), &[], 2).unwrap();
+    a.commit(plan(intent("").clear(e, NAME)), 2).unwrap();
     assert_eq!(name(&a, e), Field::Unset);
-    b.commit(plan(intent("").set(e, NAME, "kept".into())), &[], 2)
+    b.commit(plan(intent("").set(e, NAME, "kept".into())), 2)
         .unwrap();
     a.sync(&b);
     assert_eq!(name(&a, e), Field::Value("kept".into()));
@@ -262,11 +282,10 @@ fn a_clear_concurrent_with_a_value_leaves_the_value() {
 fn a_json_null_value_is_not_a_clear_in_a_snapshot() {
     let e = entity(1);
     let (mut a, _) = pair(e);
-    a.commit(plan(intent("").set(e, NOTE, None)), &[], 2)
-        .unwrap();
+    a.commit(plan(intent("").set(e, NOTE, None)), 2).unwrap();
     let note = |writer: &Writer| view(reread(&writer.folded)).entity(e).unwrap().get(NOTE);
     assert_eq!(note(&a), Field::Value(None));
-    a.commit(plan(intent("").clear(e, NOTE)), &[], 3).unwrap();
+    a.commit(plan(intent("").clear(e, NOTE)), 3).unwrap();
     assert_eq!(note(&a), Field::Unset);
 }
 
@@ -274,10 +293,10 @@ fn a_json_null_value_is_not_a_clear_in_a_snapshot() {
 fn a_concurrent_add_survives_a_remove_of_the_same_value() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
-    a.commit(plan(intent("").remove(e, TAGS, &"a".into())), &[], 2)
+    a.commit(plan(intent("").remove(e, TAGS, &"a".into())), 2)
         .unwrap();
     assert_eq!(tags(&a, e), Vec::<String>::new());
-    b.commit(plan(intent("").add(e, TAGS, "a".into())), &[], 2)
+    b.commit(plan(intent("").add(e, TAGS, "a".into())), 2)
         .unwrap();
     a.sync(&b);
     assert_eq!(tags(&a, e), ["a"]);
@@ -288,8 +307,8 @@ fn removing_one_value_keeps_another_the_same_intent_added() {
     let e = entity(1);
     let (mut a, _) = pair(e);
     let both = intent("").add(e, TAGS, "x".into()).add(e, TAGS, "y".into());
-    a.commit(plan(both), &[], 2).unwrap();
-    a.commit(plan(intent("").remove(e, TAGS, &"x".into())), &[], 3)
+    a.commit(plan(both), 2).unwrap();
+    a.commit(plan(intent("").remove(e, TAGS, &"x".into())), 3)
         .unwrap();
     assert_eq!(tags(&a, e), ["a", "y"]);
     assert_eq!(a.view().find(TAGS, &"y".into()), [e]);
@@ -305,7 +324,7 @@ fn a_delete_ends_an_entity_whose_writes_it_observed() {
     ];
     for delete in deletes {
         let (mut a, mut b) = pair(e);
-        a.commit(plan(delete), &[], 2).unwrap();
+        a.commit(plan(delete), 2).unwrap();
         b.sync(&a);
         for reader in [&a, &b] {
             assert!(reader.view().entity(e).is_none());
@@ -324,8 +343,8 @@ fn a_write_the_delete_did_not_observe_keeps_the_entity_in_conflict() {
     ];
     for (what, write) in cases {
         let (mut a, mut b) = pair(e);
-        a.commit(plan(intent("").delete(e)), &[], 2).unwrap();
-        b.commit(plan(write(intent(""), e)), &[], 2).unwrap();
+        a.commit(plan(intent("").delete(e)), 2).unwrap();
+        b.commit(plan(write(intent(""), e)), 2).unwrap();
         a.sync(&b);
         let view = a.view();
         let shown = view.entity(e).unwrap_or_else(|| panic!("{what} lost"));
@@ -337,9 +356,9 @@ fn a_write_the_delete_did_not_observe_keeps_the_entity_in_conflict() {
         );
 
         let mut deleted = a.clone();
-        deleted.commit(plan(intent("").delete(e)), &[], 3).unwrap();
+        deleted.commit(plan(intent("").delete(e)), 3).unwrap();
         assert!(deleted.view().entity(e).is_none(), "{what}: deleting again");
-        a.commit(plan(intent("").revive(e)), &[], 3).unwrap();
+        a.commit(plan(intent("").revive(e)), 3).unwrap();
         let revived = a.view();
         assert!(
             !revived.entity(e).unwrap().deletion_conflicted(),
@@ -415,10 +434,10 @@ fn ops_refuse_what_the_schema_or_the_view_does_not_allow() {
         (intent("").into_parts().1, Invalid::Empty),
     ];
     for (plan, refusal) in cases {
-        let result = plan.and_then(|plan| ops(&plan, &[], &a.folded, &schema()));
+        let result = plan.and_then(|plan| ops(&plan, &a.folded, &schema()));
         assert_eq!(result, Err(refusal.clone()), "{refusal}");
     }
-    let (_, plan) = intent("")
+    let (_, plan, _) = intent("")
         .set(e, unencodable, BTreeMap::from([(vec![1], 1)]))
         .into_parts();
     assert!(matches!(plan, Err(Invalid::Unencodable { key, .. }) if key == "name"));
@@ -429,10 +448,10 @@ fn ops_name_what_this_writer_observed() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
     let left = a
-        .commit(plan(intent("").set(e, NAME, "left".into())), &[], 2)
+        .commit(plan(intent("").set(e, NAME, "left".into())), 2)
         .unwrap();
     let right = b
-        .commit(plan(intent("").set(e, NAME, "right".into())), &[], 2)
+        .commit(plan(intent("").set(e, NAME, "right".into())), 2)
         .unwrap();
     a.sync(&b);
     let tag = a.folded.tags(e, "tags", &Raw::of(&"a").unwrap())[0].entry;
@@ -443,7 +462,7 @@ fn ops_name_what_this_writer_observed() {
             .set(e, NAME, "y".into())
             .delete(e),
     );
-    let mut written = ops(&plan, &[], &a.folded, &schema()).unwrap();
+    let mut written = ops(&plan, &a.folded, &schema()).unwrap();
     let Some(Op::Delete { observed, .. }) = written.pop() else {
         panic!("{written:?}");
     };
@@ -466,9 +485,9 @@ fn ops_name_what_this_writer_observed() {
 fn compaction_never_resurrects_a_replaced_write() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
-    b.commit(plan(intent("").set(e, NAME, "second".into())), &[], 2)
+    b.commit(plan(intent("").set(e, NAME, "second".into())), 2)
         .unwrap();
-    a.commit(plan(intent("").add(e, TAGS, "b".into())), &[], 3)
+    a.commit(plan(intent("").add(e, TAGS, "b".into())), 3)
         .unwrap();
 
     let mut own_a = Folded::default();
@@ -503,7 +522,7 @@ fn undo_sets_a_field_back_and_redo_sets_it_again() {
     let e = entity(1);
     let (mut a, _) = pair(e);
     let rename = a
-        .commit(plan(intent("Rename").set(e, NAME, "second".into())), &[], 2)
+        .commit(plan(intent("Rename").set(e, NAME, "second".into())), 2)
         .unwrap();
 
     let undo = a.undo(3).unwrap();
@@ -543,10 +562,10 @@ fn undo_sets_a_field_back_and_redo_sets_it_again() {
 fn a_new_intent_ends_redo() {
     let e = entity(1);
     let (mut a, _) = pair(e);
-    a.commit(plan(intent("").set(e, NAME, "second".into())), &[], 2)
+    a.commit(plan(intent("").set(e, NAME, "second".into())), 2)
         .unwrap();
     a.undo(3).unwrap();
-    a.commit(plan(intent("").add(e, TAGS, "b".into())), &[], 4)
+    a.commit(plan(intent("").add(e, TAGS, "b".into())), 4)
         .unwrap();
     assert_eq!(a.redo(5).unwrap_err(), Refusal::Nothing);
 }
@@ -555,9 +574,9 @@ fn a_new_intent_ends_redo() {
 fn undo_and_redo_of_set_members() {
     let e = entity(1);
     let (mut a, _) = pair(e);
-    a.commit(plan(intent("").add(e, TAGS, "b".into())), &[], 2)
+    a.commit(plan(intent("").add(e, TAGS, "b".into())), 2)
         .unwrap();
-    a.commit(plan(intent("").remove(e, TAGS, &"a".into())), &[], 3)
+    a.commit(plan(intent("").remove(e, TAGS, &"a".into())), 3)
         .unwrap();
     assert_eq!(tags(&a, e), ["b"]);
     a.undo(4).unwrap();
@@ -611,11 +630,11 @@ fn undo_is_refused_where_another_writer_changed_the_thing_since() {
         };
         for &concurrent in concurrency {
             let (mut a, mut b) = pair(e);
-            a.commit(plan(mine(intent(""), e)), &[], 2).unwrap();
+            a.commit(plan(mine(intent(""), e)), 2).unwrap();
             if !concurrent {
                 b.sync(&a);
             }
-            let change = b.commit(plan(theirs(intent(""), e)), &[], 3).unwrap();
+            let change = b.commit(plan(theirs(intent(""), e)), 3).unwrap();
             a.sync(&b);
             let refusal = Refusal::ChangedSince {
                 by: b.id,
@@ -631,7 +650,7 @@ fn undoing_a_create_is_refused_once_another_writer_wrote_to_it() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);
     let tag = b
-        .commit(plan(intent("").add(e, TAGS, "b".into())), &[], 2)
+        .commit(plan(intent("").add(e, TAGS, "b".into())), 2)
         .unwrap();
     a.sync(&b);
     let refusal = Refusal::ChangedSince {
@@ -909,9 +928,9 @@ impl Node {
     /// A writer has created `E`, and every instance starts having seen it.
     fn seeded() -> Self {
         let mut seed = Writer::new(0x5);
-        let entry = seed
-            .commit(plan(intent("").create(|_| {})), &[E], 0)
-            .unwrap();
+        let mut create = creating("", &[E]);
+        create.create(|_| {});
+        let entry = seed.commit(plan(create), 0).unwrap();
         let mut node = Self {
             instances: Vec::new(),
             log: Vec::new(),
@@ -999,7 +1018,7 @@ impl Node {
                         continue;
                     }
                     let mut writer = node.instances[index].writer.clone();
-                    let Ok(entry) = writer.commit(act(a), &[], now) else {
+                    let Ok(entry) = writer.commit(act(a), now) else {
                         continue;
                     };
                     let EntryKind::Intent(logged) = &entry.kind else {

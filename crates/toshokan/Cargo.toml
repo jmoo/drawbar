@@ -15,9 +15,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 
-# A rename that refuses to replace its destination, atomically.
+# A rename that refuses to replace its destination, atomically, and whether a
+# volume's renames can.
 [target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
 rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 pollster = "0.4"

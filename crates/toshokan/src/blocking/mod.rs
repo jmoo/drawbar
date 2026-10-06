@@ -11,11 +11,13 @@ use crate::drafts::Draft;
 use crate::env::Env;
 use crate::error::Result;
 use crate::ids::{EntityId, Identity};
-use crate::intent::Intent;
-use crate::io::{Capabilities, Io, IoResult, Operation, Root, Step};
+use crate::intent::{Driver, Intent};
+use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
+use crate::path::RelPath;
+use crate::plan::{Splice, Splicing, SHRANK};
 use crate::report::{
     Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
 };
@@ -40,14 +42,117 @@ impl Backend for MemDisk {
     }
 }
 
+/// What a saved file is filled from: the app writes it into this writer's staging
+/// through [`Staging`], a chunk at a time, as the commit runs.
+pub trait Source<B> {
+    fn fill(self: Box<Self>, staging: &mut Staging<'_, B>) -> std::result::Result<(), IoError>;
+}
+
+impl<B: Backend> Source<B> for Vec<u8> {
+    fn fill(self: Box<Self>, staging: &mut Staging<'_, B>) -> std::result::Result<(), IoError> {
+        staging.write(0, *self)
+    }
+}
+
+impl<B: Backend> Source<B> for Splice {
+    fn fill(self: Box<Self>, staging: &mut Staging<'_, B>) -> std::result::Result<(), IoError> {
+        let from = self.from.clone();
+        for step in self.steps() {
+            match step {
+                Splicing::Write { at, bytes } => staging.write(at, bytes)?,
+                Splicing::Copy { at, range } => {
+                    let bytes = staging.read(&from, range)?;
+                    if bytes.len() as u64 != range.len {
+                        return Err(IoError::Other(SHRANK.into()));
+                    }
+                    staging.write(at, bytes)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<B, F> Source<B> for F
+where
+    F: FnOnce(&mut Staging<'_, B>) -> std::result::Result<(), IoError>,
+{
+    fn fill(self: Box<Self>, staging: &mut Staging<'_, B>) -> std::result::Result<(), IoError> {
+        (*self)(staging)
+    }
+}
+
+/// The staged file a [`Source`] fills, and the folder it may read.
+pub struct Staging<'s, B> {
+    backend: &'s mut B,
+    root: Root,
+    path: RelPath,
+}
+
+impl<B: Backend> Staging<'_, B> {
+    /// Writes `bytes` at `offset` of the staged file.
+    pub fn write(&mut self, offset: u64, bytes: Vec<u8>) -> std::result::Result<(), IoError> {
+        self.backend
+            .perform(Io::Write {
+                root: self.root,
+                path: self.path.clone(),
+                offset,
+                bytes,
+            })
+            .map(drop)
+    }
+
+    /// Reads `range` of the file at `path` in the folder, such as the one being
+    /// rewritten.
+    pub fn read(&mut self, path: &RelPath, range: Range) -> std::result::Result<Vec<u8>, IoError> {
+        let read = Io::Read {
+            root: self.root,
+            path: path.clone(),
+            range,
+        };
+        match self.backend.perform(read)? {
+            Reply::Bytes(bytes) => Ok(bytes),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
+}
+
 /// Runs `operation` to completion.
-pub fn run<O: Operation>(backend: &mut impl Backend, mut operation: O) -> O::Output {
+pub fn run<O: Operation, B: Backend>(backend: &mut B, operation: O) -> O::Output {
+    run_with(backend, Vec::new(), operation)
+}
+
+/// Runs `operation` to completion, filling the `n`th [`crate::plan::Content`] it
+/// asks for from `sources[n]`.
+pub fn run_with<'s, O: Operation, B: Backend>(
+    backend: &mut B,
+    sources: Vec<Box<dyn Source<B> + 's>>,
+    mut operation: O,
+) -> O::Output {
+    let mut sources: Vec<_> = sources.into_iter().map(Some).collect();
     let mut result = None;
     loop {
-        match operation.resume(result.take()) {
+        let io = match operation.resume(result.take()) {
             Step::Done(output) => return output,
-            Step::Io(io) => result = Some(backend.perform(io)),
-        }
+            Step::Io(io) => io,
+        };
+        result = Some(match io {
+            Io::Fill {
+                root,
+                path,
+                content,
+            } => match sources.get_mut(content.0).and_then(Option::take) {
+                Some(source) => source
+                    .fill(&mut Staging {
+                        backend: &mut *backend,
+                        root,
+                        path,
+                    })
+                    .map(|()| Reply::Done),
+                None => Err(IoError::Other(format!("no content {}", content.0))),
+            },
+            io => backend.perform(io),
+        });
     }
 }
 
@@ -82,6 +187,8 @@ impl<B: Backend> Library<B> {
         self.core.history()
     }
 
+    /// An intent to build and commit. Its saves take bytes, or any [`Source`]
+    /// boxed, such as a [`Splice`].
     pub fn intent(&mut self, label: &str) -> Intent<&mut Self> {
         Intent::new(self, label)
     }
@@ -141,10 +248,24 @@ impl<B: Backend> Library<B> {
     }
 }
 
-impl<B: Backend> Intent<&mut Library<B>> {
+impl<'l, B: Backend + 'l> Driver for &'l mut Library<B> {
+    type Source = Box<dyn Source<B> + 'l>;
+
+    fn bytes(bytes: Vec<u8>) -> Self::Source {
+        Box::new(bytes)
+    }
+
+    fn entity_id(&mut self) -> EntityId {
+        self.core.entity_id()
+    }
+}
+
+impl<'l, B: Backend + 'l> Intent<&'l mut Library<B>> {
+    /// Commits the intent. One whose file effects stop partway is logged as far as
+    /// they got and fails with [`crate::Error::Partial`].
     pub fn commit(self) -> Result<Committed> {
-        let (library, plan) = self.into_parts();
-        run(&mut library.backend, library.core.commit(plan))
+        let (library, plan, sources) = self.into_parts();
+        run_with(&mut library.backend, sources, library.core.commit(plan))
     }
 }
 

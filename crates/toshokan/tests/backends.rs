@@ -103,24 +103,37 @@ mod suite {
     pub fn nothing_is_ever_replaced(b: &mut impl Driven) {
         b.ok(create(Root::Folder, "f", b"old"));
         b.ok(make_dir(Root::Folder, "d/sub"));
-        let results = b.requests(vec![
+        let mut requests = vec![
             create(Root::Folder, "f", b"new"),
             create(Root::Folder, "gone/f", b""),
-            rename("d", "f"),
             rename("d", "d/sub/in"),
             rename("gone", "x"),
-        ]);
-        assert_eq!(
-            results,
-            [
-                Err(IoError::AlreadyExists),
-                Err(IoError::NotFound),
-                Err(IoError::AlreadyExists),
-                Err(IoError::IntoItself),
-                Err(IoError::NotFound),
-            ]
-        );
+        ];
+        let mut expected = vec![
+            Err(IoError::AlreadyExists),
+            Err(IoError::NotFound),
+            Err(IoError::IntoItself),
+            Err(IoError::NotFound),
+        ];
+        if b.capabilities(Root::Folder).no_replace {
+            requests.push(rename("d", "f"));
+            expected.push(Err(IoError::AlreadyExists));
+        }
+        assert_eq!(b.requests(requests), expected);
         assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"old".to_vec()));
+    }
+
+    pub fn a_write_lands_at_its_offset_and_past_the_end_after_zeros(b: &mut impl Driven) {
+        b.ok(create(Root::Folder, "f", b"abc"));
+        let write = |text: &str, offset, bytes: &[u8]| Io::Write {
+            root: Root::Folder,
+            path: path(text),
+            offset,
+            bytes: bytes.to_vec(),
+        };
+        b.requests(vec![write("f", 1, b"XY"), write("f", 5, b"Z")]);
+        assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"aXY\0\0Z".to_vec()));
+        assert_eq!(b.one(write("none", 0, b"x")), Err(IoError::NotFound));
     }
 
     pub fn a_directory_renames_with_its_contents(b: &mut impl Driven) {
@@ -305,8 +318,31 @@ for_every_backend!(suite:
     removal_needs_the_right_kind_and_an_empty_directory,
     making_a_directory_is_idempotent_and_refuses_a_file_in_the_way,
     appends_extend_a_file,
+    a_write_lands_at_its_offset_and_past_the_end_after_zeros,
     the_roots_are_separate_trees,
     requests_on_the_wrong_kind_or_nothing_fail_alike,
     a_file_renames_across_directories_and_syncs,
     a_lock_excludes_other_processes_until_released,
 );
+
+#[test]
+fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination() {
+    let mut native = common::NativeDirs::new();
+    let declared = native.capabilities(Root::Folder).no_replace;
+    #[cfg(any(target_vendor = "apple", windows))]
+    assert!(
+        declared,
+        "the temporary directory's volume refuses atomically"
+    );
+    native.ok(create(Root::Folder, "a", b"a"));
+    native.ok(create(Root::Folder, "b", b"b"));
+    let renamed = native.one(rename("a", "b"));
+    if declared {
+        assert_eq!(renamed, Err(IoError::AlreadyExists));
+        assert_eq!(
+            native.ok(read("b", 0, 1)),
+            Reply::Bytes(b"b".to_vec()),
+            "the destination is kept"
+        );
+    }
+}

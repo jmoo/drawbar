@@ -60,6 +60,9 @@ pub enum Renames {
 /// completed operation is durable at once. With [`MemDisk::set_eager_names`], a new
 /// name is durable as soon as it is created.
 ///
+/// **Renames.** In a root without [`Capabilities::no_replace`], a file renamed onto
+/// a file replaces it, as a POSIX rename does.
+///
 /// **Crashes.** Every mutating request ([`Io::mutates`]) counts as one operation,
 /// whether or not it succeeds, and a [`Renames::CopyThenRemove`] file rename counts
 /// as two. After [`MemDisk::crash_after`]`(n)` the next `n` operations run and the
@@ -133,6 +136,9 @@ struct Disk {
 
 const ROOT_ITSELF: &str = "the root itself cannot be created, moved or removed";
 
+/// Why a backend refuses [`Io::Fill`].
+pub(crate) const FILLED_BY_DRIVERS: &str = "a driver fills a file, not a backend";
+
 impl Default for MemDisk {
     fn default() -> Self {
         Self::new()
@@ -192,6 +198,7 @@ impl MemDisk {
             Io::Stat { root, path } => disk.tree(root).stat(&path).map(Reply::Stat),
             Io::Read { root, path, range } => disk.tree(root).read(&path, range).map(Reply::Bytes),
             Io::Lock { name } => Ok(Reply::Lock(disk.lock(self.process, name))),
+            Io::Fill { .. } => Err(IoError::Other(FILLED_BY_DRIVERS.into())),
             Io::Unlock { name } => {
                 if disk.locks.get(&name) == Some(&self.process) {
                     disk.locks.remove(&name);
@@ -359,6 +366,12 @@ impl Disk {
                 self.tree_mut(root).create(&path, bytes, now, eager)
             }
             Io::Append { root, path, bytes } => self.tree_mut(root).append(&path, &bytes, now),
+            Io::Write {
+                root,
+                path,
+                offset,
+                bytes,
+            } => self.tree_mut(root).write(&path, offset, &bytes, now),
             Io::Rename { root, from, to } => self.rename(root, &from, &to),
             Io::Remove { root, path } => self.tree_mut(root).remove(&path, Kind::File),
             Io::RemoveDir { root, path } => self.tree_mut(root).remove(&path, Kind::Directory),
@@ -367,9 +380,10 @@ impl Disk {
             Io::List { .. }
             | Io::Stat { .. }
             | Io::Read { .. }
+            | Io::Fill { .. }
             | Io::Lock { .. }
             | Io::Unlock { .. } => {
-                unreachable!("only mutating requests are counted")
+                unreachable!("only mutating requests a backend performs are counted")
             }
         }
     }
@@ -385,8 +399,13 @@ impl Disk {
             Kind::Directory => Capability::RenameDir,
         })?;
         let (to_dir, to_name) = tree.place(to)?;
-        if tree.child(to_dir, to_name).is_some() {
-            return Err(IoError::AlreadyExists);
+        match tree
+            .child(to_dir, to_name)
+            .map(|ino| tree.nodes[ino].live.kind())
+        {
+            None => {}
+            Some(Kind::File) if kind == Kind::File && !tree.capabilities.no_replace => {}
+            Some(_) => return Err(IoError::AlreadyExists),
         }
         if to.starts_with(from) {
             return Err(IoError::IntoItself);
@@ -639,6 +658,30 @@ impl Tree {
         self.reserve(bytes.len())?;
         if let Content::File { data, modified } = &mut self.nodes[ino].live {
             data.extend_from_slice(bytes);
+            *modified = now;
+        }
+        Ok(())
+    }
+
+    fn write(
+        &mut self,
+        path: &RelPath,
+        offset: u64,
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<(), IoError> {
+        let ino = self.file(path)?;
+        let Content::File { data, .. } = &self.nodes[ino].live else {
+            unreachable!("`file` finds files")
+        };
+        let start = usize::try_from(offset).map_err(|_| IoError::NoSpace)?;
+        let end = start.checked_add(bytes.len()).ok_or(IoError::NoSpace)?;
+        self.reserve(end.saturating_sub(data.len()))?;
+        if let Content::File { data, modified } = &mut self.nodes[ino].live {
+            if data.len() < end {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(bytes);
             *modified = now;
         }
         Ok(())

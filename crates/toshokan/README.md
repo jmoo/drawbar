@@ -35,15 +35,13 @@ let env = Env {
 };
 let backend = Native::new("/path/to/library", "/path/to/app/data");
 let (mut lib, opened) = Library::open(backend, Layout::new(".app")?, &schema, env)?;
-let song = lib
-    .intent("Import")
-    .create(|e| {
-        e.save(&path, bytes, Expect::Absent)
-            .set(ORIGIN, "B3 Split".into())
-            .add(TAGS, "Sunday".into());
-    })
-    .commit()?
-    .created[0];
+let mut import = lib.intent("Import");
+let song = import.create(|e| {
+    e.save(&path, bytes, Expect::Absent)
+        .set(ORIGIN, "B3 Split".into())
+        .add(TAGS, "Sunday".into());
+});
+import.commit()?;
 let view = lib.view();
 let tags = view.entity(song).unwrap().members(TAGS);
 lib.undo()?;
@@ -54,6 +52,11 @@ drafts, forks, facts a restore of the folder removed, and files that arrived,
 moved or changed outside the app. A field
 read from a view is a value, a conflict between writers, or unreadable, so an app
 cannot show half a conflict by accident.
+
+A save takes bytes or a source the driver streams into staging a chunk at a
+time, such as a `Splice` of the file being rewritten, so a file of hundreds of
+megabytes is never held whole. A commit whose file effects stop partway fails
+with `Error::Partial`, which says what it logged.
 
 ## Design
 
@@ -90,4 +93,5 @@ readers, and maps its properties to the tests that check the code.
 7. **Nondeterminism is injected.** Time, randomness and file identity come from
    the app, so tests replay exactly.
 8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
-   Linux and Apple systems for a rename that never replaces.
+   Linux and Apple systems, libc on Apple systems and windows-sys on Windows,
+   for a rename that never replaces.

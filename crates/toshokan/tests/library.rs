@@ -10,7 +10,7 @@ use std::rc::Rc;
 use toshokan::asynch;
 use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
-use toshokan::intent::Intent;
+use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
 use toshokan::log::{Entry, EntryKind, Genesis, Settlement};
 use toshokan::report::{
@@ -27,9 +27,10 @@ use toshokan::{
 
 const ORIGIN: Register<String> = Register::new("origin");
 const TAGS: Set<String> = Set::new("tags");
+const PLAYS: Register<EntityId> = Register::new("plays");
 
 fn schema() -> Schema {
-    Schema::of(&[ORIGIN.key(), TAGS.key()]).unwrap()
+    Schema::of(&[ORIGIN.key(), TAGS.key(), PLAYS.key()]).unwrap()
 }
 
 fn layout() -> Layout {
@@ -65,6 +66,8 @@ struct Seen {
     folder_writes: u64,
     /// The longest read of a pending record.
     longest_pending_read: u64,
+    /// Renames to this path fail, as a backend's might.
+    refused: Option<RelPath>,
 }
 
 /// One instance's storage: a machine, checked and counted.
@@ -138,6 +141,15 @@ impl Probe {
         }
     }
 
+    fn refuse(&self, io: &Io) -> Result<(), toshokan::IoError> {
+        match (io, &self.seen.borrow().refused) {
+            (Io::Rename { to, .. }, Some(refused)) if to == refused => {
+                Err(toshokan::IoError::Other("refused by the test".into()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn len(&self, path: &RelPath) -> u64 {
         self.machine
             .folder
@@ -166,6 +178,7 @@ impl Backend for Probe {
 
     fn perform(&mut self, io: Io) -> IoResult {
         self.check(&io);
+        self.refuse(&io)?;
         self.machine.perform(io)
     }
 }
@@ -177,6 +190,7 @@ impl asynch::Fs for Probe {
 
     async fn perform(&self, io: Io) -> IoResult {
         self.check(&io);
+        self.refuse(&io)?;
         asynch::Fs::perform(&self.machine, io).await
     }
 }
@@ -190,15 +204,18 @@ fn resumed(seen: &RefCell<Seen>, opened: &Opened) {
 
 /// Both drivers' libraries behind one interface.
 trait Facade: Sized {
-    type Inner;
+    /// The driver's library, as an intent borrows it.
+    type Lib<'a>: Driver
+    where
+        Self: 'a;
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error>;
     fn view(&self) -> View;
     fn history(&self) -> Vec<HistoryItem>;
-    fn commit(
-        &mut self,
+    fn commit<'a>(
+        &'a mut self,
         label: &str,
-        build: impl FnOnce(Intent<&mut Self::Inner>) -> Intent<&mut Self::Inner>,
+        build: impl FnOnce(Intent<Self::Lib<'a>>) -> Intent<Self::Lib<'a>>,
     ) -> Result<Committed, Error>;
     fn undo(&mut self) -> Result<Committed, Error>;
     fn redo(&mut self) -> Result<Committed, Error>;
@@ -219,7 +236,7 @@ struct Blocking(blocking::Library<Probe>);
 struct Async(asynch::Library<Probe>);
 
 impl Facade for Blocking {
-    type Inner = blocking::Library<Probe>;
+    type Lib<'a> = &'a mut blocking::Library<Probe>;
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error> {
         let seen = Rc::clone(&probe.seen);
@@ -233,10 +250,10 @@ impl Facade for Blocking {
     fn history(&self) -> Vec<HistoryItem> {
         self.0.history().to_vec()
     }
-    fn commit(
-        &mut self,
+    fn commit<'a>(
+        &'a mut self,
         label: &str,
-        build: impl FnOnce(Intent<&mut Self::Inner>) -> Intent<&mut Self::Inner>,
+        build: impl FnOnce(Intent<Self::Lib<'a>>) -> Intent<Self::Lib<'a>>,
     ) -> Result<Committed, Error> {
         build(self.0.intent(label)).commit()
     }
@@ -282,7 +299,7 @@ impl Facade for Blocking {
 }
 
 impl Facade for Async {
-    type Inner = asynch::Library<Probe>;
+    type Lib<'a> = &'a mut asynch::Library<Probe>;
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error> {
         let seen = Rc::clone(&probe.seen);
@@ -298,10 +315,10 @@ impl Facade for Async {
     fn history(&self) -> Vec<HistoryItem> {
         self.0.history().to_vec()
     }
-    fn commit(
-        &mut self,
+    fn commit<'a>(
+        &'a mut self,
         label: &str,
-        build: impl FnOnce(Intent<&mut Self::Inner>) -> Intent<&mut Self::Inner>,
+        build: impl FnOnce(Intent<Self::Lib<'a>>) -> Intent<Self::Lib<'a>>,
     ) -> Result<Committed, Error> {
         pollster::block_on(build(self.0.intent(label)).commit())
     }
@@ -385,6 +402,12 @@ through_both!(
     what_a_commit_returned_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
     facts_a_restore_removed_are_republished_when_adopted,
+    one_intent_creates_entities_that_name_each_other,
+    effects_that_stop_partway_fail_the_commit_and_are_logged,
+    an_undo_that_stops_partway_fails_and_is_logged,
+    settling_an_own_effect_that_stops_partway_fails_before_the_next_intent,
+    settling_an_orphan_that_stops_partway_fails_and_is_logged,
+    a_folder_whose_renames_may_replace_is_written_and_says_so,
 );
 
 /// One machine of a shared folder.
@@ -478,14 +501,14 @@ fn tag(text: &str) -> String {
 /// Creates one entity with a file at `at`.
 fn create<F: Facade>(library: &mut F, at: &str, bytes: &[u8]) -> EntityId {
     let committed = library
-        .commit("Import", |intent| {
+        .commit("Import", |mut intent| {
             intent.create(|e| {
                 e.save(&path(at), bytes.to_vec(), Expect::Absent)
                     .add(TAGS, tag("new"));
-            })
+            });
+            intent
         })
         .unwrap();
-    assert_eq!(committed.outcome, toshokan::Outcome::Complete);
     committed.created[0]
 }
 
@@ -814,15 +837,16 @@ fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() 
 
 /// Adopts `copy.npno` and saves `new.npno` in one intent.
 fn adopt_and_save<F: Facade>(library: &mut F) -> Result<Committed, Error> {
-    library.commit("Adopt", |i| {
+    library.commit("Adopt", |mut i| {
         i.create(|e| {
             e.adopt(&path("copy.npno"), Expect::Holds(identity(b"copy")))
                 .add(TAGS, tag("copy"));
-        })
-        .create(|e| {
+        });
+        i.create(|e| {
             e.save(&path("new.npno"), b"fresh".to_vec(), Expect::Absent)
                 .add(TAGS, tag("fresh"));
-        })
+        });
+        i
     })
 }
 
@@ -859,10 +883,11 @@ fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         settled += opened.settled.len();
         again
-            .commit("Next", |i| {
+            .commit("Next", |mut i| {
                 i.create(|e| {
                     e.add(TAGS, tag("next"));
-                })
+                });
+                i
             })
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         for entity in again.view().entities() {
@@ -1012,8 +1037,7 @@ fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {
         ["Import", "Save"]
     );
 
-    let undone = a.undo().unwrap();
-    assert_eq!(undone.outcome, toshokan::Outcome::Complete);
+    a.undo().unwrap();
     assert_eq!(read(&folder, "song.npno").unwrap(), b"one");
     assert!(a.history()[1].undone);
     a.redo().unwrap();
@@ -1063,11 +1087,12 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
         }]
     );
     let committed = a
-        .commit("Tag", |i| {
+        .commit("Tag", |mut i| {
             i.create(|e| {
                 e.adopt(&path("copy.npno"), Expect::Holds(identity(b"song")))
                     .add(TAGS, tag("copy"));
-            })
+            });
+            i
         })
         .unwrap();
     let copy = committed.created[0];
@@ -1170,11 +1195,12 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
 /// The scenario losing the local root interrupts: every step a user might take.
 fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Result<(), Error> {
     let song = library
-        .commit("Import", |i| {
+        .commit("Import", |mut i| {
             i.create(|e| {
                 e.save(&path("a/song.npno"), b"one".to_vec(), Expect::Absent)
                     .add(TAGS, tag("new"));
-            })
+            });
+            i
         })?
         .created[0];
     *done += 1;
@@ -1302,10 +1328,11 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert!(opened.orphaned.is_empty(), "{shown}: {:?}", opened.orphaned);
         settled += opened.settled.len();
-        let next = again.commit("Next", |i| {
+        let next = again.commit("Next", |mut i| {
             i.create(|e| {
                 e.add(TAGS, tag("next"));
-            })
+            });
+            i
         });
         next.unwrap_or_else(|e| panic!("{shown}: {e}"));
         again.close().unwrap();
@@ -1606,10 +1633,11 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     put(&folder, "taken.npno", b"taken");
-    let refused = a.commit("Import", |i| {
+    let refused = a.commit("Import", |mut i| {
         i.create(|e| {
             e.save(&path("taken.npno"), b"mine".to_vec(), Expect::Absent);
-        })
+        });
+        i
     });
     assert!(
         matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
@@ -1623,10 +1651,11 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
         "a refused first intent creates no writer"
     );
     put(&folder, "dir.npno/inside", b"inside");
-    let refused = a.commit("Import", |i| {
+    let refused = a.commit("Import", |mut i| {
         i.create(|e| {
             e.save(&path("dir.npno"), b"mine".to_vec(), Expect::Absent);
-        })
+        });
+        i
     });
     assert!(
         matches!(&refused, Err(Error::Refused(Refusal::Directory(at))) if *at == path("dir.npno")),
@@ -1650,10 +1679,20 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
         .collect();
     assert!(changed.is_empty(), "{changed:?}");
     assert_eq!(tags(&a.view(), song), ["new"]);
-    assert!(matches!(
-        a.commit("Nothing", |i| i),
-        Err(Error::Refused(Refusal::Invalid(toshokan::Invalid::Empty)))
-    ));
+    a.commit("Tag", |i| i.add(song, TAGS, tag("next"))).unwrap();
+    assert_eq!(
+        tags(&a.view(), song),
+        ["new", "next"],
+        "the refused intent is never logged"
+    );
+    let nothing = a.commit("Nothing", |i| i);
+    assert!(
+        matches!(
+            nothing,
+            Err(Error::Refused(Refusal::Invalid(toshokan::Invalid::Empty)))
+        ),
+        "{nothing:?}"
+    );
 }
 
 fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
@@ -1930,4 +1969,236 @@ fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
             .adopt("Again"),
         Err(Error::Refused(Refusal::Nothing))
     ));
+}
+
+fn one_intent_creates_entities_that_name_each_other<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let committed = a
+        .commit("Import bundle", |mut i| {
+            let piano = i.create(|e| {
+                e.save(&path("b/piano.npno"), b"piano".to_vec(), Expect::Absent);
+            });
+            i.create(|e| {
+                e.save(
+                    &path("b/program.nprog"),
+                    b"program".to_vec(),
+                    Expect::Absent,
+                )
+                .set(PLAYS, piano);
+            });
+            i
+        })
+        .unwrap();
+    let [piano, program] = committed.created[..] else {
+        panic!("{:?}", committed.created);
+    };
+    let view = a.view();
+    assert_eq!(
+        view.entity(program).unwrap().get(PLAYS),
+        Field::Value(piano)
+    );
+    assert_eq!(
+        view.entity(piano).unwrap().file().unwrap().path,
+        path("b/piano.npno")
+    );
+}
+
+/// Opens `folder` through a probe the test keeps, to refuse renames with.
+fn open_probed<F: Facade>(folder: &MemDisk, clock: &TestClock) -> (F, Probe) {
+    let probe = Probe::new(&machine(folder));
+    let (library, _) = F::open(probe.clone(), env("a", 1, clock)).unwrap();
+    (library, probe)
+}
+
+fn refuse(probe: &Probe, text: Option<&str>) {
+    probe.seen.borrow_mut().refused = text.map(path);
+}
+
+fn effects_that_stop_partway_fail_the_commit_and_are_logged<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, probe) = open_probed::<F>(&folder, &clock);
+    let song = create(&mut a, "song.npno", b"song");
+    refuse(&probe, Some("song.npno"));
+    let saved = a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"saved".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
+        .set(song, ORIGIN, "saved".into())
+    });
+    let Err(Error::Partial(partial)) = saved else {
+        panic!("{saved:?}");
+    };
+    assert_eq!(
+        (partial.label.as_str(), partial.report.stopped.as_str()),
+        ("Save", "song.npno")
+    );
+    assert_eq!(partial.report.applied, 1, "the old bytes went to the trash");
+    assert_eq!(a.history().last().unwrap().intent, partial.committed.intent);
+    assert_eq!(
+        a.view().entity(song).unwrap().get(ORIGIN),
+        Field::Value("saved".into()),
+        "the intent's facts are logged"
+    );
+    assert_eq!(read(&folder, "song.npno"), None);
+    let trashed: Vec<u64> = a.trash().unwrap().iter().map(|item| item.len).collect();
+    assert_eq!(
+        trashed.iter().sum::<u64>(),
+        9,
+        "{trashed:?}: both versions kept"
+    );
+}
+
+fn an_undo_that_stops_partway_fails_and_is_logged<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, probe) = open_probed::<F>(&folder, &clock);
+    let song = create(&mut a, "song.npno", b"one");
+    a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    })
+    .unwrap();
+    refuse(&probe, Some("song.npno"));
+    let undone = a.undo();
+    let Err(Error::Partial(partial)) = undone else {
+        panic!("{undone:?}");
+    };
+    assert_eq!(partial.report.stopped, path("song.npno"));
+    assert!(a.history()[1].undone, "the undo is logged");
+    refuse(&probe, None);
+    assert_eq!(read(&folder, "song.npno"), None);
+}
+
+/// The disk `rename` leaves after each crash that leaves its pending record open
+/// with `song.npno` not yet moved to `b.npno`, reopened.
+fn interrupted_renames<F: Facade>(mut each: impl FnMut(MemDisk, &str)) {
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    let rename = |disk: &MemDisk, crash: Option<u64>| {
+        let clock = TestClock::at(1_000);
+        let (mut library, _) = F::open(Probe::new(&one_disk(disk)), env("a", 1, &clock)).unwrap();
+        let song = create(&mut library, "song.npno", b"song");
+        let before = disk.mutations();
+        if let Some(crash) = crash {
+            disk.crash_after(crash);
+        }
+        let renamed = library.commit("Rename", |i| {
+            i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
+        });
+        (renamed, disk.mutations() - before)
+    };
+    let (renamed, total) = rename(&MemDisk::new(), None);
+    renamed.unwrap();
+    let mut open = 0;
+    for crash in 0..total {
+        let disk = MemDisk::new();
+        let _ = rename(&disk, Some(crash));
+        let disk = disk.restart();
+        let records = disk
+            .files(Root::Folder)
+            .into_keys()
+            .filter(|p| p.components().any(|name| name == "pending"));
+        let unmoved = read(&disk, "song.npno").is_some() && read(&disk, "b.npno").is_none();
+        if records.count() == 1 && unmoved {
+            open += 1;
+            each(disk, &format!("crash after {crash}"));
+        }
+    }
+    assert!(open > 0, "some crash leaves the rename open");
+}
+
+fn settling_an_own_effect_that_stops_partway_fails_before_the_next_intent<F: Facade>() {
+    interrupted_renames::<F>(|disk, shown| {
+        let machine = Machine {
+            folder: disk.clone(),
+            local: disk.clone(),
+        };
+        let clock = TestClock::at(2_000);
+        let (mut again, opened) = F::open(Probe::new(&machine), env("a", 2, &clock)).unwrap();
+        assert_eq!(opened.settled.len(), 1, "{shown}");
+        put(&disk, "b.npno", b"theirs");
+        let song = again.view().entities()[0].id();
+        let next = again.commit("Tag", |i| i.add(song, TAGS, tag("next")));
+        let Err(Error::Unfinished(partial)) = next else {
+            panic!("{shown}: {next:?}");
+        };
+        assert_eq!(
+            (partial.label.as_str(), partial.report.stopped.as_str()),
+            ("Rename", "b.npno"),
+            "{shown}"
+        );
+        assert_eq!(tags(&again.view(), song), ["new"], "{shown}: not tried");
+        again
+            .commit("Tag", |i| i.add(song, TAGS, tag("next")))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        assert_eq!(read(&disk, "b.npno").as_deref(), Some(b"theirs".as_slice()));
+        assert_eq!(
+            read(&disk, "song.npno").as_deref(),
+            Some(b"song".as_slice())
+        );
+    });
+}
+
+fn settling_an_orphan_that_stops_partway_fails_and_is_logged<F: Facade>() {
+    interrupted_renames::<F>(|disk, shown| {
+        disk.lose_local();
+        let machine = Machine {
+            folder: disk.clone(),
+            local: disk.clone(),
+        };
+        let clock = TestClock::at(2_000);
+        let (mut heir, opened) = F::open(Probe::new(&machine), env("b", 2, &clock)).unwrap();
+        let [orphan] = &opened.orphaned[..] else {
+            panic!("{shown}: {:?}", opened.orphaned);
+        };
+        put(&disk, "b.npno", b"theirs");
+        let settled = heir.settle(orphan.clone(), Settlement::Finished);
+        let Err(Error::Partial(partial)) = settled else {
+            panic!("{shown}: {settled:?}");
+        };
+        assert_eq!(partial.report.stopped, path("b.npno"), "{shown}");
+        heir.close().unwrap();
+        let (_, opened) = F::open(Probe::new(&machine), env("b", 3, &clock)).unwrap();
+        assert_eq!(opened.orphaned, [], "{shown}: the settlement is logged");
+        assert_eq!(read(&disk, "b.npno").as_deref(), Some(b"theirs".as_slice()));
+    });
+}
+
+fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
+    let racy = Capabilities {
+        no_replace: false,
+        ..Capabilities::ALL
+    };
+    let folder = MemDisk::with_capabilities(racy, Capabilities::ALL);
+    let clock = TestClock::at(1_000);
+    let (mut a, opened) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    assert_eq!(
+        (opened.mode, opened.no_replace),
+        (toshokan::report::Mode::Writable, false)
+    );
+    let song = create(&mut a, "song.npno", b"song");
+    put(&folder, "taken.npno", b"taken");
+    let renamed = a.commit("Rename", |i| {
+        i.rename(song, &path("taken.npno"), Expect::Holds(identity(b"song")))
+    });
+    assert!(
+        matches!(renamed, Err(Error::Refused(Refusal::Changed(_)))),
+        "{renamed:?}"
+    );
+    assert_eq!(
+        read(&folder, "taken.npno").as_deref(),
+        Some(b"taken".as_slice())
+    );
 }

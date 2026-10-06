@@ -393,6 +393,14 @@ A commit:
    with a `file` op for each entity's file as the folder shows it afterwards and
    a `pin` op for each binding to pin.
 
+Building an intent writes nothing, but draws the id of each entity it creates,
+so one intent can create entities that name each other.
+
+A commit whose file effects stop partway is logged with what they did, and
+fails, saying where they stopped. When settling one of this writer's unfinished
+effects at step 4 stops partway, that settlement is logged and the commit fails
+before its own intent is tried.
+
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.
 
@@ -421,18 +429,29 @@ by one `rename` per file the last scan saw, then `remove_dir` deepest first.
 
 A writer carries out an intent's steps in this order:
 
-1. Write each new file to `tmp/<nonce>`, sync it, then sync `tmp/`.
+1. Create each new file as `tmp/<nonce>` and fill it, then sync it and `tmp/`.
+   The app's bytes are written a chunk at a time by the driver, never held by
+   the core; they may copy ranges of the file being rewritten. A copy out of
+   another writer's directory is made a chunk at a time.
 2. Check every precondition: a path holds nothing, or a file whose identity is
    the one the app expects; a directory satisfies neither. Check that every
    trash item a step restores is there. On failure, remove the staged files and write nothing more.
 3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
    `pending/<nonce>.json`.
 4. Carry out the steps in order. A move first creates the destination's
-   directory, renames without replacing, syncs the destination's directory and
-   then the source's, so a source's name is gone only once the destination's
-   is durable.
+   directory, checks that nothing is at the destination, renames without
+   replacing, syncs the destination's directory and then the source's, so a
+   source's name is gone only once the destination's is durable.
 5. Append the intent's entry.
 6. Remove the pending record.
+
+Where the folder's renames refuse an existing destination themselves, as
+`renameat2` with `RENAME_NOREPLACE`, `renamex_np` with `RENAME_EXCL` and
+`MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` do on volumes that support
+them, a move never replaces anything. Elsewhere a rename may replace, and the
+check before it is the only guard: a file another program makes at the
+destination between the check and the rename is replaced, and its bytes leave
+the folder. Opening says which kind of folder it is.
 
 If a step fails, the rest are not tried: staged files not placed are renamed to
 `trash/<their nonce>`, the entry records the effects that were made, and the

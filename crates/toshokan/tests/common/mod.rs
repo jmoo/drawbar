@@ -16,7 +16,7 @@ use toshokan::io::{Capabilities, Kind, Range};
 use toshokan::line::Line;
 use toshokan::log::{Entry, EntryKind, Logged};
 use toshokan::pending::PendingRecord;
-use toshokan::plan::FileChange;
+use toshokan::plan::{FileChange, Splice};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Compacted, Start};
 use toshokan::simulator::Machine;
@@ -30,12 +30,40 @@ pub fn path(text: &str) -> RelPath {
     RelPath::new(text).unwrap()
 }
 
+/// What a test saves, made into each driver's source.
+#[derive(Clone, Debug)]
+pub enum Fill {
+    Bytes(Vec<u8>),
+    Splice(Splice),
+}
+
+impl Fill {
+    fn blocking<'s, B: Backend + 's>(self) -> Box<dyn blocking::Source<B> + 's> {
+        match self {
+            Self::Bytes(bytes) => Box::new(bytes),
+            Self::Splice(splice) => Box::new(splice),
+        }
+    }
+
+    fn asynch<'s, F: asynch::Fs + 's>(self) -> Box<dyn asynch::Source<F> + 's> {
+        match self {
+            Self::Bytes(bytes) => Box::new(bytes),
+            Self::Splice(splice) => Box::new(splice),
+        }
+    }
+}
+
 /// One process's handle on a backend, driven by one of the drivers.
 pub trait Driven: Sized {
     fn capabilities(&self, root: Root) -> Capabilities;
-    fn run<O: Operation>(&mut self, operation: O) -> O::Output;
+    /// Runs `operation`, filling its `n`th content from `contents[n]`.
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output;
     /// A handle of another process on the same storage.
     fn other_process(&self) -> Self;
+
+    fn run<O: Operation>(&mut self, operation: O) -> O::Output {
+        self.run_filled(operation, Vec::new())
+    }
 
     fn requests(&mut self, requests: Vec<Io>) -> Vec<IoResult> {
         self.run(Script {
@@ -79,8 +107,9 @@ impl Driven for BlockingMem {
         Backend::capabilities(&self.0, root)
     }
 
-    fn run<O: Operation>(&mut self, operation: O) -> O::Output {
-        blocking::run(&mut self.0, operation)
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        let sources = contents.into_iter().map(Fill::blocking).collect();
+        blocking::run_with(&mut self.0, sources, operation)
     }
 
     fn other_process(&self) -> Self {
@@ -95,8 +124,9 @@ impl Driven for AsyncMem {
         asynch::Fs::capabilities(&self.0, root)
     }
 
-    fn run<O: Operation>(&mut self, operation: O) -> O::Output {
-        pollster::block_on(asynch::run(&self.0, operation))
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        let sources = contents.into_iter().map(Fill::asynch).collect();
+        pollster::block_on(asynch::run_with(&self.0, sources, operation))
     }
 
     fn other_process(&self) -> Self {
@@ -124,8 +154,9 @@ impl Driven for NativeDirs {
         self.backend.capabilities(root)
     }
 
-    fn run<O: Operation>(&mut self, operation: O) -> O::Output {
-        blocking::run(&mut self.backend, operation)
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        let sources = contents.into_iter().map(Fill::blocking).collect();
+        blocking::run_with(&mut self.backend, sources, operation)
     }
 
     fn other_process(&self) -> Self {
@@ -269,29 +300,26 @@ pub struct Run {
     pub record: Rc<PendingRecord>,
 }
 
-/// Resolves `changes` and writes the pending record: what a commit does before its
-/// first file effect.
+/// Resolves `changes` and writes the pending record, filling saved files from
+/// `contents`: what a commit does before its first file effect.
 pub fn prepare(
     d: &mut impl Driven,
     writer: WriterId,
     changes: &[FileChange],
+    contents: Vec<Fill>,
     bindings: &Bindings,
     env: &mut Env,
 ) -> Result<Result<Run, Refusal>, Error> {
     let layout = layout();
     let capabilities = d.capabilities(Root::Folder);
-    let plan = match effects::resolve(changes, &[], bindings, &layout, capabilities, env) {
+    let plan = match effects::resolve(changes, bindings, &layout, capabilities, env) {
         Ok(plan) => plan,
         Err(refusal) => return Ok(Err(refusal)),
     };
     let plan = Rc::new(plan);
     let record = Rc::new(PendingRecord::new(writer, "label", entry(HEAD), &plan));
-    match d.run(effects::prepare(
-        &layout,
-        Rc::clone(&plan),
-        Rc::clone(&record),
-        identify(),
-    ))? {
+    let prepared = effects::prepare(&layout, Rc::clone(&plan), Rc::clone(&record), identify());
+    match d.run_filled(prepared, contents)? {
         Ok(()) => Ok(Ok(Run { plan, record })),
         Err(refusal) => Ok(Err(refusal)),
     }
@@ -340,14 +368,15 @@ pub fn close(d: &mut impl Driven, writer: WriterId, name: Nonce) -> Result<(), E
     Ok(())
 }
 
-/// Commits `changes` whole, or refuses.
+/// Commits `changes` whole, saving `contents`, or refuses.
 pub fn commit(
     d: &mut impl Driven,
     changes: &[FileChange],
+    contents: Vec<Fill>,
     bindings: &Bindings,
     env: &mut Env,
 ) -> Result<Applied, Refusal> {
-    let run = prepare(d, WRITER, changes, bindings, env).unwrap()?;
+    let run = prepare(d, WRITER, changes, contents, bindings, env).unwrap()?;
     Ok(complete(d, &run).unwrap())
 }
 

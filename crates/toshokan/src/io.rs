@@ -12,6 +12,10 @@ use thiserror::Error as ThisError;
 
 use crate::error::Error;
 use crate::path::RelPath;
+use crate::plan::Content;
+
+/// The most bytes the core and the drivers read or copy in one request.
+pub const CHUNK: u64 = 1 << 20;
 
 /// The two trees an operation addresses.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -56,8 +60,27 @@ pub enum Io {
         path: RelPath,
         bytes: Vec<u8>,
     },
-    /// A file or directory moved to a path where nothing is. Never replaces, and
-    /// never moves a directory inside itself.
+    /// `bytes` written at `offset` of an existing file, over what is there and past
+    /// its end, zeros filling any gap. A write that fails may have written part of
+    /// `bytes`.
+    Write {
+        root: Root,
+        path: RelPath,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    /// The empty file at `path` filled with the app's `content`, which the driver
+    /// holds: the driver writes it with [`Io::Write`] requests to its backend, so its
+    /// bytes never pass through the core. A backend refuses it.
+    Fill {
+        root: Root,
+        path: RelPath,
+        content: Content,
+    },
+    /// A file or directory moved to a path where nothing is, never inside itself.
+    /// Something at `to` refuses it with [`IoError::AlreadyExists`], atomically
+    /// where the backend declares [`Capabilities::no_replace`]; elsewhere the
+    /// backend may replace it, and the core checks `to` first.
     Rename {
         root: Root,
         from: RelPath,
@@ -93,6 +116,8 @@ impl Io {
             | Self::Read { root, .. }
             | Self::Create { root, .. }
             | Self::Append { root, .. }
+            | Self::Write { root, .. }
+            | Self::Fill { root, .. }
             | Self::Rename { root, .. }
             | Self::Remove { root, .. }
             | Self::RemoveDir { root, .. }
@@ -110,6 +135,8 @@ impl Io {
             | Self::Read { path, .. }
             | Self::Create { path, .. }
             | Self::Append { path, .. }
+            | Self::Write { path, .. }
+            | Self::Fill { path, .. }
             | Self::Rename { to: path, .. }
             | Self::Remove { path, .. }
             | Self::RemoveDir { path, .. }
@@ -130,6 +157,8 @@ impl Io {
             | Self::Unlock { .. } => false,
             Self::Create { .. }
             | Self::Append { .. }
+            | Self::Write { .. }
+            | Self::Fill { .. }
             | Self::Rename { .. }
             | Self::Remove { .. }
             | Self::RemoveDir { .. }
@@ -253,6 +282,10 @@ pub struct Capabilities {
     pub append: bool,
     /// [`Io::Rename`] works on files, atomically.
     pub rename_file: bool,
+    /// [`Io::Rename`] refuses an existing destination in the same step as it
+    /// renames. Without it, something another program makes at the destination
+    /// between the core's check and the rename is replaced.
+    pub no_replace: bool,
     /// [`Io::Rename`] works on directories, atomically, with everything inside.
     pub rename_dir: bool,
     /// [`Io::Sync`] makes completed requests durable. Without it `Sync` does
@@ -264,6 +297,7 @@ impl Capabilities {
     pub const ALL: Self = Self {
         append: true,
         rename_file: true,
+        no_replace: true,
         rename_dir: true,
         fsync: true,
     };
@@ -271,6 +305,7 @@ impl Capabilities {
     pub const NONE: Self = Self {
         append: false,
         rename_file: false,
+        no_replace: false,
         rename_dir: false,
         fsync: false,
     };
