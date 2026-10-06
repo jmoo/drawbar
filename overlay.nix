@@ -352,12 +352,14 @@ let
       pkg;
 
   # Cross-build applications to exercise their whole dependency stack. `nord-usb`
-  # also keeps wasip1 because its own suite executes there in a wasm VM.
+  # also keeps wasip1 because its own suite executes there in a wasm VM, and
+  # `toshokan` builds for Windows because its Windows renames compile only there.
   crateTargets = {
     # A CLI has no use on WASI.
     nord-cli = filter (t: t != "wasip1") (attrNames targets);
     nord-usb = [ "wasip1" ];
     drawbar = [ "windows" ];
+    toshokan = [ "windows" ];
   };
 
   # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
