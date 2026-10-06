@@ -158,16 +158,20 @@ impl Hlc {
     };
 
     /// The reading for a local event at wall time `now_ms`: after `self`, and at
-    /// `now_ms` when the wall clock is ahead. `None` when the counter is exhausted.
+    /// `now_ms` when the wall clock is ahead. A full counter moves on to the next
+    /// millisecond. `None` only after the last reading there is.
     pub fn tick(self, now_ms: u64) -> Option<Self> {
-        match now_ms > self.wall_ms {
-            true => Some(Self {
+        if now_ms > self.wall_ms {
+            return Some(Self {
                 wall_ms: now_ms,
                 counter: 0,
-            }),
-            false => Some(Self {
-                wall_ms: self.wall_ms,
-                counter: self.counter.checked_add(1)?,
+            });
+        }
+        match self.counter.checked_add(1) {
+            Some(counter) => Some(Self { counter, ..self }),
+            None => Some(Self {
+                wall_ms: self.wall_ms.checked_add(1)?,
+                counter: 0,
             }),
         }
     }
@@ -258,7 +262,16 @@ mod tests {
             wall_ms: 10,
             counter: u32::MAX,
         };
-        assert_eq!(full.tick(10), None);
+        let next = Hlc {
+            wall_ms: 11,
+            counter: 0,
+        };
+        assert_eq!(full.tick(10), Some(next));
+        let last = Hlc {
+            wall_ms: u64::MAX,
+            counter: u32::MAX,
+        };
+        assert_eq!(last.tick(10), None);
         assert_eq!(start.observe(full), full);
         assert_eq!(serde_json::to_string(&start).unwrap(), "[10,3]");
     }

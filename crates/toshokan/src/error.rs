@@ -66,7 +66,8 @@ pub enum Why {
     /// The folder cannot append to files or rename them, which writing needs.
     #[error("the folder cannot be written")]
     FolderNotWritable,
-    /// The clock cannot advance past this writer's last entry.
+    /// The clock cannot advance past this writer's last entry: it holds the last
+    /// reading there is.
     #[error("this writer's clock is exhausted")]
     ClockExhausted,
 }

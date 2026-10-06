@@ -159,11 +159,12 @@ impl Library {
     fn new(
         layout: Layout,
         schema: Schema,
-        env: Env,
+        mut env: Env,
         capabilities: Capabilities,
         reader: Reader,
         writer: Option<Writer>,
     ) -> Self {
+        let clock = latest(&reader, env.now_ms());
         let folded = merge(reader.logs().values());
         let mode = match (&writer, capabilities.append && capabilities.rename_file) {
             (_, false) => Mode::ReadOnly(Why::FolderNotWritable),
@@ -173,7 +174,6 @@ impl Library {
             },
             (None, true) => Mode::Writable,
         };
-        let clock = latest(&reader);
         let mut library = Self {
             layout,
             schema,
@@ -304,7 +304,8 @@ impl Library {
                 let before =
                     std::mem::replace(&mut self.folded, merge(self.reader.logs().values()));
                 let changes = self.attribute(&before);
-                self.clock = self.clock.observe(latest(&self.reader));
+                let now = self.env.now_ms();
+                self.clock = self.clock.observe(latest(&self.reader, now));
                 let forked = self
                     .writer
                     .as_ref()
@@ -802,11 +803,19 @@ fn newer_entry(folded: &Folded, reader: &Reader, writer: WriterId) -> Option<Ent
         .find(|entry| log.holds(*entry))
 }
 
-fn latest(reader: &Reader) -> Hlc {
+/// How far past this machine's wall clock a reading in the folder may be and still
+/// move this writer's clock. A reading further ahead is shown but not followed, so
+/// one wrong or forged clock cannot pin every writer's.
+const MAX_DRIFT_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The latest reading in the folder no more than [`MAX_DRIFT_MS`] past `now_ms`.
+fn latest(reader: &Reader, now_ms: u64) -> Hlc {
+    let until = now_ms.saturating_add(MAX_DRIFT_MS);
     reader
         .logs()
         .values()
-        .filter_map(|log| log.last_at())
+        .flat_map(WriterLog::readings)
+        .filter(|at| at.wall_ms <= until)
         .max()
         .unwrap_or(Hlc::ZERO)
 }

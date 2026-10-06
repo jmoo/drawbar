@@ -12,7 +12,7 @@ use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::Intent;
 use toshokan::io::{Capabilities, Range};
-use toshokan::log::Settlement;
+use toshokan::log::{Entry, EntryKind, Genesis, Settlement};
 use toshokan::report::{
     By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, Presence, Rekey,
     Start, TrashItem, What, WriterInfo,
@@ -20,8 +20,9 @@ use toshokan::report::{
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
-    EntityId, Env, Error, Expect, Field, FileState, Identify, Identity, Io, IoResult, Layout,
-    MemDisk, Policy, Refusal, Register, RelPath, Reply, Root, Schema, Set, View, WriterId,
+    EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
+    IoResult, Layout, MemDisk, Policy, Refusal, Register, RelPath, Reply, Root, Schema, Set, View,
+    WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -1202,6 +1203,19 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
         )
     };
     let zero = "0".repeat(32);
+    let far = WriterId::from_u128(0x6);
+    let last_reading = Hlc {
+        wall_ms: u64::MAX,
+        counter: u32::MAX,
+    };
+    let genesis = EntryKind::Genesis(Genesis {
+        writer: far,
+        label: "far".into(),
+    });
+    let from_the_future = Entry::encode(EntryHash::ZERO, last_reading, genesis)
+        .unwrap()
+        .line
+        .to_bytes();
     let mut random = SeededRandom::new(7);
     let mut noise = |len: usize| -> Vec<u8> {
         use toshokan::Random;
@@ -1236,6 +1250,10 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
         ),
         (w("not-a-writer/seg.jsonl"), noise(100)),
         (".t/writers/file".into(), noise(10)),
+        (
+            format!("{}/far.jsonl", w(&far.to_string())),
+            from_the_future,
+        ),
     ];
     for (at, bytes) in &garbage {
         put(&folder, at, bytes);
@@ -1253,6 +1271,13 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
     assert_eq!(tags(&a.view(), song), ["new"]);
     a.commit("Tag", |i| i.add(song, TAGS, tag("still")))
         .unwrap();
+    let ours = a.others().unwrap();
+    let ours = ours.iter().find(|w| w.here == Presence::This).unwrap();
+    assert_eq!(
+        ours.last_entry_at.map(|at| at.wall_ms),
+        Some(1_000),
+        "a forged clock in the folder is not followed"
+    );
     assert_eq!(library_files(&folder), before, "no forged effect ran");
 
     for seed in 0..20 {

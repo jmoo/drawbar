@@ -72,8 +72,11 @@ one itself.
 
 A clock reading is the JSON array `[wall_ms, counter]`: milliseconds since the
 Unix epoch and a counter within the millisecond, a hybrid logical clock. A
-writer's next reading is later than every reading it has seen. Readings order
-writes for display only, by reading and then by writer id.
+writer's next reading is later than every reading it has seen up to one day past
+its machine's clock; a reading further ahead is shown but not followed, so one
+wrong or forged clock cannot hold back the others. A counter that runs out moves
+the reading to the next millisecond. Readings order writes for display only, by
+reading and then by writer id.
 
 ## Segments
 
