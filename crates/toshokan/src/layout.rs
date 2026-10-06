@@ -12,6 +12,7 @@
 //!   view.json                  the cached view
 //!   drafts/<entity>.json       unsaved edits
 //!   lock                       held while an instance writes as this writer
+//!   retired                    present once the writer is never written again
 //! ```
 //!
 //! The app names `<root>`. Only writer `w` writes under `writers/<w>/`. Names of
@@ -127,6 +128,11 @@ impl Layout {
     pub fn lock(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "lock")
     }
+
+    /// Present once the writer can no longer be continued: it leaves the pool.
+    pub fn retired(genesis: EntryHash) -> RelPath {
+        child(&Self::local(genesis), "retired")
+    }
 }
 
 fn child(parent: &RelPath, name: &str) -> RelPath {
@@ -170,6 +176,7 @@ mod tests {
             Layout::cached_view(genesis),
             Layout::draft(genesis, entity),
             Layout::lock(genesis),
+            Layout::retired(genesis),
         ] {
             assert_eq!(path.components().next(), Some(&*genesis.to_string()));
         }
