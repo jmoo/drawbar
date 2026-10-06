@@ -35,13 +35,11 @@ let env = Env {
 };
 let backend = Native::new("/path/to/library", "/path/to/app/data");
 let (mut lib, opened) = Library::open(backend, Layout::new(".app")?, &schema, env)?;
-let mut import = lib.intent("Import");
-let song = import.create(|e| {
+let (import, song) = lib.intent("Import").create(|e| {
     e.save(&path, bytes, Expect::Absent)
-        .set(ORIGIN, "B3 Split".into())
-        .add(TAGS, "Sunday".into());
+        .set(ORIGIN, "B3 Split".into());
 });
-import.commit()?;
+import.add(song, TAGS, "Sunday".into()).commit()?;
 let view = lib.view();
 let tags = view.entity(song).unwrap().members(TAGS);
 lib.undo()?;

@@ -502,8 +502,8 @@ fn tag(text: &str) -> String {
 /// Creates one entity with a file at `at`.
 fn create<F: Facade>(library: &mut F, at: &str, bytes: &[u8]) -> EntityId {
     let committed = library
-        .commit("Import", |mut intent| {
-            intent.create(|e| {
+        .commit("Import", |intent| {
+            let (intent, _) = intent.create(|e| {
                 e.save(&path(at), bytes.to_vec(), Expect::Absent)
                     .add(TAGS, tag("new"));
             });
@@ -856,12 +856,12 @@ fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() 
 
 /// Adopts `copy.npno` and saves `new.npno` in one intent.
 fn adopt_and_save<F: Facade>(library: &mut F) -> Result<Committed, Error> {
-    library.commit("Adopt", |mut i| {
-        i.create(|e| {
+    library.commit("Adopt", |i| {
+        let (i, _) = i.create(|e| {
             e.adopt(&path("copy.npno"), Expect::Holds(identity(b"copy")))
                 .add(TAGS, tag("copy"));
         });
-        i.create(|e| {
+        let (i, _) = i.create(|e| {
             e.save(&path("new.npno"), b"fresh".to_vec(), Expect::Absent)
                 .add(TAGS, tag("fresh"));
         });
@@ -902,8 +902,8 @@ fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         settled += opened.settled.len();
         again
-            .commit("Next", |mut i| {
-                i.create(|e| {
+            .commit("Next", |i| {
+                let (i, _) = i.create(|e| {
                     e.add(TAGS, tag("next"));
                 });
                 i
@@ -1106,8 +1106,8 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
         }]
     );
     let committed = a
-        .commit("Tag", |mut i| {
-            i.create(|e| {
+        .commit("Tag", |i| {
+            let (i, _) = i.create(|e| {
                 e.adopt(&path("copy.npno"), Expect::Holds(identity(b"song")))
                     .add(TAGS, tag("copy"));
             });
@@ -1214,8 +1214,8 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
 /// The scenario losing the local root interrupts: every step a user might take.
 fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Result<(), Error> {
     let song = library
-        .commit("Import", |mut i| {
-            i.create(|e| {
+        .commit("Import", |i| {
+            let (i, _) = i.create(|e| {
                 e.save(&path("a/song.npno"), b"one".to_vec(), Expect::Absent)
                     .add(TAGS, tag("new"));
             });
@@ -1347,8 +1347,8 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert!(opened.orphaned.is_empty(), "{shown}: {:?}", opened.orphaned);
         settled += opened.settled.len();
-        let next = again.commit("Next", |mut i| {
-            i.create(|e| {
+        let next = again.commit("Next", |i| {
+            let (i, _) = i.create(|e| {
                 e.add(TAGS, tag("next"));
             });
             i
@@ -1652,8 +1652,8 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     put(&folder, "taken.npno", b"taken");
-    let refused = a.commit("Import", |mut i| {
-        i.create(|e| {
+    let refused = a.commit("Import", |i| {
+        let (i, _) = i.create(|e| {
             e.save(&path("taken.npno"), b"mine".to_vec(), Expect::Absent);
         });
         i
@@ -1670,8 +1670,8 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
         "a refused first intent creates no writer"
     );
     put(&folder, "dir.npno/inside", b"inside");
-    let refused = a.commit("Import", |mut i| {
-        i.create(|e| {
+    let refused = a.commit("Import", |i| {
+        let (i, _) = i.create(|e| {
             e.save(&path("dir.npno"), b"mine".to_vec(), Expect::Absent);
         });
         i
@@ -1995,11 +1995,11 @@ fn one_intent_creates_entities_that_name_each_other<F: Facade>() {
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let committed = a
-        .commit("Import bundle", |mut i| {
-            let piano = i.create(|e| {
+        .commit("Import bundle", |i| {
+            let (i, piano) = i.create(|e| {
                 e.save(&path("b/piano.npno"), b"piano".to_vec(), Expect::Absent);
             });
-            i.create(|e| {
+            let (i, program) = i.create(|e| {
                 e.save(
                     &path("b/program.nprog"),
                     b"program".to_vec(),
@@ -2007,7 +2007,7 @@ fn one_intent_creates_entities_that_name_each_other<F: Facade>() {
                 )
                 .set(PLAYS, piano);
             });
-            i
+            i.add(program, TAGS, tag("bundle"))
         })
         .unwrap();
     let [piano, program] = committed.created[..] else {
@@ -2018,6 +2018,7 @@ fn one_intent_creates_entities_that_name_each_other<F: Facade>() {
         view.entity(program).unwrap().get(PLAYS),
         Field::Value(piano)
     );
+    assert_eq!(tags(&view, program), ["bundle"]);
     assert_eq!(
         view.entity(piano).unwrap().file().unwrap().path,
         path("b/piano.npno")

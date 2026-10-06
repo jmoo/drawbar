@@ -172,8 +172,7 @@ impl Writer {
 fn pair(e: EntityId) -> (Writer, Writer) {
     let mut a = Writer::new(0xa);
     let mut b = Writer::new(0xb);
-    let mut create = creating("Add", &[e]);
-    create.create(|new| {
+    let (create, _) = creating("Add", &[e]).create(|new| {
         new.set(NAME, "first".into()).add(TAGS, "a".into());
     });
     a.commit(plan(create), 1).unwrap();
@@ -1223,8 +1222,7 @@ impl Node {
     /// A writer has created `E`, and every instance starts having seen it.
     fn seeded() -> Self {
         let mut seed = Writer::new(0x5);
-        let mut create = creating("", &[E]);
-        create.create(|_| {});
+        let (create, _) = creating("", &[E]).create(|_| {});
         let entry = seed.commit(plan(create), 0).unwrap();
         let mut node = Self {
             instances: Vec::new(),

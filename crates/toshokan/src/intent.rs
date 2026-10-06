@@ -1,14 +1,13 @@
 //! Building an intent: one user action, one commit, one undo step.
 //!
 //! ```ignore
-//! let mut intent = lib.intent("Import B3 Split");
-//! let piano = intent.create(|e| {
+//! let (intent, piano) = lib.intent("Import B3 Split").create(|e| {
 //!     e.save(&piano_path, piano_bytes, Expect::Absent);
 //! });
-//! intent.create(|e| {
+//! let (intent, program) = intent.create(|e| {
 //!     e.set(ORIGIN, bundle).set(PLAYS, piano);
 //! });
-//! intent.commit()?;
+//! intent.add(program, TAGS, tag).commit()?;
 //! ```
 //!
 //! Building checks nothing and writes nothing; it only draws the ids of the
@@ -81,9 +80,13 @@ impl<L: Driver> Intent<L> {
         (self.library, plan, self.sources)
     }
 
-    /// Creates an entity, describes it and returns its id, which later changes of
-    /// this intent, other entities' fields among them, may name.
-    pub fn create(&mut self, describe: impl FnOnce(&mut Creating<'_, L::Source>)) -> EntityId {
+    /// Creates an entity, describes it, and returns the intent with the entity's
+    /// id, which later changes of this intent, other entities' fields among them,
+    /// may name.
+    pub fn create(
+        mut self,
+        describe: impl FnOnce(&mut Creating<'_, L::Source>),
+    ) -> (Self, EntityId) {
         let entity = self.library.entity_id();
         self.plan.created.push(entity);
         describe(&mut Creating {
@@ -93,7 +96,7 @@ impl<L: Driver> Intent<L> {
             entity,
             invalid: &mut self.invalid,
         });
-        entity
+        (self, entity)
     }
 
     /// Replaces every write of `key` this writer has observed, which resolves a
