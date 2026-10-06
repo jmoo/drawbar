@@ -397,8 +397,8 @@ A writer carries out an intent's steps in this order:
 
 1. Write each new file to `tmp/<nonce>`, sync it, then sync `tmp/`.
 2. Check every precondition: a path holds nothing, or a file whose identity is
-   the one the app expects. Check that every trash item a step restores is
-   there. On failure, remove the staged files and write nothing more.
+   the one the app expects; a directory satisfies neither. Check that every
+   trash item a step restores is there. On failure, remove the staged files and write nothing more.
 3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
    `pending/<nonce>.json`.
 4. Carry out the steps in order. A move first creates the destination's

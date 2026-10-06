@@ -563,7 +563,12 @@ fn refusal<'a>(
         None,
         move |refused, check| match refused {
             Some(refused) => ok(Some(refused)),
-            None => found(&check.path, &identify).map_ok(move |found| {
+            None => holding(&check.path, &identify).map_ok(move |held| {
+                let found = match held {
+                    Holding::Directory => return Some(Refusal::Directory(check.path)),
+                    Holding::Nothing => None,
+                    Holding::File(identity) => Some(identity),
+                };
                 let holds = match (check.expect, found) {
                     (Expect::Absent, None) => true,
                     (Expect::Holds(expected), Some(found)) => expected == found,
@@ -596,19 +601,20 @@ fn refusal<'a>(
     })
 }
 
-/// The identity of the file at a library path; a directory there is something
-/// already there.
-fn found<'a>(path: &RelPath, identify: &Rc<dyn Identify>) -> Fallible<'a, Option<Identity>> {
+/// What a library path holds, as a precondition sees it.
+enum Holding {
+    Nothing,
+    File(Identity),
+    Directory,
+}
+
+fn holding<'a>(path: &RelPath, identify: &Rc<dyn Identify>) -> Fallible<'a, Holding> {
     let path = path.clone();
     let identify = Rc::clone(identify);
     flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
-        None => ok(None),
-        Some(meta) if meta.kind == Kind::Directory => Flow::Done(Err(Error::Io {
-            root: Root::Folder,
-            path,
-            error: IoError::AlreadyExists,
-        })),
-        Some(meta) => flow::identity(Root::Folder, path, meta.len, &identify).map_ok(Some),
+        None => ok(Holding::Nothing),
+        Some(meta) if meta.kind == Kind::Directory => ok(Holding::Directory),
+        Some(meta) => flow::identity(Root::Folder, path, meta.len, &identify).map_ok(Holding::File),
     })
 }
 

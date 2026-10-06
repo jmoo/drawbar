@@ -1481,6 +1481,16 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
             .any(|d| d.starts_with(&layout().writers())),
         "a refused first intent creates no writer"
     );
+    put(&folder, "dir.npno/inside", b"inside");
+    let refused = a.commit("Import", |i| {
+        i.create(|e| {
+            e.save(&path("dir.npno"), b"mine".to_vec(), Expect::Absent);
+        })
+    });
+    assert!(
+        matches!(&refused, Err(Error::Refused(Refusal::Directory(at))) if *at == path("dir.npno")),
+        "{refused:?}"
+    );
     let song = create(&mut a, "song.npno", b"song");
     let written = folder.files(Root::Folder);
     let refused = a.commit("Rename", |i| {

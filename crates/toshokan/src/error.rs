@@ -79,6 +79,9 @@ pub enum Refusal {
     /// A file was not as the intent expected.
     #[error("{} is not as expected", .0.path)]
     Changed(Box<Mismatch>),
+    /// A directory is where the intent expected a file or nothing.
+    #[error("{0} is a directory")]
+    Directory(RelPath),
     /// The intent is not valid against the current view.
     #[error("{0}")]
     Invalid(Invalid),
