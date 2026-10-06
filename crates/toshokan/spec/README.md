@@ -86,6 +86,14 @@ delivers files roughly in order.
 A config whose first line reads `\* Violates <Property>: …` must fail with that
 violation; every other config must pass.
 
+The crate's `tests/portable.rs` asserts `ChainOrder`, `NothingIgnored`,
+`Retained`, `DeliveredConverges`, `Monotone` and `ForksKept` of the real reader
+and writer. A sync simulator delivers the folder to readers as `Deliver` does:
+whole files, prefixes ending at a line, deletions before the files that replace
+them, resurrections, hidden files and conflicted copies under other names. The
+tests search every delivery order of small scenarios, and random interleavings
+of writes, compactions, crashes, clones and lost local roots with sync.
+
 ## What is abstracted away
 
 Fact values and the merge itself: the merge is a join over entries, so a
