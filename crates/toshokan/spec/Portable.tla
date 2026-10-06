@@ -325,7 +325,11 @@ LeaveRestored(i) ==
 
 -----------------------------------------------------------------------------
 (* Restores. The folder, not a local root, goes back to an earlier state:  *)
-(* every file is as it was then, and files created since are gone.         *)
+(* every file is as it was then, and files created since are gone. The     *)
+(* restore is applied to the folder the writers check, by a local backup   *)
+(* tool or by a sync client that applies it to this device before the next *)
+(* write. A restore on another device that a sync client merges into this  *)
+(* one is a client keeping one of two versions, which is not modeled.      *)
 
 Backup ==
     /\ backup = {}
@@ -447,12 +451,12 @@ OwnDirectory ==
 \* snapshot, unless a restore took it.
 Retained == Kept \subseteq Holds(files)
 
-\* Every effect begun has a pending record in the folder or a closing entry,
+\* Every effect begun has a pending record or a closing entry in the folder,
 \* unless a restore took both.
 EffectAccounted ==
     \A x \in (1..nEff) \ lostEffects :
         \/ \E f \in Files : files[f].kind = "pend" /\ files[f].eff = x /\ ~files[f].deleted
-        \/ \E e \in All : ents[e].closes = x
+        \/ \E e \in Kept : ents[e].closes = x
 
 \* Once every file has reached a reader, it accepts every entry the folder
 \* keeps, whatever the delivery order, holds back only what a restore took,

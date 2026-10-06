@@ -140,6 +140,13 @@ any time. The user's consent to settle another writer's effect is the choice to
 take that step. A writer's check and the write it guards are one step, as is a
 restore: the folder takes one earlier state that it held.
 
+The modeled restore is applied to the folder the writer checks: by a backup tool
+on the writer's machine, or by a sync client that applies the rewind to this
+device before the writer's next write. A restore made on another device reaches
+this one through its sync client, which must then reconcile the writer's newer
+segment with the older copy; that is the excluded case below of a client that
+keeps one of two conflicting versions.
+
 The model does not cover a running process cloned with its open file handles,
 a sync client that keeps one of two conflicting versions and drops the other,
 a restore that lands between a writer's check and the write it guards, or hash
