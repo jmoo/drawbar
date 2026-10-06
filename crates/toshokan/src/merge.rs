@@ -113,6 +113,25 @@ pub enum Exists {
     Deleted,
 }
 
+/// The part of an entity one write changed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Part {
+    Created,
+    Deleted,
+    Field(String),
+    File,
+}
+
+/// The values of `now` whose keys `old` does not hold.
+fn added<'a, K: Ord, V>(
+    now: &'a BTreeMap<K, V>,
+    old: Option<&'a BTreeMap<K, V>>,
+) -> impl Iterator<Item = &'a V> {
+    now.iter()
+        .filter(move |(key, _)| !old.is_some_and(|old| old.contains_key(key)))
+        .map(|(_, value)| value)
+}
+
 impl Stamp {
     fn write<V>(self, entry: EntryHash, value: V) -> Write<V> {
         Write {
@@ -454,6 +473,43 @@ impl Folded {
             let kept = self.extra.entry(name.clone()).or_insert(raw.clone());
             *kept = kept.clone().max(raw.clone());
         }
+    }
+
+    /// Each part of an entity that a write `before` does not hold changed, with
+    /// the writer of that write, whether the write came in an entry or a snapshot.
+    pub fn since(&self, before: &Folded) -> Vec<(EntityId, Part, WriterId)> {
+        let mut found = Vec::new();
+        for (&entity, now) in &self.entities {
+            let old = before.entities.get(&entity);
+            let mut note = |part: Part, stamp: &Stamp| found.push((entity, part, stamp.by));
+            for (stamp, existence) in added(&now.existence.writes, old.map(|o| &o.existence.writes))
+            {
+                let part = match existence {
+                    Existence::Created => Part::Created,
+                    Existence::Deleted { .. } => Part::Deleted,
+                };
+                note(part, stamp);
+            }
+            for (key, register) in &now.registers {
+                let old = old.and_then(|o| o.registers.get(key)).map(|o| &o.writes);
+                for (stamp, _) in added(&register.writes, old) {
+                    note(Part::Field(key.clone()), stamp);
+                }
+            }
+            for (key, set) in &now.sets {
+                let old = old.and_then(|o| o.sets.get(key));
+                for stamp in added(&set.adds, old.map(|o| &o.adds)) {
+                    note(Part::Field(key.clone()), stamp);
+                }
+                for (stamp, _) in added(&set.removed, old.map(|o| &o.removed)) {
+                    note(Part::Field(key.clone()), stamp);
+                }
+            }
+            for (stamp, _) in added(&now.file.writes, old.map(|o| &o.file.writes)) {
+                note(Part::File, stamp);
+            }
+        }
+        found
     }
 
     /// Every entity that exists, or whose deletion is in conflict.

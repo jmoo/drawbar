@@ -78,6 +78,8 @@ pub struct Placement {
     /// In placement order: each after its predecessor.
     pub placed: Vec<EntryHash>,
     pub forks: Vec<Fork>,
+    /// Whether the log grew at all: a snapshot kept, a line placed or held back.
+    pub changed: bool,
 }
 
 impl WriterLog {
@@ -164,9 +166,7 @@ impl WriterLog {
     }
 
     pub fn last_at(&self) -> Option<Hlc> {
-        let entries = self.entries.iter().map(|entry| entry.at);
-        let snapshots = self.snapshots.iter().map(|snapshot| snapshot.at);
-        entries.chain(snapshots).max()
+        self.readings().max()
     }
 
     /// Every fork found so far. Never shrinks.
@@ -225,11 +225,40 @@ impl WriterLog {
         if !placed.is_empty() {
             self.order();
         }
-        let forks = match kept || strayed || !placed.is_empty() {
+        let changed = kept || strayed || !placed.is_empty();
+        let forks = match changed {
             true => self.find_forks(),
             false => Vec::new(),
         };
-        Placement { placed, forks }
+        Placement {
+            placed,
+            forks,
+            changed,
+        }
+    }
+
+    /// Places everything `other`, a log of the same writer, holds: its
+    /// snapshots, entries, strays and forks.
+    fn join(&mut self, other: &WriterLog) {
+        for (hash, prev) in &other.strays {
+            if !self.holds(*hash) {
+                self.strays.insert(*hash, *prev);
+            }
+        }
+        let reported: BTreeSet<EntryHash> = self.forks.iter().map(|fork| fork.prev).collect();
+        let forks = other
+            .forks
+            .iter()
+            .filter(|fork| !reported.contains(&fork.prev));
+        self.forks.extend(forks.copied());
+        let lines = other.entries.iter().map(|entry| entry.line.clone());
+        self.place(other.snapshots.clone(), lines.collect());
+    }
+
+    /// Every clock reading of the placed entries and the snapshots.
+    pub fn readings(&self) -> impl Iterator<Item = Hlc> + '_ {
+        let entries = self.entries.iter().map(|entry| entry.at);
+        entries.chain(self.snapshots.iter().map(|snapshot| snapshot.at))
     }
 
     fn keep(&mut self, snapshot: Snapshot) -> bool {
@@ -477,6 +506,36 @@ impl CachedView {
             .task()
     }
 
+    /// The views kept for each of `genesis`, joined. A view this build cannot
+    /// read is left out.
+    pub fn load_all(genesis: Vec<EntryHash>) -> Task<'static, Result<Self>> {
+        flow::fold(
+            genesis.into_iter(),
+            Self::default(),
+            |mut joined, genesis| {
+                flow::run(Self::load(genesis)).then(move |loaded| match loaded {
+                    Ok(view) => {
+                        joined.join(&view);
+                        flow::ok(joined)
+                    }
+                    Err(Error::Corrupt { .. }) => flow::ok(joined),
+                    Err(error) => Flow::Done(Err(error)),
+                })
+            },
+        )
+        .task()
+    }
+
+    /// Adds everything `other` holds.
+    pub fn join(&mut self, other: &CachedView) {
+        for (writer, log) in &other.writers {
+            self.writers
+                .entry(*writer)
+                .or_insert_with(|| WriterLog::new(*writer))
+                .join(log);
+        }
+    }
+
     /// Keeps this view for the writer whose genesis entry is `genesis`, replacing
     /// what was kept so that a crash leaves the old view or the new.
     pub fn save(&self, genesis: EntryHash) -> Task<'static, Result<()>> {
@@ -487,6 +546,8 @@ impl CachedView {
 /// What one read placed and found.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReadReport {
+    /// Whether the cached view grew.
+    pub changed: bool,
     /// Newly placed entries per writer, in placement order.
     pub placed: BTreeMap<WriterId, Vec<EntryHash>>,
     /// Forks found by this read and not reported before.
@@ -705,6 +766,7 @@ impl Reader {
             .or_insert_with(|| WriterLog::new(writer));
         if changed {
             let placement = log.place(snapshots, lines);
+            report.changed |= placement.changed;
             if !placement.placed.is_empty() {
                 report.placed.insert(writer, placement.placed);
             }
@@ -913,7 +975,9 @@ mod tests {
         let mut log = WriterLog::new(W);
         log.place(vec![snapshot(&lines[..2])], lines.clone());
         assert_eq!(entry_hashes(&log), hashes(&lines[2..]));
-        log.place(vec![snapshot(&lines[..4])], Vec::new());
+        let grown = log.place(vec![snapshot(&lines[..4])], Vec::new());
+        assert!(grown.changed, "a snapshot alone grows the log");
+        assert_eq!(grown.placed, []);
         assert_eq!(log.snapshots(), [snapshot(&lines[..4])]);
         assert_eq!(entry_hashes(&log), hashes(&lines[4..]));
         let older = log.place(vec![snapshot(&lines[..3])], Vec::new());

@@ -293,9 +293,10 @@ among those placed, folded or ever held back, are a fork: both branches are
 merged, and the fork is reported once per predecessor.
 
 Each install keeps what it has placed as a cached view in `<genesis>/view.json`
-of its local root, written after each read that placed an entry or found a fork,
-and when the instance closes. An instance that has not written yet has no such
-directory and starts from what its last writer cached:
+of its local root. A new writer writes it from the view its instance holds; it is
+written again after each read that kept a snapshot, placed an entry or held one
+back, and when the instance closes. An instance that takes no writer from the
+pool starts from the views of the install's retired writers, joined:
 
 ```text
 {"writers":{"<w>":{

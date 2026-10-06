@@ -348,6 +348,8 @@ through_both!(
     a_conflict_is_shown_and_resolved,
     a_clone_forks_and_both_branches_survive,
     a_restored_folder_makes_the_writer_rekey,
+    what_a_restored_writer_showed_survives_reopening_and_a_crash,
+    a_compacted_writer_is_shown_and_reported_and_survives_its_files,
     an_interrupted_adoption_is_settled_as_an_adoption,
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
@@ -659,6 +661,110 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
     let elsewhere = machine(&restored.folder);
     let (fresh, _) = F::open(Probe::new(&elsewhere), env("b", 4, &clock)).unwrap();
     assert_eq!(tags(&fresh.view(), song), ["kept", "new"]);
+}
+
+fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let backup = copy_folder(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("lost"))).unwrap();
+    a.close().unwrap();
+
+    let mut restored = Machine {
+        folder: backup,
+        local: here.local.clone(),
+    };
+    let (a, opened) = F::open(Probe::new(&restored), env("a", 3, &clock)).unwrap();
+    assert!(matches!(opened.start, Start::Rekeyed { .. }));
+    a.close().unwrap();
+    let (mut a, opened) = F::open(Probe::new(&restored), env("a", 4, &clock)).unwrap();
+    assert_eq!(
+        opened.start,
+        Start::New,
+        "the retired writer is not resumed"
+    );
+    assert_eq!(
+        tags(&a.view(), song),
+        ["lost", "new"],
+        "an instance without a writer starts from its retired writer's view"
+    );
+    a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
+    drop(a);
+    restored.crash();
+    let (a, opened) = F::open(Probe::new(&restored), env("a", 5, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
+    assert_eq!(
+        tags(&a.view(), song),
+        ["kept", "lost", "new"],
+        "the new writer kept the view it took over before it crashed"
+    );
+}
+
+fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let mut here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("from-b")))
+        .unwrap();
+    b.compact().unwrap();
+    let b_id = b
+        .view()
+        .writers()
+        .iter()
+        .find(|w| w.label == "b")
+        .unwrap()
+        .writer;
+    let theirs: Vec<RelPath> = folder
+        .files(Root::Folder)
+        .into_keys()
+        .filter(|p| p.starts_with(&layout().writer(b_id)))
+        .collect();
+    assert!(
+        theirs.iter().all(|p| p.as_str().contains("snapshot-")),
+        "{theirs:?}"
+    );
+
+    let changes = a.refresh().unwrap();
+    assert_eq!(tags(&a.view(), song), ["from-b", "new"]);
+    assert!(
+        changes.contains(&Change {
+            entity: song,
+            what: What::Field("tags".into()),
+            by: By::Writer {
+                writer: b_id,
+                label: "b".into(),
+            },
+        }),
+        "a change that arrives in a snapshot is reported: {changes:?}"
+    );
+    drop(a);
+    for path in theirs {
+        folder
+            .perform(Io::Remove {
+                root: Root::Folder,
+                path,
+            })
+            .unwrap();
+    }
+    here.crash();
+    let (a, _) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
+    assert_eq!(
+        tags(&a.view(), song),
+        ["from-b", "new"],
+        "the cached view kept what only a snapshot held"
+    );
 }
 
 /// Adopts `copy.npno` and saves `new.npno` in one intent.

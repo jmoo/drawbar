@@ -23,11 +23,11 @@ use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
-use crate::merge::{merge, Folded};
+use crate::merge::{merge, Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan, Target};
-use crate::reader::{CachedView, ReadReport, Reader};
+use crate::reader::{CachedView, ReadReport, Reader, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode, Opened,
@@ -85,7 +85,9 @@ impl Library {
             .and_then(|picked| {
                 let cached = match &picked {
                     Some(picked) => CachedView::load(picked.genesis()),
-                    None => Task::ready(Ok(CachedView::default())),
+                    None => flow::run(Writer::retired())
+                        .and_then(|retired| flow::run(CachedView::load_all(retired)))
+                        .task(),
                 };
                 flow::run(cached).then(move |cached| match cached {
                     Ok(cached) => ok((picked, cached)),
@@ -299,8 +301,9 @@ impl Library {
         flow::run(self.reader.list())
             .and_then(move |listing| {
                 let report = self.reader.absorb(listing);
-                let changes = self.attribute(&report);
-                self.folded = merge(self.reader.logs().values());
+                let before =
+                    std::mem::replace(&mut self.folded, merge(self.reader.logs().values()));
+                let changes = self.attribute(&before);
                 self.clock = self.clock.observe(latest(&self.reader));
                 let forked = self
                     .writer
@@ -451,10 +454,9 @@ impl Library {
     }
 
     /// Keeps the cached view in this writer's local directory after a read that
-    /// placed or found something, so a crash does not take back what was shown.
+    /// changed it, so a crash does not take back what was shown.
     fn save_view(&self, report: &ReadReport) -> Task<'static, Result<()>> {
-        let changed = !report.placed.is_empty() || !report.forks.is_empty();
-        match (&self.writer, changed) {
+        match (&self.writer, report.changed) {
             (Some(writer), true) => self.reader.cached().save(writer.genesis()),
             _ => Task::ready(Ok(())),
         }
@@ -758,28 +760,33 @@ impl Library {
             .task()
     }
 
-    /// The changes other writers' newly placed entries made, by writer.
-    fn attribute(&self, report: &ReadReport) -> Vec<Change> {
+    /// The changes the entries and snapshots read since `before` made, by writer.
+    fn attribute(&self, before: &Folded) -> Vec<Change> {
         let own = self.writer.as_ref().map(Writer::id);
-        let mut changes = Vec::new();
-        for (writer, placed) in &report.placed {
-            let Some(log) = self.reader.logs().get(writer) else {
-                continue;
-            };
-            let by = match Some(*writer) == own {
+        let mut changes: Vec<Change> = Vec::new();
+        for (entity, part, writer) in self.folded.since(before) {
+            let by = match Some(writer) == own {
                 true => By::This,
                 false => By::Writer {
-                    writer: *writer,
-                    label: log.label().unwrap_or_default().to_owned(),
+                    writer,
+                    label: self
+                        .reader
+                        .logs()
+                        .get(&writer)
+                        .and_then(WriterLog::label)
+                        .unwrap_or_default()
+                        .to_owned(),
                 },
             };
-            let placed: BTreeSet<&EntryHash> = placed.iter().collect();
-            for entry in log.entries() {
-                if let (true, EntryKind::Intent(logged)) =
-                    (placed.contains(&entry.hash()), &entry.kind)
-                {
-                    changes_of(&logged.ops, &by, &mut changes);
-                }
+            let what = match part {
+                Part::Created => What::Created,
+                Part::Deleted => What::Deleted,
+                Part::Field(key) => What::Field(key),
+                Part::File => What::File,
+            };
+            let change = Change { entity, what, by };
+            if !changes.contains(&change) {
+                changes.push(change);
             }
         }
         changes
@@ -927,10 +934,11 @@ fn ensure_writer<'a>(
         };
         let segment = library.env.segment_name();
         let create = Writer::create(library.layout.clone(), id, segment, label, at);
-        flow::run(create).map_ok(move |writer| {
+        flow::run(create).and_then(move |writer| {
+            let local = writer.genesis();
             library.writer = Some(writer);
             library.absorb_own(&[genesis]);
-            library
+            flow::run(library.reader.cached().save(local)).map_ok(move |()| library)
         })
     })
 }

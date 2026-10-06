@@ -105,6 +105,24 @@ impl Writer {
             .task()
     }
 
+    /// The writers of this install's pool that are retired, by genesis entry.
+    pub fn retired() -> Task<'static, Result<Vec<EntryHash>>> {
+        flow::list(Root::Local, &RelPath::ROOT)
+            .and_then(|entries| {
+                let pool = entries
+                    .into_iter()
+                    .filter(|entry| entry.kind == Kind::Directory)
+                    .filter_map(|entry| entry.name.parse::<EntryHash>().ok());
+                flow::fold(pool, Vec::new(), |mut retired, genesis| {
+                    flow::stat(Root::Local, &Layout::retired(genesis)).map_ok(move |marker| {
+                        retired.extend(marker.map(|_| genesis));
+                        retired
+                    })
+                })
+            })
+            .task()
+    }
+
     /// A new writer: its first segment, `segment`, holding its genesis entry, is
     /// made durable in the folder before its directory in the local root, and so
     /// its id, exists anywhere else.
