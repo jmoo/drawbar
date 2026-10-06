@@ -149,6 +149,7 @@ impl Library {
                 flow::run(library.drafts_task()).map_ok(move |drafts| {
                     let opened = Opened {
                         mode: library.mode.clone(),
+                        no_replace: library.capabilities.no_replace,
                         start,
                         settled: library
                             .unsettled

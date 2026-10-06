@@ -56,8 +56,10 @@ pub enum Io {
         path: RelPath,
         bytes: Vec<u8>,
     },
-    /// A file or directory moved to a path where nothing is. Never replaces, and
-    /// never moves a directory inside itself.
+    /// A file or directory moved to a path where nothing is, never inside itself.
+    /// Something at `to` refuses it with [`IoError::AlreadyExists`], atomically
+    /// where the backend declares [`Capabilities::no_replace`]; elsewhere the
+    /// backend may replace it, and the core checks `to` first.
     Rename {
         root: Root,
         from: RelPath,
@@ -253,6 +255,10 @@ pub struct Capabilities {
     pub append: bool,
     /// [`Io::Rename`] works on files, atomically.
     pub rename_file: bool,
+    /// [`Io::Rename`] refuses an existing destination in the same step as it
+    /// renames. Without it, something another program makes at the destination
+    /// between the core's check and the rename is replaced.
+    pub no_replace: bool,
     /// [`Io::Rename`] works on directories, atomically, with everything inside.
     pub rename_dir: bool,
     /// [`Io::Sync`] makes completed requests durable. Without it `Sync` does
@@ -264,6 +270,7 @@ impl Capabilities {
     pub const ALL: Self = Self {
         append: true,
         rename_file: true,
+        no_replace: true,
         rename_dir: true,
         fsync: true,
     };
@@ -271,6 +278,7 @@ impl Capabilities {
     pub const NONE: Self = Self {
         append: false,
         rename_file: false,
+        no_replace: false,
         rename_dir: false,
         fsync: false,
     };

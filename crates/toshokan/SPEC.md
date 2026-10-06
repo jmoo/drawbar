@@ -428,11 +428,19 @@ A writer carries out an intent's steps in this order:
 3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
    `pending/<nonce>.json`.
 4. Carry out the steps in order. A move first creates the destination's
-   directory, renames without replacing, syncs the destination's directory and
-   then the source's, so a source's name is gone only once the destination's
-   is durable.
+   directory, checks that nothing is at the destination, renames without
+   replacing, syncs the destination's directory and then the source's, so a
+   source's name is gone only once the destination's is durable.
 5. Append the intent's entry.
 6. Remove the pending record.
+
+Where the folder's renames refuse an existing destination themselves, as
+`renameat2` with `RENAME_NOREPLACE`, `renamex_np` with `RENAME_EXCL` and
+`MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` do on volumes that support
+them, a move never replaces anything. Elsewhere a rename may replace, and the
+check before it is the only guard: a file another program makes at the
+destination between the check and the rename is replaced, and its bytes leave
+the folder. Opening says which kind of folder it is.
 
 If a step fails, the rest are not tried: staged files not placed are renamed to
 `trash/<their nonce>`, the entry records the effects that were made, and the

@@ -90,4 +90,5 @@ readers, and maps its properties to the tests that check the code.
 7. **Nondeterminism is injected.** Time, randomness and file identity come from
    the app, so tests replay exactly.
 8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
-   Linux and Apple systems for a rename that never replaces.
+   Linux and Apple systems, libc on Apple systems and windows-sys on Windows,
+   for a rename that never replaces.

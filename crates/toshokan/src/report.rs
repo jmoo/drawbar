@@ -9,6 +9,11 @@ use crate::path::RelPath;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Opened {
     pub mode: Mode,
+    /// Whether the folder's renames refuse an existing destination themselves.
+    /// Without it, a file another program makes at the destination of a file
+    /// effect between toshokan's check and the rename is replaced, and its bytes
+    /// leave the folder.
+    pub no_replace: bool,
     /// Which writer this instance will write as.
     pub start: Start,
     /// This writer's effects that a crash interrupted. Opening writes nothing in

@@ -4,14 +4,19 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
-use common::{bound, commit, env, files, identity, layout, path, put, Driven, WRITER};
+use common::{
+    bound, commit, entry, env, files, identify, identity, layout, path, put, Driven, HEAD, WRITER,
+};
+use toshokan::blocking::{self, Backend};
 use toshokan::effects::{self, EffectStep};
 use toshokan::error::{Invalid, Mismatch};
-use toshokan::io::Capabilities;
+use toshokan::io::{Capabilities, IoError};
 use toshokan::log::{Displaced, FileFact};
+use toshokan::pending::PendingRecord;
 use toshokan::plan::{Expect, FileChange, Target};
-use toshokan::{EntityId, MemDisk, Nonce, Outcome, Refusal, RelPath, Root};
+use toshokan::{EntityId, Io, IoResult, MemDisk, Nonce, Outcome, Refusal, RelPath, Root};
 
 const E: EntityId = EntityId::from_u128(0xe);
 
@@ -325,4 +330,64 @@ fn a_restore_over_a_file_trashes_it_first() {
         [EffectStep::ToTrash { path: p, .. }, EffectStep::FromTrash { item, path: q }]
             if *p == path("a") && *q == path("a") && *item == Nonce::from_u128(5)
     ));
+}
+
+/// A folder another program writes in: once the pending record of an intent is
+/// written, after its preconditions are checked, it makes a file at `at`.
+struct Intruder {
+    disk: MemDisk,
+    at: RelPath,
+}
+
+impl Backend for Intruder {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        let journaled =
+            matches!(&io, Io::Rename { to, .. } if to.starts_with(&layout().pending_dir(WRITER)));
+        let result = self.disk.perform(io);
+        if journaled {
+            put(
+                &mut common::BlockingMem(self.disk.clone()),
+                &[(self.at.as_str(), b"theirs")],
+            );
+        }
+        result
+    }
+}
+
+#[test]
+fn where_renames_may_replace_a_file_made_at_a_destination_after_the_checks_is_kept() {
+    let racy = Capabilities {
+        no_replace: false,
+        ..Capabilities::ALL
+    };
+    let disk = MemDisk::with_capabilities(racy, Capabilities::ALL);
+    let save = FileChange::Save {
+        entity: Target::Existing(E),
+        path: path("d/n"),
+        bytes: b"mine".to_vec(),
+        expect: Expect::Absent,
+    };
+    let plan =
+        Rc::new(effects::resolve(&[save], &[], &bound(&[]), &layout(), racy, &mut env(1)).unwrap());
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let mut intruder = Intruder {
+        disk: disk.clone(),
+        at: path("d/n"),
+    };
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    blocking::run(&mut intruder, prepare).unwrap().unwrap();
+    let apply = effects::apply(&layout(), plan.record, record, 0, identify());
+    let applied = blocking::run(&mut intruder, apply).unwrap();
+    assert!(
+        matches!(&applied.outcome, Outcome::Partial(report) if report.error == IoError::AlreadyExists),
+        "{:?}",
+        applied.outcome
+    );
+    let d = &mut common::BlockingMem(disk);
+    assert_eq!(sorted(d).user, user(&[("d/n", b"theirs")]));
+    assert_eq!(sorted(d).trash, [b"mine".to_vec()]);
 }

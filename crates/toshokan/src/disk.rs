@@ -60,6 +60,9 @@ pub enum Renames {
 /// completed operation is durable at once. With [`MemDisk::set_eager_names`], a new
 /// name is durable as soon as it is created.
 ///
+/// **Renames.** In a root without [`Capabilities::no_replace`], a file renamed onto
+/// a file replaces it, as a POSIX rename does.
+///
 /// **Crashes.** Every mutating request ([`Io::mutates`]) counts as one operation,
 /// whether or not it succeeds, and a [`Renames::CopyThenRemove`] file rename counts
 /// as two. After [`MemDisk::crash_after`]`(n)` the next `n` operations run and the
@@ -385,8 +388,13 @@ impl Disk {
             Kind::Directory => Capability::RenameDir,
         })?;
         let (to_dir, to_name) = tree.place(to)?;
-        if tree.child(to_dir, to_name).is_some() {
-            return Err(IoError::AlreadyExists);
+        match tree
+            .child(to_dir, to_name)
+            .map(|ino| tree.nodes[ino].live.kind())
+        {
+            None => {}
+            Some(Kind::File) if kind == Kind::File && !tree.capabilities.no_replace => {}
+            Some(_) => return Err(IoError::AlreadyExists),
         }
         if to.starts_with(from) {
             return Err(IoError::IntoItself);

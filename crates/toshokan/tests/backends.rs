@@ -103,23 +103,23 @@ mod suite {
     pub fn nothing_is_ever_replaced(b: &mut impl Driven) {
         b.ok(create(Root::Folder, "f", b"old"));
         b.ok(make_dir(Root::Folder, "d/sub"));
-        let results = b.requests(vec![
+        let mut requests = vec![
             create(Root::Folder, "f", b"new"),
             create(Root::Folder, "gone/f", b""),
-            rename("d", "f"),
             rename("d", "d/sub/in"),
             rename("gone", "x"),
-        ]);
-        assert_eq!(
-            results,
-            [
-                Err(IoError::AlreadyExists),
-                Err(IoError::NotFound),
-                Err(IoError::AlreadyExists),
-                Err(IoError::IntoItself),
-                Err(IoError::NotFound),
-            ]
-        );
+        ];
+        let mut expected = vec![
+            Err(IoError::AlreadyExists),
+            Err(IoError::NotFound),
+            Err(IoError::IntoItself),
+            Err(IoError::NotFound),
+        ];
+        if b.capabilities(Root::Folder).no_replace {
+            requests.push(rename("d", "f"));
+            expected.push(Err(IoError::AlreadyExists));
+        }
+        assert_eq!(b.requests(requests), expected);
         assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"old".to_vec()));
     }
 
@@ -310,3 +310,25 @@ for_every_backend!(suite:
     a_file_renames_across_directories_and_syncs,
     a_lock_excludes_other_processes_until_released,
 );
+
+#[test]
+fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination() {
+    let mut native = common::NativeDirs::new();
+    let declared = native.capabilities(Root::Folder).no_replace;
+    #[cfg(any(target_vendor = "apple", windows))]
+    assert!(
+        declared,
+        "the temporary directory's volume refuses atomically"
+    );
+    native.ok(create(Root::Folder, "a", b"a"));
+    native.ok(create(Root::Folder, "b", b"b"));
+    let renamed = native.one(rename("a", "b"));
+    if declared {
+        assert_eq!(renamed, Err(IoError::AlreadyExists));
+        assert_eq!(
+            native.ok(read("b", 0, 1)),
+            Reply::Bytes(b"b".to_vec()),
+            "the destination is kept"
+        );
+    }
+}

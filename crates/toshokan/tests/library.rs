@@ -385,6 +385,7 @@ through_both!(
     what_a_commit_returned_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
     facts_a_restore_removed_are_republished_when_adopted,
+    a_folder_whose_renames_may_replace_is_written_and_says_so,
 );
 
 /// One machine of a shared folder.
@@ -1930,4 +1931,31 @@ fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
             .adopt("Again"),
         Err(Error::Refused(Refusal::Nothing))
     ));
+}
+
+fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
+    let racy = Capabilities {
+        no_replace: false,
+        ..Capabilities::ALL
+    };
+    let folder = MemDisk::with_capabilities(racy, Capabilities::ALL);
+    let clock = TestClock::at(1_000);
+    let (mut a, opened) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    assert_eq!(
+        (opened.mode, opened.no_replace),
+        (toshokan::report::Mode::Writable, false)
+    );
+    let song = create(&mut a, "song.npno", b"song");
+    put(&folder, "taken.npno", b"taken");
+    let renamed = a.commit("Rename", |i| {
+        i.rename(song, &path("taken.npno"), Expect::Holds(identity(b"song")))
+    });
+    assert!(
+        matches!(renamed, Err(Error::Refused(Refusal::Changed(_)))),
+        "{renamed:?}"
+    );
+    assert_eq!(
+        read(&folder, "taken.npno").as_deref(),
+        Some(b"taken".as_slice())
+    );
 }

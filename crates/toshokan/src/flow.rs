@@ -209,13 +209,24 @@ pub(crate) fn create<'a>(root: Root, path: &RelPath, bytes: Vec<u8>) -> Fallible
 
 /// Moves `from` to `to`, where nothing is, and makes both directories durable,
 /// the destination's first, so the source's name is gone only once the
-/// destination's is durable.
+/// destination's is durable. `to` is checked first, so a backend whose renames
+/// may replace replaces only what appears between the check and the rename.
 pub(crate) fn rename<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
     let (from, to) = (from.clone(), to.clone());
     ensure_dir(root, &to.parent().unwrap_or_default())
         .and_then({
+            let to = to.clone();
+            move |()| stat(root, &to)
+        })
+        .and_then({
             let (from, to) = (from.clone(), to.clone());
-            move |()| act(Io::Rename { root, from, to })
+            move |found| {
+                let io = Io::Rename { root, from, to };
+                match found {
+                    Some(_) => Flow::Done(Err(io.failed(IoError::AlreadyExists))),
+                    None => act(io),
+                }
+            }
         })
         .and_then({
             let to = to.clone();
