@@ -352,6 +352,8 @@ through_both!(
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
     a_compacted_writer_is_shown_and_reported_and_survives_its_files,
     an_interrupted_adoption_is_settled_as_an_adoption,
+    the_first_write_after_a_crash_follows_the_settled_intent,
+    the_first_undo_after_a_crash_undoes_the_settled_intent,
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
@@ -870,6 +872,103 @@ fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
         );
     }
     assert!(settled > 0, "some crash interrupted the effect");
+}
+
+/// Runs `interrupted` on a fresh one-disk library holding `song.npno` and
+/// `copy.npno`, crashing after each of its mutations in turn, and hands every
+/// reopened library that settled an interrupted record to `check`.
+fn after_each_settled_crash<F: Facade>(
+    interrupted: impl Fn(&mut F, EntityId) -> Result<Committed, Error>,
+    check: impl Fn(&mut F, &MemDisk, EntityId, &str),
+) {
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    let setup = |disk: &MemDisk| {
+        let clock = TestClock::at(1_000);
+        let (mut library, _) = F::open(Probe::new(&one_disk(disk)), env("a", 1, &clock)).unwrap();
+        let song = create(&mut library, "song.npno", b"song");
+        put(disk, "copy.npno", b"copy");
+        (library, song)
+    };
+    let total = {
+        let disk = MemDisk::new();
+        let (mut library, song) = setup(&disk);
+        let before = disk.mutations();
+        interrupted(&mut library, song).unwrap();
+        disk.mutations() - before
+    };
+    let mut settled = 0;
+    for crash in 0..total {
+        let disk = MemDisk::new();
+        let (mut library, song) = setup(&disk);
+        disk.crash_after(crash);
+        let _ = interrupted(&mut library, song);
+        drop(library);
+        let disk = disk.restart();
+        let shown = format!("crash after {crash}");
+        let clock = TestClock::at(2_000);
+        let (mut again, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        if opened.settled.is_empty() {
+            continue;
+        }
+        settled += 1;
+        check(&mut again, &disk, song, &shown);
+    }
+    assert!(settled > 0, "some crash interrupted the effect");
+}
+
+fn the_first_write_after_a_crash_follows_the_settled_intent<F: Facade>() {
+    after_each_settled_crash::<F>(
+        |library, song| {
+            library.commit("Save", |i| {
+                i.save(
+                    song,
+                    &path("song.npno"),
+                    b"saved".to_vec(),
+                    Expect::Holds(identity(b"song")),
+                )
+                .set(song, ORIGIN, "saved".into())
+            })
+        },
+        |again, _, song, shown| {
+            again
+                .commit("Origin", |i| i.set(song, ORIGIN, "final".into()))
+                .unwrap_or_else(|e| panic!("{shown}: {e}"));
+            assert_eq!(
+                again.view().entity(song).unwrap().get(ORIGIN),
+                Field::Value("final".into()),
+                "{shown}: the write replaces the one its writer settled"
+            );
+        },
+    );
+}
+
+fn the_first_undo_after_a_crash_undoes_the_settled_intent<F: Facade>() {
+    after_each_settled_crash::<F>(
+        |library, _| adopt_and_save(library),
+        |again, disk, _, shown| {
+            again.undo().unwrap_or_else(|e| panic!("{shown}: {e}"));
+            let history: Vec<(String, bool)> = again
+                .history()
+                .into_iter()
+                .map(|item| (item.label, item.undone))
+                .collect();
+            assert_eq!(
+                history,
+                [("Import".into(), false), ("Adopt".into(), true)],
+                "{shown}"
+            );
+            assert_eq!(read(disk, "new.npno"), None, "{shown}: the saved file left");
+            assert_eq!(
+                read(disk, "copy.npno").as_deref(),
+                Some(b"copy".as_slice()),
+                "{shown}: the adopted file stayed"
+            );
+        },
+    );
 }
 
 fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {

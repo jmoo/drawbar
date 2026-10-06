@@ -51,7 +51,7 @@ pub struct Library {
     writer: Option<Writer>,
     /// The latest clock reading seen or written.
     clock: Hlc,
-    /// This writer's interrupted effects, settled before its next write.
+    /// This writer's interrupted effects, settled before its next write is planned.
     unsettled: Vec<Settling>,
     orphaned: Vec<Orphan>,
     /// Pending records recovery would not act on.
@@ -219,47 +219,60 @@ impl Library {
         self.history.items()
     }
 
-    /// Checks every precondition against the current view and the files, then
-    /// logs the intent and carries out its file effects. Before its first write a
-    /// new writer is created; before any write this writer's interrupted effects
-    /// are settled. A refusal is [`crate::Error::Refused`] and changes nothing.
+    /// Settles this writer's interrupted effects, then checks every precondition
+    /// against the view they leave and the files, logs the intent and carries out
+    /// its file effects. Before its first write a new writer is created. A refusal
+    /// is [`crate::Error::Refused`], and the refused intent changes nothing.
     pub fn commit(
         &mut self,
         plan: std::result::Result<Plan, Invalid>,
     ) -> Task<'_, Result<Committed>> {
-        let resolved = self
-            .writable()
-            .and_then(|()| plan.map_err(|invalid| Error::Refused(Refusal::Invalid(invalid))))
-            .and_then(|plan| self.resolve(plan));
-        match resolved {
-            Ok(resolved) => commit(self, resolved).task(),
-            Err(error) => Task::ready(Err(error)),
+        match plan {
+            Ok(plan) => self.commit_with(move |_| Ok(plan)),
+            Err(invalid) => Task::ready(
+                self.writable()
+                    .and(Err(Error::Refused(Refusal::Invalid(invalid)))),
+            ),
         }
     }
 
     pub fn undo(&mut self) -> Task<'_, Result<Committed>> {
-        let plan = self.own_entries().and_then(|(writer, own)| {
-            self.history
-                .plan_undo(&own, writer, &self.view)
+        self.commit_with(|library| {
+            let (writer, own) = library.own_entries()?;
+            library
+                .history
+                .plan_undo(&own, writer, &library.view)
                 .map_err(Error::Refused)
-        });
-        self.commit_planned(plan)
+        })
     }
 
     pub fn redo(&mut self) -> Task<'_, Result<Committed>> {
-        let plan = self.own_entries().and_then(|(writer, own)| {
-            self.history
-                .plan_redo(&own, writer, &self.view)
+        self.commit_with(|library| {
+            let (writer, own) = library.own_entries()?;
+            library
+                .history
+                .plan_redo(&own, writer, &library.view)
                 .map_err(Error::Refused)
-        });
-        self.commit_planned(plan)
+        })
     }
 
-    fn commit_planned(&mut self, plan: Result<Plan>) -> Task<'_, Result<Committed>> {
-        match plan {
-            Ok(plan) => self.commit(Ok(plan)),
-            Err(error) => Task::ready(Err(error)),
+    /// Commits the plan `plan` makes from the library once this writer's
+    /// interrupted effects are settled.
+    fn commit_with<'a>(
+        &'a mut self,
+        plan: impl FnOnce(&Library) -> Result<Plan> + 'a,
+    ) -> Task<'a, Result<Committed>> {
+        if let Err(error) = self.writable() {
+            return Task::ready(Err(error));
         }
+        settle_first(self)
+            .and_then(
+                move |library| match plan(library).and_then(|plan| library.resolve(plan)) {
+                    Ok(resolved) => commit(library, resolved),
+                    Err(error) => Flow::Done(Err(error)),
+                },
+            )
+            .task()
     }
 
     fn own_entries(&self) -> Result<(WriterId, Vec<Entry>)> {
@@ -283,23 +296,29 @@ impl Library {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
-        flow::run(pending::read_one(
-            &self.layout,
-            orphan.writer,
-            orphan.record,
-        ))
-        .and_then(move |theirs| {
-            let open = theirs.filter(|theirs| self.is_orphan(orphan.record, theirs));
-            let Some(theirs) = open else {
-                return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
-            };
-            flow::run(recovery::progress(&self.layout, &theirs)).and_then(move |progress| {
-                let plan =
-                    recovery::orphan_plan(&self.layout, &theirs, &progress, how, &mut self.env);
-                settle_orphan(self, orphan, theirs, how, plan)
+        settle_first(self)
+            .and_then(move |library| {
+                let read = pending::read_one(&library.layout, orphan.writer, orphan.record);
+                flow::run(read).map_ok(move |theirs| (library, theirs))
             })
-        })
-        .task()
+            .and_then(move |(library, theirs)| {
+                let open = theirs.filter(|theirs| library.is_orphan(orphan.record, theirs));
+                let Some(theirs) = open else {
+                    return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
+                };
+                let progress = recovery::progress(&library.layout, &theirs);
+                flow::run(progress).and_then(move |progress| {
+                    let plan = recovery::orphan_plan(
+                        &library.layout,
+                        &theirs,
+                        &progress,
+                        how,
+                        &mut library.env,
+                    );
+                    settle_orphan(library, orphan, theirs, how, plan)
+                })
+            })
+            .task()
     }
 
     /// Reads other writers' new entries and rescans: what changed since the last
@@ -592,7 +611,8 @@ impl Library {
     }
 
     /// Keeps a pending record a failure left behind: this writer's is settled
-    /// before its next write; one of a writer it stopped writing as is an orphan.
+    /// before its next write is planned; one of a writer it stopped writing as
+    /// is an orphan.
     fn interrupted(&mut self, name: Nonce, record: &PendingRecord, logged: bool) {
         let own = self.writer.as_ref().map(Writer::id) == Some(record.writer);
         match own {
@@ -883,8 +903,21 @@ fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     })
 }
 
-/// Commits `resolved`: creates the writer if there is none, settles this writer's
-/// interrupted effects, then logs the intent and carries out its file effects.
+/// Settles this writer's interrupted effects, so that what is planned next is
+/// planned against the facts and history they leave.
+fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
+    if library.unsettled.is_empty() {
+        return ok(library);
+    }
+    settle_own(library).map_ok(|library| {
+        library.show();
+        library
+    })
+}
+
+/// Commits `resolved`: creates the writer if there is none, settles what is left
+/// of this writer's interrupted effects, then logs the intent and carries out its
+/// file effects.
 fn commit<'a>(library: &'a mut Library, resolved: Resolved) -> Fallible<'a, Committed> {
     let Resolved {
         label,

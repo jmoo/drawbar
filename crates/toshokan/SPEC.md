@@ -438,16 +438,17 @@ that is not a library path, or its `prev` is not in its writer's log. Opening
 reports the records it ignores.
 
 Opening finds this writer's open records whose `prev` is its head, and says how
-settling each will end. Before its next write the writer settles them: it finds
-how far the steps got by checking them from the last, and the first that shows
-done ends the done prefix. `to_trash` shows done when its trash item exists; any
-other move when its destination exists and its source does not, or both hold the
-same bytes. A `place` whose staged file is in the trash under its own nonce is
-not done. When the last done step's source still holds the same bytes as its
-destination, the source is removed. The remaining steps are carried out, the
-planned entry is appended with what the steps did, and the record is removed.
-Then every file in its `tmp/` that no open record places is removed. Settling
-twice ends as settling once.
+settling each will end. The writer settles them before it checks its next
+intent, undo, redo or settlement against the view: it finds how far the steps
+got by checking them from the last, and the first that shows done ends the done
+prefix. `to_trash` shows done when its trash item exists; any other move when
+its destination exists and its source does not, or both hold the same bytes. A
+`place` whose staged file is in the trash under its own nonce is not done. When
+the last done step's source still holds the same bytes as its destination, the
+source is removed. The remaining steps are carried out, the planned entry is
+appended with what the steps did, and the record is removed. Then every file in
+its `tmp/` that no open record places is removed. Settling twice ends as
+settling once.
 
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
