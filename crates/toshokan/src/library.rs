@@ -952,12 +952,18 @@ fn ensure_writer<'a>(
             return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
         };
         let segment = library.env.segment_name();
-        let create = Writer::create(library.layout.clone(), id, segment, label, at);
-        flow::run(create).and_then(move |writer| {
-            let local = writer.genesis();
+        let create = Writer::create(
+            library.layout.clone(),
+            id,
+            segment,
+            label,
+            at,
+            library.reader.cached(),
+        );
+        flow::run(create).map_ok(move |writer| {
             library.writer = Some(writer);
             library.absorb_own(&[genesis]);
-            flow::run(library.reader.cached().save(local)).map_ok(move |()| library)
+            library
         })
     })
 }

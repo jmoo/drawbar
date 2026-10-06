@@ -86,6 +86,7 @@ fn create(disk: &mut MemDisk) -> toshokan::Result<Writer> {
         SegmentName::from_u128(8),
         "w".into(),
         Hlc::ZERO,
+        &CachedView::default(),
     );
     run(disk, create)
 }

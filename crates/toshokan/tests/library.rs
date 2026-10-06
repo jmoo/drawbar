@@ -664,15 +664,17 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
     assert_eq!(tags(&fresh.view(), song), ["kept", "new"]);
 }
 
-fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
+/// A machine whose folder was restored after its writer tagged `song` "lost",
+/// opened once since by an instance that crashed, and an instance on it that has
+/// no writer yet.
+fn restored_without_a_writer<F: Facade>(clock: &TestClock) -> (Machine, F, EntityId) {
     let folder = MemDisk::new();
-    let clock = TestClock::at(1_000);
     let here = machine(&folder);
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
     a.close().unwrap();
     let backup = copy_folder(&folder);
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 2, clock)).unwrap();
     a.commit("Tag", |i| i.add(song, TAGS, tag("lost"))).unwrap();
     a.close().unwrap();
 
@@ -680,34 +682,56 @@ fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
         folder: backup,
         local: here.local.clone(),
     };
-    let (a, opened) = F::open(Probe::new(&restored), env("a", 3, &clock)).unwrap();
+    let (a, opened) = F::open(Probe::new(&restored), env("a", 3, clock)).unwrap();
     assert!(matches!(opened.start, Start::Rekeyed { .. }));
-    a.close().unwrap();
-    let (mut a, opened) = F::open(Probe::new(&restored), env("a", 4, &clock)).unwrap();
+    drop(a);
+    restored.crash();
+    let (a, opened) = F::open(Probe::new(&restored), env("a", 4, clock)).unwrap();
     assert_eq!(
         opened.start,
         Start::New,
-        "the retired writer is not resumed"
+        "the retired writer is not resumed, even after a crash"
     );
     assert_eq!(
         tags(&a.view(), song),
         ["lost", "new"],
         "an instance without a writer starts from its retired writer's view"
     );
-    a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
-    drop(a);
-    restored.crash();
-    let (a, opened) = F::open(Probe::new(&restored), env("a", 5, &clock)).unwrap();
-    assert!(
-        matches!(opened.start, Start::Resumed(_)),
-        "{:?}",
-        opened.start
-    );
-    assert_eq!(
-        tags(&a.view(), song),
-        ["kept", "lost", "new"],
-        "the new writer kept the view it took over before it crashed"
-    );
+    (restored, a, song)
+}
+
+fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let total = {
+        let (restored, mut a, song) = restored_without_a_writer::<F>(&clock);
+        let before = restored.local.mutations();
+        a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
+        restored.local.mutations() - before
+    };
+    for crash in 0..=total {
+        let shown = format!("crash after {crash} of {total}");
+        let (mut restored, mut a, song) = restored_without_a_writer::<F>(&clock);
+        restored.local.crash_after(crash);
+        let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("kept")));
+        drop(a);
+        restored.crash();
+        let (a, opened) = F::open(Probe::new(&restored), env("a", 5, &clock))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        let shown_tags = tags(&a.view(), song);
+        assert!(
+            shown_tags.contains(&tag("lost")),
+            "{shown}: the new writer lost the view it took over: {shown_tags:?}"
+        );
+        if crash == total {
+            committed.unwrap();
+            assert!(
+                matches!(opened.start, Start::Resumed(_)),
+                "{shown}: {:?}",
+                opened.start
+            );
+            assert_eq!(shown_tags, ["kept", "lost", "new"], "{shown}");
+        }
+    }
 }
 
 fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() {

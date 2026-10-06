@@ -18,7 +18,7 @@ use crate::io::{Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Entry, EntryKind, Genesis};
 use crate::path::RelPath;
-use crate::reader::{WriterFile, WriterLog, MAX_FILE};
+use crate::reader::{CachedView, WriterFile, WriterLog, MAX_FILE};
 use crate::report::{Rekey, Start};
 
 pub struct Writer {
@@ -125,13 +125,15 @@ impl Writer {
 
     /// A new writer: its first segment, `segment`, holding its genesis entry, is
     /// made durable in the folder before its directory in the local root, and so
-    /// its id, exists anywhere else.
+    /// its id, exists anywhere else. `view` is kept as its cached view before its
+    /// head record, so a writer in the pool always has the view it started from.
     pub fn create(
         layout: Layout,
         id: WriterId,
         segment: SegmentName,
         label: String,
         at: Hlc,
+        view: &CachedView,
     ) -> Task<'static, Result<Writer>> {
         let kind = EntryKind::Genesis(Genesis { writer: id, label });
         let entry = match Entry::encode(EntryHash::ZERO, at, kind) {
@@ -139,6 +141,7 @@ impl Writer {
             Err(_) => return Task::ready(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))),
         };
         let genesis = entry.hash();
+        let saved = view.save(genesis);
         let bytes = entry.line.to_bytes();
         let len = bytes.len() as u64;
         let dir = layout.writer(id);
@@ -178,7 +181,9 @@ impl Writer {
         })
         .and_then(move |()| flow::lock(Layout::lock(genesis)))
         .and_then(move |lock| match lock {
-            Lock::Acquired => record_head(id, genesis, genesis),
+            Lock::Acquired => {
+                flow::run(saved).and_then(move |()| record_head(id, genesis, genesis))
+            }
             Lock::Held => Flow::Done(Err(Error::Io {
                 root: Root::Local,
                 path: Layout::lock(genesis),
@@ -463,10 +468,12 @@ fn mark_retired<'a>(genesis: EntryHash) -> Flow<'a, Result<()>> {
         path: Layout::retired(genesis),
         bytes: Vec::new(),
     };
-    flow::attempt(marker.clone()).then(move |result| match result {
-        Ok(_) | Err(crate::io::IoError::AlreadyExists) => flow::ok(()),
-        Err(error) => Flow::Done(Err(marker.failed(error))),
-    })
+    flow::attempt(marker.clone())
+        .then(move |result| match result {
+            Ok(_) | Err(crate::io::IoError::AlreadyExists) => flow::ok(()),
+            Err(error) => Flow::Done(Err(marker.failed(error))),
+        })
+        .and_then(move |()| flow::sync(Root::Local, &Layout::local(genesis)))
 }
 
 fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<Claimed>> {

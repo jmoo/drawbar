@@ -407,7 +407,14 @@ impl Instance {
             let at = self.tick();
             let writer = run(
                 &mut self.machine,
-                Writer::create(layout(), id, segment, "instance".into(), at),
+                Writer::create(
+                    layout(),
+                    id,
+                    segment,
+                    "instance".into(),
+                    at,
+                    &CachedView::default(),
+                ),
             )?;
             made.push(writer.genesis());
             self.writer = Some(writer);

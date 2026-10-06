@@ -272,8 +272,8 @@ finds its own history forked while it runs does the same.
 
 A new writer is created at an instance's first write. Its first segment holds
 its genesis entry; the segment, its directory and every directory above it are
-synced. Only then does the writer get its directory in the local root, its lock
-and `head.json`.
+synced. Only then does the writer get its directory in the local root, its lock,
+its cached view and, last, `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
 seals it when it closes. Before each append, a writer confirms that the folder
