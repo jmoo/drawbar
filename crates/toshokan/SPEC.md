@@ -244,7 +244,9 @@ after any folded entry and see a fork from any point.
 observed, is a delete. A register write without `value` is a clear. A file write
 without `file` says the entity has no file. Members of an entity that are empty
 are omitted. Members of `state` a reader does not know are kept, and joined by
-keeping the greater JSON text.
+keeping the greater JSON text. Inside `entities` a reader keeps only the members
+above: a writer whose snapshots a newer version wrote loses the others when an
+older version compacts it.
 
 Only a snapshot's writer compacts. It confirms that a file in its directory
 holds its last entry, as before an append; if none does, it writes nothing and a
