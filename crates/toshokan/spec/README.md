@@ -121,7 +121,7 @@ them, resurrections, hidden files and conflicted copies under other names.
 | `FoldHashes` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
 | `UniqueNames` | `tests/writer.rs`: one new, randomly named segment per process |
 | `SealedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction deletes only segments this process sealed |
-| `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends nothing and is replaced |
+| `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends and compacts nothing, and is replaced |
 | `Convergence` | Liveness is not tested; `DeliveredConverges` is checked at the end of every complete delivery |
 
 What the model abstracts away is checked in Rust: the merge by

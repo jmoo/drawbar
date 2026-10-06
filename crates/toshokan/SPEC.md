@@ -243,9 +243,11 @@ without `file` says the entity has no file. Members of an entity that are empty
 are omitted. Members of `state` a reader does not know are kept, and joined by
 keeping the greater JSON text.
 
-Only a snapshot's writer compacts. It folds its own chain up to its last entry
-into a new snapshot, syncs the snapshot and its directory, and confirms that the
-folder holds it. Only then does it delete the segments its own process sealed
+Only a snapshot's writer compacts. It confirms that a file in its directory
+holds its last entry, as before an append; if none does, it writes nothing and a
+new writer takes over. It folds its own chain up to that entry into a new
+snapshot, syncs the snapshot and its directory, and confirms that the folder
+holds it. Only then does it delete the segments its own process sealed
 every line of which the snapshot folds, and every snapshot in its directory
 whose `folded` list starts the new one's. Segments left open by a crash or a
 copy, and the branches of another instance, are never deleted.

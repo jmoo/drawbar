@@ -286,8 +286,23 @@ fn a_running_writer_whose_segment_was_restored_refuses_to_append() {
     let id = instance.id();
     let backup = instance.machine.folder.files(Root::Folder);
     instance.write("a2").unwrap();
-    for (path, bytes) in backup {
-        let disk = &instance.machine.folder;
+    restore(&instance.machine.folder, backup);
+    let refused = instance.write("a3");
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Rekey {
+                writer,
+                why: Rekey::Restored
+            }) if writer == id
+        ),
+        "{refused:?}"
+    );
+}
+
+/// Puts back each of `files` as it was.
+fn restore(disk: &MemDisk, files: BTreeMap<toshokan::RelPath, Vec<u8>>) {
+    for (path, bytes) in files {
         disk.perform(toshokan::Io::Remove {
             root: Root::Folder,
             path: path.clone(),
@@ -300,7 +315,19 @@ fn a_running_writer_whose_segment_was_restored_refuses_to_append() {
         })
         .unwrap();
     }
-    let refused = instance.write("a3");
+}
+
+#[test]
+fn a_writer_whose_head_the_folder_lost_compacts_nothing() {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a1").unwrap();
+    let id = instance.id();
+    let backup = instance.machine.folder.files(Root::Folder);
+    instance.write("a2").unwrap();
+    run(&mut instance.machine, instance.reader.read()).unwrap();
+    restore(&instance.machine.folder, backup);
+    let before = instance.machine.folder.files(Root::Folder);
+    let refused = instance.compact();
     assert!(
         matches!(
             refused,
@@ -311,6 +338,7 @@ fn a_running_writer_whose_segment_was_restored_refuses_to_append() {
         ),
         "{refused:?}"
     );
+    assert_eq!(instance.machine.folder.files(Root::Folder), before);
 }
 
 #[test]

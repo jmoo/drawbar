@@ -13,29 +13,32 @@ use crate::path::RelPath;
 use crate::reader::{WriterFile, WriterLog, MAX_FILE};
 use crate::report::{Compacted, Rekey};
 use crate::snapshot::Snapshot;
-use crate::writer::Writer;
+use crate::writer::{holds, Writer};
 
-/// Seals the open segment and writes `snapshot-<name>.json` folding this writer's
-/// chain up to its head, durably (file and directory synced). Only once the folder
-/// holds that snapshot does it delete the segments in [`Writer::sealed`] whose
-/// every line it folds, and every snapshot in the writer's directory whose folded
-/// list starts its own. Returns the writer with the result.
+/// Seals the open segment, confirms the folder holds this writer's head, and
+/// writes `snapshot-<name>.json` folding the chain up to it, durably (file and
+/// directory synced). Only once the folder holds that snapshot does it delete the
+/// segments in [`Writer::sealed`] whose every line it folds, and every snapshot in
+/// the writer's directory whose folded list starts its own. Returns the writer
+/// with the result.
 ///
 /// `own` is this writer's log, read after its last append. Fails with
-/// [`Error::Rekey`] when `own` does not hold the writer's head, or the folder
-/// loses the snapshot before anything is deleted. Branches of a forked history
-/// other than this writer's own are not folded.
+/// [`Error::Rekey`] when `own` or the folder does not hold the writer's head,
+/// writing nothing, or when the folder loses the snapshot before anything is
+/// deleted. Branches of a forked history other than this writer's own are not
+/// folded.
 pub fn compact(
     mut writer: Writer,
     own: &WriterLog,
     name: Nonce,
 ) -> Task<'static, (Writer, Result<Compacted>)> {
-    let lost = Error::Rekey {
-        writer: writer.id(),
+    let id = writer.id();
+    let lost = move || Error::Rekey {
+        writer: id,
         why: Rekey::Restored,
     };
     let Some(snapshot) = fold(&writer, own) else {
-        return Task::ready((writer, Err(lost)));
+        return Task::ready((writer, Err(lost())));
     };
     writer.seal();
     let layout = writer.layout.clone();
@@ -47,49 +50,56 @@ pub fn compact(
         .iter()
         .map(|segment| layout.segment(writer.id(), *segment))
         .collect();
-    flow::act(Io::Create {
+    let create = Io::Create {
         root: Root::Folder,
         path: path.clone(),
         bytes: snapshot.encode(),
-    })
-    .and_then({
-        let (path, dir) = (path.clone(), dir.clone());
-        move |()| flow::sync(Root::Folder, &path).and_then(move |()| flow::sync(Root::Folder, &dir))
-    })
-    .and_then({
-        let path = path.clone();
-        move |()| flow::stat(Root::Folder, &path)
-    })
-    .and_then(move |held| match held {
-        None => Flow::Done(Err(lost)),
-        Some(_) => superseded(dir.clone(), path, snapshot, sealed).and_then(move |removed| {
-            let removed_count = removed.len();
-            remove_all(removed.clone())
-                .and_then(move |()| match removed_count {
-                    0 => flow::ok(()),
-                    _ => flow::sync(Root::Folder, &dir),
-                })
-                .map_ok(move |()| removed)
-        }),
-    })
-    .then(move |removed| {
-        let compacted = removed.map(|removed| {
-            let segments: Vec<SegmentName> = writer
-                .sealed()
-                .iter()
-                .copied()
-                .filter(|segment| removed.contains(&layout.segment(writer.id(), *segment)))
-                .collect();
-            writer.sealed.retain(|segment| !segments.contains(segment));
-            Compacted {
-                snapshot: name,
-                folded,
-                removed: segments,
+    };
+    holds(&layout, id, writer.head())
+        .and_then(move |held| match held {
+            true => flow::act(create),
+            false => Flow::Done(Err(lost())),
+        })
+        .and_then({
+            let (path, dir) = (path.clone(), dir.clone());
+            move |()| {
+                flow::sync(Root::Folder, &path).and_then(move |()| flow::sync(Root::Folder, &dir))
             }
-        });
-        Flow::Done((writer, compacted))
-    })
-    .task()
+        })
+        .and_then({
+            let path = path.clone();
+            move |()| flow::stat(Root::Folder, &path)
+        })
+        .and_then(move |held| match held {
+            None => Flow::Done(Err(lost())),
+            Some(_) => superseded(dir.clone(), path, snapshot, sealed).and_then(move |removed| {
+                let removed_count = removed.len();
+                remove_all(removed.clone())
+                    .and_then(move |()| match removed_count {
+                        0 => flow::ok(()),
+                        _ => flow::sync(Root::Folder, &dir),
+                    })
+                    .map_ok(move |()| removed)
+            }),
+        })
+        .then(move |removed| {
+            let compacted = removed.map(|removed| {
+                let segments: Vec<SegmentName> = writer
+                    .sealed()
+                    .iter()
+                    .copied()
+                    .filter(|segment| removed.contains(&layout.segment(writer.id(), *segment)))
+                    .collect();
+                writer.sealed.retain(|segment| !segments.contains(segment));
+                Compacted {
+                    snapshot: name,
+                    folded,
+                    removed: segments,
+                }
+            });
+            Flow::Done((writer, compacted))
+        })
+        .task()
 }
 
 /// The snapshot of the chain from the genesis entry to the writer's head, with
