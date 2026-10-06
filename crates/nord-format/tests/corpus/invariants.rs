@@ -162,6 +162,11 @@ pub const INVARIANTS: &[Invariant] = &[
     ),
     claim(
         Kind::Sample,
+        "strokes decode within a shift of statistic B",
+        strokes_decode_at_statistic_b,
+    ),
+    claim(
+        Kind::Sample,
         "preset parses under its own schema",
         preset_schema,
     ),
@@ -554,9 +559,11 @@ fn directories(_: &[u8], entity: &Entity) -> Result<(), String> {
 fn strokes_decode(_: &[u8], entity: &Entity) -> Result<(), String> {
     let sample = samples::sample(entity)?;
     let layout = sample.layout().context("layout")?;
+    let file_peak = sample.file_peak().context("file peak")?;
     for (index, (at, stroke)) in sample.stroke_streams().into_iter().enumerate() {
         let stream = nsmp::codec::walk(stroke, at, layout).context(format!("stroke {index}"))?;
-        let audio = nsmp::codec::decode(stroke, at, layout).context(format!("stroke {index}"))?;
+        let audio = nsmp::codec::decode(stroke, at, layout, file_peak)
+            .context(format!("stroke {index}"))?;
         let channels = if stream.cell == Some(2 * layout.cell()) {
             2
         } else {
@@ -1311,4 +1318,42 @@ fn map_payload(sample: &nord_format::cbin::Cbin<nsmp::Sample>) -> Result<&[u8], 
     nsmp::section::find(&sample.body.sections, nsmp::section::MAP)
         .map(|section| section.payload.as_slice())
         .ok_or_else(|| "no map section".to_string())
+}
+
+/// Statistic B is a stroke's content peak at a shift of two, so a stroke decoded at the
+/// right shift peaks near four times it, and a misread shift lands a power of two away.
+/// Clipped strokes, and vendor strokes whose streams peak off their statistic B, stay
+/// within one shift of it. Below a statistic B of four, its own floor is coarser.
+///
+/// Inferred from specimens; not confirmed on hardware.
+fn strokes_decode_at_statistic_b(_: &[u8], entity: &Entity) -> Result<(), String> {
+    let sample = samples::sample(entity)?;
+    let layout = sample.layout().context("layout")?;
+    let file_peak = sample.file_peak().context("file peak")?;
+    let streams = sample.stroke_streams();
+    for (index, &(at, stroke)) in streams.iter().enumerate() {
+        let statistic_b = nsmp::codec::peak(stroke, layout)
+            .ok_or(format!("stroke {index}: no statistic B"))?
+            .unsigned_abs();
+        if statistic_b < 4 {
+            continue;
+        }
+        let audio = nsmp::codec::decode(stroke, at, layout, file_peak)
+            .context(format!("stroke {index}"))?;
+        let peak = audio
+            .samples
+            .iter()
+            .map(|&v| u32::from(v.unsigned_abs()))
+            .max()
+            .unwrap_or(0);
+        ensure!(
+            2 * statistic_b < peak && peak < 8 * statistic_b,
+            "stroke {index} of {}: peaks at {peak}, and statistic B {statistic_b} states about \
+             {} (shift {:?} against the file peak {file_peak})",
+            streams.len(),
+            4 * statistic_b,
+            nsmp::codec::shift_against(stroke, file_peak),
+        );
+    }
+    Ok(())
 }

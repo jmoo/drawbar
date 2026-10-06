@@ -2350,6 +2350,11 @@ mod tests {
         }
     }
 
+    /// The file peak of a narrow file, which a decode of any of its strokes takes.
+    fn peak_of(file: &Cbin<Sample>) -> u32 {
+        codec::file_peak(file.stroke_streams().iter().map(|&(_, s)| s), Layout::V2)
+    }
+
     fn built(
         zones: &[NewZone<'_>],
         name: &str,
@@ -2702,7 +2707,7 @@ mod tests {
                 let plan = plan(source.len(), 1).unwrap();
                 let q = quantize(&source, &plan, None);
 
-                let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+                let audio = codec::decode(stroke, at, codec::Layout::V2, peak_of(&file)).unwrap();
                 assert_eq!(audio.samples.len(), plan.fields);
                 if predictor == Predictor::Plain {
                     assert_eq!(audio.differenced, 0);
@@ -2723,7 +2728,7 @@ mod tests {
         let source = sine(440.0, 20_000.0, 44_100);
         let file = encoded(&source, Predictor::Plain);
         let (at, stroke) = file.stroke_streams()[0];
-        let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+        let audio = codec::decode(stroke, at, codec::Layout::V2, peak_of(&file)).unwrap();
         // Well inside the source, away from the ends the kernel rings at.
         let window = &audio.samples[10_000..20_000];
         let peak = window.iter().map(|&v| i32::from(v).abs()).max().unwrap();
@@ -2816,7 +2821,7 @@ mod tests {
             let (_, stroke) = file.stroke_streams()[0];
             let q = quantize(&source, &plan, None);
             assert_eq!(
-                codec::shift(stroke, codec::Layout::V2),
+                codec::shift_against(stroke, peak_of(&file)),
                 Some(q.shift),
                 "amplitude {amplitude}"
             );
@@ -3016,7 +3021,7 @@ mod tests {
             .predictor(Predictor::Minimizing);
         let file = instrument(source, &options).unwrap();
         let (_, stroke) = file.stroke_streams()[0];
-        codec::shift(stroke, codec::Layout::V2).unwrap()
+        codec::shift_against(stroke, file.file_peak().unwrap()).unwrap()
     }
 
     #[test]
@@ -3103,7 +3108,7 @@ mod tests {
                 stroke[codec::PEAK_AT..codec::PEAK_AT + 3]
                     .copy_from_slice(&peak.to_be_bytes()[1..]);
                 assert_eq!(
-                    codec::shift(&stroke, codec::Layout::V2),
+                    codec::shift_against(&stroke, peak),
                     Some(shift),
                     "peak {peak}"
                 );
@@ -3252,7 +3257,7 @@ mod tests {
 
         for (index, source) in [&high, &mid, &low].iter().enumerate() {
             let (at, stream) = read.zone_stream(index).unwrap();
-            let audio = codec::decode(stream, at, codec::Layout::V2).unwrap();
+            let audio = codec::decode(stream, at, codec::Layout::V2, peak_of(&read)).unwrap();
             let plan = plan(source.len(), 1).unwrap();
             let q = quantize(source, &plan, None);
             let gain = 1i32 << q.shift;
@@ -3282,9 +3287,35 @@ mod tests {
         let many = crowd.zone_stream(1).unwrap();
         assert_ne!(one.1, many.1, "the streams differ; only the audio must not");
         assert_eq!(
-            codec::decode(one.1, one.0, codec::Layout::V2).unwrap(),
-            codec::decode(many.1, many.0, codec::Layout::V2).unwrap()
+            codec::decode(one.1, one.0, codec::Layout::V2, peak_of(&alone)).unwrap(),
+            codec::decode(many.1, many.0, codec::Layout::V2, peak_of(&crowd)).unwrap()
         );
+    }
+
+    #[test]
+    fn every_zone_of_a_multi_zone_file_decodes_at_its_source_level() {
+        let levels = [16_000.0, 4_000.0, 1_000.0];
+        let sources = levels.map(|amplitude| sine(440.0, amplitude, 20_000));
+        let zones = [
+            zone(&sources[0], 72, 96, 1),
+            zone(&sources[1], 60, 65, 2),
+            zone(&sources[2], 48, 53, 3),
+        ];
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            let file = multi_zone(made("Levels", Predictor::Minimizing, layout), &zones).unwrap();
+            let file_peak = file.file_peak().unwrap();
+            for (zone, amplitude) in file.zones().unwrap().iter().zip(levels) {
+                let audio = codec::decode(zone.stream, zone.at, layout, file_peak).unwrap();
+                let peak = audio.samples[5_000..12_000]
+                    .iter()
+                    .map(|&v| f64::from(v).abs())
+                    .fold(0.0, f64::max);
+                assert!(
+                    (peak / amplitude - 1.0).abs() < 0.05,
+                    "{layout:?}: the zone encoded at {amplitude} decodes peaking at {peak}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3489,7 +3520,9 @@ mod tests {
             let (at, stroke) = file.stroke_streams()[0];
             let walk = codec::walk(stroke, at, layout).unwrap();
             let mark = walk.records.iter().find(|r| r.mark).unwrap().first_field;
-            let decoded = codec::decode(stroke, at, layout).unwrap().samples;
+            let decoded = codec::decode(stroke, at, layout, file.file_peak().unwrap())
+                .unwrap()
+                .samples;
             let end = decoded.len();
             // Two passes of the loop, as the instrument plays them.
             let played: Vec<i64> = decoded[mark..]
@@ -3592,7 +3625,7 @@ mod tests {
         assert!(looped.crossfade <= fields_of(points.start).unwrap());
         let file = instrument(&source, &Options::new("Long fade").loops(points)).unwrap();
         let (at, stroke) = file.stroke_streams()[0];
-        assert!(codec::decode(stroke, at, codec::Layout::V2).is_ok());
+        assert!(codec::decode(stroke, at, codec::Layout::V2, file.file_peak().unwrap()).is_ok());
     }
 
     #[test]
@@ -3635,7 +3668,8 @@ mod tests {
                 let (at, stroke) = file.stroke_streams()[0];
                 let plan = looped(source.len(), 1, points).unwrap();
                 let q = quantize(&source, &plan, None);
-                let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+                let audio = codec::decode(stroke, at, codec::Layout::V2, file.file_peak().unwrap())
+                    .unwrap();
                 assert_eq!(audio.samples.len(), plan.fields);
                 let gain = 1i32 << q.shift;
                 for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
@@ -3871,7 +3905,8 @@ mod tests {
 
             let plan = plan(30_000, 2).unwrap();
             let q = quantize(&source, &plan, None);
-            let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+            let audio =
+                codec::decode(stroke, at, codec::Layout::V2, file.file_peak().unwrap()).unwrap();
             assert_eq!(audio.channels, 2);
             assert_eq!(audio.samples.len(), plan.fields);
             let gain = 1i32 << q.shift;
@@ -3898,7 +3933,8 @@ mod tests {
         )
         .unwrap();
         let (at, stroke) = file.stroke_streams()[0];
-        let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+        let audio =
+            codec::decode(stroke, at, codec::Layout::V2, file.file_peak().unwrap()).unwrap();
         assert!(audio.differenced > 0, "nothing chose a predictor");
 
         let plan = plan(frames, 2).unwrap();
@@ -3918,7 +3954,8 @@ mod tests {
             .collect();
         let file = instrument(&source, &Options::new("Panned").channels(2)).unwrap();
         let (at, stroke) = file.stroke_streams()[0];
-        let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+        let audio =
+            codec::decode(stroke, at, codec::Layout::V2, file.file_peak().unwrap()).unwrap();
         assert!(audio.samples.iter().step_by(2).any(|&v| v.abs() > 10_000));
         assert!(audio.samples[1..].iter().step_by(2).all(|&v| v == 0));
     }
@@ -3942,7 +3979,8 @@ mod tests {
 
         let plan = looped(60_000, 2, points).unwrap();
         let q = quantize(&source, &plan, None);
-        let audio = codec::decode(stroke, at, codec::Layout::V2).unwrap();
+        let audio =
+            codec::decode(stroke, at, codec::Layout::V2, file.file_peak().unwrap()).unwrap();
         let gain = 1i32 << q.shift;
         for (f, (&want, &got)) in q.values.iter().zip(&audio.samples).enumerate() {
             assert_eq!(i32::from(got), want * gain, "field {f}");
@@ -3994,7 +4032,7 @@ mod tests {
                 )
                 .unwrap();
                 let q = quantize(&source, &plan, None);
-                let audio = codec::decode(stroke, at, layout)
+                let audio = codec::decode(stroke, at, layout, file.file_peak().unwrap())
                     .unwrap_or_else(|e| panic!("{layout:?} {channels}ch: {e}"));
                 assert_eq!(audio.channels, channels, "{layout:?} {channels}ch");
                 assert_eq!(audio.samples.len(), plan.fields, "{layout:?} {channels}ch");
@@ -4383,7 +4421,7 @@ mod tests {
             .iter()
             .all(|r| r.values.iter().all(|&v| v == 0)));
         assert_eq!(codec::peak(stroke, codec::Layout::V2), Some(0));
-        assert!(codec::decode(stroke, at, codec::Layout::V2)
+        assert!(codec::decode(stroke, at, codec::Layout::V2, peak_of(&file))
             .unwrap()
             .samples
             .iter()

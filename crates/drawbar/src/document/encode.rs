@@ -287,6 +287,7 @@ mod tests {
             stroke,
             at,
             nord_format::formats::nsmp::codec::Layout::V2,
+            nord_format::formats::nsmp::codec::file_peak([stroke], Layout::V2),
         )
         .expect("it decodes");
         assert_eq!(audio.channels, 2);
