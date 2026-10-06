@@ -4,6 +4,7 @@ use crate::ids::{EntityId, EntryHash, Identity, WriterId};
 use crate::io::{IoError, Root};
 use crate::path::RelPath;
 use crate::plan::Expect;
+use crate::report::Rekey;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -41,6 +42,12 @@ pub enum Error {
     /// An intent, undo or redo was refused before anything was written.
     #[error("refused: {0}")]
     Refused(Refusal),
+
+    /// This writer cannot write again: appending would continue a history the
+    /// folder no longer holds, or that another instance also continues. Nothing
+    /// was written; the library continues as a new writer.
+    #[error("writer {writer} cannot continue its history: {why:?}")]
+    Rekey { writer: WriterId, why: Rekey },
 }
 
 /// Why a library opened read-only.
@@ -106,4 +113,6 @@ pub enum Invalid {
     Overlapping(RelPath),
     #[error("the intent changes nothing")]
     Empty,
+    #[error("the intent is too long to log as one entry")]
+    TooLong,
 }

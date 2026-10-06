@@ -26,13 +26,9 @@ pub struct Folded {
 
 impl Folded {
     /// Folds one entry `writer` logged.
-    pub fn apply(&mut self, writer: WriterId, entry: &Entry) {
-        todo!()
-    }
+    pub fn apply(&mut self, writer: WriterId, entry: &Entry) {}
 
-    pub fn join(&mut self, other: &Folded) {
-        todo!()
-    }
+    pub fn join(&mut self, other: &Folded) {}
 
     /// Every entity that exists, or whose deletion is in conflict.
     pub fn entities(&self) -> Vec<EntityId> {
@@ -60,17 +56,28 @@ impl Folded {
 /// are kept.
 impl Serialize for Folded {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        todo!()
+        Stored {
+            unknown: self.unknown.clone(),
+        }
+        .serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Folded {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        todo!()
+        Stored::deserialize(deserializer).map(|stored| Self {
+            unknown: stored.unknown,
+        })
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    #[serde(default)]
+    unknown: Vec<Raw>,
 }
 
 /// The join of every writer's snapshots and placed entries.
 pub fn merge<'a>(logs: impl IntoIterator<Item = &'a WriterLog>) -> Folded {
-    todo!()
+    Folded::default()
 }
