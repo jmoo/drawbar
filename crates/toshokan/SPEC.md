@@ -117,8 +117,8 @@ An entry is an object whose first members are:
 followed by the members of its kind. A reader ignores members it does not know,
 at any depth, and keeps the line and the whole entry (see Merging), so they
 survive. An entry of another kind, without `kind`, or whose members do not
-decode, is kept and merged as unknown; so is a line whose
-JSON has no readable `at`, because it still links the chain.
+decode, is kept and merged as unknown; so is a line whose JSON has no readable
+`at`, because it still links the chain.
 
 A **genesis** entry starts a writer's chain, with `prev` all zeros:
 
@@ -230,8 +230,9 @@ and kept and merged like any other.
 
 Members a reader does not know are kept, and a compaction carries those of the
 snapshots it folds into the new one, keeping the greater JSON text under each
-name. A reader refuses a `folded` list that is empty or repeats a hash. Because the list is whole, a reader can place an entry
-after any folded entry and see a fork from any point.
+name. A reader refuses a `folded` list that is empty or repeats a hash. Because
+the list is whole, a reader can place an entry after any folded entry and see a
+fork from any point.
 
 `state` is an object:
 
@@ -293,21 +294,21 @@ A process appends to one segment, named at random when it first appends, and
 seals it when it closes. Before each append, a writer confirms that the folder
 holds its last entry: its open segment has the length this process left it and
 ends with that entry's line. Otherwise, or with no segment open, a file in its
-directory must hold that entry, and the writer seals the segment and appends to a
-new one. If no file holds it, the writer writes nothing and stops: a new writer
-takes over from the next write. After the
-append is synced it writes the cached view and then `head.json`, before the
-commit returns. An append that fails seals the segment, so nothing follows a torn
-line.
+directory must hold that entry, and the writer seals the segment and appends to
+a new one. If no file holds it, the writer writes nothing and stops: a new
+writer takes over from the next write. After the append is synced it writes the
+cached view and then `head.json`, before the commit returns. An append that
+fails seals the segment, so nothing follows a torn line.
 
 ## Reading
 
 A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
 up to 256 MiB of it. A file whose length, modification time and last 34 bytes
 are unchanged is not read again; a segment's last 34 bytes are the tab, hash and
-LF that end its last line. A file is a segment when it is empty or its first line can be
-read, else a snapshot when it decodes as one; anything else is reported when the
-library opens, and read again next time. A snapshot whose `writer` is not `w` is reported, not used.
+LF that end its last line. A file is a segment when it is empty or its first
+line can be read, else a snapshot when it decodes as one; anything else is
+reported when the library opens, and read again next time. A snapshot whose
+`writer` is not `w` is reported, not used.
 
 A reader places an entry when its `prev` is all zeros, placed, or folded by a
 snapshot it has read. An entry whose predecessor it has not is held back, a gap,
@@ -450,7 +451,8 @@ A writer carries out an intent's steps in this order:
    another writer's directory is made a chunk at a time.
 2. Check every precondition: a path holds nothing, or a file whose identity is
    the one the app expects; a directory satisfies neither. Check that every
-   trash item a step restores is there. On failure, remove the staged files and write nothing more.
+   trash item a step restores is there. On failure, remove the staged files and
+   write nothing more.
 3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
    `pending/<nonce>.json`.
 4. Carry out the steps in order. A move first creates the destination's
@@ -483,7 +485,8 @@ A pending record is a JSON object:
 `displaced`, whose `prev` is the writer's head when the record was written.
 `files` says where each entity's file is once the first `done_after` steps are
 done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
-as it is, logged as a `pin` op rather than a `file` op. A reader reads at most 16 MiB of a record.
+as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
+16 MiB of a record.
 
 ### Recovery
 
