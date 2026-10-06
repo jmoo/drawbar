@@ -338,6 +338,19 @@ impl Machine {
     }
 }
 
+impl crate::asynch::Fs for Machine {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        Backend::capabilities(self, root)
+    }
+
+    async fn perform(&self, io: Io) -> IoResult {
+        match io.root() {
+            Root::Folder => self.folder.perform(io),
+            Root::Local => self.local.perform(io),
+        }
+    }
+}
+
 impl Backend for Machine {
     fn capabilities(&self, root: Root) -> Capabilities {
         match root {

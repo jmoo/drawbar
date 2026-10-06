@@ -19,23 +19,23 @@ use crate::writer::Writer;
 /// chain up to its head, durably (file and directory synced). Only once the folder
 /// holds that snapshot does it delete the segments in [`Writer::sealed`] whose
 /// every line it folds, and every snapshot in the writer's directory whose folded
-/// list starts its own.
+/// list starts its own. Returns the writer with the result.
 ///
 /// `own` is this writer's log, read after its last append. Fails with
 /// [`Error::Rekey`] when `own` does not hold the writer's head, or the folder
 /// loses the snapshot before anything is deleted. Branches of a forked history
 /// other than this writer's own are not folded.
-pub fn compact<'a>(
-    writer: &'a mut Writer,
-    own: &'a WriterLog,
+pub fn compact(
+    mut writer: Writer,
+    own: &WriterLog,
     name: Nonce,
-) -> Task<'a, Result<Compacted>> {
+) -> Task<'static, (Writer, Result<Compacted>)> {
     let lost = Error::Rekey {
         writer: writer.id(),
         why: Rekey::Restored,
     };
-    let Some(snapshot) = fold(writer, own) else {
-        return Task::ready(Err(lost));
+    let Some(snapshot) = fold(&writer, own) else {
+        return Task::ready((writer, Err(lost)));
     };
     writer.seal();
     let layout = writer.layout.clone();
@@ -54,7 +54,7 @@ pub fn compact<'a>(
     })
     .and_then({
         let (path, dir) = (path.clone(), dir.clone());
-        move |()| sync(path).and_then(move |()| sync(dir))
+        move |()| flow::sync(Root::Folder, &path).and_then(move |()| flow::sync(Root::Folder, &dir))
     })
     .and_then({
         let path = path.clone();
@@ -67,24 +67,27 @@ pub fn compact<'a>(
             remove_all(removed.clone())
                 .and_then(move |()| match removed_count {
                     0 => flow::ok(()),
-                    _ => sync(dir),
+                    _ => flow::sync(Root::Folder, &dir),
                 })
                 .map_ok(move |()| removed)
         }),
     })
-    .map_ok(move |removed| {
-        let segments: Vec<SegmentName> = writer
-            .sealed()
-            .iter()
-            .copied()
-            .filter(|segment| removed.contains(&layout.segment(writer.id(), *segment)))
-            .collect();
-        writer.sealed.retain(|segment| !segments.contains(segment));
-        Compacted {
-            snapshot: name,
-            folded,
-            removed: segments,
-        }
+    .then(move |removed| {
+        let compacted = removed.map(|removed| {
+            let segments: Vec<SegmentName> = writer
+                .sealed()
+                .iter()
+                .copied()
+                .filter(|segment| removed.contains(&layout.segment(writer.id(), *segment)))
+                .collect();
+            writer.sealed.retain(|segment| !segments.contains(segment));
+            Compacted {
+                snapshot: name,
+                folded,
+                removed: segments,
+            }
+        });
+        Flow::Done((writer, compacted))
     })
     .task()
 }
@@ -152,7 +155,7 @@ fn superseded<'a>(
             );
         flow::fold(candidates.into_iter(), Vec::new(), move |mut removed, file| {
             let judge = std::rc::Rc::clone(&judge);
-            flow::read_file(Root::Folder, &file.clone(), MAX_FILE).map_ok(move |bytes| {
+            flow::read_file(Root::Folder, &file, MAX_FILE).map_ok(move |bytes| {
                 if bytes.is_some_and(|bytes| judge(&file, &bytes)) {
                     removed.push(file);
                 }
@@ -163,14 +166,7 @@ fn superseded<'a>(
 }
 
 fn remove_all<'a>(paths: Vec<RelPath>) -> Flow<'a, Result<()>> {
-    flow::fold(paths.into_iter(), (), |(), path| {
+    flow::each(paths.into_iter(), |path| {
         flow::remove_if_present(Root::Folder, path)
-    })
-}
-
-fn sync<'a>(path: RelPath) -> Flow<'a, Result<()>> {
-    flow::act(Io::Sync {
-        root: Root::Folder,
-        path,
     })
 }

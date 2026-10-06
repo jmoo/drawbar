@@ -4,13 +4,14 @@
 #![allow(dead_code, reason = "each test binary uses its own part")]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 
 use toshokan::asynch;
 use toshokan::binding::Bindings;
 use toshokan::blocking::{self, run, Backend, Native};
 use toshokan::compaction::compact;
 use toshokan::effects::{self, Applied, EffectPlan};
-use toshokan::env::{PrefixIdentity, SeededRandom, TestClock};
+use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::{Capabilities, Kind, Range};
 use toshokan::line::Line;
 use toshokan::log::{Entry, EntryKind, Logged};
@@ -21,7 +22,7 @@ use toshokan::writer::{Claimed, Writer};
 use toshokan::pending::PendingRecord;
 use toshokan::plan::FileChange;
 use toshokan::{
-    EntityId, EntryHash, Env, Error, Hlc, Io, IoResult, Layout, MemDisk, Nonce, Operation, Random,
+    EntityId, EntryHash, Env, Error, Hlc, Identify, Io, IoResult, Layout, MemDisk, Nonce, Operation, Random,
     Refusal, RelPath, Reply, Root, SegmentName, Step, WriterId,
 };
 
@@ -217,17 +218,21 @@ pub fn put(d: &mut impl Driven, files: &[(&str, &[u8])]) {
 pub const IDENTIFY: PrefixIdentity = PrefixIdentity { prefix: 4 };
 
 pub fn identity(bytes: &[u8]) -> toshokan::Identity {
-    use toshokan::Identify;
     let len = bytes.len() as u64;
     let prefix = bytes[..bytes.len().min(4)].to_vec();
     IDENTIFY.identify(len, &[prefix])
+}
+
+pub fn identify() -> Rc<dyn Identify> {
+    Rc::new(IDENTIFY)
 }
 
 pub fn env(seed: u64) -> Env {
     Env {
         clock: Box::new(TestClock::at(1)),
         random: Box::new(SeededRandom::new(seed)),
-        identify: Box::new(IDENTIFY),
+        identify: identify(),
+        names: Box::new(ExactNames),
         label: "test".into(),
     }
 }
@@ -260,8 +265,8 @@ pub fn bound(files: &[(EntityId, &str)]) -> Bindings {
 
 /// What committing produced, short of appending the entry.
 pub struct Run {
-    pub plan: EffectPlan,
-    pub record: PendingRecord,
+    pub plan: Rc<EffectPlan>,
+    pub record: Rc<PendingRecord>,
 }
 
 /// Resolves `changes` and writes the pending record: what a commit does before its
@@ -279,8 +284,14 @@ pub fn prepare(
         Ok(plan) => plan,
         Err(refusal) => return Ok(Err(refusal)),
     };
-    let record = PendingRecord::new(writer, "label", entry(HEAD), &plan);
-    match d.run(effects::prepare(&layout, &plan, &record, &IDENTIFY))? {
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(writer, "label", entry(HEAD), &plan));
+    match d.run(effects::prepare(
+        &layout,
+        Rc::clone(&plan),
+        Rc::clone(&record),
+        identify(),
+    ))? {
         Ok(()) => Ok(Ok(Run { plan, record })),
         Err(refusal) => Ok(Err(refusal)),
     }
@@ -300,9 +311,9 @@ pub fn complete(d: &mut impl Driven, run: &Run) -> Result<Applied, Error> {
     let applied = d.run(effects::apply(
         &layout,
         run.plan.record,
-        &run.record,
+        Rc::clone(&run.record),
         0,
-        &IDENTIFY,
+        identify(),
     ))?;
     close(d, run.record.writer, run.plan.record)?;
     d.run(effects::finish(&layout, run.record.writer, run.plan.record))?;
@@ -410,18 +421,21 @@ impl Instance {
         });
         let at = self.tick();
         let fresh = SegmentName::from_u128(self.random.next_u128());
-        let writer = self.writer.as_mut().expect("created above");
-        let entries = run(&mut self.machine, writer.append(vec![(at, kind)], fresh))?;
-        made.extend(entries.iter().map(Entry::hash));
+        let writer = self.writer.take().expect("created above");
+        let (writer, appended) = run(&mut self.machine, writer.append(vec![(at, kind)], fresh));
+        self.writer = Some(writer);
+        made.extend(appended?.iter().map(Entry::hash));
         Ok(made)
     }
 
     pub fn compact(&mut self) -> toshokan::Result<Compacted> {
         let name = Nonce::from_u128(self.random.next_u128());
-        let writer = self.writer.as_mut().expect("a writer");
+        let writer = self.writer.take().expect("a writer");
         run(&mut self.machine, self.reader.read_writer(writer.id()))?;
         let own = &self.reader.logs()[&writer.id()];
-        run(&mut self.machine, compact(writer, own, name))
+        let (writer, compacted) = run(&mut self.machine, compact(writer, own, name));
+        self.writer = Some(writer);
+        compacted
     }
 
     pub fn close(mut self) -> Machine {

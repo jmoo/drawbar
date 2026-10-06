@@ -1,10 +1,15 @@
 //! Unsaved edits: opaque bytes over a base identity, kept in the local root and
 //! never in the folder. Losing the local root loses them and nothing else.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::ids::{EntityId, Identity};
+use crate::flow::{self, fold};
+use crate::ids::{EntityId, EntryHash, Identity};
+use crate::io::{Kind, Root, Task};
+use crate::layout::Layout;
 use crate::path::RelPath;
 
 /// An entity's unsaved edit being changed through `library`, a driver's library.
@@ -63,6 +68,57 @@ impl DraftRecord {
 #[derive(Serialize, Deserialize)]
 struct Header {
     base: Identity,
+}
+
+/// A draft as the local root keeps it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Kept {
+    pub entity: EntityId,
+    /// `None` when it cannot be read.
+    pub record: Option<DraftRecord>,
+}
+
+/// Every draft kept for the writer whose genesis entry is `genesis`, by entity.
+/// Reads only the local root.
+pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
+    flow::list(Root::Local, &Layout::drafts(genesis))
+        .and_then(move |entries| {
+            let entities: BTreeSet<EntityId> = entries
+                .into_iter()
+                .filter(|entry| entry.kind == Kind::File)
+                .filter_map(|entry| {
+                    let stem = entry.name.strip_suffix(".next").unwrap_or(&entry.name);
+                    stem.strip_suffix(".json")?.parse().ok()
+                })
+                .collect();
+            fold(entities.into_iter(), Vec::new(), move |mut drafts, entity| {
+                let path = Layout::draft(genesis, entity);
+                flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
+                    let record = bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
+                    drafts.push(Kept { entity, record });
+                    drafts
+                })
+            })
+        })
+        .task()
+}
+
+/// Keeps `record` as `entity`'s draft, replacing the one kept, so a crash leaves
+/// the old draft or the new.
+pub fn put(genesis: EntryHash, entity: EntityId, record: &DraftRecord) -> Task<'static, Result<()>> {
+    let bytes = record.encode();
+    flow::ensure_dir(Root::Local, &Layout::drafts(genesis))
+        .and_then(move |()| flow::replace(Root::Local, Layout::draft(genesis, entity), bytes))
+        .task()
+}
+
+/// Removes `entity`'s draft; none kept is success.
+pub fn discard(genesis: EntryHash, entity: EntityId) -> Task<'static, Result<()>> {
+    let path = Layout::draft(genesis, entity);
+    let staged = flow::staged(&path);
+    flow::remove(Root::Local, &staged)
+        .and_then(move |()| flow::remove(Root::Local, &path))
+        .task()
 }
 
 #[cfg(test)]

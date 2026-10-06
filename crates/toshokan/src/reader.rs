@@ -535,6 +535,12 @@ struct Listed {
     files: Vec<Scanned>,
 }
 
+/// What a reader read of the folder, before it places it.
+pub struct Listing {
+    writers: Vec<Listed>,
+    everyone: bool,
+}
+
 impl Reader {
     pub fn new(layout: Layout, cached: CachedView) -> Self {
         Self {
@@ -556,8 +562,21 @@ impl Reader {
     /// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`] in the
     /// folder, each read bounded by [`MAX_FILE`].
     pub fn read(&mut self) -> Task<'_, Result<ReadReport>> {
-        let layout = self.layout.clone();
-        let writers = flow::list(Root::Folder, &layout.writers()).map_ok(|listed| {
+        flow::run(self.list())
+            .map_ok(move |listing| self.absorb(listing))
+            .task()
+    }
+
+    /// As [`Reader::read`], for one writer's directory.
+    pub fn read_writer(&mut self, writer: WriterId) -> Task<'_, Result<ReadReport>> {
+        flow::run(self.list_writer(writer))
+            .map_ok(move |listing| self.absorb(listing))
+            .task()
+    }
+
+    /// The reads of [`Reader::read`], for [`Reader::absorb`] to place.
+    pub fn list(&self) -> Task<'static, Result<Listing>> {
+        let writers = flow::list(Root::Folder, &self.layout.writers()).map_ok(|listed| {
             listed
                 .into_iter()
                 .filter(|entry| entry.kind == Kind::Directory)
@@ -567,16 +586,16 @@ impl Reader {
         self.scan(writers, true)
     }
 
-    /// As [`Reader::read`], for one writer's directory.
-    pub fn read_writer(&mut self, writer: WriterId) -> Task<'_, Result<ReadReport>> {
+    /// The reads of [`Reader::read_writer`], for [`Reader::absorb`] to place.
+    pub fn list_writer(&self, writer: WriterId) -> Task<'static, Result<Listing>> {
         self.scan(flow::ok(vec![writer]), false)
     }
 
-    fn scan<'a>(
-        &'a mut self,
-        writers: Flow<'a, Result<Vec<WriterId>>>,
+    fn scan(
+        &self,
+        writers: Flow<'static, Result<Vec<WriterId>>>,
         everyone: bool,
-    ) -> Task<'a, Result<ReadReport>> {
+    ) -> Task<'static, Result<Listing>> {
         let layout = self.layout.clone();
         let stamps: Rc<BTreeMap<RelPath, Stamp>> = Rc::new(
             self.seen
@@ -593,11 +612,26 @@ impl Reader {
                     })
                 })
             })
-            .map_ok(move |listed| self.absorb(listed, everyone))
+            .map_ok(move |writers| Listing { writers, everyone })
             .task()
     }
 
-    fn absorb(&mut self, listed: Vec<Listed>, everyone: bool) -> ReadReport {
+    /// Places entries this instance appended as `writer`, as a read would.
+    pub fn add(&mut self, writer: WriterId, entries: &[Entry]) -> Placement {
+        let lines = entries.iter().map(|entry| entry.line.clone()).collect();
+        self.cached
+            .writers
+            .entry(writer)
+            .or_insert_with(|| WriterLog::new(writer))
+            .place(Vec::new(), lines)
+    }
+
+    /// Places what [`Reader::list`] or [`Reader::list_writer`] read.
+    pub fn absorb(&mut self, listing: Listing) -> ReadReport {
+        let Listing {
+            writers: listed,
+            everyone,
+        } = listing;
         if everyone {
             let dirs: BTreeSet<RelPath> = listed
                 .iter()

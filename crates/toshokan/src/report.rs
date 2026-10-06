@@ -11,7 +11,9 @@ pub struct Opened {
     pub mode: Mode,
     /// Which writer this instance will write as.
     pub start: Start,
-    /// This writer's effects that a crash interrupted, finished or rolled back.
+    /// This writer's effects that a crash interrupted. Opening writes nothing in
+    /// the folder, so each is finished before this writer's next write, as its
+    /// outcome predicts.
     pub settled: Vec<Settled>,
     /// Unfinished effects of writers this install no longer writes as. They may
     /// still be in progress elsewhere, so they are settled only with the user's
@@ -50,7 +52,7 @@ pub enum Rekey {
     Restored,
 }
 
-/// One of this writer's interrupted effects, settled at open.
+/// One of this writer's interrupted effects, and how settling it will end.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Settled {
     pub record: Nonce,
@@ -76,10 +78,14 @@ pub struct DraftStatus {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DraftState {
-    /// The entity's file still holds the base the draft was made over.
-    Applies,
-    /// The file changed since; `None` when it is gone.
+    /// The entity's file still holds the base the draft was made over: the draft's
+    /// bytes, to restore.
+    Applies { bytes: Vec<u8> },
+    /// The file changed since; `None` when it is gone. The draft is kept until it
+    /// is discarded.
     BaseChanged { found: Option<Identity> },
+    /// The draft cannot be read. It is kept until it is discarded.
+    Unreadable,
 }
 
 /// Two entries of one writer with one predecessor. Both branches are merged.

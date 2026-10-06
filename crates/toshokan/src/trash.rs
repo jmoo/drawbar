@@ -9,8 +9,6 @@ use crate::flow::{self, each, fold, ok};
 use crate::ids::WriterId;
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::EntryKind;
-use crate::reader::WriterLog;
 use crate::report::{Emptied, TrashItem};
 
 /// What emptying keeps.
@@ -32,29 +30,8 @@ impl Default for Policy {
     }
 }
 
-/// What `own`'s entries say they displaced.
-pub fn logged(own: &WriterLog) -> Vec<TrashItem> {
-    own.entries()
-        .iter()
-        .flat_map(|entry| match &entry.kind {
-            EntryKind::Intent(logged) => logged
-                .displaced
-                .iter()
-                .map(|displaced| TrashItem {
-                    item: displaced.item,
-                    len: displaced.len,
-                    from: displaced.from.clone(),
-                    at: entry.at,
-                    by: entry.hash(),
-                })
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect()
-}
-
-/// The items of `logged` still in `writer`'s trash, oldest first, each with its
-/// length there. Files in the trash no entry displaced are not listed, and so
+/// The items of `logged`, what `writer`'s entries say they displaced, still in its
+/// trash, oldest first, each with its length there. Files in the trash no entry displaced are not listed, and so
 /// never emptied. Reads only.
 pub fn list(
     layout: &Layout,

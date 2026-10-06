@@ -12,6 +12,7 @@
 //! written after: the entry that closes it is the next one the writer appends.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Progress, Staged};
 use crate::env::{Env, Identify};
@@ -20,9 +21,9 @@ use crate::flow::{self, each, fold, ok};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::{EntryKind, Settlement};
+use crate::log::Settlement;
 use crate::path::RelPath;
-use crate::pending::{self, PendingRecord};
+use crate::pending::{self, PendingRecord, Records};
 use crate::reader::WriterLog;
 use crate::report::{Orphan, Outcome};
 
@@ -33,9 +34,6 @@ pub trait Chain {
 
     /// Whether an entry after `hash` is placed or folded.
     fn continues(&self, hash: EntryHash) -> bool;
-
-    /// The records of other writers this writer settled.
-    fn settles(&self) -> Vec<(WriterId, Nonce)>;
 }
 
 impl Chain for WriterLog {
@@ -45,16 +43,6 @@ impl Chain for WriterLog {
 
     fn continues(&self, hash: EntryHash) -> bool {
         WriterLog::holds(self, hash) && !self.heads().contains(&hash)
-    }
-
-    fn settles(&self) -> Vec<(WriterId, Nonce)> {
-        self.entries()
-            .iter()
-            .filter_map(|entry| match &entry.kind {
-                EntryKind::Settle(settle) => Some((settle.writer, settle.record)),
-                _ => None,
-            })
-            .collect()
     }
 }
 
@@ -79,69 +67,109 @@ pub struct Settling {
     pub outcome: Outcome,
 }
 
-/// Reads every writer's pending records. `own` is this writer and the head its
-/// local root recorded. Every other writer's open records are orphans: after the
-/// local root is lost, an install cannot tell its former writer's records from a
-/// live writer's. Requests only [`crate::Io::List`], [`crate::Io::Stat`] and
-/// [`crate::Io::Read`].
+/// Reads every writer's pending records and sorts them. `own` is this writer and
+/// the head its local root recorded; `settled` the records some writer settled.
+/// Every other writer's open records are orphans: after the local root is lost,
+/// an install cannot tell its former writer's records from a live writer's.
+/// Requests only [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+///
+/// [`read`], [`classify`] and [`predict`] in turn, for a caller that cannot lend
+/// `logs` while the reads run.
 pub fn assess<'a, C: Chain>(
     layout: &'a Layout,
     own: Option<(WriterId, EntryHash)>,
     logs: &'a BTreeMap<WriterId, C>,
+    settled: &'a BTreeSet<(WriterId, Nonce)>,
 ) -> Task<'a, Result<Recovery>> {
-    let settled: BTreeSet<(WriterId, Nonce)> = logs.values().flat_map(Chain::settles).collect();
-    let records = fold(logs.keys(), Vec::new(), move |mut all, &writer| {
-        flow::run(pending::read_all(layout, writer)).map_ok(move |found| {
+    flow::run(read(layout, logs.keys().copied().collect()))
+        .and_then(move |found| {
+            let (recovery, open) = classify(layout, own, logs, settled, found);
+            flow::run(predict(layout, recovery, open))
+        })
+        .task()
+}
+
+/// Every pending record of each of `writers`.
+pub fn read(
+    layout: &Layout,
+    writers: Vec<WriterId>,
+) -> Task<'static, Result<Vec<(WriterId, Records)>>> {
+    let layout = layout.clone();
+    fold(writers.into_iter(), Vec::new(), move |mut all, writer| {
+        flow::run(pending::read_all(&layout, writer)).map_ok(move |found| {
             all.push((writer, found));
             all
         })
-    });
-    records
-        .and_then(move |all| {
-            let mut recovery = Recovery::default();
-            let mut open = Vec::new();
-            for (writer, found) in all {
-                recovery.ignored.extend(found.unreadable);
-                for (name, record) in found.records {
-                    let chain = &logs[&writer];
-                    match standing(layout, own, chain, &settled, name, &record) {
-                        Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
-                        Standing::Closed => {}
-                        Standing::Logged => recovery.own.push(Settling {
-                            record: name,
-                            pending: record,
-                            logged: true,
-                            outcome: Outcome::Complete,
-                        }),
-                        Standing::Open => open.push((name, record)),
-                        Standing::Orphan => recovery.orphaned.push(Orphan {
-                            writer,
-                            record: name,
-                            label: record.label.clone(),
-                            paths: record.paths(),
-                        }),
-                    }
-                }
+    })
+    .task()
+}
+
+/// Sorts what [`read`] found by where each record stands. Returns this writer's
+/// open records apart, for [`predict`].
+pub fn classify<C: Chain>(
+    layout: &Layout,
+    own: Option<(WriterId, EntryHash)>,
+    logs: &BTreeMap<WriterId, C>,
+    settled: &BTreeSet<(WriterId, Nonce)>,
+    found: Vec<(WriterId, Records)>,
+) -> (Recovery, Vec<(Nonce, PendingRecord)>) {
+    let mut recovery = Recovery::default();
+    let mut open = Vec::new();
+    for (writer, found) in found {
+        recovery.ignored.extend(found.unreadable);
+        let Some(chain) = logs.get(&writer) else {
+            continue;
+        };
+        for (name, record) in found.records {
+            match standing(layout, own, chain, settled, name, &record) {
+                Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
+                Standing::Closed => {}
+                Standing::Logged => recovery.own.push(Settling {
+                    record: name,
+                    pending: record,
+                    logged: true,
+                    outcome: Outcome::Complete,
+                }),
+                Standing::Open => open.push((name, record)),
+                Standing::Orphan => recovery.orphaned.push(Orphan {
+                    writer,
+                    record: name,
+                    label: record.label.clone(),
+                    paths: record.paths(),
+                }),
             }
-            fold(
-                open.into_iter(),
-                recovery,
-                move |mut recovery, (name, record)| {
-                    effects::observe(layout, &record).map_ok(move |seen| {
-                        let progress = effects::progress(layout, &record, &seen);
-                        let outcome = effects::predict(layout, name, &record, &seen, &progress);
-                        recovery.own.push(Settling {
-                            record: name,
-                            pending: record,
-                            logged: false,
-                            outcome,
-                        });
-                        recovery
-                    })
-                },
-            )
-        })
-        .task()
+        }
+    }
+    (recovery, open)
+}
+
+/// Adds this writer's `open` records to `recovery`, each with how settling it
+/// will end.
+pub fn predict(
+    layout: &Layout,
+    recovery: Recovery,
+    open: Vec<(Nonce, PendingRecord)>,
+) -> Task<'static, Result<Recovery>> {
+    let layout = layout.clone();
+    fold(
+        open.into_iter(),
+        recovery,
+        move |mut recovery, (name, record)| {
+            let layout = layout.clone();
+            effects::observe(&layout, &record).map_ok(move |seen| {
+                let progress = effects::progress(&layout, &record, &seen);
+                let outcome = effects::predict(&layout, name, &record, &seen, &progress);
+                recovery.own.push(Settling {
+                    record: name,
+                    pending: record,
+                    logged: false,
+                    outcome,
+                });
+                recovery
+            })
+        },
+    )
+    .task()
 }
 
 /// Where a record stands for a reader writing as `own`.
@@ -186,31 +214,34 @@ fn standing(
 /// removing a source the last done step left beside its destination. The caller
 /// then appends the record's entry with what [`Applied`] says and removes the
 /// record with [`effects::finish`].
-pub fn settle<'a>(
-    layout: &'a Layout,
+pub fn settle(
+    layout: &Layout,
     name: Nonce,
-    record: &'a PendingRecord,
-    identify: &'a dyn Identify,
-) -> Task<'a, Result<Applied>> {
-    effects::observe(layout, record)
+    record: Rc<PendingRecord>,
+    identify: Rc<dyn Identify>,
+) -> Task<'static, Result<Applied>> {
+    let layout = layout.clone();
+    effects::observe(&layout, &record)
         .and_then(move |seen| {
-            let Progress { done, leftover } = effects::progress(layout, record, &seen);
+            let Progress { done, leftover } = effects::progress(&layout, &record, &seen);
             let removed = match leftover {
                 Some(leftover) => flow::remove(Root::Folder, &leftover),
                 None => ok(()),
             };
-            removed.and_then(move |()| flow::run(effects::apply(layout, name, record, done, identify)))
+            removed.and_then(move |()| {
+                flow::run(effects::apply(&layout, name, record, done, identify))
+            })
         })
         .task()
 }
 
 /// Removes this writer's staged files that no record in `open` will place: what
 /// a run cut short before its record was written left behind.
-pub fn tidy<'a>(
-    layout: &'a Layout,
+pub fn tidy(
+    layout: &Layout,
     writer: WriterId,
-    open: &'a [PendingRecord],
-) -> Task<'a, Result<()>> {
+    open: &[PendingRecord],
+) -> Task<'static, Result<()>> {
     let keep: BTreeSet<String> = open
         .iter()
         .flat_map(|record| &record.steps)
@@ -236,30 +267,36 @@ pub fn tidy<'a>(
         .task()
 }
 
-/// The effects that settle another writer's record `theirs` as `how`, carried out
-/// by this writer like an intent's. Nothing is written in the other writer's
-/// directory: its staged and trashed bytes are copied, and library files the
-/// settlement displaces go to this writer's trash. Dismissing changes no file.
+/// How far another writer's record `theirs` got, for [`orphan_plan`].
+pub fn progress(layout: &Layout, theirs: &PendingRecord) -> Task<'static, Result<Progress>> {
+    let layout = layout.clone();
+    let theirs = theirs.clone();
+    effects::observe(&layout, &theirs)
+        .map_ok(move |seen| effects::progress(&layout, &theirs, &seen))
+        .task()
+}
+
+/// The effects that settle another writer's record `theirs` as `how`, from
+/// `progress`, carried out by this writer like an intent's. Nothing is written in
+/// the other writer's directory: its staged and trashed bytes are copied, and
+/// library files the settlement displaces go to this writer's trash. Dismissing
+/// changes no file.
 ///
 /// The caller commits the plan, then appends a [`crate::log::Settle`] entry.
-pub fn orphan_plan<'a>(
-    layout: &'a Layout,
-    theirs: &'a PendingRecord,
+pub fn orphan_plan(
+    layout: &Layout,
+    theirs: &PendingRecord,
+    progress: &Progress,
     how: Settlement,
-    env: &'a mut Env,
-) -> Task<'a, Result<EffectPlan>> {
-    effects::observe(layout, theirs)
-        .map_ok(move |seen| {
-            let progress = effects::progress(layout, theirs, &seen);
-            Orphaned {
-                layout,
-                theirs,
-                plan: EffectPlan::new(env.nonce()),
-                env,
-            }
-            .plan(&progress, how)
-        })
-        .task()
+    env: &mut Env,
+) -> EffectPlan {
+    Orphaned {
+        layout,
+        theirs,
+        plan: EffectPlan::new(env.nonce()),
+        env,
+    }
+    .plan(progress, how)
 }
 
 struct Orphaned<'a> {

@@ -11,9 +11,10 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use common::{
-    bound, close, entry, env, identity, layout, path, BlockingMem, Driven, HEAD, IDENTIFY, WRITER,
+    bound, close, entry, env, identify, identity, layout, path, BlockingMem, Driven, HEAD, WRITER,
 };
 use toshokan::binding::Bindings;
 use toshokan::crash::{self, Fault};
@@ -230,10 +231,6 @@ impl Chain for Fake {
     fn continues(&self, hash: EntryHash) -> bool {
         hash == HEAD && self.closed
     }
-
-    fn settles(&self) -> Vec<(WriterId, Nonce)> {
-        Vec::new()
-    }
 }
 
 fn logs(disk: &MemDisk, writer: WriterId) -> BTreeMap<WriterId, Fake> {
@@ -257,7 +254,12 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let layout = layout();
     let d = &mut BlockingMem(disk.clone());
     let logs = logs(disk, WRITER);
-    let found = d.run(recovery::assess(&layout, Some((WRITER, HEAD)), &logs))?;
+    let found = d.run(recovery::assess(
+        &layout,
+        Some((WRITER, HEAD)),
+        &logs,
+        &BTreeSet::new(),
+    ))?;
     assert!(
         found.orphaned.is_empty() && found.ignored.is_empty(),
         "{found:?}"
@@ -268,8 +270,8 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
             let applied = d.run(recovery::settle(
                 &layout,
                 settling.record,
-                &settling.pending,
-                &IDENTIFY,
+                Rc::new(settling.pending.clone()),
+                identify(),
             ))?;
             assert_eq!(applied.outcome, settling.outcome, "predicted");
             outcomes.push(applied.outcome);
@@ -402,7 +404,12 @@ fn settle_orphans(disk: &MemDisk, how: Settlement) -> usize {
     let layout = layout();
     let d = &mut BlockingMem(disk.clone());
     let found = d
-        .run(recovery::assess(&layout, None, &logs(disk, WRITER)))
+        .run(recovery::assess(
+            &layout,
+            None,
+            &logs(disk, WRITER),
+            &BTreeSet::new(),
+        ))
         .unwrap();
     assert!(
         found.own.is_empty() && found.ignored.is_empty(),
@@ -414,17 +421,23 @@ fn settle_orphans(disk: &MemDisk, how: Settlement) -> usize {
             .run(pending::read_one(&layout, orphan.writer, orphan.record))
             .unwrap()
             .expect("the orphan's record is there");
-        let plan = d
-            .run(recovery::orphan_plan(&layout, &theirs, how, &mut env))
-            .unwrap();
-        let record = PendingRecord::new(HEIR, "settle", entry(HEAD), &plan);
+        let progress = d.run(recovery::progress(&layout, &theirs)).unwrap();
+        let plan = Rc::new(recovery::orphan_plan(
+            &layout, &theirs, &progress, how, &mut env,
+        ));
+        let record = Rc::new(PendingRecord::new(HEIR, "settle", entry(HEAD), &plan));
         let prepared = d
-            .run(effects::prepare(&layout, &plan, &record, &IDENTIFY))
+            .run(effects::prepare(
+                &layout,
+                Rc::clone(&plan),
+                Rc::clone(&record),
+                identify(),
+            ))
             .unwrap();
         assert_eq!(prepared, Ok(()));
         if !plan.is_empty() {
             let applied = d
-                .run(effects::apply(&layout, plan.record, &record, 0, &IDENTIFY))
+                .run(effects::apply(&layout, plan.record, record, 0, identify()))
                 .unwrap();
             assert_eq!(applied.outcome, Outcome::Complete, "{how:?}");
             d.run(effects::finish(&layout, HEIR, plan.record)).unwrap();
@@ -521,14 +534,17 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
         fn continues(&self, _: EntryHash) -> bool {
             false
         }
-        fn settles(&self) -> Vec<(WriterId, Nonce)> {
-            vec![(WriterId::from_u128(0x99), Nonce::from_u128(5))]
-        }
     }
     let logs: BTreeMap<WriterId, Settled> = [(WRITER, Settled), (other, Settled)].into();
+    let settled = BTreeSet::from([(other, Nonce::from_u128(5))]);
     let written = disk.mutations();
     let found = d
-        .run(recovery::assess(&layout, Some((WRITER, HEAD)), &logs))
+        .run(recovery::assess(
+            &layout,
+            Some((WRITER, HEAD)),
+            &logs,
+            &settled,
+        ))
         .unwrap();
     assert_eq!(disk.mutations(), written, "assessing wrote");
     let names = |s: &[recovery::Settling]| s.iter().map(|s| s.record.to_u128()).collect::<Vec<_>>();

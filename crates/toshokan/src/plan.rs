@@ -85,6 +85,13 @@ pub enum FileChange {
     /// Moves everything under `from` to the same place under `to`. Refused when
     /// something is at `to`.
     MoveTree { from: RelPath, to: RelPath },
+    /// Gives the entity the file at `path` as it is, moving nothing: for a library
+    /// file no entity is bound to. Undo leaves the file where it is.
+    Adopt {
+        entity: Target,
+        path: RelPath,
+        expect: Expect,
+    },
     /// Brings displaced bytes back from this writer's trash to `to`.
     Restore {
         entity: EntityId,

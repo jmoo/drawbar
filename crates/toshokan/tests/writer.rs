@@ -459,16 +459,16 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
             writer.seal();
         }
         backend.fail = true;
-        let failed = run(
+        let (writer, failed) = run(
             &mut backend,
             writer.append(vec![(Hlc::ZERO, intent())], SegmentName::from_u128(9)),
         );
         assert!(failed.is_err());
-        let last = run(
+        let (writer, last) = run(
             &mut backend,
             writer.append(vec![(Hlc::ZERO, intent())], SegmentName::from_u128(10)),
-        )
-        .unwrap();
+        );
+        let last = last.unwrap();
         let view = fresh(&backend.disk);
         let log = &view.writers()[&writer.id()];
         assert_eq!(log.heads(), [last[0].hash()], "open {open}");

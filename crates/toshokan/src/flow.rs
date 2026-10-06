@@ -2,6 +2,7 @@
 //! consumes its result, so a sequence of requests reads as a sequence.
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use crate::env::Identify;
 use crate::error::{Error, Result};
@@ -327,7 +328,7 @@ pub(crate) fn lock<'a>(name: RelPath) -> Fallible<'a, Lock> {
 }
 
 /// The sibling a replacement of `path` is staged in.
-fn staged(path: &RelPath) -> RelPath {
+pub(crate) fn staged(path: &RelPath) -> RelPath {
     let parent = path.parent().expect("a replaced file has a parent");
     let name = path.name().expect("a replaced file has a name");
     parent
@@ -439,8 +440,9 @@ pub(crate) struct Observed {
 pub(crate) fn observe<'a>(
     root: Root,
     path: &RelPath,
-    identify: &'a dyn Identify,
+    identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Option<Observed>> {
+    let identify = Rc::clone(identify);
     let path = path.clone();
     stat(root, &path).and_then(move |meta| match meta {
         None => ok(None),
@@ -453,7 +455,7 @@ pub(crate) fn observe<'a>(
             error: IoError::IsDirectory,
         })),
         Some(Meta { len, modified, .. }) => {
-            identity(root, path, len, identify).map_ok(move |identity| {
+            identity(root, path, len, &identify).map_ok(move |identity| {
                 Some(Observed {
                     len,
                     modified,
@@ -469,8 +471,9 @@ pub(crate) fn identity<'a>(
     root: Root,
     path: RelPath,
     len: u64,
-    identify: &'a dyn Identify,
+    identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Identity> {
+    let identify = Rc::clone(identify);
     read_ranges(root, path, identify.ranges(len))
         .map_ok(move |parts| identify.identify(len, &parts))
 }

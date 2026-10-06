@@ -9,8 +9,9 @@
 //! never write; every commit pins the bindings this writer holds.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
-use crate::env::Identify;
+use crate::env::{Identify, Names};
 use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{EntityId, Identity};
@@ -25,22 +26,6 @@ use crate::view::{FileRef, FileState};
 /// Every entity's surviving file-register writes, as the merge gives them. More
 /// than one is a conflict.
 pub type Facts = BTreeMap<EntityId, Vec<Written<FileFact>>>;
-
-/// How the volume compares names: case and Unicode normalization.
-pub trait Names {
-    /// The form of `path` under which the volume takes two paths for one.
-    fn key(&self, path: &str) -> String;
-}
-
-/// Names are equal only byte for byte.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ExactNames;
-
-impl Names for ExactNames {
-    fn key(&self, path: &str) -> String {
-        path.to_owned()
-    }
-}
 
 /// One library file as a scan found it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,44 +54,46 @@ pub struct Bindings {
 
 /// Lists every library file outside toshokan's root. Requests only
 /// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
-pub fn scan<'a>(
-    layout: &'a Layout,
-    identify: &'a dyn Identify,
-    facts: &'a Facts,
-    previous: &'a Scan,
-) -> Task<'a, Result<Scan>> {
+pub fn scan(
+    layout: &Layout,
+    identify: &Rc<dyn Identify>,
+    facts: &Facts,
+    previous: &Scan,
+) -> Task<'static, Result<Scan>> {
     let lengths: BTreeSet<u64> = facts
         .values()
         .flatten()
         .map(|fact| fact.value.len)
         .collect();
-    let known: BTreeMap<(&RelPath, u64, Option<u64>), Identity> = facts
+    let known: BTreeMap<(RelPath, u64, Option<u64>), Identity> = facts
         .values()
         .flatten()
         .map(|fact| {
             (
-                (&fact.value.path, fact.value.len, fact.value.modified),
+                (fact.value.path.clone(), fact.value.len, fact.value.modified),
                 fact.value.identity,
             )
         })
         .chain(previous.files.iter().filter_map(|(path, file)| {
             file.identity
-                .map(|identity| ((path, file.len, file.modified), identity))
+                .map(|identity| ((path.clone(), file.len, file.modified), identity))
         }))
         .collect();
-    walk(layout, RelPath::ROOT, Scan::default())
+    let identify = Rc::clone(identify);
+    walk(Rc::new(layout.clone()), RelPath::ROOT, Scan::default())
         .and_then(move |mut scan| {
             let unknown: Vec<(RelPath, u64)> = scan
                 .files
                 .iter_mut()
                 .filter_map(|(path, file)| {
-                    file.identity = known.get(&(path, file.len, file.modified)).copied();
+                    let key = (path.clone(), file.len, file.modified);
+                    file.identity = known.get(&key).copied();
                     let needed = file.identity.is_none() && lengths.contains(&file.len);
                     needed.then(|| (path.clone(), file.len))
                 })
                 .collect();
             fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
-                flow::identity(Root::Folder, path.clone(), len, identify).map_ok(move |identity| {
+                flow::identity(Root::Folder, path.clone(), len, &identify).map_ok(move |identity| {
                     if let Some(file) = scan.files.get_mut(&path) {
                         file.identity = Some(identity);
                     }
@@ -117,7 +104,7 @@ pub fn scan<'a>(
         .task()
 }
 
-fn walk<'a>(layout: &'a Layout, dir: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
+fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
     flow::list(Root::Folder, &dir).and_then(move |entries| {
         fold(entries.into_iter(), scan, move |mut scan, entry| {
             let path = dir
@@ -125,7 +112,7 @@ fn walk<'a>(layout: &'a Layout, dir: RelPath, scan: Scan) -> flow::Fallible<'a, 
                 .expect("a listed name is one component");
             match entry.kind {
                 Kind::Directory if layout.owns(&path) => ok(scan),
-                Kind::Directory => walk(layout, path, scan),
+                Kind::Directory => walk(Rc::clone(&layout), path, scan),
                 Kind::File => flow::stat(Root::Folder, &path).then(move |meta| match meta {
                     Ok(Some(meta)) if meta.kind == Kind::File => {
                         scan.files.insert(
@@ -349,9 +336,9 @@ pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
             modified: found.modified,
         };
         if pinned != written.value {
-            ops.push(Op::File {
+            ops.push(Op::Pin {
                 entity,
-                file: Some(pinned),
+                file: pinned,
                 replaces: vec![written.entry],
             });
         }
@@ -363,7 +350,7 @@ pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
 mod tests {
     use super::*;
     use crate::disk::MemDisk;
-    use crate::env::PrefixIdentity;
+    use crate::env::{ExactNames, PrefixIdentity};
     use crate::ids::{EntryHash, Hlc, WriterId};
     use crate::io::Io;
 
@@ -661,9 +648,9 @@ mod tests {
             let scan = scanned(files, &facts);
             pins(&facts, &bind(&facts, &scan, &ExactNames), &scan)
         };
-        let [Op::File {
+        let [Op::Pin {
             entity,
-            file: Some(moved),
+            file: moved,
             replaces,
         }] = &pins_for(&[("b", 0)])[..]
         else {
@@ -686,7 +673,7 @@ mod tests {
     fn a_scan_reads_identities_only_where_length_and_time_cannot_decide() {
         let disk = MemDisk::new();
         let layout = Layout::new(".t").unwrap();
-        let identify = PrefixIdentity { prefix: 4 };
+        let identify: Rc<dyn Identify> = Rc::new(PrefixIdentity { prefix: 4 });
         for (at, bytes) in [
             ("d/a", &b"0123456789"[..]),
             ("b", b"01234567890123456789"),

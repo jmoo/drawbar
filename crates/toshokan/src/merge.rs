@@ -643,6 +643,11 @@ impl Folded {
         items
     }
 
+    /// Every unfinished effect some writer settled, by its writer and record.
+    pub fn settlements(&self) -> &BTreeSet<(WriterId, Nonce)> {
+        &self.settled
+    }
+
     /// Whether some writer settled `writer`'s unfinished effect `record`.
     pub fn settled(&self, writer: WriterId, record: Nonce) -> bool {
         self.settled.contains(&(writer, record))

@@ -180,6 +180,17 @@ impl Creating<'_> {
         self
     }
 
+    /// Gives the new entity the library file at `path`, which holds what `expect`
+    /// says: a file no entity is bound to, such as a copy.
+    pub fn adopt(&mut self, path: &RelPath, expect: Expect) -> &mut Self {
+        self.plan.files.push(FileChange::Adopt {
+            entity: self.target,
+            path: path.clone(),
+            expect,
+        });
+        self
+    }
+
     /// Writes the new entity's file.
     pub fn save(&mut self, path: &RelPath, bytes: Vec<u8>, expect: Expect) -> &mut Self {
         self.plan.files.push(FileChange::Save {

@@ -77,6 +77,21 @@ impl Writer {
         logs: &'a BTreeMap<WriterId, WriterLog>,
     ) -> Task<'a, Result<Claimed>> {
         let layout = layout.clone();
+        flow::run(Self::pick())
+            .and_then(move |picked| match picked {
+                None => flow::ok(Claimed {
+                    writer: None,
+                    start: Start::New,
+                }),
+                Some(picked) => flow::run(picked.resume(layout, logs)),
+            })
+            .task()
+    }
+
+    /// Locks the first writer of this install's pool that is not retired, whose
+    /// lock it gets and whose head record reads; `None` when there is none. The
+    /// lock is held until [`Picked::resume`] retires it or the writer closes.
+    pub fn pick() -> Task<'static, Result<Option<Picked>>> {
         flow::list(Root::Local, &RelPath::ROOT)
             .and_then(move |entries| {
                 let mut pool: Vec<EntryHash> = entries
@@ -85,7 +100,7 @@ impl Writer {
                     .filter_map(|entry| entry.name.parse().ok())
                     .collect();
                 pool.sort();
-                claim_first(layout, logs, pool)
+                pick_first(pool)
             })
             .task()
     }
@@ -175,6 +190,7 @@ impl Writer {
 
     /// Appends `kinds` as consecutive entries, durably, opening a segment named
     /// `fresh` when none is open, then records the new head in the local root.
+    /// Returns the writer with the result.
     ///
     /// Refuses, appending nothing, an entry too long for a line, and fails with
     /// [`Error::Rekey`] when the folder no longer holds this writer's head. A
@@ -184,37 +200,40 @@ impl Writer {
     /// entries reached the folder: the writer has moved on to them, and its next
     /// append confirms the folder still holds them.
     pub fn append(
-        &mut self,
+        self,
         kinds: Vec<(Hlc, EntryKind)>,
         fresh: SegmentName,
-    ) -> Task<'_, Result<Vec<Entry>>> {
+    ) -> Task<'static, (Writer, Result<Vec<Entry>>)> {
         let mut prev = self.head;
         let mut entries = Vec::with_capacity(kinds.len());
         for (at, kind) in kinds {
             let Ok(entry) = Entry::encode(prev, at, kind) else {
-                return Task::ready(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
+                let refused = Error::Refused(Refusal::Invalid(Invalid::TooLong));
+                return Task::ready((self, Err(refused)));
             };
             prev = entry.hash();
             entries.push(entry);
         }
         if entries.is_empty() {
-            return Task::ready(Ok(entries));
+            return Task::ready((self, Ok(entries)));
         }
         let bytes: Vec<u8> = entries
             .iter()
             .flat_map(|entry| entry.line.to_bytes())
             .collect();
         self.confirm()
-            .and_then(move |confirmed| {
+            .then(move |confirmed| {
+                let mut writer = self;
                 let open = match confirmed {
-                    Confirmed::Open(open) => Some(open),
-                    Confirmed::Grown => {
-                        self.seal();
+                    Err(error) => return Flow::Done((writer, Err(error))),
+                    Ok(Confirmed::Open(open)) => Some(open),
+                    Ok(Confirmed::Grown) => {
+                        writer.seal();
                         None
                     }
-                    Confirmed::Fresh => None,
+                    Ok(Confirmed::Fresh) => None,
                 };
-                self.write(open, fresh, bytes, entries)
+                writer.write(open, fresh, bytes, entries)
             })
             .task()
     }
@@ -233,7 +252,7 @@ impl Writer {
     }
 
     /// Seals the open segment and releases the writer's lock.
-    pub fn close(&mut self) -> Task<'_, Result<()>> {
+    pub fn close(&mut self) -> Task<'static, Result<()>> {
         self.seal();
         flow::act(Io::Unlock {
             name: Layout::lock(self.genesis),
@@ -268,12 +287,12 @@ impl Writer {
     }
 
     fn write(
-        &mut self,
+        mut self,
         open: Option<OpenSegment>,
         fresh: SegmentName,
         bytes: Vec<u8>,
         entries: Vec<Entry>,
-    ) -> Flow<'_, Result<Vec<Entry>>> {
+    ) -> Flow<'static, (Writer, Result<Vec<Entry>>)> {
         let len = bytes.len() as u64;
         let segment = open.map_or(fresh, |open| open.name);
         let path = self.layout.segment(self.id, segment);
@@ -298,7 +317,7 @@ impl Writer {
                 if open.is_some() {
                     self.seal();
                 }
-                return Flow::Done(Err(error));
+                return Flow::Done((self, Err(error)));
             }
             let start = open.map_or(0, |open| open.len);
             self.open = Some(OpenSegment {
@@ -310,9 +329,10 @@ impl Writer {
             sync_all(Root::Folder, synced).then(move |result| match result {
                 Err(error) => {
                     self.seal();
-                    Flow::Done(Err(error))
+                    Flow::Done((self, Err(error)))
                 }
-                Ok(()) => record_head(id, genesis, head).map_ok(move |()| entries),
+                Ok(()) => record_head(id, genesis, head)
+                    .then(move |recorded| Flow::Done((self, recorded.map(|()| entries)))),
             })
         })
     }
@@ -333,16 +353,9 @@ fn tip(
     }
 }
 
-fn claim_first(
-    layout: Layout,
-    logs: &BTreeMap<WriterId, WriterLog>,
-    mut pool: Vec<EntryHash>,
-) -> Flow<'_, Result<Claimed>> {
+fn pick_first<'a>(mut pool: Vec<EntryHash>) -> Flow<'a, Result<Option<Picked>>> {
     if pool.is_empty() {
-        return flow::ok(Claimed {
-            writer: None,
-            start: Start::New,
-        });
+        return flow::ok(None);
     }
     let genesis = pool.remove(0);
     flow::stat(Root::Local, &Layout::retired(genesis))
@@ -351,64 +364,95 @@ fn claim_first(
             None => flow::lock(Layout::lock(genesis)),
         })
         .and_then(move |lock| match lock {
-            Lock::Held => claim_first(layout, logs, pool),
+            Lock::Held => pick_first(pool),
             Lock::Acquired => {
                 flow::read_replaced(Root::Local, Layout::head(genesis)).and_then(move |bytes| {
                     let record =
                         bytes.and_then(|bytes| serde_json::from_slice::<HeadRecord>(&bytes).ok());
                     match record {
-                        None => unlock(genesis).and_then(move |()| claim_first(layout, logs, pool)),
-                        Some(record) => resume(layout, logs, genesis, record),
+                        None => unlock(genesis).and_then(move |()| pick_first(pool)),
+                        Some(record) => flow::ok(Some(Picked { genesis, record })),
                     }
                 })
             }
         })
 }
 
-/// Continues the writer whose lock is held and whose head was `record`, or
-/// retires it.
-fn resume<'a>(
-    layout: Layout,
-    logs: &BTreeMap<WriterId, WriterLog>,
+/// A writer of the pool whose lock this process holds, not yet confirmed to be
+/// able to continue.
+pub struct Picked {
     genesis: EntryHash,
     record: HeadRecord,
-) -> Flow<'a, Result<Claimed>> {
-    let id = record.writer;
-    let tip = match logs.get(&id) {
-        Some(log) => tip(log, genesis, record.head),
-        None => Err(Rekey::Restored),
-    };
-    let tip = match tip {
-        Ok(tip) => tip,
-        Err(why) => return retire(genesis, id, why),
-    };
-    holds(&layout, id, tip).and_then(move |held| match held {
-        false => retire(genesis, id, Rekey::Restored),
-        true => flow::ok(Claimed {
-            writer: Some(Writer {
-                layout,
-                id,
-                genesis,
-                head: tip,
-                open: None,
-                sealed: Vec::new(),
-            }),
-            start: Start::Resumed(id),
-        }),
-    })
 }
 
-fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<Claimed>> {
+impl Picked {
+    pub fn genesis(&self) -> EntryHash {
+        self.genesis
+    }
+
+    pub fn writer(&self) -> WriterId {
+        self.record.writer
+    }
+
+    /// Continues the writer if its history did not fork and the folder still
+    /// holds what it last wrote, or retires it. `logs` must be read from the
+    /// folder just before.
+    pub fn resume(
+        self,
+        layout: Layout,
+        logs: &BTreeMap<WriterId, WriterLog>,
+    ) -> Task<'static, Result<Claimed>> {
+        let Picked { genesis, record } = self;
+        let id = record.writer;
+        let tip = match logs.get(&id) {
+            Some(log) => tip(log, genesis, record.head),
+            None => Err(Rekey::Restored),
+        };
+        let tip = match tip {
+            Ok(tip) => tip,
+            Err(why) => return retire(genesis, id, why).task(),
+        };
+        holds(&layout, id, tip)
+            .and_then(move |held| match held {
+                false => retire(genesis, id, Rekey::Restored),
+                true => flow::ok(Claimed {
+                    writer: Some(Writer {
+                        layout,
+                        id,
+                        genesis,
+                        head: tip,
+                        open: None,
+                        sealed: Vec::new(),
+                    }),
+                    start: Start::Resumed(id),
+                }),
+            })
+            .task()
+    }
+}
+
+/// Retires the writer whose genesis entry is `genesis`, which this process
+/// writes as: it leaves the pool and is never written again.
+pub fn retire_writer(genesis: EntryHash) -> Task<'static, Result<()>> {
+    mark_retired(genesis)
+        .and_then(move |()| unlock(genesis))
+        .task()
+}
+
+fn mark_retired<'a>(genesis: EntryHash) -> Flow<'a, Result<()>> {
     let marker = Io::Create {
         root: Root::Local,
         path: Layout::retired(genesis),
         bytes: Vec::new(),
     };
-    flow::attempt(marker.clone())
-        .then(move |result| match result {
-            Ok(_) | Err(crate::io::IoError::AlreadyExists) => flow::ok(()),
-            Err(error) => Flow::Done(Err(marker.failed(error))),
-        })
+    flow::attempt(marker.clone()).then(move |result| match result {
+        Ok(_) | Err(crate::io::IoError::AlreadyExists) => flow::ok(()),
+        Err(error) => Flow::Done(Err(marker.failed(error))),
+    })
+}
+
+fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<Claimed>> {
+    mark_retired(genesis)
         .and_then(move |()| unlock(genesis))
         .map_ok(move |()| Claimed {
             writer: None,
@@ -420,6 +464,12 @@ fn unlock<'a>(genesis: EntryHash) -> Flow<'a, Result<()>> {
     flow::act(Io::Unlock {
         name: Layout::lock(genesis),
     })
+}
+
+/// The writer and head a `head.json` names; `None` when it does not read.
+pub(crate) fn head_record(bytes: &[u8]) -> Option<(WriterId, EntryHash)> {
+    let record: HeadRecord = serde_json::from_slice(bytes).ok()?;
+    Some((record.writer, record.head))
 }
 
 fn record_head<'a>(writer: WriterId, genesis: EntryHash, head: EntryHash) -> Flow<'a, Result<()>> {

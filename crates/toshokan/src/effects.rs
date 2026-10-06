@@ -12,6 +12,7 @@
 //! [`finish`]. Recovery resumes [`apply`] where an interrupted run stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
@@ -145,9 +146,14 @@ impl EffectPlan {
         }
     }
 
-    /// Whether the intent has no file effects, and so needs no pending record.
+    /// Whether the intent has no file effects at all.
     pub fn is_empty(&self) -> bool {
-        self.steps.is_empty()
+        self.steps.is_empty() && self.checks.is_empty() && self.files.is_empty()
+    }
+
+    /// Whether the effects change the folder, and so need a pending record.
+    pub fn moves_files(&self) -> bool {
+        !self.steps.is_empty()
     }
 }
 
@@ -268,6 +274,24 @@ impl Resolver<'_> {
                 self.touch(&to)?;
                 self.check(&to, Expect::Absent);
                 self.move_tree(&from, &to, capabilities.rename_dir)?;
+            }
+            FileChange::Adopt {
+                entity,
+                path,
+                expect,
+            } => {
+                let entity = match *entity {
+                    Target::Existing(entity) => entity,
+                    Target::New(n) => *created.get(n).expect("the plan creates what it names"),
+                };
+                let path = self.library(path)?;
+                self.claim(entity, &path)?;
+                self.check(&path, *expect);
+                self.plan.files.push(FileEnd {
+                    entity,
+                    path: Some(path),
+                    done_after: 0,
+                });
             }
             FileChange::Restore {
                 entity,
@@ -419,27 +443,52 @@ impl Resolver<'_> {
 /// Stages and syncs the plan's bytes, checks every precondition, then writes
 /// `record` as the plan's pending record, whole or not at all. A failed
 /// precondition removes what was staged and refuses; nothing in a user path has
-/// changed. An empty plan does nothing. A staged copy is read whole into memory.
-pub fn prepare<'a>(
-    layout: &'a Layout,
-    plan: &'a EffectPlan,
-    record: &'a PendingRecord,
-    identify: &'a dyn Identify,
-) -> Task<'a, Result<std::result::Result<(), Refusal>>> {
+/// changed. A plan that moves no file only checks. A staged copy is read whole
+/// into memory.
+pub fn prepare(
+    layout: &Layout,
+    plan: Rc<EffectPlan>,
+    record: Rc<PendingRecord>,
+    identify: Rc<dyn Identify>,
+) -> Task<'static, Result<std::result::Result<(), Refusal>>> {
     if plan.is_empty() {
         return Task::ready(Ok(Ok(())));
     }
+    let layout = layout.clone();
     let writer = record.writer;
-    stage(layout, writer, &plan.staged)
-        .and_then(move |()| refusal(layout, writer, plan, identify))
+    if !plan.moves_files() {
+        return refusal(&layout, writer, &plan, &identify)
+            .map_ok(|refused| refused.map_or(Ok(()), Err))
+            .task();
+    }
+    stage(&layout, writer, Rc::clone(&plan))
+        .and_then({
+            let (layout, plan) = (layout.clone(), Rc::clone(&plan));
+            move |()| refusal(&layout, writer, &plan, &identify)
+        })
         .and_then(move |refused| match refused {
-            Some(refusal) => each(plan.staged.iter(), move |(name, _)| {
-                flow::remove(Root::Folder, &layout.staged(writer, *name))
-            })
-            .map_ok(|()| Err(refusal)),
-            None => write_record(layout, writer, plan.record, record).map_ok(|()| Ok(())),
+            Some(refusal) => {
+                let staged: Vec<RelPath> = plan
+                    .staged
+                    .iter()
+                    .map(|(name, _)| layout.staged(writer, *name))
+                    .collect();
+                each(staged.into_iter(), |path| flow::remove(Root::Folder, &path))
+                    .map_ok(|()| Err(refusal))
+            }
+            None => write_record(&layout, writer, plan.record, &record).map_ok(|()| Ok(())),
         })
         .task()
+}
+
+/// The refusal [`prepare`] would give, found without writing anything.
+pub fn check(
+    layout: &Layout,
+    writer: WriterId,
+    plan: &EffectPlan,
+    identify: &Rc<dyn Identify>,
+) -> Task<'static, Result<Option<Refusal>>> {
+    refusal(layout, writer, plan, identify).task()
 }
 
 /// Writes the record whole: staged and synced first, then renamed into place, so
@@ -461,18 +510,17 @@ fn write_record<'a>(
         .and_then(move |()| flow::rename(Root::Folder, &staged, &path))
 }
 
-fn stage<'a>(
-    layout: &'a Layout,
-    writer: WriterId,
-    staged: &'a [(Nonce, Staged)],
-) -> Fallible<'a, ()> {
-    if staged.is_empty() {
+fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallible<'a, ()> {
+    if plan.staged.is_empty() {
         return ok(());
     }
+    let layout = layout.clone();
     let dir = layout.tmp_dir(writer);
+    let synced = dir.clone();
     flow::ensure_dir(Root::Folder, &dir)
         .and_then(move |()| {
-            each(staged.iter(), move |(name, staged)| {
+            each(0..plan.staged.len(), move |i| {
+                let (name, staged) = &plan.staged[i];
                 let path = layout.staged(writer, *name);
                 let bytes = match staged {
                     Staged::Bytes(bytes) => ok(bytes.clone()),
@@ -492,23 +540,24 @@ fn stage<'a>(
                     .and_then(move |()| flow::sync(Root::Folder, &path))
             })
         })
-        .and_then(move |()| flow::sync(Root::Folder, &dir))
+        .and_then(move |()| flow::sync(Root::Folder, &synced))
 }
 
 /// The first precondition that does not hold, or a trash item a step needs that
 /// is gone.
 fn refusal<'a>(
-    layout: &'a Layout,
+    layout: &Layout,
     writer: WriterId,
-    plan: &'a EffectPlan,
-    identify: &'a dyn Identify,
+    plan: &EffectPlan,
+    identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Option<Refusal>> {
+    let identify = Rc::clone(identify);
     let checked = fold(
-        plan.checks.iter(),
+        plan.checks.clone().into_iter(),
         None,
         move |refused, check| match refused {
             Some(refused) => ok(Some(refused)),
-            None => found(&check.path, identify).map_ok(move |found| {
+            None => found(&check.path, &identify).map_ok(move |found| {
                 let holds = match (check.expect, found) {
                     (Expect::Absent, None) => true,
                     (Expect::Holds(expected), Some(found)) => expected == found,
@@ -516,7 +565,7 @@ fn refusal<'a>(
                 };
                 (!holds).then(|| {
                     Refusal::Changed(Box::new(Mismatch {
-                        path: check.path.clone(),
+                        path: check.path,
                         expected: check.expect,
                         found,
                     }))
@@ -524,12 +573,16 @@ fn refusal<'a>(
             }),
         },
     );
-    let items = plan.steps.iter().filter_map(move |step| match step {
-        EffectStep::FromTrash { item, .. } => Some(layout.trash(writer, *item)),
-        _ => None,
-    });
+    let items: Vec<RelPath> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::FromTrash { item, .. } => Some(layout.trash(writer, *item)),
+            _ => None,
+        })
+        .collect();
     checked.and_then(move |refused| {
-        fold(items, refused, |refused, item| match refused {
+        fold(items.into_iter(), refused, |refused, item| match refused {
             Some(refused) => ok(Some(refused)),
             None => flow::stat(Root::Folder, &item)
                 .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
@@ -539,8 +592,9 @@ fn refusal<'a>(
 
 /// The identity of the file at a library path; a directory there is something
 /// already there.
-fn found<'a>(path: &RelPath, identify: &'a dyn Identify) -> Fallible<'a, Option<Identity>> {
+fn found<'a>(path: &RelPath, identify: &Rc<dyn Identify>) -> Fallible<'a, Option<Identity>> {
     let path = path.clone();
+    let identify = Rc::clone(identify);
     flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
         None => ok(None),
         Some(meta) if meta.kind == Kind::Directory => Flow::Done(Err(Error::Io {
@@ -548,7 +602,7 @@ fn found<'a>(path: &RelPath, identify: &'a dyn Identify) -> Fallible<'a, Option<
             path,
             error: IoError::AlreadyExists,
         })),
-        Some(meta) => flow::identity(Root::Folder, path, meta.len, identify).map_ok(Some),
+        Some(meta) => flow::identity(Root::Folder, path, meta.len, &identify).map_ok(Some),
     })
 }
 
@@ -556,24 +610,28 @@ fn found<'a>(path: &RelPath, identify: &'a dyn Identify) -> Fallible<'a, Option<
 /// source is gone, then reports what the folder shows. A step that fails stops the
 /// run with [`Outcome::Partial`]; staged bytes that were not placed then go to this
 /// writer's trash. The pending record `name` stays until [`finish`].
-pub fn apply<'a>(
-    layout: &'a Layout,
+pub fn apply(
+    layout: &Layout,
     name: Nonce,
-    record: &'a PendingRecord,
+    record: Rc<PendingRecord>,
     start: usize,
-    identify: &'a dyn Identify,
-) -> Task<'a, Result<Applied>> {
+    identify: Rc<dyn Identify>,
+) -> Task<'static, Result<Applied>> {
+    let layout = layout.clone();
     let writer = record.writer;
-    let steps = record.steps.iter().enumerate().skip(start);
+    let steps = start..record.steps.len();
+    let running = (layout.clone(), Rc::clone(&record));
     fold(
         steps,
         None,
-        move |failed: Option<IoError>, (i, step)| match failed {
+        move |failed: Option<IoError>, i| match failed {
             Some(failed) => ok(Some(failed)),
-            None => run_step(layout, writer, step).then(move |result| match result {
-                Ok(()) => ok(None),
-                Err(Error::Io { error, .. }) => ok(Some(error)),
-                Err(other) => ok(Some(IoError::Other(format!("step {i}: {other}")))),
+            None => run_step(&running.0, writer, &running.1.steps[i]).then(move |result| {
+                match result {
+                    Ok(()) => ok(None),
+                    Err(Error::Io { error, .. }) => ok(Some(error)),
+                    Err(other) => ok(Some(IoError::Other(format!("step {i}: {other}")))),
+                }
             }),
         },
     )
@@ -603,11 +661,11 @@ fn run_step<'a>(layout: &Layout, writer: WriterId, step: &EffectStep) -> Fallibl
 
 /// What the steps did: every step when none failed, else what the folder shows.
 fn account<'a>(
-    layout: &'a Layout,
+    layout: Layout,
     name: Nonce,
-    record: &'a PendingRecord,
+    record: Rc<PendingRecord>,
     failed: Option<IoError>,
-    identify: &'a dyn Identify,
+    identify: Rc<dyn Identify>,
 ) -> Fallible<'a, Applied> {
     let writer = record.writer;
     let done: Fallible<'a, Progress> = match failed {
@@ -615,7 +673,10 @@ fn account<'a>(
             done: record.steps.len(),
             leftover: None,
         }),
-        Some(_) => observe(layout, record).map_ok(move |seen| progress(layout, record, &seen)),
+        Some(_) => {
+            let (layout, record) = (layout.clone(), Rc::clone(&record));
+            observe(&layout, &record).map_ok(move |seen| progress(&layout, &record, &seen))
+        }
     };
     done.and_then(move |progress| {
         let unplaced: Vec<(Nonce, RelPath)> = record.steps[progress.done..]
@@ -625,85 +686,90 @@ fn account<'a>(
                 _ => None,
             })
             .collect();
+        let trashed: Vec<(Nonce, RelPath)> = record.steps[..progress.done]
+            .iter()
+            .filter_map(|step| match step {
+                EffectStep::ToTrash { path, item } => Some((*item, path.clone())),
+                _ => None,
+            })
+            .collect();
+        let ends: Vec<FileEnd> = record
+            .files
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .cloned()
+            .collect();
+        let outcome = match record.steps.get(progress.done) {
+            None => Outcome::Complete,
+            Some(step) => Outcome::Partial(PartialReport {
+                applied: progress.done,
+                stopped: step.path().clone(),
+                error: failed.unwrap_or(IoError::NotFound),
+                record: Some(name),
+            }),
+        };
+        let sweeping = layout.clone();
         fold(
             unplaced.into_iter(),
             Vec::new(),
             move |mut swept, (staged, path)| {
-                let from = layout.staged(writer, staged);
+                let from = sweeping.staged(writer, staged);
+                let to = sweeping.trash(writer, staged);
                 flow::stat(Root::Folder, &from).and_then(move |meta| match meta {
                     None => ok(swept),
-                    Some(_) => flow::rename(Root::Folder, &from, &layout.trash(writer, staged))
-                        .map_ok(move |()| {
-                            swept.push((staged, path));
-                            swept
-                        }),
+                    Some(_) => flow::rename(Root::Folder, &from, &to).map_ok(move |()| {
+                        swept.push((staged, path));
+                        swept
+                    }),
                 })
             },
         )
-        .and_then(move |swept| {
-            let trashed = record.steps[..progress.done]
-                .iter()
-                .filter_map(|step| match step {
-                    EffectStep::ToTrash { path, item } => Some((*item, path.clone())),
-                    _ => None,
-                });
-            let items: Vec<(Nonce, RelPath)> = trashed.chain(swept).collect();
-            fold(
-                items.into_iter(),
-                Vec::new(),
-                move |mut displaced, (item, from)| {
-                    flow::observe(Root::Folder, &layout.trash(writer, item), identify).map_ok(
-                        move |seen| {
-                            displaced.extend(seen.map(|seen| Displaced {
-                                item,
-                                from,
-                                identity: seen.identity,
-                                len: seen.len,
-                            }));
-                            displaced
-                        },
-                    )
-                },
-            )
+        .and_then({
+            let identify = Rc::clone(&identify);
+            move |swept| {
+                let items: Vec<(Nonce, RelPath)> = trashed.into_iter().chain(swept).collect();
+                fold(
+                    items.into_iter(),
+                    Vec::new(),
+                    move |mut displaced, (item, from)| {
+                        flow::observe(Root::Folder, &layout.trash(writer, item), &identify).map_ok(
+                            move |seen| {
+                                displaced.extend(seen.map(|seen| Displaced {
+                                    item,
+                                    from,
+                                    identity: seen.identity,
+                                    len: seen.len,
+                                }));
+                                displaced
+                            },
+                        )
+                    },
+                )
+            }
         })
         .and_then(move |displaced| {
-            let ends = record
-                .files
-                .iter()
-                .filter(move |end| end.done_after <= progress.done);
-            fold(ends, Vec::new(), move |mut files, end| match &end.path {
+            fold(ends.into_iter(), Vec::new(), move |mut files, end| match end.path {
                 None => {
                     files.push((end.entity, None));
                     ok(files)
                 }
-                Some(path) => {
-                    let path = path.clone();
-                    flow::observe(Root::Folder, &path, identify).map_ok(move |seen| {
-                        files.extend(seen.map(|seen| {
-                            let fact = FileFact {
-                                path,
-                                identity: seen.identity,
-                                len: seen.len,
-                                modified: seen.modified,
-                            };
-                            (end.entity, Some(fact))
-                        }));
-                        files
-                    })
-                }
+                Some(path) => flow::observe(Root::Folder, &path, &identify).map_ok(move |seen| {
+                    files.extend(seen.map(|seen| {
+                        let fact = FileFact {
+                            path,
+                            identity: seen.identity,
+                            len: seen.len,
+                            modified: seen.modified,
+                        };
+                        (end.entity, Some(fact))
+                    }));
+                    files
+                }),
             })
             .map_ok(move |files| Applied {
                 displaced,
                 files,
-                outcome: match record.steps.get(progress.done) {
-                    None => Outcome::Complete,
-                    Some(step) => Outcome::Partial(PartialReport {
-                        applied: progress.done,
-                        stopped: step.path().clone(),
-                        error: failed.unwrap_or(IoError::NotFound),
-                        record: Some(name),
-                    }),
-                },
+                outcome,
             })
         })
     })
@@ -726,7 +792,7 @@ pub(crate) struct Observation {
 /// How far a record's steps got: the first `done`, and a source the last of them
 /// left behind beside its destination with the same bytes.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct Progress {
+pub struct Progress {
     pub done: usize,
     pub leftover: Option<RelPath>,
 }

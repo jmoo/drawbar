@@ -43,6 +43,11 @@ pub enum Error {
     #[error("refused: {0}")]
     Refused(Refusal),
 
+    /// This instance has not written to the library yet, so it has no directory
+    /// in the local root to keep drafts in.
+    #[error("this instance has not committed anything yet")]
+    NoWriter,
+
     /// This writer cannot write again: appending would continue a history the
     /// folder no longer holds, or that another instance also continues. Nothing
     /// was written; the library continues as a new writer.
@@ -58,7 +63,7 @@ pub enum Why {
     /// it cannot append without misrepresenting it.
     #[error("this writer's history was written by a newer version")]
     NewerOwnHistory { entry: EntryHash },
-    /// The folder refused a write when the writer started.
+    /// The folder cannot append to files or rename them, which writing needs.
     #[error("the folder cannot be written")]
     FolderNotWritable,
     /// The clock cannot advance past this writer's last entry.

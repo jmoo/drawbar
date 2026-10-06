@@ -1,5 +1,6 @@
-//! What the core takes from outside: time, randomness, the app's identity function
-//! and the writer's label. Tests inject deterministic ones, so every run replays.
+//! What the core takes from outside: time, randomness, the app's identity function,
+//! the volume's name rules and the writer's label. Tests inject deterministic ones,
+//! so every run replays.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -29,11 +30,29 @@ pub trait Identify {
     fn identify(&self, len: u64, parts: &[Vec<u8>]) -> Identity;
 }
 
-/// Everything nondeterministic the core uses.
+/// How the volume compares names: case and Unicode normalization.
+pub trait Names {
+    /// The form of `path` under which the volume takes two paths for one.
+    fn key(&self, path: &str) -> String;
+}
+
+/// Names are equal only byte for byte.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExactNames;
+
+impl Names for ExactNames {
+    fn key(&self, path: &str) -> String {
+        path.to_owned()
+    }
+}
+
+/// Everything nondeterministic or volume-specific the core uses.
 pub struct Env {
     pub clock: Box<dyn Clock>,
     pub random: Box<dyn Random>,
-    pub identify: Box<dyn Identify>,
+    /// Shared with the operations that read identities while they run.
+    pub identify: Rc<dyn Identify>,
+    pub names: Box<dyn Names>,
     /// Shown to other writers beside this writer's entries. The folder may be
     /// shared, so a generic label is the safe default.
     pub label: String,
