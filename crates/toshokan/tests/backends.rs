@@ -1,122 +1,11 @@
 //! One behavior suite for every backend, run through the drivers: each behavior runs
 //! on fresh, empty roots of each backend.
 
-use std::collections::VecDeque;
+mod common;
 
-use toshokan::asynch;
-use toshokan::blocking::{self, Backend, Native};
-use toshokan::io::{Capabilities, DirEntry, IoError, Kind, Lock, Range};
-use toshokan::{Io, IoResult, MemDisk, Operation, RelPath, Reply, Root, Step};
-
-fn path(text: &str) -> RelPath {
-    RelPath::new(text).unwrap()
-}
-
-/// Makes its requests in order and returns every result.
-struct Script {
-    requests: VecDeque<Io>,
-    results: Vec<IoResult>,
-}
-
-impl Operation for Script {
-    type Output = Vec<IoResult>;
-
-    fn resume(&mut self, result: Option<IoResult>) -> Step<Vec<IoResult>> {
-        self.results.extend(result);
-        match self.requests.pop_front() {
-            Some(io) => Step::Io(io),
-            None => Step::Done(std::mem::take(&mut self.results)),
-        }
-    }
-}
-
-/// One process's view of a backend, driven by one of the drivers.
-trait Driven {
-    fn capabilities(&self, root: Root) -> Capabilities;
-    fn run(&mut self, requests: Vec<Io>) -> Vec<IoResult>;
-    /// A handle of another process on the same storage.
-    fn other_process(&self) -> Box<dyn Driven>;
-
-    fn one(&mut self, io: Io) -> IoResult {
-        self.run(vec![io]).remove(0)
-    }
-
-    fn ok(&mut self, io: Io) -> Reply {
-        let shown = format!("{io:?}");
-        self.one(io).unwrap_or_else(|e| panic!("{shown}: {e}"))
-    }
-}
-
-fn script(requests: Vec<Io>) -> Script {
-    Script {
-        requests: requests.into(),
-        results: Vec::new(),
-    }
-}
-
-struct BlockingMem(MemDisk);
-
-impl Driven for BlockingMem {
-    fn capabilities(&self, root: Root) -> Capabilities {
-        Backend::capabilities(&self.0, root)
-    }
-
-    fn run(&mut self, requests: Vec<Io>) -> Vec<IoResult> {
-        blocking::run(&mut self.0, script(requests))
-    }
-
-    fn other_process(&self) -> Box<dyn Driven> {
-        Box::new(Self(self.0.process()))
-    }
-}
-
-struct AsyncMem(MemDisk);
-
-impl Driven for AsyncMem {
-    fn capabilities(&self, root: Root) -> Capabilities {
-        asynch::Fs::capabilities(&self.0, root)
-    }
-
-    fn run(&mut self, requests: Vec<Io>) -> Vec<IoResult> {
-        pollster::block_on(asynch::run(&self.0, script(requests)))
-    }
-
-    fn other_process(&self) -> Box<dyn Driven> {
-        Box::new(Self(self.0.process()))
-    }
-}
-
-struct NativeDirs {
-    backend: Native,
-    dirs: std::rc::Rc<[tempfile::TempDir; 2]>,
-}
-
-impl NativeDirs {
-    fn new() -> Self {
-        let dirs = std::rc::Rc::new([tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()]);
-        Self {
-            backend: Native::new(dirs[0].path(), dirs[1].path()),
-            dirs,
-        }
-    }
-}
-
-impl Driven for NativeDirs {
-    fn capabilities(&self, root: Root) -> Capabilities {
-        self.backend.capabilities(root)
-    }
-
-    fn run(&mut self, requests: Vec<Io>) -> Vec<IoResult> {
-        blocking::run(&mut self.backend, script(requests))
-    }
-
-    fn other_process(&self) -> Box<dyn Driven> {
-        Box::new(Self {
-            backend: Native::new(self.dirs[0].path(), self.dirs[1].path()),
-            dirs: self.dirs.clone(),
-        })
-    }
-}
+use common::{path, Driven};
+use toshokan::io::{DirEntry, IoError, Kind, Lock, Range};
+use toshokan::{Io, IoResult, RelPath, Reply, Root};
 
 fn create(root: Root, text: &str, bytes: &[u8]) -> Io {
     Io::Create {
@@ -171,10 +60,10 @@ fn listing(entries: &[(&str, Kind)]) -> Reply {
 mod suite {
     use super::*;
 
-    pub fn a_created_file_reads_back_by_range(b: &mut dyn Driven) {
+    pub fn a_created_file_reads_back_by_range(b: &mut impl Driven) {
         b.ok(make_dir(Root::Folder, "a/b"));
         b.ok(create(Root::Folder, "a/b/f", b"hello"));
-        let reads = b.run(vec![
+        let reads = b.requests(vec![
             read("a/b/f", 0, 5),
             read("a/b/f", 3, 10),
             read("a/b/f", 9, 10),
@@ -191,7 +80,7 @@ mod suite {
         assert_eq!(b.ok(stat("a/x")), Reply::Stat(None));
     }
 
-    pub fn a_listing_is_sorted_by_name_with_kinds(b: &mut dyn Driven) {
+    pub fn a_listing_is_sorted_by_name_with_kinds(b: &mut impl Driven) {
         for name in ["b", "a", "C"] {
             b.ok(create(Root::Folder, name, b""));
         }
@@ -211,10 +100,10 @@ mod suite {
         );
     }
 
-    pub fn nothing_is_ever_replaced(b: &mut dyn Driven) {
+    pub fn nothing_is_ever_replaced(b: &mut impl Driven) {
         b.ok(create(Root::Folder, "f", b"old"));
         b.ok(make_dir(Root::Folder, "d/sub"));
-        let results = b.run(vec![
+        let results = b.requests(vec![
             create(Root::Folder, "f", b"new"),
             create(Root::Folder, "gone/f", b""),
             rename("d", "f"),
@@ -234,7 +123,7 @@ mod suite {
         assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"old".to_vec()));
     }
 
-    pub fn a_directory_renames_with_its_contents(b: &mut dyn Driven) {
+    pub fn a_directory_renames_with_its_contents(b: &mut impl Driven) {
         b.ok(make_dir(Root::Folder, "a/sub"));
         b.ok(create(Root::Folder, "a/sub/f", b"1"));
         b.ok(rename("a", "b"));
@@ -242,7 +131,7 @@ mod suite {
         assert_eq!(b.ok(stat("a")), Reply::Stat(None));
     }
 
-    pub fn removal_needs_the_right_kind_and_an_empty_directory(b: &mut dyn Driven) {
+    pub fn removal_needs_the_right_kind_and_an_empty_directory(b: &mut impl Driven) {
         b.ok(make_dir(Root::Folder, "d"));
         b.ok(create(Root::Folder, "d/f", b""));
         let remove = |text: &str| Io::Remove {
@@ -253,7 +142,7 @@ mod suite {
             root: Root::Folder,
             path: path(text),
         };
-        let results = b.run(vec![
+        let results = b.requests(vec![
             remove_dir("d"),
             remove("d"),
             remove_dir("d/f"),
@@ -274,9 +163,9 @@ mod suite {
         );
     }
 
-    pub fn making_a_directory_is_idempotent_and_refuses_a_file_in_the_way(b: &mut dyn Driven) {
+    pub fn making_a_directory_is_idempotent_and_refuses_a_file_in_the_way(b: &mut impl Driven) {
         b.ok(create(Root::Folder, "f", b""));
-        let results = b.run(vec![
+        let results = b.requests(vec![
             make_dir(Root::Folder, "a/b"),
             make_dir(Root::Folder, "a/b"),
             make_dir(Root::Folder, "f/g"),
@@ -293,7 +182,7 @@ mod suite {
         );
     }
 
-    pub fn appends_extend_a_file(b: &mut dyn Driven) {
+    pub fn appends_extend_a_file(b: &mut impl Driven) {
         if !b.capabilities(Root::Folder).append {
             return;
         }
@@ -303,7 +192,7 @@ mod suite {
             path: path("log"),
             bytes: bytes.to_vec(),
         };
-        b.run(vec![append(b"b"), append(b"c")]);
+        b.requests(vec![append(b"b"), append(b"c")]);
         assert_eq!(b.ok(read("log", 0, 9)), Reply::Bytes(b"abc".to_vec()));
         assert_eq!(
             b.one(Io::Append {
@@ -315,7 +204,7 @@ mod suite {
         );
     }
 
-    pub fn the_roots_are_separate_trees(b: &mut dyn Driven) {
+    pub fn the_roots_are_separate_trees(b: &mut impl Driven) {
         b.ok(create(Root::Local, "f", b"local"));
         assert_eq!(b.ok(stat("f")), Reply::Stat(None));
         b.ok(create(Root::Folder, "f", b"folder"));
@@ -329,7 +218,67 @@ mod suite {
         );
     }
 
-    pub fn a_lock_excludes_other_processes_until_released(b: &mut dyn Driven) {
+    pub fn requests_on_the_wrong_kind_or_nothing_fail_alike(b: &mut impl Driven) {
+        b.ok(make_dir(Root::Folder, "d"));
+        b.ok(create(Root::Folder, "f", b"x"));
+        let results = b.requests(vec![
+            read("d", 0, 1),
+            read("none", 0, 1),
+            Io::List {
+                root: Root::Folder,
+                dir: path("f"),
+            },
+            Io::List {
+                root: Root::Folder,
+                dir: path("none"),
+            },
+            create(Root::Folder, "f/g", b""),
+            rename("f", "none/f"),
+            Io::Remove {
+                root: Root::Folder,
+                path: path("none"),
+            },
+            Io::Sync {
+                root: Root::Folder,
+                path: path("none"),
+            },
+        ]);
+        assert_eq!(
+            results,
+            [
+                Err(IoError::IsDirectory),
+                Err(IoError::NotFound),
+                Err(IoError::NotDirectory),
+                Err(IoError::NotFound),
+                Err(IoError::NotDirectory),
+                Err(IoError::NotFound),
+                Err(IoError::NotFound),
+                Err(IoError::NotFound),
+            ]
+        );
+        assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"x".to_vec()));
+    }
+
+    pub fn a_file_renames_across_directories_and_syncs(b: &mut impl Driven) {
+        b.ok(make_dir(Root::Folder, "a"));
+        b.ok(make_dir(Root::Folder, "b/c"));
+        b.ok(create(Root::Folder, "a/f", b"1"));
+        b.ok(rename("a/f", "b/c/g"));
+        for synced in ["b/c/g", "b/c", "a", ""] {
+            b.ok(Io::Sync {
+                root: Root::Folder,
+                path: path(synced),
+            });
+        }
+        assert_eq!(b.ok(read("b/c/g", 0, 9)), Reply::Bytes(b"1".to_vec()));
+        assert_eq!(b.ok(stat("a/f")), Reply::Stat(None));
+        let Reply::Stat(Some(root)) = b.ok(stat("")) else {
+            panic!("the root is missing");
+        };
+        assert_eq!(root.kind, Kind::Directory);
+    }
+
+    pub fn a_lock_excludes_other_processes_until_released(b: &mut impl Driven) {
         b.ok(make_dir(Root::Local, "w"));
         let lock = || Io::Lock {
             name: path("w/lock"),
@@ -348,21 +297,7 @@ mod suite {
     }
 }
 
-macro_rules! for_every_backend {
-    ($($behavior:ident),* $(,)?) => {
-        mod blocking_mem {
-            $(#[test] fn $behavior() { super::suite::$behavior(&mut super::BlockingMem(toshokan::MemDisk::new())); })*
-        }
-        mod async_mem {
-            $(#[test] fn $behavior() { super::suite::$behavior(&mut super::AsyncMem(toshokan::MemDisk::new())); })*
-        }
-        mod native {
-            $(#[test] fn $behavior() { super::suite::$behavior(&mut super::NativeDirs::new()); })*
-        }
-    };
-}
-
-for_every_backend!(
+for_every_backend!(suite:
     a_created_file_reads_back_by_range,
     a_listing_is_sorted_by_name_with_kinds,
     nothing_is_ever_replaced,
@@ -371,5 +306,7 @@ for_every_backend!(
     making_a_directory_is_idempotent_and_refuses_a_file_in_the_way,
     appends_extend_a_file,
     the_roots_are_separate_trees,
+    requests_on_the_wrong_kind_or_nothing_fail_alike,
+    a_file_renames_across_directories_and_syncs,
     a_lock_excludes_other_processes_until_released,
 );
