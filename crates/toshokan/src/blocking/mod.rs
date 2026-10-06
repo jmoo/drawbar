@@ -73,15 +73,6 @@ impl<B: Backend> Source<B> for Splice {
     }
 }
 
-impl<B, F> Source<B> for F
-where
-    F: FnOnce(&mut Staging<'_, B>) -> std::result::Result<(), IoError>,
-{
-    fn fill(self: Box<Self>, staging: &mut Staging<'_, B>) -> std::result::Result<(), IoError> {
-        (*self)(staging)
-    }
-}
-
 /// The staged file a [`Source`] fills, and the folder it may read.
 pub struct Staging<'s, B> {
     backend: &'s mut B,
