@@ -37,6 +37,7 @@ pub struct Index {
     outline: Outline,
     /// Where each section's payload starts in the stream, in file order.
     payloads: Vec<u64>,
+    file_peak: u32,
     seal: Seal,
 }
 
@@ -52,9 +53,9 @@ pub struct ZoneSpan {
 }
 
 impl Index {
-    /// The bytes read of each stroke, from its start: its u32 id, a byte, then its root
-    /// key.
-    pub const STROKE_OPENING: usize = stroke::ROOT_KEY + 1;
+    /// The bytes read of each stroke, from its start: its u32 id and root key, and
+    /// through statistic B, which [`Self::file_peak`] needs from every stroke.
+    pub const STROKE_OPENING: usize = codec::PEAK_AT + 3;
 
     /// Read the index of the `nsmp` file that starts at the reader's position and runs
     /// to the end of the stream.
@@ -95,6 +96,7 @@ impl Index {
             layout,
             zones,
             body_start: body.start,
+            file_peak: sample.file_peak()?,
             outline: Outline::new(sample),
             payloads,
             seal,
@@ -108,6 +110,12 @@ impl Index {
     /// The generation's stream units, which [`codec::decode`] takes.
     pub fn layout(&self) -> Layout {
         self.layout
+    }
+
+    /// The [`codec::file_peak`] of every stroke, which [`codec::decode`] takes for each
+    /// zone's stream.
+    pub fn file_peak(&self) -> u32 {
+        self.file_peak
     }
 
     /// Every zone in stored order, the order [`crate::Sample::zones`] gives. Two zones
@@ -292,7 +300,7 @@ fn walk<F: Framing>(
 fn opening(index: usize, len: usize) -> Result<usize, Error> {
     match len < Index::STROKE_OPENING {
         true => Err(ParseError::AssertFail(format!(
-            "stroke {index} is {len} bytes, too short for its id and root key"
+            "stroke {index} is {len} bytes, too short for its id, root key and statistic B"
         ))
         .into()),
         false => Ok(Index::STROKE_OPENING),
@@ -510,12 +518,15 @@ mod tests {
             let bytes = built(layout);
             let whole = sample(&bytes).unwrap();
             let index = index(&bytes).unwrap();
+            assert_eq!(index.file_peak(), whole.file_peak().unwrap(), "{layout:?}");
             for (i, (span, zone)) in index.zones().iter().zip(whole.zones().unwrap()).enumerate() {
                 let stream = &bytes[span.stream.start as usize..span.stream.end as usize];
                 let audio = index.zone(i, stream).unwrap();
                 assert_eq!(
-                    codec::decode(audio.stream, audio.at, index.layout()).unwrap(),
-                    codec::decode(zone.stream, zone.at, layout).unwrap(),
+                    codec::decode(audio.stream, audio.at, index.layout(), index.file_peak())
+                        .unwrap(),
+                    codec::decode(zone.stream, zone.at, layout, whole.file_peak().unwrap())
+                        .unwrap(),
                     "{layout:?}, the zone up to {}",
                     zone.top_note
                 );
