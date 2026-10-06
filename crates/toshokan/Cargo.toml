@@ -2,7 +2,8 @@
 name = "toshokan"
 description = "Keep what a file cannot say about itself beside the file, for every writer"
 edition.workspace = true
-rust-version.workspace = true
+# `File::try_lock` for the writer lock.
+rust-version = "1.89"
 license.workspace = true
 publish = false
 repository.workspace = true
@@ -11,7 +12,7 @@ version = "0.1.0"
 [dependencies]
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 
 # A rename that refuses to replace its destination, atomically.

@@ -1,7 +1,7 @@
-//! Who wrote what, and in which order.
+//! Identifiers and clocks.
 //!
-//! Every id is allocated by the writer that owns it, so writers never coordinate and
-//! never collide. The crate draws no randomness: the caller supplies each [`WriterId`].
+//! Every id is 128 bits written as 32 lowercase hexadecimal digits. Uppercase and
+//! any other length are refused, so each id has exactly one text form.
 
 use std::fmt;
 use std::str::FromStr;
@@ -10,88 +10,30 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Error, Result};
 
-/// One writer: an app installation, a device, a process that keeps its own log.
-///
-/// Written as 32 lowercase hexadecimal characters. Uppercase is refused, so each id
-/// has exactly one text form.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WriterId(u128);
-
-impl WriterId {
-    pub const fn from_u128(value: u128) -> Self {
-        Self(value)
-    }
-
-    pub const fn to_u128(self) -> u128 {
-        self.0
-    }
-}
-
-impl fmt::Display for WriterId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:032x}", self.0)
-    }
-}
-
-impl fmt::Debug for WriterId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "WriterId({self})")
-    }
-}
-
-impl FromStr for WriterId {
-    type Err = Error;
-
-    fn from_str(text: &str) -> Result<Self> {
-        let well_formed =
-            text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        if !well_formed {
-            return Err(invalid("writer id", text));
-        }
-        u128::from_str_radix(text, 16)
-            .map(Self)
-            .map_err(|_| invalid("writer id", text))
-    }
-}
-
-/// A decimal `u64` with no sign and no leading zeros, so each number has one text form.
-pub(crate) fn canonical_u64(text: &str) -> Option<u64> {
-    let canonical = !text.is_empty()
-        && text.bytes().all(|b| b.is_ascii_digit())
-        && (text == "0" || !text.starts_with('0'));
-    canonical.then(|| text.parse().ok()).flatten()
-}
-
-fn parse_counter(what: &'static str, text: &str, whole: &str) -> Result<u64> {
-    canonical_u64(text).ok_or_else(|| invalid(what, whole))
-}
-
-fn invalid(what: &'static str, text: &str) -> Error {
-    Error::InvalidId {
-        what,
-        text: text.to_owned(),
-    }
-}
-
-/// Ids a writer allocates from its own counter: `<writer>:<counter>`.
-macro_rules! scoped_id {
+macro_rules! id128 {
     ($(#[$doc:meta])* $name:ident, $what:literal) => {
         $(#[$doc])*
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name {
-            pub writer: WriterId,
-            pub counter: u64,
-        }
+        pub struct $name(u128);
 
         impl $name {
-            pub const fn new(writer: WriterId, counter: u64) -> Self {
-                Self { writer, counter }
+            pub const fn from_u128(value: u128) -> Self {
+                Self(value)
+            }
+
+            pub const fn to_u128(self) -> u128 {
+                self.0
+            }
+
+            /// The big-endian bytes, whose hexadecimal is the text form.
+            pub const fn to_bytes(self) -> [u8; 16] {
+                self.0.to_be_bytes()
             }
         }
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}:{}", self.writer, self.counter)
+                write!(f, "{:032x}", self.0)
             }
         }
 
@@ -105,21 +47,10 @@ macro_rules! scoped_id {
             type Err = Error;
 
             fn from_str(text: &str) -> Result<Self> {
-                let (writer, counter) = text.split_once(':').ok_or_else(|| invalid($what, text))?;
-                Ok(Self {
-                    writer: writer.parse().map_err(|_| invalid($what, text))?,
-                    counter: parse_counter($what, counter, text)?,
-                })
+                parse_hex128($what, text).map(Self)
             }
         }
 
-        string_serde!($name);
-    };
-}
-
-/// Serialize as the `Display` form and parse it back with `FromStr`.
-macro_rules! string_serde {
-    ($name:ident) => {
         impl Serialize for $name {
             fn serialize<S: Serializer>(
                 &self,
@@ -139,136 +70,196 @@ macro_rules! string_serde {
         }
     };
 }
-pub(crate) use string_serde;
 
-string_serde!(WriterId);
+id128!(
+    /// A writer: one running instance's log. Random, and never reused once its
+    /// genesis entry is in the folder.
+    WriterId,
+    "writer id"
+);
 
-scoped_id!(
-    /// An entity: the subject of fields and sets, usually one file of the library.
-    ///
-    /// Ordered by writer, then counter.
+id128!(
+    /// An entity: a thing facts are about, usually one of the user's files. Random.
     EntityId,
     "entity id"
 );
 
-scoped_id!(
-    /// A group of entries a person did as one action, and undoes as one.
-    ///
-    /// Ordered by writer, then counter.
-    IntentId,
-    "intent id"
+id128!(
+    /// The name of a log segment, `<name>.jsonl`. Random, so no two histories pick the
+    /// same name. Names are advisory: readers place entries by chain, not by name.
+    SegmentName,
+    "segment name"
 );
 
-/// When an entry was written, as a Lamport timestamp made unique by its writer.
+id128!(
+    /// The random name of a snapshot, pending record, trash item or staged file.
+    Nonce,
+    "nonce"
+);
+
+id128!(
+    /// An entry's hash: its id, the link the next entry names as `prev`, and its
+    /// line's checksum.
+    EntryHash,
+    "entry hash"
+);
+
+id128!(
+    /// What the app's identity function says a file's contents are. Equal
+    /// identities are taken as equal contents.
+    Identity,
+    "identity"
+);
+
+impl EntryHash {
+    /// The `prev` of a writer's genesis entry.
+    pub const ZERO: Self = Self(0);
+
+    /// The first 128 bits of BLAKE3 over `prev`'s 16 bytes followed by `json`.
+    pub fn of(prev: EntryHash, json: &[u8]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&prev.to_bytes());
+        hasher.update(json);
+        let digest = hasher.finalize();
+        let mut first = [0; 16];
+        first.copy_from_slice(&digest.as_bytes()[..16]);
+        Self(u128::from_be_bytes(first))
+    }
+}
+
+fn parse_hex128(what: &'static str, text: &str) -> Result<u128> {
+    let well_formed =
+        text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let invalid = || Error::InvalidId {
+        what,
+        text: text.chars().take(64).collect(),
+    };
+    if !well_formed {
+        return Err(invalid());
+    }
+    u128::from_str_radix(text, 16).map_err(|_| invalid())
+}
+
+/// A hybrid logical clock reading: wall time in milliseconds since the Unix epoch,
+/// and a counter that orders events within one millisecond. Orders entries for
+/// display only; the writer id breaks ties.
 ///
-/// Ordered by `lamport`, then by `writer`; this order decides every last-writer-wins
-/// register. Written as `<lamport>@<writer>`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Version {
-    pub lamport: u64,
-    pub writer: WriterId,
+/// Written as `[wall_ms, counter]`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct Hlc {
+    pub wall_ms: u64,
+    pub counter: u32,
 }
 
-impl Version {
-    pub const fn new(lamport: u64, writer: WriterId) -> Self {
-        Self { lamport, writer }
+impl Hlc {
+    pub const ZERO: Self = Self {
+        wall_ms: 0,
+        counter: 0,
+    };
+
+    /// The reading for a local event at wall time `now_ms`: after `self`, and at
+    /// `now_ms` when the wall clock is ahead. `None` when the counter is exhausted.
+    pub fn tick(self, now_ms: u64) -> Option<Self> {
+        match now_ms > self.wall_ms {
+            true => Some(Self {
+                wall_ms: now_ms,
+                counter: 0,
+            }),
+            false => Some(Self {
+                wall_ms: self.wall_ms,
+                counter: self.counter.checked_add(1)?,
+            }),
+        }
+    }
+
+    /// The reading after seeing `other`, so the next tick orders after it.
+    pub fn observe(self, other: Hlc) -> Self {
+        self.max(other)
     }
 }
 
-impl fmt::Display for Version {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}", self.lamport, self.writer)
+impl Serialize for Hlc {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        (self.wall_ms, self.counter).serialize(serializer)
     }
 }
 
-impl fmt::Debug for Version {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Version({self})")
+impl<'de> Deserialize<'de> for Hlc {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let (wall_ms, counter) = <(u64, u32)>::deserialize(deserializer)?;
+        Ok(Self { wall_ms, counter })
     }
 }
-
-impl FromStr for Version {
-    type Err = Error;
-
-    fn from_str(text: &str) -> Result<Self> {
-        let (lamport, writer) = text
-            .split_once('@')
-            .ok_or_else(|| invalid("version", text))?;
-        Ok(Self {
-            lamport: parse_counter("version", lamport, text)?,
-            writer: writer.parse().map_err(|_| invalid("version", text))?,
-        })
-    }
-}
-
-string_serde!(Version);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const A: &str = "0123456789abcdef0123456789abcdef";
-
     #[test]
-    fn a_writer_id_prints_as_32_lowercase_hex_digits() {
-        assert_eq!(
-            WriterId::from_u128(0xff).to_string(),
-            format!("{:0>32}", "ff")
-        );
-        assert_eq!(A.parse::<WriterId>().unwrap().to_string(), A);
-    }
-
-    #[test]
-    fn a_writer_id_refuses_every_other_spelling() {
+    fn an_id_has_one_text_form() {
+        let id = WriterId::from_u128(0xab);
+        assert_eq!(id.to_string(), "000000000000000000000000000000ab");
+        assert_eq!(id.to_string().parse::<WriterId>().unwrap(), id);
         for text in [
+            "000000000000000000000000000000AB",
+            "00000000000000000000000000000ab",
+            "0000000000000000000000000000000ab",
+            "+00000000000000000000000000000ab",
             "",
-            &A[1..],
-            &format!("{A}0"),
-            &A.to_uppercase(),
-            &format!("+{}", &A[1..]),
-            &format!("{}g", &A[1..]),
         ] {
-            assert!(text.parse::<WriterId>().is_err(), "{text:?} parsed");
+            assert!(text.parse::<WriterId>().is_err(), "{text:?} accepted");
         }
+        assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{id}\""));
+        assert!(serde_json::from_str::<WriterId>("\"AB\"").is_err());
+    }
+
+    // BLAKE3 of 16 zero bytes then `{}`, first 16 bytes; computed with b3sum.
+    #[test]
+    fn an_entry_hash_covers_its_predecessor_and_json() {
+        let genesis = EntryHash::of(EntryHash::ZERO, b"{}");
+        assert_eq!(genesis.to_string(), "3ae46bcf71e48919d13408596da40d47");
+        assert_ne!(EntryHash::of(genesis, b"{}"), genesis);
+        assert_ne!(EntryHash::of(EntryHash::ZERO, b"{ }"), genesis);
     }
 
     #[test]
-    fn ids_and_versions_round_trip_through_text() {
-        let writer: WriterId = A.parse().unwrap();
-        let entity = EntityId::new(writer, 42);
-        let intent = IntentId::new(writer, 0);
-        let version = Version::new(u64::MAX, writer);
-        assert_eq!(entity.to_string(), format!("{A}:42"));
-        assert_eq!(version.to_string(), format!("{}@{A}", u64::MAX));
-        assert_eq!(entity.to_string().parse::<EntityId>().unwrap(), entity);
-        assert_eq!(intent.to_string().parse::<IntentId>().unwrap(), intent);
-        assert_eq!(version.to_string().parse::<Version>().unwrap(), version);
-    }
-
-    #[test]
-    fn counters_refuse_signs_leading_zeros_and_overflow() {
-        for counter in ["", "+1", "-1", "01", "18446744073709551616", "1 "] {
-            let text = format!("{A}:{counter}");
-            assert!(text.parse::<EntityId>().is_err(), "{text:?} parsed");
-            let text = format!("{counter}@{A}");
-            assert!(text.parse::<Version>().is_err(), "{text:?} parsed");
+    fn a_clock_ticks_forward_and_follows_the_wall() {
+        let start = Hlc {
+            wall_ms: 10,
+            counter: 3,
+        };
+        let cases = [
+            (
+                11,
+                Some(Hlc {
+                    wall_ms: 11,
+                    counter: 0,
+                }),
+            ),
+            (
+                10,
+                Some(Hlc {
+                    wall_ms: 10,
+                    counter: 4,
+                }),
+            ),
+            (
+                2,
+                Some(Hlc {
+                    wall_ms: 10,
+                    counter: 4,
+                }),
+            ),
+        ];
+        for (now, expected) in cases {
+            assert_eq!(start.tick(now), expected, "at {now}");
         }
-    }
-
-    #[test]
-    fn versions_order_by_lamport_before_writer() {
-        let low = WriterId::from_u128(1);
-        let high = WriterId::from_u128(2);
-        assert!(Version::new(1, high) < Version::new(2, low));
-        assert!(Version::new(2, low) < Version::new(2, high));
-    }
-
-    #[test]
-    fn ids_serialize_as_their_text_form() {
-        let version = Version::new(7, A.parse().unwrap());
-        let json = serde_json::to_string(&version).unwrap();
-        assert_eq!(json, format!("\"7@{A}\""));
-        assert_eq!(serde_json::from_str::<Version>(&json).unwrap(), version);
-        assert!(serde_json::from_str::<Version>("\"7@\"").is_err());
+        let full = Hlc {
+            wall_ms: 10,
+            counter: u32::MAX,
+        };
+        assert_eq!(full.tick(10), None);
+        assert_eq!(start.observe(full), full);
+        assert_eq!(serde_json::to_string(&start).unwrap(), "[10,3]");
     }
 }

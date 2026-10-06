@@ -1,446 +1,131 @@
-//! A library folder as one writer sees it: open it, change it by intents, undo them.
+//! The library as one instance holds it: the pure core both drivers run.
+//!
+//! Only [`Library::commit`] (and undo, redo and settling, which commit),
+//! [`Library::empty_trash`] and [`Library::compact`] write the folder. Opening,
+//! viewing, refreshing and scanning never do; they write only in the local root.
 
-use crate::blobs::{self, Collection};
-use crate::compact::{self, Compaction};
-use crate::effects::{self, Effect, Precondition, Report, Source};
-use crate::error::{Error, Result};
-use crate::fs::{fingerprint, Fs, RelPath};
-use crate::ids::{EntityId, IntentId, Version, WriterId};
-use crate::journal::{self, Recovered};
+#![expect(
+    dead_code,
+    unused_variables,
+    reason = "the skeleton's bodies are todo!()"
+)]
+
+use crate::env::Env;
+use crate::error::{Invalid, Result};
+use crate::ids::{EntityId, Identity};
+use crate::io::{Capabilities, Task};
 use crate::layout::Layout;
-use crate::log::{read_log, read_logs, Entry, Kind, LogWriter, Torn, WriterLog};
-use crate::merge::{merge, State};
-use crate::scan::{scan, Scan};
-use crate::undo::{plan_redo, plan_undo, History};
-use crate::value::Value;
-use crate::{CONTENT_FIELD, FILE_FIELDS, LENGTH_FIELD, MODIFIED_FIELD, PATH_FIELD};
+use crate::log::Settlement;
+use crate::plan::Plan;
+use crate::reader::Reader;
+use crate::report::{
+    Change, Committed, Compacted, Emptied, HistoryItem, Mode, Opened, Orphan, TrashItem, WriterInfo,
+};
+use crate::schema::Schema;
+use crate::trash::Policy;
+use crate::undo::History;
+use crate::view::View;
+use crate::writer::Writer;
 
-/// A library folder opened by one writer.
-///
-/// Every change is an intent: a group of entries appended to this writer's log under
-/// one intent id, with at most the file effects the intent names. An intent is
-/// refused before anything is written when the writer is read-only, the entity does
-/// not allow it, or a file is not as expected.
-///
-/// The state is every writer's log as read at open, or at the last
-/// [`Library::refresh`], plus this writer's own intents since.
-pub struct Library<F: Fs> {
-    fs: F,
+pub struct Library {
     layout: Layout,
-    log: LogWriter,
-    own: WriterLog,
-    state: State,
-    scan: Scan,
-    recovered: Vec<Recovered>,
-    torn: Vec<TornSegment>,
+    schema: Schema,
+    env: Env,
+    capabilities: Capabilities,
+    reader: Reader,
+    writer: Option<Writer>,
+    view: View,
+    history: History,
+    mode: Mode,
 }
 
-/// What an intent did.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Change {
-    pub intent: IntentId,
-    /// The entries appended under the intent, its `Intent` entry first.
-    pub entries: Vec<Entry>,
-    /// What its file effects did to the files.
-    pub files: Report,
-}
-
-/// A segment whose readable entries end early.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct TornSegment {
-    pub writer: WriterId,
-    pub segment: u64,
-    pub torn: Torn,
-}
-
-impl<F: Fs> Library<F> {
-    /// Open the library in `fs` as `writer`: read every writer's log, finish or roll
-    /// back this writer's interrupted effects, merge, and scan the files.
-    ///
-    /// With nothing to recover, opening writes nothing. A writer whose own log or
-    /// journal holds what this build does not understand opens read-only: it writes
-    /// nothing, and reports each intent a crash interrupted as pending, for a build
-    /// that can finish it.
-    pub async fn open(fs: F, layout: Layout, writer: WriterId) -> Result<Self> {
-        let mut logs = read_logs(&fs, &layout).await?;
-        let mut log = LogWriter::open(writer, &logs);
-        let recovered = journal::recover(&fs, &layout, &mut log).await?;
-        if log.read_only().is_none() && !recovered.is_empty() {
-            logs = read_logs(&fs, &layout).await?;
-        }
-        let mut library = Self {
-            fs,
-            layout,
-            log,
-            own: WriterLog::new(writer),
-            state: State::default(),
-            scan: Scan::default(),
-            recovered,
-            torn: Vec::new(),
-        };
-        library.load(logs);
-        library.rescan().await?;
-        Ok(library)
+impl Library {
+    /// Reads the cached view and the folder, claims a writer from the pool,
+    /// assesses recovery, checks drafts and scans the library's files.
+    /// `capabilities` are the folder's.
+    pub fn open(
+        layout: Layout,
+        schema: Schema,
+        env: Env,
+        capabilities: Capabilities,
+    ) -> Task<'static, Result<(Library, Opened)>> {
+        todo!()
     }
 
-    pub fn writer(&self) -> WriterId {
-        self.log.writer()
+    pub fn view(&self) -> View {
+        todo!()
     }
 
-    pub fn fs(&self) -> &F {
-        &self.fs
+    pub fn history(&self) -> &[HistoryItem] {
+        todo!()
     }
 
-    pub fn layout(&self) -> &Layout {
-        &self.layout
+    /// Checks every precondition against the current view and the files, then
+    /// logs the intent and carries out its file effects. Before its first write a
+    /// new writer is created; before any write this writer's interrupted effects
+    /// are settled. A refusal is [`crate::Error::Refused`] and changes nothing.
+    pub fn commit(
+        &mut self,
+        plan: std::result::Result<Plan, Invalid>,
+    ) -> Task<'_, Result<Committed>> {
+        todo!()
     }
 
-    pub fn state(&self) -> &State {
-        &self.state
+    pub fn undo(&mut self) -> Task<'_, Result<Committed>> {
+        todo!()
     }
 
-    /// The latest scan of the files.
-    pub fn scan(&self) -> &Scan {
-        &self.scan
+    pub fn redo(&mut self) -> Task<'_, Result<Committed>> {
+        todo!()
     }
 
-    /// The intents a crash interrupted, as open settled them, or as it left them when
-    /// this writer is read-only.
-    pub fn recovered(&self) -> &[Recovered] {
-        &self.recovered
+    /// Settles another writer's unfinished effect, with the user's consent.
+    pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<()>> {
+        todo!()
     }
 
-    /// The segments whose last lines could not be read, as of the last read.
-    pub fn torn(&self) -> &[TornSegment] {
-        &self.torn
+    /// Reads other writers' new entries and rescans: what changed since the last
+    /// view, attributed to its writer, or to nobody for outside changes.
+    pub fn refresh(&mut self) -> Task<'_, Result<Vec<Change>>> {
+        todo!()
     }
 
-    /// Why this writer cannot change the library, if it cannot.
-    pub fn read_only(&self) -> Option<&str> {
-        self.log.read_only()
+    /// Every writer with its last entry time, and whether another instance on this
+    /// machine holds it.
+    pub fn others(&mut self) -> Task<'_, Result<Vec<WriterInfo>>> {
+        todo!()
     }
 
-    /// Read every writer's log again, taking in what other writers appended since.
-    pub async fn refresh(&mut self) -> Result<()> {
-        let logs = read_logs(&self.fs, &self.layout).await?;
-        self.load(logs);
-        Ok(())
+    pub fn trash(&mut self) -> Task<'_, Result<Vec<TrashItem>>> {
+        todo!()
     }
 
-    /// Scan the files again for the current state.
-    pub async fn rescan(&mut self) -> Result<&Scan> {
-        self.scan = scan(&self.fs, &self.layout, &self.state, &self.scan).await?;
-        Ok(&self.scan)
+    pub fn empty_trash(&mut self, policy: Policy) -> Task<'_, Result<Emptied>> {
+        todo!()
     }
 
-    fn load(&mut self, logs: Vec<WriterLog>) {
-        let writer = self.writer();
-        self.state = merge(&logs);
-        let seen = logs.iter().map(WriterLog::max_lamport).max().unwrap_or(0);
-        self.log.observe(Version::new(seen, writer));
-        self.torn = logs
-            .iter()
-            .flat_map(|log| {
-                log.torn.iter().map(|&(segment, torn)| TornSegment {
-                    writer: log.writer,
-                    segment,
-                    torn,
-                })
-            })
-            .collect();
-        self.own = logs
-            .into_iter()
-            .find(|log| log.writer == writer)
-            .unwrap_or_else(|| WriterLog::new(writer));
+    pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
+        todo!()
     }
 
-    /// A new entity, existing from this intent on.
-    pub async fn create(&mut self) -> Result<(EntityId, Change)> {
-        let entity = self.log.new_entity();
-        let change = self.record(vec![Kind::Create { entity }]).await?;
-        Ok((entity, change))
-    }
-
-    /// Set a field, or clear it with `None`. `path`, `content`, `length` and
-    /// `modified` belong to file effects and [`Library::bind`].
-    pub async fn set(
+    /// Keeps an unsaved edit of `entity` over a file holding `base`.
+    pub fn put_draft(
         &mut self,
         entity: EntityId,
-        name: &str,
-        value: Option<Value>,
-    ) -> Result<Change> {
-        self.existing(entity)?;
-        if FILE_FIELDS.contains(&name) {
-            return Err(Error::Entity {
-                entity,
-                reason: "has its file's fields set only by file effects and binding",
-            });
-        }
-        let field = self.field(entity, name, value);
-        self.record(vec![field]).await
-    }
-
-    /// Add `value` to a set.
-    pub async fn add(&mut self, entity: EntityId, set: &str, value: Value) -> Result<Change> {
-        self.existing(entity)?;
-        let name = set.to_owned();
-        self.record(vec![Kind::SetAdd {
-            entity,
-            name,
-            value,
-        }])
-        .await
-    }
-
-    /// Remove `value` from a set, as far as this writer has seen it added. An add this
-    /// writer has not seen survives.
-    pub async fn remove(&mut self, entity: EntityId, set: &str, value: &Value) -> Result<Change> {
-        self.existing(entity)?;
-        let observed = self.state.tags(entity, set, value);
-        if observed.is_empty() {
-            return Err(Error::Entity {
-                entity,
-                reason: "does not hold that value in that set",
-            });
-        }
-        let name = set.to_owned();
-        let value = value.clone();
-        let remove = Kind::SetRemove {
-            entity,
-            name,
-            value,
-            observed,
-        };
-        self.record(vec![remove]).await
-    }
-
-    /// Delete an entity. Its fields are kept, and its file, if any, stays where it is.
-    pub async fn delete(&mut self, entity: EntityId) -> Result<Change> {
-        self.existing(entity)?;
-        self.record(vec![Kind::Delete { entity }]).await
-    }
-
-    /// Bind the file at `path` to an entity as it is now, as after a scan finds it.
-    pub async fn bind(&mut self, entity: EntityId, path: &RelPath) -> Result<Change> {
-        self.existing(entity)?;
-        self.layout.check_library_path(path)?;
-        let print = fingerprint(&self.fs, path, true)
-            .await?
-            .ok_or_else(|| Error::NotFound { path: path.clone() })?;
-        let int = effects::int;
-        let fields = vec![
-            self.field(
-                entity,
-                PATH_FIELD,
-                Some(Value::Text(path.as_str().to_owned())),
-            ),
-            self.field(entity, CONTENT_FIELD, print.hash.map(Value::Blob)),
-            self.field(entity, LENGTH_FIELD, int(print.len)),
-            self.field(entity, MODIFIED_FIELD, print.modified.and_then(int)),
-        ];
-        self.record(fields).await
-    }
-
-    /// Write an entity's file at `path`, where the file must meet `expect`. Old
-    /// contents move into the blob store.
-    ///
-    /// An entity bound to a file saves only at that file's path, so that it owns one
-    /// file; [`Library::rename`] moves the file first.
-    ///
-    /// On a full disk the save collects the blobs nothing needs, then gives up this
-    /// writer's whole undo history and collects again, before it refuses.
-    pub async fn save(
-        &mut self,
-        entity: EntityId,
-        path: &RelPath,
+        base: Identity,
         bytes: Vec<u8>,
-        expect: Precondition,
-    ) -> Result<Change> {
-        self.existing(entity)?;
-        let bound = self.state.field(entity, PATH_FIELD);
-        if bound.is_some_and(|bound| *bound != Value::Text(path.as_str().to_owned())) {
-            return Err(Error::Entity {
-                entity,
-                reason: "has its file at another path; rename it before saving there",
-            });
-        }
-        let save = Effect::Save {
-            entity,
-            path: path.clone(),
-            contents: Source::Bytes(bytes),
-            expect,
-        };
-        self.commit(vec![Kind::INTENT], vec![save]).await
+    ) -> Task<'_, Result<()>> {
+        todo!()
     }
 
-    /// Move an entity's file to `to`, where nothing may be.
-    pub async fn rename(&mut self, entity: EntityId, to: &RelPath) -> Result<Change> {
-        let from = self.bound(entity)?;
-        let rename = Effect::Rename {
-            entity,
-            from,
-            to: to.clone(),
-        };
-        self.commit(vec![Kind::INTENT], vec![rename]).await
+    pub fn discard_draft(&mut self, entity: EntityId) -> Task<'_, Result<()>> {
+        todo!()
     }
 
-    /// Move a directory and everything in it to `to`, where nothing may be, and every
-    /// entity bound under it.
-    pub async fn move_tree(&mut self, from: &RelPath, to: &RelPath) -> Result<Change> {
-        let move_tree = Effect::MoveTree {
-            from: from.clone(),
-            to: to.clone(),
-        };
-        self.commit(vec![Kind::INTENT], vec![move_tree]).await
-    }
-
-    /// Move an entity's file, which must meet `expect`, into the blob store and unbind
-    /// it. The entity still exists.
-    pub async fn delete_file(&mut self, entity: EntityId, expect: Precondition) -> Result<Change> {
-        let path = self.bound(entity)?;
-        let delete = Effect::Delete {
-            entity,
-            path,
-            expect,
-        };
-        self.commit(vec![Kind::INTENT], vec![delete]).await
-    }
-
-    /// Reverse this writer's latest intent that is not undone.
-    pub async fn undo(&mut self) -> Result<Change> {
-        self.log.writable()?;
-        let plan = plan_undo(&History::new(&self.own), &self.state)?;
-        self.commit(plan.entries, plan.effects).await
-    }
-
-    /// Reverse this writer's latest undo.
-    pub async fn redo(&mut self) -> Result<Change> {
-        self.log.writable()?;
-        let plan = plan_redo(&History::new(&self.own), &self.state)?;
-        self.commit(plan.entries, plan.effects).await
-    }
-
-    /// Fold this writer's log into a snapshot that keeps whole its last `window`
-    /// intents that change a fact, so undo and redo can reach them. An undo or redo
-    /// kept without the intent it reverses can itself be neither undone nor redone.
-    pub async fn compact(&mut self, window: usize) -> Result<Compaction> {
-        self.log.writable()?;
-        let own = read_log(&self.fs, &self.layout, self.writer()).await?;
-        let compacted = compact::compact(&self.fs, &self.layout, &mut self.log, &own, window).await;
-        self.reloaded(compacted).await
-    }
-
-    /// Remove this writer's blobs that nothing needs, oldest first, until they occupy at
-    /// most `budget` bytes.
-    ///
-    /// Undo may restore any blob an entry since this writer's last compaction names,
-    /// so collection keeps those; [`Library::compact`] to the undo window to keep, then
-    /// collect, to bound the store.
-    ///
-    /// It judges from every writer's log as read when it runs, not from
-    /// [`Library::state`].
-    ///
-    /// ⚠️ A crash after a blob is removed but before its removal is logged leaves it
-    /// held in the log until a collection finds it eligible again; an undo that needs
-    /// it meanwhile fails with [`Error::NotFound`].
-    pub async fn collect(&mut self, budget: u64) -> Result<Collection> {
-        let collected = blobs::collect(&self.fs, &self.layout, &mut self.log, &[], budget).await;
-        self.reloaded(collected).await
-    }
-
-    fn existing(&self, entity: EntityId) -> Result<()> {
-        match self.state.exists(entity) {
-            true => Ok(()),
-            false => Err(Error::Entity {
-                entity,
-                reason: "does not exist",
-            }),
-        }
-    }
-
-    /// The path of an existing entity's file.
-    fn bound(&self, entity: EntityId) -> Result<RelPath> {
-        self.existing(entity)?;
-        match self.state.field(entity, PATH_FIELD) {
-            Some(Value::Text(path)) => RelPath::new(path),
-            _ => Err(Error::Entity {
-                entity,
-                reason: "has no file",
-            }),
-        }
-    }
-
-    fn field(&self, entity: EntityId, name: &str, value: Option<Value>) -> Kind {
-        Kind::Field {
-            entity,
-            name: name.to_owned(),
-            value,
-            prior: self.state.field(entity, name).cloned(),
-        }
-    }
-
-    /// Append an intent of `kinds` that changes no file.
-    async fn record(&mut self, kinds: Vec<Kind>) -> Result<Change> {
-        let mut entries = vec![Kind::INTENT];
-        entries.extend(kinds);
-        self.commit(entries, Vec::new()).await
-    }
-
-    /// Append `kinds`, which start with the intent's `Intent` entry, and apply
-    /// `effects` in order. The entries and effects are journaled together, so they
-    /// reach the log only once the effects' files are changed.
-    async fn commit(&mut self, kinds: Vec<Kind>, effects: Vec<Effect>) -> Result<Change> {
-        self.log.writable()?;
-        let intent = self.log.new_intent();
-        if effects.is_empty() {
-            let entries: Vec<Entry> = kinds
-                .into_iter()
-                .map(|kind| self.log.stamp(intent, kind))
-                .collect();
-            if let Err(error) = self.log.append(&self.fs, &self.layout, &entries).await {
-                return self.reloaded(Err(error)).await;
-            }
-            for entry in &entries {
-                self.state.apply(entry);
-            }
-            self.own.entries.extend(entries.iter().cloned());
-            let files = Report::default();
-            return Ok(Change {
-                intent,
-                entries,
-                files,
-            });
-        }
-        let applied = effects::apply(
-            &self.fs,
-            &self.layout,
-            &mut self.log,
-            &self.state,
-            intent,
-            kinds,
-            &effects,
-        )
-        .await;
-        let files = self.reloaded(applied).await?;
-        let entries = self
-            .own
-            .all_entries()
-            .filter(|entry| entry.intent == intent)
-            .cloned()
-            .collect();
-        Ok(Change {
-            intent,
-            entries,
-            files,
-        })
-    }
-
-    /// `result`, after reading every log again, since the operation that gave it may
-    /// have appended to this writer's log, folded it, or failed partway.
-    async fn reloaded<T>(&mut self, result: Result<T>) -> Result<T> {
-        let refreshed = self.refresh().await;
-        let value = result?;
-        refreshed?;
-        Ok(value)
+    /// Seals the open segment, writes the cached view and releases the writer's
+    /// lock. A library dropped without closing leaves its segment open, as a crash
+    /// does.
+    pub fn close(&mut self) -> Task<'_, Result<()>> {
+        todo!()
     }
 }

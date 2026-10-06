@@ -1,126 +1,109 @@
 use thiserror::Error as ThisError;
 
-use crate::effects::Precondition;
-use crate::fs::{Capability, Fingerprint, RelPath};
-use crate::ids::{EntityId, WriterId};
-use crate::undo::Refusal;
+use crate::ids::{EntityId, EntryHash, Identity, WriterId};
+use crate::io::{IoError, Root};
+use crate::path::RelPath;
+use crate::plan::Expect;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(ThisError, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("{path} does not exist")]
-    NotFound { path: RelPath },
-
-    #[error("{path} already exists")]
-    AlreadyExists { path: RelPath },
-
-    #[error("{path} is a directory")]
-    IsDirectory { path: RelPath },
-
-    #[error("{path} is not a directory")]
-    NotDirectory { path: RelPath },
-
-    #[error("directory {path} is not empty")]
-    DirectoryNotEmpty { path: RelPath },
-
-    #[error("no space is left for {path}")]
-    NoSpace { path: RelPath },
-
-    /// The backend does not declare the capability the operation needs. Callers plan
-    /// from [`crate::fs::Capabilities`]; reaching this is a planning bug.
-    #[error("the file system cannot {0}")]
-    Unsupported(Capability),
-
-    /// An in-memory file system was told to crash. Every later operation on it fails
-    /// the same way.
-    #[error("the file system crashed")]
-    Crashed,
-
-    #[error("{path}: {source}")]
+    #[error("{root:?} {path}: {error}")]
     Io {
+        root: Root,
         path: RelPath,
-        #[source]
-        source: std::io::Error,
+        error: IoError,
     },
 
-    #[error("{path:?} is not a valid library path: {reason}")]
+    #[error("{path:?} is not a valid path: {reason}")]
     InvalidPath { path: String, reason: &'static str },
 
     #[error("{text:?} is not a valid {what}")]
     InvalidId { what: &'static str, text: String },
 
-    /// A file toshokan owns cannot be read as its format requires. A torn log tail
-    /// is not corruption; it ends the readable log.
-    #[error("{path} is corrupt: {reason}")]
+    #[error("the schema declares {name:?} twice")]
+    DuplicateKey { name: &'static str },
+
+    #[error("{name:?} is not a valid key name")]
+    InvalidKey { name: &'static str },
+
+    /// A file in this install's local root cannot be read as its format requires.
+    /// Files in the folder never cause this: what cannot be read there is reported.
+    #[error("{path} in the local root is corrupt: {reason}")]
     Corrupt { path: RelPath, reason: String },
 
-    /// This writer's own log or journal holds what this build does not understand,
-    /// so it cannot append without misrepresenting its history, or its clock or
-    /// counters are exhausted.
-    #[error("writer {writer} is read-only: {reason}")]
-    ReadOnly { writer: WriterId, reason: String },
+    /// The library is open read-only, so nothing can be written.
+    #[error("the library is read-only: {0}")]
+    ReadOnly(Why),
 
-    /// The log given for a writer was read before that writer's latest append, so
-    /// folding it would lose entries.
-    #[error("the log of writer {writer} was read before its latest append")]
-    StaleLog { writer: WriterId },
+    /// An intent, undo or redo was refused before anything was written.
+    #[error("refused: {0}")]
+    Refused(Refusal),
+}
 
-    /// A file effect found the file other than the writer expected. Nothing was
-    /// changed.
+/// Why a library opened read-only.
+#[derive(ThisError, Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Why {
+    /// This writer's own history holds entries this build does not understand, so
+    /// it cannot append without misrepresenting it.
+    #[error("this writer's history was written by a newer version")]
+    NewerOwnHistory { entry: EntryHash },
+    /// The folder refused a write when the writer started.
+    #[error("the folder cannot be written")]
+    FolderNotWritable,
+    /// The clock cannot advance past this writer's last entry.
+    #[error("this writer's clock is exhausted")]
+    ClockExhausted,
+}
+
+/// Why an intent, undo or redo was refused. A refusal changes nothing.
+#[derive(ThisError, Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// A file was not as the intent expected.
     #[error("{} is not as expected", .0.path)]
     Changed(Box<Mismatch>),
-
-    /// A file was not as expected partway through an intent's file effects. The
-    /// effects before it were made and logged; the files in `stayed` were left where
-    /// and as they were.
-    #[error("{error}, so the intent was applied in part")]
-    Partial {
-        error: Box<Error>,
-        stayed: Vec<RelPath>,
-    },
-
-    #[error("cannot undo or redo: {0}")]
-    Refused(Box<Refusal>),
-
-    /// An intent the merged state does not allow on this entity. Nothing was written.
-    #[error("{entity} {reason}")]
-    Entity {
-        entity: EntityId,
-        reason: &'static str,
-    },
+    /// The intent is not valid against the current view.
+    #[error("{0}")]
+    Invalid(Invalid),
+    /// Another writer changed what the undo or redo would change since this writer
+    /// did.
+    #[error("{by} changed it since")]
+    ChangedSince { by: WriterId, entry: EntryHash },
+    /// There is nothing to undo or redo.
+    #[error("there is nothing to undo or redo")]
+    Nothing,
+    /// The bytes an undo would bring back have left the trash.
+    #[error("the trash no longer holds what undo needs")]
+    Emptied,
 }
 
-/// Why a journaled file effect could not run: the files no longer allowed it, and it
-/// changed nothing.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Conflict {
-    /// The file at the path is not as the effect expected.
-    Changed(Box<Mismatch>),
-    /// A directory is where the effect expected a file.
-    IsDirectory { path: RelPath },
-    /// Something is at the destination of a move.
-    AlreadyExists { path: RelPath },
-    /// Nothing is at the source of a move.
-    NotFound { path: RelPath },
-}
-
-impl From<Conflict> for Error {
-    fn from(conflict: Conflict) -> Self {
-        match conflict {
-            Conflict::Changed(mismatch) => Self::Changed(mismatch),
-            Conflict::IsDirectory { path } => Self::IsDirectory { path },
-            Conflict::AlreadyExists { path } => Self::AlreadyExists { path },
-            Conflict::NotFound { path } => Self::NotFound { path },
-        }
-    }
-}
-
-/// What the writer expected at a path, and the file found there; `None` is no file.
+/// What the intent expected at a path, and what was found; `None` is nothing.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Mismatch {
     pub path: RelPath,
-    pub expected: Precondition,
-    pub found: Option<Fingerprint>,
+    pub expected: Expect,
+    pub found: Option<Identity>,
+}
+
+#[derive(ThisError, Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Invalid {
+    #[error("{0} does not exist")]
+    NoEntity(EntityId),
+    #[error("{0} has no file")]
+    NoFile(EntityId),
+    #[error("{0} is not declared in the schema")]
+    UndeclaredKey(String),
+    #[error("a value for {key} cannot be written as JSON: {reason}")]
+    Unencodable { key: String, reason: String },
+    #[error("{0} is toshokan's own")]
+    ReservedPath(RelPath),
+    #[error("two effects of one intent touch {0}")]
+    Overlapping(RelPath),
+    #[error("the intent changes nothing")]
+    Empty,
 }
