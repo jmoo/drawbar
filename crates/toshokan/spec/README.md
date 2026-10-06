@@ -130,6 +130,8 @@ code compares contents where it would otherwise trust a length:
 
 - Before appending to its open segment, a writer reads the segment's last line
   and confirms it is the writer's last entry (`tests/writer.rs`).
+- A reader skips a file it read before only while its length, modification
+  time and last line are unchanged (`src/reader.rs`).
 
 What the model abstracts away is checked in Rust: the merge by
 `tests/facts.rs`, which compares every arrival order, split and compaction of
@@ -165,7 +167,18 @@ Neither happens silently: a restore is often deliberate. Letting go changes what
 is shown, not the cached view, which still only grows. `tests/library.rs` checks
 both choices through both drivers.
 
-The model does not cover a running process cloned with its open file handles,
-a sync client that keeps one of two conflicting versions and drops the other,
-a restore that lands between a writer's check and the write it guards, or hash
-collisions.
+The model does not cover these cases, and the code does not prevent what they
+cause:
+
+- A running process cloned with its open file handles, such as a virtual
+  machine resumed twice. Both copies append to one segment, and a line can
+  follow the other copy's. Readers then report a fork or hold entries back.
+- A sync client that keeps one of two conflicting versions of a file and drops
+  the other. Entries only in the dropped version leave the folder. A reader that
+  had placed them keeps showing them and reports them as removed.
+- A restore that lands between a writer's check and the write it guards. The
+  writer appends after an entry the folder no longer holds, and readers hold
+  what it wrote back as a gap.
+- Two entries with one hash. Hashes are 128 bits of BLAKE3, so an accidental
+  collision is negligible, but a forger who writes both entries can make one
+  with about 2^64 work.

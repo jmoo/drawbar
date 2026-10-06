@@ -17,7 +17,7 @@ use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::io::{Kind, Range, Root, Task};
 use crate::layout::Layout;
-use crate::line::{lines, Line, Stop};
+use crate::line::{self, lines, Line, Stop};
 use crate::log::{Entry, EntryKind};
 use crate::path::RelPath;
 use crate::report::{Fork, Gap};
@@ -574,11 +574,13 @@ pub struct Reader {
     seen: BTreeMap<RelPath, Seen>,
 }
 
-/// A file is unchanged while its length and modification time are.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A file is unchanged while its length, its modification time and its last
+/// bytes are: for a segment, the ending that names its last line.
+#[derive(Clone, PartialEq, Eq, Debug)]
 struct Stamp {
     len: u64,
     modified: u64,
+    tail: Vec<u8>,
 }
 
 struct Seen {
@@ -689,7 +691,7 @@ impl Reader {
         let stamps: Rc<BTreeMap<RelPath, Stamp>> = Rc::new(
             self.seen
                 .iter()
-                .map(|(path, seen)| (path.clone(), seen.stamp))
+                .map(|(path, seen)| (path.clone(), seen.stamp.clone()))
                 .collect(),
         );
         writers
@@ -829,7 +831,7 @@ fn scan_writer<'a>(
                 .filter_map(|entry| dir.join(&entry.name).ok())
                 .collect();
             flow::fold(paths.into_iter(), Vec::new(), move |mut files, path| {
-                let known = stamps.get(&path).copied();
+                let known = stamps.get(&path).cloned();
                 scan_file(path, known).map_ok(move |found| {
                     files.extend(found);
                     files
@@ -842,27 +844,51 @@ fn scan_writer<'a>(
 fn scan_file<'a>(path: RelPath, known: Option<Stamp>) -> Flow<'a, Result<Option<Scanned>>> {
     flow::stat(Root::Folder, &path.clone()).and_then(move |meta| match meta {
         Some(meta) if meta.kind == Kind::File => {
-            let stamp = meta.modified.map(|modified| Stamp {
-                len: meta.len,
-                modified,
-            });
-            if stamp.is_some() && stamp == known {
-                let found = Found::Unchanged;
-                return flow::ok(Some(Scanned { path, stamp, found }));
-            }
-            let range = Range {
+            let full = Range {
                 offset: 0,
                 len: meta.len.min(MAX_FILE),
             };
-            flow::read_present(Root::Folder, &path.clone(), range).map_ok(move |bytes| {
-                bytes.map(|bytes| Scanned {
-                    path,
-                    stamp,
-                    found: Found::Read(bytes),
-                })
+            let Some(modified) = meta.modified else {
+                return read_scanned(path, None, full);
+            };
+            let tail = Range {
+                offset: meta.len.saturating_sub(line::ENDING),
+                len: meta.len.min(line::ENDING),
+            };
+            flow::read_present(Root::Folder, &path.clone(), tail).and_then(move |tail| {
+                let Some(tail) = tail else {
+                    return flow::ok(None);
+                };
+                let stamp = Stamp {
+                    len: meta.len,
+                    modified,
+                    tail,
+                };
+                match known == Some(stamp.clone()) {
+                    true => flow::ok(Some(Scanned {
+                        path,
+                        stamp: Some(stamp),
+                        found: Found::Unchanged,
+                    })),
+                    false => read_scanned(path, Some(stamp), full),
+                }
             })
         }
         _ => flow::ok(None),
+    })
+}
+
+fn read_scanned<'a>(
+    path: RelPath,
+    stamp: Option<Stamp>,
+    range: Range,
+) -> Flow<'a, Result<Option<Scanned>>> {
+    flow::read_present(Root::Folder, &path.clone(), range).map_ok(move |bytes| {
+        bytes.map(|bytes| Scanned {
+            path,
+            stamp,
+            found: Found::Read(bytes),
+        })
     })
 }
 
@@ -1193,8 +1219,8 @@ mod tests {
         .unwrap();
     }
 
-    /// A backend that counts reads of file contents.
-    struct Counting(MemDisk, usize);
+    /// A backend that counts the bytes of file contents it is asked to read.
+    struct Counting(MemDisk, u64);
 
     impl crate::blocking::Backend for Counting {
         fn capabilities(&self, root: Root) -> crate::io::Capabilities {
@@ -1202,7 +1228,9 @@ mod tests {
         }
 
         fn perform(&mut self, io: Io) -> crate::io::IoResult {
-            self.1 += usize::from(matches!(io, Io::Read { .. }));
+            if let Io::Read { range, .. } = &io {
+                self.1 += range.len;
+            }
             self.0.perform(io)
         }
     }
@@ -1231,12 +1259,56 @@ mod tests {
         assert_eq!(report.placed[&W], hashes(&lines[2..]));
         assert_eq!(report.unreadable, [(dir.join("junk").unwrap(), None)]);
         assert_eq!(disk.mutations(), 3 * 2, "only the setup wrote");
-        assert_eq!(backend.1, 3);
+        let first = backend.1;
 
         let again = crate::blocking::run(&mut backend, reader.read()).unwrap();
-        assert_eq!(backend.1, 3, "unchanged files are not read again");
+        let ends = 2 * line::ENDING + 4;
+        assert_eq!(
+            backend.1 - first,
+            ends,
+            "unchanged files are read only at their ends"
+        );
         assert_eq!(again.placed, BTreeMap::new());
         assert_eq!(again.unreadable, report.unreadable);
+    }
+
+    #[test]
+    fn a_segment_replaced_at_its_length_and_time_is_read_again() {
+        let layout = Layout::new(".lib").unwrap();
+        let mut disk = MemDisk::new();
+        let lines = chain(2);
+        let other = after(&lines[1], "x1");
+        assert_eq!(other.to_bytes().len(), lines[2].to_bytes().len());
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        let bytes = |lines: &[&Line]| -> Vec<u8> {
+            lines.iter().flat_map(|line| line.to_bytes()).collect()
+        };
+        put(&disk, &path, &bytes(&[&lines[0], &lines[1], &lines[2]]));
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut disk, reader.read()).unwrap();
+        let modified = |disk: &mut MemDisk| {
+            let stat = Io::Stat {
+                root: Root::Folder,
+                path: path.clone(),
+            };
+            match disk.perform(stat).unwrap() {
+                crate::io::Reply::Stat(Some(meta)) => meta.modified.unwrap(),
+                reply => panic!("{reply:?}"),
+            }
+        };
+        let before = modified(&mut disk);
+        let remove = Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        };
+        disk.perform(remove).unwrap();
+        put(&disk, &path, &bytes(&[&lines[0], &lines[1], &other]));
+        disk.set_modified(Root::Folder, &path, before).unwrap();
+        assert_eq!(modified(&mut disk), before);
+
+        let report = crate::blocking::run(&mut disk, reader.read()).unwrap();
+        assert_eq!(report.placed[&W], [other.hash()]);
+        assert_eq!(report.forks.len(), 1, "{report:?}");
     }
 
     #[test]

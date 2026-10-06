@@ -291,8 +291,9 @@ line.
 ## Reading
 
 A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
-up to 256 MiB of it; a file whose length and modification time are unchanged is
-not read again. A file is a segment when it is empty or its first line can be
+up to 256 MiB of it. A file whose length, modification time and last 34 bytes
+are unchanged is not read again; a segment's last 34 bytes are the tab, hash and
+LF that end its last line. A file is a segment when it is empty or its first line can be
 read, else a snapshot when it decodes as one; anything else is reported when the
 library opens, and read again next time. A snapshot whose `writer` is not `w` is reported, not used.
 
