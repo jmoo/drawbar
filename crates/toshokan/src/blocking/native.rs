@@ -361,8 +361,9 @@ mod exclusive {
 
     /// The file systems whose renames take `RENAME_NOREPLACE`, by the magic
     /// numbers of `linux/magic.h`: ext2 to ext4, XFS, Btrfs, tmpfs, F2FS,
-    /// bcachefs, overlayfs, FAT and exFAT. Network and FUSE file systems may
-    /// refuse it with `EINVAL`.
+    /// bcachefs, overlayfs, FAT and exFAT. A volume not listed renames after
+    /// checking the destination. A network file system's check is not atomic
+    /// against other clients.
     const NO_REPLACE: [u32; 9] = [
         0xEF53,
         0x5846_5342,
