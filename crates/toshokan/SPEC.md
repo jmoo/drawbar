@@ -280,8 +280,9 @@ seals it when it closes. Before each append, a writer confirms that the folder
 holds its last entry: its open segment has the length this process left it, or,
 with no segment open, a file in its directory holds that entry. If not, it
 writes nothing and stops: a new writer takes over from the next write. After the
-append is synced it writes `head.json`. An append that fails seals the segment,
-so nothing follows a torn line.
+append is synced it writes the cached view and then `head.json`, before the
+commit returns. An append that fails seals the segment, so nothing follows a torn
+line.
 
 ## Reading
 
@@ -300,7 +301,7 @@ merged, and the fork is reported once per predecessor.
 Each install keeps what it has placed as a cached view in `<genesis>/view.json`
 of its local root. A new writer writes it from the view its instance holds; it is
 written again after each read that kept a snapshot, placed an entry or held one
-back, and when the instance closes. Every open starts from
+back, after each append, and when the instance closes. Every open starts from
 the views of all the install's writers, live and retired, joined, so what any
 instance of the install has shown stays shown:
 

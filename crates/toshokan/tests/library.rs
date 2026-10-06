@@ -368,6 +368,7 @@ through_both!(
     a_refused_intent_changes_nothing,
     what_an_instance_has_shown_survives_its_crash,
     what_any_writer_of_an_install_showed_survives_a_restore,
+    what_a_commit_returned_survives_a_crash_and_a_restore,
 );
 
 /// One machine of a shared folder.
@@ -1714,5 +1715,49 @@ fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
         );
         drop(a);
         restored.crash();
+    }
+}
+
+/// A machine whose folder was backed up after `song` was created, the backup, and
+/// an instance on the machine that resumed the writer.
+fn backed_up<F: Facade>(clock: &TestClock) -> (Machine, MemDisk, F, EntityId) {
+    let folder = MemDisk::new();
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let backup = copy_folder(&folder);
+    let (a, opened) = F::open(Probe::new(&here), env("a", 2, clock)).unwrap();
+    assert!(matches!(opened.start, Start::Resumed(_)), "{:?}", opened.start);
+    (here, backup, a, song)
+}
+
+fn what_a_commit_returned_survives_a_crash_and_a_restore<F: Facade>() {
+    let total = {
+        let clock = TestClock::at(1_000);
+        let (here, _, mut a, song) = backed_up::<F>(&clock);
+        let before = here.local.mutations();
+        a.commit("Tag", |i| i.add(song, TAGS, tag("lost"))).unwrap();
+        here.local.mutations() - before
+    };
+    for crash in 0..=total {
+        let shown = format!("crash after {crash} of {total}");
+        let clock = TestClock::at(1_000);
+        let (here, backup, mut a, song) = backed_up::<F>(&clock);
+        here.local.crash_after(crash);
+        let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("lost")));
+        drop(a);
+        let restored = Machine {
+            folder: backup,
+            local: here.local.restart(),
+        };
+        let (a, _) = F::open(Probe::new(&restored), env("a", 3, &clock))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        let shown_tags = tags(&a.view(), song);
+        match committed {
+            Ok(_) => assert_eq!(shown_tags, ["lost", "new"], "{shown}"),
+            Err(_) => assert!(shown_tags.contains(&tag("new")), "{shown}: {shown_tags:?}"),
+        }
+        assert_eq!(crash == total, committed.is_ok(), "{shown}");
     }
 }

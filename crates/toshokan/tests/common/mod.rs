@@ -429,8 +429,12 @@ impl Instance {
         let fresh = SegmentName::from_u128(self.random.next_u128());
         let writer = self.writer.take().expect("created above");
         let (writer, appended) = run(&mut self.machine, writer.append(vec![(at, kind)], fresh));
+        let recorded = appended.and_then(|appended| {
+            run(&mut self.machine, writer.record())?;
+            Ok(appended)
+        });
         self.writer = Some(writer);
-        made.extend(appended?.iter().map(Entry::hash));
+        made.extend(recorded?.iter().map(Entry::hash));
         Ok(made)
     }
 

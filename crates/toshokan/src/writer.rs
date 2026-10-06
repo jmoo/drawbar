@@ -4,8 +4,8 @@
 //! A writer opens a new segment under a random name the first time it appends in a
 //! process, appends to it, and seals it when the process closes it cleanly. It
 //! deletes only segments this process opened and sealed. Before each append it
-//! confirms the folder still holds its head; after each, it records the head in
-//! the local root.
+//! confirms the folder still holds its head; after each, once the cached view
+//! holds the new entries, it records the head in the local root.
 
 use std::collections::BTreeMap;
 
@@ -200,16 +200,16 @@ impl Writer {
     }
 
     /// Appends `kinds` as consecutive entries, durably, opening a segment named
-    /// `fresh` when none is open, then records the new head in the local root.
-    /// Returns the writer with the result.
+    /// `fresh` when none is open. Returns the writer with the result. The caller
+    /// keeps the entries in the cached view, then calls [`Writer::record`].
     ///
     /// Refuses, appending nothing, an entry too long for a line, and fails with
     /// [`Error::Rekey`] when the folder no longer holds this writer's head. A
     /// failed append seals the segment, so a torn line is never followed.
     ///
-    /// ⚠️ A failure syncing the entries or recording the head comes after the
-    /// entries reached the folder: the writer has moved on to them, and its next
-    /// append confirms the folder still holds them.
+    /// ⚠️ A failure syncing the entries comes after they reached the folder: the
+    /// writer has moved on to them, and its next append confirms the folder still
+    /// holds them.
     pub fn append(
         self,
         kinds: Vec<(Hlc, EntryKind)>,
@@ -260,6 +260,11 @@ impl Writer {
     /// Segments this process opened and sealed: the only ones it may delete.
     pub fn sealed(&self) -> &[SegmentName] {
         &self.sealed
+    }
+
+    /// Records this writer's head in the local root: `head.json`, replaced.
+    pub fn record(&self) -> Task<'static, Result<()>> {
+        record_head(self.id, self.genesis, self.head).task()
     }
 
     /// Seals the open segment and releases the writer's lock.
@@ -336,14 +341,12 @@ impl Writer {
                 len: start + len,
             });
             self.head = entries.last().expect("at least one entry").hash();
-            let (id, genesis, head) = (self.id, self.genesis, self.head);
             sync_all(Root::Folder, synced).then(move |result| match result {
                 Err(error) => {
                     self.seal();
                     Flow::Done((self, Err(error)))
                 }
-                Ok(()) => record_head(id, genesis, head)
-                    .then(move |recorded| Flow::Done((self, recorded.map(|()| entries)))),
+                Ok(()) => Flow::Done((self, Ok(entries))),
             })
         })
     }

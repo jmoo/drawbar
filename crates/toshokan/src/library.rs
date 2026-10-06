@@ -1070,8 +1070,11 @@ fn append<'a>(
     })
 }
 
-/// As [`append`], with the library back whatever happened. A writer that cannot
-/// continue its history stops writing: the next commit creates another.
+/// As [`append`], with the library back whatever happened. Once the entries are
+/// durable in the folder, the cached view holding them is saved and then the head
+/// recorded, so what a commit returns survives a crash and a restore. A writer
+/// that cannot continue its history stops writing: the next commit creates
+/// another.
 fn appending<'a>(
     library: &'a mut Library,
     kinds: Vec<EntryKind>,
@@ -1090,7 +1093,12 @@ fn appending<'a>(
         match appended {
             Ok(entries) => {
                 library.absorb_own(&entries);
-                Flow::Done((library, Ok(entries)))
+                let writer = library.writer.as_ref().expect("put back above");
+                let saved = library.reader.cached().save(writer.genesis());
+                let recorded = writer.record();
+                flow::run(saved)
+                    .and_then(move |()| flow::run(recorded))
+                    .then(move |kept| Flow::Done((library, kept.map(|()| entries))))
             }
             Err(error @ Error::Rekey { .. }) => {
                 let stopped = library.stop_writing();
