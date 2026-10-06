@@ -83,16 +83,25 @@ pub enum Op {
         key: String,
         value: Raw,
     },
-    /// A set remove of the adds it names.
+    /// A set remove of the adds of `value` that the entries `tags` made.
     Remove {
         entity: EntityId,
         key: String,
+        value: Raw,
         tags: Vec<EntryHash>,
     },
-    /// A write of the entity's file register; `None` says it has no file.
+    /// A write of the entity's file register by a file effect; `None` says it has
+    /// no file.
     File {
         entity: EntityId,
         file: Option<FileFact>,
+        replaces: Vec<EntryHash>,
+    },
+    /// A write of the entity's file register recording a binding a scan derived.
+    /// Merged as [`Op::File`]; undo leaves it alone.
+    Pin {
+        entity: EntityId,
+        file: FileFact,
         replaces: Vec<EntryHash>,
     },
     /// An op this build does not know.
