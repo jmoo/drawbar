@@ -92,33 +92,21 @@ impl Writer {
     /// lock it gets and whose head record reads; `None` when there is none. The
     /// lock is held until [`Picked::resume`] retires it or the writer closes.
     pub fn pick() -> Task<'static, Result<Option<Picked>>> {
+        flow::run(Self::pool()).and_then(pick_first).task()
+    }
+
+    /// Every writer this install has a directory for in its local root, live or
+    /// retired, by genesis entry in order.
+    pub fn pool() -> Task<'static, Result<Vec<EntryHash>>> {
         flow::list(Root::Local, &RelPath::ROOT)
-            .and_then(move |entries| {
+            .map_ok(|entries| {
                 let mut pool: Vec<EntryHash> = entries
                     .into_iter()
                     .filter(|entry| entry.kind == Kind::Directory)
                     .filter_map(|entry| entry.name.parse().ok())
                     .collect();
                 pool.sort();
-                pick_first(pool)
-            })
-            .task()
-    }
-
-    /// The writers of this install's pool that are retired, by genesis entry.
-    pub fn retired() -> Task<'static, Result<Vec<EntryHash>>> {
-        flow::list(Root::Local, &RelPath::ROOT)
-            .and_then(|entries| {
-                let pool = entries
-                    .into_iter()
-                    .filter(|entry| entry.kind == Kind::Directory)
-                    .filter_map(|entry| entry.name.parse::<EntryHash>().ok());
-                flow::fold(pool, Vec::new(), |mut retired, genesis| {
-                    flow::stat(Root::Local, &Layout::retired(genesis)).map_ok(move |marker| {
-                        retired.extend(marker.map(|_| genesis));
-                        retired
-                    })
-                })
+                pool
             })
             .task()
     }

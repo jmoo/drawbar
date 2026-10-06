@@ -74,9 +74,9 @@ struct Resolved {
 }
 
 impl Library {
-    /// Claims a writer from the pool, reads its cached view and the folder,
-    /// assesses recovery, scans the library's files and checks drafts.
-    /// `capabilities` are the folder's.
+    /// Claims a writer from the pool, starts from the cached views of every writer
+    /// of the pool joined, reads the folder, assesses recovery, scans the
+    /// library's files and checks drafts. `capabilities` are the folder's.
     pub fn open(
         layout: Layout,
         schema: Schema,
@@ -85,17 +85,9 @@ impl Library {
     ) -> Task<'static, Result<(Library, Opened)>> {
         flow::run(Writer::pick())
             .and_then(|picked| {
-                let cached = match &picked {
-                    Some(picked) => CachedView::load(picked.genesis()),
-                    None => flow::run(Writer::retired())
-                        .and_then(|retired| flow::run(CachedView::load_all(retired)))
-                        .task(),
-                };
-                flow::run(cached).then(move |cached| match cached {
-                    Ok(cached) => ok((picked, cached)),
-                    Err(Error::Corrupt { .. }) => ok((picked, CachedView::default())),
-                    Err(error) => Flow::Done(Err(error)),
-                })
+                flow::run(Writer::pool())
+                    .and_then(|pool| flow::run(CachedView::load_all(pool)))
+                    .map_ok(move |cached| (picked, cached))
             })
             .and_then(move |(picked, cached)| {
                 let mut reader = Reader::new(layout.clone(), cached);

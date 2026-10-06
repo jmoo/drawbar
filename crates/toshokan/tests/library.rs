@@ -367,6 +367,7 @@ through_both!(
     others_on_this_machine_are_told_apart_from_others_elsewhere,
     a_refused_intent_changes_nothing,
     what_an_instance_has_shown_survives_its_crash,
+    what_any_writer_of_an_install_showed_survives_a_restore,
 );
 
 /// One machine of a shared folder.
@@ -1678,4 +1679,40 @@ fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
         ["b", "new"],
         "the cached view kept it"
     );
+}
+
+fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut first, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut first, "song.npno", b"song");
+    let (mut second, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    assert_eq!(opened.start, Start::New, "the first instance holds its writer");
+    second
+        .commit("Tag", |i| i.add(song, TAGS, tag("two")))
+        .unwrap();
+    second.close().unwrap();
+    first.refresh().unwrap();
+    let backup = copy_folder(&folder);
+    first
+        .commit("Tag", |i| i.add(song, TAGS, tag("lost")))
+        .unwrap();
+    first.close().unwrap();
+
+    let mut restored = Machine {
+        folder: backup,
+        local: here.local.clone(),
+    };
+    for reopen in 0..3 {
+        let (a, opened) = F::open(Probe::new(&restored), env("a", 3 + reopen, &clock)).unwrap();
+        assert_eq!(
+            tags(&a.view(), song),
+            ["lost", "new", "two"],
+            "reopen {reopen}, {:?}",
+            opened.start
+        );
+        drop(a);
+        restored.crash();
+    }
 }

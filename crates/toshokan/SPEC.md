@@ -300,8 +300,9 @@ merged, and the fork is reported once per predecessor.
 Each install keeps what it has placed as a cached view in `<genesis>/view.json`
 of its local root. A new writer writes it from the view its instance holds; it is
 written again after each read that kept a snapshot, placed an entry or held one
-back, and when the instance closes. An instance that takes no writer from the
-pool starts from the views of the install's retired writers, joined:
+back, and when the instance closes. Every open starts from
+the views of all the install's writers, live and retired, joined, so what any
+instance of the install has shown stays shown:
 
 ```text
 {"writers":{"<w>":{
