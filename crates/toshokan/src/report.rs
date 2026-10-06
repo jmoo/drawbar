@@ -154,8 +154,8 @@ pub enum Outcome {
 }
 
 /// An intent whose file effects stopped partway. Every effect before `applied`
-/// was made and logged; the pending record, if any, names what recovery will
-/// finish or roll back.
+/// was made; the pending record, while there is one, names what recovery will
+/// finish.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PartialReport {
     pub applied: usize,

@@ -53,7 +53,9 @@ pub enum Renames {
 ///
 /// **Durability.** In a root whose [`Capabilities::fsync`] is set, a file's contents
 /// and a directory's names each become durable only when [`Io::Sync`] names that
-/// file or directory. A crash keeps exactly the durable state, and what [`Tail`]
+/// file or directory. A directory's rename becomes durable whole when either
+/// directory it moved between is synced: no file system leaves a directory with
+/// two names. A crash keeps exactly the durable state, and what [`Tail`]
 /// says of bytes appended since the file's last sync. Without `fsync`, every
 /// completed operation is durable at once. With [`MemDisk::set_eager_names`], a new
 /// name is durable as soon as it is created.
@@ -103,6 +105,16 @@ struct Tree {
     nodes: Vec<Node>,
     capabilities: Capabilities,
     capacity: Option<u64>,
+    /// Directory renames not yet durable.
+    moves: Vec<DirMove>,
+}
+
+/// A directory renamed from one directory's names to another's.
+#[derive(Clone)]
+struct DirMove {
+    ino: Ino,
+    from: (Ino, String),
+    to: (Ino, String),
 }
 
 struct Disk {
@@ -382,7 +394,14 @@ impl Disk {
         let to_name = to_name.to_owned();
         if renames == Renames::Atomic || kind == Kind::Directory {
             tree.entries_mut(from_dir).remove(from_name);
-            tree.entries_mut(to_dir).insert(to_name, ino);
+            tree.entries_mut(to_dir).insert(to_name.clone(), ino);
+            if kind == Kind::Directory {
+                tree.moves.push(DirMove {
+                    ino,
+                    from: (from_dir, from_name.to_owned()),
+                    to: (to_dir, to_name),
+                });
+            }
             return Ok(());
         }
         let copy = tree.nodes[ino].clone();
@@ -406,6 +425,7 @@ impl Tree {
             }],
             capabilities,
             capacity: None,
+            moves: Vec::new(),
         }
     }
 
@@ -428,6 +448,7 @@ impl Tree {
             nodes,
             capabilities: self.capabilities,
             capacity: self.capacity,
+            moves: Vec::new(),
         }
     }
 
@@ -653,6 +674,25 @@ impl Tree {
         let ino = self.existing(path)?;
         let node = &mut self.nodes[ino];
         node.durable = node.live.clone();
+        let (now, later) = std::mem::take(&mut self.moves)
+            .into_iter()
+            .partition(|moved| moved.from.0 == ino || moved.to.0 == ino);
+        self.moves = later;
+        for DirMove {
+            ino: moved,
+            from,
+            to,
+        } in now
+        {
+            if let Content::Directory(names) = &mut self.nodes[from.0].durable {
+                if names.get(&from.1) == Some(&moved) {
+                    names.remove(&from.1);
+                }
+            }
+            if let Content::Directory(names) = &mut self.nodes[to.0].durable {
+                names.insert(to.1, moved);
+            }
+        }
         Ok(())
     }
 }
@@ -829,6 +869,27 @@ mod tests {
             files(&[("a/f", b"x"), ("b/f", b"x")]),
             "a rename whose source directory was not synced leaves both names"
         );
+    }
+
+    #[test]
+    fn a_directory_rename_survives_whole_once_either_directory_is_synced() {
+        for synced in ["a", "b"] {
+            let disk = MemDisk::new();
+            let f = Folder(&disk);
+            f.dir("a/d");
+            f.dir("b");
+            f.create("a/d/f", b"x");
+            for path in ["a/d/f", "a/d", "a", "b", ""] {
+                f.sync(path);
+            }
+            f.rename("a/d", "b/d");
+            f.sync(synced);
+            assert_eq!(
+                disk.restart().files(Root::Folder),
+                files(&[("b/d/f", b"x")]),
+                "synced {synced}"
+            );
+        }
     }
 
     #[test]
