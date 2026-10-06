@@ -915,9 +915,9 @@ fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
     })
 }
 
-/// Commits `resolved`: creates the writer if there is none, settles what is left
-/// of this writer's interrupted effects, then logs the intent and carries out its
-/// file effects.
+/// Commits `resolved` once this writer's interrupted effects are settled: creates
+/// the writer if there is none, removes stale staging, then logs the intent and
+/// carries out its file effects.
 fn commit<'a>(library: &'a mut Library, resolved: Resolved) -> Fallible<'a, Committed> {
     let Resolved {
         label,
@@ -927,7 +927,7 @@ fn commit<'a>(library: &'a mut Library, resolved: Resolved) -> Fallible<'a, Comm
         reverses,
     } = resolved;
     ensure_writer(library, &effects)
-        .and_then(settle_own)
+        .and_then(tidy_staging)
         .and_then(move |library| {
             let mut ops = facts;
             ops.extend(library.pins(&effects));
@@ -1001,14 +1001,11 @@ fn ensure_writer<'a>(
     })
 }
 
-/// Settles this writer's interrupted effects, oldest first, then removes staging
-/// no record places. A record stays to settle while settling it fails.
+/// Settles this writer's interrupted effects, oldest first. A record stays to
+/// settle while settling it fails.
 fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     let Some(settling) = library.unsettled.first().cloned() else {
-        let Some(writer) = library.writer.as_ref().map(Writer::id) else {
-            return ok(library);
-        };
-        return flow::run(recovery::tidy(&library.layout, writer, &[])).map_ok(move |()| library);
+        return ok(library);
     };
     let layout = library.layout.clone();
     let PendingRecord { writer, .. } = settling.pending;
@@ -1039,6 +1036,15 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
             settle_own(library)
         })
     })
+}
+
+/// Removes this writer's staged files that no record places: what a run cut short
+/// before writing its record left. Runs once settling has left no record open.
+fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
+    let Some(writer) = library.writer.as_ref().map(Writer::id) else {
+        return ok(library);
+    };
+    flow::run(recovery::tidy(&library.layout, writer, &[])).map_ok(move |()| library)
 }
 
 /// The intent a pending record planned to log, without the file ops its steps
@@ -1223,8 +1229,9 @@ fn log_effects<'a>(
     })
 }
 
-/// Settles another writer's record `theirs` as `how` with `plan`, then logs the
-/// settlement. Finishing logs the facts the other writer planned with it.
+/// Settles another writer's record `theirs` as `how` with `plan`, once this
+/// writer's own interrupted effects are settled: removes stale staging, then logs
+/// the settlement. Finishing logs the facts the other writer planned with it.
 fn settle_orphan(
     library: &mut Library,
     orphan: Orphan,
@@ -1243,7 +1250,7 @@ fn settle_orphan(
         outcome: how,
     });
     ensure_writer(library, &effects)
-        .and_then(settle_own)
+        .and_then(tidy_staging)
         .and_then(move |library| {
             let logged: Fallible<'_, &mut Library> = match effects.is_empty() && facts.is_empty() {
                 true => append(library, vec![settle]).map_ok(|(library, _)| library),
