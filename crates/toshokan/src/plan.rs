@@ -3,7 +3,7 @@
 //! facts and carries out their file effects.
 
 use crate::ids::{EntityId, EntryHash, Identity, Nonce};
-use crate::io::{Range, CHUNK};
+use crate::io::{IoError, Range, CHUNK};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -115,9 +115,6 @@ pub enum Piece {
     Kept(Range),
 }
 
-/// Why a splice fails when its source is shorter than a range it keeps.
-pub(crate) const SHRANK: &str = "the source of a splice no longer holds a range it keeps";
-
 /// One request of a [`Splice`] being written, at `at` of the new file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Splicing {
@@ -133,31 +130,74 @@ pub(crate) enum Splicing {
 }
 
 impl Splice {
-    /// The writes and copies that make the new file, in order.
-    pub(crate) fn steps(self) -> impl Iterator<Item = Splicing> {
-        let mut at = 0u64;
-        self.pieces.into_iter().flat_map(move |piece| {
-            let start = at;
-            let steps: Vec<Splicing> = match piece {
-                Piece::Bytes(bytes) => {
-                    at = at.saturating_add(bytes.len() as u64);
-                    vec![Splicing::Write { at: start, bytes }]
-                }
-                Piece::Kept(range) => {
-                    at = at.saturating_add(range.len);
-                    (0..range.len.div_ceil(CHUNK))
-                        .map(|i| Splicing::Copy {
-                            at: start.saturating_add(i * CHUNK),
-                            range: Range {
-                                offset: range.offset.saturating_add(i * CHUNK),
-                                len: CHUNK.min(range.len - i * CHUNK),
-                            },
-                        })
-                        .collect()
-                }
+    /// The writes and copies that make the new file, in order, each made as it is
+    /// taken. A piece that would end past the largest offset, of its source or of
+    /// the new file, is [`IoError::SpliceRange`] and ends them.
+    pub(crate) fn steps(self) -> SpliceSteps {
+        SpliceSteps {
+            pieces: self.pieces.into_iter(),
+            at: Some(0),
+            copying: None,
+        }
+    }
+}
+
+/// The steps of a [`Splice`].
+pub(crate) struct SpliceSteps {
+    pieces: std::vec::IntoIter<Piece>,
+    /// Where the next step writes in the new file; `None` once a piece failed.
+    at: Option<u64>,
+    /// What is left of the kept range being copied. It ends within the largest
+    /// offset, in its source and from `at` in the new file.
+    copying: Option<Range>,
+}
+
+impl SpliceSteps {
+    /// Copies the first chunk of `range` to `at` and keeps the rest to copy.
+    fn copy(&mut self, at: u64, range: Range) -> Splicing {
+        let len = CHUNK.min(range.len);
+        self.at = Some(at + len);
+        let rest = Range {
+            offset: range.offset + len,
+            len: range.len - len,
+        };
+        self.copying = (rest.len > 0).then_some(rest);
+        Splicing::Copy {
+            at,
+            range: Range {
+                offset: range.offset,
+                len,
+            },
+        }
+    }
+}
+
+impl Iterator for SpliceSteps {
+    type Item = Result<Splicing, IoError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let at = self.at?;
+            if let Some(range) = self.copying.take() {
+                return Some(Ok(self.copy(at, range)));
+            }
+            let piece = self.pieces.next()?;
+            let (len, in_source) = match &piece {
+                Piece::Bytes(bytes) => (bytes.len() as u64, true),
+                Piece::Kept(range) => (range.len, range.offset.checked_add(range.len).is_some()),
             };
-            steps
-        })
+            let Some(end) = at.checked_add(len).filter(|_| in_source) else {
+                self.at = None;
+                return Some(Err(IoError::SpliceRange));
+            };
+            match piece {
+                Piece::Bytes(bytes) => {
+                    self.at = Some(end);
+                    return Some(Ok(Splicing::Write { at, bytes }));
+                }
+                Piece::Kept(range) => self.copying = (range.len > 0).then_some(range),
+            }
+        }
     }
 }
 
@@ -180,7 +220,7 @@ mod tests {
         };
         let range = |offset, len| Range { offset, len };
         assert_eq!(
-            splice.steps().collect::<Vec<_>>(),
+            splice.steps().collect::<Result<Vec<_>, _>>().unwrap(),
             [
                 Splicing::Write {
                     at: 0,
@@ -200,5 +240,46 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_kept_range_of_any_length_yields_its_first_chunks_at_once() {
+        let splice = Splice {
+            from: RelPath::new("a").unwrap(),
+            pieces: vec![Piece::Kept(Range {
+                offset: 0,
+                len: u64::MAX / 2,
+            })],
+        };
+        let first: Vec<_> = splice.steps().take(2).collect();
+        let copy = |at| Splicing::Copy {
+            at,
+            range: Range {
+                offset: at,
+                len: CHUNK,
+            },
+        };
+        assert_eq!(first, [Ok(copy(0)), Ok(copy(CHUNK))]);
+    }
+
+    #[test]
+    fn a_piece_ending_past_the_largest_offset_ends_the_splice() {
+        let head = || Piece::Bytes(b"head".to_vec());
+        let kept = |offset, len| Piece::Kept(Range { offset, len });
+        for (shown, piece) in [
+            ("in its source", kept(u64::MAX - 1, 2)),
+            ("in the new file", kept(0, u64::MAX - 3)),
+        ] {
+            let splice = Splice {
+                from: RelPath::new("a").unwrap(),
+                pieces: vec![head(), piece, head()],
+            };
+            let steps: Vec<_> = splice.steps().collect();
+            let written = Splicing::Write {
+                at: 0,
+                bytes: b"head".to_vec(),
+            };
+            assert_eq!(steps, [Ok(written), Err(IoError::SpliceRange)], "{shown}");
+        }
     }
 }

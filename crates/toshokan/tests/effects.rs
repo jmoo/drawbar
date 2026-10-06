@@ -254,7 +254,7 @@ mod suite {
             matches!(
                 failed,
                 Err(Error::Io {
-                    error: IoError::Other(_),
+                    error: IoError::SpliceRange,
                     ..
                 })
             ),
@@ -266,6 +266,34 @@ mod suite {
             (folder.user, folder.pending),
             (user(&[("a.syx", b"short")]), 0)
         );
+    }
+
+    pub fn a_splice_keeping_more_than_any_file_holds_fails_at_its_first_read(d: &mut impl Driven) {
+        put(d, &[("a.syx", b"short")]);
+        let splice = Splice {
+            from: path("a.syx"),
+            pieces: vec![kept(0, u64::MAX / 2)],
+        };
+        let failed = common::prepare(
+            d,
+            WRITER,
+            &[save_over("a.syx", b"short")],
+            vec![Fill::Splice(splice)],
+            &bound(&[]),
+            &mut env(1),
+        );
+        assert!(
+            matches!(
+                failed,
+                Err(Error::Io {
+                    error: IoError::SpliceRange,
+                    ..
+                })
+            ),
+            "{:?}",
+            failed.map(|run| run.map(|_| ()))
+        );
+        assert_eq!(sorted(d).user, user(&[("a.syx", b"short")]));
     }
 
     pub fn a_tree_moves_with_every_file_in_it(d: &mut impl Driven) {
@@ -289,6 +317,7 @@ for_every_backend!(suite:
     a_save_places_new_bytes_and_moves_the_old_into_the_trash,
     a_save_spliced_from_the_file_it_replaces_copies_its_kept_ranges,
     a_splice_past_the_end_of_its_source_fails_before_any_user_path_changes,
+    a_splice_keeping_more_than_any_file_holds_fails_at_its_first_read,
     a_save_where_nothing_is_makes_its_directories,
     a_failed_precondition_refuses_and_leaves_nothing_behind,
     trashing_then_restoring_brings_the_same_bytes_back,

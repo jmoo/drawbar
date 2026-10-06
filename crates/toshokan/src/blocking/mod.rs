@@ -17,7 +17,7 @@ use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
 use crate::path::RelPath;
-use crate::plan::{Splice, Splicing, SHRANK};
+use crate::plan::{Splice, Splicing};
 use crate::report::{
     Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
 };
@@ -58,12 +58,12 @@ impl<B: Backend> Source<B> for Splice {
     fn fill(self: Box<Self>, staging: &mut Staging<'_, B>) -> std::result::Result<(), IoError> {
         let from = self.from.clone();
         for step in self.steps() {
-            match step {
+            match step? {
                 Splicing::Write { at, bytes } => staging.write(at, bytes)?,
                 Splicing::Copy { at, range } => {
                     let bytes = staging.read(&from, range)?;
                     if bytes.len() as u64 != range.len {
-                        return Err(IoError::Other(SHRANK.into()));
+                        return Err(IoError::SpliceRange);
                     }
                     staging.write(at, bytes)?;
                 }

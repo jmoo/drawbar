@@ -15,7 +15,7 @@ use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
 use crate::path::RelPath;
-use crate::plan::{Splice, Splicing, SHRANK};
+use crate::plan::{Splice, Splicing};
 use crate::report::{
     Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
 };
@@ -69,12 +69,12 @@ impl<F: Fs> Source<F> for Splice {
         Box::pin(async move {
             let from = self.from.clone();
             for step in self.steps() {
-                match step {
+                match step? {
                     Splicing::Write { at, bytes } => staging.write(at, bytes).await?,
                     Splicing::Copy { at, range } => {
                         let bytes = staging.read(&from, range).await?;
                         if bytes.len() as u64 != range.len {
-                            return Err(IoError::Other(SHRANK.into()));
+                            return Err(IoError::SpliceRange);
                         }
                         staging.write(at, bytes).await?;
                     }

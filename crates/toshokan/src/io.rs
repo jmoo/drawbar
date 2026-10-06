@@ -242,6 +242,10 @@ pub enum IoError {
     NoSpace,
     #[error("a directory cannot move inside itself")]
     IntoItself,
+    /// A splice keeps a range its source does not hold whole, or would make a
+    /// file longer than the largest offset.
+    #[error("a splice keeps a range its source does not hold")]
+    SpliceRange,
     /// The backend does not declare the capability the request needs. Operations
     /// plan from [`Capabilities`]; reaching this is a planning bug.
     #[error("the backend cannot {0}")]
