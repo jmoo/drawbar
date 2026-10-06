@@ -26,7 +26,7 @@ use crate::log::{Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
 use crate::merge::{merge, Beyond, Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
-use crate::plan::{FactChange, FileChange, Plan, Target};
+use crate::plan::{FactChange, FileChange, Plan};
 use crate::reader::{CachedView, ReadReport, Reader, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
@@ -234,6 +234,11 @@ impl Library {
 
     pub fn view(&self) -> View {
         self.view.clone()
+    }
+
+    /// An id for an entity an intent being built creates.
+    pub fn entity_id(&mut self) -> EntityId {
+        self.env.entity_id()
     }
 
     pub fn history(&self) -> &[HistoryItem] {
@@ -586,11 +591,10 @@ impl Library {
     }
 
     /// Checks `plan` against the view and turns its facts into ops and its file
-    /// changes into effects. Draws the ids of created entities.
+    /// changes into effects.
     fn resolve(&mut self, plan: Plan) -> Result<Resolved> {
         let refused = |invalid| Error::Refused(Refusal::Invalid(invalid));
-        let created: Vec<EntityId> = (0..plan.creates).map(|_| self.env.entity_id()).collect();
-        let facts = intent::ops(&plan, &created, &self.folded, &self.schema).map_err(refused)?;
+        let facts = intent::ops(&plan, &self.folded, &self.schema).map_err(refused)?;
         let revived: BTreeSet<EntityId> = plan
             .facts
             .iter()
@@ -600,20 +604,19 @@ impl Library {
             })
             .collect();
         for change in &plan.files {
-            let entity = match change {
-                FileChange::Save {
-                    entity: Target::Existing(entity),
-                    ..
-                } => *entity,
-                _ => continue,
+            let (FileChange::Save { entity, .. } | FileChange::Adopt { entity, .. }) = change
+            else {
+                continue;
             };
-            if !self.folded.present(entity) && !revived.contains(&entity) {
-                return Err(refused(Invalid::NoEntity(entity)));
+            let known = plan.created.contains(entity)
+                || self.folded.present(*entity)
+                || revived.contains(entity);
+            if !known {
+                return Err(refused(Invalid::NoEntity(*entity)));
             }
         }
         let effects = effects::resolve(
             &plan.files,
-            &created,
             &self.bindings,
             &self.layout,
             self.capabilities,
@@ -622,7 +625,7 @@ impl Library {
         .map_err(Error::Refused)?;
         Ok(Resolved {
             label: plan.label,
-            created,
+            created: plan.created,
             facts,
             effects: Rc::new(effects),
             reverses: plan.reverses,

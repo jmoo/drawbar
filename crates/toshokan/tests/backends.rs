@@ -123,6 +123,19 @@ mod suite {
         assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"old".to_vec()));
     }
 
+    pub fn a_write_lands_at_its_offset_and_past_the_end_after_zeros(b: &mut impl Driven) {
+        b.ok(create(Root::Folder, "f", b"abc"));
+        let write = |text: &str, offset, bytes: &[u8]| Io::Write {
+            root: Root::Folder,
+            path: path(text),
+            offset,
+            bytes: bytes.to_vec(),
+        };
+        b.requests(vec![write("f", 1, b"XY"), write("f", 5, b"Z")]);
+        assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"aXY\0\0Z".to_vec()));
+        assert_eq!(b.one(write("none", 0, b"x")), Err(IoError::NotFound));
+    }
+
     pub fn a_directory_renames_with_its_contents(b: &mut impl Driven) {
         b.ok(make_dir(Root::Folder, "a/sub"));
         b.ok(create(Root::Folder, "a/sub/f", b"1"));
@@ -305,6 +318,7 @@ for_every_backend!(suite:
     removal_needs_the_right_kind_and_an_empty_directory,
     making_a_directory_is_idempotent_and_refuses_a_file_in_the_way,
     appends_extend_a_file,
+    a_write_lands_at_its_offset_and_past_the_end_after_zeros,
     the_roots_are_separate_trees,
     requests_on_the_wrong_kind_or_nothing_fail_alike,
     a_file_renames_across_directories_and_syncs,

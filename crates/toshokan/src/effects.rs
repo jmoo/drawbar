@@ -1,7 +1,8 @@
 //! File effects without atomic replace.
 //!
-//! Nothing in a user path is overwritten or deleted in place. A save stages its
-//! bytes in `tmp/` and syncs them; every precondition is checked; a pending record
+//! Nothing in a user path is overwritten or deleted in place. A save fills a
+//! staged file in `tmp/` from the app's content, which the driver writes, and
+//! syncs it; every precondition is checked; a pending record
 //! is written; displaced bytes are renamed into this writer's trash and the staged
 //! file into place; the intent's entry is appended; the pending record is removed.
 //! Each user path holds its old bytes, nothing or its new bytes, and while it holds
@@ -26,7 +27,7 @@ use crate::layout::Layout;
 use crate::log::{Displaced, FileFact};
 use crate::path::RelPath;
 use crate::pending::PendingRecord;
-use crate::plan::{Expect, FileChange, Target};
+use crate::plan::{Content, Expect, FileChange};
 use crate::report::{Outcome, PartialReport};
 use crate::view::FileState;
 
@@ -105,11 +106,12 @@ pub struct Precondition {
     pub expect: Expect,
 }
 
-/// The bytes of a staged file.
+/// What a staged file is filled from.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Staged {
-    Bytes(Vec<u8>),
-    /// A copy of the file at this path in the folder.
+    /// The app's content, which the driver writes.
+    Content(Content),
+    /// A copy of the file at this path in the folder, made a chunk at a time.
     Copy(RelPath),
 }
 
@@ -172,15 +174,14 @@ pub struct Applied {
     pub outcome: Outcome,
 }
 
-/// Resolves `changes` into checks and steps. `created` gives the ids of the plan's
-/// new entities; `bindings` where existing entities' files are. Directory renames
-/// are used only where `capabilities` declares them.
+/// Resolves `changes` into checks and steps. `bindings` says where existing
+/// entities' files are. Directory renames are used only where `capabilities`
+/// declares them.
 ///
 /// A tree moved by per-file renames moves the files `bindings` knows of; a
 /// directory left behind holding anything else stays.
 pub fn resolve(
     changes: &[FileChange],
-    created: &[EntityId],
     bindings: &Bindings,
     layout: &Layout,
     capabilities: Capabilities,
@@ -194,7 +195,7 @@ pub fn resolve(
         bindings,
     };
     for change in changes {
-        resolver.change(change, created, capabilities, env)?;
+        resolver.change(change, capabilities, env)?;
     }
     Ok(resolver.plan)
 }
@@ -215,7 +216,6 @@ impl Resolver<'_> {
     fn change(
         &mut self,
         change: &FileChange,
-        created: &[EntityId],
         capabilities: Capabilities,
         env: &mut Env,
     ) -> std::result::Result<(), Refusal> {
@@ -223,13 +223,10 @@ impl Resolver<'_> {
             FileChange::Save {
                 entity,
                 path,
-                bytes,
+                content,
                 expect,
             } => {
-                let entity = match *entity {
-                    Target::Existing(entity) => entity,
-                    Target::New(n) => *created.get(n).expect("the plan creates what it names"),
-                };
+                let entity = *entity;
                 let path = self.library(path)?;
                 self.claim(entity, &path)?;
                 self.check(&path, *expect);
@@ -240,9 +237,7 @@ impl Resolver<'_> {
                     });
                 }
                 let staged = env.nonce();
-                self.plan
-                    .staged
-                    .push((staged, Staged::Bytes(bytes.clone())));
+                self.plan.staged.push((staged, Staged::Content(*content)));
                 self.step(EffectStep::Place {
                     staged,
                     path: path.clone(),
@@ -284,10 +279,7 @@ impl Resolver<'_> {
                 path,
                 expect,
             } => {
-                let entity = match *entity {
-                    Target::Existing(entity) => entity,
-                    Target::New(n) => *created.get(n).expect("the plan creates what it names"),
-                };
+                let entity = *entity;
                 let path = self.library(path)?;
                 self.claim(entity, &path)?;
                 self.check(&path, *expect);
@@ -446,11 +438,10 @@ impl Resolver<'_> {
     }
 }
 
-/// Stages and syncs the plan's bytes, checks every precondition, then writes
+/// Stages and syncs the plan's files, checks every precondition, then writes
 /// `record` as the plan's pending record, whole or not at all. A failed
 /// precondition removes what was staged and refuses; nothing in a user path has
-/// changed. A plan that moves no file only checks. A staged copy is read whole
-/// into memory.
+/// changed. A plan that moves no file only checks.
 pub fn prepare(
     layout: &Layout,
     plan: Rc<EffectPlan>,
@@ -528,22 +519,25 @@ fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallibl
             each(0..plan.staged.len(), move |i| {
                 let (name, staged) = &plan.staged[i];
                 let path = layout.staged(writer, *name);
-                let bytes = match staged {
-                    Staged::Bytes(bytes) => ok(bytes.clone()),
-                    Staged::Copy(source) => flow::read_all(Root::Folder, source, u64::MAX),
-                };
-                bytes
+                let filled = match staged {
+                    Staged::Content(content) => flow::act(Io::Create {
+                        root: Root::Folder,
+                        path: path.clone(),
+                        bytes: Vec::new(),
+                    })
                     .and_then({
-                        let path = path.clone();
-                        move |bytes| {
-                            flow::act(Io::Create {
+                        let (path, content) = (path.clone(), *content);
+                        move |()| {
+                            flow::act(Io::Fill {
                                 root: Root::Folder,
                                 path,
-                                bytes,
+                                content,
                             })
                         }
-                    })
-                    .and_then(move |()| flow::sync(Root::Folder, &path))
+                    }),
+                    Staged::Copy(source) => flow::copy(Root::Folder, source, &path),
+                };
+                filled.and_then(move |()| flow::sync(Root::Folder, &path))
             })
         })
         .and_then(move |()| flow::sync(Root::Folder, &synced))

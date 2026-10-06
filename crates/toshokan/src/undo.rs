@@ -19,7 +19,7 @@ use crate::ids::{EntityId, EntryHash, WriterId};
 use crate::log::{Displaced, Entry, EntryKind, FileFact, Op};
 use crate::merge::{Exists, Folded, Write};
 use crate::path::RelPath;
-use crate::plan::{Expect, FactChange, FileChange, Plan, Target};
+use crate::plan::{Expect, FactChange, FileChange, Plan};
 use crate::report::HistoryItem;
 use crate::schema::Raw;
 use crate::view::View;
@@ -258,7 +258,6 @@ impl Reversing<'_> {
             .filter_map(|&entry| self.folded.register_write(entity, key, entry))
             .max_by_key(|write| (write.at, write.by, write.entry))
             .and_then(|write| write.value);
-        let entity = Target::Existing(entity);
         let key = key.to_owned();
         Ok(match previous {
             Some(value) => FactChange::Set { entity, key, value },
@@ -281,7 +280,7 @@ impl Reversing<'_> {
             };
         }
         Ok(Some(FactChange::Remove {
-            entity: Target::Existing(entity),
+            entity,
             key: key.to_owned(),
             value: value.clone(),
         }))
@@ -295,7 +294,7 @@ impl Reversing<'_> {
             return Err(changed(tag));
         }
         Ok(FactChange::Add {
-            entity: Target::Existing(entity),
+            entity,
             key: key.to_owned(),
             value: value.clone(),
         })

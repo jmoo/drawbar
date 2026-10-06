@@ -10,7 +10,7 @@ use std::rc::Rc;
 use toshokan::asynch;
 use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
-use toshokan::intent::Intent;
+use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
 use toshokan::log::{Entry, EntryKind, Genesis, Settlement};
 use toshokan::report::{
@@ -27,9 +27,10 @@ use toshokan::{
 
 const ORIGIN: Register<String> = Register::new("origin");
 const TAGS: Set<String> = Set::new("tags");
+const PLAYS: Register<EntityId> = Register::new("plays");
 
 fn schema() -> Schema {
-    Schema::of(&[ORIGIN.key(), TAGS.key()]).unwrap()
+    Schema::of(&[ORIGIN.key(), TAGS.key(), PLAYS.key()]).unwrap()
 }
 
 fn layout() -> Layout {
@@ -190,15 +191,18 @@ fn resumed(seen: &RefCell<Seen>, opened: &Opened) {
 
 /// Both drivers' libraries behind one interface.
 trait Facade: Sized {
-    type Inner;
+    /// The driver's library, as an intent borrows it.
+    type Lib<'a>: Driver
+    where
+        Self: 'a;
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error>;
     fn view(&self) -> View;
     fn history(&self) -> Vec<HistoryItem>;
-    fn commit(
-        &mut self,
+    fn commit<'a>(
+        &'a mut self,
         label: &str,
-        build: impl FnOnce(Intent<&mut Self::Inner>) -> Intent<&mut Self::Inner>,
+        build: impl FnOnce(Intent<Self::Lib<'a>>) -> Intent<Self::Lib<'a>>,
     ) -> Result<Committed, Error>;
     fn undo(&mut self) -> Result<Committed, Error>;
     fn redo(&mut self) -> Result<Committed, Error>;
@@ -219,7 +223,7 @@ struct Blocking(blocking::Library<Probe>);
 struct Async(asynch::Library<Probe>);
 
 impl Facade for Blocking {
-    type Inner = blocking::Library<Probe>;
+    type Lib<'a> = &'a mut blocking::Library<Probe>;
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error> {
         let seen = Rc::clone(&probe.seen);
@@ -233,10 +237,10 @@ impl Facade for Blocking {
     fn history(&self) -> Vec<HistoryItem> {
         self.0.history().to_vec()
     }
-    fn commit(
-        &mut self,
+    fn commit<'a>(
+        &'a mut self,
         label: &str,
-        build: impl FnOnce(Intent<&mut Self::Inner>) -> Intent<&mut Self::Inner>,
+        build: impl FnOnce(Intent<Self::Lib<'a>>) -> Intent<Self::Lib<'a>>,
     ) -> Result<Committed, Error> {
         build(self.0.intent(label)).commit()
     }
@@ -282,7 +286,7 @@ impl Facade for Blocking {
 }
 
 impl Facade for Async {
-    type Inner = asynch::Library<Probe>;
+    type Lib<'a> = &'a mut asynch::Library<Probe>;
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error> {
         let seen = Rc::clone(&probe.seen);
@@ -298,10 +302,10 @@ impl Facade for Async {
     fn history(&self) -> Vec<HistoryItem> {
         self.0.history().to_vec()
     }
-    fn commit(
-        &mut self,
+    fn commit<'a>(
+        &'a mut self,
         label: &str,
-        build: impl FnOnce(Intent<&mut Self::Inner>) -> Intent<&mut Self::Inner>,
+        build: impl FnOnce(Intent<Self::Lib<'a>>) -> Intent<Self::Lib<'a>>,
     ) -> Result<Committed, Error> {
         pollster::block_on(build(self.0.intent(label)).commit())
     }
@@ -386,6 +390,7 @@ through_both!(
     facts_a_restore_removed_are_shown_until_let_go,
     facts_a_restore_removed_are_republished_when_adopted,
     a_folder_whose_renames_may_replace_is_written_and_says_so,
+    one_intent_creates_entities_that_name_each_other,
 );
 
 /// One machine of a shared folder.
@@ -479,11 +484,12 @@ fn tag(text: &str) -> String {
 /// Creates one entity with a file at `at`.
 fn create<F: Facade>(library: &mut F, at: &str, bytes: &[u8]) -> EntityId {
     let committed = library
-        .commit("Import", |intent| {
+        .commit("Import", |mut intent| {
             intent.create(|e| {
                 e.save(&path(at), bytes.to_vec(), Expect::Absent)
                     .add(TAGS, tag("new"));
-            })
+            });
+            intent
         })
         .unwrap();
     assert_eq!(committed.outcome, toshokan::Outcome::Complete);
@@ -815,15 +821,16 @@ fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() 
 
 /// Adopts `copy.npno` and saves `new.npno` in one intent.
 fn adopt_and_save<F: Facade>(library: &mut F) -> Result<Committed, Error> {
-    library.commit("Adopt", |i| {
+    library.commit("Adopt", |mut i| {
         i.create(|e| {
             e.adopt(&path("copy.npno"), Expect::Holds(identity(b"copy")))
                 .add(TAGS, tag("copy"));
-        })
-        .create(|e| {
+        });
+        i.create(|e| {
             e.save(&path("new.npno"), b"fresh".to_vec(), Expect::Absent)
                 .add(TAGS, tag("fresh"));
-        })
+        });
+        i
     })
 }
 
@@ -860,10 +867,11 @@ fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         settled += opened.settled.len();
         again
-            .commit("Next", |i| {
+            .commit("Next", |mut i| {
                 i.create(|e| {
                     e.add(TAGS, tag("next"));
-                })
+                });
+                i
             })
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         for entity in again.view().entities() {
@@ -1064,11 +1072,12 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
         }]
     );
     let committed = a
-        .commit("Tag", |i| {
+        .commit("Tag", |mut i| {
             i.create(|e| {
                 e.adopt(&path("copy.npno"), Expect::Holds(identity(b"song")))
                     .add(TAGS, tag("copy"));
-            })
+            });
+            i
         })
         .unwrap();
     let copy = committed.created[0];
@@ -1171,11 +1180,12 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
 /// The scenario losing the local root interrupts: every step a user might take.
 fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Result<(), Error> {
     let song = library
-        .commit("Import", |i| {
+        .commit("Import", |mut i| {
             i.create(|e| {
                 e.save(&path("a/song.npno"), b"one".to_vec(), Expect::Absent)
                     .add(TAGS, tag("new"));
-            })
+            });
+            i
         })?
         .created[0];
     *done += 1;
@@ -1303,10 +1313,11 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert!(opened.orphaned.is_empty(), "{shown}: {:?}", opened.orphaned);
         settled += opened.settled.len();
-        let next = again.commit("Next", |i| {
+        let next = again.commit("Next", |mut i| {
             i.create(|e| {
                 e.add(TAGS, tag("next"));
-            })
+            });
+            i
         });
         next.unwrap_or_else(|e| panic!("{shown}: {e}"));
         again.close().unwrap();
@@ -1607,10 +1618,11 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     put(&folder, "taken.npno", b"taken");
-    let refused = a.commit("Import", |i| {
+    let refused = a.commit("Import", |mut i| {
         i.create(|e| {
             e.save(&path("taken.npno"), b"mine".to_vec(), Expect::Absent);
-        })
+        });
+        i
     });
     assert!(
         matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
@@ -1624,10 +1636,11 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
         "a refused first intent creates no writer"
     );
     put(&folder, "dir.npno/inside", b"inside");
-    let refused = a.commit("Import", |i| {
+    let refused = a.commit("Import", |mut i| {
         i.create(|e| {
             e.save(&path("dir.npno"), b"mine".to_vec(), Expect::Absent);
-        })
+        });
+        i
     });
     assert!(
         matches!(&refused, Err(Error::Refused(Refusal::Directory(at))) if *at == path("dir.npno")),
@@ -1957,5 +1970,39 @@ fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
     assert_eq!(
         read(&folder, "taken.npno").as_deref(),
         Some(b"taken".as_slice())
+    );
+}
+
+fn one_intent_creates_entities_that_name_each_other<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let committed = a
+        .commit("Import bundle", |mut i| {
+            let piano = i.create(|e| {
+                e.save(&path("b/piano.npno"), b"piano".to_vec(), Expect::Absent);
+            });
+            i.create(|e| {
+                e.save(
+                    &path("b/program.nprog"),
+                    b"program".to_vec(),
+                    Expect::Absent,
+                )
+                .set(PLAYS, piano);
+            });
+            i
+        })
+        .unwrap();
+    let [piano, program] = committed.created[..] else {
+        panic!("{:?}", committed.created);
+    };
+    let view = a.view();
+    assert_eq!(
+        view.entity(program).unwrap().get(PLAYS),
+        Field::Value(piano)
+    );
+    assert_eq!(
+        view.entity(piano).unwrap().file().unwrap().path,
+        path("b/piano.npno")
     );
 }

@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::ids::Identity;
 use crate::io::{
     DirEntry, Io, IoError, IoResult, Kind, Lock, Meta, Operation, Range, Reply, Root, Step, Task,
+    CHUNK,
 };
 use crate::path::RelPath;
 
@@ -391,9 +392,6 @@ pub(crate) fn read_replaced<'a>(root: Root, path: RelPath) -> Fallible<'a, Optio
     })
 }
 
-/// The longest file read in one request.
-const CHUNK: u64 = 1 << 20;
-
 /// The whole file at `path`, refusing one longer than `max`.
 pub(crate) fn read_all<'a>(root: Root, path: &RelPath, max: u64) -> Fallible<'a, Vec<u8>> {
     let path = path.clone();
@@ -418,6 +416,58 @@ pub(crate) fn read_all<'a>(root: Root, path: &RelPath, max: u64) -> Fallible<'a,
                 read_ranges(root, path.clone(), chunks(len)).map_ok(|parts| parts.concat())
             }
         }
+    })
+}
+
+/// Copies the file `from` to a new file `to`, a chunk at a time. A source that
+/// shrinks while it is copied fails the copy.
+pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
+    let (from, to) = (from.clone(), to.clone());
+    stat(root, &from).and_then(move |meta| {
+        let len = match meta {
+            Some(Meta {
+                kind: Kind::File,
+                len,
+                ..
+            }) => len,
+            found => {
+                let error = match found {
+                    None => IoError::NotFound,
+                    Some(_) => IoError::IsDirectory,
+                };
+                return Flow::Done(Err(Error::Io {
+                    root,
+                    path: from,
+                    error,
+                }));
+            }
+        };
+        let created = act(Io::Create {
+            root,
+            path: to.clone(),
+            bytes: Vec::new(),
+        });
+        created.and_then(move |()| {
+            each(chunks(len).into_iter(), move |range| {
+                let to = to.clone();
+                let source = from.clone();
+                read(root, &from, range).and_then(move |bytes| {
+                    if bytes.len() as u64 != range.len {
+                        return Flow::Done(Err(Error::Io {
+                            root,
+                            path: source,
+                            error: IoError::Other("the file shrank while it was copied".into()),
+                        }));
+                    }
+                    act(Io::Write {
+                        root,
+                        path: to,
+                        offset: range.offset,
+                        bytes,
+                    })
+                })
+            })
+        })
     })
 }
 

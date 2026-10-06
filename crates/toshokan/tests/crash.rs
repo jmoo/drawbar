@@ -14,16 +14,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use common::{
-    bound, close, entry, env, identify, identity, layout, path, BlockingMem, Driven, HEAD, WRITER,
+    bound, close, entry, env, identify, identity, layout, path, BlockingMem, Driven, Fill, HEAD,
+    WRITER,
 };
 use toshokan::binding::Bindings;
 use toshokan::crash::{self, Fault};
 use toshokan::disk::{Renames, Tail};
 use toshokan::effects;
-use toshokan::io::Capabilities;
+use toshokan::io::{Capabilities, Range};
 use toshokan::log::Settlement;
 use toshokan::pending::{self, PendingRecord};
-use toshokan::plan::{Expect, FileChange, Target};
+use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery::{self, Chain};
 use toshokan::{EntityId, EntryHash, Error, MemDisk, Nonce, Outcome, RelPath, Root, WriterId};
 
@@ -33,6 +34,8 @@ const ITEM: Nonce = Nonce::from_u128(0x1);
 const OLD: &[u8] = b"old bytes";
 const NEW: &[u8] = b"new bytes!";
 const OTHER: &[u8] = b"other";
+/// `OLD` with its middle replaced, as a splice of it makes it.
+const SPLICED: &[u8] = b"old BYTES!s";
 
 /// A user path, what it holds before the intent and what after.
 type Change = (&'static str, Option<&'static [u8]>, Option<&'static [u8]>);
@@ -44,6 +47,8 @@ struct Case {
     files: Vec<(String, &'static [u8])>,
     bound: Vec<(EntityId, &'static str)>,
     changes: Vec<FileChange>,
+    /// What the changes' saves are filled from.
+    contents: Vec<Fill>,
     /// What each user path the intent touches holds before and after it.
     paths: Vec<Change>,
 }
@@ -51,11 +56,13 @@ struct Case {
 fn cases() -> Vec<Case> {
     let item = layout().trash(WRITER, ITEM).as_str().to_owned();
     let save = |at: &str, expect| FileChange::Save {
-        entity: Target::Existing(E),
+        entity: E,
         path: path(at),
-        bytes: NEW.to_vec(),
+        content: Content(0),
         expect,
     };
+    let new = || vec![Fill::Bytes(NEW.to_vec())];
+    let kept = |offset, len| Piece::Kept(Range { offset, len });
     let tree = FileChange::MoveTree {
         from: path("x"),
         to: path("z/x"),
@@ -72,6 +79,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![("a".into(), OLD)],
             bound: vec![],
+            contents: new(),
             changes: vec![save("a", Expect::Holds(identity(OLD)))],
             paths: vec![("a", Some(OLD), Some(NEW))],
         },
@@ -80,6 +88,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![],
             bound: vec![],
+            contents: new(),
             changes: vec![save("d/n", Expect::Absent)],
             paths: vec![("d/n", None, Some(NEW))],
         },
@@ -88,6 +97,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![("a".into(), OLD)],
             bound: vec![(E, "a")],
+            contents: vec![],
             changes: vec![FileChange::Trash {
                 entity: E,
                 expect: Expect::Holds(identity(OLD)),
@@ -99,6 +109,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![("a".into(), OLD)],
             bound: vec![(E, "a")],
+            contents: vec![],
             changes: vec![FileChange::Rename {
                 entity: E,
                 to: path("b/c"),
@@ -111,6 +122,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![("x/1".into(), OLD), ("x/y/2".into(), OTHER)],
             bound: vec![(E, "x/1")],
+            contents: vec![],
             changes: vec![tree.clone()],
             paths: tree_paths.clone(),
         },
@@ -119,6 +131,7 @@ fn cases() -> Vec<Case> {
             rename_dir: false,
             files: vec![("x/1".into(), OLD), ("x/y/2".into(), OTHER)],
             bound: vec![(E, "x/1")],
+            contents: vec![],
             changes: vec![tree],
             paths: tree_paths,
         },
@@ -127,6 +140,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![("a".into(), NEW), (item, OLD)],
             bound: vec![],
+            contents: vec![],
             changes: vec![FileChange::Restore {
                 entity: E,
                 item: ITEM,
@@ -140,6 +154,7 @@ fn cases() -> Vec<Case> {
             rename_dir: true,
             files: vec![("a".into(), OLD), ("b".into(), OTHER)],
             bound: vec![(F, "b")],
+            contents: new(),
             changes: vec![
                 save("a", Expect::Holds(identity(OLD))),
                 FileChange::Rename {
@@ -153,6 +168,23 @@ fn cases() -> Vec<Case> {
                 ("b", Some(OTHER), None),
                 ("c", None, Some(OTHER)),
             ],
+        },
+        Case {
+            name: "rewrite a file through a splice of it",
+            rename_dir: true,
+            files: vec![("a".into(), OLD)],
+            bound: vec![],
+            contents: vec![Fill::Splice(Splice {
+                from: path("a"),
+                pieces: vec![
+                    kept(0, 4),
+                    Piece::Bytes(b"BYTES".to_vec()),
+                    Piece::Bytes(b"!".to_vec()),
+                    kept(8, 1),
+                ],
+            })],
+            changes: vec![save("a", Expect::Holds(identity(OLD)))],
+            paths: vec![("a", Some(OLD), Some(SPLICED))],
         },
     ]
 }
@@ -184,8 +216,16 @@ impl Case {
     /// Commits the intent, stopping at the first error.
     fn commit(&self, disk: &MemDisk) {
         let d = &mut BlockingMem(disk.clone());
-        let Ok(Ok(run)) = common::prepare(d, WRITER, &self.changes, &self.bindings(), &mut env(7))
-        else {
+        let contents = self.contents.clone();
+        let prepared = common::prepare(
+            d,
+            WRITER,
+            &self.changes,
+            contents,
+            &self.bindings(),
+            &mut env(7),
+        );
+        let Ok(Ok(run)) = prepared else {
             return;
         };
         let _ = common::complete(d, &run);

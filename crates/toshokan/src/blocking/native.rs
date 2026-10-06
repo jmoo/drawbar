@@ -170,6 +170,15 @@ impl Native {
         .map_err(io_error)
     }
 
+    fn write(&self, root: Root, path: &RelPath, offset: u64, bytes: &[u8]) -> Result<(), IoError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(self.file(root, path)?)
+            .map_err(io_error)?;
+        file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
+        file.write_all(bytes).map_err(io_error)
+    }
+
     fn remove(&self, root: Root, path: &RelPath, kind: Kind) -> Result<(), IoError> {
         refuse_root(path)?;
         let found = self.stat(root, path)?.ok_or(IoError::NotFound)?.kind;
@@ -256,6 +265,13 @@ impl Backend for Native {
             Io::Read { root, path, range } => self.read(root, &path, range).map(Reply::Bytes),
             Io::Create { root, path, bytes } => self.create(root, &path, &bytes).map(done),
             Io::Append { root, path, bytes } => self.append(root, &path, &bytes).map(done),
+            Io::Write {
+                root,
+                path,
+                offset,
+                bytes,
+            } => self.write(root, &path, offset, &bytes).map(done),
+            Io::Fill { .. } => Err(IoError::Other(crate::disk::FILLED_BY_DRIVERS.into())),
             Io::Rename { root, from, to } => self.rename(root, &from, &to).map(done),
             Io::Remove { root, path } => self.remove(root, &path, Kind::File).map(done),
             Io::RemoveDir { root, path } => self.remove(root, &path, Kind::Directory).map(done),

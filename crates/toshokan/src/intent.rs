@@ -1,16 +1,20 @@
 //! Building an intent: one user action, one commit, one undo step.
 //!
 //! ```ignore
-//! lib.intent("Import B3 Split")
-//!     .create(|e| {
-//!         e.set(ORIGIN, bundle).add(TAGS, sunday);
-//!     })
-//!     .rename(program, &to, Expect::Holds(identity))
-//!     .commit()?;
+//! let mut intent = lib.intent("Import B3 Split");
+//! let piano = intent.create(|e| {
+//!     e.save(&piano_path, piano_bytes, Expect::Absent);
+//! });
+//! intent.create(|e| {
+//!     e.set(ORIGIN, bundle).set(PLAYS, piano);
+//! });
+//! intent.commit()?;
 //! ```
 //!
-//! Building checks nothing and writes nothing. Commit checks every precondition
-//! before anything is written; a refused intent changes nothing.
+//! Building checks nothing and writes nothing; it only draws the ids of the
+//! entities the intent creates, so one intent can create entities that name each
+//! other. Commit checks every precondition before anything is written; a refused
+//! intent changes nothing.
 
 use std::collections::BTreeSet;
 
@@ -19,25 +23,42 @@ use crate::ids::{EntityId, EntryHash};
 use crate::log::Op;
 use crate::merge::Folded;
 use crate::path::RelPath;
-use crate::plan::{Expect, FactChange, FileChange, Plan, Target};
+use crate::plan::{Content, Expect, FactChange, FileChange, Plan};
 use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value};
 
-/// An intent being built for `library`, which commits it: a driver's library.
-pub struct Intent<L> {
+/// The library an intent is built for and committed through: a driver's.
+pub trait Driver {
+    /// What the driver fills a saved file from.
+    type Source;
+
+    /// A source holding `bytes`.
+    fn bytes(bytes: Vec<u8>) -> Self::Source;
+
+    /// An id for an entity the intent creates, from the library's randomness.
+    fn entity_id(&mut self) -> EntityId;
+}
+
+/// An intent being built for `library`, which commits it.
+pub struct Intent<L: Driver> {
     library: L,
     plan: Plan,
+    /// What each [`Content`] of the plan is filled from.
+    sources: Vec<L::Source>,
     /// The first value that could not be written as JSON; commit refuses with it.
     invalid: Option<Invalid>,
 }
 
 /// An entity the intent creates, inside [`Intent::create`].
-pub struct Creating<'p> {
+pub struct Creating<'p, S> {
     plan: &'p mut Plan,
-    target: Target,
+    sources: &'p mut Vec<S>,
+    /// The driver's [`Driver::bytes`].
+    bytes: fn(Vec<u8>) -> S,
+    entity: EntityId,
     invalid: &'p mut Option<Invalid>,
 }
 
-impl<L> Intent<L> {
+impl<L: Driver> Intent<L> {
     pub fn new(library: L, label: &str) -> Self {
         Self {
             library,
@@ -45,61 +66,53 @@ impl<L> Intent<L> {
                 label: label.to_owned(),
                 ..Plan::default()
             },
+            sources: Vec::new(),
             invalid: None,
         }
     }
 
-    /// The plan so far, and why commit will refuse it if it will for an encoding.
-    pub fn into_parts(self) -> (L, Result<Plan, Invalid>) {
+    /// The library, the plan so far or why commit will refuse it for an encoding,
+    /// and what the plan's contents are filled from, in order.
+    pub fn into_parts(self) -> (L, Result<Plan, Invalid>, Vec<L::Source>) {
         let plan = match self.invalid {
             Some(invalid) => Err(invalid),
             None => Ok(self.plan),
         };
-        (self.library, plan)
+        (self.library, plan, self.sources)
     }
 
-    /// Creates an entity and describes it. [`crate::Committed::created`] lists the
-    /// ids of created entities in order.
-    pub fn create(mut self, describe: impl FnOnce(&mut Creating<'_>)) -> Self {
-        let target = Target::New(self.plan.creates);
-        self.plan.creates += 1;
+    /// Creates an entity, describes it and returns its id, which later changes of
+    /// this intent, other entities' fields among them, may name.
+    pub fn create(&mut self, describe: impl FnOnce(&mut Creating<'_, L::Source>)) -> EntityId {
+        let entity = self.library.entity_id();
+        self.plan.created.push(entity);
         describe(&mut Creating {
             plan: &mut self.plan,
-            target,
+            sources: &mut self.sources,
+            bytes: L::bytes,
+            entity,
             invalid: &mut self.invalid,
         });
-        self
+        entity
     }
 
     /// Replaces every write of `key` this writer has observed, which resolves a
     /// conflict.
     pub fn set<T: Value>(mut self, entity: EntityId, key: Register<T>, value: T) -> Self {
-        set(
-            &mut self.plan,
-            &mut self.invalid,
-            Target::Existing(entity),
-            key,
-            &value,
-        );
+        set(&mut self.plan, &mut self.invalid, entity, key, &value);
         self
     }
 
     pub fn clear<T: Value>(mut self, entity: EntityId, key: Register<T>) -> Self {
         self.plan.facts.push(FactChange::Clear {
-            entity: Target::Existing(entity),
+            entity,
             key: key.name().to_owned(),
         });
         self
     }
 
     pub fn add<T: Value>(mut self, entity: EntityId, key: Set<T>, value: T) -> Self {
-        add(
-            &mut self.plan,
-            &mut self.invalid,
-            Target::Existing(entity),
-            key,
-            &value,
-        );
+        add(&mut self.plan, &mut self.invalid, entity, key, &value);
         self
     }
 
@@ -107,7 +120,7 @@ impl<L> Intent<L> {
     pub fn remove<T: Value>(mut self, entity: EntityId, key: Set<T>, value: &T) -> Self {
         if let Some(value) = encode(&mut self.invalid, key.name(), value) {
             self.plan.facts.push(FactChange::Remove {
-                entity: Target::Existing(entity),
+                entity,
                 key: key.name().to_owned(),
                 value,
             });
@@ -129,19 +142,28 @@ impl<L> Intent<L> {
         self
     }
 
-    pub fn save(
+    /// Writes `bytes` as the entity's file at `path`.
+    pub fn save(self, entity: EntityId, path: &RelPath, bytes: Vec<u8>, expect: Expect) -> Self {
+        self.save_from(entity, path, L::bytes(bytes), expect)
+    }
+
+    /// Writes the entity's file at `path` from `source`, which the driver streams
+    /// into this writer's staging as the commit runs.
+    pub fn save_from(
         mut self,
         entity: EntityId,
         path: &RelPath,
-        bytes: Vec<u8>,
+        source: L::Source,
         expect: Expect,
     ) -> Self {
-        self.plan.files.push(FileChange::Save {
-            entity: Target::Existing(entity),
-            path: path.clone(),
-            bytes,
+        save(
+            &mut self.plan,
+            &mut self.sources,
+            entity,
+            path,
+            source,
             expect,
-        });
+        );
         self
     }
 
@@ -169,14 +191,19 @@ impl<L> Intent<L> {
     }
 }
 
-impl Creating<'_> {
+impl<S> Creating<'_, S> {
+    /// The new entity's id.
+    pub fn id(&self) -> EntityId {
+        self.entity
+    }
+
     pub fn set<T: Value>(&mut self, key: Register<T>, value: T) -> &mut Self {
-        set(self.plan, self.invalid, self.target, key, &value);
+        set(self.plan, self.invalid, self.entity, key, &value);
         self
     }
 
     pub fn add<T: Value>(&mut self, key: Set<T>, value: T) -> &mut Self {
-        add(self.plan, self.invalid, self.target, key, &value);
+        add(self.plan, self.invalid, self.entity, key, &value);
         self
     }
 
@@ -184,29 +211,47 @@ impl Creating<'_> {
     /// says: a file no entity is bound to, such as a copy.
     pub fn adopt(&mut self, path: &RelPath, expect: Expect) -> &mut Self {
         self.plan.files.push(FileChange::Adopt {
-            entity: self.target,
+            entity: self.entity,
             path: path.clone(),
             expect,
         });
         self
     }
 
-    /// Writes the new entity's file.
+    /// Writes `bytes` as the new entity's file.
     pub fn save(&mut self, path: &RelPath, bytes: Vec<u8>, expect: Expect) -> &mut Self {
-        self.plan.files.push(FileChange::Save {
-            entity: self.target,
-            path: path.clone(),
-            bytes,
-            expect,
-        });
+        let source = (self.bytes)(bytes);
+        self.save_from(path, source, expect)
+    }
+
+    /// Writes the new entity's file from `source`; see [`Intent::save_from`].
+    pub fn save_from(&mut self, path: &RelPath, source: S, expect: Expect) -> &mut Self {
+        save(self.plan, self.sources, self.entity, path, source, expect);
         self
     }
+}
+
+fn save<S>(
+    plan: &mut Plan,
+    sources: &mut Vec<S>,
+    entity: EntityId,
+    path: &RelPath,
+    source: S,
+    expect: Expect,
+) {
+    plan.files.push(FileChange::Save {
+        entity,
+        path: path.clone(),
+        content: Content(sources.len()),
+        expect,
+    });
+    sources.push(source);
 }
 
 fn set<T: Value>(
     plan: &mut Plan,
     invalid: &mut Option<Invalid>,
-    entity: Target,
+    entity: EntityId,
     key: Register<T>,
     value: &T,
 ) {
@@ -222,7 +267,7 @@ fn set<T: Value>(
 fn add<T: Value>(
     plan: &mut Plan,
     invalid: &mut Option<Invalid>,
-    entity: Target,
+    entity: EntityId,
     key: Set<T>,
     value: &T,
 ) {
@@ -250,32 +295,20 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 }
 
 /// The ops that log `plan`'s facts against what this writer has observed in
-/// `folded`: a create for each of `created`, then each fact change in order. A
-/// write replaces every surviving write of its register, a remove names every live
-/// add of its value, and a delete observes every live field write of its entity.
+/// `folded`: a create for each entity it creates, then each fact change in order.
+/// A write replaces every surviving write of its register, a remove names every
+/// live add of its value, and a delete observes every live field write of its
+/// entity.
 ///
 /// Refuses a key the schema does not declare with the change's kind, and a change
-/// to an entity that is neither shown nor revived by the plan. Of several changes
-/// to one register of one entity, or to one entity's existence, the last is
-/// logged. A plan that changes nothing is refused unless it reverses an entry.
-///
-/// # Panics
-///
-/// When a target is [`Target::New`] beyond `created`.
-pub fn ops(
-    plan: &Plan,
-    created: &[EntityId],
-    folded: &Folded,
-    schema: &Schema,
-) -> Result<Vec<Op>, Invalid> {
-    let nothing = plan.creates == 0 && plan.facts.is_empty() && plan.files.is_empty();
+/// to an entity that is neither shown, created nor revived by the plan. Of several
+/// changes to one register of one entity, or to one entity's existence, the last
+/// is logged. A plan that changes nothing is refused unless it reverses an entry.
+pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Invalid> {
+    let nothing = plan.created.is_empty() && plan.facts.is_empty() && plan.files.is_empty();
     if nothing && plan.reverses.is_none() {
         return Err(Invalid::Empty);
     }
-    let resolve = |target: Target| match target {
-        Target::Existing(entity) => entity,
-        Target::New(index) => created[index],
-    };
     let revived: BTreeSet<EntityId> = plan
         .facts
         .iter()
@@ -284,14 +317,12 @@ pub fn ops(
             _ => None,
         })
         .collect();
-    let writable = |target: Target| {
-        let entity = resolve(target);
-        match target {
-            Target::New(_) => Ok(entity),
-            Target::Existing(_) if folded.present(entity) || revived.contains(&entity) => {
-                Ok(entity)
-            }
-            Target::Existing(_) => Err(Invalid::NoEntity(entity)),
+    let writable = |entity: EntityId| {
+        let known =
+            plan.created.contains(&entity) || folded.present(entity) || revived.contains(&entity);
+        match known {
+            true => Ok(entity),
+            false => Err(Invalid::NoEntity(entity)),
         }
     };
     let declared = |key: &str, kind: KeyKind| match schema.kind(key) == Some(kind) {
@@ -299,7 +330,8 @@ pub fn ops(
         false => Err(Invalid::UndeclaredKey(key.to_owned())),
     };
 
-    let mut ops: Vec<Op> = created
+    let mut ops: Vec<Op> = plan
+        .created
         .iter()
         .map(|&entity| Op::Create {
             entity,
@@ -384,9 +416,7 @@ fn superseded(rest: &[FactChange], change: &FactChange) -> bool {
         FactChange::Set { entity, key, .. } | FactChange::Clear { entity, key } => {
             Some((*entity, Some(key.clone())))
         }
-        FactChange::Delete { entity } | FactChange::Revive { entity } => {
-            Some((Target::Existing(*entity), None))
-        }
+        FactChange::Delete { entity } | FactChange::Revive { entity } => Some((*entity, None)),
         FactChange::Add { .. } | FactChange::Remove { .. } => None,
     };
     let Some(own) = slot(change) else {
