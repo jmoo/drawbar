@@ -51,9 +51,9 @@ lib.undo()?;
 
 `opened` reports what needs the user: effects another writer left unfinished,
 drafts, forks, facts a restore of the folder removed, and files that arrived,
-moved or changed outside the app. A field
-read from a view is a value, a conflict between writers, or unreadable, so an app
-cannot show half a conflict by accident.
+moved or changed outside the app. A view never changes, so an app can hand it to
+other threads. A field read from a view is a value, a conflict between writers,
+or unreadable, so an app cannot show half a conflict by accident.
 
 ## Design
 

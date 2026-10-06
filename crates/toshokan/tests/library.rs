@@ -385,6 +385,7 @@ through_both!(
     what_a_commit_returned_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
     facts_a_restore_removed_are_republished_when_adopted,
+    a_view_is_read_on_other_threads,
 );
 
 /// One machine of a shared folder.
@@ -533,6 +534,24 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
         facts(&a.view()),
         "a new reader agrees"
     );
+}
+
+fn a_view_is_read_on_other_threads<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let view = a.view();
+    let sent = view.clone();
+    let worker = std::thread::spawn(move || tags(&sent, song));
+    std::thread::scope(|scope| {
+        let shared = &view;
+        let readers = [(); 2].map(|()| scope.spawn(move || tags(shared, song)));
+        for reader in readers {
+            assert_eq!(reader.join().unwrap(), ["new"]);
+        }
+    });
+    assert_eq!(worker.join().unwrap(), ["new"]);
 }
 
 fn a_conflict_is_shown_and_resolved<F: Facade>() {
