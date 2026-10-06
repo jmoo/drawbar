@@ -1301,8 +1301,8 @@ fn transact<'a>(
 }
 
 /// Stages, checks and journals `effects` for the intent `logged`, then carries
-/// them out. A refusal changes nothing; a failure past the journal leaves its
-/// record to settle.
+/// them out. A refusal changes nothing; a failure once the record is written
+/// leaves it to settle, and one before leaves nothing to settle.
 fn carry_out<'a>(
     library: &'a mut Library,
     logged: &Logged,
@@ -1322,21 +1322,31 @@ fn carry_out<'a>(
     let identify = Rc::clone(&library.env.identify);
     let (name, journaled) = (effects.record, effects.moves_files());
     let prepared = effects::prepare(&layout, effects, Rc::clone(&record), Rc::clone(&identify));
-    flow::run(prepared)
-        .and_then(|prepared| Flow::Done(prepared.map_err(Error::Refused)))
-        .and_then({
-            let record = Rc::clone(&record);
-            move |()| flow::run(effects::apply(&layout, name, record, 0, identify))
-        })
-        .then(move |applied| match applied {
-            Ok(applied) => ok((library, record, applied)),
-            Err(error) => {
-                if journaled {
+    flow::run(prepared).then(move |prepared| match prepared {
+        Ok(Ok(())) => {
+            let applied = effects::apply(&layout, name, Rc::clone(&record), 0, identify);
+            flow::run(applied).then(move |applied| match applied {
+                Ok(applied) => ok((library, record, applied)),
+                Err(error) => {
+                    if journaled {
+                        library.interrupted(name, &record, false);
+                    }
+                    Flow::Done(Err(error))
+                }
+            })
+        }
+        Ok(Err(refusal)) => Flow::Done(Err(Error::Refused(refusal))),
+        Err(error) if journaled => {
+            let path = layout.pending(id, name);
+            flow::stat(Root::Folder, &path).then(move |written| {
+                if let Ok(Some(_)) = written {
                     library.interrupted(name, &record, false);
                 }
                 Flow::Done(Err(error))
-            }
-        })
+            })
+        }
+        Err(error) => Flow::Done(Err(error)),
+    })
 }
 
 /// Appends the intent `logged` with what `applied` says the effects did, then

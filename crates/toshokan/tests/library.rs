@@ -1664,6 +1664,12 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
         .collect();
     assert!(changed.is_empty(), "{changed:?}");
     assert_eq!(tags(&a.view(), song), ["new"]);
+    a.commit("Tag", |i| i.add(song, TAGS, tag("next"))).unwrap();
+    assert_eq!(
+        tags(&a.view(), song),
+        ["new", "next"],
+        "the refused intent is never logged"
+    );
     assert!(matches!(
         a.commit("Nothing", |i| i),
         Err(Error::Refused(Refusal::Invalid(toshokan::Invalid::Empty)))
