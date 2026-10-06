@@ -37,6 +37,8 @@ an entry since the last compaction names. A save on a full disk gives up the who
 undo history before it refuses.
 
 [SPEC.md](SPEC.md) specifies every file toshokan writes.
+[spec/](spec/README.md) model-checks, in TLA+, the protocol between writers and
+readers that toshokan is moving to; this code does not implement it yet.
 
 ## Principles
 
