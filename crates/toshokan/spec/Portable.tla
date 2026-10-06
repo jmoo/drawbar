@@ -16,7 +16,7 @@
 (* `vis`: nothing, a readable prefix, or all of it, independently of every *)
 (* other file and every other reader.                                      *)
 (*                                                                         *)
-(* Three protocol rules are constants, TRUE when in force, so that a config *)
+(* Four protocol rules are constants, TRUE when in force, so that a config *)
 (* can drop one and exhibit the failure it permits.                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
@@ -30,9 +30,11 @@ CONSTANTS
     MaxClones,      \* bound on cloned writer histories
     MaxLosses,      \* bound on lost local roots
     MaxWriters,     \* bound on writer ids, which name directories
+    MaxRestores,    \* bound on restores of the folder from its backup
     FoldHashes,     \* a snapshot or cached view records every hash it folds
     UniqueNames,    \* no two histories give a segment the same name
-    SealedOnly      \* a writer deletes only segments its own process closed
+    SealedOnly,     \* a writer deletes only segments its own process closed
+    CheckFirst      \* a writer confirms the folder holds what it builds on
 
 None == 0
 First == CHOOSE i \in Instances : TRUE
@@ -45,6 +47,10 @@ VARIABLES
     chaos,      \* chaos budget spent
     clones,
     losses,
+    backup,     \* {} or {the folder as it was when backed up}
+    restores,
+    lost,       \* entries a restore took from the folder
+    lostEffects,\* effects a restore took every trace of
     \* Instance state, kept in the instance's local root.
     role,       \* "writer" or "reader"
     wid,        \* the directory this instance writes
@@ -65,7 +71,8 @@ VARIABLES
 writer == <<ents, files, nW, nEff, clones, losses, role, wid, head, seg, segs,
             dying, lastSnap, nextName, inflight>>
 reader == <<acc, known, pairs, vis>>
-vars == <<writer, reader, chaos>>
+folder == <<backup, restores, lost, lostEffects>>
+vars == <<writer, reader, folder, chaos>>
 
 NoEffect == [eff |-> 0, rec |-> None, logged |-> FALSE]
 Files == 1..Len(files)
@@ -82,12 +89,18 @@ Holds(fs) ==
     UNION {IF fs[f].kind = "seg" THEN Range(fs[f].ents) ELSE fs[f].folds :
                f \in {g \in 1..Len(fs) : ~fs[g].deleted}}
 
+\* Entries written and not taken by a restore.
+Kept == All \ lost
+
 -----------------------------------------------------------------------------
 (* Reading. A reader names no file: it takes every file it sees in a       *)
 (* writer's directory and places entries by chain alone.                   *)
 
+\* Where a restore shortened a segment, a longer copy shows only what the
+\* restore left; the reader merged the rest when it read it.
+Shown(v, f) == IF v[f] < Len(files[f].ents) THEN v[f] ELSE Len(files[f].ents)
 Present(v) ==
-    UNION {{files[f].ents[k] : k \in 1..v[f]} : f \in {g \in Files : files[g].kind = "seg"}}
+    UNION {{files[f].ents[k] : k \in 1..Shown(v, f)} : f \in {g \in Files : files[g].kind = "seg"}}
 Snaps(v) == {f \in Files : files[f].kind = "snap" /\ v[f] = 1}
 Folds(v) == UNION {files[s].folds : s \in Snaps(v)}
 \* What a snapshot lets a reader chain from: its anchor, or every hash it folds.
@@ -127,11 +140,18 @@ Reported(r) ==
     {files[f].eff : f \in {g \in Files : files[g].kind = "pend" /\ vis[r][g] = 1}}
         \ (Closed(r) \cup {inflight[r].eff})
 
-\* Every file its owner has not deleted is wholly visible to r.
+\* Every file in the folder is wholly visible to r.
 Delivered(r) == \A f \in Files : ~files[f].deleted => vis[r][f] = FileLen(f)
 
 -----------------------------------------------------------------------------
 (* Writers. Instance i touches only files in directory wid[i].             *)
+
+\* The entry this writer last wrote is no longer in the folder.
+HeadLost(i) == head[i] # None /\ head[i] \notin Holds(files)
+
+\* Before each write, a writer confirms that its head is in the folder;
+\* before a deletion, also that the snapshot superseding the file is.
+Writable(i) == role[i] = "writer" /\ (CheckFirst => ~HeadLost(i))
 
 NewFile(kind, d, name, es, anchor, fo, eff) ==
     [kind |-> kind, dir |-> d, name |-> name, ents |-> es, anchor |-> anchor,
@@ -143,7 +163,7 @@ AppendEntry(i, closes) ==
     LET e == Len(ents) + 1
         new == seg[i] = None
         f == IF new THEN Len(files) + 1 ELSE seg[i]
-    IN /\ role[i] = "writer"
+    IN /\ Writable(i)
        /\ Len(ents) < MaxEntries
        /\ new => Len(files) < MaxFiles
        /\ ents' = Append(ents, [dir |-> wid[i], prev |-> head[i], closes |-> closes])
@@ -160,14 +180,14 @@ AppendEntry(i, closes) ==
 Write(i) ==
     /\ AppendEntry(i, 0)
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   inflight, reader, chaos>>
+                   inflight, reader, folder, chaos>>
 
 \* The owner folds its own chain into a snapshot, closes its segment, and
 \* deletes the segments and snapshot the new one supersedes.
 Compact(i) ==
     LET s == Len(files) + 1
         old == IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
-    IN /\ role[i] = "writer"
+    IN /\ Writable(i)
        /\ segs[i] # {}
        /\ Len(files) < MaxFiles
        /\ files' = Append(files, NewFile("snap", wid[i], s, <<>>, head[i], Chain(head[i]), 0))
@@ -176,28 +196,29 @@ Compact(i) ==
        /\ segs' = [segs EXCEPT ![i] = {}]
        /\ dying' = [dying EXCEPT ![i] = @ \cup segs[i] \cup old]
        /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, nextName,
-                      inflight, reader, chaos>>
+                      inflight, reader, folder, chaos>>
 
 \* A deletion names a file. Sync applies it to whichever file holds that
 \* name, which for a segment name two histories chose may be the other's.
 DeleteOne(i) ==
-    /\ role[i] = "writer"
+    /\ Writable(i)
     /\ \E f \in dying[i] :
         LET namesake == {g \in Files : /\ files[g].kind = files[f].kind
                                        /\ files[g].dir = files[f].dir
                                        /\ files[g].name = files[f].name
                                        /\ ~files[g].deleted}
-        IN /\ dying' = [dying EXCEPT ![i] = @ \ {f}]
+        IN /\ CheckFirst => ~files[lastSnap[i]].deleted
+           /\ dying' = [dying EXCEPT ![i] = @ \ {f}]
            /\ IF namesake = {} THEN UNCHANGED files
               ELSE \E g \in namesake : files' = [files EXCEPT ![g].deleted = TRUE]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, segs,
-                   lastSnap, nextName, inflight, reader, chaos>>
+                   lastSnap, nextName, inflight, reader, folder, chaos>>
 
 \* A multi-step effect: write its pending record, log the entry that
 \* closes it, then delete the record.
 Begin(i) ==
     LET f == Len(files) + 1 IN
-    /\ role[i] = "writer"
+    /\ Writable(i)
     /\ inflight[i] = NoEffect
     /\ nEff < MaxEffects
     /\ Len(files) < MaxFiles
@@ -205,7 +226,7 @@ Begin(i) ==
     /\ inflight' = [inflight EXCEPT ![i] = [eff |-> nEff + 1, rec |-> f, logged |-> FALSE]]
     /\ nEff' = nEff + 1
     /\ UNCHANGED <<ents, nW, clones, losses, role, wid, head, seg, segs,
-                   dying, lastSnap, nextName, reader, chaos>>
+                   dying, lastSnap, nextName, reader, folder, chaos>>
 
 Close(i) ==
     /\ inflight[i].eff # 0
@@ -213,15 +234,15 @@ Close(i) ==
     /\ AppendEntry(i, inflight[i].eff)
     /\ inflight' = [inflight EXCEPT ![i].logged = TRUE]
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   reader, chaos>>
+                   reader, folder, chaos>>
 
 Unpend(i) ==
-    /\ role[i] = "writer"
+    /\ Writable(i)
     /\ inflight[i].logged
     /\ files' = [files EXCEPT ![inflight[i].rec].deleted = TRUE]
     /\ inflight' = [inflight EXCEPT ![i] = NoEffect]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, segs,
-                   dying, lastSnap, nextName, reader, chaos>>
+                   dying, lastSnap, nextName, reader, folder, chaos>>
 
 \* With the user's consent, a writer closes an effect it reports by logging
 \* the closing entry in its own directory. The record stays: only its owner
@@ -230,7 +251,7 @@ Settle(i) ==
     \E e \in Reported(i) :
         /\ AppendEntry(i, e)
         /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying,
-                       lastSnap, inflight, reader, chaos>>
+                       lastSnap, inflight, reader, folder, chaos>>
 
 \* A copied local root (a restored backup, a cloned disk, copied app data)
 \* opens on another machine as the same writer with the same history.
@@ -249,7 +270,7 @@ Clone(i, j) ==
     /\ nextName' = [nextName EXCEPT ![j] = nextName[i]]
     /\ inflight' = [inflight EXCEPT ![j] = inflight[i]]
     /\ ReadWith(j, vis[j], acc[i], known[i], pairs[i])
-    /\ UNCHANGED <<ents, files, nW, nEff, losses, vis, chaos>>
+    /\ UNCHANGED <<ents, files, nW, nEff, losses, vis, folder, chaos>>
 
 \* A crash or quit. The next open starts a new segment; the one left open
 \* may still be appended to by a process this one cannot see.
@@ -259,7 +280,7 @@ Restart(i) ==
     /\ seg' = [seg EXCEPT ![i] = None]
     /\ segs' = IF SealedOnly THEN [segs EXCEPT ![i] = @ \ {seg[i]}] ELSE segs
     /\ UNCHANGED <<ents, files, nW, nEff, clones, losses, role, wid, head,
-                   dying, lastSnap, nextName, inflight, reader, chaos>>
+                   dying, lastSnap, nextName, inflight, reader, folder, chaos>>
 
 \* Instance i continues under a new writer id and never writes or compacts
 \* its old directory again.
@@ -283,7 +304,7 @@ LoseRoot(i) ==
     /\ losses' = losses + 1
     /\ Renew(i)
     /\ ReadWith(i, vis[i], {}, {}, {})
-    /\ UNCHANGED <<ents, files, nEff, clones, role, vis, chaos>>
+    /\ UNCHANGED <<ents, files, nEff, clones, role, vis, folder, chaos>>
 
 \* An instance that sees its own directory forked takes a new writer id.
 LeaveFork(i) ==
@@ -291,23 +312,57 @@ LeaveFork(i) ==
     /\ inflight[i] = NoEffect
     /\ \E fk \in Forks(i) : fk[1] = wid[i]
     /\ Renew(i)
-    /\ UNCHANGED <<ents, files, nEff, clones, losses, role, reader, chaos>>
+    /\ UNCHANGED <<ents, files, nEff, clones, losses, role, reader, folder, chaos>>
+
+\* An instance whose head is no longer in the folder takes a new writer id
+\* rather than append after it.
+LeaveRestored(i) ==
+    /\ CheckFirst
+    /\ role[i] = "writer"
+    /\ HeadLost(i)
+    /\ Renew(i)
+    /\ UNCHANGED <<ents, files, nEff, clones, losses, role, reader, folder, chaos>>
+
+-----------------------------------------------------------------------------
+(* Restores. The folder, not a local root, goes back to an earlier state:  *)
+(* every file is as it was then, and files created since are gone.         *)
+
+Backup ==
+    /\ backup = {}
+    /\ restores < MaxRestores
+    /\ backup' = {files}
+    /\ UNCHANGED <<writer, reader, restores, lost, lostEffects, chaos>>
+
+Restore ==
+    /\ restores < MaxRestores
+    /\ \E b \in backup :
+        LET fs == [f \in Files |-> IF f <= Len(b) THEN b[f]
+                                  ELSE [files[f] EXCEPT !.deleted = TRUE]]
+            traced == {files[f].eff : f \in {g \in Files : fs[g].kind = "pend" /\ ~fs[g].deleted}}
+                          \cup {ents[e].closes : e \in Holds(fs)}
+        IN /\ files' = fs
+           /\ lost' = lost \cup (All \ Holds(fs))
+           /\ lostEffects' = lostEffects \cup ((1..nEff) \ traced)
+    /\ restores' = restores + 1
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, segs,
+                   dying, lastSnap, nextName, inflight, reader, backup, chaos>>
 
 -----------------------------------------------------------------------------
 (* Sync. Each file reaches each reader independently. A file may show any  *)
 (* prefix of what was appended, grow to all of it, arrive after its own    *)
 (* deletion, reappear after it, and stay. Hiding or shortening a file,     *)
-(* other than by delivering its deletion, spends the chaos budget.         *)
+(* other than by delivering its deletion or a restore, spends the chaos    *)
+(* budget.                                                                 *)
 
 Show(r, f, k) ==
     /\ vis' = [vis EXCEPT ![r][f] = k]
     /\ ReadWith(r, vis'[r], acc[r], known[r], pairs[r])
-    /\ UNCHANGED writer
+    /\ UNCHANGED <<writer, folder>>
 
 Deliver(r) ==
     \E f \in Files : \E k \in 0..FileLen(f) :
         /\ k # vis[r][f]
-        /\ IF k > vis[r][f] \/ (k = 0 /\ files[f].deleted)
+        /\ IF k > vis[r][f] \/ k = FileLen(f) \/ (k = 0 /\ files[f].deleted)
            THEN UNCHANGED chaos
            ELSE chaos < MaxChaos /\ chaos' = chaos + 1
         /\ Show(r, f, k)
@@ -315,7 +370,7 @@ Deliver(r) ==
 DeliverAll(r) ==
     \E f \in Files :
         /\ ~files[f].deleted
-        /\ vis[r][f] < FileLen(f)
+        /\ vis[r][f] # FileLen(f)
         /\ Show(r, f, FileLen(f))
         /\ UNCHANGED chaos
 
@@ -329,6 +384,10 @@ Init ==
     /\ chaos = 0
     /\ clones = 0
     /\ losses = 0
+    /\ backup = {}
+    /\ restores = 0
+    /\ lost = {}
+    /\ lostEffects = {}
     /\ role = [i \in Instances |-> IF i = First THEN "writer" ELSE "reader"]
     /\ wid = [i \in Instances |-> IF i = First THEN 1 ELSE 0]
     /\ head = [i \in Instances |-> None]
@@ -355,7 +414,10 @@ Next ==
         \/ Restart(i)
         \/ LoseRoot(i)
         \/ LeaveFork(i)
+        \/ LeaveRestored(i)
         \/ \E j \in Instances : Clone(i, j)
+    \/ Backup
+    \/ Restore
     \/ \E r \in Instances : Deliver(r)
 
 \* Writers may stop at any time; sync eventually delivers every file.
@@ -381,32 +443,38 @@ OwnDirectory ==
                  \cup ({seg[i], lastSnap[i], inflight[i].rec} \ {None}) :
             files[f].dir = wid[i]
 
-\* The folder keeps every entry written, in a segment or folded in a snapshot.
-Retained == All \subseteq Holds(files)
+\* The folder keeps every entry written, in a segment or folded in a
+\* snapshot, unless a restore took it.
+Retained == Kept \subseteq Holds(files)
 
-\* Every effect begun has a pending record in the folder or a closing entry.
+\* Every effect begun has a pending record in the folder or a closing entry,
+\* unless a restore took both.
 EffectAccounted ==
-    \A x \in 1..nEff :
+    \A x \in (1..nEff) \ lostEffects :
         \/ \E f \in Files : files[f].kind = "pend" /\ files[f].eff = x /\ ~files[f].deleted
         \/ \E e \in All : ents[e].closes = x
 
-\* Once every file has reached a reader, what it accepts is everything
-\* written, whatever the delivery order: no gap remains and every fork is
-\* reported. A reader without a cached view computes the same.
-Converged(r) == acc[r] = All /\ Held(r) = {} /\ ForksIn(All) \subseteq Forks(r)
+\* Once every file has reached a reader, it accepts every entry the folder
+\* keeps, whatever the delivery order, holds back only what a restore took,
+\* and reports every fork among the kept entries. A reader without a cached
+\* view computes the same.
+Converged(r) ==
+    /\ Kept \subseteq acc[r]
+    /\ Held(r) \subseteq lost
+    /\ ForksIn(Kept) \subseteq Forks(r)
 DeliveredConverges ==
-    \A r \in Instances : Delivered(r) => Converged(r) /\ Fresh(vis[r]) = All
+    \A r \in Instances : Delivered(r) => Converged(r) /\ Kept \subseteq Fresh(vis[r])
 
 \* Once every file has reached a reader, every effect begun is closed,
-\* reported, or the reader's own effect in flight.
+\* reported, or the reader's own effect in flight, unless a restore took it.
 Settled(r) ==
-    \A x \in 1..nEff :
+    \A x \in (1..nEff) \ lostEffects :
         x \in Closed(r) \cup Reported(r) \cup {inflight[r].eff}
 DeliveredSettles == \A r \in Instances : Delivered(r) => Settled(r)
 
-\* A reader's view never loses an entry or a fork, compaction and delivery
-\* order notwithstanding, unless its local root is lost or replaced by a
-\* copy. A fork is reported when it first appears, so it is reported once.
+\* A reader's view never loses an entry or a fork, compaction, delivery order
+\* and restores notwithstanding, unless its local root is lost or replaced by
+\* a copy. A fork is reported when it first appears, so it is reported once.
 LocalRootKept(r) == ~((losses' > losses \/ clones' > clones) /\ wid'[r] # wid[r])
 Monotone ==
     [][\A r \in Instances : LocalRootKept(r) => acc[r] \subseteq acc'[r]]_vars

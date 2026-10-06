@@ -710,12 +710,15 @@ in
         "Names"
         "Anchors"
         "Sealed"
+        "Unchecked"
         "FreshView"
       ];
       toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
         "PortableDeep"
         "Entries"
         "Deep"
+        "Restore"
+        "RestoreFork"
         "Sync"
         "LivenessDeep"
       ];

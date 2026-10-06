@@ -30,11 +30,12 @@ It keeps a cached view that only grows.
 
 A copied local root (a restored backup, a cloned disk) makes two instances write
 one directory: a fork. A copy may be taken at any time, even before the writer's
-first entry. An instance that sees its own directory forked, or that has lost its
-local root, continues under a new writer id and never writes its old directory
-again.
+first entry. A folder restored from a backup takes away entries no writer
+deleted. An instance that sees its own directory forked, whose last entry is no
+longer in the folder, or that has lost its local root, continues under a new
+writer id and never writes its old directory again.
 
-The protocol needs three rules beyond that. Each is a constant, and a config that
+The protocol needs four rules beyond that. Each is a constant, and a config that
 drops it shows the failure it prevents:
 
 | Rule | Constant | Without it |
@@ -42,6 +43,7 @@ drops it shows the failure it prevents:
 | A snapshot records the hash of every entry it folds, with its predecessor. | `FoldHashes` | [`Anchors.cfg`](Anchors.cfg): the original and a clone each write a first entry, and the original folds its own into a snapshot and deletes the segment. The snapshot names that entry but not its predecessor, so the reader never sees that the two entries share one and never reports the fork. |
 | No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | [`Names.cfg`](Names.cfg): the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
 | A writer deletes only segments its own process sealed. The segment open when a process stopped, or when its local root was copied, is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still appends to, taking the original's newer entries with it. |
+| Before each write, a writer confirms that the folder holds its last entry, and before deleting a superseded file, that it holds the snapshot superseding it. A writer whose last entry is gone takes a new id. | `CheckFirst` | [`Unchecked.cfg`](Unchecked.cfg): a restore takes the writer's last entry, and the writer keeps appending after it; no reader places what it writes. |
 
 Snapshots and pending records are named at random too. The model gives every
 file a unique name except segments under `UniqueNames = FALSE`.
@@ -58,9 +60,9 @@ delivers files roughly in order.
 | `ChainOrder` | A reader never accepts an entry before its predecessor. |
 | `NothingIgnored` | Every entry a reader sees is merged or held back and reported. A reader names no file, so this holds by construction. |
 | `OwnDirectory` | A writer creates, appends to and deletes files only in its own directory. |
-| `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot. |
-| `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder. |
-| `DeliveredConverges` | Once every file has reached a reader, it has accepted every entry written, holds back nothing, and reports every fork, whatever the delivery order. A reader without a cached view computes the same entries. This is the evidence that every chained entry in the folder is merged or reported. |
+| `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore took it. |
+| `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
+| `DeliveredConverges` | Once every file has reached a reader, it has accepted every entry the folder keeps, holds back only entries a restore took, and reports every fork among the kept entries, whatever the delivery order. A reader without a cached view computes the same entries. This is the evidence that every chained entry in the folder is merged or reported. |
 | `DeliveredSettles` | Once every file has reached a reader, every effect is closed, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
 | `Monotone` | A reader's view never loses an entry, unless its local root is lost or replaced by a copy. |
 | `ForksKept` | A reader never retracts a fork it has reported, under the same exception, so it reports each fork once. |
@@ -72,10 +74,12 @@ delivers files roughly in order.
 | `Portable` | a clone, crashes, compaction | `toshokan-spec` |
 | `Recovery` | effects, a lost local root | `toshokan-spec` |
 | `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
-| `Names`, `Anchors`, `Sealed`, `FreshView` | expected violations | `toshokan-spec` |
+| `Names`, `Anchors`, `Sealed`, `Unchecked`, `FreshView` | expected violations | `toshokan-spec` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
 | `Entries` | `Portable` with four entries | `toshokan-spec-deep` |
 | `Deep` | a clone, effects and a lost local root together | `toshokan-spec-deep` |
+| `Restore` | a restored folder, effects | `toshokan-spec-deep` |
+| `RestoreFork` | a restored folder, a clone | `toshokan-spec-deep` |
 | `Sync` | two sync faults: torn, hidden or resurrected files | `toshokan-spec-deep` |
 | `LivenessDeep` | `Liveness` with effects and more files | `toshokan-spec-deep` |
 
@@ -90,9 +94,10 @@ conflicts between field values are out of scope. So are user files, trash and
 staging: an effect is its pending record and its closing entry. A reader reads
 after every change it sees, and a sync fault is a step any reader can take at
 any time. The user's consent to settle another writer's effect is the choice to
-take that step.
+take that step. A writer's check and the write it guards are one step, as is a
+restore: the folder takes one earlier state that it held.
 
 The model does not cover a running process cloned with its open file handles,
 a sync client that keeps one of two conflicting versions and drops the other,
-a folder restored from an older backup, which removes entries no writer
-deleted, or hash collisions.
+a restore that lands between a writer's check and the write it guards, or hash
+collisions.
