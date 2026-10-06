@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use thiserror::Error as ThisError;
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
@@ -22,8 +23,8 @@ pub struct Entry {
     pub line: Line,
     pub at: Hlc,
     pub kind: EntryKind,
-    /// Whether the line holds what [`Entry::kind`] leaves out: a member this
-    /// build does not know at any depth, or JSON it would write otherwise.
+    /// Whether the line holds a member, at any depth, that [`Entry::kind`]
+    /// leaves out. Member order and spacing do not count.
     pub unknown_members: bool,
 }
 
@@ -202,12 +203,15 @@ impl Entry {
             _ => None,
         };
         let unknown_members = known.as_ref().is_some_and(|kind| {
-            let written = Written {
+            let written = serde_json::to_value(Written {
                 prev: line.prev(),
                 at: head.at,
                 kind,
-            };
-            serde_json::to_string(&written).ok().as_deref() != Some(json)
+            });
+            match (serde_json::from_str(json), written) {
+                (Ok(read), Ok(written)) => holds_more(&read, &written),
+                _ => true,
+            }
         });
         let kind = known.unwrap_or_else(|| {
             EntryKind::Unknown(Raw::new(json).expect("a verified line holds a JSON object"))
@@ -243,6 +247,25 @@ impl Entry {
 
 fn members<T: DeserializeOwned>(json: &str) -> Option<T> {
     serde_json::from_str(json).ok()
+}
+
+/// Whether `read` has an object member, at any depth, that `written` lacks.
+fn holds_more(read: &Value, written: &Value) -> bool {
+    match read {
+        Value::Object(read) => read.iter().any(|(name, member)| {
+            written
+                .get(name)
+                .is_none_or(|written| holds_more(member, written))
+        }),
+        Value::Array(read) => written.as_array().is_none_or(|written| {
+            read.len() != written.len()
+                || read
+                    .iter()
+                    .zip(written)
+                    .any(|(read, written)| holds_more(read, written))
+        }),
+        _ => false,
+    }
 }
 
 #[derive(Serialize)]
@@ -724,6 +747,35 @@ mod tests {
             again.line.json(),
             r#"{"prev":"00000000000000000000000000000009","at":[4,0],"into":"y","kind":"merge"}"#
         );
+    }
+
+    #[test]
+    fn only_members_a_build_leaves_out_mark_an_entry_extended() {
+        let prev = hash(1);
+        let e = "0000000000000000000000000000000e";
+        let op = format!(r#"{{"op":"add","entity":"{e}","key":"tags","value":{{"b":1,"a":[2]}}}}"#);
+        let reordered = format!(
+            r#"{{ "kind" : "intent", "ops" : [ {op} ], "label" : "L", "at" : [1, 2], "prev" : "{prev}" }}"#
+        );
+        let entry = Entry::decode(Line::seal(reordered.clone()).unwrap()).unwrap();
+        assert!(
+            matches!(entry.kind, EntryKind::Intent(_)),
+            "{:?}",
+            entry.kind
+        );
+        assert!(!entry.unknown_members, "{reordered}");
+
+        let nested = format!(
+            r#"{{"prev":"{prev}","at":[1,2],"kind":"intent","label":"L","ops":[{}]}}"#,
+            op.replace(r#""op":"add""#, r#""op":"add","since":3"#)
+        );
+        let entry = Entry::decode(Line::seal(nested.clone()).unwrap()).unwrap();
+        assert!(
+            matches!(entry.kind, EntryKind::Intent(_)),
+            "{:?}",
+            entry.kind
+        );
+        assert!(entry.unknown_members, "{nested}");
     }
 
     #[test]

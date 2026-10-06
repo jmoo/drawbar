@@ -209,9 +209,9 @@ values are the app's JSON.
 - **Trash items** are kept per writer and item from the `displaced` lists, and
   **settled records** from the `settle` entries, so compaction keeps them.
 - **Unknown** entries and ops are kept with the entry that holds them. An entry
-  of a known kind is merged and also kept whole when its JSON is not what the
-  reader would write for what it decoded, as when it holds a member the reader
-  does not know, at any depth.
+  of a known kind is merged and also kept whole when its JSON holds a member,
+  at any depth, that the reader leaves out of what it decoded. Member order and
+  spacing do not count.
 
 A value that does not decode as the key's declared type is shown as unreadable,
 and kept and merged like any other.
