@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use crate::binding::{self, Bindings, Scan};
 use crate::drafts::{self, DraftRecord};
-use crate::effects::{self, Applied, EffectPlan};
+use crate::effects::{self, Applied, EffectPlan, FileEnd};
 use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
@@ -68,8 +68,6 @@ struct Resolved {
     created: Vec<EntityId>,
     facts: Vec<Op>,
     effects: Rc<EffectPlan>,
-    /// Entities given a file as it is, which undo leaves where it is.
-    adopted: BTreeSet<EntityId>,
     reverses: Option<EntryHash>,
 }
 
@@ -497,16 +495,8 @@ impl Library {
                 _ => None,
             })
             .collect();
-        let mut adopted = BTreeSet::new();
         for change in &plan.files {
             let entity = match change {
-                FileChange::Adopt { entity, .. } => {
-                    adopted.insert(match *entity {
-                        Target::Existing(entity) => entity,
-                        Target::New(n) => created[n],
-                    });
-                    continue;
-                }
                 FileChange::Save {
                     entity: Target::Existing(entity),
                     ..
@@ -531,7 +521,6 @@ impl Library {
             created,
             facts,
             effects: Rc::new(effects),
-            adopted,
             reverses: plan.reverses,
         })
     }
@@ -556,9 +545,14 @@ impl Library {
             .collect()
     }
 
-    /// The file ops logging what the effects did to each entity's file. A file
-    /// adopted as it is is pinned, so undo leaves it alone.
-    fn file_ops(&self, applied: &Applied, adopted: &BTreeSet<EntityId>) -> Vec<Op> {
+    /// The file ops logging what the effects, whose ends are `ends`, did to each
+    /// entity's file. A file given as it is is pinned, so undo leaves it alone.
+    fn file_ops(&self, applied: &Applied, ends: &[FileEnd]) -> Vec<Op> {
+        let pinned: BTreeSet<EntityId> = ends
+            .iter()
+            .filter(|end| end.pin)
+            .map(|end| end.entity)
+            .collect();
         applied
             .files
             .iter()
@@ -569,7 +563,7 @@ impl Library {
                     .into_iter()
                     .map(|write| write.entry)
                     .collect();
-                match (file, adopted.contains(entity)) {
+                match (file, pinned.contains(entity)) {
                     (Some(file), true) => Op::Pin {
                         entity: *entity,
                         file: file.clone(),
@@ -871,7 +865,6 @@ fn commit<'a>(library: &'a mut Library, resolved: Resolved) -> Fallible<'a, Comm
         created,
         facts,
         effects,
-        adopted,
         reverses,
     } = resolved;
     ensure_writer(library, &effects)
@@ -885,7 +878,7 @@ fn commit<'a>(library: &'a mut Library, resolved: Resolved) -> Fallible<'a, Comm
                 displaced: Vec::new(),
                 reverses,
             };
-            transact(library, logged, effects, adopted, Vec::new())
+            transact(library, logged, effects, Vec::new())
         })
         .map_ok(move |(_, entry, outcome)| {
             let mut changes = Vec::new();
@@ -967,11 +960,10 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
             ))
             .and_then(move |applied| {
                 let mut logged = planned(&record);
-                logged
-                    .ops
-                    .extend(library.file_ops(&applied, &BTreeSet::new()));
+                logged.ops.extend(library.file_ops(&applied, &record.files));
                 logged.displaced = applied.displaced;
-                append(library, vec![EntryKind::Intent(logged)]).map_ok(|(library, _)| library)
+                append(library, vec![EntryKind::Intent(logged)])
+                    .and_then(|(library, _)| rescan(library))
             })
         }
     };
@@ -1052,7 +1044,6 @@ fn transact<'a>(
     library: &'a mut Library,
     logged: Logged,
     effects: Rc<EffectPlan>,
-    adopted: BTreeSet<EntityId>,
     after: Vec<EntryKind>,
 ) -> Fallible<'a, (&'a mut Library, Entry, Outcome)> {
     if effects.is_empty() {
@@ -1065,6 +1056,19 @@ fn transact<'a>(
             (library, entry, Outcome::Complete)
         });
     }
+    carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
+        log_effects(library, logged, &effects, record, applied, after)
+    })
+}
+
+/// Stages, checks and journals `effects` for the intent `logged`, then carries
+/// them out. A refusal changes nothing; a failure past the journal leaves its
+/// record to settle.
+fn carry_out<'a>(
+    library: &'a mut Library,
+    logged: &Logged,
+    effects: Rc<EffectPlan>,
+) -> Fallible<'a, (&'a mut Library, Rc<PendingRecord>, Applied)> {
     let writer = library.writer.as_ref().expect("a writer commits");
     let (id, head) = (writer.id(), writer.head());
     let at = match library.tick() {
@@ -1074,77 +1078,83 @@ fn transact<'a>(
     let Ok(entry) = Entry::encode(head, at, EntryKind::Intent(logged.clone())) else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
     };
-    let name = effects.record;
-    let journaled = effects.moves_files();
     let record = Rc::new(PendingRecord::new(id, &logged.label, entry.line, &effects));
     let layout = library.layout.clone();
     let identify = Rc::clone(&library.env.identify);
-    let prepared = effects::prepare(
-        &layout,
-        Rc::clone(&effects),
-        Rc::clone(&record),
-        Rc::clone(&identify),
-    );
+    let (name, journaled) = (effects.record, effects.moves_files());
+    let prepared = effects::prepare(&layout, effects, Rc::clone(&record), Rc::clone(&identify));
     flow::run(prepared)
         .and_then(|prepared| Flow::Done(prepared.map_err(Error::Refused)))
         .and_then({
-            let (layout, record) = (layout.clone(), Rc::clone(&record));
+            let record = Rc::clone(&record);
             move |()| flow::run(effects::apply(&layout, name, record, 0, identify))
         })
-        .then(move |applied| {
-            let applied = match applied {
-                Ok(applied) => applied,
-                Err(error) => {
-                    if journaled {
-                        library.interrupted(name, &record, false);
-                    }
-                    return Flow::Done(Err(error));
+        .then(move |applied| match applied {
+            Ok(applied) => ok((library, record, applied)),
+            Err(error) => {
+                if journaled {
+                    library.interrupted(name, &record, false);
                 }
-            };
-            let mut logged = logged;
-            logged.ops.extend(library.file_ops(&applied, &adopted));
-            logged.displaced = applied.displaced;
-            let mut kinds = vec![EntryKind::Intent(logged)];
-            kinds.extend(after);
-            let outcome = match applied.outcome {
-                Outcome::Partial(report) => Outcome::Partial(crate::report::PartialReport {
-                    record: None,
-                    ..report
-                }),
-                Outcome::Complete => Outcome::Complete,
-            };
-            appending(library, kinds).then(move |(library, appended)| match appended {
-                Ok(entries) => {
-                    let entry = entries.into_iter().next().expect("the intent was appended");
-                    let finish = match journaled {
-                        true => effects::finish(&layout, id, name),
-                        false => Task::ready(Ok(())),
-                    };
-                    flow::run(finish)
-                        .then(move |finished| match finished {
-                            Ok(()) => rescan(library),
-                            Err(error) => {
-                                library.interrupted(name, &record, true);
-                                Flow::Done(Err(error))
-                            }
-                        })
-                        .map_ok(move |library| {
-                            library.show();
-                            (library, entry, outcome)
-                        })
+                Flow::Done(Err(error))
+            }
+        })
+}
+
+/// Appends the intent `logged` with what `applied` says the effects did, then
+/// `after`, and removes the record once the entries are durable.
+fn log_effects<'a>(
+    library: &'a mut Library,
+    mut logged: Logged,
+    effects: &EffectPlan,
+    record: Rc<PendingRecord>,
+    applied: Applied,
+    after: Vec<EntryKind>,
+) -> Fallible<'a, (&'a mut Library, Entry, Outcome)> {
+    let (name, journaled) = (effects.record, effects.moves_files());
+    logged.ops.extend(library.file_ops(&applied, &record.files));
+    logged.displaced = applied.displaced;
+    let outcome = match applied.outcome {
+        Outcome::Partial(report) => Outcome::Partial(crate::report::PartialReport {
+            record: None,
+            ..report
+        }),
+        Outcome::Complete => Outcome::Complete,
+    };
+    let mut kinds = vec![EntryKind::Intent(logged)];
+    kinds.extend(after);
+    let layout = library.layout.clone();
+    appending(library, kinds).then(move |(library, appended)| {
+        let entries = match appended {
+            Ok(entries) => entries,
+            Err(error) => {
+                let logged = library
+                    .writer
+                    .as_ref()
+                    .is_some_and(|writer| writer.head() != record.after());
+                if journaled {
+                    library.interrupted(name, &record, logged);
                 }
+                return Flow::Done(Err(error));
+            }
+        };
+        let entry = entries.into_iter().next().expect("the intent was appended");
+        let finish = match journaled {
+            true => effects::finish(&layout, record.writer, name),
+            false => Task::ready(Ok(())),
+        };
+        flow::run(finish)
+            .then(move |finished| match finished {
+                Ok(()) => rescan(library),
                 Err(error) => {
-                    let logged = library
-                        .writer
-                        .as_ref()
-                        .is_some_and(|writer| writer.head() != record.after());
-                    if journaled {
-                        library.interrupted(name, &record, logged);
-                    }
+                    library.interrupted(name, &record, true);
                     Flow::Done(Err(error))
                 }
             })
-        })
+            .map_ok(move |library| {
+                library.show();
+                (library, entry, outcome)
+            })
+    })
 }
 
 /// Settles another writer's record `theirs` as `how` with `plan`, then logs the
@@ -1178,9 +1188,7 @@ fn settle_orphan(
                         displaced: Vec::new(),
                         reverses: None,
                     };
-                    let adopted = BTreeSet::new();
-                    transact(library, logged, effects, adopted, vec![settle])
-                        .map_ok(|(library, ..)| library)
+                    transact(library, logged, effects, vec![settle]).map_ok(|(library, ..)| library)
                 }
             };
             logged.map_ok(move |library| {

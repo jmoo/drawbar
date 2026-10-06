@@ -418,7 +418,8 @@ A pending record is a JSON object:
 `entry` is the intent's entry as planned, without its `file` ops and
 `displaced`, whose `prev` is the writer's head when the record was written.
 `files` says where each entity's file is once the first `done_after` steps are
-done; a `path` of `null` is no file. A reader reads at most 16 MiB of a record.
+done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
+as it is, logged as a `pin` op rather than a `file` op. A reader reads at most 16 MiB of a record.
 
 ### Recovery
 

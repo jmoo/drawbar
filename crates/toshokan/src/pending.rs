@@ -210,6 +210,7 @@ mod tests {
                 entity: EntityId::from_u128(2),
                 path: Some(path("a/f")),
                 done_after: 2,
+                pin: false,
             }],
         }
     }

@@ -348,6 +348,7 @@ through_both!(
     a_conflict_is_shown_and_resolved,
     a_clone_forks_and_both_branches_survive,
     a_restored_folder_makes_the_writer_rekey,
+    an_interrupted_adoption_is_settled_as_an_adoption,
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
@@ -658,6 +659,86 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
     let elsewhere = machine(&restored.folder);
     let (fresh, _) = F::open(Probe::new(&elsewhere), env("b", 4, &clock)).unwrap();
     assert_eq!(tags(&fresh.view(), song), ["kept", "new"]);
+}
+
+/// Adopts `copy.npno` and saves `new.npno` in one intent.
+fn adopt_and_save<F: Facade>(library: &mut F) -> Result<Committed, Error> {
+    library.commit("Adopt", |i| {
+        i.create(|e| {
+            e.adopt(&path("copy.npno"), Expect::Holds(identity(b"copy")))
+                .add(TAGS, tag("copy"));
+        })
+        .create(|e| {
+            e.save(&path("new.npno"), b"fresh".to_vec(), Expect::Absent)
+                .add(TAGS, tag("fresh"));
+        })
+    })
+}
+
+fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    let setup = |disk: &MemDisk| {
+        let clock = TestClock::at(1_000);
+        let (mut library, _) = F::open(Probe::new(&one_disk(disk)), env("a", 1, &clock)).unwrap();
+        create(&mut library, "song.npno", b"song");
+        put(disk, "copy.npno", b"copy");
+        library
+    };
+    let total = {
+        let disk = MemDisk::new();
+        let mut library = setup(&disk);
+        let before = disk.mutations();
+        adopt_and_save(&mut library).unwrap();
+        disk.mutations() - before
+    };
+    let mut settled = 0;
+    for crash in 0..total {
+        let disk = MemDisk::new();
+        let mut library = setup(&disk);
+        disk.crash_after(crash);
+        let _ = adopt_and_save(&mut library);
+        drop(library);
+        let disk = disk.restart();
+        let shown = format!("crash after {crash}");
+        let clock = TestClock::at(2_000);
+        let (mut again, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        settled += opened.settled.len();
+        again
+            .commit("Next", |i| {
+                i.create(|e| {
+                    e.add(TAGS, tag("next"));
+                })
+            })
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        for entity in again.view().entities() {
+            let Some(file) = entity.file() else {
+                continue;
+            };
+            let present = read(&disk, file.path.as_str()).is_some();
+            assert!(
+                !present || file.state != FileState::Missing,
+                "{shown}: {} is there but shown missing",
+                file.path
+            );
+        }
+        let undone = (0..10)
+            .find_map(|_| again.undo().err())
+            .expect("history ends");
+        assert!(
+            matches!(undone, Error::Refused(Refusal::Nothing)),
+            "{shown}: every intent undoes: {undone:?}"
+        );
+        assert_eq!(
+            read(&disk, "copy.npno").as_deref(),
+            Some(b"copy".as_slice()),
+            "{shown}: undoing an adoption leaves the file"
+        );
+    }
+    assert!(settled > 0, "some crash interrupted the effect");
 }
 
 fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {

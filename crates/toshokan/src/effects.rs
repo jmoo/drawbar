@@ -120,6 +120,10 @@ pub struct FileEnd {
     pub entity: EntityId,
     pub path: Option<RelPath>,
     pub done_after: usize,
+    /// The file is given to the entity as it is, and logged as a `pin` op, which
+    /// undo leaves alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pin: bool,
 }
 
 /// The file effects of one intent, resolved against the bindings.
@@ -291,6 +295,7 @@ impl Resolver<'_> {
                     entity,
                     path: Some(path),
                     done_after: 0,
+                    pin: true,
                 });
             }
             FileChange::Restore {
@@ -436,6 +441,7 @@ impl Resolver<'_> {
             entity,
             path,
             done_after,
+            pin: false,
         });
     }
 }
