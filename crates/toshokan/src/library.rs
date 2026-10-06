@@ -27,11 +27,11 @@ use crate::merge::{merge, Folded};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan, Target};
-use crate::reader::{CachedView, Reader, ReadReport};
+use crate::reader::{CachedView, ReadReport, Reader};
 use crate::recovery::{self, Settling};
 use crate::report::{
-    By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode,
-    Opened, Orphan, Outcome, Presence, Settled, Start, TrashItem, What, WriterInfo,
+    By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode, Opened,
+    Orphan, Outcome, Presence, Settled, Start, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
@@ -114,7 +114,10 @@ impl Library {
                 })
             })
             .and_then(|(library, report, start)| {
-                recover(library).map_ok(move |library| (library, report, start))
+                let saved = library.save_view(&report);
+                flow::run(saved).and_then(move |()| {
+                    recover(library).map_ok(move |library| (library, report, start))
+                })
             })
             .and_then(|(library, report, start)| {
                 rescan(library).map_ok(move |library| (library, report, start))
@@ -251,7 +254,10 @@ impl Library {
     }
 
     fn own_entries(&self) -> Result<(WriterId, Vec<Entry>)> {
-        let writer = self.writer.as_ref().ok_or(Error::Refused(Refusal::Nothing))?;
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or(Error::Refused(Refusal::Nothing))?;
         let own = self
             .reader
             .logs()
@@ -268,25 +274,23 @@ impl Library {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
-        flow::run(pending::read_one(&self.layout, orphan.writer, orphan.record))
-            .and_then(move |theirs| {
-                let open = theirs.filter(|theirs| self.is_orphan(orphan.record, theirs));
-                let Some(theirs) = open else {
-                    return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
-                };
-                flow::run(recovery::progress(&self.layout, &theirs))
-                    .and_then(move |progress| {
-                        let plan = recovery::orphan_plan(
-                            &self.layout,
-                            &theirs,
-                            &progress,
-                            how,
-                            &mut self.env,
-                        );
-                        settle_orphan(self, orphan, theirs, how, plan)
-                    })
+        flow::run(pending::read_one(
+            &self.layout,
+            orphan.writer,
+            orphan.record,
+        ))
+        .and_then(move |theirs| {
+            let open = theirs.filter(|theirs| self.is_orphan(orphan.record, theirs));
+            let Some(theirs) = open else {
+                return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
+            };
+            flow::run(recovery::progress(&self.layout, &theirs)).and_then(move |progress| {
+                let plan =
+                    recovery::orphan_plan(&self.layout, &theirs, &progress, how, &mut self.env);
+                settle_orphan(self, orphan, theirs, how, plan)
             })
-            .task()
+        })
+        .task()
     }
 
     /// Reads other writers' new entries and rescans: what changed since the last
@@ -304,11 +308,14 @@ impl Library {
                     .writer
                     .as_ref()
                     .is_some_and(|own| report.forks.iter().any(|fork| fork.writer == own.id()));
-                let retired = match forked {
+                let saved = flow::run(self.save_view(&report));
+                let stopped = match forked {
                     true => self.stop_writing(),
                     false => ok(()),
                 };
-                retired.and_then(move |()| rescan(self).map_ok(move |library| (library, changes)))
+                saved
+                    .and_then(move |()| stopped)
+                    .and_then(move |()| rescan(self).map_ok(move |library| (library, changes)))
             })
             .map_ok(move |(library, mut changes)| {
                 let explained: BTreeSet<EntityId> = changes
@@ -443,6 +450,16 @@ impl Library {
         flow::run(saved)
             .and_then(move |()| flow::run(writer.close()))
             .task()
+    }
+
+    /// Keeps the cached view in this writer's local directory after a read that
+    /// placed or found something, so a crash does not take back what was shown.
+    fn save_view(&self, report: &ReadReport) -> Task<'static, Result<()>> {
+        let changed = !report.placed.is_empty() || !report.forks.is_empty();
+        match (&self.writer, changed) {
+            (Some(writer), true) => self.reader.cached().save(writer.genesis()),
+            _ => Task::ready(Ok(())),
+        }
     }
 
     /// Whether `theirs`, another writer's record `name`, is still open: confined
@@ -826,13 +843,8 @@ fn recover(library: Library) -> Fallible<'static, Library> {
             .as_ref()
             .map(|writer| (writer.id(), writer.head()));
         let settled = library.folded.settlements().clone();
-        let (assessed, open) = recovery::classify(
-            &library.layout,
-            own,
-            library.reader.logs(),
-            &settled,
-            found,
-        );
+        let (assessed, open) =
+            recovery::classify(&library.layout, own, library.reader.logs(), &settled, found);
         flow::run(recovery::predict(&library.layout, assessed, open)).map_ok(move |assessed| {
             library.unsettled = assessed.own;
             library.orphaned = assessed.orphaned;
@@ -947,15 +959,20 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
         false => {
             let record = Rc::new(settling.pending);
             let identify = Rc::clone(&library.env.identify);
-            flow::run(recovery::settle(&layout, name, Rc::clone(&record), identify)).and_then(
-                move |applied| {
-                    let mut logged = planned(&record);
-                    logged.ops.extend(library.file_ops(&applied, &BTreeSet::new()));
-                    logged.displaced = applied.displaced;
-                    append(library, vec![EntryKind::Intent(logged)])
-                        .map_ok(|(library, _)| library)
-                },
-            )
+            flow::run(recovery::settle(
+                &layout,
+                name,
+                Rc::clone(&record),
+                identify,
+            ))
+            .and_then(move |applied| {
+                let mut logged = planned(&record);
+                logged
+                    .ops
+                    .extend(library.file_ops(&applied, &BTreeSet::new()));
+                logged.displaced = applied.displaced;
+                append(library, vec![EntryKind::Intent(logged)]).map_ok(|(library, _)| library)
+            })
         }
     };
     settled.and_then(move |library| {
@@ -969,7 +986,9 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
 /// The intent a pending record planned to log, without the file ops its steps
 /// decide. A record whose entry is not an intent logs its label alone.
 fn planned(record: &PendingRecord) -> Logged {
-    let decoded = Entry::decode(record.entry.clone()).ok().map(|entry| entry.kind);
+    let decoded = Entry::decode(record.entry.clone())
+        .ok()
+        .map(|entry| entry.kind);
     let mut logged = match decoded {
         Some(EntryKind::Intent(logged)) => logged,
         _ => Logged {

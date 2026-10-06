@@ -15,15 +15,15 @@ use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::{Capabilities, Kind, Range};
 use toshokan::line::Line;
 use toshokan::log::{Entry, EntryKind, Logged};
+use toshokan::pending::PendingRecord;
+use toshokan::plan::FileChange;
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Compacted, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer};
-use toshokan::pending::PendingRecord;
-use toshokan::plan::FileChange;
 use toshokan::{
-    EntityId, EntryHash, Env, Error, Hlc, Identify, Io, IoResult, Layout, MemDisk, Nonce, Operation, Random,
-    Refusal, RelPath, Reply, Root, SegmentName, Step, WriterId,
+    EntityId, EntryHash, Env, Error, Hlc, Identify, Io, IoResult, Layout, MemDisk, Nonce,
+    Operation, Random, Refusal, RelPath, Reply, Root, SegmentName, Step, WriterId,
 };
 
 pub fn path(text: &str) -> RelPath {
@@ -350,7 +350,6 @@ pub fn commit(
     let run = prepare(d, WRITER, changes, bindings, env).unwrap()?;
     Ok(complete(d, &run).unwrap())
 }
-
 
 pub fn machine() -> Machine {
     Machine {

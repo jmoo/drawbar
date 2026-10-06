@@ -626,13 +626,13 @@ pub fn apply(
         None,
         move |failed: Option<IoError>, i| match failed {
             Some(failed) => ok(Some(failed)),
-            None => run_step(&running.0, writer, &running.1.steps[i]).then(move |result| {
-                match result {
+            None => {
+                run_step(&running.0, writer, &running.1.steps[i]).then(move |result| match result {
                     Ok(()) => ok(None),
                     Err(Error::Io { error, .. }) => ok(Some(error)),
                     Err(other) => ok(Some(IoError::Other(format!("step {i}: {other}")))),
-                }
-            }),
+                })
+            }
         },
     )
     .and_then(move |failed| account(layout, name, record, failed, identify))
@@ -748,24 +748,30 @@ fn account<'a>(
             }
         })
         .and_then(move |displaced| {
-            fold(ends.into_iter(), Vec::new(), move |mut files, end| match end.path {
-                None => {
-                    files.push((end.entity, None));
-                    ok(files)
-                }
-                Some(path) => flow::observe(Root::Folder, &path, &identify).map_ok(move |seen| {
-                    files.extend(seen.map(|seen| {
-                        let fact = FileFact {
-                            path,
-                            identity: seen.identity,
-                            len: seen.len,
-                            modified: seen.modified,
-                        };
-                        (end.entity, Some(fact))
-                    }));
-                    files
-                }),
-            })
+            fold(
+                ends.into_iter(),
+                Vec::new(),
+                move |mut files, end| match end.path {
+                    None => {
+                        files.push((end.entity, None));
+                        ok(files)
+                    }
+                    Some(path) => {
+                        flow::observe(Root::Folder, &path, &identify).map_ok(move |seen| {
+                            files.extend(seen.map(|seen| {
+                                let fact = FileFact {
+                                    path,
+                                    identity: seen.identity,
+                                    len: seen.len,
+                                    modified: seen.modified,
+                                };
+                                (end.entity, Some(fact))
+                            }));
+                            files
+                        })
+                    }
+                },
+            )
             .map_ok(move |files| Applied {
                 displaced,
                 files,

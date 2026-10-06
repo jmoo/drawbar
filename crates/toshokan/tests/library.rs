@@ -21,7 +21,7 @@ use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
     EntityId, Env, Error, Expect, Field, FileState, Identify, Identity, Io, IoResult, Layout,
-    MemDisk, Policy, Refusal, RelPath, Register, Reply, Root, Schema, Set, View, WriterId,
+    MemDisk, Policy, Refusal, Register, RelPath, Reply, Root, Schema, Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -110,7 +110,8 @@ impl Probe {
         }
         for path in paths {
             let shared = writers.starts_with(path);
-            if !layout().owns(path) || shared && matches!(io, Io::MakeDir { .. } | Io::Sync { .. }) {
+            if !layout().owns(path) || shared && matches!(io, Io::MakeDir { .. } | Io::Sync { .. })
+            {
                 continue;
             }
             let Some(writer) = path
@@ -120,7 +121,12 @@ impl Probe {
                 panic!("{io:?} writes outside every writer's directory");
             };
             let dir = writers.join(&writer).unwrap();
-            let new = self.machine.folder.files(Root::Folder).keys().all(|p| !p.starts_with(&dir))
+            let new = self
+                .machine
+                .folder
+                .files(Root::Folder)
+                .keys()
+                .all(|p| !p.starts_with(&dir))
                 && !self.machine.folder.directories(Root::Folder).contains(&dir);
             let mut seen = self.seen.borrow_mut();
             match &seen.own {
@@ -202,8 +208,7 @@ trait Facade: Sized {
     fn compact(&mut self) -> Result<Compacted, Error>;
     fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error>;
     fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error>;
-    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement)
-        -> Result<(), Error>;
+    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement) -> Result<(), Error>;
     fn close(self) -> Result<(), Error>;
 }
 
@@ -259,11 +264,7 @@ impl Facade for Blocking {
     fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error> {
         self.0.draft(entity).discard()
     }
-    fn settle(
-        &mut self,
-        orphan: toshokan::report::Orphan,
-        how: Settlement,
-    ) -> Result<(), Error> {
+    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement) -> Result<(), Error> {
         self.0.settle(orphan, how)
     }
     fn close(self) -> Result<(), Error> {
@@ -322,11 +323,7 @@ impl Facade for Async {
     fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error> {
         pollster::block_on(self.0.draft(entity).discard())
     }
-    fn settle(
-        &mut self,
-        orphan: toshokan::report::Orphan,
-        how: Settlement,
-    ) -> Result<(), Error> {
+    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement) -> Result<(), Error> {
         pollster::block_on(self.0.settle(orphan, how))
     }
     fn close(self) -> Result<(), Error> {
@@ -363,6 +360,7 @@ through_both!(
     compaction_keeps_the_view_and_ends_undo_at_the_snapshot,
     others_on_this_machine_are_told_apart_from_others_elsewhere,
     a_refused_intent_changes_nothing,
+    what_an_instance_has_shown_survives_its_crash,
 );
 
 /// One machine of a shared folder.
@@ -478,13 +476,20 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
 
     clock.advance(10);
     b.commit("Tag", |i| i.add(song, TAGS, tag("live"))).unwrap();
-    a.commit("Tag", |i| i.add(song, TAGS, tag("piano"))).unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("piano")))
+        .unwrap();
     let from_b = a.refresh().unwrap();
     b.refresh().unwrap();
 
     assert_eq!(tags(&a.view(), song), ["live", "new", "piano"]);
     assert_eq!(facts(&a.view()), facts(&b.view()));
-    let b_id = b.view().writers().iter().find(|w| w.label == "b").unwrap().writer;
+    let b_id = b
+        .view()
+        .writers()
+        .iter()
+        .find(|w| w.label == "b")
+        .unwrap()
+        .writer;
     assert!(
         from_b.contains(&Change {
             entity: song,
@@ -499,7 +504,11 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
     let fresh = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock))
         .unwrap()
         .0;
-    assert_eq!(facts(&fresh.view()), facts(&a.view()), "a new reader agrees");
+    assert_eq!(
+        facts(&fresh.view()),
+        facts(&a.view()),
+        "a new reader agrees"
+    );
 }
 
 fn a_conflict_is_shown_and_resolved<F: Facade>() {
@@ -618,8 +627,7 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
     let Start::Resumed(writer) = opened.start else {
         panic!("{:?}", opened.start);
     };
-    a.commit("Tag", |i| i.add(song, TAGS, tag("lost")))
-        .unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("lost"))).unwrap();
     a.close().unwrap();
 
     let restored = Machine {
@@ -639,10 +647,12 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
         ["lost", "new"],
         "this install's cached view keeps what it saw"
     );
-    a.commit("Tag", |i| i.add(song, TAGS, tag("kept")))
-        .unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
     let writers: Vec<WriterInfo> = a.others().unwrap();
-    let this: Vec<_> = writers.iter().filter(|w| w.here == Presence::This).collect();
+    let this: Vec<_> = writers
+        .iter()
+        .filter(|w| w.here == Presence::This)
+        .collect();
     assert_eq!(this.len(), 1);
     assert_ne!(this[0].writer, writer, "a fresh writer");
     let elsewhere = machine(&restored.folder);
@@ -656,12 +666,20 @@ fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"one");
     a.commit("Save", |i| {
-        i.save(song, &path("song.npno"), b"two".to_vec(), Expect::Holds(identity(b"one")))
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
     })
     .unwrap();
     assert_eq!(read(&folder, "song.npno").unwrap(), b"two");
     assert_eq!(
-        a.history().iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+        a.history()
+            .iter()
+            .map(|h| h.label.as_str())
+            .collect::<Vec<_>>(),
         ["Import", "Save"]
     );
 
@@ -675,7 +693,12 @@ fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {
 
     let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
     b.commit("Save", |i| {
-        i.save(song, &path("song.npno"), b"three".to_vec(), Expect::Holds(identity(b"two")))
+        i.save(
+            song,
+            &path("song.npno"),
+            b"three".to_vec(),
+            Expect::Holds(identity(b"two")),
+        )
     })
     .unwrap();
     a.refresh().unwrap();
@@ -793,7 +816,12 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
     a.commit("Save", |i| {
-        i.save(song, &path("song.npno"), b"two".to_vec(), Expect::Holds(identity(b"song")))
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
     })
     .unwrap();
     put(&folder, "outside.npno", b"outside");
@@ -823,7 +851,12 @@ fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Res
     *done += 1;
     library.put_draft(song, identity(b"one"), b"draft")?;
     library.commit("Save", |i| {
-        i.save(song, &path("a/song.npno"), b"two".to_vec(), Expect::Holds(identity(b"one")))
+        i.save(
+            song,
+            &path("a/song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
     })?;
     library.commit("Rename", |i| {
         i.rename(song, &path("b/song.npno"), Expect::Holds(identity(b"two")))
@@ -872,12 +905,16 @@ fn losing_the_local_root_at_any_step_loses_only_drafts<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert_eq!(opened.start, Start::New, "{shown}");
         assert!(opened.drafts.is_empty(), "{shown}: drafts are lost");
-        assert!(opened.settled.is_empty(), "{shown}: nothing is this writer's");
+        assert!(
+            opened.settled.is_empty(),
+            "{shown}: nothing is this writer's"
+        );
         if done > 0 {
             let view = heir.view();
-            let imported = view.entities().into_iter().any(|e| {
-                e.members(TAGS).values.contains(&tag("new"))
-            });
+            let imported = view
+                .entities()
+                .into_iter()
+                .any(|e| e.members(TAGS).values.contains(&tag("new")));
             assert!(imported, "{shown}: a committed intent survives");
         }
         orphaned += opened.orphaned.len();
@@ -948,7 +985,10 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         assert_eq!(last.view().gaps(), [], "{shown}");
         let everywhere: BTreeSet<Vec<u8>> = disk.files(Root::Folder).into_values().collect();
         for bytes in &present {
-            assert!(everywhere.contains(bytes), "{shown}: {bytes:?} left the folder");
+            assert!(
+                everywhere.contains(bytes),
+                "{shown}: {bytes:?} left the folder"
+            );
         }
     }
     assert!(settled > 0, "some crash interrupted an effect");
@@ -983,12 +1023,30 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
     let w = |name: &str| format!(".t/writers/{name}");
     let garbage: Vec<(String, Vec<u8>)> = vec![
         (format!("{}/noise.jsonl", w(&own)), noise(4096)),
-        (format!("{}/snapshot-x.json", w(&own)), br#"{"writer":1}"#.to_vec()),
-        (format!("{}/pending/{}1.json", w(&own), &zero[1..]), vec![b' '; (16 << 20) + 1]),
-        (format!("{}/pending/{zero}.json", w(&stranger.to_string())), forged(&zero, ".t/x").into_bytes()),
-        (format!("{}/pending/{zero}.json", w(&own)), forged(&zero, "song.npno").into_bytes()),
-        (format!("{}/x.jsonl", w(&stranger.to_string())), b"{\"prev\":\"zz\"}\tbad\n".to_vec()),
-        (format!("{}/zeros.jsonl", w(&stranger.to_string())), vec![0; 1000]),
+        (
+            format!("{}/snapshot-x.json", w(&own)),
+            br#"{"writer":1}"#.to_vec(),
+        ),
+        (
+            format!("{}/pending/{}1.json", w(&own), &zero[1..]),
+            vec![b' '; (16 << 20) + 1],
+        ),
+        (
+            format!("{}/pending/{zero}.json", w(&stranger.to_string())),
+            forged(&zero, ".t/x").into_bytes(),
+        ),
+        (
+            format!("{}/pending/{zero}.json", w(&own)),
+            forged(&zero, "song.npno").into_bytes(),
+        ),
+        (
+            format!("{}/x.jsonl", w(&stranger.to_string())),
+            b"{\"prev\":\"zz\"}\tbad\n".to_vec(),
+        ),
+        (
+            format!("{}/zeros.jsonl", w(&stranger.to_string())),
+            vec![0; 1000],
+        ),
         (w("not-a-writer/seg.jsonl"), noise(100)),
         (".t/writers/file".into(), noise(10)),
     ];
@@ -1006,7 +1064,8 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
         "an oversized record is not read"
     );
     assert_eq!(tags(&a.view(), song), ["new"]);
-    a.commit("Tag", |i| i.add(song, TAGS, tag("still"))).unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("still")))
+        .unwrap();
     assert_eq!(library_files(&folder), before, "no forged effect ran");
 
     for seed in 0..20 {
@@ -1049,7 +1108,8 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
     let song = create(&mut a, "song.npno", b"song");
     let other = create(&mut a, "other.npno", b"other");
     a.put_draft(song, identity(b"song"), b"edited").unwrap();
-    a.put_draft(other, identity(b"other"), b"edited too").unwrap();
+    a.put_draft(other, identity(b"other"), b"edited too")
+        .unwrap();
     a.close().unwrap();
     put(&folder, "other.npno", b"changed outside");
 
@@ -1084,12 +1144,20 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"one");
     a.commit("Save", |i| {
-        i.save(song, &path("song.npno"), b"two".to_vec(), Expect::Holds(identity(b"one")))
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
     })
     .unwrap();
     let trash = a.trash().unwrap();
     assert_eq!(trash.len(), 1);
-    assert_eq!((trash[0].from.clone(), trash[0].len), (path("song.npno"), 3));
+    assert_eq!(
+        (trash[0].from.clone(), trash[0].len),
+        (path("song.npno"), 3)
+    );
     let kept = a.empty_trash(Policy::default()).unwrap();
     assert_eq!(kept, Emptied::default(), "nothing is old or over the cap");
     clock.advance(31 * 24 * 60 * 60 * 1000);
@@ -1111,15 +1179,23 @@ fn compaction_keeps_the_view_and_ends_undo_at_the_snapshot<F: Facade>() {
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
     for n in 0..5 {
-        a.commit("Tag", |i| i.add(song, TAGS, format!("t{n}"))).unwrap();
+        a.commit("Tag", |i| i.add(song, TAGS, format!("t{n}")))
+            .unwrap();
     }
     a.close().unwrap();
     let (mut a, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
     a.commit("Tag", |i| i.add(song, TAGS, tag("last"))).unwrap();
     let before = facts(&a.view());
     let compacted = a.compact().unwrap();
-    assert_eq!(compacted.folded, 8, "genesis, import, five tags and the last");
-    assert_eq!(compacted.removed.len(), 1, "only the segment this process sealed");
+    assert_eq!(
+        compacted.folded, 8,
+        "genesis, import, five tags and the last"
+    );
+    assert_eq!(
+        compacted.removed.len(),
+        1,
+        "only the segment this process sealed"
+    );
     assert_eq!(facts(&a.view()), before);
     assert!(matches!(a.undo(), Err(Error::Refused(Refusal::Nothing))));
     let fresh = F::open(Probe::new(&machine(&folder)), env("b", 3, &clock))
@@ -1184,8 +1260,11 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
     let song = create(&mut a, "song.npno", b"song");
     let written = folder.files(Root::Folder);
     let refused = a.commit("Rename", |i| {
-        i.add(song, TAGS, tag("x"))
-            .rename(song, &path("taken.npno"), Expect::Holds(identity(b"song")))
+        i.add(song, TAGS, tag("x")).rename(
+            song,
+            &path("taken.npno"),
+            Expect::Holds(identity(b"song")),
+        )
     });
     assert!(matches!(refused, Err(Error::Refused(Refusal::Changed(_)))));
     let after = folder.files(Root::Folder);
@@ -1200,4 +1279,46 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
         a.commit("Nothing", |i| i),
         Err(Error::Refused(Refusal::Invalid(toshokan::Invalid::Empty)))
     ));
+}
+
+fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
+    a.refresh().unwrap();
+    assert_eq!(tags(&a.view(), song), ["b", "new"]);
+    drop(a);
+    let theirs = folder
+        .files(Root::Folder)
+        .into_keys()
+        .filter(|p| p.starts_with(&layout().writers()) && p.as_str().ends_with(".jsonl"))
+        .find(|p| {
+            String::from_utf8_lossy(&folder.files(Root::Folder)[p]).contains(r#""value":"b""#)
+        })
+        .unwrap();
+    folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: theirs,
+        })
+        .unwrap();
+    let crashed = Machine {
+        folder: folder.clone(),
+        local: here.local.restart(),
+    };
+    let (a, opened) = F::open(Probe::new(&crashed), env("a", 3, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
+    assert_eq!(
+        tags(&a.view(), song),
+        ["b", "new"],
+        "the cached view kept it"
+    );
 }

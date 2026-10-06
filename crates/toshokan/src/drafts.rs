@@ -91,21 +91,30 @@ pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
                     stem.strip_suffix(".json")?.parse().ok()
                 })
                 .collect();
-            fold(entities.into_iter(), Vec::new(), move |mut drafts, entity| {
-                let path = Layout::draft(genesis, entity);
-                flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
-                    let record = bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
-                    drafts.push(Kept { entity, record });
-                    drafts
-                })
-            })
+            fold(
+                entities.into_iter(),
+                Vec::new(),
+                move |mut drafts, entity| {
+                    let path = Layout::draft(genesis, entity);
+                    flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
+                        let record =
+                            bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
+                        drafts.push(Kept { entity, record });
+                        drafts
+                    })
+                },
+            )
         })
         .task()
 }
 
 /// Keeps `record` as `entity`'s draft, replacing the one kept, so a crash leaves
 /// the old draft or the new.
-pub fn put(genesis: EntryHash, entity: EntityId, record: &DraftRecord) -> Task<'static, Result<()>> {
+pub fn put(
+    genesis: EntryHash,
+    entity: EntityId,
+    record: &DraftRecord,
+) -> Task<'static, Result<()>> {
     let bytes = record.encode();
     flow::ensure_dir(Root::Local, &Layout::drafts(genesis))
         .and_then(move |()| flow::replace(Root::Local, Layout::draft(genesis, entity), bytes))

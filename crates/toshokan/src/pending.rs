@@ -144,13 +144,15 @@ pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Recor
                         .strip_suffix(".json")
                         .and_then(|n| n.parse().ok());
                     match (entry.kind, name) {
-                        (Kind::File, Some(name)) => read(path.clone(), writer).map_ok(move |record| {
-                            match record {
-                                Some(record) => found.records.push((name, record)),
-                                None => found.unreadable.push(path),
-                            }
-                            found
-                        }),
+                        (Kind::File, Some(name)) => {
+                            read(path.clone(), writer).map_ok(move |record| {
+                                match record {
+                                    Some(record) => found.records.push((name, record)),
+                                    None => found.unreadable.push(path),
+                                }
+                                found
+                            })
+                        }
                         _ => {
                             found.unreadable.push(path);
                             ok(found)

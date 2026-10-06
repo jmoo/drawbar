@@ -153,15 +153,19 @@ fn superseded<'a>(
                     WriterFile::Segment { .. } | WriterFile::Unreadable => false,
                 },
             );
-        flow::fold(candidates.into_iter(), Vec::new(), move |mut removed, file| {
-            let judge = std::rc::Rc::clone(&judge);
-            flow::read_file(Root::Folder, &file, MAX_FILE).map_ok(move |bytes| {
-                if bytes.is_some_and(|bytes| judge(&file, &bytes)) {
-                    removed.push(file);
-                }
-                removed
-            })
-        })
+        flow::fold(
+            candidates.into_iter(),
+            Vec::new(),
+            move |mut removed, file| {
+                let judge = std::rc::Rc::clone(&judge);
+                flow::read_file(Root::Folder, &file, MAX_FILE).map_ok(move |bytes| {
+                    if bytes.is_some_and(|bytes| judge(&file, &bytes)) {
+                        removed.push(file);
+                    }
+                    removed
+                })
+            },
+        )
     })
 }
 
