@@ -16,13 +16,19 @@
 //!
 //! **Status:** proof of concept. The on-disk format is unstable.
 
+// The hidden modules are reached by the integration tests, not by apps.
 pub mod asynch;
+#[doc(hidden)]
 pub mod binding;
 pub mod blocking;
+#[doc(hidden)]
 pub mod compaction;
+#[doc(hidden)]
 pub mod crash;
 pub mod disk;
+#[doc(hidden)]
 pub mod drafts;
+#[doc(hidden)]
 pub mod effects;
 pub mod env;
 pub mod error;
@@ -31,22 +37,32 @@ pub mod ids;
 pub mod intent;
 pub mod io;
 pub mod layout;
+#[doc(hidden)]
 pub mod library;
+#[doc(hidden)]
 pub mod line;
 pub mod log;
+#[doc(hidden)]
 pub mod merge;
 pub mod path;
+#[doc(hidden)]
 pub mod pending;
 pub mod plan;
+#[doc(hidden)]
 pub mod reader;
+#[doc(hidden)]
 pub mod recovery;
 pub mod report;
 pub mod schema;
+#[doc(hidden)]
 pub mod simulator;
+#[doc(hidden)]
 pub mod snapshot;
 pub mod trash;
+#[doc(hidden)]
 pub mod undo;
 pub mod view;
+#[doc(hidden)]
 pub mod writer;
 
 pub use disk::MemDisk;
