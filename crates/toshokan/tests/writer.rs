@@ -451,6 +451,21 @@ fn compacting_again_with_nothing_new_writes_nothing() {
 }
 
 #[test]
+fn deleting_only_a_superseded_snapshot_survives_a_crash() {
+    let mut first = Instance::open(machine(), 1);
+    first.write("a").unwrap();
+    let id = first.id();
+    let old = layout().snapshot(id, first.compact().unwrap().snapshot);
+    first.write("b").unwrap();
+    let mut second = Instance::open(first.crash(), 2);
+    let compacted = second.compact().unwrap();
+    assert_eq!(compacted.removed, [], "the crashed segment stays");
+    let restarted = second.machine.folder.restart();
+    let files = files_under(&restarted, &layout().writer(id));
+    assert!(!files.contains(&old), "{old} in {files:?}");
+}
+
+#[test]
 fn losing_the_local_root_starts_a_new_writer_and_leaves_the_old_one_alone() {
     let mut instance = Instance::open(machine(), 1);
     instance.write("a").unwrap();

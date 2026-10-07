@@ -81,9 +81,9 @@ pub fn compact(
                 writer.held_by(path.clone(), len, tail);
                 doomed
                     .delete(path, lost)
-                    .and_then(move |removed| match removed.is_empty() {
-                        true => flow::ok(removed),
-                        false => flow::sync(Root::Folder, &dir).map_ok(move |()| removed),
+                    .and_then(move |(removed, any)| match any {
+                        false => flow::ok(removed),
+                        true => flow::sync(Root::Folder, &dir).map_ok(move |()| removed),
                     })
                     .then(move |removed| {
                         let compacted = removed.map(|removed| Compacted {
@@ -244,12 +244,12 @@ impl Doomed {
     /// Deletes each file once the new snapshot at `path` is confirmed to be in
     /// the folder still, and the file to be as the reader found it; a segment
     /// also only while it ends with its seal marker and the snapshot that folds
-    /// it is there. Returns the deleted segments.
+    /// it is there. Returns the deleted segments, and whether it deleted any file.
     fn delete<'a>(
         self,
         path: RelPath,
         lost: impl Fn() -> Error + Copy + 'a,
-    ) -> Fallible<'a, Vec<RelPath>> {
+    ) -> Fallible<'a, (Vec<RelPath>, bool)> {
         let confirm = move || {
             flow::stat(Root::Folder, &path).and_then(move |held| match held {
                 Some(_) => flow::ok(()),
@@ -295,20 +295,20 @@ impl Doomed {
             },
         )
         .and_then(move |removed| {
+            let any = !removed.is_empty();
             flow::fold(
                 snapshots.into_iter(),
-                removed,
-                move |removed, (path, len)| {
+                (removed, any),
+                move |(removed, any), (path, len)| {
                     again()
                         .and_then({
                             let path = path.clone();
                             move |()| same_len(path, len)
                         })
                         .and_then(move |same| match same {
-                            true => {
-                                flow::remove_if_present(Root::Folder, path).map_ok(|()| removed)
-                            }
-                            false => flow::ok(removed),
+                            true => flow::remove_if_present(Root::Folder, path)
+                                .map_ok(|()| (removed, true)),
+                            false => flow::ok((removed, any)),
                         })
                 },
             )
