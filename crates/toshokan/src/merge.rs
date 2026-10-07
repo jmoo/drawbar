@@ -101,8 +101,9 @@ struct FileValue {
 #[derive(Clone, PartialEq, Debug, Default)]
 struct EntityState {
     existence: Register<Existence>,
-    registers: BTreeMap<String, Register<Option<Raw>>>,
-    sets: BTreeMap<String, OrSet>,
+    // Boxed with the sets: a map node has room for eleven, and an entity has a few.
+    registers: BTreeMap<String, Box<Register<Option<Raw>>>>,
+    sets: BTreeMap<String, Box<OrSet>>,
     file: Register<Option<FileValue>>,
     extra: Extra,
 }
@@ -499,12 +500,12 @@ impl EntityState {
     fn newest_beyond(&self, old: &Self) -> Option<WriterId> {
         let none = Register::default();
         let registers = self.registers.iter().flat_map(|(key, register)| {
-            let old = old.registers.get(key).unwrap_or(&none);
+            let old = old.registers.get(key).map_or(&none, Box::as_ref);
             register.beyond(old).map(|(stamp, _)| *stamp)
         });
         let empty = OrSet::default();
         let sets = self.sets.iter().flat_map(|(key, set)| {
-            let old = old.sets.get(key).unwrap_or(&empty);
+            let old = old.sets.get(key).map_or(&empty, Box::as_ref);
             let adds = added(&set.adds, Some(&old.adds)).copied();
             adds.chain(added(&set.removed, Some(&old.removed)).map(|(stamp, _)| *stamp))
         });
@@ -799,8 +800,8 @@ impl Folded {
             let keys: BTreeSet<&String> =
                 now.registers.keys().chain(old.registers.keys()).collect();
             for key in keys {
-                let n = now.registers.get(key).unwrap_or(&empty);
-                let o = old.registers.get(key).unwrap_or(&empty);
+                let n = now.registers.get(key).map_or(&empty, Box::as_ref);
+                let o = old.registers.get(key).map_or(&empty, Box::as_ref);
                 if let Some((by, value, replaces)) = n.rewrite(o) {
                     let key = key.clone();
                     let op = Op::Write {
@@ -815,8 +816,8 @@ impl Folded {
             let empty = OrSet::default();
             let keys: BTreeSet<&String> = now.sets.keys().chain(old.sets.keys()).collect();
             for key in keys {
-                let n = now.sets.get(key).unwrap_or(&empty);
-                let o = old.sets.get(key).unwrap_or(&empty);
+                let n = now.sets.get(key).map_or(&empty, Box::as_ref);
+                let o = old.sets.get(key).map_or(&empty, Box::as_ref);
                 for (by, op) in n.rewrite(o, entity, key) {
                     note(Part::Field(key.clone()), by, op);
                 }
@@ -920,7 +921,11 @@ impl Folded {
     }
 
     fn register_of(&self, entity: EntityId, key: &str) -> Option<&Register<Option<Raw>>> {
-        self.entities.get(&entity)?.registers.get(key)
+        self.entities
+            .get(&entity)?
+            .registers
+            .get(key)
+            .map(Box::as_ref)
     }
 
     /// The members of a set as JSON, sorted and without duplicates.
@@ -960,7 +965,7 @@ impl Folded {
     }
 
     fn set_of(&self, entity: EntityId, key: &str) -> Option<&OrSet> {
-        self.entities.get(&entity)?.sets.get(key)
+        self.entities.get(&entity)?.sets.get(key).map(Box::as_ref)
     }
 
     /// The surviving writes of every existing entity's file register that say
@@ -1425,12 +1430,12 @@ impl From<&EntityState> for Record<EntityRecord> {
             registers: state
                 .registers
                 .iter()
-                .map(|(key, register)| (key.clone(), register.into()))
+                .map(|(key, register)| (key.clone(), register.as_ref().into()))
                 .collect(),
             sets: state
                 .sets
                 .iter()
-                .map(|(key, set)| (key.clone(), set.into()))
+                .map(|(key, set)| (key.clone(), set.as_ref().into()))
                 .collect(),
             file: (&state.file).into(),
         };
@@ -1446,12 +1451,12 @@ impl From<Record<EntityRecord>> for EntityState {
             registers: known
                 .registers
                 .into_iter()
-                .map(|(key, register)| (key, register.into()))
+                .map(|(key, register)| (key, Box::new(register.into())))
                 .collect(),
             sets: known
                 .sets
                 .into_iter()
-                .map(|(key, set)| (key, set.into()))
+                .map(|(key, set)| (key, Box::new(set.into())))
                 .collect(),
             file: known.file.into(),
             extra: record.extra,
