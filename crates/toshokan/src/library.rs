@@ -75,7 +75,10 @@ pub struct Library {
     ahead: BTreeSet<Hlc>,
     /// The file facts `folded` shows.
     facts: Facts,
+    /// The last scan; before the first, the identities `remembered` keeps.
     scan: Scan,
+    /// The identities scans read that no fact gives, as the local root keeps them.
+    remembered: Scan,
     /// Bound from `facts` and `scan` unless `bind_due`.
     bindings: Arc<Bindings>,
     bind_due: bool,
@@ -119,7 +122,13 @@ impl Library {
                     (picked, cached, let_go.unwrap_or_default())
                 })
             })
-            .and_then(move |(picked, cached, let_go)| {
+            .and_then(|(picked, cached, let_go)| {
+                flow::read_replaced(Root::Local, Layout::identities()).map_ok(move |bytes| {
+                    let remembered = bytes.and_then(|bytes| Scan::of_identities(&bytes));
+                    (picked, cached, (let_go, remembered.unwrap_or_default()))
+                })
+            })
+            .and_then(move |(picked, cached, kept)| {
                 let mut reader = Reader::new(layout.clone(), cached);
                 flow::run(reader.list()).and_then(move |listing| {
                     let report = reader.absorb(listing);
@@ -138,7 +147,7 @@ impl Library {
                             capabilities,
                             reader,
                             claimed.writer,
-                            let_go,
+                            kept,
                         );
                         (library, report, claimed.start)
                     })
@@ -202,7 +211,7 @@ impl Library {
         capabilities: Capabilities,
         reader: Reader,
         writer: Option<Writer>,
-        let_go: Let,
+        (let_go, remembered): (Let, Scan),
     ) -> Self {
         let mut library = Self {
             layout,
@@ -223,7 +232,8 @@ impl Library {
             removed: Vec::new(),
             ahead: BTreeSet::new(),
             facts: Facts::new(),
-            scan: Scan::default(),
+            scan: remembered.clone(),
+            remembered,
             bindings: Arc::default(),
             bind_due: false,
             pins: Vec::new(),
@@ -877,7 +887,31 @@ impl Library {
         self.bind_due = false;
     }
 
-    fn scan_task(&self) -> Task<'static, Result<Scan>> {
+    /// Keeps in the local root the identities scans read that no fact gives, so a
+    /// later open need not read them again: those just read, and those kept before
+    /// of files the last scan found unchanged. Writes only when they changed.
+    fn remember<'a>(&mut self, read: Vec<RelPath>) -> Fallible<'a, ()> {
+        let scan = &self.scan.files;
+        let unchanged = self.remembered.files.iter();
+        let unchanged = unchanged.filter(|(path, file)| scan.get(*path) == Some(*file));
+        let read = read
+            .into_iter()
+            .filter_map(|path| Some((path.clone(), *scan.get(&path)?)));
+        let remembered = Scan {
+            files: unchanged
+                .map(|(path, file)| (path.clone(), *file))
+                .chain(read)
+                .collect(),
+        };
+        if remembered == self.remembered {
+            return ok(());
+        }
+        let bytes = remembered.identities();
+        self.remembered = remembered;
+        flow::replace(Root::Local, Layout::identities(), bytes)
+    }
+
+    fn scan_task(&self) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
         binding::scan(&self.layout, &self.env.identify, &self.facts, &self.scan)
     }
 
@@ -1206,10 +1240,11 @@ fn recover(library: Library) -> Fallible<'static, Library> {
 /// Scans the library's files and binds them.
 fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     let scan = library.borrow().scan_task();
-    flow::run(scan).map_ok(move |scan| {
+    flow::run(scan).and_then(move |(scan, read)| {
         let mut library = library;
         library.borrow_mut().rebind(scan);
-        library
+        let remembered = library.borrow_mut().remember(read);
+        remembered.map_ok(move |()| library)
     })
 }
 
@@ -1223,9 +1258,9 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
         ..
     } = &*library;
     let scan = binding::rescan(layout, &env.identify, facts, scan, paths);
-    flow::run(scan).map_ok(move |scan| {
+    flow::run(scan).and_then(move |(scan, read)| {
         library.rebind(scan);
-        library
+        library.remember(read).map_ok(move |()| library)
     })
 }
 

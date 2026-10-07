@@ -53,14 +53,50 @@ pub struct Bindings {
     pub report: ScanReport,
 }
 
-/// Lists every library file outside toshokan's root. Requests only
-/// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+/// One identity as `identities.json` keeps it: of the file at a path, length and
+/// time.
+type Remembered = (RelPath, u64, Option<u64>, Identity);
+
+impl Scan {
+    /// The identities this scan holds, as `identities.json` keeps them.
+    pub fn identities(&self) -> Vec<u8> {
+        let rows: Vec<Remembered> = self
+            .files
+            .iter()
+            .filter_map(|(path, file)| {
+                Some((path.clone(), file.len, file.modified, file.identity?))
+            })
+            .collect();
+        serde_json::to_vec(&rows).expect("identities are JSON")
+    }
+
+    /// The files whose identities `identities.json` keeps; `None` when `bytes` are
+    /// not such a file.
+    pub fn of_identities(bytes: &[u8]) -> Option<Self> {
+        let rows: Vec<Remembered> = serde_json::from_slice(bytes).ok()?;
+        let files = rows.into_iter().map(|(path, len, modified, identity)| {
+            let file = Scanned {
+                len,
+                modified,
+                identity: Some(identity),
+            };
+            (path, file)
+        });
+        Some(Self {
+            files: files.collect(),
+        })
+    }
+}
+
+/// Lists every library file outside toshokan's root, with the paths whose
+/// identities it read. Requests only [`crate::Io::List`], [`crate::Io::Stat`] and
+/// [`crate::Io::Read`].
 pub fn scan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
     facts: &Facts,
     previous: &Scan,
-) -> Task<'static, Result<Scan>> {
+) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
     let known = Known::of(facts, previous, |_| true);
     let identify = Rc::clone(identify);
     walk(Rc::new(layout.clone()), RelPath::ROOT, Scan::default())
@@ -69,15 +105,15 @@ pub fn scan(
 }
 
 /// `previous` with each of `paths` scanned again: the file at a path, the files
-/// under a directory, or nothing. Requests only [`crate::Io::List`],
-/// [`crate::Io::Stat`] and [`crate::Io::Read`].
+/// under a directory, or nothing; with the paths whose identities it read.
+/// Requests only [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
 pub fn rescan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
     facts: &Facts,
     previous: &Scan,
     paths: Vec<RelPath>,
-) -> Task<'static, Result<Scan>> {
+) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
     let touched: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
     let mut scan = previous.clone();
     scan.files.retain(|path, _| !under(path, &touched));
@@ -131,13 +167,13 @@ impl Known {
     }
 }
 
-/// `scan` with the identities `known` gives, and those it must read: of each file
-/// whose length is a fact's.
+/// `scan` with the identities `known` gives, and those it must read, of each file
+/// whose length is a fact's; with the paths whose identities it read.
 fn identified<'a>(
     mut scan: Scan,
     known: Known,
     identify: Rc<dyn Identify>,
-) -> flow::Fallible<'a, Scan> {
+) -> flow::Fallible<'a, (Scan, Vec<RelPath>)> {
     let unknown: Vec<(RelPath, u64)> = scan
         .files
         .iter_mut()
@@ -149,14 +185,16 @@ fn identified<'a>(
             needed.then(|| (path.clone(), file.len))
         })
         .collect();
-    fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
+    let read = unknown.iter().map(|(path, _)| path.clone()).collect();
+    let identified = fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
         flow::identity(Root::Folder, path.clone(), len, &identify).map_ok(move |identity| {
             if let Some(file) = scan.files.get_mut(&path) {
                 file.identity = Some(identity);
             }
             scan
         })
-    })
+    });
+    identified.map_ok(move |scan| (scan, read))
 }
 
 /// `scan` with what is at `path`: a file, every file under a directory, or
@@ -775,11 +813,12 @@ mod tests {
             )
             .unwrap()
         };
-        let first = run(&Scan::default());
+        let (first, read) = run(&Scan::default());
         assert_eq!(
             first.files.keys().collect::<Vec<_>>(),
             [&path("b"), &path("d/a")]
         );
+        assert_eq!(read, [path("d/a")]);
         assert!(
             first.files[&path("d/a")].identity.is_some(),
             "its length is a fact's"
@@ -788,9 +827,10 @@ mod tests {
         let mut previous = first.clone();
         let remembered = Identity::from_u128(42);
         previous.files.get_mut(&path("d/a")).unwrap().identity = Some(remembered);
+        let (again, read) = run(&previous);
         assert_eq!(
-            run(&previous).files[&path("d/a")].identity,
-            Some(remembered),
+            (again.files[&path("d/a")].identity, read),
+            (Some(remembered), Vec::new()),
             "same length and time"
         );
     }

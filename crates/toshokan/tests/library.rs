@@ -68,6 +68,8 @@ struct Seen {
     local_writes: u64,
     /// Lists, stats and reads of library paths.
     library_reads: u64,
+    /// Reads of library files' bytes.
+    file_reads: u64,
     /// The longest read of a pending record.
     longest_pending_read: u64,
     /// Renames to this path fail, as a backend's might.
@@ -104,6 +106,10 @@ impl Probe {
         self.seen.borrow().library_reads
     }
 
+    fn file_reads(&self) -> u64 {
+        self.seen.borrow().file_reads
+    }
+
     /// Panics on a write under toshokan's root outside the directory of the writer
     /// this instance writes as. The directories holding every writer's may be
     /// made and synced.
@@ -116,7 +122,9 @@ impl Probe {
             }
         }
         if io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
-            self.seen.borrow_mut().library_reads += 1;
+            let mut seen = self.seen.borrow_mut();
+            seen.library_reads += 1;
+            seen.file_reads += u64::from(matches!(io, Io::Read { .. }));
         }
         if io.mutates() && io.root() == Root::Local {
             self.seen.borrow_mut().local_writes += 1;
@@ -409,6 +417,7 @@ through_both!(
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
+    an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -1390,6 +1399,30 @@ fn binds(folder: &MemDisk, writer: WriterId) -> Vec<Entry> {
     entries
         .filter(|entry| matches!(entry.kind, EntryKind::Bind(_)))
         .collect()
+}
+
+fn an_identity_read_for_a_new_time_is_read_once_per_install<F: Facade>() {
+    let folder = MemDisk::new();
+    let files = shelved(&folder, 20);
+    for (_, at) in &files {
+        let later = modified(&folder, at) + 1_000_000;
+        folder.set_modified(Root::Folder, at, later).unwrap();
+    }
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let open = |seed| {
+        let probe = Probe::new(&here);
+        let (library, opened) = F::open(probe.clone(), env("a", seed, &clock)).unwrap();
+        (library, opened, probe.file_reads())
+    };
+    let (_, opened, reads) = open(1);
+    assert_eq!((reads, opened.scan.changed.len()), (20, 0));
+    let (_, opened, reads) = open(2);
+    assert_eq!((reads, opened.scan.changed.len()), (0, 0));
+    let (song, at) = &files[0];
+    put(&folder, at.as_str(), b"FILE 0");
+    let (_, opened, reads) = open(3);
+    assert_eq!((reads, opened.scan.changed), (1, vec![*song]));
 }
 
 #[test]

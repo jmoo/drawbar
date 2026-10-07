@@ -43,17 +43,19 @@ Each install keeps, per library, a local root of its own that is never synced:
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
 | `<genesis>/retired`              | Empty; the writer is never written again     |
 | `let-go.json`                    | Entries the install let go, by writer        |
+| `identities.json`                | Identities the install's scans read          |
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
 root are the install's pool of writers.
 
-`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, and
-`let-go.json` is `{"<writer id>":["<entry hash>",…]}`. A file in the
-local root that is replaced, such as `head.json`, `view.json` or a draft, is
-first written beside it as `<name>.next` and synced; then `<name>` is removed and
-`<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
-`<name>` is missing.
+`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`,
+`let-go.json` is `{"<writer id>":["<entry hash>",…]}`, and `identities.json` is
+`[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
+A file in the local root that is replaced, such as `head.json`, `view.json` or a
+draft, is first written beside it as `<name>.next` and synced; then `<name>` is
+removed and `<name>.next` renamed to it. A reader takes `<name>`, or
+`<name>.next` when `<name>` is missing.
 
 ## Identifiers and clocks
 
@@ -385,9 +387,11 @@ their identities:
 
 1. A scan lists every library file with its length and modification time. It
    reads an identity only when a file's length is that of some file fact, and no
-   earlier scan or fact gives the identity for that path, length and time. After
-   a commit, only the paths its file effects moved files from and to are scanned
-   again; opening and refreshing scan every file.
+   fact, earlier scan or `identities.json` gives the identity for that path,
+   length and time. The install keeps in `identities.json` the identities its
+   scans read while their files keep their length and time. After a commit, only
+   the paths its file effects moved files from and to are scanned again; opening
+   and refreshing scan every file.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case
@@ -405,7 +409,7 @@ Every commit pins the moves this writer holds that its facts do not say yet: eac
 file in sync at another path, as a `pin` op in a `bind` entry. A new
 modification time alone is not logged; it only spares a scan reading an
 identity. Conflicted file registers, changed files and missing ones are left for
-the user. A scan writes nothing.
+the user. A scan writes nothing in the folder.
 
 ## Intents
 
