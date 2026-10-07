@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::binding::{self, Bindings, Facts, Scan};
 use crate::drafts::{self, DraftRecord};
-use crate::effects::{self, Applied, EffectPlan, FileEnd};
+use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
 use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
@@ -1213,6 +1213,33 @@ fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     })
 }
 
+/// Scans again only `paths`, and binds.
+fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut Library> {
+    let Library {
+        layout,
+        env,
+        facts,
+        scan,
+        ..
+    } = &*library;
+    let scan = binding::rescan(layout, &env.identify, facts, scan, paths);
+    flow::run(scan).map_ok(move |scan| {
+        library.rebind(scan);
+        library
+    })
+}
+
+/// The library paths `steps` move files from and to.
+fn moved_paths(steps: &[EffectStep]) -> Vec<RelPath> {
+    let moves = steps.iter().filter(|step| {
+        !matches!(
+            step,
+            EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. }
+        )
+    });
+    moves.flat_map(EffectStep::library_paths).cloned().collect()
+}
+
 /// Settles this writer's interrupted effects, so that what is planned next is
 /// planned against the facts and history they leave.
 fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
@@ -1594,7 +1621,8 @@ fn carry_out<'a>(
 
 /// Appends the intent `logged` with what `applied` says the effects did, closed
 /// by `closing` if they complete and followed by `bind` entries pinning `pins`,
-/// and removes the record once the entries are durable.
+/// removes the record once the entries are durable, and scans again the paths the
+/// effects moved files from and to.
 fn log_effects<'a>(
     library: &'a mut Library,
     mut logged: Logged,
@@ -1611,6 +1639,7 @@ fn log_effects<'a>(
     let closing = closing.filter(|_| outcome == Outcome::Complete);
     let mut kinds = closed(logged, closing);
     kinds.extend(bound(pins));
+    let touched = moved_paths(&effects.steps);
     let layout = library.layout.clone();
     appending(library, kinds).then(move |(library, appended)| {
         let entries = match appended {
@@ -1632,7 +1661,7 @@ fn log_effects<'a>(
         };
         flow::run(finish)
             .then(move |finished| match finished {
-                Ok(()) => rescan(library),
+                Ok(()) => rescan_paths(library, touched),
                 Err(error) => {
                     library.interrupted(name, &record, true);
                     Flow::Done(Err(error))

@@ -66,6 +66,8 @@ struct Seen {
     own: Option<String>,
     folder_writes: u64,
     local_writes: u64,
+    /// Lists, stats and reads of library paths.
+    library_reads: u64,
     /// The longest read of a pending record.
     longest_pending_read: u64,
     /// Renames to this path fail, as a backend's might.
@@ -98,6 +100,10 @@ impl Probe {
         self.seen.borrow().local_writes
     }
 
+    fn library_reads(&self) -> u64 {
+        self.seen.borrow().library_reads
+    }
+
     /// Panics on a write under toshokan's root outside the directory of the writer
     /// this instance writes as. The directories holding every writer's may be
     /// made and synced.
@@ -108,6 +114,9 @@ impl Probe {
                 let len = range.len.min(self.len(path));
                 seen.longest_pending_read = seen.longest_pending_read.max(len);
             }
+        }
+        if io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
+            self.seen.borrow_mut().library_reads += 1;
         }
         if io.mutates() && io.root() == Root::Local {
             self.seen.borrow_mut().local_writes += 1;
@@ -399,6 +408,7 @@ through_both!(
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
+    a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -1256,6 +1266,57 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
         "the pinned path wins over a copy at the old one"
     );
     assert_eq!(b.view().unbound(), [path("song.npno")]);
+}
+
+fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let others = 100;
+    for i in 0..others {
+        put(&folder, &format!("old/{i}.npno"), i.to_string().as_bytes());
+    }
+    a.refresh().unwrap();
+    folder
+        .perform(Io::Rename {
+            root: Root::Folder,
+            from: path("song.npno"),
+            to: path("old/song.npno"),
+        })
+        .unwrap();
+    let before = probe.library_reads();
+    let new = create(&mut a, "new/one.npno", b"one");
+    let reads = probe.library_reads() - before;
+    assert!(
+        reads < others,
+        "{reads} lists, stats and reads of library paths"
+    );
+    let file = a.view().entity(new).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("new/one.npno"), FileState::InSync)
+    );
+    a.commit("Move", |i| i.move_tree(&path("new"), &path("shelf/new")))
+        .unwrap();
+    let file = a.view().entity(new).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("shelf/new/one.npno"), FileState::InSync)
+    );
+
+    let changes = a.refresh().unwrap().changes;
+    assert_eq!(
+        changes,
+        [Change {
+            entity: song,
+            what: What::File,
+            by: By::Outside
+        }]
+    );
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(file.path, path("old/song.npno"));
 }
 
 /// A writer's log that bound `count` files under `lib/` to as many entities, at

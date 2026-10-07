@@ -385,7 +385,9 @@ their identities:
 
 1. A scan lists every library file with its length and modification time. It
    reads an identity only when a file's length is that of some file fact, and no
-   earlier scan or fact gives the identity for that path, length and time.
+   earlier scan or fact gives the identity for that path, length and time. After
+   a commit, only the paths its file effects moved files from and to are scanned
+   again; opening and refreshing scan every file.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case
