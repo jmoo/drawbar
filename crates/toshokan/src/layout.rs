@@ -5,6 +5,7 @@
 //!   <segment>.jsonl            log segments
 //!   snapshot-<nonce>.json      snapshots
 //!   pending/<nonce>.json       journal records of multi-step effects
+//!   pending/<nonce>.<step>     a record's step that copies has started
 //!   trash/<nonce>              displaced user bytes
 //!   tmp/<nonce>                staged files
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
@@ -85,6 +86,12 @@ impl Layout {
 
     pub fn pending(&self, writer: WriterId, name: Nonce) -> RelPath {
         child(&self.pending_dir(writer), &format!("{name}.json"))
+    }
+
+    /// Present once step `step` of the record `record`, which moves by copying,
+    /// has started.
+    pub fn marker(&self, writer: WriterId, record: Nonce, step: usize) -> RelPath {
+        child(&self.pending_dir(writer), &format!("{record}.{step}"))
     }
 
     pub fn trash_dir(&self, writer: WriterId) -> RelPath {

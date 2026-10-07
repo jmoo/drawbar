@@ -381,6 +381,21 @@ pub fn env(seed: u64) -> Env {
     }
 }
 
+/// A folder that cannot rename, and whose completed requests are as durable as
+/// they will get, as a browser's picked folder without `move()`.
+pub const COPYING: Capabilities = Capabilities {
+    append: true,
+    rename_file: false,
+    no_replace: false,
+    rename_dir: false,
+    fsync: false,
+};
+
+/// An empty disk whose folder is [`COPYING`].
+pub fn copying() -> MemDisk {
+    MemDisk::with_capabilities(COPYING, Capabilities::ALL)
+}
+
 pub fn layout() -> Layout {
     Layout::new(".t").unwrap()
 }
@@ -457,7 +472,7 @@ pub fn complete(d: &mut impl Driven, run: &Run) -> Result<Applied, Error> {
         identify(),
     ))?;
     close(d, run.record.writer, run.plan.record)?;
-    d.run(effects::finish(&layout, run.record.writer, run.plan.record))?;
+    d.run(effects::finish(&layout, run.plan.record, &run.record))?;
     Ok(applied)
 }
 

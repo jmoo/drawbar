@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
-use crate::effects::{EffectPlan, EffectStep, FileEnd};
+use crate::effects::{EffectPlan, EffectStep, FileEnd, Moves};
 use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
@@ -32,6 +32,8 @@ pub struct PendingRecord {
     pub label: String,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
+    /// How the steps move files, whoever carries them out.
+    pub moves: Moves,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -41,6 +43,8 @@ struct Wire {
     label: String,
     steps: Vec<EffectStep>,
     files: Vec<FileEnd>,
+    #[serde(default, skip_serializing_if = "Moves::renames")]
+    moves: Moves,
 }
 
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
@@ -57,6 +61,7 @@ impl PendingRecord {
             label: label.to_owned(),
             steps: plan.steps.clone(),
             files: plan.files.clone(),
+            moves: plan.moves,
         }
     }
 
@@ -79,6 +84,7 @@ impl PendingRecord {
             label: wire.label,
             steps: wire.steps,
             files: wire.files,
+            moves: wire.moves,
         })
     }
 
@@ -89,6 +95,7 @@ impl PendingRecord {
             label: self.label.clone(),
             steps: self.steps.clone(),
             files: self.files.clone(),
+            moves: self.moves,
         };
         serde_json::to_vec(&wire).expect("a record serializes")
     }
@@ -122,8 +129,16 @@ impl PendingRecord {
 pub struct Records {
     /// Records that decode and name the directory's writer, by name.
     pub records: Vec<(Nonce, PendingRecord)>,
-    /// Everything else in the directory.
+    /// Everything else in the directory but markers.
     pub unreadable: Vec<RelPath>,
+}
+
+/// The record and step a file of a pending directory marks as started, when its
+/// name is a marker's.
+pub(crate) fn marker(name: &str) -> Option<(Nonce, usize)> {
+    let (record, step) = name.split_once('.')?;
+    let marked = (record.parse().ok()?, step.parse().ok()?);
+    (format!("{}.{}", marked.0, marked.1) == name).then_some(marked)
 }
 
 /// Every pending record of `writer`. Reads only, each read bounded.
@@ -143,7 +158,9 @@ pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Recor
                         .name
                         .strip_suffix(".json")
                         .and_then(|n| n.parse().ok());
+                    let marks = marker(&entry.name).is_some();
                     match (entry.kind, name) {
+                        (Kind::File, _) if marks => ok(found),
                         (Kind::File, Some(name)) => {
                             read(path.clone(), writer).map_ok(move |record| {
                                 match record {
@@ -212,6 +229,7 @@ mod tests {
                 done_after: 2,
                 pin: false,
             }],
+            moves: Moves::Rename,
         }
     }
 
@@ -242,6 +260,39 @@ mod tests {
             text.contains(r#"{"step":"remove_dir","path":"d"}"#),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_record_that_moves_by_copying_says_so_and_one_that_renames_says_nothing() {
+        let renaming = record(vec![]);
+        let copying = PendingRecord {
+            moves: Moves::Copy,
+            ..record(vec![])
+        };
+        let text = |record: &PendingRecord| String::from_utf8(record.encode()).unwrap();
+        assert!(!text(&renaming).contains("moves"), "{}", text(&renaming));
+        assert!(
+            text(&copying).ends_with(r#","moves":"copy"}"#),
+            "{}",
+            text(&copying)
+        );
+        assert_eq!(PendingRecord::decode(&copying.encode()).unwrap(), copying);
+    }
+
+    #[test]
+    fn only_a_nonce_and_a_step_number_name_a_marker() {
+        let nonce = Nonce::from_u128(3);
+        assert_eq!(marker(&format!("{nonce}.12")), Some((nonce, 12)));
+        for name in [
+            format!("{nonce}.json"),
+            format!("{nonce}.+1"),
+            format!("{nonce}.01"),
+            format!("{nonce}."),
+            "x.1".to_owned(),
+            nonce.to_string(),
+        ] {
+            assert_eq!(marker(&name), None, "{name}");
+        }
     }
 
     #[test]

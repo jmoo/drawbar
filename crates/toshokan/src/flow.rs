@@ -500,8 +500,9 @@ pub(crate) fn read_all<'a>(root: Root, path: &RelPath, max: u64) -> Fallible<'a,
     })
 }
 
-/// Copies the file `from` to a new file `to`, a chunk at a time. A source that
-/// shrinks while it is copied fails the copy.
+/// Copies the file `from` to a new file `to`, a chunk at a time. Something at
+/// `to` refuses it. A source that shrinks while it is copied fails the copy, and a
+/// copy that fails once `to` is made removes it.
 pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
     let (from, to) = (from.clone(), to.clone());
     stat(root, &from).and_then(move |meta| {
@@ -528,6 +529,7 @@ pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a,
             path: to.clone(),
             bytes: Vec::new(),
         });
+        let made = to.clone();
         created.and_then(move |()| {
             each(chunks(len).into_iter(), move |range| {
                 let to = to.clone();
@@ -548,8 +550,29 @@ pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a,
                     })
                 })
             })
+            .then(move |copied| match copied {
+                Ok(()) => ok(()),
+                Err(error) => remove_if_present(root, made).then(move |_| Flow::Done(Err(error))),
+            })
         })
     })
+}
+
+/// Moves the file `from` to `to`, where nothing is, without a rename: copies it a
+/// chunk at a time, syncs the copy and then its directory, and only then removes
+/// `from` and syncs its directory. Until then `to` may hold the start of `from`'s
+/// bytes.
+pub(crate) fn copy_move<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
+    let (from, to) = (from.clone(), to.clone());
+    let dir = to.parent().unwrap_or_default();
+    ensure_dir(root, &dir)
+        .and_then({
+            let (from, to) = (from.clone(), to.clone());
+            move |()| copy(root, &from, &to)
+        })
+        .and_then(move |()| sync(root, &to))
+        .and_then(move |()| sync(root, &dir))
+        .and_then(move |()| remove(root, &from))
 }
 
 fn chunks(len: u64) -> Vec<Range> {
@@ -692,19 +715,38 @@ pub(crate) fn identities<'a>(
     })
 }
 
-/// Whether `a` and `b` are files with the same bytes.
-pub(crate) fn same_bytes<'a>(root: Root, a: &RelPath, b: &RelPath) -> Fallible<'a, bool> {
-    let (a, b) = (a.clone(), b.clone());
-    stat(root, &a).and_then(move |first| {
-        stat(root, &b).and_then(move |second| match (first, second) {
-            (Some(first), Some(second))
-                if first.kind == Kind::File
-                    && second.kind == Kind::File
-                    && first.len == second.len =>
+/// What one file holds of another's bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Held {
+    /// All of them, and nothing more.
+    All,
+    /// Fewer of them, from the start, as a copy cut short leaves.
+    Start,
+    Other,
+}
+
+/// What the file `to` holds of the file `from`'s bytes; [`Held::Other`] unless
+/// both are files.
+pub(crate) fn held<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, Held> {
+    let (from, to) = (from.clone(), to.clone());
+    stat(root, &from).and_then(move |whole| {
+        stat(root, &to).and_then(move |part| match (whole, part) {
+            (Some(whole), Some(part))
+                if whole.kind == Kind::File && part.kind == Kind::File && part.len <= whole.len =>
             {
-                compare(root, a, b, chunks(first.len).into())
+                let held = match part.len == whole.len {
+                    true => Held::All,
+                    false => Held::Start,
+                };
+                compare(root, from, to, chunks(part.len).into()).map_ok(move |same| {
+                    if same {
+                        held
+                    } else {
+                        Held::Other
+                    }
+                })
             }
-            _ => ok(false),
+            _ => ok(Held::Other),
         })
     })
 }
@@ -783,8 +825,80 @@ mod tests {
             run(&disk, read_all(Root::Folder, &path("a"), CHUNK)).is_err(),
             "too long"
         );
-        assert!(run(&disk, same_bytes(Root::Folder, &path("a"), &path("b"))).unwrap());
-        assert!(!run(&disk, same_bytes(Root::Folder, &path("a"), &path("c"))).unwrap());
-        assert!(!run(&disk, same_bytes(Root::Folder, &path("a"), &path("none"))).unwrap());
+        let held = |a: &str, b: &str| run(&disk, held(Root::Folder, &path(a), &path(b))).unwrap();
+        assert_eq!(held("a", "b"), Held::All);
+        assert_eq!(held("a", "c"), Held::Other);
+        assert_eq!(held("a", "none"), Held::Other);
+        let start = Io::Create {
+            root: Root::Folder,
+            path: path("start"),
+            bytes: long[..CHUNK as usize + 1].to_vec(),
+        };
+        run(&disk, act(start)).unwrap();
+        assert_eq!(held("a", "start"), Held::Start);
+        assert_eq!(held("start", "a"), Held::Other, "longer than its source");
+        assert_eq!(held("c", "start"), Held::Start);
+    }
+
+    #[test]
+    fn a_copy_that_fails_once_it_made_its_destination_removes_it() {
+        let disk = MemDisk::new();
+        let bytes = vec![7; 10];
+        let create = Io::Create {
+            root: Root::Folder,
+            path: path("a"),
+            bytes,
+        };
+        run(&disk, act(create)).unwrap();
+        disk.set_capacity(Root::Folder, Some(15));
+        let copied = run(&disk, copy(Root::Folder, &path("a"), &path("b")));
+        assert!(
+            matches!(
+                copied,
+                Err(Error::Io {
+                    error: IoError::NoSpace,
+                    ..
+                })
+            ),
+            "{copied:?}"
+        );
+        assert_eq!(
+            disk.files(Root::Folder).into_keys().collect::<Vec<_>>(),
+            [path("a")]
+        );
+    }
+
+    #[test]
+    fn a_move_by_copy_removes_its_source_only_once_the_copy_is_durable() {
+        let setup = || {
+            let disk = MemDisk::new();
+            let long: Vec<u8> = (0..CHUNK + 5).map(|i| i as u8).collect();
+            run(&disk, ensure_dir(Root::Folder, &path("d"))).unwrap();
+            let create = Io::Create {
+                root: Root::Folder,
+                path: path("d/a"),
+                bytes: long.clone(),
+            };
+            run(&disk, act(create)).unwrap();
+            run(&disk, sync(Root::Folder, &path("d/a"))).unwrap();
+            run(&disk, sync(Root::Folder, &path("d"))).unwrap();
+            (disk, long)
+        };
+        let (disk, long) = setup();
+        let before = disk.mutations();
+        run(&disk, copy_move(Root::Folder, &path("d/a"), &path("e/b"))).unwrap();
+        let operations = disk.mutations() - before;
+        for after in 0..=operations {
+            let (disk, _) = setup();
+            disk.crash_after(after);
+            let _ = run(&disk, copy_move(Root::Folder, &path("d/a"), &path("e/b")));
+            let files = disk.restart().files(Root::Folder);
+            let whole = |at: &str| files.get(&path(at)) == Some(&long);
+            assert!(
+                whole("d/a") || whole("e/b"),
+                "after {after}: {:?}",
+                files.keys()
+            );
+        }
     }
 }

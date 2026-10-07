@@ -7,6 +7,21 @@ this one. The format is unstable while toshokan is a proof of concept.
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.
 
+## Durability
+
+A backend says, for each of the folder and the local root, whether it can sync.
+Where it can, a file's contents are durable once a sync of the file returns,
+and a name made or removed once a sync of its directory returns. Where it
+cannot, toshokan counts a request as durable once it completes: what completed
+survives the app stopping, and what survives the machine or the browser stopping
+is the backend's business. Every use of durable in this document means this,
+and nothing toshokan reports promises more.
+
+A backend also says whether it can append, rename a file, rename a directory,
+and rename without replacing. toshokan plans from what it says, never from a
+request that failed. A folder that cannot append is opened read-only. The local
+root must rename files.
+
 ## Layout
 
 The app chooses a library folder and the name of a root directory inside it,
@@ -19,6 +34,7 @@ table is relative to the root.
 | `writers/<w>/<segment>.jsonl`       | A segment of writer `w`'s log            |
 | `writers/<w>/snapshot-<nonce>.json` | A snapshot of writer `w`'s log           |
 | `writers/<w>/pending/<nonce>.json`  | The record of an unfinished file effect  |
+| `writers/<w>/pending/<nonce>.<i>`   | Empty: step `i` of `<nonce>` has begun   |
 | `writers/<w>/trash/<nonce>`         | Bytes an intent of `w` displaced         |
 | `writers/<w>/tmp/<nonce>`           | A file `w` is staging                    |
 
@@ -548,6 +564,10 @@ destination; restoring a trash item over a file, `to_trash` then `from_trash`. A
 directory moves by one `rename` where the backend renames directories, otherwise
 by one `rename` per file the last scan saw, then `remove_dir` deepest first.
 
+Where the folder cannot rename files, each move copies instead, and directories
+move file by file. The record says so with `"moves":"copy"`, and whoever carries
+out its steps, the writer resuming them included, moves the same way.
+
 A writer carries out an intent's steps in this order:
 
 1. Create each new file as `tmp/<nonce>` and fill it, then sync it and `tmp/`.
@@ -559,7 +579,8 @@ A writer carries out an intent's steps in this order:
    trash item a step restores is there. On failure, remove the staged files and
    write nothing more.
 3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
-   `pending/<nonce>.json`.
+   `pending/<nonce>.json`. A record whose moves copy is created at
+   `pending/<nonce>.json` and synced with its directory.
 4. Carry out the steps in order. A move first creates the destination's
    directory, checks that nothing is at the destination, renames without
    replacing, syncs the destination's directory and then the source's, so a
@@ -567,6 +588,13 @@ A writer carries out an intent's steps in this order:
    `place` steps into one directory are moved together, then that directory and
    `tmp/` are synced once for all of them; a crash between the two syncs leaves
    staged files beside the placed ones, and settling removes them.
+
+   A move that copies first creates the marker `pending/<nonce>.<i>`, where `i`
+   is the step's index, and syncs `pending/`. It then creates the destination,
+   refused when something is there, copies the source into it a chunk at a time,
+   syncs it and its directory, and only then removes the source and syncs the
+   source's directory. A copy that fails removes what it wrote. Each step runs
+   alone.
 5. Append the intent's entry.
 6. Remove the pending record.
 
@@ -576,12 +604,18 @@ Where the folder's renames refuse an existing destination themselves, as
 them, a move never replaces anything. Elsewhere a rename may replace, and the
 check before it is the only guard: a file another program makes at the
 destination between the check and the rename is replaced, and its bytes leave
-the folder. Opening says which kind of folder it is.
+the folder. A move that copies creates its destination, which replaces nothing
+where the backend's creates refuse an existing file. Opening says which kind of
+folder it is.
 
-If a step fails, the rest are not tried: staged files not placed are renamed to
-`trash/<their nonce>`, the entry records the effects that were made, and the
-intent reports that it stopped partway. Each library path holds its old bytes,
-nothing, or its new bytes, and while it holds nothing a pending record names it.
+If a step fails, the rest are not tried: staged files not placed are moved to
+`trash/<their nonce>`, replacing what a move cut short left there, the entry
+records the effects that were made, and the intent reports that it stopped
+partway. Each library path holds its old bytes, nothing, or its new bytes, and
+while it holds nothing a pending record names it. Where moves copy, a library
+path may also hold the start of its new bytes while a pending record names it.
+
+Removing a record first removes its markers and syncs `pending/`.
 
 A pending record is a JSON object:
 
@@ -591,6 +625,7 @@ A pending record is a JSON object:
 
 `entry` is the intent's entry as planned, without its `file` ops and
 `displaced`, whose `prev` is the writer's head when the record was written.
+`"moves":"copy"`, omitted otherwise, says the steps move files by copying.
 `files` says where each entity's file is once the first `done_after` steps are
 done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
 as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
@@ -619,19 +654,35 @@ appended with what the steps did, and the record is removed. Then every file in
 its `tmp/` that no open record places is removed. Settling twice ends as
 settling once.
 
+The steps of a record whose moves copy are found from its markers instead,
+since a later step may put bytes back where an earlier one copied them from.
+Without a marker, no step is done. Otherwise every step before the last marked
+one is done, and that one is done when its source is gone and its destination
+is there, unless it is a `place` whose staged file is in the trash. When its
+source and destination hold the same bytes, it is done and the source is
+removed. When the destination holds fewer of the source's bytes, from the start,
+the destination is removed and the step carried out again. Anything else at the
+destination stays, and the step stops there.
+
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
 tell them apart. It reports the record, and settles it only when the user asks,
 as an intent of its own: to finish, it carries out the remaining steps, skipping
 a `to_trash` whose path holds nothing, and logs the facts the record planned; to
-roll back, it reverses the done ones; to dismiss, it changes no file. It copies
-files out of the other writer's `tmp/` and `trash/` rather than moving them, and
-moves a library file it displaces into its own trash. Once its steps are done, it
-appends a `settle` entry naming the writer and record, after which no reader
-reports the record. If its steps stop partway, the settlement fails and its
-intent is logged with what they did, without the planned facts or a `settle`
-entry. The record stays open, and settling it again finds from the folder what
-remains. Only the record's writer removes it.
+roll back, it reverses the done ones; to dismiss, it changes no file. It finds
+how far the steps got by checking them from the last, whichever way they move,
+since its own settling may have carried them further or reversed some; a
+`to_trash` of a record whose moves copy shows done as any other move does. A
+library path holding the start of a copy at the destination of the record's last
+marked step makes that step the one in progress and goes to the settler's trash
+first, as does a library path the last done step left beside its destination. It
+copies files out of the other writer's `tmp/` and `trash/` rather than moving
+them, and moves a library file it displaces into its own trash. Once its steps
+are done, it appends a `settle` entry naming the writer and record, after which
+no reader reports the record. If its steps stop partway, the settlement fails
+and its intent is logged with what they did, without the planned facts or a
+`settle` entry. The record stays open, and settling it again finds from the
+folder what remains. Only the record's writer removes it.
 
 ## Undo and redo
 

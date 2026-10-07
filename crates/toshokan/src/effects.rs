@@ -7,7 +7,9 @@
 //! file into place; the intent's entry is appended; the pending record is removed.
 //! Each user path holds its old bytes, nothing or its new bytes, and while it holds
 //! nothing a pending record names it. A source is never removed before its
-//! destination is durable.
+//! destination is durable. Where the folder cannot rename files, each move copies
+//! and then removes its source ([`Moves::Copy`]); a user path being copied to may
+//! also hold the start of its new bytes, while a pending record names it.
 //!
 //! A commit runs [`resolve`], [`prepare`], [`apply`], the writer's append, then
 //! [`finish`]. Recovery resumes [`apply`] where an interrupted run stopped.
@@ -21,13 +23,13 @@ use serde::{Deserialize, Serialize};
 use crate::binding::Bindings;
 use crate::env::{Env, Identify};
 use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
-use crate::flow::{self, each, fold, ok, Fallible, Flow};
+use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Displaced, FileFact};
 use crate::path::RelPath;
-use crate::pending::PendingRecord;
+use crate::pending::{self, PendingRecord};
 use crate::plan::{Content, Expect, FileChange};
 use crate::report::{Outcome, PartialReport};
 use crate::view::FileState;
@@ -100,6 +102,32 @@ impl EffectStep {
     }
 }
 
+/// How an intent's steps move files: chosen from the folder's capabilities and kept
+/// in its pending record, so that whoever resumes the steps moves them the same way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Moves {
+    /// Each move is one rename.
+    #[default]
+    Rename,
+    /// Each move copies its source and then removes it, after a marker in the
+    /// pending directory says the step started.
+    Copy,
+}
+
+impl Moves {
+    pub fn of(capabilities: Capabilities) -> Self {
+        match capabilities.rename_file {
+            true => Self::Rename,
+            false => Self::Copy,
+        }
+    }
+
+    pub fn renames(&self) -> bool {
+        *self == Self::Rename
+    }
+}
+
 /// What an intent requires at a library path before anything is written.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Precondition {
@@ -139,10 +167,11 @@ pub struct EffectPlan {
     pub staged: Vec<(Nonce, Staged)>,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
+    pub moves: Moves,
 }
 
 impl EffectPlan {
-    /// No effects yet, under the record name `record`.
+    /// No effects yet, under the record name `record`, moving files by renames.
     pub fn new(record: Nonce) -> Self {
         Self {
             record,
@@ -150,6 +179,7 @@ impl EffectPlan {
             staged: Vec::new(),
             steps: Vec::new(),
             files: Vec::new(),
+            moves: Moves::Rename,
         }
     }
 
@@ -176,8 +206,8 @@ pub struct Applied {
 }
 
 /// Resolves `changes` into checks and steps. `bindings` says where existing
-/// entities' files are. Directory renames are used only where `capabilities`
-/// declares them.
+/// entities' files are. Moves copy where `capabilities` declares no file renames,
+/// and directory renames are used only where it declares them too.
 ///
 /// A tree moved by per-file renames moves the files `bindings` knows of; a
 /// directory left behind holding anything else stays.
@@ -189,7 +219,10 @@ pub fn resolve(
     env: &mut Env,
 ) -> std::result::Result<EffectPlan, Refusal> {
     let mut resolver = Resolver {
-        plan: EffectPlan::new(env.nonce()),
+        plan: EffectPlan {
+            moves: Moves::of(capabilities),
+            ..EffectPlan::new(env.nonce())
+        },
         touched: Vec::new(),
         claimed: BTreeSet::new(),
         layout,
@@ -273,7 +306,8 @@ impl Resolver<'_> {
                 self.touch(&from)?;
                 self.touch(&to)?;
                 self.check(&to, Expect::Absent);
-                self.move_tree(&from, &to, capabilities.rename_dir)?;
+                let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
+                self.move_tree(&from, &to, rename_dir)?;
             }
             FileChange::Adopt {
                 entity,
@@ -490,7 +524,8 @@ pub fn check(
 }
 
 /// Writes the record whole: staged and synced first, then renamed into place, so
-/// a crash never leaves part of one.
+/// a crash never leaves part of one. A record that moves by copying is created in
+/// place, whole where a created file is.
 fn write_record<'a>(
     layout: &Layout,
     writer: WriterId,
@@ -499,6 +534,23 @@ fn write_record<'a>(
 ) -> Fallible<'a, ()> {
     let staged = layout.staged(writer, name);
     let path = layout.pending(writer, name);
+    if record.moves == Moves::Copy {
+        let dir = layout.pending_dir(writer);
+        let bytes = record.encode();
+        return flow::ensure_dir(Root::Folder, &dir)
+            .and_then({
+                let path = path.clone();
+                move |()| {
+                    flow::act(Io::Create {
+                        root: Root::Folder,
+                        path,
+                        bytes,
+                    })
+                }
+            })
+            .and_then(move |()| flow::sync(Root::Folder, &path))
+            .and_then(move |()| flow::sync(Root::Folder, &dir));
+    }
     flow::ensure_dir(Root::Folder, &layout.tmp_dir(writer))
         .and_then({
             let staged = staged.clone();
@@ -630,8 +682,7 @@ pub fn apply(
     identify: Rc<dyn Identify>,
 ) -> Task<'static, Result<Applied>> {
     let layout = layout.clone();
-    let writer = record.writer;
-    let runs = runs(&record.steps, start);
+    let runs = runs(&record.steps, start, record.moves);
     let running = (layout.clone(), Rc::clone(&record));
     fold(
         runs.into_iter(),
@@ -640,13 +691,11 @@ pub fn apply(
             Some(failed) => ok(Some(failed)),
             None => {
                 let first = run.start;
-                run_steps(&running.0, writer, &running.1.steps[run]).then(
-                    move |result| match result {
-                        Ok(()) => ok(None),
-                        Err(Error::Io { error, .. }) => ok(Some(error)),
-                        Err(other) => ok(Some(IoError::Other(format!("step {first}: {other}")))),
-                    },
-                )
+                run_steps(&running.0, name, &running.1, run).then(move |result| match result {
+                    Ok(()) => ok(None),
+                    Err(Error::Io { error, .. }) => ok(Some(error)),
+                    Err(other) => ok(Some(IoError::Other(format!("step {first}: {other}")))),
+                })
             }
         },
     )
@@ -655,12 +704,14 @@ pub fn apply(
 }
 
 /// The steps from `start` in runs carried out together: consecutive `place`
-/// steps into one directory, and every other step alone.
-fn runs(steps: &[EffectStep], start: usize) -> Vec<Range<usize>> {
+/// steps into one directory where moves rename, and every other step alone.
+fn runs(steps: &[EffectStep], start: usize, moves: Moves) -> Vec<Range<usize>> {
     let mut runs: Vec<Range<usize>> = Vec::new();
     for i in start..steps.len() {
         match runs.last_mut() {
-            Some(run) if placed_together(&steps[run.start], &steps[i]) => run.end = i + 1,
+            Some(run) if moves.renames() && placed_together(&steps[run.start], &steps[i]) => {
+                run.end = i + 1
+            }
             _ => runs.push(i..i + 1),
         }
     }
@@ -679,9 +730,15 @@ fn placed_together(first: &EffectStep, next: &EffectStep) -> bool {
     }
 }
 
-fn run_steps<'a>(layout: &Layout, writer: WriterId, steps: &[EffectStep]) -> Fallible<'a, ()> {
-    match steps {
-        [step] => run_step(layout, writer, step),
+fn run_steps<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+    run: Range<usize>,
+) -> Fallible<'a, ()> {
+    let writer = record.writer;
+    match &record.steps[run.clone()] {
+        [step] => run_step(layout, name, record, run.start, step),
         places => {
             let moves = places.iter().filter_map(|step| step.ends(layout, writer));
             flow::rename_all(Root::Folder, moves.collect())
@@ -689,8 +746,17 @@ fn run_steps<'a>(layout: &Layout, writer: WriterId, steps: &[EffectStep]) -> Fal
     }
 }
 
-fn run_step<'a>(layout: &Layout, writer: WriterId, step: &EffectStep) -> Fallible<'a, ()> {
+fn run_step<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+    index: usize,
+    step: &EffectStep,
+) -> Fallible<'a, ()> {
+    let writer = record.writer;
     match (step, step.ends(layout, writer)) {
+        (_, Some((from, to))) if record.moves == Moves::Copy => mark(layout, writer, name, index)
+            .and_then(move |()| flow::copy_move(Root::Folder, &from, &to)),
         (_, Some((from, to))) => flow::rename(Root::Folder, &from, &to),
         (EffectStep::MakeDir { path }, None) => flow::ensure_dir(Root::Folder, path),
         (EffectStep::RemoveDir { path }, None) => {
@@ -709,6 +775,29 @@ fn run_step<'a>(layout: &Layout, writer: WriterId, step: &EffectStep) -> Fallibl
     }
 }
 
+/// Makes the marker of step `step` of the record `name` durable: the steps before
+/// it are done, and its copy may have started.
+fn mark<'a>(layout: &Layout, writer: WriterId, name: Nonce, step: usize) -> Fallible<'a, ()> {
+    let io = Io::Create {
+        root: Root::Folder,
+        path: layout.marker(writer, name, step),
+        bytes: Vec::new(),
+    };
+    let dir = layout.pending_dir(writer);
+    flow::attempt(io.clone()).then(move |result| match result {
+        Ok(_) | Err(IoError::AlreadyExists) => flow::sync(Root::Folder, &dir),
+        Err(error) => Flow::Done(Err(io.failed(error))),
+    })
+}
+
+/// Moves this writer's own `from` to `to` as `moves` says, with no marker.
+fn relocate<'a>(moves: Moves, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
+    match moves {
+        Moves::Rename => flow::rename(Root::Folder, from, to),
+        Moves::Copy => flow::copy_move(Root::Folder, from, to),
+    }
+}
+
 /// What the steps did: every step when none failed, else what the folder shows.
 fn account<'a>(
     layout: Layout,
@@ -719,13 +808,10 @@ fn account<'a>(
 ) -> Fallible<'a, Applied> {
     let writer = record.writer;
     let done: Fallible<'a, Progress> = match failed {
-        None => ok(Progress {
-            done: record.steps.len(),
-            leftover: None,
-        }),
+        None => ok(Progress::upto(record.steps.len())),
         Some(_) => {
             let (layout, record) = (layout.clone(), Rc::clone(&record));
-            observe(&layout, &record).map_ok(move |seen| progress(&layout, &record, &seen))
+            observe(&layout, name, &record).map_ok(move |seen| progress(&layout, &record, &seen))
         }
     };
     done.and_then(move |progress| {
@@ -759,18 +845,32 @@ fn account<'a>(
             }),
         };
         let sweeping = layout.clone();
+        let moves = record.moves;
         fold(
             unplaced.into_iter(),
             Vec::new(),
             move |mut swept, (staged, path)| {
                 let from = sweeping.staged(writer, staged);
                 let to = sweeping.trash(writer, staged);
-                flow::stat(Root::Folder, &from).and_then(move |meta| match meta {
-                    None => ok(swept),
-                    Some(_) => flow::rename(Root::Folder, &from, &to).map_ok(move |()| {
-                        swept.push((staged, path));
-                        swept
-                    }),
+                flow::stat(Root::Folder, &from).and_then(move |meta| {
+                    if meta.is_none() {
+                        return ok(swept);
+                    }
+                    // The staged name is new, so a file under it in the trash is
+                    // what a sweep cut short left of the staged file.
+                    flow::stat(Root::Folder, &to)
+                        .and_then({
+                            let to = to.clone();
+                            move |meta| match meta {
+                                Some(_) => flow::remove(Root::Folder, &to),
+                                None => ok(()),
+                            }
+                        })
+                        .and_then(move |()| relocate(moves, &from, &to))
+                        .map_ok(move |()| {
+                            swept.push((staged, path));
+                            swept
+                        })
                 })
             },
         )
@@ -821,18 +921,44 @@ fn account<'a>(
     })
 }
 
-/// Removes the pending record `name` once the intent's entry is durable. A record
-/// already gone is success.
-pub fn finish(layout: &Layout, writer: WriterId, name: Nonce) -> Task<'static, Result<()>> {
-    flow::remove(Root::Folder, &layout.pending(writer, name)).task()
+/// Removes the pending record `name` once the intent's entry is durable, after its
+/// markers. A record already gone is success.
+pub fn finish(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'static, Result<()>> {
+    let path = layout.pending(record.writer, name);
+    let dir = layout.pending_dir(record.writer);
+    let unmarked = match record.moves {
+        Moves::Rename => ok(()),
+        Moves::Copy => flow::list(Root::Folder, &dir).and_then(move |entries| {
+            let marks: Vec<RelPath> = entries
+                .iter()
+                .filter(|entry| pending::marker(&entry.name).is_some_and(|(of, _)| of == name))
+                .map(|entry| {
+                    dir.join(&entry.name)
+                        .expect("a listed name is one component")
+                })
+                .collect();
+            match marks.is_empty() {
+                true => ok(()),
+                false => each(marks.into_iter(), |path| {
+                    flow::remove_if_present(Root::Folder, path)
+                })
+                .and_then(move |()| flow::sync(Root::Folder, &dir)),
+            }
+        }),
+    };
+    unmarked
+        .and_then(move |()| flow::remove(Root::Folder, &path))
+        .task()
 }
 
-/// Which of a record's paths the folder holds, and which pairs of a step's source
-/// and destination both hold the same bytes.
+/// Which of a record's paths the folder holds, what each step's destination holds
+/// of its source's bytes where both are there, and the last step of a record that
+/// copies whose marker is there.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct Observation {
     present: BTreeSet<RelPath>,
-    equal: BTreeSet<(RelPath, RelPath)>,
+    held: BTreeMap<(RelPath, RelPath), Held>,
+    started: Option<usize>,
 }
 
 impl Observation {
@@ -842,17 +968,49 @@ impl Observation {
     }
 }
 
-/// How far a record's steps got: the first `done`, and a source the last of them
-/// left behind beside its destination with the same bytes.
+/// How far a record's steps got: the first `done`; a source the last of them
+/// left behind beside its destination with the same bytes; and the destination of
+/// the next, a copy of which stopped after the start of its source's bytes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Progress {
     pub done: usize,
     pub leftover: Option<RelPath>,
+    pub partial: Option<RelPath>,
 }
 
-/// Reads what [`progress`] needs. Requests only [`Io::Stat`] and [`Io::Read`].
-pub(crate) fn observe<'a>(layout: &Layout, record: &PendingRecord) -> Fallible<'a, Observation> {
+impl Progress {
+    fn upto(done: usize) -> Self {
+        Self {
+            done,
+            leftover: None,
+            partial: None,
+        }
+    }
+}
+
+/// Reads what [`progress`] needs of the record `name`. Requests only [`Io::List`],
+/// [`Io::Stat`] and [`Io::Read`].
+pub(crate) fn observe<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Fallible<'a, Observation> {
     let writer = record.writer;
+    let moves: BTreeSet<usize> = (0..record.steps.len())
+        .filter(|&i| record.steps[i].ends(layout, writer).is_some())
+        .collect();
+    let started = match record.moves {
+        Moves::Rename => ok(None),
+        Moves::Copy => flow::list(Root::Folder, &layout.pending_dir(writer)).map_ok(move |found| {
+            let marked = found
+                .iter()
+                .filter_map(|entry| pending::marker(&entry.name));
+            marked
+                .filter(|&(of, step)| of == name && moves.contains(&step))
+                .map(|(_, step)| step)
+                .max()
+        }),
+    };
     let mut paths = BTreeSet::new();
     let mut pairs = Vec::new();
     for step in &record.steps {
@@ -865,50 +1023,74 @@ pub(crate) fn observe<'a>(layout: &Layout, record: &PendingRecord) -> Fallible<'
             pairs.push((from, to));
         }
     }
-    fold(paths.into_iter(), BTreeSet::new(), |mut present, path| {
-        flow::stat(Root::Folder, &path).map_ok(move |meta| {
-            if meta.is_some() {
-                present.insert(path);
-            }
-            present
+    started.and_then(move |started| {
+        fold(paths.into_iter(), BTreeSet::new(), |mut present, path| {
+            flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                if meta.is_some() {
+                    present.insert(path);
+                }
+                present
+            })
         })
-    })
-    .and_then(move |present| {
-        let both: Vec<(RelPath, RelPath)> = pairs
-            .into_iter()
-            .filter(|(from, to)| present.contains(from) && present.contains(to))
-            .collect();
-        fold(
-            both.into_iter(),
-            BTreeSet::new(),
-            |mut equal, (from, to)| {
-                flow::same_bytes(Root::Folder, &from, &to).map_ok(move |same| {
-                    if same {
-                        equal.insert((from, to));
-                    }
-                    equal
+        .and_then(move |present| {
+            let both: Vec<(RelPath, RelPath)> = pairs
+                .into_iter()
+                .filter(|(from, to)| present.contains(from) && present.contains(to))
+                .collect();
+            fold(both.into_iter(), BTreeMap::new(), |mut held, (from, to)| {
+                flow::held(Root::Folder, &from, &to).map_ok(move |found| {
+                    held.insert((from, to), found);
+                    held
                 })
-            },
-        )
-        .map_ok(move |equal| Observation { present, equal })
+            })
+            .map_ok(move |held| Observation {
+                present,
+                held,
+                started,
+            })
+        })
     })
 }
 
-/// How far a record's steps got. Steps run in order, each finished before the
-/// next starts, so the last step that shows done ends the done prefix. Directory
-/// steps are idempotent and do not count.
+/// How far this writer's record's steps got. Steps run in order, each finished
+/// before the next starts. Directory steps are idempotent and do not count.
 pub(crate) fn progress(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progress {
+    match record.moves {
+        Moves::Rename => scanned(layout, record, seen),
+        Moves::Copy => copied(layout, record, seen),
+    }
+}
+
+/// How far another writer's record's steps got, as the folder shows them, which
+/// settlements may since have carried further or partly reversed, unless the
+/// marked step of a record that copies left the start of a copy past where the
+/// folder shows them.
+pub(crate) fn reached(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progress {
+    let shown = scanned(layout, record, seen);
+    let marked = match record.moves {
+        Moves::Rename => return shown,
+        Moves::Copy => copied(layout, record, seen),
+    };
+    match marked.partial {
+        Some(_) if marked.done >= shown.done => marked,
+        _ => shown,
+    }
+}
+
+/// How far steps got as the folder shows them: the last step that shows done ends
+/// the done prefix.
+fn scanned(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progress {
     let writer = record.writer;
     let has = |path: &RelPath| seen.present.contains(path);
     for (i, step) in record.steps.iter().enumerate().rev() {
         let Some((from, to)) = step.ends(layout, writer) else {
             continue;
         };
-        let equal = seen.equal.contains(&(from.clone(), to.clone()));
-        // A trash item's name is new, so its presence is proof; a staged file's
-        // absence is, unless it was swept into the trash instead.
+        let equal = seen.held.get(&(from.clone(), to.clone())) == Some(&Held::All);
+        // A renamed trash item's name is new, so its presence is proof; a staged
+        // file's absence is, unless it was swept into the trash instead.
         let done = match step {
-            EffectStep::ToTrash { .. } => has(&to),
+            EffectStep::ToTrash { .. } if record.moves.renames() => has(&to),
             EffectStep::Place { staged, .. } => {
                 has(&to) && (equal || !has(&from) && !has(&layout.trash(writer, *staged)))
             }
@@ -916,14 +1098,44 @@ pub(crate) fn progress(layout: &Layout, record: &PendingRecord, seen: &Observati
         };
         if done {
             return Progress {
-                done: i + 1,
                 leftover: (has(&from) && equal).then_some(from),
+                ..Progress::upto(i + 1)
             };
         }
     }
-    Progress {
-        done: 0,
-        leftover: None,
+    Progress::upto(0)
+}
+
+/// How far copies got. A step's marker is made once every step before it is done,
+/// and its source is removed only once its destination holds all of the source's
+/// bytes, so the last marked step is the one in progress. Contents alone cannot
+/// tell which step that is, since a later step may put bytes back where an earlier
+/// one copied them from.
+fn copied(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progress {
+    let Some(i) = seen.started else {
+        return Progress::upto(0);
+    };
+    let step = &record.steps[i];
+    let (from, to) = step
+        .ends(layout, record.writer)
+        .expect("only moves are marked");
+    let has = |path: &RelPath| seen.present.contains(path);
+    let swept = match step {
+        EffectStep::Place { staged, .. } => has(&layout.trash(record.writer, *staged)),
+        _ => false,
+    };
+    let held = seen.held.get(&(from.clone(), to.clone()));
+    match (has(&from), has(&to), held) {
+        (false, true, _) if !swept => Progress::upto(i + 1),
+        (true, true, Some(Held::All)) => Progress {
+            leftover: Some(from),
+            ..Progress::upto(i + 1)
+        },
+        (true, true, Some(Held::Start)) => Progress {
+            partial: Some(to),
+            ..Progress::upto(i)
+        },
+        _ => Progress::upto(i),
     }
 }
 
@@ -936,8 +1148,8 @@ pub(crate) fn predict(
     progress: &Progress,
 ) -> Outcome {
     let mut present = seen.present.clone();
-    if let Some(leftover) = &progress.leftover {
-        present.remove(leftover);
+    for removed in progress.leftover.iter().chain(&progress.partial) {
+        present.remove(removed);
     }
     for (i, step) in record.steps.iter().enumerate().skip(progress.done) {
         let Some((from, to)) = step.ends(layout, record.writer) else {
