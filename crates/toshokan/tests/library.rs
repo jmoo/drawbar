@@ -3,7 +3,7 @@
 //! Every instance runs on a probe that panics on a write in another writer's
 //! directory (I3) and counts the writes it passes to the folder (I4).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -72,7 +72,7 @@ struct Seen {
     file_reads: u64,
     /// The longest read of a pending record.
     longest_pending_read: u64,
-    /// Renames to this path fail, as a backend's might.
+    /// Moves to this path fail, as a backend's might.
     refused: Option<RelPath>,
     /// Reads of library paths fail once the head is next recorded.
     blind_after_record: bool,
@@ -224,7 +224,9 @@ impl Probe {
             return Err(toshokan::IoError::Other("failed by the test".into()));
         }
         match (io, &seen.refused) {
-            (Io::Rename { to, .. }, Some(refused)) if to == refused => {
+            (Io::Rename { to, .. } | Io::Create { path: to, .. }, Some(refused))
+                if to == refused =>
+            {
                 Err(toshokan::IoError::Other("refused by the test".into()))
             }
             _ => Ok(()),
@@ -456,7 +458,41 @@ impl Facade for Async {
     }
 }
 
-/// Runs each scenario through both drivers.
+thread_local! {
+    /// What the folder of each disk a scenario makes can do.
+    static FOLDER: Cell<Capabilities> = const { Cell::new(Capabilities::ALL) };
+}
+
+/// A folder that can neither rename nor sync, whose moves copy.
+const COPYING: Capabilities = Capabilities {
+    append: true,
+    rename_file: false,
+    no_replace: false,
+    rename_dir: false,
+    fsync: false,
+};
+
+/// An empty disk whose folder can do what the scenario runs with.
+fn disk() -> MemDisk {
+    MemDisk::with_capabilities(FOLDER.get(), Capabilities::ALL)
+}
+
+/// Runs `scenario` on folders that can do only what `folder` says, then on
+/// folders that can do everything again, however the scenario ends.
+fn on(folder: Capabilities, scenario: fn()) {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FOLDER.set(Capabilities::ALL);
+        }
+    }
+    let _restore = Restore;
+    FOLDER.set(folder);
+    scenario();
+}
+
+/// Runs each scenario through both drivers, on folders that can do everything and
+/// on folders whose moves copy.
 macro_rules! through_both {
     ($($scenario:ident),* $(,)?) => {
         mod blocking_driver {
@@ -464,6 +500,12 @@ macro_rules! through_both {
         }
         mod async_driver {
             $(#[test] fn $scenario() { super::$scenario::<super::Async>(); })*
+        }
+        mod blocking_copying {
+            $(#[test] fn $scenario() { super::on(super::COPYING, super::$scenario::<super::Blocking>); })*
+        }
+        mod async_copying {
+            $(#[test] fn $scenario() { super::on(super::COPYING, super::$scenario::<super::Async>); })*
         }
     };
 }
@@ -564,6 +606,28 @@ fn put(folder: &MemDisk, text: &str, bytes: &[u8]) {
     }
 }
 
+/// Moves a file in the folder as another program would, which renames even where
+/// toshokan cannot.
+fn move_outside(folder: &MemDisk, from: &str, to: &str) {
+    if folder.capabilities(Root::Folder).rename_file {
+        folder
+            .perform(Io::Rename {
+                root: Root::Folder,
+                from: path(from),
+                to: path(to),
+            })
+            .unwrap();
+        return;
+    }
+    put(folder, to, &read(folder, from).unwrap());
+    folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: path(from),
+        })
+        .unwrap();
+}
+
 fn read(folder: &MemDisk, text: &str) -> Option<Vec<u8>> {
     match folder.perform(Io::Read {
         root: Root::Folder,
@@ -625,7 +689,7 @@ fn create<F: Facade>(library: &mut F, at: &str, bytes: &[u8]) -> EntityId {
 }
 
 fn two_writers_tag_one_library_and_converge<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -671,7 +735,7 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
 }
 
 fn what_refreshes_fold_in_is_what_a_fresh_open_shows<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
@@ -720,7 +784,7 @@ fn what_refreshes_fold_in_is_what_a_fresh_open_shows<F: Facade>() {
 }
 
 fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
@@ -748,7 +812,7 @@ fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
 }
 
 fn a_view_is_read_on_other_threads<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -766,7 +830,7 @@ fn a_view_is_read_on_other_threads<F: Facade>() {
 }
 
 fn a_conflict_is_shown_and_resolved<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -805,7 +869,7 @@ fn a_conflict_is_shown_and_resolved<F: Facade>() {
 }
 
 fn a_clone_forks_and_both_branches_survive<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -850,7 +914,7 @@ fn a_clone_forks_and_both_branches_survive<F: Facade>() {
 }
 
 fn copy_folder(folder: &MemDisk) -> MemDisk {
-    let copy = MemDisk::new();
+    let copy = disk();
     for dir in folder.directories(Root::Folder) {
         copy.perform(Io::MakeDir {
             root: Root::Folder,
@@ -870,7 +934,7 @@ fn copy_folder(folder: &MemDisk) -> MemDisk {
 }
 
 fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -918,7 +982,7 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
 /// opened once since by an instance that crashed, and an instance on it that has
 /// no writer yet.
 fn restored_without_a_writer<F: Facade>(clock: &TestClock) -> (Machine, F, EntityId) {
-    let folder = MemDisk::new();
+    let folder = disk();
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -985,7 +1049,7 @@ fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
 }
 
 fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let mut here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -1070,7 +1134,7 @@ fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
         library
     };
     let total = {
-        let disk = MemDisk::new();
+        let disk = disk();
         let mut library = setup(&disk);
         let before = disk.mutations();
         adopt_and_save(&mut library).unwrap();
@@ -1078,7 +1142,7 @@ fn an_interrupted_adoption_is_settled_as_an_adoption<F: Facade>() {
     };
     let mut settled = 0;
     for crash in 0..total {
-        let disk = MemDisk::new();
+        let disk = disk();
         let mut library = setup(&disk);
         disk.crash_after(crash);
         let _ = adopt_and_save(&mut library);
@@ -1143,7 +1207,7 @@ fn after_each_settled_crash<F: Facade>(
         (library, song)
     };
     let total = {
-        let disk = MemDisk::new();
+        let disk = disk();
         let (mut library, song) = setup(&disk);
         let before = disk.mutations();
         interrupted(&mut library, song).unwrap();
@@ -1151,7 +1215,7 @@ fn after_each_settled_crash<F: Facade>(
     };
     let mut settled = 0;
     for crash in 0..total {
-        let disk = MemDisk::new();
+        let disk = disk();
         let (mut library, song) = setup(&disk);
         disk.crash_after(crash);
         let _ = interrupted(&mut library, song);
@@ -1222,7 +1286,7 @@ fn the_first_undo_after_a_crash_undoes_the_settled_intent<F: Facade>() {
 }
 
 fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"one");
@@ -1270,7 +1334,7 @@ fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {
 }
 
 fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -1320,7 +1384,7 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
 }
 
 fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -1330,13 +1394,7 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
             path: path("moved"),
         })
         .unwrap();
-    folder
-        .perform(Io::Rename {
-            root: Root::Folder,
-            from: path("song.npno"),
-            to: path("moved/song.npno"),
-        })
-        .unwrap();
+    move_outside(&folder, "song.npno", "moved/song.npno");
     let changes = a.refresh().unwrap().changes;
     assert_eq!(
         changes,
@@ -1372,7 +1430,7 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
 }
 
 fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -1383,13 +1441,7 @@ fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
             path: path("moved"),
         })
         .unwrap();
-    folder
-        .perform(Io::Rename {
-            root: Root::Folder,
-            from: path("song.npno"),
-            to: path("moved/song.npno"),
-        })
-        .unwrap();
+    move_outside(&folder, "song.npno", "moved/song.npno");
     a.refresh().unwrap();
     a.undo().unwrap();
     let file = a.view().entity(song).unwrap().file().unwrap();
@@ -1422,7 +1474,7 @@ fn see(probe: &Probe) {
 }
 
 fn an_undo_is_committed_when_its_identity_read_fails<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
@@ -1434,13 +1486,7 @@ fn an_undo_is_committed_when_its_identity_read_fails<F: Facade>() {
             path: path("moved"),
         })
         .unwrap();
-    folder
-        .perform(Io::Rename {
-            root: Root::Folder,
-            from: path("song.npno"),
-            to: path("moved/song.npno"),
-        })
-        .unwrap();
+    move_outside(&folder, "song.npno", "moved/song.npno");
     a.refresh().unwrap();
     blind_after_record(&probe);
     a.undo().unwrap();
@@ -1465,7 +1511,7 @@ fn an_undo_is_committed_when_its_identity_read_fails<F: Facade>() {
 }
 
 fn a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
@@ -1539,7 +1585,7 @@ fn a_settlement_is_committed_when_its_rescan_fails<F: Facade>() {
 }
 
 fn a_failed_rescan_after_a_rename_binds_no_copy_in_its_place<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
@@ -1646,7 +1692,7 @@ fn committed_while_failing<F: Facade>(
 fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
     const VIEW: &[&str] = &["view.log", "view.json.next"];
     let clock = TestClock::at(1_000);
-    let folder = MemDisk::new();
+    let folder = disk();
     let here = machine(&folder);
     let (a, song, tagged) = committed_while_failing::<F>(&here, &clock, VIEW);
     assert_eq!(behind(&tagged), [Lag::View]);
@@ -1664,7 +1710,7 @@ fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
     );
     assert_eq!(tags(&reopened.view(), song), ["new", "x"], "after a crash");
 
-    let folder = MemDisk::new();
+    let folder = disk();
     let here = machine(&folder);
     let (mut a, song, _) = committed_while_failing::<F>(&here, &clock, VIEW);
     let labels = |a: &F| {
@@ -1692,7 +1738,7 @@ fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
 fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
     const HEAD: &[&str] = &["head.json.next"];
     let clock = TestClock::at(1_000);
-    let folder = MemDisk::new();
+    let folder = disk();
     let here = machine(&folder);
     let (a, song, tagged) = committed_while_failing::<F>(&here, &clock, HEAD);
     assert_eq!(behind(&tagged), [Lag::Head]);
@@ -1719,7 +1765,7 @@ fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
         "the next entry follows the tag"
     );
 
-    let folder = MemDisk::new();
+    let folder = disk();
     let here = machine(&folder);
     let (mut a, _, tagged) = committed_while_failing::<F>(&here, &clock, HEAD);
     a.refresh().unwrap();
@@ -1733,7 +1779,7 @@ fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
 }
 
 fn a_commit_whose_record_cannot_be_removed_is_kept<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
@@ -1799,7 +1845,7 @@ fn a_settlement_whose_record_cannot_be_removed_is_logged_once<F: Facade>() {
 }
 
 fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let probe = Probe::new(&here);
@@ -1818,7 +1864,7 @@ fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
 }
 
 fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
@@ -1828,13 +1874,7 @@ fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
         put(&folder, &format!("old/{i}.npno"), i.to_string().as_bytes());
     }
     a.refresh().unwrap();
-    folder
-        .perform(Io::Rename {
-            root: Root::Folder,
-            from: path("song.npno"),
-            to: path("old/song.npno"),
-        })
-        .unwrap();
+    move_outside(&folder, "song.npno", "old/song.npno");
     let before = probe.library_reads();
     let new = create(&mut a, "new/one.npno", b"one");
     let reads = probe.library_reads() - before;
@@ -1942,7 +1982,7 @@ fn binds(folder: &MemDisk, writer: WriterId) -> Vec<Entry> {
 }
 
 fn an_identity_read_for_a_new_time_is_read_once_per_install<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let files = shelved(&folder, 20);
     for (_, at) in &files {
         let later = modified(&folder, at) + 1_000_000;
@@ -1967,7 +2007,7 @@ fn an_identity_read_for_a_new_time_is_read_once_per_install<F: Facade>() {
 
 #[test]
 fn a_library_whose_files_all_have_new_modification_times_commits() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let files = shelved(&folder, 26_000);
     for (_, at) in &files {
         let later = modified(&folder, at) + 1_000_000;
@@ -1986,7 +2026,7 @@ fn a_library_whose_files_all_have_new_modification_times_commits() {
 
 #[test]
 fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let files = shelved(&folder, 26_000);
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
@@ -2028,7 +2068,7 @@ fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
 }
 
 fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -2089,7 +2129,7 @@ fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Res
 
 fn losing_the_local_root_at_any_step_loses_only_drafts<F: Facade>() {
     let total = {
-        let disk = MemDisk::new();
+        let disk = disk();
         let clock = TestClock::at(1_000);
         let mut library = F::open(Probe::new(&machine(&disk)), env("a", 1, &clock))
             .unwrap()
@@ -2100,7 +2140,7 @@ fn losing_the_local_root_at_any_step_loses_only_drafts<F: Facade>() {
     let contents: [&[u8]; 2] = [b"one", b"two"];
     let mut orphaned = 0;
     for crash in 0..total {
-        let folder = MemDisk::new();
+        let folder = disk();
         let clock = TestClock::at(1_000);
         let here = machine(&folder);
         let (mut library, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2167,7 +2207,7 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         local: disk.clone(),
     };
     let total = {
-        let disk = MemDisk::new();
+        let disk = disk();
         let clock = TestClock::at(1_000);
         let mut library = F::open(Probe::new(&one_disk(&disk)), env("a", 1, &clock))
             .unwrap()
@@ -2177,7 +2217,7 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
     };
     let mut settled = 0;
     for crash in 0..total {
-        let disk = MemDisk::new();
+        let disk = disk();
         let clock = TestClock::at(1_000);
         let (mut library, _) = F::open(Probe::new(&one_disk(&disk)), env("a", 1, &clock)).unwrap();
         disk.crash_after(crash);
@@ -2203,9 +2243,14 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         assert!(opened.settled.is_empty(), "{shown}: settled once");
         assert_eq!(last.view().gaps(), [], "{shown}");
         let everywhere: BTreeSet<Vec<u8>> = disk.files(Root::Folder).into_values().collect();
+        // Where moves copy, a crash can leave the start of a copy, which
+        // settling removes once the copy is whole.
+        let copied = |part: &Vec<u8>| {
+            !FOLDER.get().rename_file && everywhere.iter().any(|whole| whole.starts_with(part))
+        };
         for bytes in &present {
             assert!(
-                everywhere.contains(bytes),
+                everywhere.contains(bytes) || copied(bytes),
                 "{shown}: {bytes:?} left the folder"
             );
         }
@@ -2214,7 +2259,7 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
 }
 
 fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2324,7 +2369,7 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
     assert_eq!(library_files(&folder), before, "no forged effect ran");
 
     for seed in 0..20 {
-        let fuzzed = MemDisk::new();
+        let fuzzed = disk();
         let clock = TestClock::at(1_000);
         let mut random = SeededRandom::new(seed);
         use toshokan::Random;
@@ -2352,7 +2397,7 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
 }
 
 fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2394,7 +2439,7 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
 }
 
 fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"one");
@@ -2428,7 +2473,7 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
 }
 
 fn compaction_keeps_the_view_and_ends_undo_at_the_snapshot<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2460,7 +2505,7 @@ fn compaction_keeps_the_view_and_ends_undo_at_the_snapshot<F: Facade>() {
 }
 
 fn others_on_this_machine_are_told_apart_from_others_elsewhere<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2492,7 +2537,7 @@ fn others_on_this_machine_are_told_apart_from_others_elsewhere<F: Facade>() {
 }
 
 fn a_refused_intent_changes_nothing<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     put(&folder, "taken.npno", b"taken");
@@ -2559,7 +2604,7 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
 }
 
 fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2601,7 +2646,7 @@ fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
 }
 
 fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut first, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
@@ -2643,7 +2688,7 @@ fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
 /// A machine whose folder was backed up after `song` was created, the backup, and
 /// an instance on the machine that resumed the writer.
 fn backed_up<F: Facade>(clock: &TestClock) -> (Machine, MemDisk, F, EntityId) {
-    let folder = MemDisk::new();
+    let folder = disk();
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
@@ -2748,7 +2793,7 @@ fn label_of(view: &View, label: &str) -> WriterId {
 }
 
 fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let mut here = machine(&folder);
     let (a, backup, song) = tagged_after_a_backup::<F>(&folder, &here, &clock);
@@ -2797,7 +2842,7 @@ fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
 }
 
 fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, backup, song) = tagged_after_a_backup::<F>(&folder, &here, &clock);
@@ -2844,7 +2889,7 @@ fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
 }
 
 fn an_adoption_whose_let_go_cannot_be_kept_is_committed<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (a, backup, _) = tagged_after_a_backup::<F>(&folder, &here, &clock);
@@ -2871,7 +2916,7 @@ fn an_adoption_whose_let_go_cannot_be_kept_is_committed<F: Facade>() {
 }
 
 fn one_intent_creates_entities_that_name_each_other<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let committed = a
@@ -2917,7 +2962,7 @@ fn refuse(probe: &Probe, text: Option<&str>) {
 }
 
 fn effects_that_stop_partway_fail_the_commit_and_are_logged<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, probe) = open_probed::<F>(&folder, &clock);
     let song = create(&mut a, "song.npno", b"song");
@@ -2955,7 +3000,7 @@ fn effects_that_stop_partway_fail_the_commit_and_are_logged<F: Facade>() {
 }
 
 fn an_undo_that_stops_partway_fails_and_is_logged<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, probe) = open_probed::<F>(&folder, &clock);
     let song = create(&mut a, "song.npno", b"one");
@@ -3001,17 +3046,16 @@ fn interrupted<F: Facade>(
         let changed = change(&mut library, song);
         (changed, disk.mutations() - before)
     };
-    let (changed, total) = run(&MemDisk::new(), None);
+    let (changed, total) = run(&disk(), None);
     changed.unwrap();
     let mut open = 0;
     for crash in 0..total {
-        let disk = MemDisk::new();
+        let disk = disk();
         let _ = run(&disk, Some(crash));
         let disk = disk.restart();
-        let records = disk
-            .files(Root::Folder)
-            .into_keys()
-            .filter(|p| p.components().any(|name| name == "pending"));
+        let records = disk.files(Root::Folder).into_keys().filter(|p| {
+            p.components().any(|name| name == "pending") && p.as_str().ends_with(".json")
+        });
         if records.count() == 1 && unfinished(&disk) {
             open += 1;
             each(disk, &format!("crash after {crash}"));
@@ -3195,7 +3239,7 @@ fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
 }
 
 fn a_commit_writes_to_the_local_root_only_what_it_adds<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let seen = Rc::clone(&probe.seen);
@@ -3213,7 +3257,7 @@ fn a_commit_writes_to_the_local_root_only_what_it_adds<F: Facade>() {
 }
 
 fn reopening_reads_only_the_ends_of_files_read_before<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
@@ -3248,7 +3292,7 @@ fn reopening_reads_only_the_ends_of_files_read_before<F: Facade>() {
 }
 
 fn a_writers_directory_stays_bounded_across_sessions<F: Facade>() {
-    let folder = MemDisk::new();
+    let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
