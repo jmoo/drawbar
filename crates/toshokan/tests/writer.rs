@@ -863,3 +863,51 @@ fn a_writer_confirms_its_head_from_the_end_of_the_file_that_holds_it() {
         reads.longest
     );
 }
+
+#[test]
+fn finishing_a_compactions_deletions_confirms_the_head_from_its_snapshot() {
+    let setup = || {
+        let mut instance = Instance::open(one_disk(MemDisk::new()), 1);
+        instance.write("a").unwrap();
+        instance.compact().unwrap();
+        instance.write("b").unwrap();
+        instance
+    };
+    let mut probe = setup();
+    let before = probe.machine.folder.mutations();
+    probe.compact().unwrap();
+    let operations = probe.machine.folder.mutations() - before;
+    let mut finished = 0;
+    for after in 0..operations {
+        let mut instance = setup();
+        let id = instance.id();
+        instance.machine.folder.crash_after(after);
+        assert!(instance.compact().is_err(), "crash after {after}");
+        let mut again = Instance::open(one_disk(instance.machine.folder.restart()), 2);
+        let left = segments(&again.machine, id);
+        let Err(Error::Refused(Refusal::Nothing)) = again.compact() else {
+            continue;
+        };
+        finished += usize::from(segments(&again.machine, id) < left);
+        let writer = again.writer.take().unwrap();
+        let mut reads = Reads {
+            machine: &mut again.machine,
+            longest: 0,
+        };
+        let kind = toshokan::log::EntryKind::Intent(toshokan::log::Logged {
+            label: "c".into(),
+            ops: Vec::new(),
+            displaced: Vec::new(),
+            reverses: None,
+        });
+        let append = writer.append(vec![(Hlc::ZERO, kind)], SegmentName::from_u128(77));
+        let (_, appended) = run(&mut reads, append);
+        appended.unwrap_or_else(|e| panic!("crash after {after}: {e}"));
+        assert!(
+            reads.longest <= ENDING,
+            "crash after {after}: read {} bytes at once",
+            reads.longest
+        );
+    }
+    assert!(finished > 0, "some crash leaves a segment to delete");
+}

@@ -12,7 +12,7 @@ use crate::io::{Io, Range, Root, Task};
 use crate::line;
 use crate::merge::merge;
 use crate::path::RelPath;
-use crate::reader::{Reader, WriterFile, WriterLog};
+use crate::reader::{Reader, Stamp, WriterFile, WriterLog};
 use crate::report::{Compacted, Rekey};
 use crate::schema::Raw;
 use crate::snapshot::Snapshot;
@@ -31,8 +31,8 @@ use crate::writer::Writer;
 /// writer's head, writing nothing, or when the folder loses the snapshot before
 /// a deletion. Refused with [`Refusal::Nothing`] when a snapshot the reader
 /// found in the writer's directory already folds its head; it then writes
-/// nothing, and deletes what that snapshot lets it that a compaction cut short
-/// left.
+/// nothing, deletes what that snapshot lets it that a compaction cut short
+/// left, and confirms its head from that snapshot from then on.
 /// Branches of a forked history other than this writer's own are not folded.
 pub fn compact(
     writer: Writer,
@@ -44,9 +44,11 @@ pub fn compact(
         writer: id,
         why: Rekey::Restored,
     };
-    if let Some((path, folding)) = folding_head(reader, &writer) {
+    if let Some((path, stamp, folding)) = folding_head(reader, &writer) {
         let doomed = Doomed::of(reader, id, &folding, None).sparing(&path);
         let dir = writer.layout.writer(id);
+        let mut writer = writer;
+        writer.held_by(path.clone(), stamp.len, stamp.tail.clone());
         return deleted(doomed, path, dir, lost)
             .then(move |deleted| {
                 let refused = deleted.and(Err(Error::Refused(Refusal::Nothing)));
@@ -103,17 +105,17 @@ pub fn compact(
 }
 
 /// A snapshot the reader found in the writer's directory that folds its head,
-/// with its path.
-fn folding_head(reader: &Reader, writer: &Writer) -> Option<(RelPath, Rc<Snapshot>)> {
+/// with its path and stamp.
+fn folding_head(reader: &Reader, writer: &Writer) -> Option<(RelPath, Stamp, Rc<Snapshot>)> {
     let (id, head) = (writer.id(), writer.head());
     reader
         .files(id)
         .into_iter()
         .find_map(|(path, stamp, file)| match (file, stamp) {
-            (WriterFile::Snapshot(old), Some(_))
+            (WriterFile::Snapshot(old), Some(stamp))
                 if old.writer == id && old.head() == Some(head) =>
             {
-                Some((path.clone(), Rc::clone(old)))
+                Some((path.clone(), stamp.clone(), Rc::clone(old)))
             }
             _ => None,
         })
