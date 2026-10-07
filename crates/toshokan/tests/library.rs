@@ -487,6 +487,7 @@ through_both!(
     an_undo_is_committed_when_its_identity_read_fails,
     a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale,
     a_settlement_is_committed_when_its_rescan_fails,
+    a_failed_rescan_after_a_rename_binds_no_copy_in_its_place,
     a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once,
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
     a_commit_whose_record_cannot_be_removed_is_kept,
@@ -1534,6 +1535,59 @@ fn a_settlement_is_committed_when_its_rescan_fails<F: Facade>() {
             "{shown}"
         );
     });
+}
+
+fn a_failed_rescan_after_a_rename_binds_no_copy_in_its_place<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    put(&folder, "copy.npno", b"song");
+    a.refresh().unwrap();
+    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    blind_after_record(&probe);
+    let renamed = a
+        .commit("Rename", |i| {
+            i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
+        })
+        .unwrap();
+    assert!(
+        probe.seen.borrow().blind,
+        "the rescan came after the append"
+    );
+    see(&probe);
+    assert_eq!(behind(&renamed), [Lag::Scan]);
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("b.npno"), FileState::Unscanned),
+        "the copy is not taken for the renamed file"
+    );
+    let tagged = a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert!(
+        tagged
+            .changes
+            .iter()
+            .all(|change| change.what != What::File),
+        "nothing is pinned: {:?}",
+        tagged.changes
+    );
+    assert_eq!(behind(&tagged), [Lag::Scan], "until a refresh scans");
+    let refreshed = a.refresh().unwrap();
+    assert!(
+        refreshed
+            .changes
+            .iter()
+            .all(|change| change.by != By::Outside),
+        "the rename was this writer's: {:?}",
+        refreshed.changes
+    );
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!((file.path, file.state), (path("b.npno"), FileState::InSync));
+    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    let next = a.commit("Tag", |i| i.add(song, TAGS, tag("y"))).unwrap();
+    assert_eq!(next.local, Local::Current);
 }
 
 /// The parts `committed` reports behind.

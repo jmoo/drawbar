@@ -70,12 +70,6 @@ impl Scan {
         serde_json::to_vec(&rows).expect("identities are JSON")
     }
 
-    /// Forgets what this scan found at each of `paths` and under them.
-    pub fn forget(&mut self, paths: &[RelPath]) {
-        let paths: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
-        self.files.retain(|path, _| !under(path, &paths));
-    }
-
     /// The files whose identities `identities.json` keeps; `None` when `bytes` are
     /// not such a file.
     pub fn of_identities(bytes: &[u8]) -> Option<Self> {
@@ -92,6 +86,67 @@ impl Scan {
             files: files.collect(),
         })
     }
+}
+
+/// What a failed scan left unknown: library paths and what is under them, and
+/// the entities then bound to them. Kept until a scan of every file succeeds.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Unscanned {
+    pub paths: BTreeSet<RelPath>,
+    pub entities: BTreeSet<EntityId>,
+}
+
+impl Unscanned {
+    /// Adds `paths`, and the entities `bindings` binds to them or under them.
+    pub fn add(&mut self, paths: Vec<RelPath>, bindings: &Bindings) {
+        let named: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
+        let bound = bindings.bound.iter();
+        let bound = bound.filter(|(_, file)| under(&file.path, &named));
+        self.entities.extend(bound.map(|(entity, _)| *entity));
+        self.paths.extend(paths);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.entities.is_empty()
+    }
+}
+
+/// Binds as [`bind`] does, with the pins of what it binds, but blind to what
+/// `unscanned` leaves unknown: the files under its paths are left out of `scan`,
+/// and each of its entities, or of those a file fact of which names such a path,
+/// is bound as [`FileState::Unscanned`] at its latest logged path and pinned
+/// nowhere.
+pub fn bind_known(
+    facts: &Facts,
+    scan: &Scan,
+    names: &dyn Names,
+    unscanned: &Unscanned,
+) -> (Bindings, Vec<Op>) {
+    if unscanned.is_empty() {
+        let bindings = bind(facts, scan, names);
+        let pins = pins(facts, &bindings, scan);
+        return (bindings, pins);
+    }
+    let paths: BTreeSet<&str> = unscanned.paths.iter().map(RelPath::as_str).collect();
+    let mut known = scan.clone();
+    known.files.retain(|path, _| !under(path, &paths));
+    let (unknown, facts): (Facts, Facts) =
+        facts.clone().into_iter().partition(|(entity, written)| {
+            unscanned.entities.contains(entity)
+                || written.iter().any(|w| under(&w.value.path, &paths))
+        });
+    let mut bindings = bind(&facts, &known, names);
+    let pins = pins(&facts, &bindings, &known);
+    for (entity, written) in unknown {
+        if let Some(latest) = written.last() {
+            let file = FileRef {
+                path: latest.value.path.clone(),
+                state: FileState::Unscanned,
+            };
+            bindings.bound.insert(entity, file);
+        }
+    }
+    (bindings, pins)
 }
 
 /// Lists every library file outside toshokan's root, with the paths whose
@@ -574,6 +629,7 @@ mod tests {
             for (entity, file) in &bindings.bound {
                 let fact = &facts[entity][0].value;
                 match file.state {
+                    FileState::Unscanned => panic!("{shown}: {entity} is left unscanned"),
                     FileState::Missing => {
                         let alone = holding(&scan, fact);
                         let sole = facts

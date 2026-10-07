@@ -459,9 +459,12 @@ their identities:
    the paths its file effects moved files from and to are scanned again, and of
    the other files only those whose length a file fact gained have their
    identities read; opening and refreshing scan every file. A scan that fails
-   once a commit's entries are durable does not fail the commit. The paths it
-   would have scanned are dropped from the last scan, so no entity binds to a
-   file that may have moved, until a refresh scans every file.
+   once a commit's entries are durable does not fail the commit. Until a scan of
+   every file succeeds, the paths it would have scanned and what is under them
+   are unknown: no file there is bound, reported or a candidate for a move. The
+   entities bound there before the commit, and those whose file facts name such
+   a path, are bound to no file and shown at their logged path as unscanned.
+   Nothing about them is pinned.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case

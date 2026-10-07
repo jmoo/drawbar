@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Bindings, Facts, Scan};
+use crate::binding::{self, Bindings, Facts, Scan, Unscanned};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -40,7 +40,7 @@ use crate::report::{
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
 use crate::undo::History;
-use crate::view::{FileState, Parts, View};
+use crate::view::{FileRef, FileState, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
 pub struct Library {
@@ -80,7 +80,9 @@ pub struct Library {
     scan: Scan,
     /// The identities scans read that no fact gives, as the local root keeps them.
     remembered: Scan,
-    /// Bound from `facts` and `scan` unless `bind_due`.
+    /// What a failed scan left unknown, until a scan of every file succeeds.
+    unscanned: Unscanned,
+    /// Bound from `facts`, `scan` and `unscanned` unless `bind_due`.
     bindings: Arc<Bindings>,
     bind_due: bool,
     /// The moves the bindings found that the facts do not say yet.
@@ -238,6 +240,7 @@ impl Library {
             facts: Facts::new(),
             scan: remembered.clone(),
             remembered,
+            unscanned: Unscanned::default(),
             bindings: Arc::default(),
             bind_due: false,
             pins: Vec::new(),
@@ -509,7 +512,8 @@ impl Library {
                     .collect();
                 let rebound = !Arc::ptr_eq(&before, &library.bindings);
                 for (entity, file) in library.bindings.bound.iter().filter(|_| rebound) {
-                    if before.bound.get(entity) != Some(file) && !explained.contains(entity) {
+                    let was = before.bound.get(entity).map(presumed);
+                    if was.as_ref() != Some(file) && !explained.contains(entity) {
                         changes.push(Change {
                             entity: *entity,
                             what: What::File,
@@ -949,8 +953,9 @@ impl Library {
     }
 
     fn bind(&mut self) {
-        let bindings = binding::bind(&self.facts, &self.scan, &*self.env.names);
-        self.pins = binding::pins(&self.facts, &bindings, &self.scan);
+        let names = &*self.env.names;
+        let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &self.unscanned);
+        self.pins = pins;
         self.bindings = Arc::new(bindings);
         self.bind_due = false;
     }
@@ -1189,6 +1194,17 @@ impl Library {
     }
 }
 
+/// Where `file` was presumed to be: an unscanned file is where its fact says.
+fn presumed(file: &FileRef) -> FileRef {
+    match file.state {
+        FileState::Unscanned => FileRef {
+            path: file.path.clone(),
+            state: FileState::InSync,
+        },
+        _ => file.clone(),
+    }
+}
+
 fn what(part: &Part) -> What {
     match part {
         Part::Created => What::Created,
@@ -1301,12 +1317,17 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     })
 }
 
-/// Scans the library's files and binds them.
+/// Scans the library's files and binds them, what a failed scan left unknown
+/// included.
 fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     let scan = library.borrow().scan_task();
     flow::run(scan).and_then(move |(scan, read)| {
         let mut library = library;
         let known = library.borrow_mut();
+        if !known.unscanned.is_empty() {
+            known.unscanned = Unscanned::default();
+            known.bind_due = true;
+        }
         known.behind.remove(&Lag::Scan);
         known.rebind(scan);
         remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
@@ -1343,8 +1364,8 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
 }
 
 /// Once entries are durable, binds to what `scan` finds. A scan that fails does
-/// not fail what was logged: the bindings lose what the last scan found at
-/// `unsure`, where files may have moved, until the next refresh scans again.
+/// not fail what was logged: `unsure`, where files may have moved, and the
+/// entities bound there are unknown until a scan of every file succeeds.
 /// Identities it fails to keep in the local root are read again by a later open.
 fn rebind_logged<'a>(
     library: &'a mut Library,
@@ -1357,7 +1378,7 @@ fn rebind_logged<'a>(
             remember(library, read).then(|(library, _)| ok(library))
         }
         Err(error) => {
-            library.scan.forget(&unsure);
+            library.unscanned.add(unsure, &library.bindings);
             library.lag(Lag::Scan, &Err(error));
             library.bind_due = true;
             ok(library)

@@ -198,8 +198,8 @@ pub enum Lag {
     /// `let-go.json` lacks the entries an adoption let go. Reopening reports them
     /// as removed again.
     LetGo,
-    /// The scan after the commit failed. The files its effects touched are bound
-    /// to no entity until a refresh scans every file.
+    /// The scan after the commit failed. The entities whose files its effects
+    /// touched are [`crate::FileState::Unscanned`] until a refresh scans every file.
     Scan,
     /// The commit's pending record is still in the folder. No reader reports it,
     /// since the log continues past it.
