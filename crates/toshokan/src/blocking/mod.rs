@@ -25,7 +25,7 @@ use crate::schema::Schema;
 use crate::trash::Policy;
 use crate::view::View;
 
-/// Storage that performs requests as they come.
+/// Storage that performs requests as they come, the batched ones included.
 pub trait Backend {
     fn capabilities(&self, root: Root) -> Capabilities;
 

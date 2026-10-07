@@ -21,7 +21,7 @@ use crate::binding::Bindings;
 use crate::env::{Env, Identify};
 use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
 use crate::flow::{self, each, fold, ok, Fallible, Flow};
-use crate::ids::{EntityId, Identity, Nonce, WriterId};
+use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Displaced, FileFact};
@@ -552,16 +552,31 @@ fn refusal<'a>(
     identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Option<Refusal>> {
     let identify = Rc::clone(identify);
-    let checked = fold(
-        plan.checks.clone().into_iter(),
-        None,
-        move |refused, check| match refused {
-            Some(refused) => ok(Some(refused)),
-            None => holding(&check.path, &identify).map_ok(move |held| {
-                let found = match held {
-                    Holding::Directory => return Some(Refusal::Directory(check.path)),
-                    Holding::Nothing => None,
-                    Holding::File(identity) => Some(identity),
+    let checks = plan.checks.clone();
+    let paths: Vec<RelPath> = checks.iter().map(|check| check.path.clone()).collect();
+    let stated = fold(paths.into_iter(), Vec::new(), |mut metas, path| {
+        flow::stat(Root::Folder, &path).map_ok(move |meta| {
+            metas.push(meta);
+            metas
+        })
+    });
+    let checked = stated.and_then(move |metas| {
+        let files = checks
+            .iter()
+            .zip(&metas)
+            .filter_map(|(check, meta)| match meta {
+                Some(meta) if meta.kind == Kind::File => Some((check.path.clone(), meta.len)),
+                _ => None,
+            });
+        flow::identities(Root::Folder, files.collect(), &identify).map_ok(move |identities| {
+            let mut identities = identities.into_iter();
+            checks.into_iter().zip(metas).find_map(|(check, meta)| {
+                let found = match meta {
+                    None => None,
+                    Some(meta) if meta.kind == Kind::Directory => {
+                        return Some(Refusal::Directory(check.path));
+                    }
+                    Some(_) => identities.next().expect("an identity for each file"),
                 };
                 let holds = match (check.expect, found) {
                     (Expect::Absent, None) => true,
@@ -575,9 +590,9 @@ fn refusal<'a>(
                         found,
                     }))
                 })
-            }),
-        },
-    );
+            })
+        })
+    });
     let items: Vec<RelPath> = plan
         .steps
         .iter()
@@ -592,23 +607,6 @@ fn refusal<'a>(
             None => flow::stat(Root::Folder, &item)
                 .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
         })
-    })
-}
-
-/// What a library path holds, as a precondition sees it.
-enum Holding {
-    Nothing,
-    File(Identity),
-    Directory,
-}
-
-fn holding<'a>(path: &RelPath, identify: &Rc<dyn Identify>) -> Fallible<'a, Holding> {
-    let path = path.clone();
-    let identify = Rc::clone(identify);
-    flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
-        None => ok(Holding::Nothing),
-        Some(meta) if meta.kind == Kind::Directory => ok(Holding::Directory),
-        Some(meta) => flow::identity(Root::Folder, path, meta.len, &identify).map_ok(Holding::File),
     })
 }
 
@@ -734,54 +732,44 @@ fn account<'a>(
             let identify = Rc::clone(&identify);
             move |swept| {
                 let items: Vec<(Nonce, RelPath)> = trashed.into_iter().chain(swept).collect();
-                fold(
-                    items.into_iter(),
-                    Vec::new(),
-                    move |mut displaced, (item, from)| {
-                        flow::observe(Root::Folder, &layout.trash(writer, item), &identify).map_ok(
-                            move |seen| {
-                                displaced.extend(seen.map(|seen| Displaced {
-                                    item,
-                                    from,
-                                    identity: seen.identity,
-                                    len: seen.len,
-                                }));
-                                displaced
-                            },
-                        )
-                    },
-                )
+                let paths = items.iter().map(|(item, _)| layout.trash(writer, *item));
+                flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
+                    let seen = items.into_iter().zip(seen);
+                    let displaced = seen.filter_map(|((item, from), seen)| {
+                        let seen = seen?;
+                        Some(Displaced {
+                            item,
+                            from,
+                            identity: seen.identity,
+                            len: seen.len,
+                        })
+                    });
+                    displaced.collect::<Vec<Displaced>>()
+                })
             }
         })
         .and_then(move |displaced| {
-            fold(
-                ends.into_iter(),
-                Vec::new(),
-                move |mut files, end| match end.path {
-                    None => {
-                        files.push((end.entity, None));
-                        ok(files)
-                    }
-                    Some(path) => {
-                        flow::observe(Root::Folder, &path, &identify).map_ok(move |seen| {
-                            files.extend(seen.map(|seen| {
-                                let fact = FileFact {
-                                    path,
-                                    identity: seen.identity,
-                                    len: seen.len,
-                                    modified: seen.modified,
-                                };
-                                (end.entity, Some(fact))
-                            }));
-                            files
-                        })
-                    }
-                },
-            )
-            .map_ok(move |files| Applied {
-                displaced,
-                files,
-                outcome,
+            let paths = ends.iter().filter_map(|end| end.path.clone());
+            flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
+                let mut seen = seen.into_iter();
+                let files = ends.into_iter().filter_map(|end| {
+                    let Some(path) = end.path else {
+                        return Some((end.entity, None));
+                    };
+                    let seen = seen.next().expect("an observation for each path")?;
+                    let fact = FileFact {
+                        path,
+                        identity: seen.identity,
+                        len: seen.len,
+                        modified: seen.modified,
+                    };
+                    Some((end.entity, Some(fact)))
+                });
+                Applied {
+                    displaced,
+                    files: files.collect(),
+                    outcome,
+                }
             })
         })
     })

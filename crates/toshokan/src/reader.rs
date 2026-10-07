@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, WriterId};
-use crate::io::{Kind, Range, Root, Task};
+use crate::io::{Kind, Meta, Range, Root, Task};
 use crate::layout::Layout;
 use crate::line::{self, lines, Line, Stop};
 use crate::log::{Entry, EntryKind};
@@ -651,8 +651,9 @@ impl Reader {
     }
 
     /// Reads every writer's directory and places what it can. Requests only
-    /// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`] in the
-    /// folder, each read bounded by [`MAX_FILE`].
+    /// [`crate::Io::List`], then per writer an [`crate::Io::ListStat`] and
+    /// [`crate::Io::ReadMany`] of the files' ends and of the changed files, each
+    /// read bounded by [`MAX_FILE`].
     pub fn read(&mut self) -> Task<'_, Result<ReadReport>> {
         flow::run(self.list())
             .map_ok(move |listing| self.absorb(listing))
@@ -824,72 +825,73 @@ fn scan_writer<'a>(
     stamps: Rc<BTreeMap<RelPath, Stamp>>,
 ) -> Flow<'a, Result<Listed>> {
     let dir = layout.writer(writer);
-    flow::list(Root::Folder, &dir)
+    flow::list_stat(Root::Folder, &dir)
         .and_then(move |entries| {
-            let paths: Vec<RelPath> = entries
+            let files: Vec<(RelPath, Meta)> = entries
                 .into_iter()
-                .filter(|entry| entry.kind == Kind::File)
-                .filter_map(|entry| dir.join(&entry.name).ok())
+                .filter(|(_, meta)| meta.kind == Kind::File)
+                .filter_map(|(name, meta)| Some((dir.join(&name).ok()?, meta)))
                 .collect();
-            flow::fold(paths.into_iter(), Vec::new(), move |mut files, path| {
-                let known = stamps.get(&path).cloned();
-                scan_file(path, known).map_ok(move |found| {
-                    files.extend(found);
-                    files
-                })
-            })
+            let tails = files.iter().filter(|(_, meta)| meta.modified.is_some());
+            let tails = tails.map(|(path, meta)| {
+                let tail = Range {
+                    offset: meta.len.saturating_sub(line::ENDING),
+                    len: meta.len.min(line::ENDING),
+                };
+                (path.clone(), tail)
+            });
+            flow::read_many(Root::Folder, tails.collect())
+                .and_then(move |tails| read_changed(files, tails, &stamps))
         })
         .map_ok(move |files| Listed { writer, files })
 }
 
-fn scan_file<'a>(path: RelPath, known: Option<Stamp>) -> Flow<'a, Result<Option<Scanned>>> {
-    flow::stat(Root::Folder, &path.clone()).and_then(move |meta| match meta {
-        Some(meta) if meta.kind == Kind::File => {
-            let full = Range {
-                offset: 0,
-                len: meta.len.min(MAX_FILE),
-            };
-            let Some(modified) = meta.modified else {
-                return read_scanned(path, None, full);
-            };
-            let tail = Range {
-                offset: meta.len.saturating_sub(line::ENDING),
-                len: meta.len.min(line::ENDING),
-            };
-            flow::read_present(Root::Folder, &path.clone(), tail).and_then(move |tail| {
-                let Some(tail) = tail else {
-                    return flow::ok(None);
-                };
-                let stamp = Stamp {
+/// Reads whole the files of `files` whose stamp is not the one `stamps` holds,
+/// given the tails of those with a modification time, in order.
+fn read_changed<'a>(
+    files: Vec<(RelPath, Meta)>,
+    tails: Vec<Option<Vec<u8>>>,
+    stamps: &BTreeMap<RelPath, Stamp>,
+) -> Flow<'a, Result<Vec<Scanned>>> {
+    let mut tails = tails.into_iter();
+    let mut found = Vec::new();
+    for (path, meta) in files {
+        let stamp = match meta.modified {
+            None => None,
+            Some(modified) => match tails.next().expect("a tail for each file with a time") {
+                None => continue,
+                Some(tail) => Some(Stamp {
                     len: meta.len,
                     modified,
                     tail,
+                }),
+            },
+        };
+        let unchanged = stamp.is_some() && stamp.as_ref() == stamps.get(&path);
+        found.push((path, stamp, unchanged, meta.len.min(MAX_FILE)));
+    }
+    let reads = found.iter().filter(|(_, _, unchanged, _)| !unchanged);
+    let reads = reads.map(|(path, _, _, len)| {
+        (
+            path.clone(),
+            Range {
+                offset: 0,
+                len: *len,
+            },
+        )
+    });
+    flow::read_many(Root::Folder, reads.collect()).map_ok(move |read| {
+        let mut read = read.into_iter();
+        found
+            .into_iter()
+            .filter_map(|(path, stamp, unchanged, _)| {
+                let found = match unchanged {
+                    true => Found::Unchanged,
+                    false => Found::Read(read.next().expect("a read for each changed file")?),
                 };
-                match known == Some(stamp.clone()) {
-                    true => flow::ok(Some(Scanned {
-                        path,
-                        stamp: Some(stamp),
-                        found: Found::Unchanged,
-                    })),
-                    false => read_scanned(path, Some(stamp), full),
-                }
+                Some(Scanned { path, stamp, found })
             })
-        }
-        _ => flow::ok(None),
-    })
-}
-
-fn read_scanned<'a>(
-    path: RelPath,
-    stamp: Option<Stamp>,
-    range: Range,
-) -> Flow<'a, Result<Option<Scanned>>> {
-    flow::read_present(Root::Folder, &path.clone(), range).map_ok(move |bytes| {
-        bytes.map(|bytes| Scanned {
-            path,
-            stamp,
-            found: Found::Read(bytes),
-        })
+            .collect()
     })
 }
 
@@ -1229,8 +1231,12 @@ mod tests {
         }
 
         fn perform(&mut self, io: Io) -> crate::io::IoResult {
-            if let Io::Read { range, .. } = &io {
-                self.1 += range.len;
+            match &io {
+                Io::Read { range, .. } => self.1 += range.len,
+                Io::ReadMany { reads, .. } => {
+                    self.1 += reads.iter().map(|(_, r)| r.len).sum::<u64>()
+                }
+                _ => {}
             }
             self.0.perform(io)
         }

@@ -184,6 +184,71 @@ pub(crate) fn list<'a>(root: Root, dir: &RelPath) -> Fallible<'a, Vec<DirEntry>>
     })
 }
 
+/// A directory's entries with what is at each; none when it does not exist.
+pub(crate) fn list_stat<'a>(root: Root, dir: &RelPath) -> Fallible<'a, Vec<(String, Meta)>> {
+    let failed = Io::ListStat {
+        root,
+        dir: dir.clone(),
+    };
+    attempt(failed.clone()).then(move |result| match result {
+        Ok(Reply::ListedStat(entries)) => ok(entries),
+        Err(IoError::NotFound) => ok(Vec::new()),
+        Err(error) => Flow::Done(Err(failed.failed(error))),
+        Ok(_) => Flow::Done(Err(
+            failed.failed(IoError::Other("the backend gave the wrong reply".into()))
+        )),
+    })
+}
+
+/// The most bytes one [`Io::ReadMany`] asks for, unless one read alone asks for
+/// more.
+const MANY: u64 = 64 * CHUNK;
+
+/// The bytes of each of `reads`, in order; `None` where no file is there. The
+/// reads go in as few [`Io::ReadMany`] requests as [`MANY`] allows.
+pub(crate) fn read_many<'a>(
+    root: Root,
+    reads: Vec<(RelPath, Range)>,
+) -> Fallible<'a, Vec<Option<Vec<u8>>>> {
+    let mut batches: Vec<Vec<(RelPath, Range)>> = Vec::new();
+    let mut asked = 0u64;
+    for read in reads {
+        let len = read.1.len;
+        match batches.last_mut() {
+            Some(batch) if asked.saturating_add(len) <= MANY => {
+                asked += len;
+                batch.push(read);
+            }
+            _ => {
+                asked = len;
+                batches.push(vec![read]);
+            }
+        }
+    }
+    fold(batches.into_iter(), Vec::new(), move |mut all, reads| {
+        let paths: Vec<RelPath> = reads.iter().map(|(path, _)| path.clone()).collect();
+        let io = Io::ReadMany { root, reads };
+        attempt(io.clone()).then(move |result| {
+            let read = match result {
+                Ok(Reply::ReadMany(read)) if read.len() == paths.len() => read,
+                Ok(_) => {
+                    let wrong = IoError::Other("the backend gave the wrong reply".into());
+                    return Flow::Done(Err(io.failed(wrong)));
+                }
+                Err(error) => return Flow::Done(Err(io.failed(error))),
+            };
+            for (path, read) in paths.into_iter().zip(read) {
+                match read {
+                    Ok(bytes) => all.push(Some(bytes)),
+                    Err(IoError::NotFound) => all.push(None),
+                    Err(error) => return Flow::Done(Err(Error::Io { root, path, error })),
+                }
+            }
+            ok(all)
+        })
+    })
+}
+
 pub(crate) fn sync<'a>(root: Root, path: &RelPath) -> Fallible<'a, ()> {
     act(Io::Sync {
         root,
@@ -527,6 +592,51 @@ pub(crate) fn observe<'a>(
     })
 }
 
+/// What is at each of `paths`, as [`observe`] says, the identities read together.
+pub(crate) fn observe_all<'a>(
+    root: Root,
+    paths: Vec<RelPath>,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, Vec<Option<Observed>>> {
+    let identify = Rc::clone(identify);
+    fold(paths.into_iter(), Vec::new(), move |mut found, path| {
+        stat(root, &path).and_then(move |meta| match meta {
+            Some(Meta {
+                kind: Kind::Directory,
+                ..
+            }) => Flow::Done(Err(Error::Io {
+                root,
+                path,
+                error: IoError::IsDirectory,
+            })),
+            meta => {
+                found.push((path, meta));
+                ok(found)
+            }
+        })
+    })
+    .and_then(move |found| {
+        let files = found
+            .iter()
+            .filter_map(|(path, meta)| Some((path.clone(), meta.as_ref()?.len)));
+        identities(root, files.collect(), &identify).map_ok(move |identities| {
+            let mut identities = identities.into_iter();
+            found
+                .into_iter()
+                .map(|(_, meta)| {
+                    let meta = meta?;
+                    let identity = identities.next().expect("an identity for each file")?;
+                    Some(Observed {
+                        len: meta.len,
+                        modified: meta.modified,
+                        identity,
+                    })
+                })
+                .collect()
+        })
+    })
+}
+
 /// The identity of the file of `len` bytes at `path`.
 pub(crate) fn identity<'a>(
     root: Root,
@@ -537,6 +647,33 @@ pub(crate) fn identity<'a>(
     let identify = Rc::clone(identify);
     read_ranges(root, path, identify.ranges(len))
         .map_ok(move |parts| identify.identify(len, &parts))
+}
+
+/// The identity of each file of `files`, given its length, read together; `None`
+/// for a file no longer there.
+pub(crate) fn identities<'a>(
+    root: Root,
+    files: Vec<(RelPath, u64)>,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, Vec<Option<Identity>>> {
+    let identify = Rc::clone(identify);
+    let ranges: Vec<Vec<Range>> = files.iter().map(|(_, len)| identify.ranges(*len)).collect();
+    let reads = files
+        .iter()
+        .zip(&ranges)
+        .flat_map(|((path, _), ranges)| ranges.iter().map(move |range| (path.clone(), *range)));
+    read_many(root, reads.collect()).map_ok(move |parts| {
+        let mut parts = parts.into_iter();
+        files
+            .into_iter()
+            .zip(ranges)
+            .map(|((_, len), ranges)| {
+                let read: Vec<Option<Vec<u8>>> = parts.by_ref().take(ranges.len()).collect();
+                let read: Option<Vec<Vec<u8>>> = read.into_iter().collect();
+                read.map(|parts| identify.identify(len, &parts))
+            })
+            .collect()
+    })
 }
 
 /// Whether `a` and `b` are files with the same bytes.

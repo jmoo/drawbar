@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::task::Poll;
 
 use crate::disk::MemDisk;
 use crate::drafts::Draft;
@@ -23,12 +24,92 @@ use crate::schema::Schema;
 use crate::trash::Policy;
 use crate::view::View;
 
-/// Storage that performs requests asynchronously.
+/// Storage that performs requests asynchronously, the batched ones included;
+/// storage that has no batched form answers those with [`fan_out`].
 #[allow(async_fn_in_trait)]
 pub trait Fs {
     fn capabilities(&self, root: Root) -> Capabilities;
 
     async fn perform(&self, io: Io) -> IoResult;
+}
+
+/// Answers `io` with `perform`, which takes only single requests:
+/// [`Io::ListStat`] as an [`Io::List`] and then an [`Io::Stat`] of every name,
+/// those issued together, and [`Io::ReadMany`] as its reads, issued together.
+pub async fn fan_out<P, F>(io: Io, perform: P) -> IoResult
+where
+    P: Fn(Io) -> F,
+    F: Future<Output = IoResult>,
+{
+    let wrong = || IoError::Other("the backend gave the wrong reply".into());
+    match io {
+        Io::ListStat { root, dir } => {
+            let listed = perform(Io::List {
+                root,
+                dir: dir.clone(),
+            });
+            let Reply::Listed(entries) = listed.await? else {
+                return Err(wrong());
+            };
+            let paths = entries.iter().map(|entry| dir.join(&entry.name));
+            let paths: Vec<RelPath> = paths
+                .collect::<Result<_>>()
+                .map_err(|error| IoError::Other(error.to_string()))?;
+            let stats = join(
+                paths
+                    .into_iter()
+                    .map(|path| perform(Io::Stat { root, path })),
+            );
+            let mut found = Vec::new();
+            for (entry, stat) in entries.into_iter().zip(stats.await) {
+                match stat? {
+                    Reply::Stat(Some(meta)) => found.push((entry.name, meta)),
+                    Reply::Stat(None) => {}
+                    _ => return Err(wrong()),
+                }
+            }
+            Ok(Reply::ListedStat(found))
+        }
+        Io::ReadMany { root, reads } => {
+            let reads = reads
+                .into_iter()
+                .map(|(path, range)| perform(Io::Read { root, path, range }));
+            let read = join(reads).await.into_iter().map(|result| match result? {
+                Reply::Bytes(bytes) => Ok(bytes),
+                _ => Err(wrong()),
+            });
+            Ok(Reply::ReadMany(read.collect()))
+        }
+        io => perform(io).await,
+    }
+}
+
+/// Every future's output, in order, the futures polled together.
+async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T>>) -> Vec<T> {
+    let mut running: Vec<_> = futures.map(Box::pin).collect();
+    let mut outputs: Vec<Option<T>> = running.iter().map(|_| None).collect();
+    std::future::poll_fn(|context| {
+        let mut waiting = false;
+        for (future, output) in running.iter_mut().zip(outputs.iter_mut()) {
+            if output.is_some() {
+                continue;
+            }
+            match future.as_mut().poll(context) {
+                Poll::Ready(value) => *output = Some(value),
+                Poll::Pending => waiting = true,
+            }
+        }
+        match waiting {
+            true => Poll::Pending,
+            false => Poll::Ready(
+                outputs
+                    .iter_mut()
+                    .map(|output| output.take().expect("every future is ready"))
+                    .collect(),
+            ),
+        }
+    })
+    .await
 }
 
 impl Fs for MemDisk {
@@ -276,5 +357,84 @@ impl<F: Fs> Draft<&mut Library<F>> {
     pub async fn discard(self) -> Result<()> {
         let (library, entity) = self.into_parts();
         run(&library.fs, library.core.discard_draft(entity)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::task::Context;
+
+    use super::*;
+
+    /// Ready on its second poll.
+    struct Later(bool);
+
+    impl Future for Later {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn a_batch_storage_cannot_take_is_issued_as_single_requests_together() {
+        let disk = MemDisk::new();
+        for name in ["d", "d/a", "d/b", "d/c"] {
+            let path = RelPath::new(name).unwrap();
+            let io = match name {
+                "d" => Io::MakeDir {
+                    root: Root::Folder,
+                    path,
+                },
+                _ => Io::Create {
+                    root: Root::Folder,
+                    path,
+                    bytes: name.as_bytes().to_vec(),
+                },
+            };
+            disk.perform(io).unwrap();
+        }
+        let (running, most) = (Cell::new(0), Cell::new(0));
+        let single = |io: Io| {
+            let (disk, running, most) = (&disk, &running, &most);
+            async move {
+                running.set(running.get() + 1);
+                most.set(most.get().max(running.get()));
+                Later(false).await;
+                running.set(running.get() - 1);
+                disk.perform(io)
+            }
+        };
+        let dir = RelPath::new("d").unwrap();
+        let listed = Io::ListStat {
+            root: Root::Folder,
+            dir: dir.clone(),
+        };
+        let answered = pollster::block_on(fan_out(listed.clone(), single));
+        assert_eq!(answered, disk.perform(listed));
+        assert_eq!(most.get(), 3, "the three stats are in flight together");
+        let reads = Io::ReadMany {
+            root: Root::Folder,
+            reads: ["d/a", "d/none", "d/c"]
+                .map(|name| (RelPath::new(name).unwrap(), Range { offset: 2, len: 9 }))
+                .into(),
+        };
+        let answered = pollster::block_on(fan_out(reads.clone(), single));
+        assert_eq!(answered, disk.perform(reads));
+        assert_eq!(
+            answered,
+            Ok(Reply::ReadMany(vec![
+                Ok(b"a".to_vec()),
+                Err(IoError::NotFound),
+                Ok(b"c".to_vec())
+            ]))
+        );
     }
 }

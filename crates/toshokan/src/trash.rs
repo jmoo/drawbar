@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::Result;
-use crate::flow::{self, each, fold, ok};
+use crate::flow::{self, each, ok};
 use crate::ids::WriterId;
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
@@ -30,40 +30,32 @@ impl Default for Policy {
     }
 }
 
-/// The items of `logged`, what `writer`'s entries say they displaced, still in its
-/// trash, oldest first, each with its length there. Files in the trash no entry displaced are not listed, and so
-/// never emptied. Reads only.
+/// The items of `logged`, what `writer`'s entries say they displaced, still in
+/// its trash, oldest first, each with its length there. Files in the trash no
+/// entry displaced are not listed, and so never emptied. Reads only, in one
+/// request.
 pub fn list(
     layout: &Layout,
     writer: WriterId,
     logged: Vec<TrashItem>,
 ) -> Task<'static, Result<Vec<TrashItem>>> {
-    let dir = layout.trash_dir(writer);
-    flow::list(Root::Folder, &dir)
-        .and_then(move |entries| {
+    flow::list_stat(Root::Folder, &layout.trash_dir(writer))
+        .map_ok(move |entries| {
             let mut logged: BTreeMap<String, TrashItem> = logged
                 .into_iter()
                 .map(|item| (item.item.to_string(), item))
                 .collect();
-            let present: Vec<TrashItem> = entries
+            let mut items: Vec<TrashItem> = entries
                 .into_iter()
-                .filter(|entry| entry.kind == Kind::File)
-                .filter_map(|entry| logged.remove(&entry.name))
-                .collect();
-            fold(present.into_iter(), Vec::new(), move |mut items, item| {
-                let path = dir
-                    .join(&item.item.to_string())
-                    .expect("a nonce is one component");
-                flow::stat(Root::Folder, &path).map_ok(move |meta| {
-                    items.extend(meta.map(|meta| TrashItem {
+                .filter(|(_, meta)| meta.kind == Kind::File)
+                .filter_map(|(name, meta)| {
+                    let item = logged.remove(&name)?;
+                    Some(TrashItem {
                         len: meta.len,
                         ..item
-                    }));
-                    items
+                    })
                 })
-            })
-        })
-        .map_ok(|mut items: Vec<TrashItem>| {
+                .collect();
             items.sort_by_key(|item| (item.at, item.item));
             items
         })

@@ -43,10 +43,19 @@ pub enum Io {
     List { root: Root, dir: RelPath },
     /// What is at a path; `None` when nothing is.
     Stat { root: Root, path: RelPath },
+    /// What [`Io::List`] and an [`Io::Stat`] of each name would say, in one
+    /// request. A name gone before it is stated is left out.
+    ListStat { root: Root, dir: RelPath },
     Read {
         root: Root,
         path: RelPath,
         range: Range,
+    },
+    /// Several reads in one request, each answered as [`Io::Read`] would answer it
+    /// alone, in order.
+    ReadMany {
+        root: Root,
+        reads: Vec<(RelPath, Range)>,
     },
     /// A new file holding `bytes`, in an existing directory. Never replaces.
     Create {
@@ -113,7 +122,9 @@ impl Io {
         match self {
             Self::List { root, .. }
             | Self::Stat { root, .. }
+            | Self::ListStat { root, .. }
             | Self::Read { root, .. }
+            | Self::ReadMany { root, .. }
             | Self::Create { root, .. }
             | Self::Append { root, .. }
             | Self::Write { root, .. }
@@ -127,10 +138,14 @@ impl Io {
         }
     }
 
-    /// The path the request is about; for a rename, its destination.
+    /// The path the request is about; for a rename, its destination; for several
+    /// reads, the first one's.
     pub fn path(&self) -> &RelPath {
+        static ROOT: RelPath = RelPath::ROOT;
         match self {
+            Self::ReadMany { reads, .. } => reads.first().map_or(&ROOT, |(path, _)| path),
             Self::List { dir: path, .. }
+            | Self::ListStat { dir: path, .. }
             | Self::Stat { path, .. }
             | Self::Read { path, .. }
             | Self::Create { path, .. }
@@ -152,7 +167,9 @@ impl Io {
         match self {
             Self::List { .. }
             | Self::Stat { .. }
+            | Self::ListStat { .. }
             | Self::Read { .. }
+            | Self::ReadMany { .. }
             | Self::Lock { .. }
             | Self::Unlock { .. } => false,
             Self::Create { .. }
@@ -214,8 +231,12 @@ pub enum Reply {
     Listed(Vec<DirEntry>),
     /// For [`Io::Stat`].
     Stat(Option<Meta>),
+    /// For [`Io::ListStat`]: each name with what is there, sorted by name.
+    ListedStat(Vec<(String, Meta)>),
     /// For [`Io::Read`].
     Bytes(Vec<u8>),
+    /// For [`Io::ReadMany`]: each read's bytes or why it failed, in order.
+    ReadMany(Vec<Result<Vec<u8>, IoError>>),
     /// For [`Io::Lock`].
     Lock(Lock),
     /// For every other request.

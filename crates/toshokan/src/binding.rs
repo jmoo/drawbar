@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use crate::env::{Identify, Names};
 use crate::error::Result;
-use crate::flow::{self, fold, ok, Flow};
+use crate::flow::{self, fold, ok};
 use crate::ids::{EntityId, Identity};
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
@@ -53,7 +53,7 @@ pub struct Bindings {
 }
 
 /// Lists every library file outside toshokan's root. Requests only
-/// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+/// [`crate::Io::ListStat`], one per directory, and [`crate::Io::ReadMany`].
 pub fn scan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
@@ -92,42 +92,42 @@ pub fn scan(
                     needed.then(|| (path.clone(), file.len))
                 })
                 .collect();
-            fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
-                flow::identity(Root::Folder, path.clone(), len, &identify).map_ok(move |identity| {
-                    if let Some(file) = scan.files.get_mut(&path) {
-                        file.identity = Some(identity);
+            let paths: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
+            flow::identities(Root::Folder, unknown, &identify).map_ok(move |identities| {
+                for (path, identity) in paths.into_iter().zip(identities) {
+                    match identity {
+                        Some(identity) => {
+                            if let Some(file) = scan.files.get_mut(&path) {
+                                file.identity = Some(identity);
+                            }
+                        }
+                        None => {
+                            scan.files.remove(&path);
+                        }
                     }
-                    scan
-                })
+                }
+                scan
             })
         })
         .task()
 }
 
 fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
-    flow::list(Root::Folder, &dir).and_then(move |entries| {
-        fold(entries.into_iter(), scan, move |mut scan, entry| {
-            let path = dir
-                .join(&entry.name)
-                .expect("a listed name is one component");
-            match entry.kind {
+    flow::list_stat(Root::Folder, &dir).and_then(move |entries| {
+        fold(entries.into_iter(), scan, move |mut scan, (name, meta)| {
+            let path = dir.join(&name).expect("a listed name is one component");
+            match meta.kind {
                 Kind::Directory if layout.owns(&path) => ok(scan),
                 Kind::Directory => walk(Rc::clone(&layout), path, scan),
-                Kind::File => flow::stat(Root::Folder, &path).then(move |meta| match meta {
-                    Ok(Some(meta)) if meta.kind == Kind::File => {
-                        scan.files.insert(
-                            path,
-                            Scanned {
-                                len: meta.len,
-                                modified: meta.modified,
-                                identity: None,
-                            },
-                        );
-                        ok(scan)
-                    }
-                    Ok(_) => ok(scan),
-                    Err(error) => Flow::Done(Err(error)),
-                }),
+                Kind::File => {
+                    let file = Scanned {
+                        len: meta.len,
+                        modified: meta.modified,
+                        identity: None,
+                    };
+                    scan.files.insert(path, file);
+                    ok(scan)
+                }
             }
         })
     })
