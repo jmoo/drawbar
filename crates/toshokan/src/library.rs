@@ -30,7 +30,7 @@ use crate::merge::{merge, Beyond, Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
-use crate::reader::{ReadReport, Reader, WriterLog};
+use crate::reader::{ReadReport, Reader, Stamp, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode, Opened,
@@ -760,12 +760,12 @@ impl Library {
         }
     }
 
-    /// Places entries this instance just appended and folds them in.
-    fn absorb_own(&mut self, entries: &[Entry]) {
+    /// Places entries this instance just appended to `written` and folds them in.
+    fn absorb_own(&mut self, entries: &[Entry], written: Option<(RelPath, Stamp)>) {
         let Some(id) = self.writer.as_ref().map(Writer::id) else {
             return;
         };
-        self.reader.add(id, entries);
+        self.reader.add(id, entries, written);
         for entry in entries {
             self.folded.apply(id, entry);
             self.history.push(entry);
@@ -1415,10 +1415,12 @@ fn ensure_writer<'a>(
         let create = Writer::create(library.layout.clone(), id, segment, label, at, |genesis| {
             reader.checkpoint(genesis)
         });
-        flow::run(create).map_ok(move |writer| {
-            library.writer = Some(writer);
-            library.absorb_own(&[genesis]);
-            library
+        flow::run(create).and_then(move |writer| {
+            writer.stamp().then(move |written| {
+                library.writer = Some(writer);
+                library.absorb_own(&[genesis], written);
+                ok(library)
+            })
         })
     })
 }
@@ -1536,13 +1538,16 @@ fn appending<'a>(
         library.writer = Some(writer);
         match appended {
             Ok(entries) => {
-                library.absorb_own(&entries);
                 let writer = library.writer.as_ref().expect("put back above");
-                let saved = library.reader.save(writer.genesis());
-                let recorded = writer.record();
-                flow::run(saved)
-                    .and_then(move |()| flow::run(recorded))
-                    .then(move |kept| Flow::Done((library, kept.map(|()| entries))))
+                writer.stamp().then(move |written| {
+                    library.absorb_own(&entries, written);
+                    let writer = library.writer.as_ref().expect("put back above");
+                    let saved = library.reader.save(writer.genesis());
+                    let recorded = writer.record();
+                    flow::run(saved)
+                        .and_then(move |()| flow::run(recorded))
+                        .then(move |kept| Flow::Done((library, kept.map(|()| entries))))
+                })
             }
             Err(error @ Error::Rekey { .. }) => {
                 let stopped = library.stop_writing();

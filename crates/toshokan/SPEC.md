@@ -328,8 +328,8 @@ new one. It looks first at the file it last knew to hold the entry, unchanged in
 length and last 34 bytes, then at every file whose last 34 bytes end that
 entry's line, and only then reads files whole. If no file holds it, the writer
 writes nothing and stops: a new writer takes over from the next write. After the
-append is synced it writes the cached view and then `head.json`, before the
-commit returns. An append that fails leaves the segment without a seal marker
+append is synced it stats the segment, writes the cached view and then
+`head.json`, before the commit returns. An append that fails leaves the segment without a seal marker
 and appends nothing more to it, so nothing follows a torn line.
 
 ## Reading
@@ -384,8 +384,9 @@ predecessor, each line's JSON verbatim with its hash; `strays` the entries ever
 held back and never placed, so that a fork with one is found after its file is
 gone; `forks` every fork reported. `absorbed` names the retired writers of the
 install whose views this one holds. `files` says what the reader last found in
-each file of the writers' directories, so that an open reads again only the files
-that changed:
+each file of the writers' directories, or for a segment this instance appended
+to since, what the append left there when the stat after it found the length it
+left, so that a read reads again only the files that changed:
 
 ```text
 {"len":<n>,"modified":<n>,"tail":"<hex>","segment":{"count":<n>,"first":"<hash>",

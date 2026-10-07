@@ -954,14 +954,26 @@ impl Reader {
             .task()
     }
 
-    /// Places entries this instance appended as `writer`, as a read would.
-    pub fn add(&mut self, writer: WriterId, entries: &[Entry]) -> Placement {
+    /// Places entries this instance appended as `writer`, as a read would, and
+    /// records `written`, the segment the append ended and its stamp, as a read
+    /// would find it.
+    pub fn add(
+        &mut self,
+        writer: WriterId,
+        entries: &[Entry],
+        written: Option<(RelPath, Stamp)>,
+    ) -> Placement {
         let entries: Vec<Rc<Entry>> = entries.iter().cloned().map(Rc::new).collect();
-        self.folder
+        let folder = self
+            .folder
             .entry(writer)
-            .or_insert_with(|| Folder::new(writer))
-            .log
-            .place(Vec::new(), entries.clone());
+            .or_insert_with(|| Folder::new(writer));
+        folder.log.place(Vec::new(), entries.clone());
+        if let Some((path, stamp)) = written {
+            if folder.appended(&path, &entries, stamp) {
+                self.unsaved.files.insert(path);
+            }
+        }
         let placement = self.cached.log_mut(writer).place(Vec::new(), entries);
         self.unsaved.add(writer, &placement);
         self.drop_unsaved_without_store();
@@ -1153,6 +1165,43 @@ impl Folder {
             log: WriterLog::new(writer),
             stale: true,
         }
+    }
+
+    /// Records that the segment at `path` gained `entries`, ending it as `stamp`
+    /// says: when the last read left it just where they begin, or they are all it
+    /// holds. Whether it recorded them.
+    fn appended(&mut self, path: &RelPath, entries: &[Rc<Entry>], stamp: Stamp) -> bool {
+        let added: u64 = entries.iter().map(|e| e.line.to_bytes().len() as u64).sum();
+        let Some(start) = stamp.len.checked_sub(added) else {
+            return false;
+        };
+        let continues = match self.files.get(path) {
+            None => start == 0,
+            Some(Record {
+                stamp: Some(old),
+                file: WriterFile::Segment(segment),
+            }) => {
+                old.len == start
+                    && segment.end == start
+                    && !segment.sealed
+                    && segment.entries.last().map(|last| last.hash())
+                        == entries.first().map(|first| first.prev())
+            }
+            Some(_) => false,
+        };
+        if !continues {
+            return false;
+        }
+        let record = self.files.entry(path.clone()).or_insert_with(|| Record {
+            stamp: None,
+            file: WriterFile::Segment(Segment::default()),
+        });
+        if let WriterFile::Segment(segment) = &mut record.file {
+            segment.entries.extend(entries.iter().cloned());
+            segment.end = stamp.len;
+        }
+        record.stamp = Some(stamp);
+        true
     }
 
     /// Every snapshot of `writer` and every entry the files hold.

@@ -689,6 +689,18 @@ fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
     assert_eq!(refreshed.changes, []);
     assert_eq!((probe.folder_writes(), probe.local_writes()), writes);
     assert_eq!(facts(&a.view()), facts(&view));
+
+    a.commit("Tag", |i| i.add(song, TAGS, tag("a"))).unwrap();
+    let writes = (probe.folder_writes(), probe.local_writes());
+    probe.seen.borrow_mut().log_read = 0;
+    let refreshed = a.refresh().unwrap();
+    assert_eq!(refreshed.changes, [], "after its own commit");
+    assert_eq!((probe.folder_writes(), probe.local_writes()), writes);
+    let read = probe.seen.borrow().log_read;
+    assert!(
+        read <= toshokan::line::ENDING,
+        "read {read} bytes of one file"
+    );
 }
 
 fn a_view_is_read_on_other_threads<F: Facade>() {
@@ -1341,9 +1353,7 @@ fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
         (file.path, file.state),
         (path("moved/song.npno"), FileState::InSync)
     );
-    let committed = a
-        .commit("Tag", |i| i.add(song, TAGS, tag("back")))
-        .unwrap();
+    let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("back"))).unwrap();
     assert!(
         committed.changes.contains(&Change {
             entity: song,

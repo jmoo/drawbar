@@ -17,7 +17,7 @@ use crate::layout::Layout;
 use crate::line;
 use crate::log::{Entry, EntryKind, Genesis};
 use crate::path::RelPath;
-use crate::reader::{Reader, WriterFile, WriterLog, MAX_FILE};
+use crate::reader::{Reader, Stamp, WriterFile, WriterLog, MAX_FILE};
 use crate::report::{Rekey, Start};
 
 pub struct Writer {
@@ -208,6 +208,26 @@ impl Writer {
 
     pub fn open_segment(&self) -> Option<OpenSegment> {
         self.open
+    }
+
+    /// The open segment with the stamp a read would find on it now; `None`, for
+    /// the next read to stamp it, when no segment is open, the stat fails, or the
+    /// segment is no longer as long as this process left it.
+    pub(crate) fn stamp<'a>(&self) -> Flow<'a, Option<(RelPath, Stamp)>> {
+        let Some(open) = self.open else {
+            return Flow::Done(None);
+        };
+        let path = self.layout.segment(self.id, open.name);
+        let tail = line::ending(self.head);
+        flow::stat(Root::Folder, &path).then(move |meta| {
+            let meta = meta.ok().flatten().filter(|meta| meta.len == open.len);
+            let stamp = meta.and_then(|meta| meta.modified).map(|modified| Stamp {
+                len: open.len,
+                modified,
+                tail,
+            });
+            Flow::Done(stamp.map(|stamp| (path, stamp)))
+        })
     }
 
     /// Appends `kinds` as consecutive entries, durably, opening a segment named
