@@ -359,8 +359,9 @@ back or found a file changed, after each append, and when the instance closes,
 the instance appends a record of what the view gained to `view.log` and syncs it.
 It writes `view.json` again, and then removes `view.log`, when `view.log` has
 grown past half of `view.json` and 1 MiB more, when a record could not be
-appended or the last one is torn, and when the view holds what neither file
-does.
+appended or the last one is torn, when the view keeps a new snapshot, which
+folds entries `view.json` holds whole, and when the view holds what neither
+file does.
 
 Every open starts from the views of the install's writers joined, so what any
 instance of the install has shown stays shown: the view of the writer it
