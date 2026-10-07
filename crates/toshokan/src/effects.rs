@@ -13,6 +13,7 @@
 //! [`finish`]. Recovery resumes [`apply`] where an interrupted run stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -502,7 +503,14 @@ fn write_record<'a>(
         .and_then({
             let staged = staged.clone();
             let bytes = record.encode();
-            move |()| flow::create(Root::Folder, &staged, bytes)
+            move |()| {
+                let created = flow::act(Io::Create {
+                    root: Root::Folder,
+                    path: staged.clone(),
+                    bytes,
+                });
+                created.and_then(move |()| flow::sync(Root::Folder, &staged))
+            }
         })
         .and_then(move |()| flow::rename(Root::Folder, &staged, &path))
 }
@@ -623,24 +631,62 @@ pub fn apply(
 ) -> Task<'static, Result<Applied>> {
     let layout = layout.clone();
     let writer = record.writer;
-    let steps = start..record.steps.len();
+    let runs = runs(&record.steps, start);
     let running = (layout.clone(), Rc::clone(&record));
     fold(
-        steps,
+        runs.into_iter(),
         None,
-        move |failed: Option<IoError>, i| match failed {
+        move |failed: Option<IoError>, run: Range<usize>| match failed {
             Some(failed) => ok(Some(failed)),
             None => {
-                run_step(&running.0, writer, &running.1.steps[i]).then(move |result| match result {
-                    Ok(()) => ok(None),
-                    Err(Error::Io { error, .. }) => ok(Some(error)),
-                    Err(other) => ok(Some(IoError::Other(format!("step {i}: {other}")))),
-                })
+                let first = run.start;
+                run_steps(&running.0, writer, &running.1.steps[run]).then(
+                    move |result| match result {
+                        Ok(()) => ok(None),
+                        Err(Error::Io { error, .. }) => ok(Some(error)),
+                        Err(other) => ok(Some(IoError::Other(format!("step {first}: {other}")))),
+                    },
+                )
             }
         },
     )
     .and_then(move |failed| account(layout, name, record, failed, identify))
     .task()
+}
+
+/// The steps from `start` in runs carried out together: consecutive `place`
+/// steps into one directory, and every other step alone.
+fn runs(steps: &[EffectStep], start: usize) -> Vec<Range<usize>> {
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for i in start..steps.len() {
+        match runs.last_mut() {
+            Some(run) if placed_together(&steps[run.start], &steps[i]) => run.end = i + 1,
+            _ => runs.push(i..i + 1),
+        }
+    }
+    runs
+}
+
+// ⚠️ A crash between a run's two syncs can leave each move's source beside its
+// destination, and recovery removes only the last one's. Only a staged file is
+// harmless left behind, so only `place` steps run together.
+fn placed_together(first: &EffectStep, next: &EffectStep) -> bool {
+    match (first, next) {
+        (EffectStep::Place { path: a, .. }, EffectStep::Place { path: b, .. }) => {
+            a.parent() == b.parent()
+        }
+        _ => false,
+    }
+}
+
+fn run_steps<'a>(layout: &Layout, writer: WriterId, steps: &[EffectStep]) -> Fallible<'a, ()> {
+    match steps {
+        [step] => run_step(layout, writer, step),
+        places => {
+            let moves = places.iter().filter_map(|step| step.ends(layout, writer));
+            flow::rename_all(Root::Folder, moves.collect())
+        }
+    }
 }
 
 fn run_step<'a>(layout: &Layout, writer: WriterId, step: &EffectStep) -> Fallible<'a, ()> {

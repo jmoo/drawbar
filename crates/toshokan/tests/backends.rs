@@ -330,7 +330,10 @@ mod suite {
                 Err(IoError::NotDirectory),
                 Err(IoError::NotFound),
                 Err(IoError::NotFound),
-                Err(IoError::NotFound),
+                match b.capabilities(Root::Folder).fsync {
+                    true => Err(IoError::NotFound),
+                    false => Ok(Reply::Done),
+                },
             ]
         );
         assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"x".to_vec()));

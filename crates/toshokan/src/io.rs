@@ -104,7 +104,8 @@ pub enum Io {
     MakeDir { root: Root, path: RelPath },
     /// Makes durable a file's contents, or a directory's names. A new or renamed
     /// name is durable only once its directory is synced; a rename across
-    /// directories needs both.
+    /// directories needs both. The drivers answer it themselves, without asking
+    /// a backend that does not declare [`Capabilities::fsync`].
     Sync { root: Root, path: RelPath },
     /// Takes the lock `name` in the local root for this process, without waiting.
     /// A lock held by another process answers [`Reply::Lock`]`(`[`Lock::Held`]`)`.

@@ -6,16 +6,16 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{env, identify, layout, path, put, Recorded, WRITER};
+use common::{bound, commit, env, identify, layout, path, put, Driven, Fill, Recorded, WRITER};
 use toshokan::binding::{self, Facts, Scan};
 use toshokan::blocking::{self, Library};
 use toshokan::log::FileFact;
-use toshokan::plan::Expect;
+use toshokan::plan::{Content, Expect, FileChange};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::TrashItem;
 use toshokan::schema::Written;
-use toshokan::trash;
-use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, Schema};
+use toshokan::trash::{self, Policy};
+use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, RelPath, Schema};
 
 /// Each request's kind and the path it names.
 fn shapes(requests: &[Io]) -> Vec<(&'static str, String)> {
@@ -120,7 +120,7 @@ fn a_writer_directory_is_read_in_three_requests_and_reread_unchanged_in_two() {
 }
 
 #[test]
-fn a_trash_is_listed_in_one_request() {
+fn a_trash_is_listed_in_one_request_and_emptied_with_one_sync() {
     let mut d = Recorded::new(MemDisk::new());
     let items: Vec<TrashItem> = (1..=4)
         .map(|n| TrashItem {
@@ -145,6 +145,50 @@ fn a_trash_is_listed_in_one_request() {
     assert!(listed.iter().all(|item| item.len == 5));
     let dir = layout().trash_dir(WRITER);
     assert_eq!(shapes(&d.take()), [shape("ListStat", dir.as_str())]);
+    let none = Policy {
+        max_age_ms: 0,
+        max_bytes: 0,
+    };
+    let emptied = blocking::run(&mut d, trash::empty(&layout(), WRITER, listed, none, 1)).unwrap();
+    assert_eq!(emptied.removed.len(), 4);
+    let mut expected: Vec<_> = paths.iter().map(|at| shape("Remove", at)).collect();
+    expected.push(shape("Sync", dir.as_str()));
+    assert_eq!(shapes(&d.take()), expected);
+}
+
+/// The directories and the files a commit of new files into one directory syncs.
+fn synced_saving(files: usize) -> (Vec<RelPath>, usize) {
+    let mut d = Recorded::new(MemDisk::new());
+    let saves: Vec<FileChange> = (0..files)
+        .map(|i| FileChange::Save {
+            entity: EntityId::from_u128(i as u128 + 1),
+            path: path(&format!("d/f{i}")),
+            content: Content(i),
+            expect: Expect::Absent,
+        })
+        .collect();
+    let contents = (0..files).map(|i| Fill::Bytes(vec![i as u8; 3])).collect();
+    commit(&mut d, &saves, contents, &bound(&[]), &mut env(1)).unwrap();
+    let synced = d.take().into_iter().filter_map(|io| match io {
+        Io::Sync { path, .. } => Some(path),
+        _ => None,
+    });
+    let (dirs, files): (Vec<RelPath>, Vec<RelPath>) = synced.partition(|synced| {
+        d.disk.directories(toshokan::Root::Folder).contains(synced) || synced.is_root()
+    });
+    (dirs, files.len())
+}
+
+#[test]
+fn saving_more_files_into_one_directory_adds_no_directory_sync() {
+    let (one_dirs, one_files) = synced_saving(1);
+    let (many_dirs, many_files) = synced_saving(20);
+    assert_eq!(many_dirs, one_dirs);
+    assert_eq!(
+        many_files - one_files,
+        19,
+        "each staged file's contents are synced"
+    );
 }
 
 const NAME: Register<String> = Register::new("name");
@@ -186,5 +230,31 @@ fn opening_and_refreshing_ask_per_directory_not_per_file() {
     assert!(
         many_refresh.iter().all(|io| !io.mutates()),
         "{many_refresh:?}"
+    );
+}
+
+#[test]
+fn a_backend_without_fsync_is_never_asked_to_sync() {
+    let without = toshokan::io::Capabilities {
+        fsync: false,
+        ..toshokan::io::Capabilities::ALL
+    };
+    let sync = || Io::Sync {
+        root: toshokan::Root::Folder,
+        path: path("nothing/there"),
+    };
+    let disk = MemDisk::with_capabilities(without, without);
+    assert_eq!(
+        common::BlockingMem(disk.clone()).one(sync()),
+        Ok(toshokan::Reply::Done)
+    );
+    assert_eq!(
+        common::AsyncMem(disk.clone()).one(sync()),
+        Ok(toshokan::Reply::Done)
+    );
+    assert_eq!(
+        disk.mutations(),
+        0,
+        "the disk counts every sync it is asked"
     );
 }

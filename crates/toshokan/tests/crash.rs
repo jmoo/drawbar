@@ -95,6 +95,23 @@ fn cases() -> Vec<Case> {
             paths: vec![("d/n", None, Some(NEW))],
         },
         Case {
+            name: "save new files into one directory",
+            rename_dir: true,
+            files: vec![],
+            bound: vec![],
+            contents: vec![Fill::Bytes(NEW.to_vec()), Fill::Bytes(OTHER.to_vec())],
+            changes: vec![
+                save("d/n", Expect::Absent),
+                FileChange::Save {
+                    entity: F,
+                    path: path("d/m"),
+                    content: Content(1),
+                    expect: Expect::Absent,
+                },
+            ],
+            paths: vec![("d/n", None, Some(NEW)), ("d/m", None, Some(OTHER))],
+        },
+        Case {
             name: "trash",
             rename_dir: true,
             files: vec![("a".into(), OLD)],

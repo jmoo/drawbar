@@ -235,6 +235,7 @@ pub async fn run_with<'s, O: Operation, F: Fs>(
                     .map(|()| Reply::Done),
                 None => Err(IoError::Other(format!("no content {}", content.0))),
             },
+            Io::Sync { root, .. } if !fs.capabilities(root).fsync => Ok(Reply::Done),
             io => fs.perform(io).await,
         });
     }

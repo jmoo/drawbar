@@ -142,6 +142,7 @@ pub fn run_with<'s, O: Operation, B: Backend>(
                     .map(|()| Reply::Done),
                 None => Err(IoError::Other(format!("no content {}", content.0))),
             },
+            Io::Sync { root, .. } if !backend.capabilities(root).fsync => Ok(Reply::Done),
             io => backend.perform(io),
         });
     }

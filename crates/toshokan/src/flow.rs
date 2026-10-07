@@ -261,44 +261,60 @@ pub(crate) fn sync_parent<'a>(root: Root, path: &RelPath) -> Fallible<'a, ()> {
     sync(root, &path.parent().unwrap_or_default())
 }
 
-/// Creates `path` durably: the file's contents, then its name.
-pub(crate) fn create<'a>(root: Root, path: &RelPath, bytes: Vec<u8>) -> Fallible<'a, ()> {
-    let (synced, named) = (path.clone(), path.clone());
-    act(Io::Create {
-        root,
-        path: path.clone(),
-        bytes,
-    })
-    .and_then(move |()| sync(root, &synced))
-    .and_then(move |()| sync_parent(root, &named))
-}
-
 /// Moves `from` to `to`, where nothing is, and makes both directories durable,
 /// the destination's first, so the source's name is gone only once the
 /// destination's is durable. `to` is checked first, so a backend whose renames
 /// may replace replaces only what appears between the check and the rename.
 pub(crate) fn rename<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
-    let (from, to) = (from.clone(), to.clone());
-    ensure_dir(root, &to.parent().unwrap_or_default())
-        .and_then({
-            let to = to.clone();
-            move |()| stat(root, &to)
+    rename_all(root, vec![(from.clone(), to.clone())])
+}
+
+/// Moves each of `moves` as [`rename`] does, all of them out of one directory and
+/// into one directory, then syncs the destination's directory and the source's
+/// once for all of them. A move that fails stops the rest and fails the run, once
+/// the moves before it are synced.
+pub(crate) fn rename_all<'a>(root: Root, moves: Vec<(RelPath, RelPath)>) -> Fallible<'a, ()> {
+    let Some((from, to)) = moves.first() else {
+        return ok(());
+    };
+    let from_dir = from.parent().unwrap_or_default();
+    let to_dir = to.parent().unwrap_or_default();
+    ensure_dir(root, &to_dir)
+        .and_then(move |()| {
+            fold(
+                moves.into_iter(),
+                (0, None),
+                move |(moved, failed): (usize, Option<Error>), (from, to)| {
+                    if failed.is_some() {
+                        return ok((moved, failed));
+                    }
+                    move_to_absent(root, from, to).then(move |result| match result {
+                        Ok(()) => ok((moved + 1, None)),
+                        Err(error) => ok((moved, Some(error))),
+                    })
+                },
+            )
         })
-        .and_then({
-            let (from, to) = (from.clone(), to.clone());
-            move |found| {
-                let io = Io::Rename { root, from, to };
-                match found {
-                    Some(_) => Flow::Done(Err(io.failed(IoError::AlreadyExists))),
-                    None => act(io),
-                }
-            }
+        .and_then(move |(moved, failed)| {
+            let synced = match moved {
+                0 => ok(()),
+                _ => sync(root, &to_dir).and_then(move |()| match from_dir == to_dir {
+                    true => ok(()),
+                    false => sync(root, &from_dir),
+                }),
+            };
+            synced.and_then(move |()| Flow::Done(failed.map_or(Ok(()), Err)))
         })
-        .and_then({
-            let to = to.clone();
-            move |()| sync_parent(root, &to)
-        })
-        .and_then(move |()| sync_parent(root, &from))
+}
+
+fn move_to_absent<'a>(root: Root, from: RelPath, to: RelPath) -> Fallible<'a, ()> {
+    stat(root, &to).and_then(move |found| {
+        let io = Io::Rename { root, from, to };
+        match found {
+            Some(_) => Flow::Done(Err(io.failed(IoError::AlreadyExists))),
+            None => act(io),
+        }
+    })
 }
 
 /// Removes the file at `path` and makes that durable; nothing there is success.
@@ -752,7 +768,12 @@ mod tests {
         let mut late = long.clone();
         *late.last_mut().unwrap() ^= 1;
         for (name, bytes) in [("a", &long), ("b", &long), ("c", &late)] {
-            run(&disk, create(Root::Folder, &path(name), bytes.clone())).unwrap();
+            let create = Io::Create {
+                root: Root::Folder,
+                path: path(name),
+                bytes: bytes.clone(),
+            };
+            run(&disk, act(create)).unwrap();
         }
         assert_eq!(
             run(&disk, read_all(Root::Folder, &path("a"), u64::MAX)).unwrap(),
