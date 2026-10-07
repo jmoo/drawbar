@@ -449,6 +449,7 @@ through_both!(
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
+    undoing_a_delete_binds_the_file_moved_while_deleted,
     a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
@@ -1312,6 +1313,46 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
         "the pinned path wins over a copy at the old one"
     );
     assert_eq!(b.view().unbound(), [path("song.npno")]);
+}
+
+fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.commit("Delete", |i| i.delete(song)).unwrap();
+    folder
+        .perform(Io::MakeDir {
+            root: Root::Folder,
+            path: path("moved"),
+        })
+        .unwrap();
+    folder
+        .perform(Io::Rename {
+            root: Root::Folder,
+            from: path("song.npno"),
+            to: path("moved/song.npno"),
+        })
+        .unwrap();
+    a.refresh().unwrap();
+    a.undo().unwrap();
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("moved/song.npno"), FileState::InSync)
+    );
+    let committed = a
+        .commit("Tag", |i| i.add(song, TAGS, tag("back")))
+        .unwrap();
+    assert!(
+        committed.changes.contains(&Change {
+            entity: song,
+            what: What::File,
+            by: By::This
+        }),
+        "{:?}",
+        committed.changes
+    );
 }
 
 fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {

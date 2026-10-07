@@ -1273,6 +1273,15 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
     })
 }
 
+/// Once the facts changed, reads the identities they now need of the files the
+/// last scan found, and binds.
+fn reidentify(library: &mut Library) -> Fallible<'_, &mut Library> {
+    match library.bind_due {
+        true => rescan_paths(library, Vec::new()),
+        false => ok(library),
+    }
+}
+
 /// The library paths `steps` move files from and to.
 fn moved_paths(steps: &[EffectStep]) -> Vec<RelPath> {
     let moves = steps.iter().filter(|step| {
@@ -1600,10 +1609,14 @@ fn transact<'a>(
     if effects.is_empty() {
         let mut kinds = closed(logged, closing);
         kinds.extend(bound(pins));
-        return append(library, kinds).map_ok(|(library, entries)| {
-            library.show();
-            (library, entries, Outcome::Complete)
-        });
+        return append(library, kinds)
+            .and_then(|(library, entries)| {
+                reidentify(library).map_ok(move |library| (library, entries))
+            })
+            .map_ok(|(library, entries)| {
+                library.show();
+                (library, entries, Outcome::Complete)
+            });
     }
     carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
         log_effects(library, logged, &effects, record, applied, closing, pins)

@@ -440,8 +440,9 @@ their identities:
    fact, earlier scan or `identities.json` gives the identity for that path,
    length and time. The install keeps in `identities.json` the identities its
    scans read while their files keep their length and time. After a commit, only
-   the paths its file effects moved files from and to are scanned again; opening
-   and refreshing scan every file.
+   the paths its file effects moved files from and to are scanned again, and of
+   the other files only those whose length a file fact gained have their
+   identities read; opening and refreshing scan every file.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case
