@@ -22,8 +22,8 @@ use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
     EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
-    IoResult, Layout, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply, Root, Schema,
-    Set, View, WriterId,
+    IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply, Root,
+    Schema, Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -77,11 +77,15 @@ struct Seen {
     /// Reads of library paths fail once the head is next recorded.
     blind_after_record: bool,
     blind: bool,
+    /// Requests this picks fail.
+    failing: Option<Box<Picks>>,
     /// Bytes written in the local root.
     local_written: u64,
     /// The longest read of a file directly in a writer's directory.
     log_read: u64,
 }
+
+type Picks = dyn Fn(&Io) -> bool;
 
 /// Each file `io` reads, with the range it asks for.
 fn reads(io: &Io) -> impl Iterator<Item = (&RelPath, Range)> {
@@ -216,6 +220,9 @@ impl Probe {
         if seen.blind && io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
             return Err(toshokan::IoError::Other("blinded by the test".into()));
         }
+        if seen.failing.as_ref().is_some_and(|failing| failing(io)) {
+            return Err(toshokan::IoError::Other("failed by the test".into()));
+        }
         match (io, &seen.refused) {
             (Io::Rename { to, .. }, Some(refused)) if to == refused => {
                 Err(toshokan::IoError::Other("refused by the test".into()))
@@ -302,7 +309,11 @@ trait Facade: Sized {
     fn compact(&mut self) -> Result<Compacted, Error>;
     fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error>;
     fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error>;
-    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement) -> Result<(), Error>;
+    fn settle(
+        &mut self,
+        orphan: toshokan::report::Orphan,
+        how: Settlement,
+    ) -> Result<Committed, Error>;
     fn close(self) -> Result<(), Error>;
 }
 
@@ -364,7 +375,11 @@ impl Facade for Blocking {
     fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error> {
         self.0.draft(entity).discard()
     }
-    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement) -> Result<(), Error> {
+    fn settle(
+        &mut self,
+        orphan: toshokan::report::Orphan,
+        how: Settlement,
+    ) -> Result<Committed, Error> {
         self.0.settle(orphan, how)
     }
     fn close(self) -> Result<(), Error> {
@@ -429,7 +444,11 @@ impl Facade for Async {
     fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error> {
         pollster::block_on(self.0.draft(entity).discard())
     }
-    fn settle(&mut self, orphan: toshokan::report::Orphan, how: Settlement) -> Result<(), Error> {
+    fn settle(
+        &mut self,
+        orphan: toshokan::report::Orphan,
+        how: Settlement,
+    ) -> Result<Committed, Error> {
         pollster::block_on(self.0.settle(orphan, how))
     }
     fn close(self) -> Result<(), Error> {
@@ -468,6 +487,10 @@ through_both!(
     an_undo_is_committed_when_its_identity_read_fails,
     a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale,
     a_settlement_is_committed_when_its_rescan_fails,
+    a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once,
+    a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
+    a_commit_whose_record_cannot_be_removed_is_kept,
+    a_settlement_whose_record_cannot_be_removed_is_logged_once,
     a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
@@ -481,9 +504,10 @@ through_both!(
     a_refused_intent_changes_nothing,
     what_an_instance_has_shown_survives_its_crash,
     what_any_writer_of_an_install_showed_survives_a_restore,
-    what_a_commit_returned_survives_a_crash_and_a_restore,
+    what_a_commit_returned_current_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
     facts_a_restore_removed_are_republished_when_adopted,
+    an_adoption_whose_let_go_cannot_be_kept_is_committed,
     one_intent_creates_entities_that_name_each_other,
     effects_that_stop_partway_fail_the_commit_and_are_logged,
     an_undo_that_stops_partway_fails_and_is_logged,
@@ -1512,6 +1536,213 @@ fn a_settlement_is_committed_when_its_rescan_fails<F: Facade>() {
     });
 }
 
+/// The parts `committed` reports behind.
+fn behind(committed: &Committed) -> Vec<Lag> {
+    match &committed.local {
+        Local::Current => Vec::new(),
+        Local::Behind(parts) => parts.keys().copied().collect(),
+    }
+}
+
+/// Makes the requests `which` picks fail until [`heal`].
+fn fail(probe: &Probe, which: impl Fn(&Io) -> bool + 'static) {
+    probe.seen.borrow_mut().failing = Some(Box::new(which));
+}
+
+fn heal(probe: &Probe) {
+    probe.seen.borrow_mut().failing = None;
+}
+
+/// Picks writes in the local root to a file named one of `names`.
+fn local_writes(names: &'static [&'static str]) -> impl Fn(&Io) -> bool {
+    move |io| {
+        io.root() == Root::Local
+            && io.mutates()
+            && io.path().name().is_some_and(|name| names.contains(&name))
+    }
+}
+
+/// A file of the local root named `name`, of any writer.
+fn local_file(here: &Machine, name: &str) -> Option<Vec<u8>> {
+    let files = here.local.files(Root::Local).into_iter();
+    files
+        .filter(|(path, _)| path.name() == Some(name))
+        .map(|(_, bytes)| bytes)
+        .next()
+}
+
+/// `a` opened on `here`, with `song` created, and its tag "x" committed while the
+/// local root's files `names` cannot be written. Returns the commit.
+fn committed_while_failing<F: Facade>(
+    here: &Machine,
+    clock: &TestClock,
+    names: &'static [&'static str],
+) -> (F, EntityId, Committed) {
+    let probe = Probe::new(here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    fail(&probe, local_writes(names));
+    let tagged = a.commit("Tag", |i| i.add(song, TAGS, tag("x")));
+    heal(&probe);
+    let tagged = tagged.expect("the entries are durable");
+    (a, song, tagged)
+}
+
+fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
+    const VIEW: &[&str] = &["view.log", "view.json.next"];
+    let clock = TestClock::at(1_000);
+    let folder = MemDisk::new();
+    let here = machine(&folder);
+    let (a, song, tagged) = committed_while_failing::<F>(&here, &clock, VIEW);
+    assert_eq!(behind(&tagged), [Lag::View]);
+    assert_eq!(tags(&a.view(), song), ["new", "x"]);
+    drop(a);
+    let crashed = Machine {
+        folder: folder.clone(),
+        local: here.local.restart(),
+    };
+    let (reopened, opened) = F::open(Probe::new(&crashed), env("a", 2, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
+    assert_eq!(tags(&reopened.view(), song), ["new", "x"], "after a crash");
+
+    let folder = MemDisk::new();
+    let here = machine(&folder);
+    let (mut a, song, _) = committed_while_failing::<F>(&here, &clock, VIEW);
+    let labels = |a: &F| {
+        let items = a.history().into_iter();
+        items
+            .map(|item| (item.label, item.undone))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        labels(&a),
+        [("Import".to_owned(), false), ("Tag".to_owned(), false)]
+    );
+    let undone = a.undo().unwrap();
+    assert_eq!(undone.local, Local::Current, "the view is saved again");
+    assert_eq!(tags(&a.view(), song), ["new"], "one undo undoes the tag");
+    assert_eq!(
+        labels(&a),
+        [("Import".to_owned(), false), ("Tag".to_owned(), true)]
+    );
+    a.close().unwrap();
+    let (again, _) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
+    assert_eq!(tags(&again.view(), song), ["new"]);
+}
+
+fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
+    const HEAD: &[&str] = &["head.json.next"];
+    let clock = TestClock::at(1_000);
+    let folder = MemDisk::new();
+    let here = machine(&folder);
+    let (a, song, tagged) = committed_while_failing::<F>(&here, &clock, HEAD);
+    assert_eq!(behind(&tagged), [Lag::Head]);
+    let writer = label_of(&a.view(), "a");
+    drop(a);
+    let crashed = Machine {
+        folder: folder.clone(),
+        local: here.local.restart(),
+    };
+    let (mut reopened, opened) = F::open(Probe::new(&crashed), env("a", 2, &clock)).unwrap();
+    assert_eq!(
+        opened.start,
+        Start::Resumed(writer),
+        "the stale head is followed to the last entry of the chain"
+    );
+    assert_eq!(tags(&reopened.view(), song), ["new", "x"]);
+    let next = reopened
+        .commit("Tag", |i| i.add(song, TAGS, tag("y")))
+        .unwrap();
+    assert_eq!(next.local, Local::Current);
+    assert_eq!(
+        reopened.view().forks(),
+        [],
+        "the next entry follows the tag"
+    );
+
+    let folder = MemDisk::new();
+    let here = machine(&folder);
+    let (mut a, _, tagged) = committed_while_failing::<F>(&here, &clock, HEAD);
+    a.refresh().unwrap();
+    let head = local_file(&here, "head.json").unwrap();
+    assert!(
+        String::from_utf8(head)
+            .unwrap()
+            .contains(&tagged.intent.to_string()),
+        "a refresh records the head"
+    );
+}
+
+fn a_commit_whose_record_cannot_be_removed_is_kept<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    fail(
+        &probe,
+        |io| matches!(io, Io::Remove { root: Root::Folder, path } if path.components().any(|c| c == "pending")),
+    );
+    let renamed = a.commit("Rename", |i| {
+        i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
+    });
+    heal(&probe);
+    let renamed = renamed.expect("the entries are durable");
+    assert_eq!(behind(&renamed), [Lag::Record]);
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!((file.path, file.state), (path("b.npno"), FileState::InSync));
+    let tagged = a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert_eq!(tagged.local, Local::Current, "the next write removes it");
+    let pending = folder.files(Root::Folder).into_keys();
+    let pending: Vec<RelPath> = pending
+        .filter(|path| path.components().any(|c| c == "pending"))
+        .collect();
+    assert_eq!(pending, []);
+    let labels: Vec<String> = a.history().into_iter().map(|item| item.label).collect();
+    assert_eq!(labels, ["Import", "Rename", "Tag"]);
+}
+
+fn a_settlement_whose_record_cannot_be_removed_is_logged_once<F: Facade>() {
+    interrupted_renames::<F>(|disk, shown| {
+        let machine = Machine {
+            folder: disk.clone(),
+            local: disk.clone(),
+        };
+        let clock = TestClock::at(2_000);
+        let probe = Probe::new(&machine);
+        let (mut again, opened) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+        assert_eq!(opened.settled.len(), 1, "{shown}");
+        let song = again.view().entities()[0].id();
+        fail(
+            &probe,
+            |io| matches!(io, Io::Remove { root: Root::Folder, path } if path.components().any(|c| c == "pending")),
+        );
+        let tagged = again.commit("Tag", |i| i.add(song, TAGS, tag("next")));
+        heal(&probe);
+        let tagged = tagged.unwrap_or_else(|e| panic!("{shown}: {e}"));
+        assert_eq!(behind(&tagged), [Lag::Record], "{shown}");
+        let next = again
+            .commit("Tag", |i| i.add(song, TAGS, tag("last")))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        assert_eq!(next.local, Local::Current, "{shown}");
+        let labels: Vec<String> = again.history().into_iter().map(|i| i.label).collect();
+        assert_eq!(
+            labels.iter().filter(|label| *label == "Rename").count(),
+            1,
+            "{shown}: the settlement is logged once: {labels:?}"
+        );
+        assert_eq!(
+            tags(&again.view(), song),
+            ["last", "new", "next"],
+            "{shown}"
+        );
+    });
+}
+
 fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
     let folder = MemDisk::new();
     let clock = TestClock::at(1_000);
@@ -2353,7 +2584,7 @@ fn backed_up<F: Facade>(clock: &TestClock) -> (Machine, MemDisk, F, EntityId) {
     (here, backup, a, song)
 }
 
-fn what_a_commit_returned_survives_a_crash_and_a_restore<F: Facade>() {
+fn what_a_commit_returned_current_survives_a_crash_and_a_restore<F: Facade>() {
     let total = {
         let clock = TestClock::at(1_000);
         let (here, _, mut a, song) = backed_up::<F>(&clock);
@@ -2375,11 +2606,20 @@ fn what_a_commit_returned_survives_a_crash_and_a_restore<F: Facade>() {
         let (a, _) = F::open(Probe::new(&restored), env("a", 3, &clock))
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         let shown_tags = tags(&a.view(), song);
-        match committed {
-            Ok(_) => assert_eq!(shown_tags, ["lost", "new"], "{shown}"),
-            Err(_) => assert!(shown_tags.contains(&tag("new")), "{shown}: {shown_tags:?}"),
+        let local = committed.map(|committed| committed.local);
+        match &local {
+            Ok(Local::Current) => assert_eq!(shown_tags, ["lost", "new"], "{shown}"),
+            _ => assert!(shown_tags.contains(&tag("new")), "{shown}: {shown_tags:?}"),
         }
-        assert_eq!(crash == total, committed.is_ok(), "{shown}");
+        assert!(
+            local.is_ok(),
+            "{shown}: the entries are durable before the local root"
+        );
+        assert_eq!(
+            crash == total,
+            matches!(local, Ok(Local::Current)),
+            "{shown}"
+        );
     }
 }
 
@@ -2527,6 +2767,33 @@ fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
             .adopt("Again"),
         Err(Error::Refused(Refusal::Nothing))
     ));
+}
+
+fn an_adoption_whose_let_go_cannot_be_kept_is_committed<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (a, backup, _) = tagged_after_a_backup::<F>(&folder, &here, &clock);
+    a.close().unwrap();
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 8, &clock)).unwrap();
+    let shown = facts(&a.view());
+    restore(&folder, &backup);
+    assert_ne!(a.refresh().unwrap().removed, []);
+    fail(&probe, local_writes(&["let-go.json.next"]));
+    let adopted = a.adopt("Keep what the restore removed");
+    heal(&probe);
+    let adopted = adopted.expect("the entries are durable");
+    assert_eq!(behind(&adopted), [Lag::LetGo]);
+    assert_eq!(facts(&a.view()), shown);
+    assert_eq!(a.refresh().unwrap().removed, [], "let go in memory");
+    assert!(
+        local_file(&here, "let-go.json").is_some(),
+        "the refresh keeps what was let go"
+    );
+    a.close().unwrap();
+    let (_, opened) = F::open(Probe::new(&here), env("a", 9, &clock)).unwrap();
+    assert_eq!(opened.removed, []);
 }
 
 fn one_intent_creates_entities_that_name_each_other<F: Facade>() {

@@ -1,5 +1,7 @@
 //! What the library tells the app: on open, on commit, on refresh and on upkeep.
 
+use std::collections::BTreeMap;
+
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::io::IoError;
@@ -157,7 +159,8 @@ pub struct Ambiguous {
     pub candidates: Vec<RelPath>,
 }
 
-/// A committed intent, its file effects all made.
+/// A committed intent, its file effects all made. Its entries are durable in the
+/// folder and shown.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Committed {
     /// The entry that logged it.
@@ -165,6 +168,42 @@ pub struct Committed {
     /// The entities it created, in the order the intent created them.
     pub created: Vec<EntityId>,
     pub changes: Vec<Change>,
+    /// ⚠️ Whether this instance's own state caught up with the commit. While it
+    /// is [`Local::Behind`], a crash followed by a restore of the folder that
+    /// takes the commit's entries can take them from this install's view too.
+    pub local: Local,
+}
+
+/// Whether what this instance keeps beside the folder holds everything it has
+/// committed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Local {
+    Current,
+    /// Each part that lags, with the failure that left it behind. The next commit,
+    /// refresh or close saves the view, the head and what was let go again; a
+    /// refresh scans again; the next write removes the record.
+    Behind(BTreeMap<Lag, String>),
+}
+
+/// A part of this instance's state that can lag a commit whose entries are
+/// durable.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Lag {
+    /// The cached view in the local root lacks the commit. Reopening reads it
+    /// from the folder.
+    View,
+    /// `head.json` names an earlier entry. Reopening continues from the last entry
+    /// of the writer's chain in the folder.
+    Head,
+    /// `let-go.json` lacks the entries an adoption let go. Reopening reports them
+    /// as removed again.
+    LetGo,
+    /// The scan after the commit failed. The files its effects touched are bound
+    /// to no entity until a refresh scans every file.
+    Scan,
+    /// The commit's pending record is still in the folder. No reader reports it,
+    /// since the log continues past it.
+    Record,
 }
 
 /// How an intent's file effects end: all made, or stopped partway.

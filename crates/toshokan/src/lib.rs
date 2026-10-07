@@ -75,7 +75,7 @@ pub use io::{Io, IoError, IoResult, Operation, Reply, Root, Step, Task};
 pub use layout::Layout;
 pub use path::RelPath;
 pub use plan::{Expect, Plan};
-pub use report::{Committed, Opened, Outcome, Partial};
+pub use report::{Committed, Lag, Local, Opened, Outcome, Partial};
 pub use schema::{Field, Members, Raw, Register, Schema, Set, Value};
 pub use trash::Policy;
 pub use view::{EntityView, FileRef, FileState, View};

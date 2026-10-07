@@ -197,7 +197,7 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.redo())
     }
 
-    pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<()> {
+    pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<Committed> {
         run(&mut self.backend, self.core.settle(orphan, how))
     }
 

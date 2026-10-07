@@ -335,6 +335,15 @@ append is synced it stats the segment, writes the cached view and then
 without a seal marker and appends nothing more to it, so nothing follows a torn
 line.
 
+The entries are then durable, and the commit succeeds whatever fails after them
+(see Intents). A cached view or `head.json` that cannot be written lags: the
+instance writes it again at its next commit, refresh or close. A crash meanwhile
+loses nothing the folder holds. Reopening reads the folder into the cached view,
+and a `head.json` that names an earlier entry of the writer's chain still lets
+the instance continue the writer, after the chain's last entry. Until the view
+is written, a crash followed by a restore of the folder that takes the commit's
+entries takes them from this install's view too.
+
 ## Reading
 
 A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
@@ -426,8 +435,9 @@ Nothing is republished or dropped until the user chooses:
 
 - **Let go.** The install writes the entries the folder lacks to `let-go.json`
   and shows each writer whose lost entries are all let go as the folder's files
-  hold it. The cached view keeps them. An entry the folder holds again is shown
-  again.
+  hold it. When `let-go.json` cannot be written, the entries are let go for now,
+  and the next commit, refresh or close writes it again. The cached view keeps
+  them. An entry the folder holds again is shown again.
 - **Adopt.** The reader commits one intent whose ops make the folder show what
   the reader showed: a `create` or `delete`, a `write` of a value shown (the
   latest, of several the folder lacks), an `add` or `remove` per member and a
@@ -499,6 +509,15 @@ A commit whose file effects stop partway is logged with what they did, and
 fails, saying where they stopped. When settling one of this writer's unfinished
 effects at step 4 stops partway, that settlement is logged and the commit fails
 before its own intent is tried.
+
+Otherwise a commit whose entries are durable succeeds, whatever fails after
+them, and says which parts of the instance's own state lag it: the cached view,
+`head.json` or `let-go.json` not written, which the next commit, refresh or
+close writes again; the scan after it failed, which the next refresh repeats; or
+its pending record not removed, which the next write removes. A record whose
+intent is logged is not open, so no reader reports it meanwhile. Settling one of
+this writer's own effects, adopting, and settling another writer's effect commit
+in the same way.
 
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.

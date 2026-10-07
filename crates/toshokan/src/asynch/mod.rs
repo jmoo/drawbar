@@ -285,7 +285,7 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.redo()).await
     }
 
-    pub async fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<()> {
+    pub async fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<Committed> {
         run(&self.fs, self.core.settle(orphan, how)).await
     }
 

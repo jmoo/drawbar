@@ -33,9 +33,9 @@ use crate::plan::{FactChange, FileChange, Plan};
 use crate::reader::{ReadReport, Reader, Stamp, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
-    By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode, Opened,
-    Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start, TrashItem, What,
-    WriterInfo,
+    By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
+    Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start,
+    TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
@@ -88,6 +88,8 @@ pub struct Library {
     presence: BTreeMap<WriterId, Presence>,
     history: History,
     view: View,
+    /// The parts of this instance's state that lag what it committed, with why.
+    behind: BTreeMap<Lag, String>,
 }
 
 type Let = BTreeMap<WriterId, BTreeSet<EntryHash>>;
@@ -248,6 +250,7 @@ impl Library {
                 forks: Vec::new(),
                 gaps: Vec::new(),
             }),
+            behind: BTreeMap::new(),
         };
         library.refold();
         library.follow(readings(&library.reader).collect::<Vec<_>>());
@@ -285,7 +288,8 @@ impl Library {
     /// is [`crate::Error::Refused`], and the refused intent changes nothing. Effects
     /// that stop partway are [`crate::Error::Partial`]; the intent is logged as far
     /// as they got. Settling that stops partway is [`crate::Error::Unfinished`],
-    /// and the intent is not tried.
+    /// and the intent is not tried. Otherwise a commit whose entries are durable
+    /// succeeds, and [`Committed::local`] says what of this instance lags it.
     pub fn commit(
         &mut self,
         plan: std::result::Result<Plan, Invalid>,
@@ -346,15 +350,28 @@ impl Library {
                 };
                 commit(library, resolved)
             })
-            .and_then(|(library, committed)| library.forget().map_ok(move |()| committed))
+            .and_then(|(library, mut committed)| {
+                flow::run(library.forget()).then(move |kept| {
+                    library.lag(Lag::LetGo, &kept);
+                    committed.local = library.local();
+                    ok(committed)
+                })
+            })
             .task()
     }
 
     /// Stops showing what [`Opened::removed`] reports: each writer whose entries
     /// the folder lost is shown as the folder holds it, on every open of this
     /// install, until the folder holds them again. Writes only in the local root.
+    /// When that write fails, they are not shown for now, and the next commit,
+    /// refresh or close writes it again.
     pub fn let_go(&mut self) -> Task<'_, Result<()>> {
-        self.forget().task()
+        flow::run(self.forget())
+            .then(move |kept| {
+                self.lag(Lag::LetGo, &kept);
+                Flow::Done(kept)
+            })
+            .task()
     }
 
     /// Commits what `resolve` makes of the library once this writer's
@@ -375,16 +392,33 @@ impl Library {
             .task()
     }
 
-    /// Lets go every entry the folder lost: keeps them in `let-go.json` of the
-    /// local root and shows their writers as the folder holds them.
-    fn forget<'a>(&'a mut self) -> Fallible<'a, ()> {
-        let let_go = self.reader.removed();
-        let bytes = serde_json::to_vec(&let_go).expect("hashes by writer are JSON");
-        flow::replace(Root::Local, Layout::let_go(), bytes).map_ok(move |()| {
-            self.let_go = let_go;
-            self.refold();
-            self.show();
-        })
+    /// Lets go every entry the folder lost: shows their writers as the folder
+    /// holds them, and keeps the entries in `let-go.json` of the local root.
+    fn forget(&mut self) -> Task<'static, Result<()>> {
+        self.let_go = self.reader.removed();
+        self.refold();
+        self.show();
+        self.keep_let_go()
+    }
+
+    fn keep_let_go(&self) -> Task<'static, Result<()>> {
+        let bytes = serde_json::to_vec(&self.let_go).expect("hashes by writer are JSON");
+        flow::replace(Root::Local, Layout::let_go(), bytes).task()
+    }
+
+    /// Notes how saving `part` again went.
+    fn lag(&mut self, part: Lag, saved: &Result<()>) {
+        match saved {
+            Ok(()) => self.behind.remove(&part),
+            Err(error) => self.behind.insert(part, error.to_string()),
+        };
+    }
+
+    fn local(&self) -> Local {
+        match self.behind.is_empty() {
+            true => Local::Current,
+            false => Local::Behind(self.behind.clone()),
+        }
     }
 
     fn own_entries(&self) -> Result<(WriterId, Vec<Entry>)> {
@@ -410,7 +444,7 @@ impl Library {
     /// this writer's own log: finishes it, rolls it back or dismisses it. Nothing
     /// is written in the other writer's directory. Effects that stop partway are
     /// [`crate::Error::Partial`] and leave the effect open to settle again.
-    pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<()>> {
+    pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<Committed>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
@@ -457,15 +491,14 @@ impl Library {
                     .writer
                     .as_ref()
                     .is_some_and(|own| report.forks.iter().any(|fork| fork.writer == own.id()));
-                let saved = flow::run(self.save_view());
-                let stopped = match forked {
-                    true => self.stop_writing(),
-                    false => ok(()),
-                };
                 let read = report.anything_new();
-                saved
-                    .and_then(move |()| stopped)
-                    .and_then(move |()| rescan(self))
+                keep_local(self, false)
+                    .then(move |(library, kept)| match (kept, forked) {
+                        (Err(error), _) => Flow::Done(Err(error)),
+                        (Ok(()), true) => library.stop_writing().map_ok(move |()| library),
+                        (Ok(()), false) => ok(library),
+                    })
+                    .and_then(rescan)
                     .map_ok(move |library| (library, changes, read))
             })
             .map_ok(move |(library, mut changes, read)| {
@@ -598,16 +631,21 @@ impl Library {
         }
     }
 
-    /// Seals the open segment, writes the cached view and releases the writer's
-    /// lock. A library dropped without closing leaves its segment open, as a crash
-    /// does.
+    /// Writes the cached view and what else lags, seals the open segment and
+    /// releases the writer's lock. A library dropped without closing leaves its
+    /// segment open, as a crash does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
-        let Some(writer) = self.writer.take() else {
+        if self.writer.is_none() {
             return Task::ready(Ok(()));
-        };
-        let saved = self.reader.save(writer.genesis());
-        flow::run(saved)
-            .and_then(move |()| flow::run(writer.close()))
+        }
+        keep_local(self, false)
+            .then(|(library, kept)| {
+                let writer = library.writer.take().expect("checked above");
+                match kept {
+                    Ok(()) => flow::run(writer.close()),
+                    Err(error) => Flow::Done(Err(error)),
+                }
+            })
             .task()
     }
 
@@ -760,6 +798,24 @@ impl Library {
         }
     }
 
+    /// Notes how removing this writer's record `name`, whose entry is logged,
+    /// went: one that stays is removed by the next write.
+    fn closed(&mut self, name: Nonce, removed: &Result<()>) {
+        let record = |settling: &Settling| settling.record == name;
+        match removed {
+            Ok(()) => self.unsettled.retain(|settling| !record(settling)),
+            Err(_) => {
+                for settling in self.unsettled.iter_mut().filter(|s| record(s)) {
+                    settling.logged = true;
+                }
+            }
+        }
+        let left = self.unsettled.iter().any(|settling| settling.logged);
+        if removed.is_err() || !left {
+            self.lag(Lag::Record, removed);
+        }
+    }
+
     /// Places entries this instance just appended to `written` and folds them in.
     fn absorb_own(&mut self, entries: &[Entry], written: Option<(RelPath, Stamp)>) {
         let Some(id) = self.writer.as_ref().map(Writer::id) else {
@@ -868,6 +924,8 @@ impl Library {
             return ok(());
         };
         self.history = History::default();
+        self.behind.remove(&Lag::Head);
+        self.behind.remove(&Lag::Record);
         let open = std::mem::take(&mut self.unsettled).into_iter();
         for settling in open.filter(|settling| !settling.logged) {
             self.interrupted(settling.record, &settling.pending, false);
@@ -897,10 +955,10 @@ impl Library {
         self.bind_due = false;
     }
 
-    /// Keeps in the local root the identities scans read that no fact gives, so a
-    /// later open need not read them again: those just read, and those kept before
-    /// of files the last scan found unchanged. Writes only when they changed.
-    fn remember<'a>(&mut self, read: Vec<RelPath>) -> Fallible<'a, ()> {
+    /// The identities the local root should keep of those scans read that no fact
+    /// gives: those just read, and those kept before of files the last scan found
+    /// unchanged. `None` when they did not change.
+    fn remembering(&self, read: Vec<RelPath>) -> Option<Scan> {
         let scan = &self.scan.files;
         let unchanged = self.remembered.files.iter();
         let unchanged = unchanged.filter(|(path, file)| scan.get(*path) == Some(*file));
@@ -913,12 +971,7 @@ impl Library {
                 .chain(read)
                 .collect(),
         };
-        if remembered == self.remembered {
-            return ok(());
-        }
-        let bytes = remembered.identities();
-        self.remembered = remembered;
-        flow::replace(Root::Local, Layout::identities(), bytes)
+        (remembered != self.remembered).then_some(remembered)
     }
 
     fn scan_task(&self) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
@@ -1253,10 +1306,27 @@ fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     let scan = library.borrow().scan_task();
     flow::run(scan).and_then(move |(scan, read)| {
         let mut library = library;
-        library.borrow_mut().rebind(scan);
-        let remembered = library.borrow_mut().remember(read);
-        remembered.map_ok(move |()| library)
+        let known = library.borrow_mut();
+        known.behind.remove(&Lag::Scan);
+        known.rebind(scan);
+        remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
     })
+}
+
+/// Keeps in the local root the identities [`Library::remembering`] gives, so a
+/// later open need not read them again. Returns the library with how it went.
+fn remember<'a, L: BorrowMut<Library> + 'a>(
+    library: L,
+    read: Vec<RelPath>,
+) -> Flow<'a, (L, Result<()>)> {
+    let Some(remembered) = library.borrow().remembering(read) else {
+        return Flow::Done((library, Ok(())));
+    };
+    let bytes = remembered.identities();
+    let mut library = library;
+    library.borrow_mut().remembered = remembered;
+    flow::replace(Root::Local, Layout::identities(), bytes)
+        .then(move |kept| Flow::Done((library, kept)))
 }
 
 /// Once entries are durable, scans again only `paths`, and binds.
@@ -1281,14 +1351,17 @@ fn rebind_logged<'a>(
     scan: Task<'static, Result<(Scan, Vec<RelPath>)>>,
     unsure: Vec<RelPath>,
 ) -> Fallible<'a, &'a mut Library> {
-    flow::run(scan).then(move |scanned| {
-        let Ok((scan, read)) = scanned else {
+    flow::run(scan).then(move |scanned| match scanned {
+        Ok((scan, read)) => {
+            library.rebind(scan);
+            remember(library, read).then(|(library, _)| ok(library))
+        }
+        Err(error) => {
             library.scan.forget(&unsure);
+            library.lag(Lag::Scan, &Err(error));
             library.bind_due = true;
-            return ok(library);
-        };
-        library.rebind(scan);
-        library.remember(read).then(move |_| ok(library))
+            ok(library)
+        }
     })
 }
 
@@ -1351,7 +1424,7 @@ fn commit<'a>(
             transact(library, logged, effects, None, pins.collect())
         })
         .and_then(move |(library, entries, outcome)| {
-            match committed(shown, &entries, created, outcome) {
+            match committed(shown, &entries, created, outcome, library.local()) {
                 Ok(committed) => ok((library, committed)),
                 Err(partial) => Flow::Done(Err(Error::Partial(partial))),
             }
@@ -1365,6 +1438,7 @@ fn committed(
     entries: &[Entry],
     created: Vec<EntityId>,
     outcome: Outcome,
+    local: Local,
 ) -> std::result::Result<Committed, Box<Partial>> {
     let ops = entries.iter().flat_map(|entry| match &entry.kind {
         EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
@@ -1374,6 +1448,7 @@ fn committed(
         intent: entries[0].hash(),
         created,
         changes: distinct(ops.filter_map(change_of)),
+        local,
     };
     match outcome {
         Outcome::Complete => Ok(committed),
@@ -1443,18 +1518,23 @@ fn ensure_writer<'a>(
 }
 
 /// Settles this writer's interrupted effects, oldest first, and shows what they
-/// leave. A record stays to settle while settling it fails. One whose effects
-/// stop partway is logged as far as they got, removed, and fails the settling
-/// with [`Error::Unfinished`].
+/// leave. A record stays to settle while settling it fails, and to remove while
+/// removing it fails. One whose effects stop partway is logged as far as they got,
+/// removed, and fails the settling with [`Error::Unfinished`].
 fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
-    let Some(settling) = library.unsettled.first().cloned() else {
+    let open = library.unsettled.clone();
+    flow::fold(open.into_iter(), library, settle_one).map_ok(|library| {
         library.show();
-        return ok(library);
-    };
+        library
+    })
+}
+
+fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let layout = library.layout.clone();
     let PendingRecord { writer, .. } = settling.pending;
     let name = settling.record;
-    let settled: Fallible<'_, (&mut Library, Option<Box<Partial>>)> = match settling.logged {
+    type Appended = Option<(String, Vec<Entry>, Outcome)>;
+    let settled: Fallible<'_, (&mut Library, Appended)> = match settling.logged {
         true => ok((library, None)),
         false => {
             let record = Rc::new(settling.pending);
@@ -1472,20 +1552,23 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
                 let label = logged.label.clone();
                 append(library, vec![EntryKind::Intent(logged)]).and_then(
                     move |(library, entries)| {
-                        let partial = committed(label, &entries, Vec::new(), applied.outcome);
                         let scan = library.scan_task();
-                        rebind_logged(library, scan, record.paths())
-                            .map_ok(move |library| (library, partial.err()))
+                        rebind_logged(library, scan, record.paths()).map_ok(move |library| {
+                            (library, Some((label, entries, applied.outcome)))
+                        })
                     },
                 )
             })
         }
     };
-    settled.and_then(move |(library, partial)| {
-        flow::run(effects::finish(&layout, writer, name)).and_then(move |()| {
-            library.unsettled.retain(|settling| settling.record != name);
+    settled.and_then(move |(library, appended)| {
+        flow::run(effects::finish(&layout, writer, name)).then(move |removed| {
+            library.closed(name, &removed);
+            let partial = appended.and_then(|(label, entries, outcome)| {
+                committed(label, &entries, Vec::new(), outcome, library.local()).err()
+            });
             match partial {
-                None => settle_own(library),
+                None => ok(library),
                 Some(partial) => {
                     library.show();
                     Flow::Done(Err(Error::Unfinished(partial)))
@@ -1536,10 +1619,11 @@ fn append<'a>(
 }
 
 /// As [`append`], with the library back whatever happened. Once the entries are
-/// durable in the folder, the cached view holding them is saved and then the head
-/// recorded, so what a commit returns survives a crash and a restore. A writer
-/// that cannot continue its history stops writing: the next commit creates
-/// another.
+/// durable in the folder, they are shown and kept in the history, and the cached
+/// view holding them is saved and then the head recorded, so that what a commit
+/// returns survives a crash and a restore. Neither failing fails the append; see
+/// [`keep_local`]. A writer that cannot continue its history stops writing: the
+/// next commit creates another.
 fn appending<'a>(
     library: &'a mut Library,
     kinds: Vec<EntryKind>,
@@ -1560,12 +1644,8 @@ fn appending<'a>(
                 let writer = library.writer.as_ref().expect("put back above");
                 writer.stamp().then(move |written| {
                     library.absorb_own(&entries, written);
-                    let writer = library.writer.as_ref().expect("put back above");
-                    let saved = library.reader.save(writer.genesis());
-                    let recorded = writer.record();
-                    flow::run(saved)
-                        .and_then(move |()| flow::run(recorded))
-                        .then(move |kept| Flow::Done((library, kept.map(|()| entries))))
+                    keep_local(library, true)
+                        .then(move |(library, _)| Flow::Done((library, Ok(entries))))
                 })
             }
             Err(error @ Error::Rekey { .. }) => {
@@ -1574,6 +1654,35 @@ fn appending<'a>(
             }
             Err(error) => Flow::Done((library, Err(error))),
         }
+    })
+}
+
+/// Saves the cached view, then records the head when `head` asks or when it
+/// lags, then keeps what was let go when that lags, each whatever became of the
+/// one before. Each failure leaves its part behind, to save again the next time;
+/// the first is returned. A crash meanwhile loses nothing the folder holds:
+/// reopening reads the folder into the view, which only grows, and continues from
+/// the last entry of the writer's chain there.
+fn keep_local(library: &mut Library, head: bool) -> Flow<'_, (&mut Library, Result<()>)> {
+    let saved = library.save_view();
+    flow::run(saved).then(move |saved| {
+        library.lag(Lag::View, &saved);
+        let due = head || library.behind.contains_key(&Lag::Head);
+        let recorded = match &library.writer {
+            Some(writer) if due => writer.record(),
+            _ => Task::ready(Ok(())),
+        };
+        flow::run(recorded).then(move |recorded| {
+            library.lag(Lag::Head, &recorded);
+            let let_go = match library.behind.contains_key(&Lag::LetGo) {
+                true => library.keep_let_go(),
+                false => Task::ready(Ok(())),
+            };
+            flow::run(let_go).then(move |kept| {
+                library.lag(Lag::LetGo, &kept);
+                Flow::Done((library, saved.and(recorded).and(kept)))
+            })
+        })
     })
 }
 
@@ -1701,7 +1810,7 @@ fn carry_out<'a>(
 /// Appends the intent `logged` with what `applied` says the effects did, closed
 /// by `closing` if they complete and followed by `bind` entries pinning `pins`,
 /// removes the record once the entries are durable, and scans again the paths the
-/// effects moved files from and to.
+/// effects moved files from and to. Once the entries are durable nothing fails.
 fn log_effects<'a>(
     library: &'a mut Library,
     mut logged: Logged,
@@ -1739,12 +1848,12 @@ fn log_effects<'a>(
             false => Task::ready(Ok(())),
         };
         flow::run(finish)
-            .then(move |finished| match finished {
-                Ok(()) => rescan_paths(library, touched),
-                Err(error) => {
+            .then(move |removed| {
+                if removed.is_err() {
                     library.interrupted(name, &record, true);
-                    Flow::Done(Err(error))
+                    library.closed(name, &removed);
                 }
+                rescan_paths(library, touched)
             })
             .map_ok(move |library| {
                 library.show();
@@ -1764,7 +1873,7 @@ fn settle_orphan(
     theirs: PendingRecord,
     how: Settlement,
     plan: EffectPlan,
-) -> Fallible<'_, ()> {
+) -> Fallible<'_, Committed> {
     let effects = Rc::new(plan);
     let facts = match how {
         Settlement::Finished => planned(&theirs).ops,
@@ -1775,39 +1884,35 @@ fn settle_orphan(
         record: orphan.record,
         outcome: how,
     };
+    let label = theirs.label.clone();
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
-        .and_then(move |library| {
-            let logged: Fallible<'_, (&mut Library, Option<Box<Partial>>)> =
-                match effects.is_empty() && facts.is_empty() {
-                    true => append(library, vec![EntryKind::Settle(settle)])
-                        .map_ok(|(library, _)| (library, None)),
-                    false => {
-                        let label = theirs.label.clone();
-                        let logged = Logged {
-                            label: theirs.label,
-                            ops: Vec::new(),
-                            displaced: Vec::new(),
-                            reverses: None,
-                        };
-                        let closing = Closing { facts, settle };
-                        transact(library, logged, effects, Some(closing), Vec::new()).map_ok(
-                            move |(library, entries, outcome)| {
-                                let partial = committed(label, &entries, Vec::new(), outcome);
-                                (library, partial.err())
-                            },
-                        )
-                    }
-                };
-            logged.and_then(move |(library, partial)| {
-                library.show();
-                if let Some(partial) = partial {
-                    return Flow::Done(Err(Error::Partial(partial)));
+        .and_then(
+            move |library| match effects.is_empty() && facts.is_empty() {
+                true => append(library, vec![EntryKind::Settle(settle)])
+                    .map_ok(|(library, entries)| (library, entries, Outcome::Complete)),
+                false => {
+                    let logged = Logged {
+                        label: theirs.label,
+                        ops: Vec::new(),
+                        displaced: Vec::new(),
+                        reverses: None,
+                    };
+                    let closing = Closing { facts, settle };
+                    transact(library, logged, effects, Some(closing), Vec::new())
                 }
-                library
-                    .orphaned
-                    .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
-                ok(())
-            })
+            },
+        )
+        .and_then(move |(library, entries, outcome)| {
+            library.show();
+            match committed(label, &entries, Vec::new(), outcome, library.local()) {
+                Err(partial) => Flow::Done(Err(Error::Partial(partial))),
+                Ok(committed) => {
+                    library
+                        .orphaned
+                        .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
+                    ok(committed)
+                }
+            }
         })
 }

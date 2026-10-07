@@ -187,6 +187,10 @@ cause:
 - A restore that lands between a writer's check and the write it guards. The
   writer appends after an entry the folder no longer holds, and readers hold
   what it wrote back as a gap.
+- A cached view that cannot be written after an append. The commit still
+  succeeds, and says so. Until the view is written, a crash followed by a
+  restore that takes the commit's entries takes them from this install's view,
+  which `Monotone` otherwise keeps.
 - Two entries with one hash. Hashes are 128 bits of BLAKE3, so an accidental
   collision is negligible, but a forger who writes both entries can make one
   with about 2^64 work.

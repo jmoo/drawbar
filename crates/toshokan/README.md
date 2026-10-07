@@ -54,7 +54,9 @@ or unreadable, so an app cannot show half a conflict by accident.
 A save takes bytes or a source the driver streams into staging a chunk at a
 time, such as a `Splice` of the file being rewritten, so a file of hundreds of
 megabytes is never held whole. A commit whose file effects stop partway fails
-with `Error::Partial`, which says what it logged.
+with `Error::Partial`, which says what it logged. Any other commit whose entries
+reached the folder succeeds, and `Committed::local` says what the instance keeps
+beside the folder that lags it until the next commit, refresh or close.
 
 ## Design
 
