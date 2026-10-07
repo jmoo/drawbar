@@ -121,6 +121,22 @@ pub enum Op {
     Unknown(Raw),
 }
 
+impl Op {
+    /// The entity the op changes; `None` for an op this build does not know.
+    pub fn entity(&self) -> Option<EntityId> {
+        match self {
+            Self::Create { entity, .. }
+            | Self::Delete { entity, .. }
+            | Self::Write { entity, .. }
+            | Self::Add { entity, .. }
+            | Self::Remove { entity, .. }
+            | Self::File { entity, .. }
+            | Self::Pin { entity, .. } => Some(*entity),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
 /// Where an entity's file is and what it held when this writer last wrote or bound
 /// it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

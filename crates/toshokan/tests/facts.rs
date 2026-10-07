@@ -63,7 +63,7 @@ fn plan(intent: Intent<Ids>) -> Plan {
 fn view(folded: Folded) -> View {
     View::new(Parts {
         folded,
-        bindings: Bindings::default(),
+        bindings: Bindings::default().into(),
         writers: Vec::new(),
         forks: Vec::new(),
         gaps: Vec::new(),

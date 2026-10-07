@@ -20,6 +20,7 @@
 
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::SerializeMap;
@@ -32,10 +33,11 @@ use crate::reader::WriterLog;
 use crate::report::TrashItem;
 use crate::schema::{Raw, Written};
 
-/// The folded state of a set of entries.
+/// The folded state of a set of entries. A clone shares each entity's state with
+/// the original until one of them changes it.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Folded {
-    entities: BTreeMap<EntityId, EntityState>,
+    entities: BTreeMap<EntityId, Arc<EntityState>>,
     trash: BTreeMap<(WriterId, Nonce), Trashed>,
     settled: BTreeSet<(WriterId, Nonce)>,
     unknown: BTreeSet<(EntryHash, Raw)>,
@@ -515,6 +517,17 @@ impl EntityState {
         stamps.max().map(|stamp| stamp.by)
     }
 
+    /// The surviving file writes that say where the file is, oldest first.
+    fn file_facts(&self) -> Vec<Written<FileFact>> {
+        let facts = written(&self.file).into_iter().map(|write| Written {
+            value: FileFact::from(write.value),
+            by: write.by,
+            at: write.at,
+            entry: write.entry,
+        });
+        facts.collect()
+    }
+
     fn present(&self) -> bool {
         let created = self
             .existence
@@ -678,12 +691,18 @@ impl Folded {
     }
 
     fn entity(&mut self, entity: EntityId) -> &mut EntityState {
-        self.entities.entry(entity).or_default()
+        Arc::make_mut(self.entities.entry(entity).or_default())
     }
 
     pub fn join(&mut self, other: &Folded) {
         for (&entity, state) in &other.entities {
-            self.entity(entity).join(state);
+            match self.entities.entry(entity) {
+                Slot::Vacant(slot) => {
+                    slot.insert(Arc::clone(state));
+                }
+                Slot::Occupied(slot) if Arc::ptr_eq(slot.get(), state) => {}
+                Slot::Occupied(mut slot) => Arc::make_mut(slot.get_mut()).join(state),
+            }
         }
         for (&key, trashed) in &other.trash {
             match self.trash.entry(key) {
@@ -705,6 +724,9 @@ impl Folded {
         let mut found = Vec::new();
         for (&entity, now) in &self.entities {
             let old = before.entities.get(&entity);
+            if old.is_some_and(|old| Arc::ptr_eq(old, now)) {
+                continue;
+            }
             let mut note = |part: Part, stamp: &Stamp| found.push((entity, part, stamp.by));
             for (stamp, existence) in added(&now.existence.writes, old.map(|o| &o.existence.writes))
             {
@@ -740,7 +762,7 @@ impl Folded {
     /// not, each with the op that makes `kept` show it too. A register or file
     /// showing several values `kept` lacks comes back as the latest of them.
     pub fn beyond(&self, kept: &Folded) -> Vec<Beyond> {
-        let none = EntityState::default();
+        let none = Arc::default();
         let mut found = Vec::new();
         for (&entity, now) in &self.entities {
             let old = kept.entities.get(&entity).unwrap_or(&none);
@@ -829,7 +851,9 @@ impl Folded {
 
     /// Whether `entity` exists, or its deletion is in conflict.
     pub fn present(&self, entity: EntityId) -> bool {
-        self.entities.get(&entity).is_some_and(EntityState::present)
+        self.entities
+            .get(&entity)
+            .is_some_and(|state| state.present())
     }
 
     /// Whether a surviving delete of `entity` and a write it did not observe are
@@ -837,7 +861,7 @@ impl Folded {
     pub fn deletion_conflicted(&self, entity: EntityId) -> bool {
         self.entities
             .get(&entity)
-            .is_some_and(EntityState::deletion_conflicted)
+            .is_some_and(|state| state.deletion_conflicted())
     }
 
     /// The surviving writes of `entity`'s existence register, oldest first.
@@ -945,20 +969,18 @@ impl Folded {
         self.entities
             .iter()
             .filter(|(_, state)| state.present())
-            .map(|(&entity, state)| {
-                let writes = written(&state.file)
-                    .into_iter()
-                    .map(|write| Written {
-                        value: FileFact::from(write.value),
-                        by: write.by,
-                        at: write.at,
-                        entry: write.entry,
-                    })
-                    .collect::<Vec<_>>();
-                (entity, writes)
-            })
+            .map(|(&entity, state)| (entity, state.file_facts()))
             .filter(|(_, writes)| !writes.is_empty())
             .collect()
+    }
+
+    /// [`Folded::files`] of one entity: empty unless it exists.
+    pub fn file(&self, entity: EntityId) -> Vec<Written<FileFact>> {
+        self.entities
+            .get(&entity)
+            .filter(|state| state.present())
+            .map(|state| state.file_facts())
+            .unwrap_or_default()
     }
 
     /// The surviving writes of `entity`'s file register, `None` where a write says
@@ -1500,7 +1522,7 @@ impl Serialize for Folded {
         let entities: BTreeMap<EntityId, Record<EntityRecord>> = self
             .entities
             .iter()
-            .map(|(&entity, state)| (entity, Record::from(state)))
+            .map(|(&entity, state)| (entity, Record::from(&**state)))
             .collect();
         let trash: Vec<Record<TrashRecord>> = self
             .trash
@@ -1540,7 +1562,7 @@ impl<'de> Deserialize<'de> for Folded {
                 raw.decode().map_err(D::Error::custom)?;
             folded.entities = entities
                 .into_iter()
-                .map(|(entity, record)| (entity, EntityState::from(record)))
+                .map(|(entity, record)| (entity, Arc::new(EntityState::from(record))))
                 .collect();
         }
         if let Some(raw) = members.remove(TRASH) {

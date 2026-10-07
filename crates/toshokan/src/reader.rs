@@ -552,6 +552,8 @@ impl CachedView {
 /// What one read placed and found.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReadReport {
+    /// Whether any file was read, or went away, since the last read.
+    pub read: bool,
     /// Whether the cached view grew.
     pub changed: bool,
     /// Newly placed entries per writer, in placement order.
@@ -728,6 +730,7 @@ impl Reader {
             writers: listed,
             everyone,
         } = listing;
+        let mut report = ReadReport::default();
         if everyone {
             let dirs: BTreeSet<RelPath> = listed
                 .iter()
@@ -735,15 +738,16 @@ impl Reader {
                 .collect();
             self.seen
                 .retain(|path, _| path.parent().is_some_and(|dir| dirs.contains(&dir)));
+            let before = self.folder.len();
             self.folder
                 .retain(|writer, _| listed.iter().any(|listed| listed.writer == *writer));
+            report.read = before != self.folder.len();
             for (writer, log) in &mut self.cached.writers {
                 if !listed.iter().any(|listed| listed.writer == *writer) {
                     log.gaps.clear();
                 }
             }
         }
-        let mut report = ReadReport::default();
         for listed in listed {
             self.absorb_writer(listed, &mut report);
         }
@@ -796,7 +800,9 @@ impl Reader {
                 }
             }
         }
-        if changed || !self.folder.contains_key(&writer) {
+        let read = changed || !self.folder.contains_key(&writer);
+        report.read |= read;
+        if read {
             let mut folder = WriterLog::new(writer);
             folder.place(snapshots.clone(), lines.clone());
             self.folder.insert(writer, folder);

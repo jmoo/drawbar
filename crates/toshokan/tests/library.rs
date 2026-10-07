@@ -22,8 +22,8 @@ use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
     EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
-    IoResult, Layout, MemDisk, Policy, Refusal, Register, RelPath, Reply, Root, Schema, Set, View,
-    WriterId,
+    IoResult, Layout, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply, Root, Schema,
+    Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -65,6 +65,7 @@ struct Seen {
     /// directory is created.
     own: Option<String>,
     folder_writes: u64,
+    local_writes: u64,
     /// The longest read of a pending record.
     longest_pending_read: u64,
     /// Renames to this path fail, as a backend's might.
@@ -93,6 +94,10 @@ impl Probe {
         self.seen.borrow().folder_writes
     }
 
+    fn local_writes(&self) -> u64 {
+        self.seen.borrow().local_writes
+    }
+
     /// Panics on a write under toshokan's root outside the directory of the writer
     /// this instance writes as. The directories holding every writer's may be
     /// made and synced.
@@ -103,6 +108,9 @@ impl Probe {
                 let len = range.len.min(self.len(path));
                 seen.longest_pending_read = seen.longest_pending_read.max(len);
             }
+        }
+        if io.mutates() && io.root() == Root::Local {
+            self.seen.borrow_mut().local_writes += 1;
         }
         if !io.mutates() || io.root() != Root::Folder {
             return;
@@ -378,6 +386,8 @@ macro_rules! through_both {
 
 through_both!(
     two_writers_tag_one_library_and_converge,
+    what_refreshes_fold_in_is_what_a_fresh_open_shows,
+    a_refresh_that_finds_nothing_new_writes_nothing,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_and_both_branches_survive,
     a_restored_folder_makes_the_writer_rekey,
@@ -558,6 +568,70 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
         facts(&a.view()),
         "a new reader agrees"
     );
+}
+
+fn what_refreshes_fold_in_is_what_a_fresh_open_shows<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let mut songs = vec![create(&mut a, "song.npno", b"song")];
+    let mut random = SeededRandom::new(9);
+    for step in 0..60 {
+        clock.advance(1);
+        let pick = random.next_u128();
+        let song = songs[pick as usize / 7 % songs.len()];
+        let (writer, other) = match pick % 2 {
+            0 => (&mut a, &mut b),
+            _ => (&mut b, &mut a),
+        };
+        writer.refresh().unwrap();
+        let value = format!("t{}", step % 3);
+        let _ = match pick / 2 % 6 {
+            0 => writer.commit("Tag", |i| i.add(song, TAGS, value)).map(drop),
+            1 => writer
+                .commit("Untag", |i| i.remove(song, TAGS, &value))
+                .map(drop),
+            2 => writer
+                .commit("Origin", |i| i.set(song, ORIGIN, value))
+                .map(drop),
+            3 => writer.commit("Delete", |i| i.delete(song)).map(drop),
+            4 => writer.compact().map(drop),
+            _ => {
+                let at = format!("song-{step}.npno");
+                songs.push(create(writer, &at, at.as_bytes()));
+                Ok(())
+            }
+        };
+        if (pick / 12).is_multiple_of(3) {
+            continue;
+        }
+        other.refresh().unwrap();
+        let fresh = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock))
+            .unwrap()
+            .0;
+        assert!(
+            other.view().folded() == fresh.view().folded(),
+            "step {step}: {:?}",
+            facts(&other.view())
+        );
+        assert_eq!(facts(&other.view()), facts(&fresh.view()), "step {step}");
+    }
+}
+
+fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
+    a.refresh().unwrap();
+    let writes = (probe.folder_writes(), probe.local_writes());
+    let refreshed = a.refresh().unwrap();
+    assert_eq!(refreshed.changes, []);
+    assert_eq!((probe.folder_writes(), probe.local_writes()), writes);
 }
 
 fn a_view_is_read_on_other_threads<F: Facade>() {

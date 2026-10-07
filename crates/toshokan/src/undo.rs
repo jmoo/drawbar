@@ -12,7 +12,7 @@
 //! revived are deleted again rather than having their fields cleared, so a redo
 //! revives them whole.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Invalid, Refusal};
 use crate::ids::{EntityId, EntryHash, WriterId};
@@ -32,62 +32,60 @@ pub struct History {
     done: Vec<EntryHash>,
     /// The entries the next redos reverse, latest last.
     undone: Vec<EntryHash>,
+    /// The item of each intent, undo and redo.
+    origins: BTreeMap<EntryHash, usize>,
 }
 
 impl History {
     /// From this writer's own entries in chain order. Intents a snapshot folded
     /// are out of reach: compaction ends what can be undone.
-    ///
-    /// An entry reversing the latest done intent is its undo; one reversing the
-    /// latest undo is a redo, which the next undo reverses. Any other intent
-    /// starts a new item and ends every redo.
     pub fn of<'a>(own: impl IntoIterator<Item = &'a Entry>) -> Self {
         let mut history = Self::default();
-        let mut origins: Vec<(EntryHash, usize)> = Vec::new();
         for entry in own {
-            let EntryKind::Intent(logged) = &entry.kind else {
-                continue;
-            };
-            let hash = entry.hash();
-            let origin = |of: EntryHash| {
-                origins
-                    .iter()
-                    .find(|(entry, _)| *entry == of)
-                    .map(|&(_, item)| item)
-            };
-            let reversed = logged.reverses.and_then(|reverses| {
-                let item = origin(reverses)?;
-                if history.done.last() == Some(&reverses) {
-                    history.done.pop();
-                    history.undone.push(hash);
-                    Some((item, true))
-                } else if history.undone.last() == Some(&reverses) {
-                    history.undone.pop();
-                    history.done.push(hash);
-                    Some((item, false))
-                } else {
-                    None
-                }
-            });
-            match reversed {
-                Some((item, undone)) => {
-                    history.items[item].undone = undone;
-                    origins.push((hash, item));
-                }
-                None => {
-                    origins.push((hash, history.items.len()));
-                    history.items.push(HistoryItem {
-                        intent: hash,
-                        label: logged.label.clone(),
-                        at: entry.at,
-                        undone: false,
-                    });
-                    history.done.push(hash);
-                    history.undone.clear();
-                }
-            }
+            history.push(entry);
         }
         history
+    }
+
+    /// Adds this writer's next entry. An entry reversing the latest done intent
+    /// is its undo; one reversing the latest undo is a redo, which the next undo
+    /// reverses. Any other intent starts a new item and ends every redo.
+    pub fn push(&mut self, entry: &Entry) {
+        let EntryKind::Intent(logged) = &entry.kind else {
+            return;
+        };
+        let hash = entry.hash();
+        let reversed = logged.reverses.and_then(|reverses| {
+            let item = *self.origins.get(&reverses)?;
+            if self.done.last() == Some(&reverses) {
+                self.done.pop();
+                self.undone.push(hash);
+                Some((item, true))
+            } else if self.undone.last() == Some(&reverses) {
+                self.undone.pop();
+                self.done.push(hash);
+                Some((item, false))
+            } else {
+                None
+            }
+        });
+        match reversed {
+            Some((item, undone)) => {
+                self.items[item].undone = undone;
+                self.origins.insert(hash, item);
+            }
+            None => {
+                self.origins.insert(hash, self.items.len());
+                self.items.push(HistoryItem {
+                    intent: hash,
+                    label: logged.label.clone(),
+                    at: entry.at,
+                    undone: false,
+                });
+                self.done.push(hash);
+                self.undone.clear();
+            }
+        }
     }
 
     pub fn items(&self) -> &[HistoryItem] {
