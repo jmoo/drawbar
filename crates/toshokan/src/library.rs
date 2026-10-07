@@ -1259,7 +1259,7 @@ fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     })
 }
 
-/// Scans again only `paths`, and binds.
+/// Once entries are durable, scans again only `paths`, and binds.
 fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut Library> {
     let Library {
         layout,
@@ -1268,10 +1268,27 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
         scan,
         ..
     } = &*library;
-    let scan = binding::rescan(layout, &env.identify, facts, scan, paths);
-    flow::run(scan).and_then(move |(scan, read)| {
+    let scan = binding::rescan(layout, &env.identify, facts, scan, paths.clone());
+    rebind_logged(library, scan, paths)
+}
+
+/// Once entries are durable, binds to what `scan` finds. A scan that fails does
+/// not fail what was logged: the bindings lose what the last scan found at
+/// `unsure`, where files may have moved, until the next refresh scans again.
+/// Identities it fails to keep in the local root are read again by a later open.
+fn rebind_logged<'a>(
+    library: &'a mut Library,
+    scan: Task<'static, Result<(Scan, Vec<RelPath>)>>,
+    unsure: Vec<RelPath>,
+) -> Fallible<'a, &'a mut Library> {
+    flow::run(scan).then(move |scanned| {
+        let Ok((scan, read)) = scanned else {
+            library.scan.forget(&unsure);
+            library.bind_due = true;
+            return ok(library);
+        };
         library.rebind(scan);
-        library.remember(read).map_ok(move |()| library)
+        library.remember(read).then(move |_| ok(library))
     })
 }
 
@@ -1456,7 +1473,9 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
                 append(library, vec![EntryKind::Intent(logged)]).and_then(
                     move |(library, entries)| {
                         let partial = committed(label, &entries, Vec::new(), applied.outcome);
-                        rescan(library).map_ok(move |library| (library, partial.err()))
+                        let scan = library.scan_task();
+                        rebind_logged(library, scan, record.paths())
+                            .map_ok(move |library| (library, partial.err()))
                     },
                 )
             })

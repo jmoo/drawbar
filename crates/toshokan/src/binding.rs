@@ -70,6 +70,12 @@ impl Scan {
         serde_json::to_vec(&rows).expect("identities are JSON")
     }
 
+    /// Forgets what this scan found at each of `paths` and under them.
+    pub fn forget(&mut self, paths: &[RelPath]) {
+        let paths: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
+        self.files.retain(|path, _| !under(path, &paths));
+    }
+
     /// The files whose identities `identities.json` keeps; `None` when `bytes` are
     /// not such a file.
     pub fn of_identities(bytes: &[u8]) -> Option<Self> {

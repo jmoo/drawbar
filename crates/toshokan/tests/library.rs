@@ -74,6 +74,9 @@ struct Seen {
     longest_pending_read: u64,
     /// Renames to this path fail, as a backend's might.
     refused: Option<RelPath>,
+    /// Reads of library paths fail once the head is next recorded.
+    blind_after_record: bool,
+    blind: bool,
     /// Bytes written in the local root.
     local_written: u64,
     /// The longest read of a file directly in a writer's directory.
@@ -201,7 +204,19 @@ impl Probe {
     }
 
     fn refuse(&self, io: &Io) -> Result<(), toshokan::IoError> {
-        match (io, &self.seen.borrow().refused) {
+        let mut seen = self.seen.borrow_mut();
+        if let Io::Rename {
+            root: Root::Local,
+            to,
+            ..
+        } = io
+        {
+            seen.blind |= seen.blind_after_record && to.name() == Some("head.json");
+        }
+        if seen.blind && io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
+            return Err(toshokan::IoError::Other("blinded by the test".into()));
+        }
+        match (io, &seen.refused) {
             (Io::Rename { to, .. }, Some(refused)) if to == refused => {
                 Err(toshokan::IoError::Other("refused by the test".into()))
             }
@@ -450,6 +465,9 @@ through_both!(
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     undoing_a_delete_binds_the_file_moved_while_deleted,
+    an_undo_is_committed_when_its_identity_read_fails,
+    a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale,
+    a_settlement_is_committed_when_its_rescan_fails,
     a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
@@ -1363,6 +1381,135 @@ fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
         "{:?}",
         committed.changes
     );
+}
+
+/// Makes reads of library paths fail once `probe` next records the head, after
+/// the entries are durable.
+fn blind_after_record(probe: &Probe) {
+    let mut seen = probe.seen.borrow_mut();
+    (seen.blind_after_record, seen.blind) = (true, false);
+}
+
+fn see(probe: &Probe) {
+    let mut seen = probe.seen.borrow_mut();
+    (seen.blind_after_record, seen.blind) = (false, false);
+}
+
+fn an_undo_is_committed_when_its_identity_read_fails<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.commit("Delete", |i| i.delete(song)).unwrap();
+    folder
+        .perform(Io::MakeDir {
+            root: Root::Folder,
+            path: path("moved"),
+        })
+        .unwrap();
+    folder
+        .perform(Io::Rename {
+            root: Root::Folder,
+            from: path("song.npno"),
+            to: path("moved/song.npno"),
+        })
+        .unwrap();
+    a.refresh().unwrap();
+    blind_after_record(&probe);
+    a.undo().unwrap();
+    assert!(
+        probe.seen.borrow().blind,
+        "the identity read came after the append"
+    );
+    see(&probe);
+    assert!(a.view().entity(song).is_some(), "the undo is shown");
+    let redone = a.redo().unwrap();
+    assert!(
+        redone.changes.iter().any(|change| change.entity == song),
+        "redo redoes the delete the undo reversed: {:?}",
+        redone.changes
+    );
+    a.undo().unwrap();
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("moved/song.npno"), FileState::InSync)
+    );
+}
+
+fn a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    blind_after_record(&probe);
+    a.commit("Rename", |i| {
+        i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
+    })
+    .unwrap();
+    assert!(
+        probe.seen.borrow().blind,
+        "the rescan came after the append"
+    );
+    see(&probe);
+    assert_ne!(
+        a.view().entity(song).unwrap().file().unwrap().path,
+        path("song.npno"),
+        "the file the rename moved is not bound where it was"
+    );
+    let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert!(
+        committed
+            .changes
+            .iter()
+            .all(|change| change.what != What::File),
+        "no stale move is pinned: {:?}",
+        committed.changes
+    );
+    a.refresh().unwrap();
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!((file.path, file.state), (path("b.npno"), FileState::InSync));
+}
+
+fn a_settlement_is_committed_when_its_rescan_fails<F: Facade>() {
+    interrupted_renames::<F>(|disk, shown| {
+        let machine = Machine {
+            folder: disk.clone(),
+            local: disk.clone(),
+        };
+        let clock = TestClock::at(2_000);
+        let probe = Probe::new(&machine);
+        let (mut again, opened) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+        assert_eq!(opened.settled.len(), 1, "{shown}");
+        let song = again.view().entities()[0].id();
+        blind_after_record(&probe);
+        let committed = again
+            .commit("Tag", |i| i.add(song, TAGS, tag("next")))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        assert!(
+            probe.seen.borrow().blind,
+            "{shown}: the rescan came after the append"
+        );
+        see(&probe);
+        assert!(
+            committed
+                .changes
+                .iter()
+                .all(|change| change.what != What::File),
+            "{shown}: no stale move is pinned: {:?}",
+            committed.changes
+        );
+        assert_eq!(tags(&again.view(), song), ["new", "next"], "{shown}");
+        again.refresh().unwrap();
+        let file = again.view().entity(song).unwrap().file().unwrap();
+        assert_eq!(
+            (file.path, file.state),
+            (path("b.npno"), FileState::InSync),
+            "{shown}"
+        );
+    });
 }
 
 fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
