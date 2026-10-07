@@ -19,7 +19,7 @@ use crate::cache::{self, Store};
 use crate::error::{Error, Result};
 use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, WriterId};
-use crate::io::{Kind, Range, Root, Task};
+use crate::io::{Kind, Meta, Range, Root, Task};
 use crate::layout::Layout;
 use crate::line::{self, Stop};
 use crate::log::{Entry, EntryKind};
@@ -890,8 +890,9 @@ impl Reader {
     }
 
     /// Reads every writer's directory and places what it can. Requests only
-    /// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`] in the
-    /// folder, each read bounded by [`MAX_FILE`].
+    /// [`crate::Io::List`], then per writer an [`crate::Io::ListStat`] and
+    /// [`crate::Io::ReadMany`] of the files' ends and of the changed files, each
+    /// read bounded by [`MAX_FILE`].
     pub fn read(&mut self) -> Task<'_, Result<ReadReport>> {
         flow::run(self.list())
             .map_ok(move |listing| self.absorb(listing))
@@ -1176,22 +1177,75 @@ fn scan_writer<'a>(
     known: Rc<BTreeMap<RelPath, Known>>,
 ) -> Flow<'a, Result<Listed>> {
     let dir = layout.writer(writer);
-    flow::list(Root::Folder, &dir)
+    flow::list_stat(Root::Folder, &dir)
         .and_then(move |entries| {
-            let paths: Vec<RelPath> = entries
+            let files: Vec<Planned> = entries
                 .into_iter()
-                .filter(|entry| entry.kind == Kind::File)
-                .filter_map(|entry| dir.join(&entry.name).ok())
-                .collect();
-            flow::fold(paths.into_iter(), Vec::new(), move |mut files, path| {
-                let known = known.get(&path).cloned();
-                scan_file(path, known).map_ok(move |found| {
-                    files.extend(found);
-                    files
+                .filter(|(_, meta)| meta.kind == Kind::File)
+                .filter_map(|(name, meta)| {
+                    let path = dir.join(&name).ok()?;
+                    let plan = Plan::of(&meta, known.get(&path));
+                    Some(Planned { path, meta, plan })
                 })
-            })
+                .collect();
+            read_planned(files)
         })
         .map_ok(move |files| Listed { writer, files })
+}
+
+/// A file a writer's directory listed, and what to read of it first.
+struct Planned {
+    path: RelPath,
+    meta: Meta,
+    plan: Plan,
+}
+
+enum Plan {
+    /// Its tail, to compare with that of the last read, whose length and
+    /// modification time it still has.
+    Tail(Vec<u8>),
+    /// What a segment gained past the readable lines of the last read, from the
+    /// ending of the last of them on.
+    Grown {
+        resume: Resume,
+        modified: u64,
+    },
+    Whole,
+}
+
+impl Plan {
+    fn of(meta: &Meta, known: Option<&Known>) -> Self {
+        let Some(modified) = meta.modified else {
+            return Plan::Whole;
+        };
+        match known {
+            Some(Known { stamp, .. }) if stamp.len == meta.len && stamp.modified == modified => {
+                Plan::Tail(stamp.tail.clone())
+            }
+            Some(Known {
+                stamp,
+                resume: Some(resume),
+            }) if meta.len > stamp.len && meta.len <= MAX_FILE => Plan::Grown {
+                resume: resume.clone(),
+                modified,
+            },
+            _ => Plan::Whole,
+        }
+    }
+
+    fn reads(&self, len: u64, modified: Option<u64>) -> Vec<Range> {
+        match self {
+            Plan::Tail(_) => vec![tail_range(len)],
+            Plan::Grown { resume, .. } => {
+                let offset = resume.end - line::ENDING;
+                vec![Range {
+                    offset,
+                    len: len - offset,
+                }]
+            }
+            Plan::Whole => whole_ranges(len, modified),
+        }
+    }
 }
 
 /// The last [`line::ENDING`] bytes of a file `len` bytes long.
@@ -1202,112 +1256,110 @@ fn tail_range(len: u64) -> Range {
     }
 }
 
-fn scan_file<'a>(path: RelPath, known: Option<Known>) -> Flow<'a, Result<Option<Scanned>>> {
-    flow::stat(Root::Folder, &path.clone()).and_then(move |meta| {
-        let Some(meta) = meta.filter(|meta| meta.kind == Kind::File) else {
-            return flow::ok(None);
-        };
-        let Some(modified) = meta.modified else {
-            return read_whole(path, meta.len, None);
-        };
-        let stamp = move |tail: Vec<u8>| Stamp {
-            len: meta.len,
-            modified,
-            tail,
-        };
-        match known {
-            Some(known) if known.stamp.len == meta.len => {
-                flow::read_present(Root::Folder, &path.clone(), tail_range(meta.len)).and_then(
-                    move |tail| match tail.map(stamp) {
-                        None => flow::ok(None),
-                        Some(now) if now == known.stamp => flow::ok(Some(Scanned {
-                            path,
-                            found: Found::Unchanged,
-                        })),
-                        Some(_) => read_whole(path, meta.len, Some(modified)),
-                    },
-                )
-            }
-            Some(Known {
-                stamp: before,
-                resume: Some(resume),
-            }) if meta.len > before.len && meta.len <= MAX_FILE => {
-                read_grown(path, resume, meta.len, modified)
-            }
-            _ => read_whole(path, meta.len, Some(modified)),
-        }
-    })
-}
-
-/// The bytes past `resume.end`, once the bytes before it are confirmed to still
-/// end the last line read; otherwise the whole file.
-fn read_grown<'a>(
-    path: RelPath,
-    resume: Resume,
-    len: u64,
-    modified: u64,
-) -> Flow<'a, Result<Option<Scanned>>> {
-    let offset = resume.end - line::ENDING;
-    let range = Range {
-        offset,
-        len: len - offset,
-    };
-    flow::read_present(Root::Folder, &path.clone(), range).and_then(move |bytes| {
-        let Some(bytes) = bytes else {
-            return flow::ok(None);
-        };
-        let ending = line::ENDING as usize;
-        if bytes.len() as u64 != range.len || bytes[..ending] != resume.ending[..] {
-            return read_whole(path, len, Some(modified));
-        }
-        let stamp = Stamp {
-            len,
-            modified,
-            tail: bytes[bytes.len() - ending..].to_vec(),
-        };
-        flow::ok(Some(Scanned {
-            path,
-            found: Found::Grown {
-                bytes: bytes[ending..].to_vec(),
-                stamp,
-            },
-        }))
-    })
-}
-
-/// The file from its start, up to [`MAX_FILE`] bytes, stamped when the backend
-/// gave a modification time.
-fn read_whole<'a>(
-    path: RelPath,
-    len: u64,
-    modified: Option<u64>,
-) -> Flow<'a, Result<Option<Scanned>>> {
-    let range = Range {
+/// A file from its start, up to [`MAX_FILE`] bytes, and its tail apart when that
+/// is past what is read and the file has a modification time to stamp.
+fn whole_ranges(len: u64, modified: Option<u64>) -> Vec<Range> {
+    let whole = Range {
         offset: 0,
         len: len.min(MAX_FILE),
     };
-    flow::read_present(Root::Folder, &path.clone(), range).and_then(move |bytes| {
-        let Some(bytes) = bytes else {
-            return flow::ok(None);
-        };
-        let tail = tail_range(len);
-        let ends = (bytes.len() as u64 == len).then(|| bytes[tail.offset as usize..].to_vec());
-        let tail = match (modified, ends) {
-            (None, _) => flow::ok(None),
-            (Some(_), Some(ends)) => flow::ok(Some(ends)),
-            (Some(_), None) => flow::read_present(Root::Folder, &path.clone(), tail),
-        };
-        tail.map_ok(move |tail| {
-            let stamp = modified.zip(tail).map(|(modified, tail)| Stamp {
-                len,
-                modified,
-                tail,
-            });
-            let found = Found::Read { bytes, stamp };
-            Some(Scanned { path, found })
+    match modified.is_some() && len > MAX_FILE {
+        true => vec![whole, tail_range(len)],
+        false => vec![whole],
+    }
+}
+
+/// Reads `files` as planned, in one [`crate::Io::ReadMany`], then whole in a
+/// second those whose tail or grown part showed the last read no longer holds.
+/// A file gone before its read is left out.
+fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<Scanned>>> {
+    let reads = files.iter().flat_map(|file| {
+        let ranges = file.plan.reads(file.meta.len, file.meta.modified);
+        ranges.into_iter().map(|range| (file.path.clone(), range))
+    });
+    flow::read_many(Root::Folder, reads.collect()).and_then(move |read| {
+        let mut read = read.into_iter();
+        let mut found = Vec::new();
+        let mut again = Vec::new();
+        for Planned { path, meta, plan } in files {
+            let parts: Vec<Option<Vec<u8>>> = read
+                .by_ref()
+                .take(plan.reads(meta.len, meta.modified).len())
+                .collect();
+            match planned(plan, &meta, parts) {
+                Some(Some(scanned)) => found.push(Scanned {
+                    path,
+                    found: scanned,
+                }),
+                Some(None) => again.push((path, meta)),
+                None => {}
+            }
+        }
+        let reads = again.iter().flat_map(|(path, meta)| {
+            let ranges = whole_ranges(meta.len, meta.modified);
+            ranges.into_iter().map(|range| (path.clone(), range))
+        });
+        flow::read_many(Root::Folder, reads.collect()).map_ok(move |read| {
+            let mut read = read.into_iter();
+            for (path, meta) in again {
+                let ranges = whole_ranges(meta.len, meta.modified).len();
+                let parts: Vec<Option<Vec<u8>>> = read.by_ref().take(ranges).collect();
+                if let Some(whole) = whole(&meta, parts) {
+                    found.push(Scanned { path, found: whole });
+                }
+            }
+            found
         })
     })
 }
+
+/// What `parts`, read as `plan` asked, found: `None` when the file is gone, and
+/// `Some(None)` when it must be read whole.
+fn planned(plan: Plan, meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Option<Found>> {
+    match plan {
+        Plan::Whole => whole(meta, parts).map(Some),
+        Plan::Tail(known) => {
+            let tail = parts.into_iter().next()??;
+            Some((tail == known).then_some(Found::Unchanged))
+        }
+        Plan::Grown { resume, modified } => {
+            let bytes = parts.into_iter().next()??;
+            let ending = line::ENDING as usize;
+            let expected = meta.len - (resume.end - line::ENDING);
+            if bytes.len() as u64 != expected || bytes[..ending] != resume.ending[..] {
+                return Some(None);
+            }
+            let stamp = Stamp {
+                len: meta.len,
+                modified,
+                tail: bytes[bytes.len() - ending..].to_vec(),
+            };
+            Some(Some(Found::Grown {
+                bytes: bytes[ending..].to_vec(),
+                stamp,
+            }))
+        }
+    }
+}
+
+/// A file read whole as [`whole_ranges`] asks, stamped when the backend gave a
+/// modification time and its tail was read; `None` when the file is gone.
+fn whole(meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Found> {
+    let mut parts = parts.into_iter();
+    let bytes = parts.next()??;
+    let len = meta.len;
+    let tail = match bytes.len() as u64 == len {
+        true => Some(bytes[tail_range(len).offset as usize..].to_vec()),
+        false => parts.next().flatten(),
+    };
+    let stamp = meta.modified.zip(tail).map(|(modified, tail)| Stamp {
+        len,
+        modified,
+        tail,
+    });
+    Some(Found::Read { bytes, stamp })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1664,8 +1716,12 @@ mod tests {
         }
 
         fn perform(&mut self, io: Io) -> crate::io::IoResult {
-            if let Io::Read { range, .. } = &io {
-                self.1 += range.len;
+            match &io {
+                Io::Read { range, .. } => self.1 += range.len,
+                Io::ReadMany { reads, .. } => {
+                    self.1 += reads.iter().map(|(_, r)| r.len).sum::<u64>()
+                }
+                _ => {}
             }
             self.0.perform(io)
         }

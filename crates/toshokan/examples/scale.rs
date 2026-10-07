@@ -97,7 +97,9 @@ impl IoStats {
         let order = [
             "List",
             "Stat",
+            "ListStat",
             "Read",
+            "ReadMany",
             "Create",
             "Append",
             "Write",
@@ -114,7 +116,7 @@ impl IoStats {
             .filter_map(|kind| {
                 let (n, bytes) = by_kind.get(kind)?;
                 Some(match (*kind, bytes) {
-                    (_, 0) | ("List", _) => format!("{kind} {n}"),
+                    (_, 0) | ("List" | "ListStat", _) => format!("{kind} {n}"),
                     _ => format!("{kind} {n} ({})", size(*bytes)),
                 })
             })
@@ -142,7 +144,9 @@ fn kind_of(io: &Io) -> (&'static str, u64) {
     match io {
         Io::List { .. } => ("List", 0),
         Io::Stat { .. } => ("Stat", 0),
+        Io::ListStat { .. } => ("ListStat", 0),
         Io::Read { .. } => ("Read", 0),
+        Io::ReadMany { .. } => ("ReadMany", 0),
         Io::Create { bytes, .. } => ("Create", bytes.len() as u64),
         Io::Append { bytes, .. } => ("Append", bytes.len() as u64),
         Io::Write { bytes, .. } => ("Write", bytes.len() as u64),
@@ -168,7 +172,11 @@ impl Backend for Counted {
         let result = self.inner.perform(io);
         let got = match &result {
             Ok(Reply::Bytes(bytes)) => bytes.len() as u64,
+            Ok(Reply::ReadMany(read)) => {
+                read.iter().flatten().map(|bytes| bytes.len() as u64).sum()
+            }
             Ok(Reply::Listed(entries)) => entries.len() as u64,
+            Ok(Reply::ListedStat(entries)) => entries.len() as u64,
             _ => 0,
         };
         let mut stats = self.stats.borrow_mut();
@@ -739,7 +747,7 @@ impl Bench {
                 first.allocs,
                 first.io.total(),
                 first.io.shown(),
-                size(first.io.bytes(&["Read"])),
+                size(first.io.bytes(&["Read", "ReadMany"])),
                 size(first.io.bytes(&["Create", "Append", "Write"])),
                 size(first.io.local_bytes()),
             );

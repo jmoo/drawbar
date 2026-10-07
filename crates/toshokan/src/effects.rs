@@ -13,6 +13,7 @@
 //! [`finish`]. Recovery resumes [`apply`] where an interrupted run stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use crate::binding::Bindings;
 use crate::env::{Env, Identify};
 use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
 use crate::flow::{self, each, fold, ok, Fallible, Flow};
-use crate::ids::{EntityId, Identity, Nonce, WriterId};
+use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Displaced, FileFact};
@@ -502,7 +503,14 @@ fn write_record<'a>(
         .and_then({
             let staged = staged.clone();
             let bytes = record.encode();
-            move |()| flow::create(Root::Folder, &staged, bytes)
+            move |()| {
+                let created = flow::act(Io::Create {
+                    root: Root::Folder,
+                    path: staged.clone(),
+                    bytes,
+                });
+                created.and_then(move |()| flow::sync(Root::Folder, &staged))
+            }
         })
         .and_then(move |()| flow::rename(Root::Folder, &staged, &path))
 }
@@ -552,16 +560,31 @@ fn refusal<'a>(
     identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Option<Refusal>> {
     let identify = Rc::clone(identify);
-    let checked = fold(
-        plan.checks.clone().into_iter(),
-        None,
-        move |refused, check| match refused {
-            Some(refused) => ok(Some(refused)),
-            None => holding(&check.path, &identify).map_ok(move |held| {
-                let found = match held {
-                    Holding::Directory => return Some(Refusal::Directory(check.path)),
-                    Holding::Nothing => None,
-                    Holding::File(identity) => Some(identity),
+    let checks = plan.checks.clone();
+    let paths: Vec<RelPath> = checks.iter().map(|check| check.path.clone()).collect();
+    let stated = fold(paths.into_iter(), Vec::new(), |mut metas, path| {
+        flow::stat(Root::Folder, &path).map_ok(move |meta| {
+            metas.push(meta);
+            metas
+        })
+    });
+    let checked = stated.and_then(move |metas| {
+        let files = checks
+            .iter()
+            .zip(&metas)
+            .filter_map(|(check, meta)| match meta {
+                Some(meta) if meta.kind == Kind::File => Some((check.path.clone(), meta.len)),
+                _ => None,
+            });
+        flow::identities(Root::Folder, files.collect(), &identify).map_ok(move |identities| {
+            let mut identities = identities.into_iter();
+            checks.into_iter().zip(metas).find_map(|(check, meta)| {
+                let found = match meta {
+                    None => None,
+                    Some(meta) if meta.kind == Kind::Directory => {
+                        return Some(Refusal::Directory(check.path));
+                    }
+                    Some(_) => identities.next().expect("an identity for each file"),
                 };
                 let holds = match (check.expect, found) {
                     (Expect::Absent, None) => true,
@@ -575,9 +598,9 @@ fn refusal<'a>(
                         found,
                     }))
                 })
-            }),
-        },
-    );
+            })
+        })
+    });
     let items: Vec<RelPath> = plan
         .steps
         .iter()
@@ -595,23 +618,6 @@ fn refusal<'a>(
     })
 }
 
-/// What a library path holds, as a precondition sees it.
-enum Holding {
-    Nothing,
-    File(Identity),
-    Directory,
-}
-
-fn holding<'a>(path: &RelPath, identify: &Rc<dyn Identify>) -> Fallible<'a, Holding> {
-    let path = path.clone();
-    let identify = Rc::clone(identify);
-    flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
-        None => ok(Holding::Nothing),
-        Some(meta) if meta.kind == Kind::Directory => ok(Holding::Directory),
-        Some(meta) => flow::identity(Root::Folder, path, meta.len, &identify).map_ok(Holding::File),
-    })
-}
-
 /// Carries out `record`'s steps from `start`, each destination durable before its
 /// source is gone, then reports what the folder shows. A step that fails stops the
 /// run with [`Outcome::Partial`]; staged bytes that were not placed then go to this
@@ -625,24 +631,62 @@ pub fn apply(
 ) -> Task<'static, Result<Applied>> {
     let layout = layout.clone();
     let writer = record.writer;
-    let steps = start..record.steps.len();
+    let runs = runs(&record.steps, start);
     let running = (layout.clone(), Rc::clone(&record));
     fold(
-        steps,
+        runs.into_iter(),
         None,
-        move |failed: Option<IoError>, i| match failed {
+        move |failed: Option<IoError>, run: Range<usize>| match failed {
             Some(failed) => ok(Some(failed)),
             None => {
-                run_step(&running.0, writer, &running.1.steps[i]).then(move |result| match result {
-                    Ok(()) => ok(None),
-                    Err(Error::Io { error, .. }) => ok(Some(error)),
-                    Err(other) => ok(Some(IoError::Other(format!("step {i}: {other}")))),
-                })
+                let first = run.start;
+                run_steps(&running.0, writer, &running.1.steps[run]).then(
+                    move |result| match result {
+                        Ok(()) => ok(None),
+                        Err(Error::Io { error, .. }) => ok(Some(error)),
+                        Err(other) => ok(Some(IoError::Other(format!("step {first}: {other}")))),
+                    },
+                )
             }
         },
     )
     .and_then(move |failed| account(layout, name, record, failed, identify))
     .task()
+}
+
+/// The steps from `start` in runs carried out together: consecutive `place`
+/// steps into one directory, and every other step alone.
+fn runs(steps: &[EffectStep], start: usize) -> Vec<Range<usize>> {
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for i in start..steps.len() {
+        match runs.last_mut() {
+            Some(run) if placed_together(&steps[run.start], &steps[i]) => run.end = i + 1,
+            _ => runs.push(i..i + 1),
+        }
+    }
+    runs
+}
+
+// ⚠️ A crash between a run's two syncs can leave each move's source beside its
+// destination, and recovery removes only the last one's. Only a staged file is
+// harmless left behind, so only `place` steps run together.
+fn placed_together(first: &EffectStep, next: &EffectStep) -> bool {
+    match (first, next) {
+        (EffectStep::Place { path: a, .. }, EffectStep::Place { path: b, .. }) => {
+            a.parent() == b.parent()
+        }
+        _ => false,
+    }
+}
+
+fn run_steps<'a>(layout: &Layout, writer: WriterId, steps: &[EffectStep]) -> Fallible<'a, ()> {
+    match steps {
+        [step] => run_step(layout, writer, step),
+        places => {
+            let moves = places.iter().filter_map(|step| step.ends(layout, writer));
+            flow::rename_all(Root::Folder, moves.collect())
+        }
+    }
 }
 
 fn run_step<'a>(layout: &Layout, writer: WriterId, step: &EffectStep) -> Fallible<'a, ()> {
@@ -734,54 +778,44 @@ fn account<'a>(
             let identify = Rc::clone(&identify);
             move |swept| {
                 let items: Vec<(Nonce, RelPath)> = trashed.into_iter().chain(swept).collect();
-                fold(
-                    items.into_iter(),
-                    Vec::new(),
-                    move |mut displaced, (item, from)| {
-                        flow::observe(Root::Folder, &layout.trash(writer, item), &identify).map_ok(
-                            move |seen| {
-                                displaced.extend(seen.map(|seen| Displaced {
-                                    item,
-                                    from,
-                                    identity: seen.identity,
-                                    len: seen.len,
-                                }));
-                                displaced
-                            },
-                        )
-                    },
-                )
+                let paths = items.iter().map(|(item, _)| layout.trash(writer, *item));
+                flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
+                    let seen = items.into_iter().zip(seen);
+                    let displaced = seen.filter_map(|((item, from), seen)| {
+                        let seen = seen?;
+                        Some(Displaced {
+                            item,
+                            from,
+                            identity: seen.identity,
+                            len: seen.len,
+                        })
+                    });
+                    displaced.collect::<Vec<Displaced>>()
+                })
             }
         })
         .and_then(move |displaced| {
-            fold(
-                ends.into_iter(),
-                Vec::new(),
-                move |mut files, end| match end.path {
-                    None => {
-                        files.push((end.entity, None));
-                        ok(files)
-                    }
-                    Some(path) => {
-                        flow::observe(Root::Folder, &path, &identify).map_ok(move |seen| {
-                            files.extend(seen.map(|seen| {
-                                let fact = FileFact {
-                                    path,
-                                    identity: seen.identity,
-                                    len: seen.len,
-                                    modified: seen.modified,
-                                };
-                                (end.entity, Some(fact))
-                            }));
-                            files
-                        })
-                    }
-                },
-            )
-            .map_ok(move |files| Applied {
-                displaced,
-                files,
-                outcome,
+            let paths = ends.iter().filter_map(|end| end.path.clone());
+            flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
+                let mut seen = seen.into_iter();
+                let files = ends.into_iter().filter_map(|end| {
+                    let Some(path) = end.path else {
+                        return Some((end.entity, None));
+                    };
+                    let seen = seen.next().expect("an observation for each path")?;
+                    let fact = FileFact {
+                        path,
+                        identity: seen.identity,
+                        len: seen.len,
+                        modified: seen.modified,
+                    };
+                    Some((end.entity, Some(fact)))
+                });
+                Applied {
+                    displaced,
+                    files: files.collect(),
+                    outcome,
+                }
             })
         })
     })

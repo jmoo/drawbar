@@ -753,13 +753,15 @@ mod tests {
         }
 
         fn perform(&mut self, io: Io) -> IoResult {
-            if let Io::Read {
-                root,
-                path,
-                range: Range { len, .. },
-            } = &io
-            {
-                *self.read.entry(*root).or_default() += len;
+            let reads = match &io {
+                Io::Read { path, range, .. } => vec![(path, range)],
+                Io::ReadMany { reads, .. } => {
+                    reads.iter().map(|(path, range)| (path, range)).collect()
+                }
+                _ => Vec::new(),
+            };
+            for (path, Range { len, .. }) in reads {
+                *self.read.entry(io.root()).or_default() += len;
                 self.paths.push(path.clone());
             }
             self.disk.perform(io)

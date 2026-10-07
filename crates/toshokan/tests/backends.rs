@@ -4,7 +4,7 @@
 mod common;
 
 use common::{path, Driven};
-use toshokan::io::{DirEntry, IoError, Kind, Lock, Range};
+use toshokan::io::{DirEntry, IoError, Kind, Lock, Meta, Range};
 use toshokan::{Io, IoResult, RelPath, Reply, Root};
 
 fn create(root: Root, text: &str, bytes: &[u8]) -> Io {
@@ -97,6 +97,70 @@ mod suite {
                 ("b", Kind::File),
                 ("d", Kind::Directory),
             ])
+        );
+    }
+
+    pub fn a_listing_with_metadata_says_what_a_listing_and_each_stat_say(b: &mut impl Driven) {
+        b.ok(make_dir(Root::Folder, "d/e"));
+        b.ok(create(Root::Folder, "d/b", b"bb"));
+        b.ok(create(Root::Folder, "d/a", b"a"));
+        let dir = path("d");
+        let Reply::Listed(entries) = b.ok(Io::List {
+            root: Root::Folder,
+            dir: dir.clone(),
+        }) else {
+            panic!("not a listing");
+        };
+        let each: Vec<(String, Meta)> = entries
+            .into_iter()
+            .map(|entry| {
+                let at = dir.join(&entry.name).unwrap();
+                let Reply::Stat(Some(meta)) = b.ok(stat(at.as_str())) else {
+                    panic!("{at:?} is missing");
+                };
+                (entry.name, meta)
+            })
+            .collect();
+        let names: Vec<&str> = each.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "e"]);
+        let list_stat = |dir: &str| Io::ListStat {
+            root: Root::Folder,
+            dir: path(dir),
+        };
+        assert_eq!(b.ok(list_stat("d")), Reply::ListedStat(each));
+        assert_eq!(
+            b.requests(vec![list_stat("none"), list_stat("d/a")]),
+            [Err(IoError::NotFound), Err(IoError::NotDirectory)]
+        );
+    }
+
+    pub fn several_reads_answer_each_as_it_would_alone(b: &mut impl Driven) {
+        b.ok(make_dir(Root::Folder, "d"));
+        b.ok(create(Root::Folder, "f", b"hello"));
+        let reads = [("f", 0, 5), ("none", 0, 1), ("d", 0, 1), ("f", 3, 10)];
+        let alone: Vec<IoResult> = reads
+            .iter()
+            .map(|&(at, offset, len)| b.one(read(at, offset, len)))
+            .collect();
+        let together = b.ok(Io::ReadMany {
+            root: Root::Folder,
+            reads: reads
+                .iter()
+                .map(|&(at, offset, len)| (path(at), Range { offset, len }))
+                .collect(),
+        });
+        let alone = alone.into_iter().map(|read| match read {
+            Ok(Reply::Bytes(bytes)) => Ok(bytes),
+            Ok(other) => panic!("{other:?}"),
+            Err(error) => Err(error),
+        });
+        assert_eq!(together, Reply::ReadMany(alone.collect()));
+        assert_eq!(
+            b.ok(Io::ReadMany {
+                root: Root::Folder,
+                reads: Vec::new(),
+            }),
+            Reply::ReadMany(Vec::new())
         );
     }
 
@@ -266,7 +330,10 @@ mod suite {
                 Err(IoError::NotDirectory),
                 Err(IoError::NotFound),
                 Err(IoError::NotFound),
-                Err(IoError::NotFound),
+                match b.capabilities(Root::Folder).fsync {
+                    true => Err(IoError::NotFound),
+                    false => Ok(Reply::Done),
+                },
             ]
         );
         assert_eq!(b.ok(read("f", 0, 9)), Reply::Bytes(b"x".to_vec()));
@@ -313,6 +380,8 @@ mod suite {
 for_every_backend!(suite:
     a_created_file_reads_back_by_range,
     a_listing_is_sorted_by_name_with_kinds,
+    a_listing_with_metadata_says_what_a_listing_and_each_stat_say,
+    several_reads_answer_each_as_it_would_alone,
     nothing_is_ever_replaced,
     a_directory_renames_with_its_contents,
     removal_needs_the_right_kind_and_an_empty_directory,

@@ -89,8 +89,8 @@ impl Scan {
 }
 
 /// Lists every library file outside toshokan's root, with the paths whose
-/// identities it read. Requests only [`crate::Io::List`], [`crate::Io::Stat`] and
-/// [`crate::Io::Read`].
+/// identities it read. Requests only [`crate::Io::ListStat`], one per directory,
+/// and [`crate::Io::ReadMany`].
 pub fn scan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
@@ -106,7 +106,8 @@ pub fn scan(
 
 /// `previous` with each of `paths` scanned again: the file at a path, the files
 /// under a directory, or nothing; with the paths whose identities it read.
-/// Requests only [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+/// Requests only [`crate::Io::Stat`], [`crate::Io::ListStat`] and
+/// [`crate::Io::ReadMany`].
 pub fn rescan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
@@ -185,16 +186,24 @@ fn identified<'a>(
             needed.then(|| (path.clone(), file.len))
         })
         .collect();
-    let read = unknown.iter().map(|(path, _)| path.clone()).collect();
-    let identified = fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
-        flow::identity(Root::Folder, path.clone(), len, &identify).map_ok(move |identity| {
-            if let Some(file) = scan.files.get_mut(&path) {
-                file.identity = Some(identity);
+    let paths: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
+    flow::identities(Root::Folder, unknown, &identify).map_ok(move |identities| {
+        let mut read = Vec::new();
+        for (path, identity) in paths.into_iter().zip(identities) {
+            match identity {
+                Some(identity) => {
+                    if let Some(file) = scan.files.get_mut(&path) {
+                        file.identity = Some(identity);
+                    }
+                    read.push(path);
+                }
+                None => {
+                    scan.files.remove(&path);
+                }
             }
-            scan
-        })
-    });
-    identified.map_ok(move |scan| (scan, read))
+        }
+        (scan, read)
+    })
 }
 
 /// `scan` with what is at `path`: a file, every file under a directory, or
@@ -211,18 +220,13 @@ fn visit<'a>(layout: Rc<Layout>, path: RelPath, scan: Scan) -> flow::Fallible<'a
 }
 
 fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
-    flow::list(Root::Folder, &dir).and_then(move |entries| {
-        fold(entries.into_iter(), scan, move |scan, entry| {
-            let path = dir
-                .join(&entry.name)
-                .expect("a listed name is one component");
-            match entry.kind {
+    flow::list_stat(Root::Folder, &dir).and_then(move |entries| {
+        fold(entries.into_iter(), scan, move |scan, (name, meta)| {
+            let path = dir.join(&name).expect("a listed name is one component");
+            match meta.kind {
                 Kind::Directory if layout.owns(&path) => ok(scan),
                 Kind::Directory => walk(Rc::clone(&layout), path, scan),
-                Kind::File => flow::stat(Root::Folder, &path).map_ok(move |meta| match meta {
-                    Some(meta) => found(scan, path, meta),
-                    None => scan,
-                }),
+                Kind::File => ok(found(scan, path, meta)),
             }
         })
     })

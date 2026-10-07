@@ -5,10 +5,11 @@
 use std::collections::BTreeMap;
 
 use crate::error::Result;
-use crate::flow::{self, each, fold, ok};
+use crate::flow::{self, each};
 use crate::ids::WriterId;
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
+use crate::path::RelPath;
 use crate::report::{Emptied, TrashItem};
 
 /// What emptying keeps.
@@ -30,40 +31,32 @@ impl Default for Policy {
     }
 }
 
-/// The items of `logged`, what `writer`'s entries say they displaced, still in its
-/// trash, oldest first, each with its length there. Files in the trash no entry displaced are not listed, and so
-/// never emptied. Reads only.
+/// The items of `logged`, what `writer`'s entries say they displaced, still in
+/// its trash, oldest first, each with its length there. Files in the trash no
+/// entry displaced are not listed, and so never emptied. Reads only, in one
+/// request.
 pub fn list(
     layout: &Layout,
     writer: WriterId,
     logged: Vec<TrashItem>,
 ) -> Task<'static, Result<Vec<TrashItem>>> {
-    let dir = layout.trash_dir(writer);
-    flow::list(Root::Folder, &dir)
-        .and_then(move |entries| {
+    flow::list_stat(Root::Folder, &layout.trash_dir(writer))
+        .map_ok(move |entries| {
             let mut logged: BTreeMap<String, TrashItem> = logged
                 .into_iter()
                 .map(|item| (item.item.to_string(), item))
                 .collect();
-            let present: Vec<TrashItem> = entries
+            let mut items: Vec<TrashItem> = entries
                 .into_iter()
-                .filter(|entry| entry.kind == Kind::File)
-                .filter_map(|entry| logged.remove(&entry.name))
-                .collect();
-            fold(present.into_iter(), Vec::new(), move |mut items, item| {
-                let path = dir
-                    .join(&item.item.to_string())
-                    .expect("a nonce is one component");
-                flow::stat(Root::Folder, &path).map_ok(move |meta| {
-                    items.extend(meta.map(|meta| TrashItem {
+                .filter(|(_, meta)| meta.kind == Kind::File)
+                .filter_map(|(name, meta)| {
+                    let item = logged.remove(&name)?;
+                    Some(TrashItem {
                         len: meta.len,
                         ..item
-                    }));
-                    items
+                    })
                 })
-            })
-        })
-        .map_ok(|mut items: Vec<TrashItem>| {
+                .collect();
             items.sort_by_key(|item| (item.at, item.item));
             items
         })
@@ -93,7 +86,7 @@ pub fn expired(items: &[TrashItem], policy: Policy, now_ms: u64) -> Vec<TrashIte
 }
 
 /// Removes from `writer`'s trash the items of `items` that `policy` does not keep
-/// at wall time `now_ms`.
+/// at wall time `now_ms`, then syncs the trash once.
 pub fn empty(
     layout: &Layout,
     writer: WriterId,
@@ -101,7 +94,6 @@ pub fn empty(
     policy: Policy,
     now_ms: u64,
 ) -> Task<'static, Result<Emptied>> {
-    let layout = layout.clone();
     let removed = expired(&items, policy, now_ms);
     let emptied = Emptied {
         removed: removed.iter().map(|item| item.item).collect(),
@@ -110,10 +102,19 @@ pub fn empty(
             .map(|item| item.len)
             .fold(0, u64::saturating_add),
     };
-    each(removed.into_iter(), move |item| {
-        flow::remove(Root::Folder, &layout.trash(writer, item.item))
+    if removed.is_empty() {
+        return Task::ready(Ok(emptied));
+    }
+    let paths: Vec<RelPath> = removed
+        .iter()
+        .map(|item| layout.trash(writer, item.item))
+        .collect();
+    let dir = layout.trash_dir(writer);
+    each(paths.into_iter(), |path| {
+        flow::remove_if_present(Root::Folder, path)
     })
-    .and_then(move |()| ok(emptied))
+    .and_then(move |()| flow::sync(Root::Folder, &dir))
+    .map_ok(move |()| emptied)
     .task()
 }
 
@@ -121,7 +122,6 @@ pub fn empty(
 mod tests {
     use super::*;
     use crate::ids::{EntryHash, Hlc, Nonce};
-    use crate::path::RelPath;
 
     const DAY: u64 = 24 * 60 * 60 * 1000;
 

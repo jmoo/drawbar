@@ -196,7 +196,13 @@ impl MemDisk {
         match io {
             Io::List { root, dir } => disk.tree(root).list(&dir).map(Reply::Listed),
             Io::Stat { root, path } => disk.tree(root).stat(&path).map(Reply::Stat),
+            Io::ListStat { root, dir } => disk.tree(root).list_stat(&dir).map(Reply::ListedStat),
             Io::Read { root, path, range } => disk.tree(root).read(&path, range).map(Reply::Bytes),
+            Io::ReadMany { root, reads } => {
+                let tree = disk.tree(root);
+                let read = reads.iter().map(|(path, range)| tree.read(path, *range));
+                Ok(Reply::ReadMany(read.collect()))
+            }
             Io::Lock { name } => Ok(Reply::Lock(disk.lock(self.process, name))),
             Io::Fill { .. } => Err(IoError::Other(FILLED_BY_DRIVERS.into())),
             Io::Unlock { name } => {
@@ -379,7 +385,9 @@ impl Disk {
             Io::Sync { root, path } => self.tree_mut(root).sync(&path),
             Io::List { .. }
             | Io::Stat { .. }
+            | Io::ListStat { .. }
             | Io::Read { .. }
+            | Io::ReadMany { .. }
             | Io::Fill { .. }
             | Io::Lock { .. }
             | Io::Unlock { .. } => {
@@ -604,11 +612,22 @@ impl Tree {
         }
     }
 
+    fn list_stat(&self, dir: &RelPath) -> Result<Vec<(String, Meta)>, IoError> {
+        match &self.nodes[self.existing(dir)?].live {
+            Content::Directory(entries) => Ok(entries
+                .iter()
+                .map(|(name, &ino)| (name.clone(), self.meta(ino)))
+                .collect()),
+            Content::File { .. } => Err(IoError::NotDirectory),
+        }
+    }
+
     fn stat(&self, path: &RelPath) -> Result<Option<Meta>, IoError> {
-        let Some(ino) = self.lookup(path)? else {
-            return Ok(None);
-        };
-        Ok(Some(match &self.nodes[ino].live {
+        Ok(self.lookup(path)?.map(|ino| self.meta(ino)))
+    }
+
+    fn meta(&self, ino: Ino) -> Meta {
+        match &self.nodes[ino].live {
             Content::File { data, modified } => Meta {
                 kind: Kind::File,
                 len: data.len() as u64,
@@ -619,7 +638,7 @@ impl Tree {
                 len: 0,
                 modified: None,
             },
-        }))
+        }
     }
 
     fn read(&self, path: &RelPath, range: Range) -> Result<Vec<u8>, IoError> {

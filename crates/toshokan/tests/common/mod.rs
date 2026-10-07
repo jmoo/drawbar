@@ -134,6 +134,116 @@ impl Driven for AsyncMem {
     }
 }
 
+/// A [`MemDisk`] behind an async backend that takes single requests only, each
+/// finished on a later poll, and answers batched ones by [`asynch::fan_out`].
+pub struct Unbatched(pub MemDisk);
+
+impl asynch::Fs for Unbatched {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        asynch::Fs::capabilities(&self.0, root)
+    }
+
+    async fn perform(&self, io: Io) -> IoResult {
+        asynch::fan_out(io, |io| single(&self.0, io)).await
+    }
+}
+
+async fn single(disk: &MemDisk, io: Io) -> IoResult {
+    assert!(
+        !matches!(io, Io::ListStat { .. } | Io::ReadMany { .. }),
+        "{io:?} is batched"
+    );
+    Later(false).await;
+    disk.perform(io)
+}
+
+/// Ready on its second poll.
+pub struct Later(pub bool);
+
+impl std::future::Future for Later {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        context.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+}
+
+pub struct AsyncUnbatched(pub MemDisk);
+
+impl Driven for AsyncUnbatched {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        asynch::Fs::capabilities(&self.0, root)
+    }
+
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        let sources = contents.into_iter().map(Fill::asynch).collect();
+        pollster::block_on(asynch::run_with(
+            &Unbatched(self.0.clone()),
+            sources,
+            operation,
+        ))
+    }
+
+    fn other_process(&self) -> Self {
+        Self(self.0.process())
+    }
+}
+
+/// A [`MemDisk`] that keeps every request it is asked, in order.
+#[derive(Clone)]
+pub struct Recorded {
+    pub disk: MemDisk,
+    pub requests: Rc<std::cell::RefCell<Vec<Io>>>,
+}
+
+impl Recorded {
+    pub fn new(disk: MemDisk) -> Self {
+        Self {
+            disk,
+            requests: Rc::default(),
+        }
+    }
+
+    /// The requests asked since the last call.
+    pub fn take(&self) -> Vec<Io> {
+        std::mem::take(&mut self.requests.borrow_mut())
+    }
+}
+
+impl Backend for Recorded {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        self.requests.borrow_mut().push(io.clone());
+        self.disk.perform(io)
+    }
+}
+
+impl Driven for Recorded {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        let sources = contents.into_iter().map(Fill::blocking).collect();
+        blocking::run_with(self, sources, operation)
+    }
+
+    fn other_process(&self) -> Self {
+        Self::new(self.disk.process())
+    }
+}
+
 pub struct NativeDirs {
     backend: Native,
     dirs: std::rc::Rc<[tempfile::TempDir; 2]>,
@@ -176,6 +286,9 @@ macro_rules! for_every_backend {
         }
         mod async_mem {
             $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::AsyncMem(toshokan::MemDisk::new())); })*
+        }
+        mod async_unbatched {
+            $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::AsyncUnbatched(toshokan::MemDisk::new())); })*
         }
         mod native {
             $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::NativeDirs::new()); })*

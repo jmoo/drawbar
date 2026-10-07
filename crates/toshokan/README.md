@@ -62,6 +62,8 @@ The core does no I/O. Every operation is a state machine that asks for reads,
 writes and syncs, and consumes their results. The `blocking` driver runs it on
 the machine's file system, and the `asynch` driver on any async backend, such as
 a browser's; both run it on an in-memory disk that models what survives a crash.
+A directory listing with every file's metadata is one request, and so are many
+reads, so opening a library costs a request per directory rather than per file.
 Time, randomness, the app's identity function and the volume's name rules are
 injected, so the crash harness and the sync simulator replay every run exactly.
 

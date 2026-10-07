@@ -531,7 +531,10 @@ A writer carries out an intent's steps in this order:
 4. Carry out the steps in order. A move first creates the destination's
    directory, checks that nothing is at the destination, renames without
    replacing, syncs the destination's directory and then the source's, so a
-   source's name is gone only once the destination's is durable.
+   source's name is gone only once the destination's is durable. Consecutive
+   `place` steps into one directory are moved together, then that directory and
+   `tmp/` are synced once for all of them; a crash between the two syncs leaves
+   staged files beside the placed ones, and settling removes them.
 5. Append the intent's entry.
 6. Remove the pending record.
 
@@ -627,7 +630,9 @@ intent staged and could not place. An item is listed with the entry whose
 `displaced` names it. Only its writer removes an item, and only by emptying:
 first every item displaced longer ago than the policy's age, by default 30 days,
 then the oldest items until the rest fit the policy's size, by default 1 GiB.
-An item no entry names is never emptied.
+An item no entry names is never emptied. Emptying removes the items, then syncs
+the trash once; an item whose removal a crash undid is removed by the next
+emptying.
 
 Emptying a trash is the only way bytes leave the folder.
 

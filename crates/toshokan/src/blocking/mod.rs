@@ -25,7 +25,7 @@ use crate::schema::Schema;
 use crate::trash::Policy;
 use crate::view::View;
 
-/// Storage that performs requests as they come.
+/// Storage that performs requests as they come, the batched ones included.
 pub trait Backend {
     fn capabilities(&self, root: Root) -> Capabilities;
 
@@ -142,6 +142,7 @@ pub fn run_with<'s, O: Operation, B: Backend>(
                     .map(|()| Reply::Done),
                 None => Err(IoError::Other(format!("no content {}", content.0))),
             },
+            Io::Sync { root, .. } if !backend.capabilities(root).fsync => Ok(Reply::Done),
             io => backend.perform(io),
         });
     }

@@ -114,6 +114,19 @@ impl Native {
         Ok(entries)
     }
 
+    fn list_stat(&self, root: Root, dir: &RelPath) -> Result<Vec<(String, Meta)>, IoError> {
+        let mut found = Vec::new();
+        for entry in self.list(root, dir)? {
+            let path = dir
+                .join(&entry.name)
+                .map_err(|error| IoError::Other(error.to_string()))?;
+            if let Some(meta) = self.stat(root, &path)? {
+                found.push((entry.name, meta));
+            }
+        }
+        Ok(found)
+    }
+
     fn read(&self, root: Root, path: &RelPath, range: Range) -> Result<Vec<u8>, IoError> {
         let mut file = File::open(self.file(root, path)?).map_err(io_error)?;
         file.seek(SeekFrom::Start(range.offset)).map_err(io_error)?;
@@ -262,7 +275,14 @@ impl Backend for Native {
         match io {
             Io::List { root, dir } => self.list(root, &dir).map(Reply::Listed),
             Io::Stat { root, path } => self.stat(root, &path).map(Reply::Stat),
+            Io::ListStat { root, dir } => self.list_stat(root, &dir).map(Reply::ListedStat),
             Io::Read { root, path, range } => self.read(root, &path, range).map(Reply::Bytes),
+            Io::ReadMany { root, reads } => Ok(Reply::ReadMany(
+                reads
+                    .iter()
+                    .map(|(path, range)| self.read(root, path, *range))
+                    .collect(),
+            )),
             Io::Create { root, path, bytes } => self.create(root, &path, &bytes).map(done),
             Io::Append { root, path, bytes } => self.append(root, &path, &bytes).map(done),
             Io::Write {

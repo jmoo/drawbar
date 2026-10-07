@@ -80,6 +80,16 @@ struct Seen {
     log_read: u64,
 }
 
+/// Each file `io` reads, with the range it asks for.
+fn reads(io: &Io) -> impl Iterator<Item = (&RelPath, Range)> {
+    let reads: Vec<(&RelPath, Range)> = match io {
+        Io::Read { path, range, .. } => vec![(path, *range)],
+        Io::ReadMany { reads, .. } => reads.iter().map(|(path, range)| (path, *range)).collect(),
+        _ => Vec::new(),
+    };
+    reads.into_iter()
+}
+
 /// One instance's storage: a machine, checked and counted.
 #[derive(Clone)]
 struct Probe {
@@ -119,7 +129,7 @@ impl Probe {
     /// made and synced.
     fn check(&self, io: &Io) {
         self.count(io);
-        if let Io::Read { path, range, .. } = io {
+        for (path, range) in reads(io) {
             if path.components().any(|name| name == "pending") {
                 let mut seen = self.seen.borrow_mut();
                 let len = range.len.min(self.len(path));
@@ -129,7 +139,8 @@ impl Probe {
         if io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
             let mut seen = self.seen.borrow_mut();
             seen.library_reads += 1;
-            seen.file_reads += u64::from(matches!(io, Io::Read { .. }));
+            let files = reads(io).filter(|(path, _)| !layout().owns(path));
+            seen.file_reads += files.count() as u64;
         }
         if io.mutates() && io.root() == Root::Local {
             self.seen.borrow_mut().local_writes += 1;
@@ -174,20 +185,18 @@ impl Probe {
 
     fn count(&self, io: &Io) {
         let mut seen = self.seen.borrow_mut();
-        match io {
-            Io::Create { root, bytes, .. } | Io::Append { root, bytes, .. }
-                if *root == Root::Local =>
-            {
+        if let Io::Create { root, bytes, .. } | Io::Append { root, bytes, .. } = io {
+            if *root == Root::Local {
                 seen.local_written += bytes.len() as u64;
             }
-            Io::Read {
-                root: Root::Folder,
-                path,
-                range,
-            } if path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()) => {
+        }
+        if io.root() != Root::Folder {
+            return;
+        }
+        for (path, range) in reads(io) {
+            if path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()) {
                 seen.log_read = seen.log_read.max(range.len.min(self.len(path)));
             }
-            _ => {}
         }
     }
 
