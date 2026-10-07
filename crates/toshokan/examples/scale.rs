@@ -1083,6 +1083,7 @@ fn main() {
             Ok(committed) => eprintln!("    {} changes logged", committed.changes.len()),
             Err(error) => eprintln!("    refused: {error}"),
         }
+        bench.measure("refresh after its own commit", || lib.refresh().unwrap());
     }
     for run in 0..args.runs {
         let path = RelPath::new(&format!("new/one-{run}.bin")).unwrap();
