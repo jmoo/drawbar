@@ -9,14 +9,15 @@
 (* are not modeled: the merge is a join over entries, so a reader's state  *)
 (* is the set of entries whose effects it has merged (`acc`).              *)
 (*                                                                         *)
-(* A file is a segment (a growing sequence of entries), a snapshot (the    *)
-(* chain it folds, anchored at its last entry) or a pending record (one    *)
-(* effect in flight). Files are never edited in place: segments only grow, *)
-(* and the owner deletes whole files. Each reader sees each file through   *)
-(* `vis`: nothing, a readable prefix, or all of it, independently of every *)
-(* other file and every other reader.                                      *)
+(* A file is a segment (a growing sequence of entries, which the process   *)
+(* writing it seals when it closes it), a snapshot (the chain it folds,    *)
+(* anchored at its last entry) or a pending record (one effect in flight). *)
+(* Files are never edited in place: segments only grow, and the owner      *)
+(* deletes whole files. Each reader sees each file through `vis`: nothing, *)
+(* a readable prefix, or all of it, independently of every other file and  *)
+(* every other reader.                                                     *)
 (*                                                                         *)
-(* Four protocol rules are constants, TRUE when in force, so that a config *)
+(* Five protocol rules are constants, TRUE when in force, so that a config *)
 (* can drop one and exhibit the failure it permits.                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
@@ -33,7 +34,8 @@ CONSTANTS
     MaxRestores,    \* bound on restores of the folder from its backup
     FoldHashes,     \* a snapshot or cached view records every hash it folds
     UniqueNames,    \* no two histories give a segment the same name
-    SealedOnly,     \* a writer deletes only segments its own process closed
+    SealedOnly,     \* a writer deletes only segments with a seal marker
+    FoldedOnly,     \* a writer deletes only segments one of its snapshots folds
     CheckFirst      \* a writer confirms the folder holds what it builds on
 
 None == 0
@@ -56,7 +58,6 @@ VARIABLES
     wid,        \* the directory this instance writes
     head,       \* the last entry this instance wrote
     seg,        \* the segment it appends to, or None
-    segs,       \* segments since its last snapshot that it may delete
     dying,      \* files it is deleting now
     lastSnap,   \* its last snapshot, or None
     nextName,   \* its segment name counter, when names are not unique
@@ -68,8 +69,8 @@ VARIABLES
     pairs,      \* entries whose predecessor the reader has seen
     vis         \* vis[r][f]: how much of file f reader r sees
 
-writer == <<ents, files, nW, nEff, clones, losses, role, wid, head, seg, segs,
-            dying, lastSnap, nextName, inflight>>
+writer == <<ents, files, nW, nEff, clones, losses, role, wid, head, seg, dying,
+            lastSnap, nextName, inflight>>
 reader == <<acc, known, pairs, vis>>
 folder == <<backup, restores, lost, lostEffects>>
 vars == <<writer, reader, folder, chaos>>
@@ -155,7 +156,17 @@ Writable(i) == role[i] = "writer" /\ (CheckFirst => ~HeadLost(i))
 
 NewFile(kind, d, name, es, anchor, fo, eff) ==
     [kind |-> kind, dir |-> d, name |-> name, ents |-> es, anchor |-> anchor,
-     folds |-> fo, eff |-> eff, deleted |-> FALSE]
+     folds |-> fo, eff |-> eff, sealed |-> FALSE, deleted |-> FALSE]
+
+\* A segment of directory d that its writer may delete from folder fs: it
+\* ends with a seal marker, and a snapshot of d in fs folds all it holds.
+MayDelete(fs, d, f) ==
+    /\ SealedOnly => fs[f].sealed
+    /\ FoldedOnly =>
+           \E s \in 1..Len(fs) : /\ fs[s].kind = "snap"
+                                /\ fs[s].dir = d
+                                /\ ~fs[s].deleted
+                                /\ Range(fs[f].ents) \subseteq fs[s].folds
 
 \* Appending to no open segment starts a new one; a fresh open never
 \* appends to a segment it did not start.
@@ -174,7 +185,6 @@ AppendEntry(i, closes) ==
        /\ nextName' = IF new /\ ~UniqueNames
                       THEN [nextName EXCEPT ![i] = @ + 1] ELSE nextName
        /\ seg' = [seg EXCEPT ![i] = f]
-       /\ segs' = IF new THEN [segs EXCEPT ![i] = @ \cup {f}] ELSE segs
        /\ head' = [head EXCEPT ![i] = e]
 
 Write(i) ==
@@ -182,24 +192,33 @@ Write(i) ==
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
                    inflight, reader, folder, chaos>>
 
-\* The owner folds its own chain into a snapshot, closes its segment, and
-\* deletes the segments and snapshot the new one supersedes.
+\* The owner seals its segment, folds its own chain into a snapshot, and
+\* deletes the snapshot the new one supersedes and the segments of its
+\* directory it may delete.
 Compact(i) ==
-    LET s == Len(files) + 1
+    LET sealed == IF seg[i] = None THEN files
+                  ELSE [files EXCEPT ![seg[i]].sealed = TRUE]
+        s == Len(files) + 1
+        fs == Append(sealed, NewFile("snap", wid[i], s, <<>>, head[i], Chain(head[i]), 0))
         old == IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
+        superseded == {f \in Files : /\ fs[f].kind = "seg"
+                                     /\ fs[f].dir = wid[i]
+                                     /\ ~fs[f].deleted
+                                     /\ MayDelete(fs, wid[i], f)}
     IN /\ Writable(i)
-       /\ segs[i] # {}
+       /\ head[i] # None
+       /\ lastSnap[i] # None => files[lastSnap[i]].anchor # head[i]
        /\ Len(files) < MaxFiles
-       /\ files' = Append(files, NewFile("snap", wid[i], s, <<>>, head[i], Chain(head[i]), 0))
+       /\ files' = fs
        /\ lastSnap' = [lastSnap EXCEPT ![i] = s]
        /\ seg' = [seg EXCEPT ![i] = None]
-       /\ segs' = [segs EXCEPT ![i] = {}]
-       /\ dying' = [dying EXCEPT ![i] = @ \cup segs[i] \cup old]
+       /\ dying' = [dying EXCEPT ![i] = @ \cup superseded \cup old]
        /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, nextName,
                       inflight, reader, folder, chaos>>
 
 \* A deletion names a file. Sync applies it to whichever file holds that
 \* name, which for a segment name two histories chose may be the other's.
+\* A segment the writer may no longer delete is left in place.
 DeleteOne(i) ==
     /\ Writable(i)
     /\ \E f \in dying[i] :
@@ -207,11 +226,12 @@ DeleteOne(i) ==
                                        /\ files[g].dir = files[f].dir
                                        /\ files[g].name = files[f].name
                                        /\ ~files[g].deleted}
+            kept == files[f].kind = "seg" /\ ~MayDelete(files, wid[i], f)
         IN /\ CheckFirst => ~files[lastSnap[i]].deleted
            /\ dying' = [dying EXCEPT ![i] = @ \ {f}]
-           /\ IF namesake = {} THEN UNCHANGED files
+           /\ IF namesake = {} \/ kept THEN UNCHANGED files
               ELSE \E g \in namesake : files' = [files EXCEPT ![g].deleted = TRUE]
-    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, segs,
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg,
                    lastSnap, nextName, inflight, reader, folder, chaos>>
 
 \* A multi-step effect: write its pending record, log the entry that
@@ -225,8 +245,8 @@ Begin(i) ==
     /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, None, {}, nEff + 1))
     /\ inflight' = [inflight EXCEPT ![i] = [eff |-> nEff + 1, rec |-> f, logged |-> FALSE]]
     /\ nEff' = nEff + 1
-    /\ UNCHANGED <<ents, nW, clones, losses, role, wid, head, seg, segs,
-                   dying, lastSnap, nextName, reader, folder, chaos>>
+    /\ UNCHANGED <<ents, nW, clones, losses, role, wid, head, seg, dying,
+                   lastSnap, nextName, reader, folder, chaos>>
 
 Close(i) ==
     /\ inflight[i].eff # 0
@@ -241,8 +261,8 @@ Unpend(i) ==
     /\ inflight[i].logged
     /\ files' = [files EXCEPT ![inflight[i].rec].deleted = TRUE]
     /\ inflight' = [inflight EXCEPT ![i] = NoEffect]
-    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, segs,
-                   dying, lastSnap, nextName, reader, folder, chaos>>
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
+                   lastSnap, nextName, reader, folder, chaos>>
 
 \* With the user's consent, a writer closes an effect it reports by logging
 \* the closing entry in its own directory. The record stays: only its owner
@@ -264,7 +284,6 @@ Clone(i, j) ==
     /\ wid' = [wid EXCEPT ![j] = wid[i]]
     /\ head' = [head EXCEPT ![j] = head[i]]
     /\ seg' = [seg EXCEPT ![j] = None]
-    /\ segs' = [segs EXCEPT ![j] = IF SealedOnly THEN segs[i] \ {seg[i]} ELSE segs[i]]
     /\ dying' = [dying EXCEPT ![j] = dying[i]]
     /\ lastSnap' = [lastSnap EXCEPT ![j] = lastSnap[i]]
     /\ nextName' = [nextName EXCEPT ![j] = nextName[i]]
@@ -272,13 +291,21 @@ Clone(i, j) ==
     /\ ReadWith(j, vis[j], acc[i], known[i], pairs[i])
     /\ UNCHANGED <<ents, files, nW, nEff, losses, vis, folder, chaos>>
 
-\* A crash or quit. The next open starts a new segment; the one left open
-\* may still be appended to by a process this one cannot see.
-Restart(i) ==
+\* A process that quits seals its segment with a durable marker. The next
+\* open starts a new segment.
+Quit(i) ==
+    /\ Writable(i)
+    /\ seg[i] # None
+    /\ files' = [files EXCEPT ![seg[i]].sealed = TRUE]
+    /\ seg' = [seg EXCEPT ![i] = None]
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, dying,
+                   lastSnap, nextName, inflight, reader, folder, chaos>>
+
+\* A crash leaves its segment without a seal marker.
+Crash(i) ==
     /\ role[i] = "writer"
     /\ seg[i] # None
     /\ seg' = [seg EXCEPT ![i] = None]
-    /\ segs' = IF SealedOnly THEN [segs EXCEPT ![i] = @ \ {seg[i]}] ELSE segs
     /\ UNCHANGED <<ents, files, nW, nEff, clones, losses, role, wid, head,
                    dying, lastSnap, nextName, inflight, reader, folder, chaos>>
 
@@ -290,7 +317,6 @@ Renew(i) ==
     /\ wid' = [wid EXCEPT ![i] = nW + 1]
     /\ head' = [head EXCEPT ![i] = None]
     /\ seg' = [seg EXCEPT ![i] = None]
-    /\ segs' = [segs EXCEPT ![i] = {}]
     /\ dying' = [dying EXCEPT ![i] = {}]
     /\ lastSnap' = [lastSnap EXCEPT ![i] = None]
     /\ nextName' = [nextName EXCEPT ![i] = 0]
@@ -348,8 +374,8 @@ Restore ==
            /\ lost' = lost \cup (All \ Holds(fs))
            /\ lostEffects' = lostEffects \cup ((1..nEff) \ traced)
     /\ restores' = restores + 1
-    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, segs,
-                   dying, lastSnap, nextName, inflight, reader, backup, chaos>>
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
+                   lastSnap, nextName, inflight, reader, backup, chaos>>
 
 -----------------------------------------------------------------------------
 (* Sync. Each file reaches each reader independently. A file may show any  *)
@@ -396,7 +422,6 @@ Init ==
     /\ wid = [i \in Instances |-> IF i = First THEN 1 ELSE 0]
     /\ head = [i \in Instances |-> None]
     /\ seg = [i \in Instances |-> None]
-    /\ segs = [i \in Instances |-> {}]
     /\ dying = [i \in Instances |-> {}]
     /\ lastSnap = [i \in Instances |-> None]
     /\ nextName = [i \in Instances |-> 0]
@@ -415,7 +440,8 @@ Next ==
         \/ Close(i)
         \/ Unpend(i)
         \/ Settle(i)
-        \/ Restart(i)
+        \/ Quit(i)
+        \/ Crash(i)
         \/ LoseRoot(i)
         \/ LeaveFork(i)
         \/ LeaveRestored(i)
@@ -443,8 +469,7 @@ NothingIgnored ==
 \* A writer creates, appends to and deletes files only in its own directory.
 OwnDirectory ==
     \A i \in Instances : role[i] = "writer" =>
-        \A f \in segs[i] \cup dying[i]
-                 \cup ({seg[i], lastSnap[i], inflight[i].rec} \ {None}) :
+        \A f \in dying[i] \cup ({seg[i], lastSnap[i], inflight[i].rec} \ {None}) :
             files[f].dir = wid[i]
 
 \* The folder keeps every entry written, in a segment or folded in a

@@ -6,7 +6,7 @@ layer that delivers each file to each reader independently and in any order.
 
 ```sh
 nix build .#nord.toshokan-spec       # small bounds; `nix flake check` runs it
-nix build .#nord.toshokan-spec-deep  # larger bounds, about 80 minutes
+nix build .#nord.toshokan-spec-deep  # larger bounds, about four and a half hours
 ```
 
 To run one config by hand, `nix shell nixpkgs#tlaplus`, then
@@ -17,8 +17,10 @@ To run one config by hand, `nix shell nixpkgs#tlaplus`, then
 Each writer has a random id, which names its directory, and only that writer
 writes there. An entry is identified by its hash, which covers the hash of its
 predecessor, so a writer's entries form a chain. A writer appends entries to
-segments, folds its own chain into a snapshot, and then deletes the segments
-and the snapshot the new one supersedes. A multi-step effect writes a pending
+segments, and a process that closes its segment seals it with a marker. A
+writer folds its own chain into a snapshot, and then deletes the snapshot the
+new one supersedes and the sealed segments that a snapshot in its directory
+folds. A multi-step effect writes a pending
 record, logs the entry that closes it, then deletes the record. Another writer
 that sees the record of an effect no entry closes reports it, and with the
 user's consent closes it in its own log; only the record's owner deletes it.
@@ -35,14 +37,15 @@ deleted. An instance that sees its own directory forked, whose last entry is no
 longer in the folder, or that has lost its local root, continues under a new
 writer id and never writes its old directory again.
 
-The protocol needs four rules beyond that. Each is a constant, and a config that
+The protocol needs five rules beyond that. Each is a constant, and a config that
 drops it shows the failure it prevents:
 
 | Rule | Constant | Without it |
 | --- | --- | --- |
 | A snapshot records the hash of every entry it folds, with its predecessor. | `FoldHashes` | [`Anchors.cfg`](Anchors.cfg): the original and a clone each write a first entry, and the original folds its own into a snapshot and deletes the segment. The snapshot names that entry but not its predecessor, so the reader never sees that the two entries share one and never reports the fork. |
 | No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | [`Names.cfg`](Names.cfg): the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
-| A writer deletes only segments its own process sealed. The segment open when a process stopped, or when its local root was copied, is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still appends to, taking the original's newer entries with it. |
+| A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
+| A writer deletes only segments every entry of which a snapshot in its directory folds. | `FoldedOnly` | [`Folded.cfg`](Folded.cfg): the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
 | Before each write, a writer confirms that the folder holds its last entry, and before deleting a superseded file, that it holds the snapshot superseding it. A writer whose last entry is gone takes a new id. | `CheckFirst` | [`Unchecked.cfg`](Unchecked.cfg): a restore takes the writer's last entry, and the writer keeps appending after it; no reader places what it writes. |
 
 Snapshots and pending records are named at random too. The model gives every
@@ -74,7 +77,7 @@ delivers files roughly in order.
 | `Portable` | a clone, crashes, compaction | `toshokan-spec` |
 | `Recovery` | effects, a lost local root | `toshokan-spec` |
 | `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
-| `Names`, `Anchors`, `Sealed`, `Unchecked`, `FreshView` | expected violations | `toshokan-spec` |
+| `Names`, `Anchors`, `Sealed`, `Folded`, `Unchecked`, `FreshView` | expected violations | `toshokan-spec` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
 | `Entries` | `Portable` with four entries | `toshokan-spec-deep` |
 | `Deep` | a clone, effects and a lost local root together | `toshokan-spec-deep` |
@@ -96,8 +99,9 @@ reader's obligations. [SPEC.md](../SPEC.md) states each in full.
 - A reader reads every parseable file in a writer's directory whatever its name,
   places entries by chain only, caches only entries whose predecessor it holds,
   and never shrinks its cache.
-- A process deletes only segments it opened and sealed itself, and names each
-  segment at random.
+- A writer deletes only segments of its directory that end with a seal marker
+  and that a snapshot in its directory wholly folds. A process seals only the
+  segment it closes, and names each segment at random.
 - No writer id is kept in the local root before its genesis entry is durable in
   the folder, and a writer that has to stop is replaced by a new random id.
 - Another writer's pending record is settled only with the user's consent, in
@@ -120,7 +124,7 @@ them, resurrections, hidden files and conflicted copies under other names.
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another |
 | `FoldHashes` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
 | `UniqueNames` | `tests/writer.rs`: one new, randomly named segment per process |
-| `SealedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction deletes only segments this process sealed |
+| `SealedOnly`, `FoldedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction deletes only segments this process sealed and its snapshot folds |
 | `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends and compacts nothing, and is replaced |
 | `Convergence` | Liveness is not tested; `DeliveredConverges` is checked at the end of every complete delivery |
 

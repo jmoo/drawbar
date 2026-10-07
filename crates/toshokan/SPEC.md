@@ -267,10 +267,12 @@ Only a snapshot's writer compacts. It confirms that a file in its directory
 holds its last entry, as before an append; if none does, it writes nothing and a
 new writer takes over. It folds its own chain up to that entry into a new
 snapshot, syncs the snapshot and its directory, and confirms that the folder
-holds it. Only then does it delete the segments its own process sealed
-every line of which the snapshot folds, and every snapshot in its directory
-whose `folded` list starts the new one's. Segments left open by a crash or a
-copy, and the branches of another instance, are never deleted.
+holds it. Only then does it delete every segment in its directory that ends
+with a seal marker and every line of which a snapshot in its directory folds,
+and every snapshot in its directory whose `folded` list starts the new one's. A
+segment without a seal marker, such as one left open by a crash or a copy, is
+never deleted, and neither is a segment holding an entry that no snapshot in the
+directory folds.
 
 ## Writers
 
@@ -291,14 +293,17 @@ synced. Only then does the writer get its directory in the local root, its lock,
 its cached view and, last, `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
-seals it when it closes. Before each append, a writer confirms that the folder
-holds its last entry: its open segment has the length this process left it and
-ends with that entry's line. Otherwise, or with no segment open, a file in its
-directory must hold that entry, and the writer seals the segment and appends to
-a new one. If no file holds it, the writer writes nothing and stops: a new
-writer takes over from the next write. After the append is synced it writes the
-cached view and then `head.json`, before the commit returns. An append that
-fails seals the segment, so nothing follows a torn line.
+seals it when it closes it or compacts: it appends a seal marker after the last
+line and syncs the segment. Nothing is appended to a sealed segment. Before each
+append, a writer confirms that the folder holds its last entry: its open segment
+has the length this process left it and ends with that entry's line. Otherwise,
+or with no segment open, a file in its directory must hold that entry, and the
+writer leaves the segment without a seal marker and appends to a new one. If no
+file holds it, the writer writes nothing and stops: a new writer takes over from
+the next write. After the append is synced it writes the cached view and then
+`head.json`, before the commit returns. An append that fails leaves the segment
+without a seal marker and appends nothing more to it, so nothing follows a torn
+line.
 
 ## Reading
 
@@ -571,7 +576,7 @@ drafts.
 
 The folder keeps, for the life of a writer: every entry, in a segment or folded
 in a snapshot; the hash of every folded entry, about 35 bytes each; one segment
-per process that crashed, was copied, or closed before compacting; trash items
+per process that crashed or was copied; trash items
 until the writer empties them; and the pending records of a writer that will
 never run again, settled or not. The local root keeps one directory per writer
 the install has used.
