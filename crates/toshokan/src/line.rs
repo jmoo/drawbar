@@ -76,30 +76,39 @@ impl Line {
 
     /// One line, its newline included.
     pub fn parse(line: &[u8]) -> Result<Self, LineError> {
-        if line.first() == Some(&0) {
-            return Err(LineError::ZeroFilled);
-        }
-        if line.len() > MAX_LINE {
-            return Err(LineError::TooLong);
-        }
-        let Some(body) = line.strip_suffix(b"\n") else {
-            return Err(LineError::Unterminated);
-        };
-        let text = std::str::from_utf8(body).map_err(|_| LineError::NotUtf8)?;
-        let (json, hash) = text.rsplit_once('\t').ok_or(LineError::NoHash)?;
-        let hash: EntryHash = hash.parse().map_err(|_| LineError::BadHash)?;
-        if json.contains(['\t', '\n']) {
-            return Err(LineError::Unescaped);
-        }
-        let prev = prev_of(json)?;
+        let (json, hash) = split(line)?;
+        Self::checked(prev_of(json)?, json.to_owned(), hash)
+    }
+
+    /// The line of `json`, whose `prev` member is `prev`, once `hash` is its
+    /// hash.
+    pub(crate) fn checked(
+        prev: EntryHash,
+        json: String,
+        hash: EntryHash,
+    ) -> Result<Self, LineError> {
         if EntryHash::of(prev, json.as_bytes()) != hash {
             return Err(LineError::Mismatch);
         }
-        Ok(Self {
-            prev,
-            hash,
-            json: json.to_owned(),
-        })
+        Ok(Self { prev, hash, json })
+    }
+
+    /// The line whose JSON is `json` and whose hash is `hash`, kept by this
+    /// install from a line [`Line::parse`] accepted, so its JSON is an object:
+    /// `prev` is read from where this build writes it, its first member, when it
+    /// is there. The hash is checked, so a damaged copy is refused.
+    pub fn kept(json: String, hash: EntryHash) -> Result<Self, LineError> {
+        if json.len() + HASH_DIGITS + 2 > MAX_LINE {
+            return Err(LineError::TooLong);
+        }
+        if json.contains(['\t', '\n']) {
+            return Err(LineError::Unescaped);
+        }
+        let prev = match leading_prev(&json) {
+            Some(prev) => prev,
+            None => prev_of(&json)?,
+        };
+        Self::checked(prev, json, hash)
     }
 
     pub fn prev(&self) -> EntryHash {
@@ -117,6 +126,36 @@ impl Line {
     pub fn to_bytes(&self) -> Vec<u8> {
         format!("{}\t{}\n", self.json, self.hash).into_bytes()
     }
+}
+
+/// A line, its newline included, as its JSON and the hash it ends with, once it
+/// has the shape of one: no zero first byte, at most [`MAX_LINE`] bytes, UTF-8, a
+/// tab before the hash and none in the JSON. The JSON is not parsed.
+pub(crate) fn split(line: &[u8]) -> Result<(&str, EntryHash), LineError> {
+    if line.first() == Some(&0) {
+        return Err(LineError::ZeroFilled);
+    }
+    if line.len() > MAX_LINE {
+        return Err(LineError::TooLong);
+    }
+    let Some(body) = line.strip_suffix(b"\n") else {
+        return Err(LineError::Unterminated);
+    };
+    let text = std::str::from_utf8(body).map_err(|_| LineError::NotUtf8)?;
+    let (json, hash) = text.rsplit_once('\t').ok_or(LineError::NoHash)?;
+    let hash: EntryHash = hash.parse().map_err(|_| LineError::BadHash)?;
+    if json.contains(['\t', '\n']) {
+        return Err(LineError::Unescaped);
+    }
+    Ok((json, hash))
+}
+
+/// `prev` as this build writes it: `{"prev":"<hash>",` or the whole object.
+fn leading_prev(json: &str) -> Option<EntryHash> {
+    let rest = json.strip_prefix(r#"{"prev":""#)?;
+    let (hash, rest) = rest.split_at_checked(HASH_DIGITS)?;
+    let follows = rest == "\"}" || rest.starts_with("\",");
+    follows.then(|| hash.parse().ok()).flatten()
 }
 
 fn prev_of(json: &str) -> Result<EntryHash, LineError> {

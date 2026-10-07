@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 use serde_json::Value;
 use thiserror::Error as ThisError;
 
@@ -174,6 +175,44 @@ struct Head {
     kind: Option<Raw>,
 }
 
+/// An intent line read in one pass, as [`Head`] and [`Logged`] read it; any
+/// other line takes the general path.
+#[derive(Deserialize)]
+struct IntentLine<'a> {
+    prev: EntryHash,
+    at: Hlc,
+    #[serde(borrow)]
+    kind: Option<&'a str>,
+    label: String,
+    #[serde(borrow)]
+    ops: Vec<&'a RawValue>,
+    #[serde(default)]
+    displaced: Vec<Displaced>,
+    #[serde(default)]
+    reverses: Option<EntryHash>,
+}
+
+impl IntentLine<'_> {
+    /// The line's `prev`, `at` and intent, when it is one.
+    fn read(json: &str) -> Option<(EntryHash, Hlc, Logged)> {
+        let line: IntentLine = serde_json::from_str(json).ok()?;
+        if line.kind != Some("intent") {
+            return None;
+        }
+        let ops = line.ops.iter().map(|raw| {
+            decode_op(raw.get())
+                .unwrap_or_else(|| Op::Unknown(Raw::new(raw.get()).expect("read as JSON")))
+        });
+        let logged = Logged {
+            label: line.label,
+            ops: ops.collect(),
+            displaced: line.displaced,
+            reverses: line.reverses,
+        };
+        Some((line.prev, line.at, logged))
+    }
+}
+
 #[derive(Serialize)]
 struct Written<'a> {
     prev: EntryHash,
@@ -188,12 +227,15 @@ impl Entry {
     /// unknown op becomes [`Op::Unknown`]; unknown members are left out of the
     /// kind, survive in the line, and set [`Entry::unknown_members`].
     pub fn decode(line: Line) -> Result<Self, Malformed> {
-        let head: Head = serde_json::from_str(line.json()).map_err(|error| Malformed {
+        if let Some((_, at, logged)) = IntentLine::read(line.json()) {
+            return Ok(Self::of(line, at, Some(EntryKind::Intent(logged))));
+        }
+        let json = line.json();
+        let head: Head = serde_json::from_str(json).map_err(|error| Malformed {
             hash: line.hash(),
             reason: error.to_string(),
         })?;
         let name = head.kind.and_then(|kind| kind.decode::<String>().ok());
-        let json = line.json();
         let known = match name.as_deref() {
             Some("genesis") if line.prev() == EntryHash::ZERO => {
                 members(json).map(EntryKind::Genesis)
@@ -202,26 +244,72 @@ impl Entry {
             Some("settle") => members(json).map(EntryKind::Settle),
             _ => None,
         };
+        Ok(Self::of(line, head.at, known))
+    }
+
+    /// One line, its newline included, verified as [`Line::parse`] verifies it and
+    /// decoded as [`Entry::linked`] decodes it. An intent line is parsed once.
+    pub fn parse(line: &[u8]) -> Result<Self, LineError> {
+        let (json, hash) = crate::line::split(line)?;
+        match IntentLine::read(json) {
+            Some((prev, at, logged)) => {
+                let line = Line::checked(prev, json.to_owned(), hash)?;
+                Ok(Self::of(line, at, Some(EntryKind::Intent(logged))))
+            }
+            None => Line::parse(line).map(Self::linked),
+        }
+    }
+
+    /// A line this install verified before and kept as its JSON and hash. A
+    /// damaged copy fails its hash and is refused.
+    pub fn kept(json: String, hash: EntryHash) -> Result<Self, LineError> {
+        if let Some((prev, at, logged)) = IntentLine::read(&json) {
+            let line = Line::checked(prev, json, hash)?;
+            return Ok(Self::of(line, at, Some(EntryKind::Intent(logged))));
+        }
+        let line = Line::kept(json, hash)?;
+        Raw::new(line.json()).map_err(|_| LineError::NoPrev)?;
+        Ok(Self::linked(line))
+    }
+
+    /// A verified line as an entry. A line whose JSON is not an entry is still a
+    /// link of the chain, so it is decoded as an unknown kind.
+    pub fn linked(line: Line) -> Self {
+        Self::decode(line.clone()).unwrap_or_else(|_| Self {
+            at: Hlc::ZERO,
+            kind: EntryKind::Unknown(Raw::new(line.json()).expect("a verified line holds JSON")),
+            line,
+            unknown_members: false,
+        })
+    }
+
+    /// The entry of `line`, read at `at`, as `known` when its members decode.
+    fn of(line: Line, at: Hlc, known: Option<EntryKind>) -> Self {
+        let json = line.json();
         let unknown_members = known.as_ref().is_some_and(|kind| {
-            let written = serde_json::to_value(Written {
+            let written = Written {
                 prev: line.prev(),
-                at: head.at,
+                at,
                 kind,
-            });
-            match (serde_json::from_str(json), written) {
-                (Ok(read), Ok(written)) => holds_more(&read, &written),
-                _ => true,
+            };
+            match serde_json::to_string(&written) {
+                Ok(text) if text == json => false,
+                Ok(_) => match (serde_json::from_str(json), serde_json::to_value(&written)) {
+                    (Ok(read), Ok(written)) => holds_more(&read, &written),
+                    _ => true,
+                },
+                Err(_) => true,
             }
         });
         let kind = known.unwrap_or_else(|| {
             EntryKind::Unknown(Raw::new(json).expect("a verified line holds a JSON object"))
         });
-        Ok(Self {
-            at: head.at,
+        Self {
+            at,
             kind,
             line,
             unknown_members,
-        })
+        }
     }
 
     /// The entry logging `kind` at `at` after `prev`, as [`Entry::decode`] reads it
@@ -427,14 +515,19 @@ struct OpName {
     op: String,
 }
 
+// Each variant's members include `op`, so that a repeated `op` member refuses
+// the op however its name was found.
+
 #[derive(Deserialize)]
 struct CreateIn {
+    op: String,
     entity: EntityId,
     replaces: Vec<EntryHash>,
 }
 
 #[derive(Deserialize)]
 struct DeleteIn {
+    op: String,
     entity: EntityId,
     replaces: Vec<EntryHash>,
     observed: Vec<EntryHash>,
@@ -442,6 +535,7 @@ struct DeleteIn {
 
 #[derive(Deserialize)]
 struct WriteIn {
+    op: String,
     entity: EntityId,
     key: String,
     #[serde(default, deserialize_with = "present")]
@@ -451,6 +545,7 @@ struct WriteIn {
 
 #[derive(Deserialize)]
 struct AddIn {
+    op: String,
     entity: EntityId,
     key: String,
     value: Raw,
@@ -458,6 +553,7 @@ struct AddIn {
 
 #[derive(Deserialize)]
 struct RemoveIn {
+    op: String,
     entity: EntityId,
     key: String,
     value: Raw,
@@ -466,6 +562,7 @@ struct RemoveIn {
 
 #[derive(Deserialize)]
 struct FileIn {
+    op: String,
     entity: EntityId,
     #[serde(default)]
     file: Option<FileFact>,
@@ -474,6 +571,7 @@ struct FileIn {
 
 #[derive(Deserialize)]
 struct PinIn {
+    op: String,
     entity: EntityId,
     file: FileFact,
     replaces: Vec<EntryHash>,
@@ -484,28 +582,50 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Raw>, D:
     Raw::deserialize(deserializer).map(Some)
 }
 
+/// The name an op written by [`OpOut`] starts with, read without parsing it.
+fn leading_name(json: &str) -> Option<&str> {
+    let rest = json.strip_prefix(r#"{"op":""#)?;
+    let (name, rest) = rest.split_once('"')?;
+    let plain = name.bytes().all(|b| b.is_ascii_lowercase());
+    (plain && rest.starts_with(',')).then_some(name)
+}
+
+/// The members of op `name`, when `json` decodes as them and names it.
+fn op_members<T: DeserializeOwned>(json: &str, name: &str, op: impl Fn(&T) -> &str) -> Option<T> {
+    members(json).filter(|members| op(members) == name)
+}
+
 fn decode_op(json: &str) -> Option<Op> {
-    match members::<OpName>(json)?.op.as_str() {
-        "create" => {
-            members(json).map(|CreateIn { entity, replaces }| Op::Create { entity, replaces })
-        }
-        "delete" => members(json).map(
+    let name = match leading_name(json) {
+        Some(name) => name.to_owned(),
+        None => members::<OpName>(json)?.op,
+    };
+    let name = name.as_str();
+    match name {
+        "create" => op_members(json, name, |m: &CreateIn| &m.op).map(
+            |CreateIn {
+                 entity, replaces, ..
+             }| Op::Create { entity, replaces },
+        ),
+        "delete" => op_members(json, name, |m: &DeleteIn| &m.op).map(
             |DeleteIn {
                  entity,
                  replaces,
                  observed,
+                 ..
              }| Op::Delete {
                 entity,
                 replaces,
                 observed,
             },
         ),
-        "write" => members(json).map(
+        "write" => op_members(json, name, |m: &WriteIn| &m.op).map(
             |WriteIn {
                  entity,
                  key,
                  value,
                  replaces,
+                 ..
              }| Op::Write {
                 entity,
                 key,
@@ -513,13 +633,18 @@ fn decode_op(json: &str) -> Option<Op> {
                 replaces,
             },
         ),
-        "add" => members(json).map(|AddIn { entity, key, value }| Op::Add { entity, key, value }),
-        "remove" => members(json).map(
+        "add" => op_members(json, name, |m: &AddIn| &m.op).map(
+            |AddIn {
+                 entity, key, value, ..
+             }| Op::Add { entity, key, value },
+        ),
+        "remove" => op_members(json, name, |m: &RemoveIn| &m.op).map(
             |RemoveIn {
                  entity,
                  key,
                  value,
                  tags,
+                 ..
              }| Op::Remove {
                 entity,
                 key,
@@ -527,22 +652,24 @@ fn decode_op(json: &str) -> Option<Op> {
                 tags,
             },
         ),
-        "file" => members(json).map(
+        "file" => op_members(json, name, |m: &FileIn| &m.op).map(
             |FileIn {
                  entity,
                  file,
                  replaces,
+                 ..
              }| Op::File {
                 entity,
                 file,
                 replaces,
             },
         ),
-        "pin" => members(json).map(
+        "pin" => op_members(json, name, |m: &PinIn| &m.op).map(
             |PinIn {
                  entity,
                  file,
                  replaces,
+                 ..
              }| Op::Pin {
                 entity,
                 file,
@@ -801,6 +928,7 @@ mod tests {
             format!(r#"{{"prev":"{prev}"}}"#),
             format!(r#"{{"prev":"{prev}","at":"soon"}}"#),
             format!(r#"{{"prev":"{prev}","at":[1]}}"#),
+            format!(r#"{{"prev":"{prev}","at":"soon","kind":"intent","label":"L","ops":[]}}"#),
         ] {
             let line = Line::seal(json.clone()).unwrap();
             let hash = line.hash();
@@ -808,6 +936,62 @@ mod tests {
                 matches!(Entry::decode(line), Err(Malformed { hash: h, .. }) if h == hash),
                 "{json}"
             );
+        }
+    }
+
+    #[test]
+    fn a_line_read_in_one_pass_reads_as_it_does_parsed_then_decoded() {
+        let prev = hash(1);
+        let e = "0000000000000000000000000000000e";
+        let add = format!(r#"{{"op":"add","entity":"{e}","key":"tags","value":"x"}}"#);
+        let jsons = [
+            format!(r#"{{"prev":"{prev}","at":[1,0],"kind":"intent","label":"L","ops":[{add}]}}"#),
+            format!(r#"{{"prev":"{prev}","at":[1,0],"kind":"intent","label":"L","ops":[],"x":1}}"#),
+            format!(r#"{{"kind":"intent","ops":[{add}],"label":"L","at":[1,0],"prev":"{prev}"}}"#),
+            format!(r#"{{"prev":"{prev}","at":[1,0],"kind":"intent","label":"L","ops":[7,{{}}]}}"#),
+            format!(
+                r#"{{"prev":"{prev}","at":[1,0],"kind":"settle","writer":"{e}","record":"{e}","outcome":"dismissed"}}"#
+            ),
+            format!(r#"{{"prev":"{prev}","at":[1,0],"kind":"merge"}}"#),
+            format!(r#"{{"prev":"{prev}","at":"soon","kind":"intent","label":"L","ops":[]}}"#),
+            format!(
+                r#"{{"prev":"{prev}","prev":"{e}","at":[1,0],"kind":"intent","label":"L","ops":[]}}"#
+            ),
+            format!(r#"{{"prev":"{prev}","at":[1,0],"kind":"intent","label":"L","ops":[]"#),
+        ];
+        for json in jsons {
+            for hash in [EntryHash::of(prev, json.as_bytes()), hash(2)] {
+                let bytes = format!("{json}\t{hash}\n");
+                let once = Entry::parse(bytes.as_bytes());
+                let twice = Line::parse(bytes.as_bytes()).map(Entry::linked);
+                assert_eq!(once, twice, "{json}");
+                if let Ok(entry) = &once {
+                    assert_eq!(
+                        Entry::kept(json.clone(), hash).as_ref(),
+                        Ok(entry),
+                        "{json}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_op_naming_itself_twice_is_unknown() {
+        let e = "0000000000000000000000000000000e";
+        for op in [
+            format!(r#"{{"op":"add","entity":"{e}","key":"k","value":1,"op":"write"}}"#),
+            format!(r#"{{"entity":"{e}","op":"add","key":"k","value":1,"op":"add"}}"#),
+        ] {
+            let json = format!(
+                r#"{{"prev":"{}","at":[1,0],"kind":"intent","label":"L","ops":[{op}]}}"#,
+                hash(1)
+            );
+            let entry = Entry::decode(Line::seal(json).unwrap()).unwrap();
+            let EntryKind::Intent(logged) = &entry.kind else {
+                panic!("{:?}", entry.kind)
+            };
+            assert_eq!(logged.ops, [Op::Unknown(raw(&op))], "{op}");
         }
     }
 
