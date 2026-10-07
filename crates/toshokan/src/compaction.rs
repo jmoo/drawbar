@@ -3,6 +3,7 @@
 //! writes as.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use crate::error::{Error, Refusal, Result};
 use crate::flow::{self, Fallible, Flow};
@@ -28,8 +29,10 @@ use crate::writer::Writer;
 /// `reader` must have read the writer's directory after its last append. Fails
 /// with [`Error::Rekey`] when the reader or the folder does not hold the
 /// writer's head, writing nothing, or when the folder loses the snapshot before
-/// a deletion. Refused with [`Refusal::Nothing`], writing nothing, when a
-/// snapshot the reader found in the writer's directory already folds its head.
+/// a deletion. Refused with [`Refusal::Nothing`] when a snapshot the reader
+/// found in the writer's directory already folds its head; it then writes
+/// nothing, and deletes what that snapshot lets it that a compaction cut short
+/// left.
 /// Branches of a forked history other than this writer's own are not folded.
 pub fn compact(
     writer: Writer,
@@ -41,8 +44,15 @@ pub fn compact(
         writer: id,
         why: Rekey::Restored,
     };
-    if folds_head(reader, &writer) {
-        return Task::ready((writer, Err(Error::Refused(Refusal::Nothing))));
+    if let Some((path, folding)) = folding_head(reader, &writer) {
+        let doomed = Doomed::of(reader, id, &folding, None).sparing(&path);
+        let dir = writer.layout.writer(id);
+        return deleted(doomed, path, dir, lost)
+            .then(move |deleted| {
+                let refused = deleted.and(Err(Error::Refused(Refusal::Nothing)));
+                Flow::Done((writer, refused))
+            })
+            .task();
     }
     let Some(snapshot) = reader.logs().get(&id).and_then(|own| fold(&writer, own)) else {
         return Task::ready((writer, Err(lost())));
@@ -79,33 +89,50 @@ pub fn compact(
                     Err(error) => return Flow::Done((writer, Err(error))),
                 }
                 writer.held_by(path.clone(), len, tail);
-                doomed
-                    .delete(path, lost)
-                    .and_then(move |(removed, any)| match any {
-                        false => flow::ok(removed),
-                        true => flow::sync(Root::Folder, &dir).map_ok(move |()| removed),
-                    })
-                    .then(move |removed| {
-                        let compacted = removed.map(|removed| Compacted {
-                            snapshot: name,
-                            folded,
-                            removed,
-                        });
-                        Flow::Done((writer, compacted))
-                    })
+                deleted(doomed, path, dir, lost).then(move |removed| {
+                    let compacted = removed.map(|removed| Compacted {
+                        snapshot: name,
+                        folded,
+                        removed,
+                    });
+                    Flow::Done((writer, compacted))
+                })
             })
         })
         .task()
 }
 
-/// Whether a snapshot the reader found in the writer's directory folds its head.
-fn folds_head(reader: &Reader, writer: &Writer) -> bool {
+/// A snapshot the reader found in the writer's directory that folds its head,
+/// with its path.
+fn folding_head(reader: &Reader, writer: &Writer) -> Option<(RelPath, Rc<Snapshot>)> {
     let (id, head) = (writer.id(), writer.head());
-    reader.files(id).into_iter().any(|(_, stamp, file)| {
-        stamp.is_some()
-            && matches!(file, WriterFile::Snapshot(old)
-                if old.writer == id && old.head() == Some(head))
-    })
+    reader
+        .files(id)
+        .into_iter()
+        .find_map(|(path, stamp, file)| match (file, stamp) {
+            (WriterFile::Snapshot(old), Some(_))
+                if old.writer == id && old.head() == Some(head) =>
+            {
+                Some((path.clone(), Rc::clone(old)))
+            }
+            _ => None,
+        })
+}
+
+/// Deletes the `doomed` files that the snapshot at `path` lets go, then syncs
+/// the writer's directory `dir` if any went. Returns the deleted segments.
+fn deleted<'a>(
+    doomed: Doomed,
+    path: RelPath,
+    dir: RelPath,
+    lost: impl Fn() -> Error + Copy + 'a,
+) -> Fallible<'a, Vec<RelPath>> {
+    doomed
+        .delete(path, lost)
+        .and_then(move |(removed, any)| match any {
+            false => flow::ok(removed),
+            true => flow::sync(Root::Folder, &dir).map_ok(move |()| removed),
+        })
 }
 
 /// How many of a snapshot's last bytes stand for it.
@@ -165,11 +192,11 @@ fn fold(writer: &Writer, own: &WriterLog) -> Option<Snapshot> {
     })
 }
 
-/// The files of the writer's directory the new snapshot lets it delete, as the
+/// The files of the writer's directory a snapshot lets it delete, as the
 /// reader last found them.
 struct Doomed {
     segments: Vec<Sealed>,
-    /// Snapshots whose folded list starts the new one's, with their lengths.
+    /// Snapshots whose folded list starts that snapshot's, with their lengths.
     snapshots: Vec<(RelPath, u64)>,
 }
 
@@ -179,7 +206,8 @@ struct Sealed {
     /// Its length with the marker.
     len: u64,
     last: EntryHash,
-    /// The other snapshot that folds it, with its length; `None` for the new one.
+    /// The other snapshot that folds it, with its length; `None` when the one
+    /// [`Doomed::of`] was given does.
     folder: Option<(RelPath, u64)>,
 }
 
@@ -241,7 +269,13 @@ impl Doomed {
         }
     }
 
-    /// Deletes each file once the new snapshot at `path` is confirmed to be in
+    /// Leaves the snapshot at `path`, which folds what `of` was given.
+    fn sparing(mut self, path: &RelPath) -> Self {
+        self.snapshots.retain(|(doomed, _)| doomed != path);
+        self
+    }
+
+    /// Deletes each file once the snapshot at `path` is confirmed to be in
     /// the folder still, and the file to be as the reader found it; a segment
     /// also only while it ends with its seal marker and the snapshot that folds
     /// it is there. Returns the deleted segments, and whether it deleted any file.

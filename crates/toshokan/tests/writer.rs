@@ -571,6 +571,47 @@ fn a_crash_anywhere_in_compaction_keeps_every_entry() {
     }
 }
 
+#[test]
+fn compacting_after_a_crash_in_the_deletions_finishes_them() {
+    let setup = || {
+        let mut instance = Instance::open(one_disk(MemDisk::new()), 1);
+        instance.write("a").unwrap();
+        instance.compact().unwrap();
+        instance.write("b").unwrap();
+        instance
+    };
+    let kept = |machine: &Machine, id| {
+        let files = files_under(&machine.folder, &layout().writer(id));
+        let snapshots = files.iter().filter(|path| {
+            path.name()
+                .is_some_and(|name| name.starts_with("snapshot-"))
+        });
+        (snapshots.count(), segments(machine, id))
+    };
+    let mut probe = setup();
+    let before = probe.machine.folder.mutations();
+    probe.compact().unwrap();
+    let operations = probe.machine.folder.mutations() - before;
+    let mut finished = 0;
+    for after in 0..operations {
+        let mut instance = setup();
+        let id = instance.id();
+        instance.machine.folder.crash_after(after);
+        assert!(instance.compact().is_err(), "crash after {after}");
+        let mut again = Instance::open(one_disk(instance.machine.folder.restart()), 2);
+        assert_eq!(again.start, Start::Resumed(id), "crash after {after}");
+        let left = kept(&again.machine, id);
+        match again.compact() {
+            Ok(_) => continue,
+            Err(Error::Refused(Refusal::Nothing)) => {}
+            Err(error) => panic!("crash after {after}: {error}"),
+        }
+        finished += usize::from(left != (1, 0));
+        assert_eq!(kept(&again.machine, id), (1, 0), "crash after {after}");
+    }
+    assert!(finished > 0, "some crash leaves deletions to finish");
+}
+
 /// A disk whose next sync fails once `fail` is set.
 struct FailingSync {
     disk: MemDisk,
