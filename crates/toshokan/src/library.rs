@@ -22,7 +22,8 @@ use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
-use crate::log::{Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
+use crate::line::MAX_LINE;
+use crate::log::{Bound, Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
 use crate::merge::{merge, Beyond, Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
@@ -647,7 +648,7 @@ impl Library {
         Ok(at)
     }
 
-    /// The file-register writes that pin this writer's derived bindings, but for
+    /// The file-register writes that pin the moves this writer found, but for
     /// entities whose files the intent changes itself.
     fn pins(&self, effects: &EffectPlan) -> Vec<Op> {
         let changed: BTreeSet<EntityId> = effects.files.iter().map(|end| end.entity).collect();
@@ -1082,38 +1083,40 @@ fn commit<'a>(
         .and_then(move |library| {
             let filed: BTreeSet<EntityId> = facts.iter().filter_map(file_of).collect();
             let pins = library.pins(&effects).into_iter();
-            let mut ops = facts;
-            ops.extend(pins.filter(|op| file_of(op).is_none_or(|e| !filed.contains(&e))));
+            let pins = pins.filter(|op| file_of(op).is_none_or(|e| !filed.contains(&e)));
             let logged = Logged {
                 label,
-                ops,
+                ops: facts,
                 displaced: Vec::new(),
                 reverses,
             };
-            transact(library, logged, effects, None)
+            transact(library, logged, effects, None, pins.collect())
         })
-        .and_then(move |(library, entry, outcome)| {
-            match committed(shown, &entry, created, outcome) {
+        .and_then(move |(library, entries, outcome)| {
+            match committed(shown, &entries, created, outcome) {
                 Ok(committed) => ok((library, committed)),
                 Err(partial) => Flow::Done(Err(Error::Partial(partial))),
             }
         })
 }
 
-/// What committing `entry`, labeled `label`, did: the intent, or how its effects
-/// stopped partway.
+/// What appending `entries`, an intent labeled `label` and what followed it, did:
+/// the intent, or how its effects stopped partway.
 fn committed(
     label: String,
-    entry: &Entry,
+    entries: &[Entry],
     created: Vec<EntityId>,
     outcome: Outcome,
 ) -> std::result::Result<Committed, Box<Partial>> {
     let mut changes = Vec::new();
-    if let EntryKind::Intent(logged) = &entry.kind {
-        changes_of(&logged.ops, &By::This, &mut changes);
+    for entry in entries {
+        if let EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) = &entry.kind
+        {
+            changes_of(ops, &By::This, &mut changes);
+        }
     }
     let committed = Committed {
-        intent: entry.hash(),
+        intent: entries[0].hash(),
         created,
         changes,
     };
@@ -1216,7 +1219,7 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
                 let label = logged.label.clone();
                 append(library, vec![EntryKind::Intent(logged)]).and_then(
                     move |(library, entries)| {
-                        let partial = committed(label, &entries[0], Vec::new(), applied.outcome);
+                        let partial = committed(label, &entries, Vec::new(), applied.outcome);
                         rescan(library).map_ok(move |library| (library, partial.err()))
                     },
                 )
@@ -1324,6 +1327,31 @@ struct Closing {
     settle: Settle,
 }
 
+/// The most of a line the ops of one `bind` entry take, so that a commit pins any
+/// number of moves.
+const BIND_BYTES: usize = MAX_LINE / 2;
+
+/// The `bind` entries that pin `pins`.
+fn bound(pins: Vec<Op>) -> Vec<EntryKind> {
+    let mut kinds = Vec::new();
+    let (mut ops, mut size) = (Vec::new(), 0);
+    for op in pins {
+        let len = serde_json::to_string(&op).map_or(0, |json| json.len()) + 1;
+        if size + len > BIND_BYTES && !ops.is_empty() {
+            kinds.push(EntryKind::Bind(Bound {
+                ops: std::mem::take(&mut ops),
+            }));
+            size = 0;
+        }
+        size += len;
+        ops.push(op);
+    }
+    if !ops.is_empty() {
+        kinds.push(EntryKind::Bind(Bound { ops }));
+    }
+    kinds
+}
+
 /// The entries that log `logged`, closed by `closing` when there is one.
 fn closed(mut logged: Logged, closing: Option<Closing>) -> Vec<EntryKind> {
     let Some(Closing { mut facts, settle }) = closing else {
@@ -1335,25 +1363,28 @@ fn closed(mut logged: Logged, closing: Option<Closing>) -> Vec<EntryKind> {
 }
 
 /// Logs `logged`, carrying out `effects` under a pending record when there are
-/// any, and closed by `closing` only when they complete. Returns the intent's
-/// entry and how the effects ended. An interrupted run leaves the record for the
-/// next write to settle.
+/// any, closed by `closing` only when they complete, and followed by `bind`
+/// entries pinning `pins`. Returns the entries, the intent's first, and how the
+/// effects ended. An interrupted run leaves the record for the next write to
+/// settle.
 fn transact<'a>(
     library: &'a mut Library,
     logged: Logged,
     effects: Rc<EffectPlan>,
     closing: Option<Closing>,
-) -> Fallible<'a, (&'a mut Library, Entry, Outcome)> {
+    pins: Vec<Op>,
+) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
     if effects.is_empty() {
-        return append(library, closed(logged, closing)).map_ok(|(library, entries)| {
+        let mut kinds = closed(logged, closing);
+        kinds.extend(bound(pins));
+        return append(library, kinds).map_ok(|(library, entries)| {
             library.rebind(library.scan.clone());
             library.show();
-            let entry = entries.into_iter().next().expect("the intent was appended");
-            (library, entry, Outcome::Complete)
+            (library, entries, Outcome::Complete)
         });
     }
     carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
-        log_effects(library, logged, &effects, record, applied, closing)
+        log_effects(library, logged, &effects, record, applied, closing, pins)
     })
 }
 
@@ -1407,8 +1438,8 @@ fn carry_out<'a>(
 }
 
 /// Appends the intent `logged` with what `applied` says the effects did, closed
-/// by `closing` if they complete, and removes the record once the entries are
-/// durable.
+/// by `closing` if they complete and followed by `bind` entries pinning `pins`,
+/// and removes the record once the entries are durable.
 fn log_effects<'a>(
     library: &'a mut Library,
     mut logged: Logged,
@@ -1416,13 +1447,15 @@ fn log_effects<'a>(
     record: Rc<PendingRecord>,
     applied: Applied,
     closing: Option<Closing>,
-) -> Fallible<'a, (&'a mut Library, Entry, Outcome)> {
+    pins: Vec<Op>,
+) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     logged.ops.extend(library.file_ops(&applied, &record.files));
     logged.displaced = applied.displaced;
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
-    let kinds = closed(logged, closing);
+    let mut kinds = closed(logged, closing);
+    kinds.extend(bound(pins));
     let layout = library.layout.clone();
     appending(library, kinds).then(move |(library, appended)| {
         let entries = match appended {
@@ -1438,7 +1471,6 @@ fn log_effects<'a>(
                 return Flow::Done(Err(error));
             }
         };
-        let entry = entries.into_iter().next().expect("the intent was appended");
         let finish = match journaled {
             true => effects::finish(&layout, record.writer, name),
             false => Task::ready(Ok(())),
@@ -1453,7 +1485,7 @@ fn log_effects<'a>(
             })
             .map_ok(move |library| {
                 library.show();
-                (library, entry, outcome)
+                (library, entries, outcome)
             })
     })
 }
@@ -1496,9 +1528,9 @@ fn settle_orphan(
                             reverses: None,
                         };
                         let closing = Closing { facts, settle };
-                        transact(library, logged, effects, Some(closing)).map_ok(
-                            move |(library, entry, outcome)| {
-                                let partial = committed(label, &entry, Vec::new(), outcome);
+                        transact(library, logged, effects, Some(closing), Vec::new()).map_ok(
+                            move |(library, entries, outcome)| {
+                                let partial = committed(label, &entries, Vec::new(), outcome);
                                 (library, partial.err())
                             },
                         )

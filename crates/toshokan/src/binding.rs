@@ -6,7 +6,7 @@
 //! still holds it, such a file is a copy, a new file without an entity until an
 //! intent says something about it. When several files could be the one, or one
 //! file could be several entities', nothing is bound and it is reported. Scans
-//! never write; every commit pins the bindings this writer holds.
+//! never write; every commit pins the moves this writer found.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -314,9 +314,10 @@ fn missing(fact: &FileFact) -> FileRef {
     }
 }
 
-/// File-register writes for the bindings that `facts` do not already say: a file
-/// found in sync at another path or with another time. Conflicted registers,
-/// changed files and missing ones are left for the user.
+/// File-register writes for the moves `facts` do not already say: a file found in
+/// sync at another path. A new modification time alone is not pinned; it only
+/// saves reading an identity. Conflicted registers, changed files and missing
+/// ones are left for the user.
 pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
     let mut ops = Vec::new();
     for (&entity, file) in &bindings.bound {
@@ -329,19 +330,20 @@ pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
         let Some(found) = scan.files.get(&file.path) else {
             continue;
         };
+        if file.path == written.value.path {
+            continue;
+        }
         let pinned = FileFact {
             path: file.path.clone(),
             identity: found.identity.unwrap_or(written.value.identity),
             len: found.len,
             modified: found.modified,
         };
-        if pinned != written.value {
-            ops.push(Op::Pin {
-                entity,
-                file: pinned,
-                replaces: vec![written.entry],
-            });
-        }
+        ops.push(Op::Pin {
+            entity,
+            file: pinned,
+            replaces: vec![written.entry],
+        });
     }
     ops
 }
@@ -641,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_records_a_move_or_a_new_time_and_nothing_else() {
+    fn a_pin_records_a_move_and_nothing_else() {
         let e = EntityId::from_u128(1);
         let facts = one("a");
         let pins_for = |files: &[(&str, usize)]| {
@@ -660,7 +662,7 @@ mod tests {
             (*entity, moved.path.as_str(), replaces.as_slice()),
             (e, "b", &[EntryHash::from_u128(1)][..])
         );
-        assert_eq!(pins_for(&[("a", 0)]).len(), 1, "a new time");
+        assert!(pins_for(&[("a", 0)]).is_empty(), "a new time");
         assert!(pins_for(&[("a", 1)]).is_empty(), "changed outside");
         assert!(pins_for(&[]).is_empty(), "missing");
         let mut in_sync = one("a");

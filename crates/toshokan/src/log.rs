@@ -33,6 +33,7 @@ pub enum EntryKind {
     Genesis(Genesis),
     Intent(Logged),
     Settle(Settle),
+    Bind(Bound),
     /// A kind this build does not know, or a known kind whose members do not
     /// decode, as the entry's whole JSON object: kept, merged by nothing, and
     /// reported.
@@ -48,8 +49,7 @@ pub struct Genesis {
     pub label: String,
 }
 
-/// A committed intent: its facts, the file effects it made, and the bindings the
-/// writer pinned with it.
+/// A committed intent: its facts and the file effects it made.
 ///
 /// ⚠️ Its ops decode only straight from JSON text: not through `#[serde(flatten)]`
 /// or an internally tagged enum, which buffer the [`Raw`] values an op keeps.
@@ -142,6 +142,13 @@ pub struct Displaced {
     pub len: u64,
 }
 
+/// The moves a writer found and pinned as it committed, logged after the intent:
+/// merged as an intent's ops are, and never undone.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Bound {
+    pub ops: Vec<Op>,
+}
+
 /// This writer settled another writer's unfinished effect, with the user's consent.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Settle {
@@ -200,6 +207,7 @@ impl Entry {
             }
             Some("intent") => members(json).map(EntryKind::Intent),
             Some("settle") => members(json).map(EntryKind::Settle),
+            Some("bind") => members(json).map(EntryKind::Bind),
             _ => None,
         };
         let unknown_members = known.as_ref().is_some_and(|kind| {
@@ -291,6 +299,11 @@ impl Serialize for EntryKind {
             Self::Settle(settle) => Tagged {
                 kind: "settle",
                 members: settle,
+            }
+            .serialize(serializer),
+            Self::Bind(bound) => Tagged {
+                kind: "bind",
+                members: bound,
             }
             .serialize(serializer),
             Self::Unknown(raw) => {
@@ -663,6 +676,12 @@ mod tests {
                 writer: WriterId::from_u128(2),
                 record: Nonce::from_u128(3),
                 outcome: Settlement::RolledBack,
+            }),
+            EntryKind::Bind(Bound {
+                ops: every_op()
+                    .into_iter()
+                    .filter(|op| matches!(op, Op::Pin { .. }))
+                    .collect(),
             }),
         ];
         for kind in kinds {

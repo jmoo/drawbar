@@ -108,11 +108,11 @@ further.
 
 An entry is an object whose first members are:
 
-| Member | Value                                 |
-| ------ | ------------------------------------- |
-| `prev` | The hash of the entry before it       |
-| `at`   | Its clock reading                     |
-| `kind` | `"genesis"`, `"intent"` or `"settle"` |
+| Member | Value                                           |
+| ------ | ----------------------------------------------- |
+| `prev` | The hash of the entry before it                 |
+| `at`   | Its clock reading                               |
+| `kind` | `"genesis"`, `"intent"`, `"settle"` or `"bind"` |
 
 followed by the members of its kind. A reader ignores members it does not know,
 at any depth, and keeps the line and the whole entry (see Merging), so they
@@ -173,6 +173,17 @@ effect with the user's consent:
 | `writer`  | The writer whose pending record it settles     |
 | `record`  | The record's nonce                             |
 | `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"` |
+
+A **bind** entry pins moves this writer's reader found (see Binding), after the
+intent it committed with:
+
+| Member | Value         |
+| ------ | ------------- |
+| `ops`  | Its `pin` ops |
+
+Its ops are merged as an intent's are, and it is never undone. A commit spreads
+its pins over as many `bind` entries as keep each line within the limit, so any
+number of moves can be pinned.
 
 Nothing derived is logged: views, bindings a reader has not pinned, and the
 merged state exist only in readers and in snapshots.
@@ -388,10 +399,11 @@ their identities:
    holds it is a copy: a new file with no entity until an intent says something
    about it.
 
-Every commit appends the bindings this writer holds that its facts do not say
-yet, as `pin` ops: a file in sync at another path, or with a new modification
-time. Conflicted file registers, changed files and missing ones are left for the
-user. A scan writes nothing.
+Every commit pins the moves this writer holds that its facts do not say yet: each
+file in sync at another path, as a `pin` op in a `bind` entry. A new
+modification time alone is not logged; it only spares a scan reading an
+identity. Conflicted file registers, changed files and missing ones are left for
+the user. A scan writes nothing.
 
 ## Intents
 
@@ -411,8 +423,8 @@ A commit:
    and only then creates its writer, so a refused first intent leaves nothing.
 4. Settles this writer's own unfinished effects (see Recovery).
 5. Carries out the file effects under a pending record, then appends the intent
-   with a `file` op for each entity's file as the folder shows it afterwards and
-   a `pin` op for each binding to pin.
+   with a `file` op for each entity's file as the folder shows it afterwards,
+   and after it the `bind` entries that pin the moves found.
 
 Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.

@@ -568,6 +568,11 @@ impl Folded {
             EntryKind::Settle(settle) => {
                 self.settled.insert((settle.writer, settle.record));
             }
+            EntryKind::Bind(bound) => {
+                for op in &bound.ops {
+                    self.apply_op(hash, stamp, op);
+                }
+            }
             EntryKind::Unknown(raw) => {
                 self.unknown.insert((hash, raw.clone()));
             }
