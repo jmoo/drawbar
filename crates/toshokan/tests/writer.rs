@@ -13,7 +13,7 @@ use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer};
-use toshokan::{Error, Hlc, MemDisk, Root, SegmentName, WriterId};
+use toshokan::{Error, Hlc, MemDisk, Refusal, Root, SegmentName, WriterId};
 
 fn segments(machine: &Machine, writer: WriterId) -> usize {
     files_under(&machine.folder, &layout().writer(writer))
@@ -434,6 +434,20 @@ fn compaction_keeps_the_members_a_newer_build_wrote_in_the_snapshot_it_folds() {
     for member in [r#""later":{"x":[1, 2]}"#, r#""also":[ true ]"#] {
         assert!(kept.contains(member), "{member} in {kept}");
     }
+}
+
+#[test]
+fn compacting_again_with_nothing_new_writes_nothing() {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a").unwrap();
+    instance.compact().unwrap();
+    let before = instance.machine.folder.files(Root::Folder);
+    let again = instance.compact();
+    assert!(
+        matches!(again, Err(Error::Refused(Refusal::Nothing))),
+        "{again:?}"
+    );
+    assert_eq!(instance.machine.folder.files(Root::Folder), before);
 }
 
 #[test]

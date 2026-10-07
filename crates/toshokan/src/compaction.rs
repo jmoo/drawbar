@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Refusal, Result};
 use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Io, Range, Root, Task};
@@ -28,8 +28,9 @@ use crate::writer::Writer;
 /// `reader` must have read the writer's directory after its last append. Fails
 /// with [`Error::Rekey`] when the reader or the folder does not hold the
 /// writer's head, writing nothing, or when the folder loses the snapshot before
-/// a deletion. Branches of a forked history other than this writer's own are not
-/// folded.
+/// a deletion. Refused with [`Refusal::Nothing`], writing nothing, when a
+/// snapshot the reader found in the writer's directory already folds its head.
+/// Branches of a forked history other than this writer's own are not folded.
 pub fn compact(
     writer: Writer,
     reader: &Reader,
@@ -40,6 +41,9 @@ pub fn compact(
         writer: id,
         why: Rekey::Restored,
     };
+    if folds_head(reader, &writer) {
+        return Task::ready((writer, Err(Error::Refused(Refusal::Nothing))));
+    }
     let Some(snapshot) = reader.logs().get(&id).and_then(|own| fold(&writer, own)) else {
         return Task::ready((writer, Err(lost())));
     };
@@ -92,6 +96,16 @@ pub fn compact(
             })
         })
         .task()
+}
+
+/// Whether a snapshot the reader found in the writer's directory folds its head.
+fn folds_head(reader: &Reader, writer: &Writer) -> bool {
+    let (id, head) = (writer.id(), writer.head());
+    reader.files(id).into_iter().any(|(_, stamp, file)| {
+        stamp.is_some()
+            && matches!(file, WriterFile::Snapshot(old)
+                if old.writer == id && old.head() == Some(head))
+    })
 }
 
 /// How many of a snapshot's last bytes stand for it.

@@ -535,7 +535,9 @@ impl Library {
 
     /// Folds this writer's own entries into a snapshot and deletes the sealed
     /// segments of its directory a snapshot folds. Undo reaches back only to the
-    /// snapshot.
+    /// snapshot. Refused with [`Refusal::Nothing`] when this instance writes as no
+    /// writer yet, and when a snapshot in the writer's directory already folds its
+    /// last entry.
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));

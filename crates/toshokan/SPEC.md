@@ -285,9 +285,10 @@ members with it.
 
 Only a snapshot's writer compacts. It confirms that a file in its directory
 holds its last entry, as before an append; if none does, it writes nothing and a
-new writer takes over. It folds its own chain up to that entry into a new
-snapshot, syncs the snapshot and its directory, and confirms that the folder
-holds it. Only then does it delete every segment in its directory that ends
+new writer takes over. When a snapshot in its directory already folds that
+entry, there is nothing to compact and it writes nothing. Otherwise it folds its
+own chain up to that entry into a new snapshot, syncs the snapshot and its
+directory, and confirms that the folder holds it. Only then does it delete every segment in its directory that ends
 with a seal marker and every line of which a snapshot in its directory folds,
 and every snapshot in its directory whose `folded` list starts the new one's. A
 segment without a seal marker, such as one left open by a crash or a copy, is
