@@ -78,8 +78,11 @@ pub struct Library {
     facts: Facts,
     /// The last scan; before the first, the identities `remembered` keeps.
     scan: Scan,
-    /// The identities scans read that no fact gives, as the local root keeps them.
+    /// The identities scans read that no fact gives, as the local root should keep
+    /// them.
     remembered: Scan,
+    /// Whether the local root lacks `remembered`, since writing it failed.
+    unkept: bool,
     /// What a failed scan left unknown, until a scan of every file succeeds.
     unscanned: Unscanned,
     /// Bound from `facts`, `scan` and `unscanned` unless `bind_due`.
@@ -240,6 +243,7 @@ impl Library {
             facts: Facts::new(),
             scan: remembered.clone(),
             remembered,
+            unkept: false,
             unscanned: Unscanned::default(),
             bindings: Arc::default(),
             bind_due: false,
@@ -962,7 +966,7 @@ impl Library {
 
     /// The identities the local root should keep of those scans read that no fact
     /// gives: those just read, and those kept before of files the last scan found
-    /// unchanged. `None` when they did not change.
+    /// unchanged. `None` when the local root keeps them already.
     fn remembering(&self, read: Vec<RelPath>) -> Option<Scan> {
         let scan = &self.scan.files;
         let unchanged = self.remembered.files.iter();
@@ -976,7 +980,7 @@ impl Library {
                 .chain(read)
                 .collect(),
         };
-        (remembered != self.remembered).then_some(remembered)
+        (remembered != self.remembered || self.unkept).then_some(remembered)
     }
 
     fn scan_task(&self) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
@@ -1346,8 +1350,10 @@ fn remember<'a, L: BorrowMut<Library> + 'a>(
     let bytes = remembered.identities();
     let mut library = library;
     library.borrow_mut().remembered = remembered;
-    flow::replace(Root::Local, Layout::identities(), bytes)
-        .then(move |kept| Flow::Done((library, kept)))
+    flow::replace(Root::Local, Layout::identities(), bytes).then(move |kept| {
+        library.borrow_mut().unkept = kept.is_err();
+        Flow::Done((library, kept))
+    })
 }
 
 /// Once entries are durable, scans again only `paths`, and binds.
@@ -1366,7 +1372,7 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
 /// Once entries are durable, binds to what `scan` finds. A scan that fails does
 /// not fail what was logged: `unsure`, where files may have moved, and the
 /// entities bound there are unknown until a scan of every file succeeds.
-/// Identities it fails to keep in the local root are read again by a later open.
+/// Identities it fails to keep in the local root are kept after the next scan.
 fn rebind_logged<'a>(
     library: &'a mut Library,
     scan: Task<'static, Result<(Scan, Vec<RelPath>)>>,

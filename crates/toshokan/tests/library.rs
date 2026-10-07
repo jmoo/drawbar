@@ -492,6 +492,7 @@ through_both!(
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
     a_commit_whose_record_cannot_be_removed_is_kept,
     a_settlement_whose_record_cannot_be_removed_is_logged_once,
+    identities_a_failed_write_lost_are_kept_by_the_next_scan,
     a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
@@ -1795,6 +1796,25 @@ fn a_settlement_whose_record_cannot_be_removed_is_logged_once<F: Facade>() {
             "{shown}"
         );
     });
+}
+
+fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    put(&folder, "tune.npno", b"tune");
+    fail(&probe, local_writes(&["identities.json.next"]));
+    assert!(a.refresh().is_err(), "the identities cannot be kept");
+    heal(&probe);
+    a.refresh().unwrap();
+    let kept = local_file(&here, "identities.json").expect("kept by the next scan");
+    assert!(
+        String::from_utf8(kept).unwrap().contains("tune.npno"),
+        "the identity read for a length a fact has"
+    );
 }
 
 fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
